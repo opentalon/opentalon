@@ -20,6 +20,7 @@ Existing solutions often suffer from:
 - **Low code quality** — inconsistent patterns, lack of tests, and technical debt that compounds
 - **Repeatable bugs** — the same classes of issues resurfacing release after release
 - **Hard to extend** — adding features means forking or fighting the architecture
+- **No smart model routing** — you either pick one model and overpay, or manually juggle providers yourself
 
 OpenTalon is engineered for long-term quality from day one. Every architectural decision is made with maintainability, security, and stability in mind — so the project stays healthy as it grows.
 
@@ -125,6 +126,43 @@ Both plugin tiers share the same set of extension points:
 
 - **gRPC Plugin SDK** — scaffolding CLI, example plugins, and integration test helpers
 - **Lua API reference** — documentation, example scripts, and a REPL for interactive testing
+
+## Smart Model Routing
+
+OpenTalon includes a **weighted smart router** that automatically picks the best AI model for each task — optimizing for cost without sacrificing quality.
+
+```mermaid
+graph LR
+    Request[Request] --> Classifier[Task Classifier]
+    Classifier --> Router[Weighted Router]
+    Router --> CheapModel["Cheap Model (weight: 90)"]
+    Router --> MidModel["Mid Model (weight: 50)"]
+    Router --> StrongModel["Strong Model (weight: 10)"]
+    CheapModel --> Signal{User accepts?}
+    Signal --> |Yes| Store[Affinity Store]
+    Signal --> |No| MidModel
+    Store --> |"learns over time"| Router
+```
+
+### How it works
+
+1. **Weights** — each model has a weight (0–100). Cheaper models get higher weight and are tried first
+2. **Auto-classification** — incoming requests are categorized by heuristics (message length, code blocks, keywords, conversation depth)
+3. **Escalation** — if the user rejects a response (regenerates, says "try again", or thumbs-down), the system escalates to the next model by weight
+4. **Learning** — the affinity store records which model succeeded for which task type. Over time, the router learns: "code generation needs Sonnet, simple Q&A is fine on Haiku"
+5. **User overrides** — if you already know what you want, pin a model per request (`--model`), per session (`/model`), or per task type in config
+
+### Multi-Provider Support
+
+OpenTalon supports multiple AI providers out of the box, with a unified configuration:
+
+- **Built-in providers** — Anthropic, OpenAI, Google, and more
+- **Custom providers** — any OpenAI-compatible or Anthropic-compatible endpoint (self-hosted, OVH, Ollama, vLLM, etc.)
+- **Provider plugins** — add new providers via the gRPC plugin system
+- **Auth profile rotation** — multiple API keys or OAuth tokens per provider, with automatic round-robin and cooldown on rate limits
+- **Two-stage failover** — first rotate credentials within a provider, then fall back to the next model in the chain. Exponential backoff on failures.
+
+> For the full architecture, see [docs/design/providers.md](docs/design/providers.md).
 
 ## Roadmap
 
