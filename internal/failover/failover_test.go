@@ -2,6 +2,7 @@ package failover
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/auth"
@@ -191,5 +192,96 @@ func TestIsRetryable(t *testing.T) {
 		if got := IsRetryable(err); got != tt.want {
 			t.Errorf("IsRetryable(%d, retryable=%v) = %v, want %v", tt.code, tt.retryable, got, tt.want)
 		}
+	}
+}
+
+func TestProviderErrorString(t *testing.T) {
+	err := &ProviderError{StatusCode: 429, Message: "rate limited"}
+	want := "provider error 429: rate limited"
+	if got := err.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestAllExhaustedErrorString(t *testing.T) {
+	err := &AllExhaustedError{Attempted: []string{"anthropic/haiku", "openai/gpt-5"}}
+	got := err.Error()
+	if got == "" {
+		t.Error("expected non-empty error string")
+	}
+}
+
+func TestNonProviderErrorClassification(t *testing.T) {
+	plainErr := fmt.Errorf("connection refused")
+	if IsRateLimitError(plainErr) {
+		t.Error("plain error should not be rate limit")
+	}
+	if IsAuthError(plainErr) {
+		t.Error("plain error should not be auth error")
+	}
+	if IsRetryable(plainErr) {
+		t.Error("plain error should not be retryable")
+	}
+}
+
+func TestExecuteRetryOnAuthError(t *testing.T) {
+	reg, rotator, cooldowns := setupTest()
+	_ = reg.Register(&mockProvider{id: "anthropic"})
+
+	callCount := 0
+	fn := func(ctx context.Context, p provider.Provider, profile *auth.Profile, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+		callCount++
+		if callCount == 1 {
+			return nil, &ProviderError{StatusCode: 401, Message: "unauthorized", Retryable: true}
+		}
+		return &provider.CompletionResponse{Content: "ok"}, nil
+	}
+
+	ctrl := NewController(reg, rotator, cooldowns, nil)
+	resp, err := ctrl.Execute(context.Background(), "anthropic/claude-haiku-4", "sess1", &provider.CompletionRequest{}, fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Content != "ok" {
+		t.Errorf("content = %q, want ok", resp.Content)
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 calls, got %d", callCount)
+	}
+}
+
+func TestExecuteSkipsDuplicateModels(t *testing.T) {
+	reg, rotator, cooldowns := setupTest()
+	_ = reg.Register(&mockProvider{id: "anthropic"})
+
+	callCount := 0
+	fn := func(ctx context.Context, p provider.Provider, profile *auth.Profile, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+		callCount++
+		return nil, &ProviderError{StatusCode: 429, Retryable: true}
+	}
+
+	fallbacks := []provider.ModelRef{"anthropic/claude-haiku-4"}
+	ctrl := NewController(reg, rotator, cooldowns, fallbacks)
+
+	_, err := ctrl.Execute(context.Background(), "anthropic/claude-haiku-4", "sess1", &provider.CompletionRequest{}, fn)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if _, ok := err.(*AllExhaustedError); !ok {
+		t.Errorf("expected AllExhaustedError, got %T: %v", err, err)
+	}
+}
+
+func TestExecuteUnregisteredProvider(t *testing.T) {
+	reg, rotator, cooldowns := setupTest()
+
+	fn := func(ctx context.Context, p provider.Provider, profile *auth.Profile, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+		return p.Complete(ctx, req)
+	}
+
+	ctrl := NewController(reg, rotator, cooldowns, nil)
+	_, err := ctrl.Execute(context.Background(), "unknown/model-x", "sess1", &provider.CompletionRequest{}, fn)
+	if err == nil {
+		t.Fatal("expected error for unregistered provider")
 	}
 }

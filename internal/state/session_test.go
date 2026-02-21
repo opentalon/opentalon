@@ -140,3 +140,54 @@ func TestSessionUpdatedAtChanges(t *testing.T) {
 		t.Error("UpdatedAt should advance after AddMessage")
 	}
 }
+
+func TestSessionSetModelNotFound(t *testing.T) {
+	store := NewSessionStore("")
+	err := store.SetModel("nonexistent", "anthropic/haiku")
+	if err == nil {
+		t.Error("expected error for nonexistent session")
+	}
+}
+
+func TestSessionSaveNotFound(t *testing.T) {
+	store := NewSessionStore(t.TempDir())
+	err := store.Save("nonexistent")
+	if err == nil {
+		t.Error("expected error for saving nonexistent session")
+	}
+}
+
+func TestSessionLoadNonexistent(t *testing.T) {
+	store := NewSessionStore(t.TempDir())
+	err := store.Load("nonexistent")
+	if err == nil {
+		t.Error("expected error for loading nonexistent session file")
+	}
+}
+
+func TestSessionMetadata(t *testing.T) {
+	store := NewSessionStore("")
+	sess := store.Create("sess1")
+	sess.Metadata["user_id"] = "u123"
+	sess.Metadata["mode"] = "debug"
+
+	got, _ := store.Get("sess1")
+	if got.Metadata["user_id"] != "u123" {
+		t.Errorf("metadata user_id = %q", got.Metadata["user_id"])
+	}
+}
+
+func TestSessionMultipleMessages(t *testing.T) {
+	store := NewSessionStore("")
+	store.Create("sess1")
+	for i := 0; i < 50; i++ {
+		_ = store.AddMessage("sess1", provider.Message{
+			Role:    provider.RoleUser,
+			Content: "msg",
+		})
+	}
+	sess, _ := store.Get("sess1")
+	if len(sess.Messages) != 50 {
+		t.Errorf("expected 50 messages, got %d", len(sess.Messages))
+	}
+}

@@ -295,3 +295,106 @@ func TestOrchestratorNoWorkflowForSingleCall(t *testing.T) {
 		t.Errorf("expected no workflow for single tool call, got %d", len(workflows))
 	}
 }
+
+func TestOrchestratorMaxIterationsExceeded(t *testing.T) {
+	llm := &fakeLLM{responses: make([]string, 25)}
+	for i := range llm.responses {
+		llm.responses[i] = "[tool] gitlab.analyze_code"
+	}
+	parser := &fakeParser{parseFn: func(string) []ToolCall {
+		return []ToolCall{{ID: "cx", Plugin: "gitlab", Action: "analyze_code"}}
+	}}
+
+	orch, sessID := setupOrchestrator(llm, parser)
+	_, err := orch.Run(context.Background(), sessID, "infinite loop")
+	if err == nil {
+		t.Fatal("expected error for max iterations")
+	}
+	if !strings.Contains(err.Error(), "exceeded") {
+		t.Errorf("error = %q, should mention exceeded", err.Error())
+	}
+}
+
+func TestOrchestratorLLMFailure(t *testing.T) {
+	llm := &fakeLLM{responses: nil}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	orch, sessID := setupOrchestrator(llm, parser)
+	_, err := orch.Run(context.Background(), sessID, "hi")
+	if err == nil {
+		t.Fatal("expected error when LLM has no responses")
+	}
+}
+
+func TestOrchestratorSessionHistoryGrows(t *testing.T) {
+	llm := &fakeLLM{responses: []string{"Hello!"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+
+	orch := New(llm, parser, registry, memory, sessions)
+	_, _ = orch.Run(context.Background(), "s1", "Hi")
+
+	sess, _ := sessions.Get("s1")
+	if len(sess.Messages) != 2 {
+		t.Errorf("expected 2 messages (user+assistant), got %d", len(sess.Messages))
+	}
+}
+
+func TestFormatToolCallMessageNoArgs(t *testing.T) {
+	call := ToolCall{ID: "1", Plugin: "gitlab", Action: "list_repos"}
+	got := formatToolCallMessage(call)
+	want := "[tool_call] gitlab.list_repos"
+	if got != want {
+		t.Errorf("formatToolCallMessage = %q, want %q", got, want)
+	}
+}
+
+func TestFormatToolCallMessageWithArgs(t *testing.T) {
+	call := ToolCall{ID: "1", Plugin: "gitlab", Action: "analyze", Args: map[string]string{"repo": "myrepo"}}
+	got := formatToolCallMessage(call)
+	if !strings.Contains(got, "repo=myrepo") {
+		t.Errorf("formatToolCallMessage = %q, should contain repo=myrepo", got)
+	}
+}
+
+func TestFormatToolResultMessageSuccess(t *testing.T) {
+	result := ToolResult{CallID: "1", Content: "all good"}
+	got := formatToolResultMessage(result)
+	if got != "[tool_result] all good" {
+		t.Errorf("formatToolResultMessage = %q", got)
+	}
+}
+
+func TestFormatToolResultMessageError(t *testing.T) {
+	result := ToolResult{CallID: "1", Error: "not found"}
+	got := formatToolResultMessage(result)
+	if got != "[tool_result] error: not found" {
+		t.Errorf("formatToolResultMessage = %q", got)
+	}
+}
+
+func TestFilterByTag(t *testing.T) {
+	memories := []*state.Memory{
+		{ID: "m1", Content: "wf1", Tags: []string{"workflow"}},
+		{ID: "m2", Content: "fact1", Tags: []string{"fact"}},
+		{ID: "m3", Content: "wf2", Tags: []string{"workflow", "important"}},
+	}
+	got := filterByTag(memories, "workflow")
+	if len(got) != 2 {
+		t.Errorf("expected 2 workflows, got %d", len(got))
+	}
+}
+
+func TestFilterByTagNone(t *testing.T) {
+	memories := []*state.Memory{
+		{ID: "m1", Content: "fact", Tags: []string{"fact"}},
+	}
+	got := filterByTag(memories, "workflow")
+	if len(got) != 0 {
+		t.Errorf("expected 0, got %d", len(got))
+	}
+}

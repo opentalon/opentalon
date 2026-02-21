@@ -93,3 +93,57 @@ func TestClassifyGeneral(t *testing.T) {
 		t.Errorf("Classify() = %q, want general", got)
 	}
 }
+
+func TestClassifyClassKeyword(t *testing.T) {
+	c := NewTaskClassifier()
+	msgs := []provider.Message{{Role: provider.RoleUser, Content: "class UserService {"}}
+	if got := c.Classify(msgs); got != TaskCode {
+		t.Errorf("Classify() = %q, want code", got)
+	}
+}
+
+func TestClassifyAllTransformKeywords(t *testing.T) {
+	c := NewTaskClassifier()
+	keywords := []string{
+		"summarise", "paraphrase", "rephrase", "format", "extract",
+	}
+	for _, kw := range keywords {
+		msgs := []provider.Message{{Role: provider.RoleUser, Content: "Please " + kw + " this text for me"}}
+		if got := c.Classify(msgs); got != TaskTransform {
+			t.Errorf("Classify(%q) = %q, want transform", kw, got)
+		}
+	}
+}
+
+func TestClassifyUsesLastMessage(t *testing.T) {
+	c := NewTaskClassifier()
+	msgs := []provider.Message{
+		{Role: provider.RoleUser, Content: strings.Repeat("long analysis text ", 30)},
+		{Role: provider.RoleUser, Content: "Hi there"},
+	}
+	if got := c.Classify(msgs); got != TaskChat {
+		t.Errorf("should classify based on last message, got %q, want chat", got)
+	}
+}
+
+func TestClassifyDeepConversationThreshold(t *testing.T) {
+	c := NewTaskClassifier()
+	msgs := make([]provider.Message, 11)
+	for i := range msgs {
+		msgs[i] = provider.Message{Role: provider.RoleUser, Content: "message"}
+	}
+	if got := c.Classify(msgs); got != TaskDeepConversation {
+		t.Errorf("11 messages should be deep conversation, got %q", got)
+	}
+}
+
+func TestClassifyExactlyAtThreshold(t *testing.T) {
+	c := NewTaskClassifier()
+	msgs := make([]provider.Message, 10)
+	for i := range msgs {
+		msgs[i] = provider.Message{Role: provider.RoleUser, Content: "short msg"}
+	}
+	if got := c.Classify(msgs); got == TaskDeepConversation {
+		t.Error("exactly at threshold should NOT be deep conversation")
+	}
+}

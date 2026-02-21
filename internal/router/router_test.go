@@ -170,3 +170,75 @@ func TestOverrideTakesPriorityOverPin(t *testing.T) {
 		t.Errorf("override should beat pin, got %s", ref)
 	}
 }
+
+func TestRecordSignalNilAffinity(t *testing.T) {
+	r := NewWeightedRouter(testCatalog(), nil, nil)
+	r.RecordSignal(TaskCode, "anthropic/claude-sonnet-4", SignalAccepted)
+}
+
+func TestNextModelNotInCatalog(t *testing.T) {
+	r := NewWeightedRouter(testCatalog(), nil, nil)
+	_, err := r.NextModel("unknown/model")
+	if err == nil {
+		t.Error("expected error for model not in catalog")
+	}
+}
+
+func TestRouteMultiplePins(t *testing.T) {
+	pins := map[TaskType]provider.ModelRef{
+		TaskCode:     "anthropic/claude-sonnet-4",
+		TaskAnalysis: "anthropic/claude-opus-4-6",
+	}
+	r := NewWeightedRouter(testCatalog(), pins, nil)
+
+	ref, _ := r.Route(TaskCode, nil)
+	if ref != "anthropic/claude-sonnet-4" {
+		t.Errorf("code pin = %s, want sonnet", ref)
+	}
+
+	ref, _ = r.Route(TaskAnalysis, nil)
+	if ref != "anthropic/claude-opus-4-6" {
+		t.Errorf("analysis pin = %s, want opus", ref)
+	}
+
+	ref, _ = r.Route(TaskChat, nil)
+	if ref != "anthropic/claude-haiku-4" {
+		t.Errorf("unpinned chat = %s, want haiku (by weight)", ref)
+	}
+}
+
+func TestNextModelChaining(t *testing.T) {
+	r := NewWeightedRouter(testCatalog(), nil, nil)
+
+	first, _ := r.Route(TaskChat, nil)
+	second, err := r.NextModel(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := r.NextModel(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || second == third {
+		t.Error("chained models should be different")
+	}
+}
+
+func TestModelsCatalogLength(t *testing.T) {
+	r := NewWeightedRouter(testCatalog(), nil, nil)
+	if len(r.Models()) != 5 {
+		t.Errorf("expected 5 models, got %d", len(r.Models()))
+	}
+}
+
+func TestRouteSessionOverrideScope(t *testing.T) {
+	r := NewWeightedRouter(testCatalog(), nil, nil)
+	override := &Override{Model: "openai/gpt-5.2", Scope: "session"}
+	ref, err := r.Route(TaskCode, override)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != "openai/gpt-5.2" {
+		t.Errorf("session override = %s, want openai/gpt-5.2", ref)
+	}
+}

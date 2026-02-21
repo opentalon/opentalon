@@ -264,3 +264,91 @@ state:
 		t.Errorf("data_dir = %q, want /custom/data", cfg.State.DataDir)
 	}
 }
+
+func TestLoadFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+	if err := os.WriteFile(path, []byte(testYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Models.Providers) != 4 {
+		t.Errorf("expected 4 providers, got %d", len(cfg.Models.Providers))
+	}
+}
+
+func TestLoadFileNotFound(t *testing.T) {
+	_, err := Load("/nonexistent/config.yaml")
+	if err == nil {
+		t.Error("expected error for missing file")
+	}
+}
+
+func TestParseAuthCooldowns(t *testing.T) {
+	cfg, err := Parse([]byte(testYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Auth.Cooldowns.Initial != "1m" {
+		t.Errorf("cooldown initial = %q, want 1m", cfg.Auth.Cooldowns.Initial)
+	}
+	if cfg.Auth.Cooldowns.Max != "1h" {
+		t.Errorf("cooldown max = %q, want 1h", cfg.Auth.Cooldowns.Max)
+	}
+	if cfg.Auth.Cooldowns.Multiplier != 5 {
+		t.Errorf("cooldown multiplier = %d, want 5", cfg.Auth.Cooldowns.Multiplier)
+	}
+	if cfg.Auth.Cooldowns.BillingMaxHours != 24 {
+		t.Errorf("cooldown billing_max_hours = %d, want 24", cfg.Auth.Cooldowns.BillingMaxHours)
+	}
+}
+
+func TestParseModelDefinitionFields(t *testing.T) {
+	cfg, err := Parse([]byte(testYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ovh := cfg.Models.Providers["ovh"].Models[0]
+	if ovh.Name != "GPT OSS 120B" {
+		t.Errorf("name = %q, want GPT OSS 120B", ovh.Name)
+	}
+	if !ovh.Reasoning {
+		t.Error("reasoning should be true")
+	}
+	if len(ovh.InputTypes) != 1 || ovh.InputTypes[0] != "text" {
+		t.Errorf("input types = %v, want [text]", ovh.InputTypes)
+	}
+	if ovh.MaxTokens != 131072 {
+		t.Errorf("max_tokens = %d, want 131072", ovh.MaxTokens)
+	}
+	if ovh.Cost.Output != 0.44 {
+		t.Errorf("cost.output = %f, want 0.44", ovh.Cost.Output)
+	}
+}
+
+func TestParseEmptyConfig(t *testing.T) {
+	cfg, err := Parse([]byte("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Models.Providers) != 0 {
+		t.Errorf("expected empty providers")
+	}
+	home, _ := os.UserHomeDir()
+	want := home + "/.opentalon"
+	if cfg.State.DataDir != want {
+		t.Errorf("default data_dir = %q, want %q", cfg.State.DataDir, want)
+	}
+}
+
+func TestExpandEnvMultipleVars(t *testing.T) {
+	t.Setenv("VAR_A", "aaa")
+	t.Setenv("VAR_B", "bbb")
+	got := expandEnv("${VAR_A}-${VAR_B}")
+	if got != "aaa-bbb" {
+		t.Errorf("expandEnv = %q, want aaa-bbb", got)
+	}
+}
