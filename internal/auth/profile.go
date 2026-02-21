@@ -1,10 +1,11 @@
 package auth
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type AuthType string
@@ -15,18 +16,23 @@ const (
 )
 
 type UsageStats struct {
-	LastUsed      time.Time `json:"last_used"`
-	CooldownUntil time.Time `json:"cooldown_until,omitempty"`
-	DisabledUntil time.Time `json:"disabled_until,omitempty"`
-	ErrorCount    int       `json:"error_count"`
+	LastUsed      time.Time `yaml:"last_used,omitempty"`
+	CooldownUntil time.Time `yaml:"cooldown_until,omitempty"`
+	DisabledUntil time.Time `yaml:"disabled_until,omitempty"`
+	ErrorCount    int       `yaml:"error_count,omitempty"`
 }
 
+// Profile represents a single credential for a provider.
+// API keys are resolved from env vars at startup and held in memory.
+// The Key field is never persisted to disk -- only runtime state (Stats)
+// and OAuth tokens are written to the runtime cache file.
 type Profile struct {
-	ID         string     `json:"id"`
-	ProviderID string     `json:"provider_id"`
-	Type       AuthType   `json:"type"`
-	Key        string     `json:"key,omitempty"`
-	Stats      UsageStats `json:"usage_stats"`
+	ID         string     `yaml:"id"`
+	ProviderID string     `yaml:"provider_id"`
+	Type       AuthType   `yaml:"type"`
+	Key        string     `yaml:"-"` // never persisted; resolved from env vars
+	OAuthToken string     `yaml:"oauth_token,omitempty"`
+	Stats      UsageStats `yaml:"usage_stats,omitempty"`
 }
 
 func (p *Profile) InCooldown(now time.Time) bool {
@@ -39,6 +45,33 @@ func (p *Profile) IsDisabled(now time.Time) bool {
 
 func (p *Profile) Available(now time.Time) bool {
 	return !p.InCooldown(now) && !p.IsDisabled(now)
+}
+
+const maskSuffix = "***"
+
+// MaskedKey returns the credential with most characters replaced by ***.
+// Shows at most the first 6 characters for identification.
+func (p *Profile) MaskedKey() string {
+	secret := p.Key
+	if secret == "" {
+		secret = p.OAuthToken
+	}
+	if secret == "" {
+		return ""
+	}
+	visible := 6
+	if len(secret) <= visible {
+		return maskSuffix
+	}
+	return secret[:visible] + maskSuffix
+}
+
+// Credential returns the active credential (API key or OAuth token).
+func (p *Profile) Credential() string {
+	if p.Key != "" {
+		return p.Key
+	}
+	return p.OAuthToken
 }
 
 type Store struct {
@@ -61,11 +94,11 @@ func (s *Store) Load() error {
 		}
 		return fmt.Errorf("reading auth profiles: %w", err)
 	}
-	return json.Unmarshal(data, &s.profiles)
+	return yaml.Unmarshal(data, &s.profiles)
 }
 
 func (s *Store) Save() error {
-	data, err := json.MarshalIndent(s.profiles, "", "  ")
+	data, err := yaml.Marshal(s.profiles)
 	if err != nil {
 		return fmt.Errorf("marshaling auth profiles: %w", err)
 	}

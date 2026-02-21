@@ -264,3 +264,97 @@ func TestStoreAddAndGet(t *testing.T) {
 		t.Error("Get should return nil for nonexistent profile")
 	}
 }
+
+func TestMaskedKey(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{"long API key", "sk-ant-abc123xyz789secret", "sk-ant***"},
+		{"short key", "abc", "***"},
+		{"exact 6 chars", "abcdef", "***"},
+		{"7 chars", "abcdefg", "abcdef***"},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Profile{Key: tt.key}
+			if got := p.MaskedKey(); got != tt.want {
+				t.Errorf("MaskedKey() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStoreYAMLRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/auth-state.yaml"
+
+	store := NewStore(path)
+	store.Add(&Profile{
+		ID:         "anthropic:default",
+		ProviderID: "anthropic",
+		Type:       AuthTypeAPIKey,
+		Key:        "sk-ant-test-key",
+	})
+	store.Add(&Profile{
+		ID:         "openai:default",
+		ProviderID: "openai",
+		Type:       AuthTypeOAuth,
+		OAuthToken: "oauth-token-123",
+	})
+
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded := NewStore(path)
+	if err := loaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	p := loaded.Get("anthropic:default")
+	if p == nil {
+		t.Fatal("expected anthropic profile")
+	}
+	if p.Key != "" {
+		t.Errorf("Key should NOT be persisted, got %q", p.Key)
+	}
+	if p.Type != AuthTypeAPIKey {
+		t.Errorf("Type = %q, want api_key", p.Type)
+	}
+
+	p2 := loaded.Get("openai:default")
+	if p2 == nil {
+		t.Fatal("expected openai profile")
+	}
+	if p2.Type != AuthTypeOAuth {
+		t.Errorf("Type = %q, want oauth", p2.Type)
+	}
+	if p2.OAuthToken != "oauth-token-123" {
+		t.Errorf("OAuthToken = %q, want oauth-token-123", p2.OAuthToken)
+	}
+}
+
+func TestCredential(t *testing.T) {
+	apiKey := &Profile{Key: "sk-ant-123"}
+	if apiKey.Credential() != "sk-ant-123" {
+		t.Errorf("expected API key, got %q", apiKey.Credential())
+	}
+
+	oauth := &Profile{OAuthToken: "eyJ-token"}
+	if oauth.Credential() != "eyJ-token" {
+		t.Errorf("expected OAuth token, got %q", oauth.Credential())
+	}
+
+	apiKeyPriority := &Profile{Key: "sk-key", OAuthToken: "token"}
+	if apiKeyPriority.Credential() != "sk-key" {
+		t.Errorf("API key should take priority, got %q", apiKeyPriority.Credential())
+	}
+
+	empty := &Profile{}
+	if empty.Credential() != "" {
+		t.Errorf("expected empty, got %q", empty.Credential())
+	}
+}

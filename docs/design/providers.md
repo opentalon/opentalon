@@ -75,21 +75,55 @@ type ModelResolver interface {
 
 Each provider can have multiple credentials — API keys, OAuth tokens, or setup tokens. The system rotates between them automatically.
 
-### Storage
+### Where secrets live
 
-Credentials are stored in `~/.opentalon/auth-profiles.json`:
+**API keys live in environment variables only.** They are referenced in the main config via `${ENV_VAR}` syntax and resolved at startup. They are never written to disk.
 
-```json
-{
-  "anthropic": [
-    { "id": "anthropic:default", "type": "api_key", "key": "sk-ant-..." },
-    { "id": "anthropic:work", "type": "api_key", "key": "sk-ant-..." }
-  ],
-  "openai": [
-    { "id": "openai:default", "type": "api_key", "key": "sk-..." }
-  ]
-}
+```yaml
+# config.yaml -- user edits this
+models:
+  providers:
+    anthropic:
+      api_key: "${ANTHROPIC_API_KEY}"      # resolved from env at startup
+    openai:
+      api_key: "${OPENAI_API_KEY}"
 ```
+
+Multiple keys per provider use numbered env vars: `ANTHROPIC_API_KEY_1`, `ANTHROPIC_API_KEY_2`, etc.
+
+### Runtime state file
+
+`~/.opentalon/auth-state.yaml` is an **auto-generated internal cache** -- never edited by users. It stores:
+
+- Cooldown/usage state (which profiles are rate-limited, error counts)
+- OAuth tokens obtained via `opentalon auth login`
+- Last-used timestamps for rotation
+
+```yaml
+# auth-state.yaml -- auto-generated, never edit manually
+anthropic:
+  - id: "anthropic:default"
+    type: api_key
+    usage_stats:
+      last_used: 2026-02-21T15:30:00Z
+      error_count: 0
+
+  - id: "anthropic:key2"
+    type: api_key
+    usage_stats:
+      last_used: 2026-02-21T14:00:00Z
+      cooldown_until: 2026-02-21T15:00:00Z
+      error_count: 2
+
+openai:
+  - id: "openai:oauth"
+    type: oauth
+    oauth_token: "eyJ..."   # obtained via 'opentalon auth login'
+```
+
+Note: the `key` field (API key) is **never persisted** to this file. It only exists in memory, resolved from env vars.
+
+**Secret masking:** API keys and tokens are never shown in full in logs or CLI output. The `MaskedKey()` method returns a truncated version (e.g. `sk-ant***`) for safe display.
 
 ### Selection Order
 
