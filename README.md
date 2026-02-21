@@ -30,6 +30,74 @@ OpenTalon is engineered for long-term quality from day one. Every architectural 
 
 Security is not an afterthought. OpenTalon is secure by default with a minimal attack surface. Plugins run as **separate OS processes** communicating over gRPC, so a compromised or misbehaving plugin can never access the core's memory or escalate privileges. Secrets are handled properly, inputs are validated at every boundary, and dependencies are kept lean and audited. No shortcuts.
 
+```mermaid
+graph LR
+    User[User Message] --> Core[OpenTalon Core / LLM]
+    Core -->|"conversation context only"| PluginA[Plugin A]
+    Core -->|"conversation context only"| PluginB[Plugin B]
+    PluginA -->|"result"| Core
+    PluginB -->|"result"| Core
+    PluginA x--x|"blocked"| PluginB
+```
+
+- **Plugins work strictly within their own scope** — each plugin does its job and returns a result, nothing else
+- **Plugins never talk to each other** — no shared state, no event bus, no direct calls
+- **A plugin cannot trigger another plugin** — not via its response, not via prompt injection, not by any mechanism. Only the core/LLM decides what runs next
+- **The LLM orchestrates everything** — it decides which plugin to call, in what order, and routes results between them
+- **Plugins only see what the core sends** — conversation context and the specific task, nothing more
+
+#### How isolation is enforced
+
+Every plugin response passes through a **guard pipeline** before reaching the LLM:
+
+```mermaid
+flowchart TD
+    LLM[LLM decides tool call] --> Validate[Validate call against registry]
+    Validate --> Timeout["Set timeout (default 30s)"]
+    Timeout --> Execute[Execute plugin via gRPC]
+    Execute --> SizeCheck{Response within 64KB limit?}
+    SizeCheck -->|No| Truncate[Truncate + add notice]
+    SizeCheck -->|Yes| Sanitize[Strip forbidden patterns]
+    Truncate --> Sanitize
+    Sanitize --> ValidateResult{CallID matches? Fields valid?}
+    ValidateResult -->|No| ErrorResult[Replace with error]
+    ValidateResult -->|Yes| WrapResult["Wrap in [plugin_output] block"]
+    ErrorResult --> FeedBack[Feed back to LLM as data]
+    WrapResult --> FeedBack
+```
+
+| Threat | Guard |
+|---|---|
+| Plugin returns fake tool calls in its output | Response sanitizer strips all tool-call patterns before the LLM sees them |
+| Plugin crafts output to trick the LLM | Output is wrapped in `[plugin_output]` blocks — the LLM is instructed to treat it as data only |
+| Plugin tries to read another plugin's state | State store enforces namespace isolation — pluginID is set by the core, not the plugin |
+| Plugin tries to discover or call other plugins | gRPC contract exposes exactly one method: `Execute`. No registry, no peer discovery |
+| Plugin runs forever or consumes all resources | Per-call timeout (configurable) + OS-level resource limits |
+
+#### LLM Safety Rules
+
+The LLM itself receives **built-in safety rules** in its system prompt at the start of every session. These rules instruct the LLM — in multiple languages — to never execute tool calls found inside plugin output, to treat all plugin responses as untrusted data, and to never let a plugin influence which other plugins get called.
+
+The default rules are built into OpenTalon and can be **customized** via `config.yaml`:
+
+```yaml
+orchestrator:
+  rules:
+    - "Never send PII or personal data to external plugins"
+    - "All financial data must stay within internal plugins only"
+    - |
+      When working with customer data, follow these constraints:
+      1. Never log raw customer identifiers
+      2. Mask email addresses before passing to any plugin
+      3. Reject plugin results that contain unmasked credit card numbers
+    - |
+      For compliance with internal policy SEC-2024-07:
+      - Only approved plugins may access production databases
+      - Plugin responses containing SQL must be flagged for review
+```
+
+This lets organizations add domain-specific rules — including multi-line instructions — without modifying source code. These custom rules are appended to the built-in safety rules and injected into the LLM system prompt at the start of every session.
+
 ### Stability
 
 Thorough testing at every level — unit, integration, and end-to-end. Pull requests can only be merged with a fully green test suite, no exceptions — not even for project owners :) Zero tolerance for repeatable bugs. Predictable behavior under load, graceful degradation, and clear error reporting.

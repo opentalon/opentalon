@@ -352,3 +352,38 @@ func TestExpandEnvMultipleVars(t *testing.T) {
 		t.Errorf("expandEnv = %q, want aaa-bbb", got)
 	}
 }
+
+func TestParseOrchestratorRules(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+orchestrator:
+  rules:
+    - "Never send PII to external plugins"
+    - "All financial data must stay internal"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Orchestrator.Rules) != 2 {
+		t.Errorf("expected 2 rules, got %d", len(cfg.Orchestrator.Rules))
+	}
+	if cfg.Orchestrator.Rules[0] != "Never send PII to external plugins" {
+		t.Errorf("rule[0] = %q", cfg.Orchestrator.Rules[0])
+	}
+}
+
+func TestParseOrchestratorNoRules(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Orchestrator.Rules) != 0 {
+		t.Errorf("expected 0 rules when omitted, got %d", len(cfg.Orchestrator.Rules))
+	}
+}

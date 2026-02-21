@@ -192,3 +192,93 @@ type PluginStateStore interface {
 - Persisted to `<data_dir>/plugins/<plugin_id>/state.yaml`
 - Full isolation: Plugin A cannot read Plugin B's state
 - Core manages persistence -- plugins use a simple Get/Set API over gRPC
+
+## Plugin Security Guards
+
+Plugins are isolated by design, but isolation must be actively enforced. A plugin must not be able to trigger another plugin, manipulate the orchestrator, or escape its scope — regardless of what it returns.
+
+### Threat Model
+
+| Attack | Description |
+|---|---|
+| Response injection | Plugin returns text that looks like a tool call, hoping the parser treats it as an instruction |
+| Prompt manipulation | Plugin crafts output designed to trick the LLM into calling other plugins |
+| State snooping | Plugin tries to read another plugin's state files from disk |
+| Registry access | Plugin tries to discover or call other registered plugins |
+| Resource abuse | Plugin runs forever, consumes all memory, or floods the network |
+
+### Guards
+
+#### 1. Response Sanitizer
+
+Plugin output is treated as **untrusted data**. Before feeding it back to the LLM:
+
+- Strip or escape any patterns that match tool-call syntax (`[tool_call]`, function-call JSON, etc.)
+- Wrap plugin output in a clearly delimited data block so the LLM sees it as a result, never as an instruction
+- Enforce a maximum response size (default: 64KB). Truncate with a notice if exceeded.
+
+```go
+type Guard struct {
+    MaxResponseBytes int
+    ForbiddenPatterns []*regexp.Regexp
+}
+
+func (g *Guard) Sanitize(result ToolResult) ToolResult
+```
+
+#### 2. Execution Timeout
+
+Every plugin call has a deadline. If a plugin does not respond in time, the call is cancelled.
+
+- Default timeout: 30 seconds (configurable per plugin)
+- Enforced via `context.WithTimeout` on the gRPC call
+- Timed-out calls return an error result — the LLM decides what to do next
+
+#### 3. Result Validation
+
+The core validates every `ToolResult` before accepting it:
+
+- `CallID` must match the original `ToolCall.ID`
+- `Content` must be a string within size limits
+- `Error` must be a string or empty
+- No extra fields, no embedded objects, no binary data
+
+Invalid results are replaced with a generic error.
+
+#### 4. State Namespace Enforcement
+
+The `PluginStateStore` enforces isolation at the API level:
+
+- The `pluginID` is set by the core when it calls the plugin — the plugin cannot override it
+- `Get(pluginID, key)` / `Set(pluginID, key, value)` — the plugin only sees its own namespace
+- Filesystem paths are derived from `pluginID` — no path traversal possible (plugin IDs are validated to be alphanumeric)
+
+#### 5. Strict gRPC Contract
+
+The plugin gRPC interface exposes exactly one method:
+
+```protobuf
+service Plugin {
+    rpc Execute(ToolCallRequest) returns (ToolResultResponse);
+}
+```
+
+There is no method to list plugins, query the registry, access other plugins, or call the orchestrator. The plugin receives a task and returns a result. That is the entire surface.
+
+### Guard Flow
+
+```mermaid
+flowchart TD
+    LLM[LLM decides tool call] --> Validate[Validate call against registry]
+    Validate --> Timeout["Set timeout (context.WithTimeout)"]
+    Timeout --> Execute[Execute plugin via gRPC]
+    Execute --> SizeCheck{Response within size limit?}
+    SizeCheck -->|No| Truncate[Truncate + add notice]
+    SizeCheck -->|Yes| Sanitize[Sanitize response content]
+    Truncate --> Sanitize
+    Sanitize --> ValidateResult{CallID matches? Fields valid?}
+    ValidateResult -->|No| ErrorResult[Replace with error result]
+    ValidateResult -->|Yes| WrapResult[Wrap as data block]
+    ErrorResult --> FeedBack[Feed back to LLM]
+    WrapResult --> FeedBack
+```

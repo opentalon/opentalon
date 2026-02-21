@@ -29,6 +29,8 @@ type Orchestrator struct {
 	registry *ToolRegistry
 	memory   *state.MemoryStore
 	sessions *state.SessionStore
+	guard    *Guard
+	rules    *RulesConfig
 }
 
 func New(
@@ -38,12 +40,25 @@ func New(
 	memory *state.MemoryStore,
 	sessions *state.SessionStore,
 ) *Orchestrator {
+	return NewWithRules(llm, parser, registry, memory, sessions, nil)
+}
+
+func NewWithRules(
+	llm LLMClient,
+	parser ToolCallParser,
+	registry *ToolRegistry,
+	memory *state.MemoryStore,
+	sessions *state.SessionStore,
+	customRules []string,
+) *Orchestrator {
 	return &Orchestrator{
 		llm:      llm,
 		parser:   parser,
 		registry: registry,
 		memory:   memory,
 		sessions: sessions,
+		guard:    NewGuard(),
+		rules:    NewRulesConfig(customRules),
 	}
 }
 
@@ -94,7 +109,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 		}
 
 		for _, call := range calls {
-			toolResult := o.executeCall(call)
+			toolResult := o.executeCall(ctx, call)
 			result.ToolCalls = append(result.ToolCalls, call)
 			result.Results = append(result.Results, toolResult)
 
@@ -104,7 +119,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 			})
 			_ = o.sessions.AddMessage(sessionID, provider.Message{
 				Role:    provider.RoleUser,
-				Content: formatToolResultMessage(toolResult),
+				Content: o.guard.WrapContent(toolResult),
 			})
 		}
 	}
@@ -129,6 +144,8 @@ func (o *Orchestrator) buildMessages(sess *state.Session, userMessage string) []
 func (o *Orchestrator) buildSystemPrompt(userMessage string) string {
 	var sb strings.Builder
 	sb.WriteString("You are an AI assistant with access to the following tools:\n\n")
+
+	sb.WriteString(o.rules.BuildPromptSection())
 
 	caps := o.registry.ListCapabilities()
 	for _, cap := range caps {
@@ -170,7 +187,7 @@ func filterByTag(memories []*state.Memory, tag string) []*state.Memory {
 	return result
 }
 
-func (o *Orchestrator) executeCall(call ToolCall) ToolResult {
+func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResult {
 	exec, ok := o.registry.GetExecutor(call.Plugin)
 	if !ok {
 		return ToolResult{
@@ -184,7 +201,11 @@ func (o *Orchestrator) executeCall(call ToolCall) ToolResult {
 			Error:  fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin),
 		}
 	}
-	return exec.Execute(call)
+
+	result := o.guard.ExecuteWithTimeout(ctx, exec, call)
+	result = o.guard.ValidateResult(call, result)
+	result = o.guard.Sanitize(result)
+	return result
 }
 
 func (o *Orchestrator) maybeRecordWorkflow(result *RunResult, userMessage string) {

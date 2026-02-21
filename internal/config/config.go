@@ -10,10 +10,15 @@ import (
 )
 
 type Config struct {
-	Models  ModelsConfig  `yaml:"models"`
-	Routing RoutingConfig `yaml:"routing"`
-	Auth    AuthConfig    `yaml:"auth"`
-	State   StateConfig   `yaml:"state"`
+	Models       ModelsConfig       `yaml:"models"`
+	Routing      RoutingConfig      `yaml:"routing"`
+	Auth         AuthConfig         `yaml:"auth"`
+	State        StateConfig        `yaml:"state"`
+	Orchestrator OrchestratorConfig `yaml:"orchestrator"`
+}
+
+type OrchestratorConfig struct {
+	Rules []string `yaml:"rules"`
 }
 
 type StateConfig struct {
