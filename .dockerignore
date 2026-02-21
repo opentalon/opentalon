@@ -1,0 +1,8 @@
+.git
+.github
+.gitignore
+.golangci.yml
+README.md
+LICENSE
+Dockerfile
+.dockerignore

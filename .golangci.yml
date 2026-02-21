@@ -1,0 +1,23 @@
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - gosimple
+    - ineffassign
+    - gocritic
+    - gofmt
+    - goimports
+
+linters-settings:
+  gocritic:
+    enabled-checks:
+      - dupImport
+      - ifElseChain
+      - nestingReduce
+      - unnecessaryBlock
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 5
