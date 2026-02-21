@@ -69,6 +69,9 @@ auth:
     max: "1h"
     multiplier: 5
     billing_max_hours: 24
+
+state:
+  data_dir: /var/lib/opentalon
 `
 
 func TestParseConfig(t *testing.T) {
@@ -147,14 +150,9 @@ func TestParseRouting(t *testing.T) {
 }
 
 func TestEnvSubstitution(t *testing.T) {
-	os.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-123")
-	os.Setenv("OVH_BASE_URL", "https://ovh.example.com/v1")
-	os.Setenv("OVH_API_KEY", "ovh-key-456")
-	defer func() {
-		os.Unsetenv("ANTHROPIC_API_KEY")
-		os.Unsetenv("OVH_BASE_URL")
-		os.Unsetenv("OVH_API_KEY")
-	}()
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-123")
+	t.Setenv("OVH_BASE_URL", "https://ovh.example.com/v1")
+	t.Setenv("OVH_API_KEY", "ovh-key-456")
 
 	cfg, err := Parse([]byte(testYAML))
 	if err != nil {
@@ -173,6 +171,7 @@ func TestEnvSubstitution(t *testing.T) {
 }
 
 func TestEnvSubstitutionPreservesUnsetVars(t *testing.T) {
+	//nolint:errcheck // test cleanup of env var
 	os.Unsetenv("OPENAI_API_KEY")
 	cfg, err := Parse([]byte(testYAML))
 	if err != nil {
@@ -203,8 +202,7 @@ func TestParseInvalidYAML(t *testing.T) {
 }
 
 func TestExpandEnv(t *testing.T) {
-	os.Setenv("TEST_VAR", "hello")
-	defer os.Unsetenv("TEST_VAR")
+	t.Setenv("TEST_VAR", "hello")
 
 	tests := []struct {
 		input string
@@ -221,5 +219,48 @@ func TestExpandEnv(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("expandEnv(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestStateDataDirExplicit(t *testing.T) {
+	cfg, err := Parse([]byte(testYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.State.DataDir != "/var/lib/opentalon" {
+		t.Errorf("data_dir = %q, want /var/lib/opentalon", cfg.State.DataDir)
+	}
+}
+
+func TestStateDataDirDefault(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, _ := os.UserHomeDir()
+	want := home + "/.opentalon"
+	if cfg.State.DataDir != want {
+		t.Errorf("data_dir = %q, want %q", cfg.State.DataDir, want)
+	}
+}
+
+func TestStateDataDirEnvSubstitution(t *testing.T) {
+	t.Setenv("OPENTALON_DATA_DIR", "/custom/data")
+	yaml := `
+models:
+  providers: {}
+state:
+  data_dir: "${OPENTALON_DATA_DIR}"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.State.DataDir != "/custom/data" {
+		t.Errorf("data_dir = %q, want /custom/data", cfg.State.DataDir)
 	}
 }

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 
 	"gopkg.in/yaml.v3"
@@ -12,6 +13,11 @@ type Config struct {
 	Models  ModelsConfig  `yaml:"models"`
 	Routing RoutingConfig `yaml:"routing"`
 	Auth    AuthConfig    `yaml:"auth"`
+	State   StateConfig   `yaml:"state"`
+}
+
+type StateConfig struct {
+	DataDir string `yaml:"data_dir"`
 }
 
 type ModelsConfig struct {
@@ -104,5 +110,11 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	expandEnvInProviders(&cfg)
+	if cfg.State.DataDir == "" {
+		home, _ := os.UserHomeDir()
+		cfg.State.DataDir = filepath.Join(home, ".opentalon")
+	} else {
+		cfg.State.DataDir = expandEnv(cfg.State.DataDir)
+	}
 	return &cfg, nil
 }
