@@ -2,6 +2,7 @@
 
 **An open-source alternative to OpenClaw, built from scratch in Go.**
 
+[![CI](https://github.com/opentalon/opentalon/actions/workflows/ci.yml/badge.svg)](https://github.com/opentalon/opentalon/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://go.dev)
 
