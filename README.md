@@ -1,0 +1,138 @@
+# OpenTalon
+
+**An open-source alternative to OpenClaw, built from scratch in Go.**
+
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://go.dev)
+
+---
+
+## What is OpenTalon?
+
+OpenTalon is an open-source platform built from the ground up in Go as a robust alternative to OpenClaw. It is designed for individuals, teams, and large organizations that need a reliable, secure, and extensible solution — without the compromises that come with legacy codebases.
+
+## Why OpenTalon?
+
+Existing solutions often suffer from:
+
+- **Poor maintainability** — tangled codebases that become harder to change over time
+- **Low code quality** — inconsistent patterns, lack of tests, and technical debt that compounds
+- **Repeatable bugs** — the same classes of issues resurfacing release after release
+- **Hard to extend** — adding features means forking or fighting the architecture
+
+OpenTalon is engineered for long-term quality from day one. Every architectural decision is made with maintainability, security, and stability in mind — so the project stays healthy as it grows.
+
+## Core Principles
+
+### Security First
+
+Security is not an afterthought. OpenTalon is secure by default with a minimal attack surface. Plugins run as **separate OS processes** communicating over gRPC, so a compromised or misbehaving plugin can never access the core's memory or escalate privileges. Secrets are handled properly, inputs are validated at every boundary, and dependencies are kept lean and audited. No shortcuts.
+
+### Stability
+
+Thorough testing at every level — unit, integration, and end-to-end. Pull requests can only be merged with a fully green test suite, no exceptions — not even for project owners :) Zero tolerance for repeatable bugs. Predictable behavior under load, graceful degradation, and clear error reporting.
+
+### Customizability
+
+A two-tier plugin system lets users extend OpenTalon without forking. Whether you need a full-blown storage backend or a lightweight request filter, there is a plugin tier designed for your use case. See [Plugin System](#plugin-system) below.
+
+### Maintainability
+
+Clean architecture, idiomatic Go, and high code quality standards enforced by linters, formatters, and code review. The codebase is designed to be readable and approachable for new contributors.
+
+### Multi-Platform Deployment
+
+First-class support for running anywhere:
+
+- **Local** — single binary, no external dependencies required to get started
+- **VPS** — lightweight deployment with systemd or supervisor
+- **Docker** — official container images
+- **Kubernetes** — Helm charts for production-grade deployments
+
+## Getting Started
+
+<!-- TODO: Add prerequisites and quick-start commands once the initial codebase exists -->
+
+## Installation
+
+<!-- TODO: Add installation instructions for binary, Docker, Helm/Kubernetes, from source -->
+
+## Plugin System
+
+OpenTalon features a **two-tier plugin architecture** that balances power, safety, and ease of use.
+
+```mermaid
+graph LR
+    subgraph core [OpenTalon Core]
+        PluginHost[Plugin Host]
+        LuaVM[Lua VM]
+    end
+
+    subgraph grpcPlugins [gRPC Plugins]
+        AuthPlugin[Auth Plugin]
+        StoragePlugin[Storage Plugin]
+        CustomPlugin[Custom Plugin]
+    end
+
+    subgraph luaScripts [Lua Scripts]
+        FilterScript[filter.lua]
+        HookScript[hook.lua]
+        RuleScript[rules.lua]
+    end
+
+    PluginHost <-->|gRPC| AuthPlugin
+    PluginHost <-->|gRPC| StoragePlugin
+    PluginHost <-->|gRPC| CustomPlugin
+    LuaVM <-->|embedded| FilterScript
+    LuaVM <-->|embedded| HookScript
+    LuaVM <-->|embedded| RuleScript
+```
+
+### Tier 1: gRPC Plugins (HashiCorp go-plugin style)
+
+For heavy, standalone extensions such as auth providers, storage backends, and third-party integrations.
+
+- Each plugin is a **separate binary** that communicates with the core over **gRPC via a local socket**
+- **Process isolation** — a crashing or misbehaving plugin cannot take down the core; each plugin runs in its own OS process with its own memory space
+- **Language-agnostic** — write plugins in Go, Python, Rust, or any language that speaks gRPC (Go is the primary SDK)
+- **Security boundary** — separate OS process with limited permissions; strict protobuf contracts define exactly what a plugin can and cannot do
+- **Discovery and lifecycle** — plugins are registered via config or auto-discovered from a directory, health-checked, and gracefully restarted on failure
+- Same proven pattern behind **Terraform**, **Vault**, and **Nomad**
+
+### Tier 2: Lua Scripting (embedded via gopher-lua)
+
+For lightweight, hot-reloadable customization such as filters, rules, hooks, and data transformations.
+
+- **Embedded Lua VM** inside the core — no separate process, no recompilation needed
+- **Hot-reload** — update `.lua` scripts without restarting OpenTalon
+- **Sandboxed** — restricted standard library, memory and CPU limits to prevent runaway scripts
+- **Low barrier to entry** — ideal for operators and non-Go developers who need quick customizations
+- Inspired by **Nginx/OpenResty**, **Kong**, and **Redis** scripting models
+
+### Extension Points
+
+Both plugin tiers share the same set of extension points:
+
+- Auth providers
+- Storage backends
+- Notification channels
+- Scheduled tasks
+- Request/response hooks
+- Custom API endpoints
+
+### Developer Experience
+
+- **gRPC Plugin SDK** — scaffolding CLI, example plugins, and integration test helpers
+- **Lua API reference** — documentation, example scripts, and a REPL for interactive testing
+
+## Roadmap
+
+<!-- TODO: Add roadmap milestones -->
+
+## Contributing
+
+<!-- TODO: Add contributing guidelines and link to CONTRIBUTING.md -->
+
+## License
+
+OpenTalon is licensed under the [Apache License 2.0](LICENSE).
