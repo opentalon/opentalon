@@ -10,11 +10,18 @@ import (
 )
 
 type Config struct {
-	Models       ModelsConfig       `yaml:"models"`
-	Routing      RoutingConfig      `yaml:"routing"`
-	Auth         AuthConfig         `yaml:"auth"`
-	State        StateConfig        `yaml:"state"`
-	Orchestrator OrchestratorConfig `yaml:"orchestrator"`
+	Models       ModelsConfig             `yaml:"models"`
+	Routing      RoutingConfig            `yaml:"routing"`
+	Auth         AuthConfig               `yaml:"auth"`
+	State        StateConfig              `yaml:"state"`
+	Orchestrator OrchestratorConfig       `yaml:"orchestrator"`
+	Channels     map[string]ChannelConfig `yaml:"channels"`
+}
+
+type ChannelConfig struct {
+	Enabled bool                   `yaml:"enabled"`
+	Plugin  string                 `yaml:"plugin"`
+	Config  map[string]interface{} `yaml:"config"`
 }
 
 type OrchestratorConfig struct {
@@ -115,6 +122,7 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	expandEnvInProviders(&cfg)
+	expandEnvInChannels(&cfg)
 	if cfg.State.DataDir == "" {
 		home, _ := os.UserHomeDir()
 		cfg.State.DataDir = filepath.Join(home, ".opentalon")
@@ -122,4 +130,16 @@ func Parse(data []byte) (*Config, error) {
 		cfg.State.DataDir = expandEnv(cfg.State.DataDir)
 	}
 	return &cfg, nil
+}
+
+func expandEnvInChannels(cfg *Config) {
+	for name, ch := range cfg.Channels {
+		ch.Plugin = expandEnv(ch.Plugin)
+		for k, v := range ch.Config {
+			if s, ok := v.(string); ok {
+				ch.Config[k] = expandEnv(s)
+			}
+		}
+		cfg.Channels[name] = ch
+	}
 }

@@ -387,3 +387,122 @@ models:
 		t.Errorf("expected 0 rules when omitted, got %d", len(cfg.Orchestrator.Rules))
 	}
 }
+
+func TestParseChannels(t *testing.T) {
+	t.Setenv("SLACK_APP_TOKEN", "xapp-test")
+	t.Setenv("SLACK_BOT_TOKEN", "xoxb-test")
+
+	yaml := `
+models:
+  providers: {}
+channels:
+  my-slack:
+    enabled: true
+    plugin: "./plugins/opentalon-slack"
+    config:
+      app_token: "${SLACK_APP_TOKEN}"
+      bot_token: "${SLACK_BOT_TOKEN}"
+  my-telegram:
+    enabled: true
+    plugin: "grpc://telegram.internal:9001"
+    config:
+      bot_token: "static-token"
+  disabled-channel:
+    enabled: false
+    plugin: "docker://ghcr.io/opentalon/plugin-x:latest"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Channels) != 3 {
+		t.Fatalf("expected 3 channels, got %d", len(cfg.Channels))
+	}
+
+	slack := cfg.Channels["my-slack"]
+	if !slack.Enabled {
+		t.Error("my-slack should be enabled")
+	}
+	if slack.Plugin != "./plugins/opentalon-slack" {
+		t.Errorf("slack plugin = %q", slack.Plugin)
+	}
+	if slack.Config["app_token"] != "xapp-test" {
+		t.Errorf("slack app_token = %q, want xapp-test", slack.Config["app_token"])
+	}
+	if slack.Config["bot_token"] != "xoxb-test" {
+		t.Errorf("slack bot_token = %q, want xoxb-test", slack.Config["bot_token"])
+	}
+
+	tg := cfg.Channels["my-telegram"]
+	if tg.Plugin != "grpc://telegram.internal:9001" {
+		t.Errorf("telegram plugin = %q", tg.Plugin)
+	}
+
+	disabled := cfg.Channels["disabled-channel"]
+	if disabled.Enabled {
+		t.Error("disabled-channel should be disabled")
+	}
+}
+
+func TestParseChannelsEnvInPlugin(t *testing.T) {
+	t.Setenv("MY_PLUGIN_HOST", "myhost.internal")
+	yaml := `
+models:
+  providers: {}
+channels:
+  dynamic:
+    enabled: true
+    plugin: "grpc://${MY_PLUGIN_HOST}:9001"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Channels["dynamic"].Plugin != "grpc://myhost.internal:9001" {
+		t.Errorf("plugin = %q, want grpc://myhost.internal:9001", cfg.Channels["dynamic"].Plugin)
+	}
+}
+
+func TestParseNoChannels(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Channels) != 0 {
+		t.Errorf("expected 0 channels when omitted, got %d", len(cfg.Channels))
+	}
+}
+
+func TestParseChannelAllModes(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+channels:
+  binary:
+    enabled: true
+    plugin: "./plugins/my-plugin"
+  grpc:
+    enabled: true
+    plugin: "grpc://host:9001"
+  docker:
+    enabled: true
+    plugin: "docker://img:tag"
+  webhook:
+    enabled: true
+    plugin: "https://example.com/hook"
+  websocket:
+    enabled: true
+    plugin: "wss://ws.example.com/ch"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Channels) != 5 {
+		t.Fatalf("expected 5 channels, got %d", len(cfg.Channels))
+	}
+}
