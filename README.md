@@ -236,7 +236,7 @@ All three categories share the same set of extension points:
 - **gRPC Plugin SDK** — scaffolding CLI, example plugins, and integration test helpers. Works for tool plugins, channel plugins, and gRPC hooks.
 - **Lua API reference** — documentation, example scripts, and a REPL for interactive testing
 
-> For the full architecture, see [docs/design/plugins.md](docs/design/plugins.md) and [docs/design/channels.md](docs/design/channels.md).
+> For the full architecture, see [docs/design/plugins.md](docs/design/plugins.md) and [docs/design/channels.md](docs/design/channels.md). For real-world workflow examples, see [examples/](examples/).
 
 Channel configuration example — all five modes side by side:
 
