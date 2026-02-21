@@ -104,7 +104,7 @@ Thorough testing at every level — unit, integration, and end-to-end. Pull requ
 
 ### Customizability
 
-A two-tier plugin system lets users extend OpenTalon without forking. Whether you need a full-blown storage backend or a lightweight request filter, there is a plugin tier designed for your use case. See [Plugin System](#plugin-system) below.
+A two-tier plugin system lets users extend OpenTalon without forking. Whether you need a full-blown storage backend or a lightweight request filter, there is a plugin tier designed for your use case. Lua hooks let companies enforce their own **business rules, vocabulary, and compliance policies** using deterministic logic — without burning LLM tokens. See [Plugin System](#plugin-system) below. For pluggable messaging channels (Slack, Teams, Telegram, etc.), see [Channels](#channels) and the [full architecture doc](docs/design/channels.md).
 
 ### Maintainability
 
@@ -176,8 +176,27 @@ For lightweight, hot-reloadable customization such as filters, rules, hooks, and
 - **Embedded Lua VM** inside the core — no separate process, no recompilation needed
 - **Hot-reload** — update `.lua` scripts without restarting OpenTalon
 - **Sandboxed** — restricted standard library, memory and CPU limits to prevent runaway scripts
+- **Expert system + small LLM** — hooks can run rule-based logic (pattern matching, decision trees) and optionally call a small/local LLM via `ctx.llm()` for classification or validation
 - **Low barrier to entry** — ideal for operators and non-Go developers who need quick customizations
 - Inspired by **Nginx/OpenResty**, **Kong**, and **Redis** scripting models
+
+### Company Rules, Context & Vocabulary — Without Burning LLM Tokens
+
+Lua pre/post hooks let organizations enforce their own business rules, terminology, and compliance requirements **before** the message ever reaches the main LLM. This means:
+
+- **Vocabulary enforcement** — automatically rewrite informal or non-standard terms into company-approved language. A simple Lua replacement table handles this with zero LLM cost.
+- **Business rule classification** — route, prioritize, or reject requests using deterministic rules (regex, keyword matching, decision trees). No tokens burned.
+- **Compliance checks** — detect PII, credentials, or policy violations in both incoming messages and outgoing responses using pure Lua pattern matching.
+- **Context enrichment** — inject company-specific metadata (project codes, team names, priority levels) into the request so the main LLM has the right context without needing to figure it out itself.
+
+For ambiguous cases that rules alone can't handle, hooks can call a small/cheap LLM (`ctx.llm()`) — a local Ollama model or a low-cost cloud model — for lightweight AI tasks like language detection or sentiment analysis. The main (expensive) LLM only sees clean, pre-processed, company-ready input.
+
+```
+User message ──▶ Lua pre-hooks (rules + optional small LLM) ──▶ Main LLM ──▶ Lua post-hooks ──▶ Response
+                  │  zero tokens for deterministic rules         │              │
+                  │  cheap tokens for small LLM fallback         │              │  enforce vocabulary
+                  │  enrich context, classify, normalize         │              │  compliance check
+```
 
 ### Extension Points
 
@@ -194,6 +213,83 @@ Both plugin tiers share the same set of extension points:
 
 - **gRPC Plugin SDK** — scaffolding CLI, example plugins, and integration test helpers
 - **Lua API reference** — documentation, example scripts, and a REPL for interactive testing
+
+> For the full architecture, examples, and Lua API reference, see [docs/design/plugins.md](docs/design/plugins.md).
+
+## Channels
+
+OpenTalon includes a **platform-agnostic channel framework** that lets any messaging system plug in. The core defines abstract contracts and infrastructure — actual implementations (Slack, Teams, Telegram, WhatsApp, Discord, Jira, Matrix, etc.) live in **separate repositories**.
+
+```mermaid
+flowchart TD
+    subgraph external ["External repos"]
+        ChA["Channel Plugin A"]
+        ChB["Channel Plugin B"]
+        ToolA["Tool Plugin A"]
+        ToolB["Tool Plugin B"]
+    end
+
+    subgraph core [OpenTalon Core]
+        ChannelReg[Channel Registry]
+        Orch[LLM Orchestrator]
+        ToolReg[Tool Registry]
+    end
+
+    ChA <-->|"Channel gRPC / HTTP / WS"| ChannelReg
+    ChB <-->|"Channel gRPC / HTTP / WS"| ChannelReg
+    ToolA <-->|"Tool gRPC"| ToolReg
+    ToolB <-->|"Tool gRPC"| ToolReg
+    ChannelReg --> Orch
+    Orch --> ToolReg
+```
+
+### Five connection modes
+
+The core auto-detects how to connect based on the `plugin` URI scheme:
+
+| Format | Mode | Best for |
+|---|---|---|
+| `./path/to/binary` | **Binary** | Local dev, simple deployments |
+| `grpc://host:port` | **Remote gRPC** | Kubernetes, cloud-native |
+| `docker://image:tag` | **Docker** | Self-hosted with isolation |
+| `https://endpoint/path` | **Webhook** | Serverless (Lambda, Cloud Functions) |
+| `wss://host/path` | **WebSocket** | Real-time, lightweight |
+
+### Configuration
+
+```yaml
+channels:
+  my-slack:
+    enabled: true
+    plugin: "./plugins/opentalon-slack"                       # binary
+    config:
+      app_token: "${SLACK_APP_TOKEN}"
+      bot_token: "${SLACK_BOT_TOKEN}"
+  my-telegram:
+    enabled: true
+    plugin: "grpc://telegram-bot.internal:9001"               # remote gRPC
+    config:
+      bot_token: "${TELEGRAM_BOT_TOKEN}"
+  my-teams:
+    enabled: true
+    plugin: "docker://ghcr.io/opentalon/plugin-teams:latest"  # docker
+    config:
+      tenant_id: "${TEAMS_TENANT_ID}"
+  my-whatsapp:
+    enabled: true
+    plugin: "https://us-central1-proj.cloudfunctions.net/wa"  # webhook
+    config:
+      verify_token: "${WA_VERIFY_TOKEN}"
+  my-custom:
+    enabled: true
+    plugin: "wss://custom-bridge.example.com/channel"         # websocket
+    config:
+      api_key: "${CUSTOM_API_KEY}"
+```
+
+The `config` block is **opaque to the core** — it is forwarded to the plugin without interpretation. The core only manages lifecycle and speaks the generic `ChannelService` contract. Each plugin interprets its own config however it needs.
+
+> For the full architecture, see [docs/design/channels.md](docs/design/channels.md).
 
 ## Smart Model Routing
 
