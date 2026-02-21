@@ -104,7 +104,7 @@ Thorough testing at every level — unit, integration, and end-to-end. Pull requ
 
 ### Customizability
 
-A two-tier plugin system lets users extend OpenTalon without forking. Whether you need a full-blown storage backend or a lightweight request filter, there is a plugin tier designed for your use case. Lua hooks let companies enforce their own **business rules, vocabulary, and compliance policies** using deterministic logic — without burning LLM tokens. See [Plugin System](#plugin-system) below. For pluggable messaging channels (Slack, Teams, Telegram, etc.), see [Channels](#channels) and the [full architecture doc](docs/design/channels.md).
+Everything in OpenTalon is extensible and **language-agnostic**. Tool plugins, channel adapters, and processing hooks can all be written in Go, Python, Rust, or any language that speaks gRPC. For simple rules, an embedded Lua VM provides hot-reloadable scripts with zero deployment overhead. Companies can enforce their own **business rules, vocabulary, and compliance policies** using deterministic logic — without burning LLM tokens. See [Extensibility](#extensibility) below.
 
 ### Maintainability
 
@@ -127,125 +127,63 @@ First-class support for running anywhere:
 
 <!-- TODO: Add installation instructions for binary, Docker, Helm/Kubernetes, from source -->
 
-## Plugin System
+## Extensibility
 
-OpenTalon features a **two-tier plugin architecture** that balances power, safety, and ease of use.
-
-```mermaid
-graph LR
-    subgraph core [OpenTalon Core]
-        PluginHost[Plugin Host]
-        LuaVM[Lua VM]
-    end
-
-    subgraph grpcPlugins [gRPC Plugins]
-        AuthPlugin[Auth Plugin]
-        StoragePlugin[Storage Plugin]
-        CustomPlugin[Custom Plugin]
-    end
-
-    subgraph luaScripts [Lua Scripts]
-        FilterScript[filter.lua]
-        HookScript[hook.lua]
-        RuleScript[rules.lua]
-    end
-
-    PluginHost <-->|gRPC| AuthPlugin
-    PluginHost <-->|gRPC| StoragePlugin
-    PluginHost <-->|gRPC| CustomPlugin
-    LuaVM <-->|embedded| FilterScript
-    LuaVM <-->|embedded| HookScript
-    LuaVM <-->|embedded| RuleScript
-```
-
-### Tier 1: gRPC Plugins (HashiCorp go-plugin style)
-
-For heavy, standalone extensions such as auth providers, storage backends, and third-party integrations.
-
-- Each plugin is a **separate binary** that communicates with the core over **gRPC via a local socket**
-- **Process isolation** — a crashing or misbehaving plugin cannot take down the core; each plugin runs in its own OS process with its own memory space
-- **Language-agnostic** — write plugins in Go, Python, Rust, or any language that speaks gRPC (Go is the primary SDK)
-- **Security boundary** — separate OS process with limited permissions; strict protobuf contracts define exactly what a plugin can and cannot do
-- **Discovery and lifecycle** — plugins are registered via config or auto-discovered from a directory, health-checked, and gracefully restarted on failure
-- Same proven pattern behind **Terraform**, **Vault**, and **Nomad**
-
-### Tier 2: Lua Scripting (embedded via gopher-lua)
-
-For lightweight, hot-reloadable customization such as filters, rules, hooks, and data transformations.
-
-- **Embedded Lua VM** inside the core — no separate process, no recompilation needed
-- **Hot-reload** — update `.lua` scripts without restarting OpenTalon
-- **Sandboxed** — restricted standard library, memory and CPU limits to prevent runaway scripts
-- **Expert system + small LLM** — hooks can run rule-based logic (pattern matching, decision trees) and optionally call a small/local LLM via `ctx.llm()` for classification or validation
-- **Low barrier to entry** — ideal for operators and non-Go developers who need quick customizations
-- Inspired by **Nginx/OpenResty**, **Kong**, and **Redis** scripting models
-
-### Company Rules, Context & Vocabulary — Without Burning LLM Tokens
-
-Lua pre/post hooks let organizations enforce their own business rules, terminology, and compliance requirements **before** the message ever reaches the main LLM. This means:
-
-- **Vocabulary enforcement** — automatically rewrite informal or non-standard terms into company-approved language. A simple Lua replacement table handles this with zero LLM cost.
-- **Business rule classification** — route, prioritize, or reject requests using deterministic rules (regex, keyword matching, decision trees). No tokens burned.
-- **Compliance checks** — detect PII, credentials, or policy violations in both incoming messages and outgoing responses using pure Lua pattern matching.
-- **Context enrichment** — inject company-specific metadata (project codes, team names, priority levels) into the request so the main LLM has the right context without needing to figure it out itself.
-
-For ambiguous cases that rules alone can't handle, hooks can call a small/cheap LLM (`ctx.llm()`) — a local Ollama model or a low-cost cloud model — for lightweight AI tasks like language detection or sentiment analysis. The main (expensive) LLM only sees clean, pre-processed, company-ready input.
-
-```
-User message ──▶ Lua pre-hooks (rules + optional small LLM) ──▶ Main LLM ──▶ Lua post-hooks ──▶ Response
-                  │  zero tokens for deterministic rules         │              │
-                  │  cheap tokens for small LLM fallback         │              │  enforce vocabulary
-                  │  enrich context, classify, normalize         │              │  compliance check
-```
-
-### Extension Points
-
-Both plugin tiers share the same set of extension points:
-
-- Auth providers
-- Storage backends
-- Notification channels
-- Scheduled tasks
-- Request/response hooks
-- Custom API endpoints
-
-### Developer Experience
-
-- **gRPC Plugin SDK** — scaffolding CLI, example plugins, and integration test helpers
-- **Lua API reference** — documentation, example scripts, and a REPL for interactive testing
-
-> For the full architecture, examples, and Lua API reference, see [docs/design/plugins.md](docs/design/plugins.md).
-
-## Channels
-
-OpenTalon includes a **platform-agnostic channel framework** that lets any messaging system plug in. The core defines abstract contracts and infrastructure — actual implementations (Slack, Teams, Telegram, WhatsApp, Discord, Jira, Matrix, etc.) live in **separate repositories**.
+OpenTalon is fully extensible. **Everything** is language-agnostic — plugins, channels, and hooks can be written in Go, Python, Rust, TypeScript, or any language that speaks gRPC. For lightweight scripting, an embedded Lua VM provides hot-reloadable hooks with zero deployment overhead.
 
 ```mermaid
 flowchart TD
-    subgraph external ["External repos"]
-        ChA["Channel Plugin A"]
-        ChB["Channel Plugin B"]
-        ToolA["Tool Plugin A"]
-        ToolB["Tool Plugin B"]
+    subgraph external ["External (any language: Go, Python, Rust, etc.)"]
+        ToolA["Tool Plugin"]
+        ToolB["Tool Plugin"]
+        ChA["Channel Plugin"]
+        ChB["Channel Plugin"]
     end
 
     subgraph core [OpenTalon Core]
+        PreHooks["Pre-hooks (Lua / gRPC)"]
         ChannelReg[Channel Registry]
         Orch[LLM Orchestrator]
         ToolReg[Tool Registry]
+        PostHooks["Post-hooks (Lua / gRPC)"]
     end
 
-    ChA <-->|"Channel gRPC / HTTP / WS"| ChannelReg
-    ChB <-->|"Channel gRPC / HTTP / WS"| ChannelReg
-    ToolA <-->|"Tool gRPC"| ToolReg
-    ToolB <-->|"Tool gRPC"| ToolReg
-    ChannelReg --> Orch
+    ChA <-->|"gRPC / HTTP / WS"| ChannelReg
+    ChB <-->|"gRPC / HTTP / WS"| ChannelReg
+    ChannelReg --> PreHooks
+    PreHooks --> Orch
     Orch --> ToolReg
+    ToolReg <-->|gRPC| ToolA
+    ToolReg <-->|gRPC| ToolB
+    Orch --> PostHooks
+    PostHooks --> ChannelReg
 ```
 
-### Five connection modes
+There are **three extension categories**, all language-agnostic:
 
-The core auto-detects how to connect based on the `plugin` URI scheme:
+| Category | Purpose | Interface | Examples |
+|---|---|---|---|
+| **Tool plugins** | Capabilities the LLM invokes | gRPC (`PluginService`) | GitLab, Jira, code search, CI/CD |
+| **Channel plugins** | I/O adapters for messaging platforms | gRPC / HTTP / WebSocket (`ChannelService`) | Slack, Teams, Telegram, WhatsApp, Discord |
+| **Hooks** | Pre/post processing pipeline | Lua (embedded) or gRPC | Vocabulary enforcement, compliance, classification |
+
+### Tool Plugins (gRPC — any language)
+
+For standalone capabilities the LLM calls: integrations, actions, data retrieval.
+
+- **Language-agnostic** — write in Go, Python, Rust, or any language that speaks gRPC (Go is the primary SDK)
+- Each plugin is a **separate binary** communicating over **gRPC via a local socket**
+- **Process isolation** — a crashing plugin cannot take down the core
+- **Security boundary** — strict protobuf contracts; plugins cannot access other plugins, the registry, or core internals
+- **Discovery and lifecycle** — registered via config or auto-discovered from a directory, health-checked, and restarted on failure
+- Same proven pattern behind **Terraform**, **Vault**, and **Nomad**
+
+### Channel Plugins (gRPC / HTTP / WS — any language)
+
+I/O adapters for messaging platforms. Written in any language, deployed as separate binaries/services.
+
+- **Platform-agnostic** — the core defines a generic `ChannelService` contract. Implementations for Slack, Teams, Telegram, WhatsApp, Discord, Jira, Matrix, etc. live in separate repositories
+- **Five connection modes** — auto-detected from the `plugin` URI scheme:
 
 | Format | Mode | Best for |
 |---|---|---|
@@ -255,7 +193,52 @@ The core auto-detects how to connect based on the `plugin` URI scheme:
 | `https://endpoint/path` | **Webhook** | Serverless (Lambda, Cloud Functions) |
 | `wss://host/path` | **WebSocket** | Real-time, lightweight |
 
-### Configuration
+### Hooks: Lua Scripting + gRPC
+
+Pre/post processing hooks run **before and after** the main LLM. Two options:
+
+- **Lua scripts** (embedded) — hot-reloadable, sandboxed, zero deployment overhead. Ideal for simple rules, filters, and quick customizations. Can call a small/local LLM via `ctx.llm()` for lightweight AI tasks. Inspired by **Nginx/OpenResty**, **Kong**, and **Redis**.
+- **gRPC hook plugins** (any language) — for complex business logic that needs databases, APIs, or custom libraries. Same process isolation and language flexibility as tool plugins.
+
+### Company Rules, Context & Vocabulary — Without Burning LLM Tokens
+
+Hooks let organizations enforce their own business rules, terminology, and compliance requirements **before** the message ever reaches the main LLM — using **Lua** for simple zero-overhead rules or **Go / any language** via gRPC for complex logic.
+
+- **Vocabulary enforcement** — rewrite non-standard terms into company-approved language. Lua replacement table (zero LLM cost) or a Go plugin loading terminology from a database.
+- **Business rule classification** — route, prioritize, or reject requests using deterministic rules. No tokens burned.
+- **Compliance checks** — detect PII, credentials, or policy violations. Lua for pattern matching, Go for compliance API integration.
+- **Context enrichment** — inject company metadata (project codes, team names, priority levels) so the main LLM has the right context without figuring it out.
+- **Business transformation** — convert LLM output into structured actions (Jira tickets, calendar events, CRM updates) using a gRPC plugin in any language.
+
+For ambiguous cases, Lua hooks can call a small/cheap LLM (`ctx.llm()`) for lightweight AI. The main (expensive) LLM only sees clean, pre-processed input.
+
+```
+User message ──▶ Pre-hooks (Lua / Go / small LLM) ──▶ Main LLM ──▶ Post-hooks (Lua / Go) ──▶ Response
+                  │  zero tokens for rules                │              │
+                  │  cheap tokens for small LLM           │              │  enforce vocabulary
+                  │  full power via gRPC plugins          │              │  compliance, transform
+```
+
+### Extension Points
+
+All three categories share the same set of extension points:
+
+- Tool actions (LLM-callable capabilities)
+- Request/response hooks (pre/post processing)
+- Auth providers
+- Storage backends
+- Notification channels
+- Scheduled tasks
+- Custom API endpoints
+
+### Developer Experience
+
+- **gRPC Plugin SDK** — scaffolding CLI, example plugins, and integration test helpers. Works for tool plugins, channel plugins, and gRPC hooks.
+- **Lua API reference** — documentation, example scripts, and a REPL for interactive testing
+
+> For the full architecture, see [docs/design/plugins.md](docs/design/plugins.md) and [docs/design/channels.md](docs/design/channels.md).
+
+Channel configuration example — all five modes side by side:
 
 ```yaml
 channels:
@@ -287,9 +270,7 @@ channels:
       api_key: "${CUSTOM_API_KEY}"
 ```
 
-The `config` block is **opaque to the core** — it is forwarded to the plugin without interpretation. The core only manages lifecycle and speaks the generic `ChannelService` contract. Each plugin interprets its own config however it needs.
-
-> For the full architecture, see [docs/design/channels.md](docs/design/channels.md).
+The `config` block is **opaque to the core** — forwarded to the plugin without interpretation. Each plugin interprets its own config however it needs.
 
 ## Smart Model Routing
 
