@@ -17,7 +17,7 @@ func (s *stubProvider) Complete(_ context.Context, _ *CompletionRequest) (*Compl
 func (s *stubProvider) Stream(_ context.Context, _ *CompletionRequest) (ResponseStream, error) {
 	return nil, nil
 }
-func (s *stubProvider) Models() []ModelInfo { return s.models }
+func (s *stubProvider) Models() []ModelInfo            { return s.models }
 func (s *stubProvider) SupportsFeature(_ Feature) bool { return false }
 
 func TestRegistryRegisterAndGet(t *testing.T) {
