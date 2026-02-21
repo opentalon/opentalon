@@ -25,7 +25,7 @@ func (m *mockProvider) Complete(_ context.Context, _ *provider.CompletionRequest
 func (m *mockProvider) Stream(_ context.Context, _ *provider.CompletionRequest) (provider.ResponseStream, error) {
 	return nil, nil
 }
-func (m *mockProvider) Models() []provider.ModelInfo { return nil }
+func (m *mockProvider) Models() []provider.ModelInfo            { return nil }
 func (m *mockProvider) SupportsFeature(_ provider.Feature) bool { return false }
 
 func setupTest() (*provider.Registry, *auth.Rotator, *auth.CooldownTracker) {

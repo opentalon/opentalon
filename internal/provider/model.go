@@ -46,7 +46,7 @@ func ParseModelRef(s string) (ModelRef, error) {
 type Feature string
 
 const (
-	FeatureStreaming  Feature = "streaming"
+	FeatureStreaming Feature = "streaming"
 	FeatureReasoning Feature = "reasoning"
 	FeatureImages    Feature = "images"
 	FeatureTools     Feature = "tools"
@@ -58,13 +58,13 @@ type ModelCost struct {
 }
 
 type ModelInfo struct {
-	ID            string   `json:"id" yaml:"id"`
-	Name          string   `json:"name" yaml:"name"`
-	ProviderID    string   `json:"provider_id" yaml:"provider_id"`
-	Reasoning     bool     `json:"reasoning" yaml:"reasoning"`
-	InputTypes    []string `json:"input" yaml:"input"`
-	ContextWindow int      `json:"context_window" yaml:"context_window"`
-	MaxTokens     int      `json:"max_tokens" yaml:"max_tokens"`
+	ID            string    `json:"id" yaml:"id"`
+	Name          string    `json:"name" yaml:"name"`
+	ProviderID    string    `json:"provider_id" yaml:"provider_id"`
+	Reasoning     bool      `json:"reasoning" yaml:"reasoning"`
+	InputTypes    []string  `json:"input" yaml:"input"`
+	ContextWindow int       `json:"context_window" yaml:"context_window"`
+	MaxTokens     int       `json:"max_tokens" yaml:"max_tokens"`
 	Cost          ModelCost `json:"cost" yaml:"cost"`
 	Features      []Feature `json:"features" yaml:"features"`
 }

@@ -29,10 +29,10 @@ type Usage struct {
 }
 
 type CompletionResponse struct {
-	ID      string  `json:"id"`
-	Model   string  `json:"model"`
-	Content string  `json:"content"`
-	Usage   Usage   `json:"usage"`
+	ID      string `json:"id"`
+	Model   string `json:"model"`
+	Content string `json:"content"`
+	Usage   Usage  `json:"usage"`
 }
 
 type StreamChunk struct {

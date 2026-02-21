@@ -7,8 +7,8 @@ import (
 )
 
 type Rotator struct {
-	store   *Store
-	pinned  map[string]string // session ID -> profile ID
+	store  *Store
+	pinned map[string]string // session ID -> profile ID
 }
 
 func NewRotator(store *Store) *Rotator {

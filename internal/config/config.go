@@ -15,8 +15,8 @@ type Config struct {
 }
 
 type ModelsConfig struct {
-	Providers map[string]ProviderConfig   `yaml:"providers"`
-	Catalog   map[string]CatalogEntry     `yaml:"catalog"`
+	Providers map[string]ProviderConfig `yaml:"providers"`
+	Catalog   map[string]CatalogEntry   `yaml:"catalog"`
 }
 
 type ProviderConfig struct {
@@ -27,12 +27,12 @@ type ProviderConfig struct {
 }
 
 type ModelDefinition struct {
-	ID            string   `yaml:"id"`
-	Name          string   `yaml:"name"`
-	Reasoning     bool     `yaml:"reasoning"`
-	InputTypes    []string `yaml:"input"`
-	ContextWindow int      `yaml:"context_window"`
-	MaxTokens     int      `yaml:"max_tokens"`
+	ID            string     `yaml:"id"`
+	Name          string     `yaml:"name"`
+	Reasoning     bool       `yaml:"reasoning"`
+	InputTypes    []string   `yaml:"input"`
+	ContextWindow int        `yaml:"context_window"`
+	MaxTokens     int        `yaml:"max_tokens"`
 	Cost          CostConfig `yaml:"cost"`
 }
 
@@ -54,9 +54,9 @@ type RoutingConfig struct {
 }
 
 type AffinityConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Store    string `yaml:"store"`
-	DecayDays int   `yaml:"decay_days"`
+	Enabled   bool   `yaml:"enabled"`
+	Store     string `yaml:"store"`
+	DecayDays int    `yaml:"decay_days"`
 }
 
 type AuthConfig struct {
