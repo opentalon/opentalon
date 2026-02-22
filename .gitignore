@@ -47,3 +47,9 @@ config.local.yaml
 *.log
 
 Makefile
+./channels
+!./channels/.gitkeep
+
+./plugins
+!./plugins/.gitkeep
+
