@@ -121,14 +121,6 @@ First-class support for running anywhere:
 - **Docker** — official container images
 - **Kubernetes** — Helm charts for production-grade deployments
 
-## Getting Started
-
-<!-- TODO: Add prerequisites and quick-start commands once the initial codebase exists -->
-
-## Installation
-
-<!-- TODO: Add installation instructions for binary, Docker, Helm/Kubernetes, from source -->
-
 ## Extensibility
 
 OpenTalon is fully extensible. **Everything** is language-agnostic — plugins, channels, and hooks can be written in Go, Python, Rust, TypeScript, or any language that speaks gRPC. For lightweight scripting, an embedded Lua VM provides hot-reloadable hooks with zero deployment overhead.
@@ -370,13 +362,17 @@ Users can also create jobs by talking to the LLM:
 
 > For a detailed walkthrough of scheduler-driven workflows, see [examples/workflow-ipossum-whatsapp](examples/workflow-ipossum-whatsapp/).
 
-## Roadmap
-
-<!-- TODO: Add roadmap milestones -->
-
 ## Contributing
 
-<!-- TODO: Add contributing guidelines and link to CONTRIBUTING.md -->
+We welcome contributions of all kinds — bug reports, feature requests, documentation improvements, and code.
+
+1. **Report issues** — found a bug or have an idea? [Open an issue](https://github.com/opentalon/opentalon/issues/new) with a clear description and steps to reproduce
+2. **Submit pull requests** — fork the repo, create a feature branch, and open a PR against `master`. Keep PRs focused on a single change
+3. **Write tests** — every PR must include tests. The CI pipeline runs `go test -race ./...` and `golangci-lint` — both must pass before merging
+4. **Follow conventions** — idiomatic Go, `gofmt`-formatted, meaningful commit messages. Read the existing code to match the style
+5. **Discuss first** — for large changes or new features, open an issue to discuss the approach before writing code
+
+All contributions are subject to the [Apache 2.0 License](LICENSE).
 
 ## License
 
