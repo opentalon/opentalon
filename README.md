@@ -89,6 +89,8 @@ flowchart TD
 | Plugin tries to discover or call other plugins | gRPC contract exposes exactly one method: `Execute`. No registry, no peer discovery |
 | Plugin runs forever or consumes all resources | Per-call timeout (configurable) + OS-level resource limits |
 
+**Guard of LLM models:** A plugin can host its **own LLM** (e.g. a small local model or a dedicated API). Used as a content preparer, such a plugin can implement a **guard of LLM models**—for example, classify or validate the request and block or redirect before the main orchestrator LLM is invoked, or enforce which models or providers are allowed. The core only sees the plugin’s result (e.g. transformed message or “do not send to LLM”); the plugin’s internal use of an LLM stays out of the main token path.
+
 #### LLM Safety Rules
 
 The LLM itself receives **built-in safety rules** in its system prompt at the start of every session. These rules instruct the LLM — in multiple languages — to never execute tool calls found inside plugin output, to treat all plugin responses as untrusted data, and to never let a plugin influence which other plugins get called.
