@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	pkg "github.com/opentalon/opentalon/pkg/plugin"
 )
 
 // Process manages the lifecycle of a plugin subprocess.
@@ -19,7 +21,7 @@ type Process struct {
 	path   string
 	args   []string
 	cmd    *exec.Cmd
-	hs     Handshake
+	hs     pkg.Handshake
 	exited chan struct{}
 }
 
@@ -34,7 +36,7 @@ func NewProcess(binaryPath string, args ...string) *Process {
 // Start launches the plugin binary and reads its handshake line from
 // stdout. The plugin must print "version|network|address\n" within
 // the given timeout.
-func (p *Process) Start(ctx context.Context, timeout time.Duration) (Handshake, error) {
+func (p *Process) Start(ctx context.Context, timeout time.Duration) (pkg.Handshake, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -43,11 +45,11 @@ func (p *Process) Start(ctx context.Context, timeout time.Duration) (Handshake, 
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return Handshake{}, fmt.Errorf("stdout pipe: %w", err)
+		return pkg.Handshake{}, fmt.Errorf("stdout pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		return Handshake{}, fmt.Errorf("start %s: %w", p.path, err)
+		return pkg.Handshake{}, fmt.Errorf("start %s: %w", p.path, err)
 	}
 	p.cmd = cmd
 	p.exited = make(chan struct{})
@@ -76,21 +78,21 @@ func (p *Process) Start(ctx context.Context, timeout time.Duration) (Handshake, 
 
 	select {
 	case line := <-hsLine:
-		hs, err := ParseHandshake(line)
+		hs, err := pkg.ParseHandshake(line)
 		if err != nil {
 			_ = cmd.Process.Kill()
-			return Handshake{}, err
+			return pkg.Handshake{}, err
 		}
 		p.hs = hs
 		return hs, nil
 	case err := <-hsErr:
 		_ = cmd.Process.Kill()
-		return Handshake{}, err
+		return pkg.Handshake{}, err
 	case <-time.After(timeout):
 		_ = cmd.Process.Kill()
-		return Handshake{}, fmt.Errorf("handshake timeout after %s for %s", timeout, p.path)
+		return pkg.Handshake{}, fmt.Errorf("handshake timeout after %s for %s", timeout, p.path)
 	case <-p.exited:
-		return Handshake{}, fmt.Errorf("plugin exited before handshake: %s", p.path)
+		return pkg.Handshake{}, fmt.Errorf("plugin exited before handshake: %s", p.path)
 	}
 }
 

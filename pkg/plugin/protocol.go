@@ -10,8 +10,10 @@ import (
 )
 
 const (
+	// HandshakeVersion is the protocol version in the handshake line.
 	HandshakeVersion = 1
-	MaxMessageSize   = 4 * 1024 * 1024 // 4 MB
+	// MaxMessageSize is the maximum length of a single protocol message (4 MB).
+	MaxMessageSize = 4 * 1024 * 1024
 )
 
 // Request is the wire format sent from the host to the plugin.

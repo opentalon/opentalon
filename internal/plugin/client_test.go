@@ -7,12 +7,13 @@ import (
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	pkg "github.com/opentalon/opentalon/pkg/plugin"
 )
 
 // fakePluginServer runs a plugin server on a Unix socket in the
 // current goroutine. It returns the listener so the caller can
 // close it.
-func fakePluginServer(t *testing.T, handler Handler) (network, address string, cleanup func()) {
+func fakePluginServer(t *testing.T, handler pkg.Handler) (network, address string, cleanup func()) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "ot-pl-*")
 	if err != nil {
@@ -32,7 +33,7 @@ func fakePluginServer(t *testing.T, handler Handler) (network, address string, c
 			if err != nil {
 				return
 			}
-			go serveConn(handler, conn)
+			go pkg.ServeConnection(handler, conn)
 		}
 	}()
 
@@ -44,15 +45,15 @@ func fakePluginServer(t *testing.T, handler Handler) (network, address string, c
 
 type echoHandler struct{}
 
-func (h *echoHandler) Capabilities() CapabilitiesMsg {
-	return CapabilitiesMsg{
+func (h *echoHandler) Capabilities() pkg.CapabilitiesMsg {
+	return pkg.CapabilitiesMsg{
 		Name:        "echo",
 		Description: "Echoes arguments back",
-		Actions: []ActionMsg{
+		Actions: []pkg.ActionMsg{
 			{
 				Name:        "say",
 				Description: "Echo a message",
-				Parameters: []ParameterMsg{
+				Parameters: []pkg.ParameterMsg{
 					{Name: "text", Description: "Text to echo", Type: "string", Required: true},
 				},
 			},
@@ -60,12 +61,12 @@ func (h *echoHandler) Capabilities() CapabilitiesMsg {
 	}
 }
 
-func (h *echoHandler) Execute(req Request) Response {
+func (h *echoHandler) Execute(req pkg.Request) pkg.Response {
 	text := req.Args["text"]
 	if text == "" {
-		return Response{CallID: req.ID, Error: "missing text"}
+		return pkg.Response{CallID: req.ID, Error: "missing text"}
 	}
-	return Response{CallID: req.ID, Content: "echo: " + text}
+	return pkg.Response{CallID: req.ID, Content: "echo: " + text}
 }
 
 func TestClientDialAndCapabilities(t *testing.T) {

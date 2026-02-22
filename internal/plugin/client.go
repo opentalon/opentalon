@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	pkg "github.com/opentalon/opentalon/pkg/plugin"
 )
 
 // Client connects to a running plugin over a Unix socket or TCP
@@ -36,18 +37,18 @@ func Dial(network, address string, timeout time.Duration) (*Client, error) {
 }
 
 // DialFromHandshake connects using information from a handshake.
-func DialFromHandshake(hs Handshake, timeout time.Duration) (*Client, error) {
+func DialFromHandshake(hs pkg.Handshake, timeout time.Duration) (*Client, error) {
 	return Dial(hs.Network, hs.Address, timeout)
 }
 
 func (c *Client) fetchCapabilities() error {
-	req := Request{Method: "capabilities"}
-	if err := WriteMessage(c.conn, &req); err != nil {
+	req := pkg.Request{Method: "capabilities"}
+	if err := pkg.WriteMessage(c.conn, &req); err != nil {
 		return fmt.Errorf("request capabilities: %w", err)
 	}
 
-	var resp Response
-	if err := ReadMessage(c.conn, &resp); err != nil {
+	var resp pkg.Response
+	if err := pkg.ReadMessage(c.conn, &resp); err != nil {
 		return fmt.Errorf("read capabilities: %w", err)
 	}
 	if resp.Error != "" {
@@ -74,7 +75,7 @@ func (c *Client) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	req := Request{
+	req := pkg.Request{
 		Method: "execute",
 		ID:     call.ID,
 		Plugin: call.Plugin,
@@ -82,12 +83,12 @@ func (c *Client) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 		Args:   call.Args,
 	}
 
-	if err := WriteMessage(c.conn, &req); err != nil {
+	if err := pkg.WriteMessage(c.conn, &req); err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("write: %v", err)}
 	}
 
-	var resp Response
-	if err := ReadMessage(c.conn, &resp); err != nil {
+	var resp pkg.Response
+	if err := pkg.ReadMessage(c.conn, &resp); err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("read: %v", err)}
 	}
 
@@ -118,7 +119,7 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
-func toPluginCapability(msg *CapabilitiesMsg) orchestrator.PluginCapability {
+func toPluginCapability(msg *pkg.CapabilitiesMsg) orchestrator.PluginCapability {
 	actions := make([]orchestrator.Action, len(msg.Actions))
 	for i, a := range msg.Actions {
 		params := make([]orchestrator.Parameter, len(a.Parameters))

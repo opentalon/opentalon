@@ -3,6 +3,8 @@ package plugin
 import (
 	"net"
 	"testing"
+
+	pkg "github.com/opentalon/opentalon/pkg/plugin"
 )
 
 func TestParseHandshakeValid(t *testing.T) {
@@ -16,7 +18,7 @@ func TestParseHandshakeValid(t *testing.T) {
 		{"1|tcp|127.0.0.1:9001", 1, "tcp", "127.0.0.1:9001"},
 	}
 	for _, tc := range tests {
-		hs, err := ParseHandshake(tc.input)
+		hs, err := pkg.ParseHandshake(tc.input)
 		if err != nil {
 			t.Errorf("ParseHandshake(%q): %v", tc.input, err)
 			continue
@@ -42,7 +44,7 @@ func TestParseHandshakeInvalid(t *testing.T) {
 		"1|unix",                // missing address
 	}
 	for _, input := range bad {
-		_, err := ParseHandshake(input)
+		_, err := pkg.ParseHandshake(input)
 		if err == nil {
 			t.Errorf("ParseHandshake(%q): expected error", input)
 		}
@@ -50,7 +52,7 @@ func TestParseHandshakeInvalid(t *testing.T) {
 }
 
 func TestHandshakeString(t *testing.T) {
-	hs := Handshake{Version: 1, Network: "unix", Address: "/tmp/p.sock"}
+	hs := pkg.Handshake{Version: 1, Network: "unix", Address: "/tmp/p.sock"}
 	got := hs.String()
 	if got != "1|unix|/tmp/p.sock" {
 		t.Errorf("String() = %q", got)
@@ -62,15 +64,15 @@ func TestWriteReadMessage(t *testing.T) {
 	defer func() { _ = server.Close() }()
 	defer func() { _ = client.Close() }()
 
-	sent := Request{Method: "execute", ID: "call-1", Plugin: "gitlab", Action: "list_mrs", Args: map[string]string{"project": "myapp"}}
+	sent := pkg.Request{Method: "execute", ID: "call-1", Plugin: "gitlab", Action: "list_mrs", Args: map[string]string{"project": "myapp"}}
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- WriteMessage(client, &sent)
+		errCh <- pkg.WriteMessage(client, &sent)
 	}()
 
-	var received Request
-	if err := ReadMessage(server, &received); err != nil {
+	var received pkg.Request
+	if err := pkg.ReadMessage(server, &received); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-errCh; err != nil {
@@ -99,15 +101,15 @@ func TestWriteReadResponse(t *testing.T) {
 	defer func() { _ = server.Close() }()
 	defer func() { _ = client.Close() }()
 
-	sent := Response{
+	sent := pkg.Response{
 		CallID:  "call-1",
 		Content: "merge request created",
 	}
 
-	go func() { _ = WriteMessage(server, &sent) }()
+	go func() { _ = pkg.WriteMessage(server, &sent) }()
 
-	var received Response
-	if err := ReadMessage(client, &received); err != nil {
+	var received pkg.Response
+	if err := pkg.ReadMessage(client, &received); err != nil {
 		t.Fatal(err)
 	}
 	if received.CallID != "call-1" {
@@ -123,15 +125,15 @@ func TestCapabilitiesRoundTrip(t *testing.T) {
 	defer func() { _ = server.Close() }()
 	defer func() { _ = client.Close() }()
 
-	sent := Response{
-		Caps: &CapabilitiesMsg{
+	sent := pkg.Response{
+		Caps: &pkg.CapabilitiesMsg{
 			Name:        "gitlab",
 			Description: "GitLab integration",
-			Actions: []ActionMsg{
+			Actions: []pkg.ActionMsg{
 				{
 					Name:        "list_mrs",
 					Description: "List merge requests",
-					Parameters: []ParameterMsg{
+					Parameters: []pkg.ParameterMsg{
 						{Name: "project", Description: "Project ID", Type: "string", Required: true},
 					},
 				},
@@ -139,10 +141,10 @@ func TestCapabilitiesRoundTrip(t *testing.T) {
 		},
 	}
 
-	go func() { _ = WriteMessage(server, &sent) }()
+	go func() { _ = pkg.WriteMessage(server, &sent) }()
 
-	var received Response
-	if err := ReadMessage(client, &received); err != nil {
+	var received pkg.Response
+	if err := pkg.ReadMessage(client, &received); err != nil {
 		t.Fatal(err)
 	}
 

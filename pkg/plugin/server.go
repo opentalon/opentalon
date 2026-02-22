@@ -8,6 +8,10 @@ import (
 	"path/filepath"
 )
 
+// SocketFileName is the Unix socket filename the server listens on.
+// When the host sets OPENTALON_PLUGIN_SOCK_DIR, the server creates the socket there.
+const SocketFileName = "plugin.sock"
+
 // Handler is the interface that plugin authors implement on the
 // server side. The host calls Execute for each tool invocation.
 type Handler interface {
@@ -24,7 +28,7 @@ func Serve(handler Handler) error {
 	if err != nil {
 		return fmt.Errorf("create socket dir: %w", err)
 	}
-	sockPath := filepath.Join(sockDir, "plugin.sock")
+	sockPath := filepath.Join(sockDir, SocketFileName)
 
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -43,11 +47,12 @@ func Serve(handler Handler) error {
 		if err != nil {
 			return fmt.Errorf("accept: %w", err)
 		}
-		go serveConn(handler, conn)
+		go ServeConnection(handler, conn)
 	}
 }
 
-func serveConn(handler Handler, conn net.Conn) {
+// ServeConnection handles a single connection (used by Serve and by tests).
+func ServeConnection(handler Handler, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 	for {
 		var req Request
