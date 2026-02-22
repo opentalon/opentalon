@@ -601,7 +601,7 @@ scheduler:
   jobs:
     - name: "violation-check"
       interval: "1h"
-      action: "ipossum.check_violations"
+      action: "content.check_violations"
       notify_channel: "whatsapp"
     - name: "daily-report"
       interval: "24h"
@@ -625,7 +625,7 @@ scheduler:
 	if job.Interval != "1h" {
 		t.Errorf("job interval = %q", job.Interval)
 	}
-	if job.Action != "ipossum.check_violations" {
+	if job.Action != "content.check_violations" {
 		t.Errorf("job action = %q", job.Action)
 	}
 	if job.NotifyChannel != "whatsapp" {

@@ -93,7 +93,7 @@ func TestJobParseAction(t *testing.T) {
 		act    string
 		err    bool
 	}{
-		{"ipossum.check_violations", "ipossum", "check_violations", false},
+		{"content.check_violations", "content", "check_violations", false},
 		{"reports.generate", "reports", "generate", false},
 		{"invalid", "", "", true},
 		{".action", "", "", true},
