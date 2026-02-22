@@ -8,24 +8,26 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
 // fakeChannelHandler simulates a channel plugin on the server side.
 type fakeChannelHandler struct {
-	caps     Capabilities
-	received []OutboundMessage
+	caps     pkg.Capabilities
+	received []pkg.OutboundMessage
 	sendDone chan struct{} // closed when "send" was handled (for test sync)
 }
 
 func (h *fakeChannelHandler) serve(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 	for {
-		var req ChannelRequest
-		if err := readMsg(conn, &req); err != nil {
+		var req pkg.ChannelRequest
+		if err := pkg.ReadMessage(conn, &req); err != nil {
 			return
 		}
 
-		var resp ChannelResponse
+		var resp pkg.ChannelResponse
 		switch req.Method {
 		case "capabilities":
 			resp.Caps = &h.caps
@@ -33,8 +35,8 @@ func (h *fakeChannelHandler) serve(conn net.Conn) {
 			// After ack, send a test inbound message.
 			go func() {
 				time.Sleep(20 * time.Millisecond)
-				msg := ChannelResponse{
-					Msg: &InboundMessage{
+				msg := pkg.ChannelResponse{
+					Msg: &pkg.InboundMessage{
 						ChannelID:      h.caps.ID,
 						ConversationID: "conv-1",
 						SenderID:       "user-1",
@@ -43,7 +45,7 @@ func (h *fakeChannelHandler) serve(conn net.Conn) {
 						Timestamp:      time.Now(),
 					},
 				}
-				_ = writeMsg(conn, &msg)
+				_ = pkg.WriteMessage(conn, &msg)
 			}()
 		case "send":
 			if req.Msg != nil {
@@ -58,7 +60,7 @@ func (h *fakeChannelHandler) serve(conn net.Conn) {
 			resp.Error = fmt.Sprintf("unknown method %q", req.Method)
 		}
 
-		if err := writeMsg(conn, &resp); err != nil {
+		if err := pkg.WriteMessage(conn, &resp); err != nil {
 			return
 		}
 	}
@@ -96,7 +98,7 @@ func fakeChannelServer(t *testing.T, handler *fakeChannelHandler) (network, addr
 
 func TestChannelClientCapabilities(t *testing.T) {
 	handler := &fakeChannelHandler{
-		caps: Capabilities{
+		caps: pkg.Capabilities{
 			ID:               "test-slack",
 			Name:             "Slack",
 			Threads:          true,
@@ -139,7 +141,7 @@ func TestChannelClientSend(t *testing.T) {
 	defer func() { _ = serverConn.Close(); _ = clientConn.Close() }()
 
 	handler := &fakeChannelHandler{
-		caps:     Capabilities{ID: "test-ch", Name: "Test"},
+		caps:     pkg.Capabilities{ID: "test-ch", Name: "Test"},
 		sendDone: make(chan struct{}),
 	}
 	go handler.serve(serverConn)
@@ -150,12 +152,12 @@ func TestChannelClientSend(t *testing.T) {
 	// Capture channel before handler runs so we don't race on handler.sendDone (handler sets it to nil).
 	sendDone := handler.sendDone
 
-	inbox := make(chan InboundMessage, 1)
+	inbox := make(chan pkg.InboundMessage, 1)
 	if err := client.Start(context.Background(), inbox); err != nil {
 		t.Fatal(err)
 	}
 
-	msg := OutboundMessage{
+	msg := pkg.OutboundMessage{
 		ConversationID: "conv-1",
 		Content:        "hello from core",
 	}
@@ -181,7 +183,7 @@ func TestChannelClientSend(t *testing.T) {
 
 func TestChannelClientReceive(t *testing.T) {
 	handler := &fakeChannelHandler{
-		caps: Capabilities{ID: "recv-ch", Name: "Recv"},
+		caps: pkg.Capabilities{ID: "recv-ch", Name: "Recv"},
 	}
 
 	network, addr, cleanup := fakeChannelServer(t, handler)
@@ -193,7 +195,7 @@ func TestChannelClientReceive(t *testing.T) {
 	}
 	defer func() { _ = client.Stop() }()
 
-	inbox := make(chan InboundMessage, 10)
+	inbox := make(chan pkg.InboundMessage, 10)
 	if err := client.Start(context.Background(), inbox); err != nil {
 		t.Fatal(err)
 	}
@@ -226,18 +228,18 @@ func TestChannelProtocolRoundTrip(t *testing.T) {
 	defer func() { _ = server.Close() }()
 	defer func() { _ = client.Close() }()
 
-	sent := ChannelRequest{
+	sent := pkg.ChannelRequest{
 		Method: "send",
-		Msg: &OutboundMessage{
+		Msg: &pkg.OutboundMessage{
 			ConversationID: "c1",
 			Content:        "test message",
 		},
 	}
 
-	go func() { _ = writeMsg(client, &sent) }()
+	go func() { _ = pkg.WriteMessage(client, &sent) }()
 
-	var received ChannelRequest
-	if err := readMsg(server, &received); err != nil {
+	var received pkg.ChannelRequest
+	if err := pkg.ReadMessage(server, &received); err != nil {
 		t.Fatal(err)
 	}
 	if received.Method != "send" {

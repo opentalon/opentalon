@@ -6,16 +6,18 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
 // PluginClient connects to a channel plugin over a Unix socket or TCP
-// and implements the Channel interface.
+// and implements the pkg.Channel interface.
 type PluginClient struct {
 	mu   sync.Mutex
 	conn net.Conn
-	caps Capabilities
+	caps pkg.Capabilities
 
-	inbox  chan<- InboundMessage
+	inbox  chan<- pkg.InboundMessage
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -24,7 +26,7 @@ type PluginClient struct {
 	// waiting for an ack, the next response is delivered here so the second
 	// user message is not consumed as a fake ack.
 	ackMu      sync.Mutex
-	pendingAck chan ChannelResponse
+	pendingAck chan pkg.ChannelResponse
 }
 
 // DialChannel connects to a channel plugin and fetches its capabilities.
@@ -44,18 +46,18 @@ func DialChannel(network, address string, timeout time.Duration) (*PluginClient,
 
 // NewClientWithConn is for testing: it creates a client that uses the given conn
 // and caps without dialing. Caller must run the server side on the other end of conn.
-func NewClientWithConn(conn net.Conn, caps Capabilities) *PluginClient {
+func NewClientWithConn(conn net.Conn, caps pkg.Capabilities) *PluginClient {
 	return &PluginClient{conn: conn, caps: caps}
 }
 
 func (c *PluginClient) fetchCapabilities() error {
-	req := ChannelRequest{Method: "capabilities"}
-	if err := writeMsg(c.conn, &req); err != nil {
+	req := pkg.ChannelRequest{Method: "capabilities"}
+	if err := pkg.WriteMessage(c.conn, &req); err != nil {
 		return fmt.Errorf("request capabilities: %w", err)
 	}
 
-	var resp ChannelResponse
-	if err := readMsg(c.conn, &resp); err != nil {
+	var resp pkg.ChannelResponse
+	if err := pkg.ReadMessage(c.conn, &resp); err != nil {
 		return fmt.Errorf("read capabilities: %w", err)
 	}
 	if resp.Error != "" {
@@ -73,11 +75,11 @@ func (c *PluginClient) fetchCapabilities() error {
 func (c *PluginClient) ID() string { return c.caps.ID }
 
 // Capabilities returns the channel's declared capabilities.
-func (c *PluginClient) Capabilities() Capabilities { return c.caps }
+func (c *PluginClient) Capabilities() pkg.Capabilities { return c.caps }
 
 // Start begins listening for inbound messages from the channel plugin.
 // Messages are pushed into the provided inbox channel.
-func (c *PluginClient) Start(ctx context.Context, inbox chan<- InboundMessage) error {
+func (c *PluginClient) Start(ctx context.Context, inbox chan<- pkg.InboundMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -85,8 +87,8 @@ func (c *PluginClient) Start(ctx context.Context, inbox chan<- InboundMessage) e
 	c.ctx, c.cancel = context.WithCancel(ctx)
 
 	// Tell the plugin to start streaming messages.
-	req := ChannelRequest{Method: "start"}
-	if err := writeMsg(c.conn, &req); err != nil {
+	req := pkg.ChannelRequest{Method: "start"}
+	if err := pkg.WriteMessage(c.conn, &req); err != nil {
 		return fmt.Errorf("send start: %w", err)
 	}
 
@@ -104,8 +106,8 @@ func (c *PluginClient) receiveLoop() {
 		default:
 		}
 
-		var resp ChannelResponse
-		if err := readMsg(c.conn, &resp); err != nil {
+		var resp pkg.ChannelResponse
+		if err := pkg.ReadMessage(c.conn, &resp); err != nil {
 			select {
 			case <-c.ctx.Done():
 				return
@@ -143,8 +145,8 @@ func (c *PluginClient) receiveLoop() {
 // Send dispatches an outbound message to the channel plugin.
 // The ack is received via the single reader (receiveLoop) so the next inbound
 // user message is not mistakenly consumed as the ack.
-func (c *PluginClient) Send(ctx context.Context, msg OutboundMessage) error {
-	ackCh := make(chan ChannelResponse, 1)
+func (c *PluginClient) Send(ctx context.Context, msg pkg.OutboundMessage) error {
+	ackCh := make(chan pkg.ChannelResponse, 1)
 	c.ackMu.Lock()
 	if c.pendingAck != nil {
 		c.ackMu.Unlock()
@@ -154,8 +156,8 @@ func (c *PluginClient) Send(ctx context.Context, msg OutboundMessage) error {
 	c.ackMu.Unlock()
 
 	c.mu.Lock()
-	req := ChannelRequest{Method: "send", Msg: &msg}
-	err := writeMsg(c.conn, &req)
+	req := pkg.ChannelRequest{Method: "send", Msg: &msg}
+	err := pkg.WriteMessage(c.conn, &req)
 	c.mu.Unlock()
 	if err != nil {
 		c.ackMu.Lock()
@@ -164,7 +166,7 @@ func (c *PluginClient) Send(ctx context.Context, msg OutboundMessage) error {
 		return fmt.Errorf("send message: %w", err)
 	}
 
-	var resp ChannelResponse
+	var resp pkg.ChannelResponse
 	var done <-chan struct{}
 	if c.ctx != nil {
 		done = c.ctx.Done()
@@ -194,7 +196,7 @@ func (c *PluginClient) Stop() error {
 	if c.cancel != nil {
 		c.cancel()
 	}
-	// Close the connection to unblock any pending readMsg in receiveLoop.
+	// Close the connection to unblock any pending read in receiveLoop.
 	err := c.conn.Close()
 	c.wg.Wait()
 	return err

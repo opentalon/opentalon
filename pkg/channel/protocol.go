@@ -8,7 +8,8 @@ import (
 	"net"
 )
 
-const maxMessageSize = 4 * 1024 * 1024 // 4 MB
+// MaxMessageSize is the maximum length of a single protocol message (4 MB).
+const MaxMessageSize = 4 * 1024 * 1024
 
 // ChannelRequest is the wire format sent from the host to a channel plugin.
 type ChannelRequest struct {
@@ -23,13 +24,14 @@ type ChannelResponse struct {
 	Caps  *Capabilities   `json:"caps,omitempty"`
 }
 
-func writeMsg(conn net.Conn, v interface{}) error {
+// WriteMessage encodes v as JSON with a 4-byte big-endian length prefix and writes it to conn.
+func WriteMessage(conn net.Conn, v interface{}) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	if len(data) > maxMessageSize {
-		return fmt.Errorf("message too large: %d bytes (max %d)", len(data), maxMessageSize)
+	if len(data) > MaxMessageSize {
+		return fmt.Errorf("message too large: %d bytes (max %d)", len(data), MaxMessageSize)
 	}
 	header := make([]byte, 4)
 	binary.BigEndian.PutUint32(header, uint32(len(data)))
@@ -42,14 +44,15 @@ func writeMsg(conn net.Conn, v interface{}) error {
 	return nil
 }
 
-func readMsg(conn net.Conn, v interface{}) error {
+// ReadMessage reads a length-prefixed JSON message from conn and decodes it into v.
+func ReadMessage(conn net.Conn, v interface{}) error {
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return fmt.Errorf("read header: %w", err)
 	}
 	size := binary.BigEndian.Uint32(header)
-	if size > maxMessageSize {
-		return fmt.Errorf("message too large: %d bytes (max %d)", size, maxMessageSize)
+	if size > MaxMessageSize {
+		return fmt.Errorf("message too large: %d bytes (max %d)", size, MaxMessageSize)
 	}
 	body := make([]byte, size)
 	if _, err := io.ReadFull(conn, body); err != nil {

@@ -6,35 +6,37 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
 type mockChannel struct {
 	id    string
-	caps  Capabilities
+	caps  pkg.Capabilities
 	mu    sync.Mutex
-	sent  []OutboundMessage
+	sent  []pkg.OutboundMessage
 	stop  bool
-	inbox chan<- InboundMessage
+	inbox chan<- pkg.InboundMessage
 }
 
 func newMockChannel(id string) *mockChannel {
 	return &mockChannel{
 		id:   id,
-		caps: Capabilities{ID: id, Name: id, Threads: true},
+		caps: pkg.Capabilities{ID: id, Name: id, Threads: true},
 	}
 }
 
-func (m *mockChannel) ID() string                 { return m.id }
-func (m *mockChannel) Capabilities() Capabilities { return m.caps }
+func (m *mockChannel) ID() string                     { return m.id }
+func (m *mockChannel) Capabilities() pkg.Capabilities { return m.caps }
 
-func (m *mockChannel) Start(_ context.Context, inbox chan<- InboundMessage) error {
+func (m *mockChannel) Start(_ context.Context, inbox chan<- pkg.InboundMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.inbox = inbox
 	return nil
 }
 
-func (m *mockChannel) Send(_ context.Context, msg OutboundMessage) error {
+func (m *mockChannel) Send(_ context.Context, msg pkg.OutboundMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sent = append(m.sent, msg)
@@ -48,7 +50,7 @@ func (m *mockChannel) Stop() error {
 	return nil
 }
 
-func (m *mockChannel) pushMessage(msg InboundMessage) {
+func (m *mockChannel) pushMessage(msg pkg.InboundMessage) {
 	m.mu.Lock()
 	inbox := m.inbox
 	m.mu.Unlock()
@@ -57,10 +59,10 @@ func (m *mockChannel) pushMessage(msg InboundMessage) {
 	}
 }
 
-func (m *mockChannel) sentMessages() []OutboundMessage {
+func (m *mockChannel) sentMessages() []pkg.OutboundMessage {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]OutboundMessage, len(m.sent))
+	out := make([]pkg.OutboundMessage, len(m.sent))
 	copy(out, m.sent)
 	return out
 }
@@ -73,12 +75,12 @@ func (m *mockChannel) stopped() bool {
 
 type failStartChannel struct{ mockChannel }
 
-func (f *failStartChannel) Start(_ context.Context, _ chan<- InboundMessage) error {
+func (f *failStartChannel) Start(_ context.Context, _ chan<- pkg.InboundMessage) error {
 	return fmt.Errorf("start failed")
 }
 
-func echoHandler(_ context.Context, sessionKey string, msg InboundMessage) (OutboundMessage, error) {
-	return OutboundMessage{
+func echoHandler(_ context.Context, sessionKey string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
+	return pkg.OutboundMessage{
 		ConversationID: msg.ConversationID,
 		ThreadID:       msg.ThreadID,
 		Content:        "echo: " + msg.Content,
@@ -95,7 +97,7 @@ func TestSessionKey(t *testing.T) {
 		{"discord", "guild1", "thread1", "discord:guild1:thread1"},
 	}
 	for _, tt := range tests {
-		got := SessionKey(tt.ch, tt.conv, tt.thread)
+		got := pkg.SessionKey(tt.ch, tt.conv, tt.thread)
 		if got != tt.want {
 			t.Errorf("SessionKey(%q,%q,%q) = %q, want %q", tt.ch, tt.conv, tt.thread, got, tt.want)
 		}
@@ -139,7 +141,7 @@ func TestRegistryRegisterStartFailure(t *testing.T) {
 	reg := NewRegistry(echoHandler)
 	defer reg.StopAll()
 
-	ch := &failStartChannel{mockChannel: mockChannel{id: "bad"}}
+	ch := &failStartChannel{mockChannel: mockChannel{id: "bad", caps: pkg.Capabilities{ID: "bad", Name: "bad"}}}
 	if err := reg.Register(ch); err == nil {
 		t.Fatal("expected error when Start fails")
 	}
@@ -201,7 +203,7 @@ func TestRegistrySend(t *testing.T) {
 	ch := newMockChannel("whatsapp")
 	_ = reg.Register(ch)
 
-	msg := OutboundMessage{
+	msg := pkg.OutboundMessage{
 		ConversationID: "conv1",
 		Content:        "hello from core",
 	}
@@ -219,7 +221,7 @@ func TestRegistrySendNotFound(t *testing.T) {
 	reg := NewRegistry(echoHandler)
 	defer reg.StopAll()
 
-	if err := reg.Send(context.Background(), "nope", OutboundMessage{}); err == nil {
+	if err := reg.Send(context.Background(), "nope", pkg.OutboundMessage{}); err == nil {
 		t.Fatal("expected error sending to unregistered channel")
 	}
 }
@@ -231,7 +233,7 @@ func TestRegistryDispatch(t *testing.T) {
 	ch := newMockChannel("discord")
 	_ = reg.Register(ch)
 
-	ch.pushMessage(InboundMessage{
+	ch.pushMessage(pkg.InboundMessage{
 		ConversationID: "room1",
 		ThreadID:       "t1",
 		Content:        "hi",
@@ -280,8 +282,8 @@ func TestRegistryStopAll(t *testing.T) {
 }
 
 func TestRegistryDispatchHandlerError(t *testing.T) {
-	errHandler := func(_ context.Context, _ string, _ InboundMessage) (OutboundMessage, error) {
-		return OutboundMessage{}, fmt.Errorf("handler error")
+	errHandler := func(_ context.Context, _ string, _ pkg.InboundMessage) (pkg.OutboundMessage, error) {
+		return pkg.OutboundMessage{}, fmt.Errorf("handler error")
 	}
 
 	reg := NewRegistry(errHandler)
@@ -290,7 +292,7 @@ func TestRegistryDispatchHandlerError(t *testing.T) {
 	ch := newMockChannel("errch")
 	_ = reg.Register(ch)
 
-	ch.pushMessage(InboundMessage{
+	ch.pushMessage(pkg.InboundMessage{
 		ConversationID: "c1",
 		Content:        "fail",
 	})
