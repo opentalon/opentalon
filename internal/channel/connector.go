@@ -6,11 +6,9 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strings"
+	"path/filepath"
 	"sync"
 	"time"
-
-	"bufio"
 )
 
 const (
@@ -55,16 +53,32 @@ func (c *Connector) Connect(ctx context.Context, id, pluginRef string) (Channel,
 	}
 }
 
-func (c *Connector) connectBinary(ctx context.Context, id, binaryPath string) (Channel, error) {
-	cmd := exec.CommandContext(ctx, binaryPath)
-	cmd.Stderr = os.Stderr
+// sockFileName is the Unix socket filename used when OPENTALON_CHANNEL_SOCK_DIR is set.
+const sockFileName = "channel.sock"
 
-	stdout, err := cmd.StdoutPipe()
+func (c *Connector) connectBinary(ctx context.Context, id, binaryPath string) (Channel, error) {
+	absPath, err := filepath.Abs(binaryPath)
 	if err != nil {
-		return nil, fmt.Errorf("stdout pipe: %w", err)
+		return nil, fmt.Errorf("channel %q path: %w", id, err)
+	}
+	if _, err := os.Stat(absPath); err != nil {
+		return nil, fmt.Errorf("channel %q binary %s: %w", id, absPath, err)
 	}
 
+	sockDir, err := os.MkdirTemp("", "opentalon-channel-*")
+	if err != nil {
+		return nil, fmt.Errorf("create socket dir: %w", err)
+	}
+	sockPath := filepath.Join(sockDir, sockFileName)
+
+	cmd := exec.CommandContext(ctx, absPath)
+	cmd.Env = append(os.Environ(), "OPENTALON_CHANNEL_SOCK_DIR="+sockDir)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
 	if err := cmd.Start(); err != nil {
+		_ = os.RemoveAll(sockDir)
 		return nil, fmt.Errorf("start channel binary %s: %w", binaryPath, err)
 	}
 
@@ -74,44 +88,27 @@ func (c *Connector) connectBinary(ctx context.Context, id, binaryPath string) (C
 		close(exited)
 	}()
 
-	hsLine := make(chan string, 1)
-	hsErr := make(chan error, 1)
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		if scanner.Scan() {
-			hsLine <- strings.TrimSpace(scanner.Text())
-		} else {
-			if err := scanner.Err(); err != nil {
-				hsErr <- err
-			} else {
-				hsErr <- fmt.Errorf("channel binary closed stdout before handshake")
-			}
+	// Wait for the channel to create the socket (no stdout handshake when env is set).
+	for deadline := time.Now().Add(defaultHandshakeTimeout); time.Now().Before(deadline); {
+		if _, err := os.Stat(sockPath); err == nil {
+			break
 		}
-	}()
-
-	var network, address string
-	select {
-	case line := <-hsLine:
-		parts := strings.SplitN(line, "|", 3)
-		if len(parts) != 3 {
+		select {
+		case <-exited:
+			_ = os.RemoveAll(sockDir)
+			return nil, fmt.Errorf("channel binary %q exited before socket ready", id)
+		case <-ctx.Done():
 			_ = cmd.Process.Kill()
-			return nil, fmt.Errorf("invalid handshake from channel %q: %q", id, line)
+			_ = os.RemoveAll(sockDir)
+			return nil, ctx.Err()
+		case <-time.After(25 * time.Millisecond):
 		}
-		network = parts[1]
-		address = parts[2]
-	case err := <-hsErr:
-		_ = cmd.Process.Kill()
-		return nil, fmt.Errorf("channel %q handshake error: %w", id, err)
-	case <-time.After(defaultHandshakeTimeout):
-		_ = cmd.Process.Kill()
-		return nil, fmt.Errorf("channel %q handshake timeout", id)
-	case <-exited:
-		return nil, fmt.Errorf("channel binary %q exited before handshake", id)
 	}
 
-	client, err := DialChannel(network, address, defaultDialTimeout)
+	client, err := DialChannel("unix", sockPath, defaultDialTimeout)
 	if err != nil {
 		_ = cmd.Process.Kill()
+		_ = os.RemoveAll(sockDir)
 		return nil, fmt.Errorf("dial channel %q: %w", id, err)
 	}
 

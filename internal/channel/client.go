@@ -19,6 +19,12 @@ type PluginClient struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// Single-reader demux: only receiveLoop reads from conn. When Send() is
+	// waiting for an ack, the next response is delivered here so the second
+	// user message is not consumed as a fake ack.
+	ackMu      sync.Mutex
+	pendingAck chan ChannelResponse
 }
 
 // DialChannel connects to a channel plugin and fetches its capabilities.
@@ -34,6 +40,12 @@ func DialChannel(network, address string, timeout time.Duration) (*PluginClient,
 		return nil, err
 	}
 	return c, nil
+}
+
+// NewClientWithConn is for testing: it creates a client that uses the given conn
+// and caps without dialing. Caller must run the server side on the other end of conn.
+func NewClientWithConn(conn net.Conn, caps Capabilities) *PluginClient {
+	return &PluginClient{conn: conn, caps: caps}
 }
 
 func (c *PluginClient) fetchCapabilities() error {
@@ -102,6 +114,22 @@ func (c *PluginClient) receiveLoop() {
 			return
 		}
 
+		// If Send() is waiting for an ack, give it this response so the next
+		// inbound user message is not consumed as the ack.
+		c.ackMu.Lock()
+		pending := c.pendingAck
+		if pending != nil {
+			c.pendingAck = nil
+		}
+		c.ackMu.Unlock()
+		if pending != nil {
+			select {
+			case pending <- resp:
+			case <-c.ctx.Done():
+				return
+			}
+			continue
+		}
 		if resp.Msg != nil {
 			select {
 			case c.inbox <- *resp.Msg:
@@ -113,19 +141,48 @@ func (c *PluginClient) receiveLoop() {
 }
 
 // Send dispatches an outbound message to the channel plugin.
+// The ack is received via the single reader (receiveLoop) so the next inbound
+// user message is not mistakenly consumed as the ack.
 func (c *PluginClient) Send(ctx context.Context, msg OutboundMessage) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	ackCh := make(chan ChannelResponse, 1)
+	c.ackMu.Lock()
+	if c.pendingAck != nil {
+		c.ackMu.Unlock()
+		return fmt.Errorf("concurrent Send not allowed")
+	}
+	c.pendingAck = ackCh
+	c.ackMu.Unlock()
 
+	c.mu.Lock()
 	req := ChannelRequest{Method: "send", Msg: &msg}
-	if err := writeMsg(c.conn, &req); err != nil {
+	err := writeMsg(c.conn, &req)
+	c.mu.Unlock()
+	if err != nil {
+		c.ackMu.Lock()
+		c.pendingAck = nil
+		c.ackMu.Unlock()
 		return fmt.Errorf("send message: %w", err)
 	}
 
 	var resp ChannelResponse
-	if err := readMsg(c.conn, &resp); err != nil {
-		return fmt.Errorf("read send ack: %w", err)
+	var done <-chan struct{}
+	if c.ctx != nil {
+		done = c.ctx.Done()
 	}
+	select {
+	case resp = <-ackCh:
+	case <-done:
+		c.ackMu.Lock()
+		c.pendingAck = nil
+		c.ackMu.Unlock()
+		if c.ctx != nil {
+			return c.ctx.Err()
+		}
+		return context.Canceled
+	}
+	c.ackMu.Lock()
+	c.pendingAck = nil
+	c.ackMu.Unlock()
 	if resp.Error != "" {
 		return fmt.Errorf("send error: %s", resp.Error)
 	}

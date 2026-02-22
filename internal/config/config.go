@@ -14,15 +14,23 @@ type Config struct {
 	Routing      RoutingConfig            `yaml:"routing"`
 	Auth         AuthConfig               `yaml:"auth"`
 	State        StateConfig              `yaml:"state"`
+	Log          LogConfig                `yaml:"log"`
 	Orchestrator OrchestratorConfig       `yaml:"orchestrator"`
 	Plugins      map[string]PluginConfig  `yaml:"plugins"`
 	Channels     map[string]ChannelConfig `yaml:"channels"`
 	Scheduler    SchedulerConfig          `yaml:"scheduler"`
 }
 
+// LogConfig holds logging options. When LOG_LEVEL=debug, LLM request payloads are logged.
+type LogConfig struct {
+	File string `yaml:"file"` // optional path to log file (env-expanded)
+}
+
 type PluginConfig struct {
 	Enabled bool                   `yaml:"enabled"`
-	Path    string                 `yaml:"path"`
+	Path    string                 `yaml:"path"`   // local path to binary (optional if github is set)
+	GitHub  string                 `yaml:"github"` // e.g. "owner/repo" (bundler-style)
+	Ref     string                 `yaml:"ref"`    // branch, tag, or commit; resolved and pinned in plugins.lock
 	Config  map[string]interface{} `yaml:"config,omitempty"`
 }
 
@@ -43,12 +51,22 @@ type JobConfig struct {
 
 type ChannelConfig struct {
 	Enabled bool                   `yaml:"enabled"`
-	Plugin  string                 `yaml:"plugin"`
+	Path    string                 `yaml:"path"`   // path to binary or grpc://... (optional if github is set)
+	GitHub  string                 `yaml:"github"` // e.g. "opentalon/slack-channel" (bundler-style)
+	Ref     string                 `yaml:"ref"`    // branch, tag, or commit; pinned in channels.lock
 	Config  map[string]interface{} `yaml:"config"`
 }
 
+// ContentPreparerEntry configures a plugin action to run before the first LLM call; its output becomes the user message (or can block the LLM via send_to_llm: false).
+type ContentPreparerEntry struct {
+	Plugin string `yaml:"plugin"`
+	Action string `yaml:"action"`
+	ArgKey string `yaml:"arg_key"` // optional, default "text" — key for passing current content as arg
+}
+
 type OrchestratorConfig struct {
-	Rules []string `yaml:"rules"`
+	Rules            []string               `yaml:"rules"`
+	ContentPreparers []ContentPreparerEntry `yaml:"content_preparers,omitempty"`
 }
 
 type StateConfig struct {
@@ -153,6 +171,9 @@ func Parse(data []byte) (*Config, error) {
 	} else {
 		cfg.State.DataDir = expandEnv(cfg.State.DataDir)
 	}
+	if cfg.Log.File != "" {
+		cfg.Log.File = expandEnv(cfg.Log.File)
+	}
 	return &cfg, nil
 }
 
@@ -170,7 +191,9 @@ func expandEnvInPlugins(cfg *Config) {
 
 func expandEnvInChannels(cfg *Config) {
 	for name, ch := range cfg.Channels {
-		ch.Plugin = expandEnv(ch.Plugin)
+		ch.Path = expandEnv(ch.Path)
+		ch.GitHub = expandEnv(ch.GitHub)
+		ch.Ref = expandEnv(ch.Ref)
 		for k, v := range ch.Config {
 			if s, ok := v.(string); ok {
 				ch.Config[k] = expandEnv(s)

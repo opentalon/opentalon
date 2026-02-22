@@ -26,6 +26,19 @@ Existing solutions often suffer from:
 
 OpenTalon is engineered for long-term quality from day one. Every architectural decision is made with maintainability, security, and stability in mind — so the project stays healthy as it grows.
 
+### First working example: console + hello-world plugin
+
+Run OpenTalon in the terminal with the **console channel** and the **hello-world plugin**. When you type a message containing "hello", the plugin runs first (concatenates " world" and adds a random prompt fragment), then the LLM replies.
+
+```bash
+cp config.example.yaml config.yaml
+export DEEPSEEK_API_KEY="your-key"   # or any OpenAI-compatible API key
+make all
+./opentalon -config config.yaml
+```
+
+Type a message and press Enter. Try `hello` — you get "hello world" plus a random question sent to the LLM; try something else — you get a guard message and no LLM call. Ctrl+C or Ctrl+D to exit. See [docs/plugins/hello-world-plugin.md](docs/plugins/hello-world-plugin.md) and [docs/configuration.md](docs/configuration.md).
+
 ## Core Principles
 
 ### Security First
@@ -227,6 +240,7 @@ All three categories share the same set of extension points:
 
 ### Developer Experience
 
+- **Example: [Hello World plugin](docs/plugins/hello-world-plugin.md)** — build your first tool plugin (hello→world + optional prompt fragment), then run OpenTalon with DeepSeek or any provider.
 - **gRPC Plugin SDK** — scaffolding CLI, example plugins, and integration test helpers. Works for tool plugins, channel plugins, and gRPC hooks.
 - **Lua API reference** — documentation, example scripts, and a REPL for interactive testing
 
@@ -361,6 +375,56 @@ Users can also create jobs by talking to the LLM:
 - **Full CRUD** — list, pause, resume, update, and delete jobs through the LLM or directly via the scheduler API
 
 > For a detailed walkthrough of scheduler-driven workflows, see [examples/workflow-ipossum-whatsapp](examples/workflow-ipossum-whatsapp/).
+
+## Build locally with plugins
+
+Build the core, then reference the **hello-world plugin** and **console channel** from GitHub so OpenTalon fetches and builds them on first run (or use local paths).
+
+1. Clone and build the core:
+
+   ```bash
+   git clone https://github.com/opentalon/opentalon.git
+   cd opentalon
+   go build -o opentalon ./cmd/opentalon
+   ```
+
+2. Create `config.yaml` (copy from `config.example.yaml`) and set your API key. Use GitHub refs for the plugin and console channel:
+
+   ```yaml
+   orchestrator:
+     rules: []
+     content_preparers:
+       - plugin: hello-world
+         action: prepare
+         arg_key: text
+
+   channels:
+     console:
+       enabled: true
+       github: "opentalon/console-channel"
+       ref: "main"
+       config: {}
+
+   plugins:
+     hello-world:
+       enabled: true
+       github: "opentalon/hello-world-plugin"
+       ref: "main"
+       config: {}
+
+   state:
+     data_dir: ~/.opentalon
+   # ... add models.providers and routing (see config.example.yaml)
+   ```
+
+3. Run OpenTalon:
+
+   ```bash
+   export DEEPSEEK_API_KEY="your-key"   # or OPENAI_API_KEY, etc.
+   ./opentalon -config config.yaml
+   ```
+
+   The first run resolves the refs, clones [opentalon/console-channel](https://github.com/opentalon/console-channel) and [opentalon/hello-world-plugin](https://github.com/opentalon/hello-world-plugin), builds them, and writes `channels.lock` and `plugins.lock`. Later runs reuse the locked versions until you change `ref` or delete the lock entries.
 
 ## Contributing
 

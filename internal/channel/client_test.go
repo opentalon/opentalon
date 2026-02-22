@@ -14,6 +14,7 @@ import (
 type fakeChannelHandler struct {
 	caps     Capabilities
 	received []OutboundMessage
+	sendDone chan struct{} // closed when "send" was handled (for test sync)
 }
 
 func (h *fakeChannelHandler) serve(conn net.Conn) {
@@ -47,6 +48,11 @@ func (h *fakeChannelHandler) serve(conn net.Conn) {
 		case "send":
 			if req.Msg != nil {
 				h.received = append(h.received, *req.Msg)
+			}
+			if h.sendDone != nil {
+				ch := h.sendDone
+				h.sendDone = nil
+				close(ch)
 			}
 		default:
 			resp.Error = fmt.Sprintf("unknown method %q", req.Method)
@@ -128,18 +134,23 @@ func TestChannelClientCapabilities(t *testing.T) {
 }
 
 func TestChannelClientSend(t *testing.T) {
+	// net.Pipe() + channel sync: standard Go pattern so test waits for server to process.
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close(); _ = clientConn.Close() }()
+
 	handler := &fakeChannelHandler{
-		caps: Capabilities{ID: "test-ch", Name: "Test"},
+		caps:     Capabilities{ID: "test-ch", Name: "Test"},
+		sendDone: make(chan struct{}),
 	}
+	go handler.serve(serverConn)
 
-	network, addr, cleanup := fakeChannelServer(t, handler)
-	defer cleanup()
+	client := NewClientWithConn(clientConn, handler.caps)
+	defer func() { _ = client.Stop() }()
 
-	client, err := DialChannel(network, addr, defaultDialTimeout)
-	if err != nil {
+	inbox := make(chan InboundMessage, 1)
+	if err := client.Start(context.Background(), inbox); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = client.Stop() }()
 
 	msg := OutboundMessage{
 		ConversationID: "conv-1",
@@ -148,6 +159,13 @@ func TestChannelClientSend(t *testing.T) {
 
 	if err := client.Send(context.Background(), msg); err != nil {
 		t.Fatal(err)
+	}
+
+	// Wait for server to handle "send" before asserting (channel sync pattern).
+	select {
+	case <-handler.sendDone:
+	case <-time.After(time.Second):
+		t.Fatal("timeout: server did not handle send")
 	}
 
 	if len(handler.received) != 1 {

@@ -1,0 +1,54 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/opentalon
+/cmd/opentalon/opentalon
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependency dirs
+/vendor/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets (do not commit)
+.env
+.env.local
+*.local
+
+# Local config (paths, API keys) — copy config.example.yaml to config.yaml
+config.yaml
+config.local.yaml
+
+# Build / tmp
+/dist/
+/tmp/
+*.log
+
+# Project-specific: built plugin/channel binaries (source in plugins/*/ and channels/*/ is tracked)
+plugins
+!plugins/.gitkeep
+channels
+!channels/.gitkeep
+Makefile

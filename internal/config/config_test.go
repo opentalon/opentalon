@@ -398,18 +398,18 @@ models:
 channels:
   my-slack:
     enabled: true
-    plugin: "./plugins/opentalon-slack"
+    path: "./plugins/opentalon-slack"
     config:
       app_token: "${SLACK_APP_TOKEN}"
       bot_token: "${SLACK_BOT_TOKEN}"
   my-telegram:
     enabled: true
-    plugin: "grpc://telegram.internal:9001"
+    path: "grpc://telegram.internal:9001"
     config:
       bot_token: "static-token"
   disabled-channel:
     enabled: false
-    plugin: "docker://ghcr.io/opentalon/plugin-x:latest"
+    path: "docker://ghcr.io/opentalon/plugin-x:latest"
 `
 	cfg, err := Parse([]byte(yaml))
 	if err != nil {
@@ -423,8 +423,8 @@ channels:
 	if !slack.Enabled {
 		t.Error("my-slack should be enabled")
 	}
-	if slack.Plugin != "./plugins/opentalon-slack" {
-		t.Errorf("slack plugin = %q", slack.Plugin)
+	if slack.Path != "./plugins/opentalon-slack" {
+		t.Errorf("slack path = %q", slack.Path)
 	}
 	if slack.Config["app_token"] != "xapp-test" {
 		t.Errorf("slack app_token = %q, want xapp-test", slack.Config["app_token"])
@@ -434,8 +434,8 @@ channels:
 	}
 
 	tg := cfg.Channels["my-telegram"]
-	if tg.Plugin != "grpc://telegram.internal:9001" {
-		t.Errorf("telegram plugin = %q", tg.Plugin)
+	if tg.Path != "grpc://telegram.internal:9001" {
+		t.Errorf("telegram path = %q", tg.Path)
 	}
 
 	disabled := cfg.Channels["disabled-channel"]
@@ -452,14 +452,14 @@ models:
 channels:
   dynamic:
     enabled: true
-    plugin: "grpc://${MY_PLUGIN_HOST}:9001"
+    path: "grpc://${MY_PLUGIN_HOST}:9001"
 `
 	cfg, err := Parse([]byte(yaml))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Channels["dynamic"].Plugin != "grpc://myhost.internal:9001" {
-		t.Errorf("plugin = %q, want grpc://myhost.internal:9001", cfg.Channels["dynamic"].Plugin)
+	if cfg.Channels["dynamic"].Path != "grpc://myhost.internal:9001" {
+		t.Errorf("path = %q, want grpc://myhost.internal:9001", cfg.Channels["dynamic"].Path)
 	}
 }
 
@@ -484,19 +484,19 @@ models:
 channels:
   binary:
     enabled: true
-    plugin: "./plugins/my-plugin"
+    path: "./plugins/my-plugin"
   grpc:
     enabled: true
-    plugin: "grpc://host:9001"
+    path: "grpc://host:9001"
   docker:
     enabled: true
-    plugin: "docker://img:tag"
+    path: "docker://img:tag"
   webhook:
     enabled: true
-    plugin: "https://example.com/hook"
+    path: "https://example.com/hook"
   websocket:
     enabled: true
-    plugin: "wss://ws.example.com/ch"
+    path: "wss://ws.example.com/ch"
 `
 	cfg, err := Parse([]byte(yaml))
 	if err != nil {
@@ -556,6 +556,26 @@ plugins:
 	disabled := cfg.Plugins["disabled-plug"]
 	if disabled.Enabled {
 		t.Error("disabled-plug should be disabled")
+	}
+}
+
+func TestParsePluginsWithGitHub(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+plugins:
+  example-plugin:
+    enabled: true
+    github: "owner/example-repo"
+    ref: "main"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Plugins["example-plugin"]
+	if p.GitHub != "owner/example-repo" || p.Ref != "main" {
+		t.Errorf("github = %q, ref = %q", p.GitHub, p.Ref)
 	}
 }
 

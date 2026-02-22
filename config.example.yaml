@@ -1,0 +1,72 @@
+# Copy to config.yaml (or ~/.opentalon/config.yaml) and set your API key.
+# config.yaml is gitignored so you don't commit secrets.
+
+models:
+  providers:
+    # DeepSeek — OpenAI-compatible API (free tier available)
+    deepseek:
+      base_url: "https://api.deepseek.com/v1"
+      api_key: "${DEEPSEEK_API_KEY}"
+      api: openai-completions
+      models:
+        - id: deepseek-chat
+          name: DeepSeek Chat
+          input: [text]
+          context_window: 128000
+          cost:
+            input: 0.14
+            output: 0.28
+        - id: deepseek-reasoner
+          name: DeepSeek Reasoner
+          reasoning: true
+          input: [text]
+          context_window: 128000
+          cost:
+            input: 0.55
+            output: 2.19
+
+  catalog:
+    deepseek/deepseek-chat:
+      alias: deepseek
+      weight: 80
+    deepseek/deepseek-reasoner:
+      alias: deepseek-r
+      weight: 20
+
+routing:
+  primary: deepseek/deepseek-chat
+  fallbacks:
+    - deepseek/deepseek-reasoner
+
+orchestrator:
+  rules: []
+  # Run these plugin actions before the first LLM call; their output becomes the user message (or they can block with send_to_llm: false).
+  content_preparers:
+    - plugin: hello-world
+      action: prepare
+      arg_key: text
+
+channels:
+  console:
+    enabled: true
+    path: "./channels/console"
+    # github: "opentalon/console-channel"
+    # ref: "master"
+    config: {}
+
+plugins:
+  hello-world:
+    enabled: true
+    # Option A: local path (build with: make plugin)
+    path: "./plugins/hello-world-plugin/hello-world-plugin"
+    # Option B: bundler-style — download from GitHub, pin in plugins.lock (ref: branch, tag, or commit)
+    # github: "opentalon/hello-world-plugin"
+    # ref: "master"
+    config: {}
+
+state:
+  data_dir: ~/.opentalon
+
+# When LOG_LEVEL=debug, what we send to the LLM is logged (helps verify plugin output).
+log:
+  file: ~/.opentalon/opentalon.log

@@ -2,7 +2,10 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"strings"
 	"sync"
 
@@ -11,6 +14,13 @@ import (
 )
 
 const maxAgentLoopIterations = 20
+
+// ContentPreparerEntry configures a plugin action to run before the first LLM call.
+type ContentPreparerEntry struct {
+	Plugin string
+	Action string
+	ArgKey string // optional, default "text"
+}
 
 type LLMClient interface {
 	Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error)
@@ -22,15 +32,23 @@ type ToolCallParser interface {
 	Parse(response string) []ToolCall
 }
 
+// NoopParser is a parser that never returns tool calls (LLM replies as plain text only).
+var NoopParser ToolCallParser = noopParser{}
+
+type noopParser struct{}
+
+func (noopParser) Parse(_ string) []ToolCall { return nil }
+
 type Orchestrator struct {
-	mu       sync.Mutex
-	llm      LLMClient
-	parser   ToolCallParser
-	registry *ToolRegistry
-	memory   *state.MemoryStore
-	sessions *state.SessionStore
-	guard    *Guard
-	rules    *RulesConfig
+	mu        sync.Mutex
+	llm       LLMClient
+	parser    ToolCallParser
+	registry  *ToolRegistry
+	memory    *state.MemoryStore
+	sessions  *state.SessionStore
+	guard     *Guard
+	rules     *RulesConfig
+	preparers []ContentPreparerEntry
 }
 
 func New(
@@ -40,7 +58,7 @@ func New(
 	memory *state.MemoryStore,
 	sessions *state.SessionStore,
 ) *Orchestrator {
-	return NewWithRules(llm, parser, registry, memory, sessions, nil)
+	return NewWithRules(llm, parser, registry, memory, sessions, nil, nil)
 }
 
 func NewWithRules(
@@ -50,22 +68,31 @@ func NewWithRules(
 	memory *state.MemoryStore,
 	sessions *state.SessionStore,
 	customRules []string,
+	contentPreparers []ContentPreparerEntry,
 ) *Orchestrator {
 	return &Orchestrator{
-		llm:      llm,
-		parser:   parser,
-		registry: registry,
-		memory:   memory,
-		sessions: sessions,
-		guard:    NewGuard(),
-		rules:    NewRulesConfig(customRules),
+		llm:       llm,
+		parser:    parser,
+		registry:  registry,
+		memory:    memory,
+		sessions:  sessions,
+		guard:     NewGuard(),
+		rules:     NewRulesConfig(customRules),
+		preparers: contentPreparers,
 	}
 }
 
 type RunResult struct {
-	Response  string
-	ToolCalls []ToolCall
-	Results   []ToolResult
+	Response        string // LLM answer
+	InputForDisplay string // optional: what we sent to the LLM (e.g. tool results), for channels that want to show it
+	ToolCalls       []ToolCall
+	Results         []ToolResult
+}
+
+// preparerResponse is the optional JSON shape from a content preparer (guard behavior).
+type preparerResponse struct {
+	SendToLLM *bool  `json:"send_to_llm"`
+	Message   string `json:"message"`
 }
 
 func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (*RunResult, error) {
@@ -76,9 +103,49 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 		return nil, fmt.Errorf("session lookup: %w", err)
 	}
 
+	content := userMessage
+	// Run content preparers before the first LLM call (config-driven).
+	for _, prep := range o.preparers {
+		argKey := prep.ArgKey
+		if argKey == "" {
+			argKey = "text"
+		}
+		if !o.registry.HasAction(prep.Plugin, prep.Action) {
+			continue
+		}
+		call := ToolCall{
+			ID:     fmt.Sprintf("preparer-%s-%s", prep.Plugin, prep.Action),
+			Plugin: prep.Plugin,
+			Action: prep.Action,
+			Args:   map[string]string{argKey: content},
+		}
+		toolResult := o.executeCall(ctx, call)
+		if toolResult.Error != "" {
+			continue
+		}
+		// Preparer response convention: JSON with send_to_llm and optional message.
+		// When send_to_llm is false we skip the LLM and return this message to the channel.
+		var pr preparerResponse
+		if err := json.Unmarshal([]byte(toolResult.Content), &pr); err == nil && pr.SendToLLM != nil && !*pr.SendToLLM {
+			msg := pr.Message
+			if msg == "" {
+				msg = toolResult.Content
+			}
+			if msg == "" {
+				msg = "Request not sent to LLM (plugin guard)."
+			}
+			return &RunResult{Response: msg}, nil
+		}
+		if pr.Message != "" {
+			content = pr.Message
+		} else {
+			content = toolResult.Content
+		}
+	}
+
 	if err := o.sessions.AddMessage(sessionID, provider.Message{
 		Role:    provider.RoleUser,
-		Content: userMessage,
+		Content: content,
 	}); err != nil {
 		return nil, fmt.Errorf("adding user message: %w", err)
 	}
@@ -88,7 +155,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		sess, _ := o.sessions.Get(sessionID)
 
-		messages := o.buildMessages(sess, userMessage)
+		messages := o.buildMessages(sess, content)
+
+		if os.Getenv("LOG_LEVEL") == "debug" {
+			log.Printf("[LLM request] round %d, %d messages:", i+1, len(messages))
+			for j, m := range messages {
+				preview := m.Content
+				if len(preview) > 2000 {
+					preview = preview[:2000] + "... [truncated]"
+				}
+				log.Printf("[LLM request]   [%d] %s: %s", j+1, m.Role, preview)
+			}
+		}
 
 		resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{
 			Messages: messages,
@@ -100,6 +178,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 		calls := o.parser.Parse(resp.Content)
 		if calls == nil {
 			result.Response = resp.Content
+			if len(result.Results) > 0 {
+				var parts []string
+				for _, r := range result.Results {
+					if r.Error != "" {
+						parts = append(parts, "[error] "+r.Error)
+					} else if r.Content != "" {
+						parts = append(parts, r.Content)
+					}
+				}
+				result.InputForDisplay = strings.TrimSpace(strings.Join(parts, "\n"))
+			}
 			_ = o.sessions.AddMessage(sessionID, provider.Message{
 				Role:    provider.RoleAssistant,
 				Content: resp.Content,
@@ -143,14 +232,23 @@ func (o *Orchestrator) buildMessages(sess *state.Session, userMessage string) []
 
 func (o *Orchestrator) buildSystemPrompt(userMessage string) string {
 	var sb strings.Builder
-	sb.WriteString("You are an AI assistant with access to the following tools:\n\n")
+	sb.WriteString("You are an AI assistant with access to the following tools.\n\n")
+	sb.WriteString("When you receive plugin or tool results, reply to the user in a brief natural language answer. Do not simply repeat or echo the tool output; use it to answer the user's question or confirm what was done.\n\n")
 
 	sb.WriteString(o.rules.BuildPromptSection())
 
+	// Don't list content-preparer actions as tools; they already ran before this turn.
+	preparerAction := make(map[string]bool)
+	for _, prep := range o.preparers {
+		preparerAction[prep.Plugin+"."+prep.Action] = true
+	}
 	caps := o.registry.ListCapabilities()
 	for _, cap := range caps {
 		sb.WriteString(fmt.Sprintf("## %s\n%s\n", cap.Name, cap.Description))
 		for _, action := range cap.Actions {
+			if preparerAction[cap.Name+"."+action.Name] {
+				continue
+			}
 			sb.WriteString(fmt.Sprintf("- %s.%s: %s\n", cap.Name, action.Name, action.Description))
 			for _, p := range action.Parameters {
 				req := ""
