@@ -506,3 +506,120 @@ channels:
 		t.Fatalf("expected 5 channels, got %d", len(cfg.Channels))
 	}
 }
+
+func TestParseSchedulerJobs(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+scheduler:
+  jobs:
+    - name: "violation-check"
+      interval: "1h"
+      action: "ipossum.check_violations"
+      notify_channel: "whatsapp"
+    - name: "daily-report"
+      interval: "24h"
+      action: "reports.generate"
+      args:
+        format: "summary"
+      enabled: false
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Scheduler.Jobs) != 2 {
+		t.Fatalf("expected 2 jobs, got %d", len(cfg.Scheduler.Jobs))
+	}
+
+	job := cfg.Scheduler.Jobs[0]
+	if job.Name != "violation-check" {
+		t.Errorf("job name = %q", job.Name)
+	}
+	if job.Interval != "1h" {
+		t.Errorf("job interval = %q", job.Interval)
+	}
+	if job.Action != "ipossum.check_violations" {
+		t.Errorf("job action = %q", job.Action)
+	}
+	if job.NotifyChannel != "whatsapp" {
+		t.Errorf("job notify_channel = %q", job.NotifyChannel)
+	}
+	if job.Enabled != nil {
+		t.Error("enabled should be nil (defaults to true)")
+	}
+
+	job2 := cfg.Scheduler.Jobs[1]
+	if job2.Enabled == nil || *job2.Enabled != false {
+		t.Error("daily-report should be explicitly disabled")
+	}
+	if job2.Args["format"] != "summary" {
+		t.Errorf("job2 args format = %q", job2.Args["format"])
+	}
+}
+
+func TestParseSchedulerApprovers(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+scheduler:
+  approvers: ["admin@company.com", "ops-lead@company.com"]
+  max_jobs_per_user: 5
+  jobs:
+    - name: "check"
+      interval: "1h"
+      action: "a.b"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Scheduler.Approvers) != 2 {
+		t.Fatalf("expected 2 approvers, got %d", len(cfg.Scheduler.Approvers))
+	}
+	if cfg.Scheduler.Approvers[0] != "admin@company.com" {
+		t.Errorf("approver[0] = %q", cfg.Scheduler.Approvers[0])
+	}
+	if cfg.Scheduler.Approvers[1] != "ops-lead@company.com" {
+		t.Errorf("approver[1] = %q", cfg.Scheduler.Approvers[1])
+	}
+	if cfg.Scheduler.MaxJobsPerUser != 5 {
+		t.Errorf("max_jobs_per_user = %d", cfg.Scheduler.MaxJobsPerUser)
+	}
+}
+
+func TestParseSchedulerNoApprovers(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+scheduler:
+  jobs:
+    - name: "check"
+      interval: "1h"
+      action: "a.b"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Scheduler.Approvers) != 0 {
+		t.Errorf("expected no approvers, got %d", len(cfg.Scheduler.Approvers))
+	}
+	if cfg.Scheduler.MaxJobsPerUser != 0 {
+		t.Errorf("max_jobs_per_user should default to 0, got %d", cfg.Scheduler.MaxJobsPerUser)
+	}
+}
+
+func TestParseSchedulerNoJobs(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Scheduler.Jobs) != 0 {
+		t.Errorf("expected 0 jobs when omitted, got %d", len(cfg.Scheduler.Jobs))
+	}
+}

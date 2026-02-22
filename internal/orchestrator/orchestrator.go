@@ -223,6 +223,23 @@ func (o *Orchestrator) maybeRecordWorkflow(result *RunResult, userMessage string
 	o.memory.Add(sb.String(), "workflow")
 }
 
+// RunAction executes a single plugin action directly, bypassing the LLM loop.
+// Used by the scheduler and other subsystems that need to invoke tools programmatically.
+func (o *Orchestrator) RunAction(ctx context.Context, plugin, action string, args map[string]string) (string, error) {
+	call := ToolCall{
+		ID:     fmt.Sprintf("direct-%s-%s", plugin, action),
+		Plugin: plugin,
+		Action: action,
+		Args:   args,
+	}
+
+	result := o.executeCall(ctx, call)
+	if result.Error != "" {
+		return "", fmt.Errorf("%s.%s: %s", plugin, action, result.Error)
+	}
+	return result.Content, nil
+}
+
 func formatToolCallMessage(call ToolCall) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("[tool_call] %s.%s", call.Plugin, call.Action))
