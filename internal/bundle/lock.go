@@ -139,3 +139,45 @@ func SaveSkillsLock(stateDir string, lock *SkillsLock) error {
 	}
 	return os.WriteFile(skillsLockPath(stateDir), data, 0644)
 }
+
+// LuaPluginsLock is the content of lua_plugins.lock (resolved refs for downloaded Lua plugins).
+type LuaPluginsLock struct {
+	Repo    *LockEntry           `yaml:"repo,omitempty"`    // default monorepo (one repo, many plugin subdirs)
+	Plugins map[string]LockEntry `yaml:"plugins,omitempty"` // per-plugin repos (name -> entry, Path = plugin dir)
+}
+
+func luaPluginsLockPath(stateDir string) string {
+	return filepath.Join(stateDir, "lua_plugins.lock")
+}
+
+// LoadLuaPluginsLock reads lua_plugins.lock from the state directory.
+func LoadLuaPluginsLock(stateDir string) (*LuaPluginsLock, error) {
+	p := luaPluginsLockPath(stateDir)
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &LuaPluginsLock{Plugins: make(map[string]LockEntry)}, nil
+		}
+		return nil, fmt.Errorf("read lua_plugins.lock: %w", err)
+	}
+	var lock LuaPluginsLock
+	if err := yaml.Unmarshal(data, &lock); err != nil {
+		return nil, fmt.Errorf("parse lua_plugins.lock: %w", err)
+	}
+	if lock.Plugins == nil {
+		lock.Plugins = make(map[string]LockEntry)
+	}
+	return &lock, nil
+}
+
+// SaveLuaPluginsLock writes lua_plugins.lock to the state directory.
+func SaveLuaPluginsLock(stateDir string, lock *LuaPluginsLock) error {
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+	data, err := yaml.Marshal(lock)
+	if err != nil {
+		return fmt.Errorf("marshal lua_plugins.lock: %w", err)
+	}
+	return os.WriteFile(luaPluginsLockPath(stateDir), data, 0644)
+}

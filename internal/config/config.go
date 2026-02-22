@@ -20,6 +20,46 @@ type Config struct {
 	Channels        map[string]ChannelConfig `yaml:"channels"`
 	Scheduler       SchedulerConfig          `yaml:"scheduler"`
 	RequestPackages RequestPackagesConfig    `yaml:"request_packages"`
+	Lua             *LuaConfig               `yaml:"lua,omitempty"`
+}
+
+// LuaConfig configures embedded Lua plugins (content preparers). Use scripts_dir for local .lua files,
+// or plugins + default_github/ref to download by name from GitHub (one repo, one subdir per plugin).
+type LuaConfig struct {
+	ScriptsDir    string           `yaml:"scripts_dir"`    // local dir of .lua files (e.g. scripts/hello-world.lua)
+	Plugins       []LuaPluginEntry `yaml:"plugins"`        // plugin names to download (use default repo or per-plugin github/ref)
+	DefaultGitHub string           `yaml:"default_github"` // default repo for plugins (e.g. opentalon/lua-plugins)
+	DefaultRef    string           `yaml:"default_ref"`    // default ref (e.g. master)
+}
+
+// LuaPluginEntry is one Lua plugin: either a name (string) or { name, github?, ref? }.
+type LuaPluginEntry struct {
+	Name   string `yaml:"name"`
+	GitHub string `yaml:"github"`
+	Ref    string `yaml:"ref"`
+}
+
+// UnmarshalYAML allows Lua plugin to be a string (name only) or a map (name, github, ref).
+func (e *LuaPluginEntry) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		e.Name = n.Value
+		return nil
+	}
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("lua plugin must be a string (name) or object { name, github?, ref? }")
+	}
+	var raw struct {
+		Name   string `yaml:"name"`
+		GitHub string `yaml:"github"`
+		Ref    string `yaml:"ref"`
+	}
+	if err := n.Decode(&raw); err != nil {
+		return err
+	}
+	e.Name = raw.Name
+	e.GitHub = raw.GitHub
+	e.Ref = raw.Ref
+	return nil
 }
 
 // RequestPackagesConfig configures skill-style request packages (no compiled plugin).
@@ -240,6 +280,17 @@ func Parse(data []byte) (*Config, error) {
 	}
 	if cfg.Log.File != "" {
 		cfg.Log.File = expandEnv(cfg.Log.File)
+	}
+	if cfg.Lua != nil {
+		if cfg.Lua.ScriptsDir != "" {
+			cfg.Lua.ScriptsDir = expandEnv(cfg.Lua.ScriptsDir)
+		}
+		if cfg.Lua.DefaultGitHub != "" {
+			cfg.Lua.DefaultGitHub = expandEnv(cfg.Lua.DefaultGitHub)
+		}
+		if cfg.Lua.DefaultRef != "" {
+			cfg.Lua.DefaultRef = expandEnv(cfg.Lua.DefaultRef)
+		}
 	}
 	return &cfg, nil
 }

@@ -105,6 +105,15 @@ plugins:
 #               description: Issue description
 #               required: false
 
+# Lua plugins: embedded scripts as content preparers (no compiled binary).
+# Use scripts_dir for local .lua files, or plugins + default_github/ref to download by name from GitHub.
+# In content_preparers use plugin: "lua:hello-world" to run the hello-world Lua script.
+# lua:
+#   scripts_dir: ./scripts   # local .lua files (e.g. scripts/hello-world.lua)
+#   default_github: opentalon/lua-plugins   # one repo, one subdir per plugin (e.g. hello-world/hello-world.lua)
+#   default_ref: master
+#   plugins: [hello-world]   # download these by name; or per-plugin: - name: X; github: org/repo; ref: main
+
 state:
   data_dir: ~/.opentalon
 

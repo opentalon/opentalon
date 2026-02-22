@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/opentalon/opentalon/internal/lua"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
@@ -40,15 +41,16 @@ type noopParser struct{}
 func (noopParser) Parse(_ string) []ToolCall { return nil }
 
 type Orchestrator struct {
-	mu        sync.Mutex
-	llm       LLMClient
-	parser    ToolCallParser
-	registry  *ToolRegistry
-	memory    *state.MemoryStore
-	sessions  *state.SessionStore
-	guard     *Guard
-	rules     *RulesConfig
-	preparers []ContentPreparerEntry
+	mu             sync.Mutex
+	llm            LLMClient
+	parser         ToolCallParser
+	registry       *ToolRegistry
+	memory         *state.MemoryStore
+	sessions       *state.SessionStore
+	guard          *Guard
+	rules          *RulesConfig
+	preparers      []ContentPreparerEntry
+	luaScriptPaths map[string]string // optional; plugin name -> path to .lua script (for "lua:name" preparers)
 }
 
 func New(
@@ -58,7 +60,7 @@ func New(
 	memory *state.MemoryStore,
 	sessions *state.SessionStore,
 ) *Orchestrator {
-	return NewWithRules(llm, parser, registry, memory, sessions, nil, nil)
+	return NewWithRules(llm, parser, registry, memory, sessions, nil, nil, nil)
 }
 
 func NewWithRules(
@@ -69,16 +71,18 @@ func NewWithRules(
 	sessions *state.SessionStore,
 	customRules []string,
 	contentPreparers []ContentPreparerEntry,
+	luaScriptPaths map[string]string,
 ) *Orchestrator {
 	return &Orchestrator{
-		llm:       llm,
-		parser:    parser,
-		registry:  registry,
-		memory:    memory,
-		sessions:  sessions,
-		guard:     NewGuard(),
-		rules:     NewRulesConfig(customRules),
-		preparers: contentPreparers,
+		llm:            llm,
+		parser:         parser,
+		registry:       registry,
+		memory:         memory,
+		sessions:       sessions,
+		guard:          NewGuard(),
+		rules:          NewRulesConfig(customRules),
+		preparers:      contentPreparers,
+		luaScriptPaths: luaScriptPaths,
 	}
 }
 
@@ -106,6 +110,28 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	content := userMessage
 	// Run content preparers before the first LLM call (config-driven).
 	for _, prep := range o.preparers {
+		// Lua preparer: plugin "lua:hello-world" runs the script at luaScriptPaths["hello-world"]
+		if strings.HasPrefix(prep.Plugin, "lua:") {
+			scriptName := strings.TrimPrefix(prep.Plugin, "lua:")
+			scriptPath := o.luaScriptPaths[scriptName]
+			if scriptPath == "" {
+				continue
+			}
+			result, err := lua.RunPrepare(scriptPath, content)
+			if err != nil {
+				log.Printf("Warning: lua preparer %s: %v", scriptName, err)
+				continue
+			}
+			if !result.SendToLLM {
+				msg := result.Content
+				if msg == "" {
+					msg = "Request not sent to LLM (Lua guard)."
+				}
+				return &RunResult{Response: msg}, nil
+			}
+			content = result.Content
+			continue
+		}
 		argKey := prep.ArgKey
 		if argKey == "" {
 			argKey = "text"
