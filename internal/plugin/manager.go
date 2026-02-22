@@ -99,7 +99,7 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 	}
 
 	if err := m.registry.Register(cap, client); err != nil {
-		client.Close()
+		_ = client.Close()
 		if proc != nil {
 			_ = proc.Stop(defaultStopGrace)
 		}
