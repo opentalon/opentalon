@@ -10,15 +10,82 @@ import (
 )
 
 type Config struct {
-	Models       ModelsConfig             `yaml:"models"`
-	Routing      RoutingConfig            `yaml:"routing"`
-	Auth         AuthConfig               `yaml:"auth"`
-	State        StateConfig              `yaml:"state"`
-	Log          LogConfig                `yaml:"log"`
-	Orchestrator OrchestratorConfig       `yaml:"orchestrator"`
-	Plugins      map[string]PluginConfig  `yaml:"plugins"`
-	Channels     map[string]ChannelConfig `yaml:"channels"`
-	Scheduler    SchedulerConfig          `yaml:"scheduler"`
+	Models          ModelsConfig             `yaml:"models"`
+	Routing         RoutingConfig            `yaml:"routing"`
+	Auth            AuthConfig               `yaml:"auth"`
+	State           StateConfig              `yaml:"state"`
+	Log             LogConfig                `yaml:"log"`
+	Orchestrator    OrchestratorConfig       `yaml:"orchestrator"`
+	Plugins         map[string]PluginConfig  `yaml:"plugins"`
+	Channels        map[string]ChannelConfig `yaml:"channels"`
+	Scheduler       SchedulerConfig          `yaml:"scheduler"`
+	RequestPackages RequestPackagesConfig    `yaml:"request_packages"`
+}
+
+// RequestPackagesConfig configures skill-style request packages (no compiled plugin).
+type RequestPackagesConfig struct {
+	Path               string          `yaml:"path"`                 // directory containing .yaml files (each file = one plugin set)
+	SkillsPath         string          `yaml:"skills_path"`          // directory of OpenClaw-style skills (each subdir: SKILL.md or request.yaml)
+	Skills             []SkillEntry    `yaml:"skills"`               // skill names to download (use default repo or per-skill github/ref)
+	DefaultSkillGitHub string          `yaml:"default_skill_github"` // default repo for skills (e.g. openclaw/skills)
+	DefaultSkillRef    string          `yaml:"default_skill_ref"`    // default ref (e.g. main)
+	Inline             []RequestSetInl `yaml:"inline"`               // inline plugin sets
+}
+
+// SkillEntry is one skill to download: either a name (string in YAML) or { name, github?, ref? }.
+type SkillEntry struct {
+	Name   string `yaml:"name"`
+	GitHub string `yaml:"github"`
+	Ref    string `yaml:"ref"`
+}
+
+// UnmarshalYAML allows skill to be a string (name only) or a map (name, github, ref).
+func (s *SkillEntry) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		s.Name = n.Value
+		return nil
+	}
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("skill must be a string (name) or object { name, github?, ref? }")
+	}
+	var raw struct {
+		Name   string `yaml:"name"`
+		GitHub string `yaml:"github"`
+		Ref    string `yaml:"ref"`
+	}
+	if err := n.Decode(&raw); err != nil {
+		return err
+	}
+	s.Name = raw.Name
+	s.GitHub = raw.GitHub
+	s.Ref = raw.Ref
+	return nil
+}
+
+// RequestSetInl is an inline request package set (plugin name + packages).
+type RequestSetInl struct {
+	Plugin      string              `yaml:"plugin"`
+	Description string              `yaml:"description"`
+	Packages    []RequestPackageInl `yaml:"packages"`
+}
+
+// RequestPackageInl is the config shape for one request package.
+type RequestPackageInl struct {
+	Action      string            `yaml:"action"`
+	Description string            `yaml:"description"`
+	Method      string            `yaml:"method"`
+	URL         string            `yaml:"url"`
+	Body        string            `yaml:"body"`
+	Headers     map[string]string `yaml:"headers"`
+	RequiredEnv []string          `yaml:"required_env"`
+	Parameters  []RequestParamInl `yaml:"parameters"`
+}
+
+// RequestParamInl describes one parameter.
+type RequestParamInl struct {
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+	Required    bool   `yaml:"required"`
 }
 
 // LogConfig holds logging options. When LOG_LEVEL=debug, LLM request payloads are logged.

@@ -709,3 +709,39 @@ models:
 		t.Errorf("expected 0 jobs when omitted, got %d", len(cfg.Scheduler.Jobs))
 	}
 }
+
+func TestParseRequestPackagesSkills(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+request_packages:
+  default_skill_github: openclaw/skills
+  default_skill_ref: main
+  skills:
+    - jira-create-issue
+    - slack-send
+    - name: custom-skill
+      github: myorg/my-skills
+      ref: v1
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := cfg.RequestPackages
+	if rp.DefaultSkillGitHub != "openclaw/skills" || rp.DefaultSkillRef != "main" {
+		t.Errorf("default_skill_github = %q, default_skill_ref = %q", rp.DefaultSkillGitHub, rp.DefaultSkillRef)
+	}
+	if len(rp.Skills) != 3 {
+		t.Fatalf("expected 3 skills, got %d", len(rp.Skills))
+	}
+	if rp.Skills[0].Name != "jira-create-issue" || rp.Skills[0].GitHub != "" {
+		t.Errorf("skill[0] = name %q github %q", rp.Skills[0].Name, rp.Skills[0].GitHub)
+	}
+	if rp.Skills[1].Name != "slack-send" {
+		t.Errorf("skill[1].Name = %q", rp.Skills[1].Name)
+	}
+	if rp.Skills[2].Name != "custom-skill" || rp.Skills[2].GitHub != "myorg/my-skills" || rp.Skills[2].Ref != "v1" {
+		t.Errorf("skill[2] = name %q github %q ref %q", rp.Skills[2].Name, rp.Skills[2].GitHub, rp.Skills[2].Ref)
+	}
+}

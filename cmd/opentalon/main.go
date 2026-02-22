@@ -16,6 +16,7 @@ import (
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/plugin"
 	"github.com/opentalon/opentalon/internal/provider"
+	"github.com/opentalon/opentalon/internal/requestpkg"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/version"
 )
@@ -101,6 +102,78 @@ func main() {
 	pluginManager := plugin.NewManager(toolRegistry)
 	if err := pluginManager.LoadAll(ctx, pluginEntries); err != nil {
 		log.Printf("Warning: some plugins failed to load: %v", err)
+	}
+
+	// Request packages (skill-style): no compiled plugin, core runs HTTP requests from config/dir
+	var requestSets []requestpkg.Set
+	if cfg.RequestPackages.Path != "" {
+		dirSets, err := requestpkg.LoadDir(cfg.RequestPackages.Path)
+		if err != nil {
+			log.Printf("Warning: request_packages path %q: %v", cfg.RequestPackages.Path, err)
+		} else {
+			requestSets = append(requestSets, dirSets...)
+		}
+	}
+	if cfg.RequestPackages.SkillsPath != "" {
+		skillSets, err := requestpkg.LoadSkillsDir(cfg.RequestPackages.SkillsPath)
+		if err != nil {
+			log.Printf("Warning: request_packages skills_path %q: %v", cfg.RequestPackages.SkillsPath, err)
+		} else {
+			requestSets = append(requestSets, skillSets...)
+		}
+	}
+	// Download skills by name (from default repo or per-skill github/ref)
+	var defaultRepoPath string
+	if cfg.RequestPackages.DefaultSkillGitHub != "" && cfg.RequestPackages.DefaultSkillRef != "" {
+		p, err := bundle.EnsureSkillsRepo(ctx, dataDir, cfg.RequestPackages.DefaultSkillGitHub, cfg.RequestPackages.DefaultSkillRef)
+		if err != nil {
+			log.Printf("Warning: skills repo %s: %v", cfg.RequestPackages.DefaultSkillGitHub, err)
+		} else {
+			defaultRepoPath = p
+		}
+	}
+	for _, skill := range cfg.RequestPackages.Skills {
+		if skill.Name == "" {
+			continue
+		}
+		var skillDir string
+		switch {
+		case skill.GitHub != "" && skill.Ref != "":
+			path, err := bundle.EnsureSkillDir(ctx, dataDir, skill.Name, skill.GitHub, skill.Ref)
+			if err != nil {
+				log.Printf("Warning: skill %s: %v", skill.Name, err)
+				continue
+			}
+			skillDir = path
+		case defaultRepoPath != "":
+			skillDir = filepath.Join(defaultRepoPath, skill.Name)
+		default:
+			log.Printf("Warning: skill %s has no github/ref and no default_skill_github/ref", skill.Name)
+			continue
+		}
+		set, err := requestpkg.LoadSkillDir(skillDir)
+		if err != nil {
+			log.Printf("Warning: load skill %s from %s: %v", skill.Name, skillDir, err)
+			continue
+		}
+		requestSets = append(requestSets, set)
+	}
+	for _, inl := range cfg.RequestPackages.Inline {
+		set := requestpkg.Set{PluginName: inl.Plugin, Description: inl.Description}
+		for _, p := range inl.Packages {
+			params := make([]requestpkg.ParamDefinition, len(p.Parameters))
+			for i, q := range p.Parameters {
+				params[i] = requestpkg.ParamDefinition{Name: q.Name, Description: q.Description, Required: q.Required}
+			}
+			set.Packages = append(set.Packages, requestpkg.Package{
+				Action: p.Action, Description: p.Description, Method: p.Method, URL: p.URL,
+				Body: p.Body, Headers: p.Headers, RequiredEnv: p.RequiredEnv, Parameters: params,
+			})
+		}
+		requestSets = append(requestSets, set)
+	}
+	if err := requestpkg.Register(toolRegistry, requestSets); err != nil {
+		log.Printf("Warning: request_packages: %v", err)
 	}
 
 	contentPreparers := make([]orchestrator.ContentPreparerEntry, 0, len(cfg.Orchestrator.ContentPreparers))

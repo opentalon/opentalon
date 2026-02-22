@@ -64,6 +64,47 @@ plugins:
     # ref: "master"
     config: {}
 
+# Request packages: skill-style API calls (no compiled plugin). Core runs HTTP requests from templates.
+# Use {{env.VAR}} and {{args.param}} in url/body/headers. Guardrails: required_env validated before request.
+# To reuse OpenClaw/ClawHub skills you can:
+#   - skills_path: local dir of skill subdirs (each subdir: SKILL.md or request.yaml)
+#   - skills: list of skill names; core downloads them by name (clone only, no build). Use default repo
+#     or per-skill github/ref. One repo can host many skills (monorepo): set default_skill_github and
+#     default_skill_ref; each list entry is the subdir name (e.g. jira-create-issue).
+# request_packages:
+#   path: ./request-pkgs   # optional: load .yaml files (each file = one plugin set)
+#   skills_path: ./skills  # optional: local OpenClaw-style skills (each subdir: SKILL.md or request.yaml)
+#   default_skill_github: openclaw/skills   # default repo when using skills: [name, ...]
+#   default_skill_ref: main
+#   skills: [jira-create-issue, slack-send] # download these by name (from default repo or per-skill github/ref)
+#   # Or per-skill repo (object form):
+#   # skills:
+#   #   - name: jira-create-issue
+#   #     github: openclaw/skill-jira
+#   #     ref: main
+#   inline:
+#     - plugin: jira
+#       description: Create and manage Jira issues
+#       packages:
+#         - action: create_issue
+#           description: Create a Jira issue in a project
+#           method: POST
+#           url: "{{env.JIRA_URL}}/rest/api/3/issue"
+#           body: '{"fields":{"project":{"key":"{{args.project}}"},"summary":"{{args.summary}}","description":"{{args.description}}","issuetype":{"name":"Task"}}}'
+#           headers:
+#             Authorization: "Bearer {{env.JIRA_API_TOKEN}}"
+#           required_env: [JIRA_URL, JIRA_API_TOKEN]
+#           parameters:
+#             - name: project
+#               description: Project key (e.g. OPS)
+#               required: true
+#             - name: summary
+#               description: Issue summary
+#               required: true
+#             - name: description
+#               description: Issue description
+#               required: false
+
 state:
   data_dir: ~/.opentalon
 
