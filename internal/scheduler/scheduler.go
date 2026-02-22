@@ -324,12 +324,20 @@ func (s *Scheduler) startTicker(rj *runningJob) {
 	go s.runJob(jobCtx, rj)
 }
 
+func (s *Scheduler) snapshotJob(rj *runningJob) Job {
+	s.mu.RLock()
+	j := rj.job
+	s.mu.RUnlock()
+	return j
+}
+
 func (s *Scheduler) runJob(ctx context.Context, rj *runningJob) {
 	defer s.wg.Done()
 
-	dur, err := rj.job.parseDuration()
+	job := s.snapshotJob(rj)
+	dur, err := job.parseDuration()
 	if err != nil {
-		log.Printf("scheduler: job %q invalid interval: %v", rj.job.Name, err)
+		log.Printf("scheduler: job %q invalid interval: %v", job.Name, err)
 		return
 	}
 
@@ -347,22 +355,24 @@ func (s *Scheduler) runJob(ctx context.Context, rj *runningJob) {
 }
 
 func (s *Scheduler) executeJob(rj *runningJob) {
-	plugin, action, err := rj.job.parseAction()
+	job := s.snapshotJob(rj)
+
+	plugin, action, err := job.parseAction()
 	if err != nil {
-		log.Printf("scheduler: job %q bad action: %v", rj.job.Name, err)
+		log.Printf("scheduler: job %q bad action: %v", job.Name, err)
 		return
 	}
 
-	result, err := s.runner.RunAction(s.ctx, plugin, action, rj.job.Args)
+	result, err := s.runner.RunAction(s.ctx, plugin, action, job.Args)
 	if err != nil {
-		log.Printf("scheduler: job %q execution error: %v", rj.job.Name, err)
+		log.Printf("scheduler: job %q execution error: %v", job.Name, err)
 		return
 	}
 
-	if rj.job.NotifyChannel != "" && s.notifier != nil {
-		msg := fmt.Sprintf("[scheduled: %s] %s", rj.job.Name, result)
-		if err := s.notifier.Notify(s.ctx, rj.job.NotifyChannel, msg); err != nil {
-			log.Printf("scheduler: job %q notify error: %v", rj.job.Name, err)
+	if job.NotifyChannel != "" && s.notifier != nil {
+		msg := fmt.Sprintf("[scheduled: %s] %s", job.Name, result)
+		if err := s.notifier.Notify(s.ctx, job.NotifyChannel, msg); err != nil {
+			log.Printf("scheduler: job %q notify error: %v", job.Name, err)
 		}
 	}
 }
