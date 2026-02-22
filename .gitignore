@@ -46,9 +46,4 @@ config.local.yaml
 /tmp/
 *.log
 
-# Project-specific: built plugin/channel binaries (source in plugins/*/ and channels/*/ is tracked)
-plugins
-!plugins/.gitkeep
-channels
-!channels/.gitkeep
 Makefile
