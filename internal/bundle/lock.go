@@ -100,8 +100,8 @@ func SaveChannelsLock(stateDir string, lock *ChannelsLock) error {
 
 // SkillsLock is the content of skills.lock (resolved refs for downloaded OpenClaw-style skills).
 type SkillsLock struct {
-	Repo   *LockEntry            `yaml:"repo,omitempty"`   // default monorepo (one repo, many skill subdirs)
-	Skills map[string]LockEntry  `yaml:"skills,omitempty"` // per-skill repos (name -> entry, Path = skill dir)
+	Repo   *LockEntry           `yaml:"repo,omitempty"`   // default monorepo (one repo, many skill subdirs)
+	Skills map[string]LockEntry `yaml:"skills,omitempty"` // per-skill repos (name -> entry, Path = skill dir)
 }
 
 func skillsLockPath(stateDir string) string {

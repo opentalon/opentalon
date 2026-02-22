@@ -137,16 +137,17 @@ func main() {
 			continue
 		}
 		var skillDir string
-		if skill.GitHub != "" && skill.Ref != "" {
+		switch {
+		case skill.GitHub != "" && skill.Ref != "":
 			path, err := bundle.EnsureSkillDir(ctx, dataDir, skill.Name, skill.GitHub, skill.Ref)
 			if err != nil {
 				log.Printf("Warning: skill %s: %v", skill.Name, err)
 				continue
 			}
 			skillDir = path
-		} else if defaultRepoPath != "" {
+		case defaultRepoPath != "":
 			skillDir = filepath.Join(defaultRepoPath, skill.Name)
-		} else {
+		default:
 			log.Printf("Warning: skill %s has no github/ref and no default_skill_github/ref", skill.Name)
 			continue
 		}

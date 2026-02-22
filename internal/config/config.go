@@ -24,12 +24,12 @@ type Config struct {
 
 // RequestPackagesConfig configures skill-style request packages (no compiled plugin).
 type RequestPackagesConfig struct {
-	Path               string          `yaml:"path"`                   // directory containing .yaml files (each file = one plugin set)
-	SkillsPath         string          `yaml:"skills_path"`            // directory of OpenClaw-style skills (each subdir: SKILL.md or request.yaml)
-	Skills             []SkillEntry    `yaml:"skills"`                 // skill names to download (use default repo or per-skill github/ref)
-	DefaultSkillGitHub string          `yaml:"default_skill_github"`   // default repo for skills (e.g. openclaw/skills)
-	DefaultSkillRef    string          `yaml:"default_skill_ref"`      // default ref (e.g. main)
-	Inline             []RequestSetInl `yaml:"inline"`                 // inline plugin sets
+	Path               string          `yaml:"path"`                 // directory containing .yaml files (each file = one plugin set)
+	SkillsPath         string          `yaml:"skills_path"`          // directory of OpenClaw-style skills (each subdir: SKILL.md or request.yaml)
+	Skills             []SkillEntry    `yaml:"skills"`               // skill names to download (use default repo or per-skill github/ref)
+	DefaultSkillGitHub string          `yaml:"default_skill_github"` // default repo for skills (e.g. openclaw/skills)
+	DefaultSkillRef    string          `yaml:"default_skill_ref"`    // default ref (e.g. main)
+	Inline             []RequestSetInl `yaml:"inline"`               // inline plugin sets
 }
 
 // SkillEntry is one skill to download: either a name (string in YAML) or { name, github?, ref? }.
