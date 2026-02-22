@@ -14,14 +14,14 @@ models:
       api: anthropic-messages
 ```
 
-Set your key and run in the **console** (stdin/stdout):
+Set your key and run with the **console channel** in your config (see [Bundler-style plugins and channels](#bundler-style-plugins-and-channels) below). Example:
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
 opentalon -config config.yaml
 ```
 
-You get an interactive prompt: type a message, press Enter, and the LLM replies. Ctrl+C or Ctrl+D to exit. OpenTalon uses the provider and model from your config (e.g. `routing.primary`).
+With the console channel enabled, you get an interactive prompt: type a message, press Enter, and the LLM replies. Ctrl+C or Ctrl+D to exit. OpenTalon uses the provider and model from your config (e.g. `routing.primary`). Without the console channel, the process may run other channels only and not show a prompt.
 
 ## Adding Providers
 

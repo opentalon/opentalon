@@ -37,7 +37,7 @@ make all
 ./opentalon -config config.yaml
 ```
 
-Type a message and press Enter. Try `hello` — you get "hello world" plus a random question sent to the LLM; try something else — you get a guard message and no LLM call. Ctrl+C or Ctrl+D to exit. See [docs/plugins/hello-world-plugin.md](docs/plugins/hello-world-plugin.md) and [docs/configuration.md](docs/configuration.md).
+Type a message and press Enter. Try `hello` — you get "hello world" plus a random question sent to the LLM; try something else — you get a guard message and no LLM call. Ctrl+C or Ctrl+D to exit. See [hello-world plugin](https://github.com/opentalon/hellow-world-plugin) and [docs/configuration.md](docs/configuration.md).
 
 ## Core Principles
 
@@ -240,7 +240,7 @@ All three categories share the same set of extension points:
 
 ### Developer Experience
 
-- **Example: [Hello World plugin](docs/plugins/hello-world-plugin.md)** — build your first tool plugin (hello→world + optional prompt fragment), then run OpenTalon with DeepSeek or any provider.
+- **Example: [Hello World plugin](https://github.com/opentalon/hellow-world-plugin)** — build your first tool plugin (hello→world + optional prompt fragment), then run OpenTalon with DeepSeek or any provider.
 - **gRPC Plugin SDK** — scaffolding CLI, example plugins, and integration test helpers. Works for tool plugins, channel plugins, and gRPC hooks.
 - **Lua API reference** — documentation, example scripts, and a REPL for interactive testing
 
@@ -402,14 +402,12 @@ Build the core, then reference the **hello-world plugin** and **console channel*
      console:
        enabled: true
        github: "opentalon/console-channel"
-       ref: "main"
        config: {}
 
    plugins:
      hello-world:
        enabled: true
        github: "opentalon/hello-world-plugin"
-       ref: "main"
        config: {}
 
    state:
