@@ -174,7 +174,11 @@ plugins:
 
 # Scheduled check — poll Ipossum for new violations periodically
 scheduler:
+  # Enterprise: only designated users can create/delete dynamic jobs
+  approvers: ["admin@company.com", "ops-lead@company.com"]
+  max_jobs_per_user: 5
   jobs:
+    # Config-defined jobs are read-only — cannot be deleted or modified via chat
     - name: "violation-check"
       interval: "1h"
       action: "ipossum.check_violations"
@@ -220,17 +224,134 @@ steps:
 outcome: success
 ```
 
+## Dynamic scheduling via conversation
+
+After uploading content, the LLM proactively suggests periodic monitoring. The user confirms the schedule directly in chat — no config files needed.
+
+### Approval-based flow
+
+```
+Creator (WhatsApp)                OpenTalon (LLM + Scheduler)
+       │                              │
+       │  *sends 5 photos*            │
+       │  "Protect these"             │
+       │ ──────────────────────────▶  │
+       │                              │  (uploads to Ipossum, gets content IDs)
+       │                              │
+       │  "Done! 5 files uploaded     │
+       │   and being monitored.       │
+       │                              │
+       │   Would you like me to       │
+       │   check for violations       │
+       │   automatically?             │
+       │   I'd suggest every 1 hour." │
+       │ ◀──────────────────────────  │
+       │                              │
+       │  "Yes, check every 30m"      │
+       │ ──────────────────────────▶  │
+       │                              │  scheduler.create_job
+       │                              │    name: "violation-check"
+       │                              │    interval: "30m"
+       │                              │    action: "ipossum.check_violations"
+       │                              │    notify_channel: "whatsapp"
+       │                              │
+       │  "Scheduled! I'll check      │
+       │   every 30 minutes and       │
+       │   notify you here if         │
+       │   anything is found."        │
+       │ ◀──────────────────────────  │
+       │                              │
+       │         ... 30m later ...    │
+       │                              │  (scheduler fires, runs check,
+       │                              │   3 violations found, notifies)
+       │                              │
+       │  "⚠️ 3 unauthorized copies   │
+       │   found: ..."               │
+       │ ◀──────────────────────────  │
+```
+
+### Managing scheduled jobs in chat
+
+```
+User: "What jobs are running?"
+LLM:  → scheduler.list_jobs
+      "You have 1 scheduled job:
+       • violation-check — every 30m → ipossum.check_violations (active)"
+
+User: "Pause it for now"
+LLM:  → scheduler.pause_job(name: "violation-check")
+      "Paused. I won't check until you resume."
+
+User: "Resume, but make it hourly"
+LLM:  → scheduler.update_job(name: "violation-check", interval: "1h")
+      "Resumed at 1h interval."
+
+User: "Delete the job"
+LLM:  "Are you sure? This will stop automatic violation checks."
+User: "Yes"
+LLM:  → scheduler.delete_job(name: "violation-check")
+      "Deleted. You can ask me to set it up again anytime."
+```
+
+### Enterprise: job governance and approvers
+
+In large organizations, not every user should be able to create scheduled jobs (each job consumes LLM tokens on every tick). Configure `approvers` to restrict who can manage dynamic jobs:
+
+```yaml
+scheduler:
+  approvers: ["admin@company.com", "ops-lead@company.com"]
+  max_jobs_per_user: 5
+```
+
+When a non-approver tries to create a job:
+
+```
+User: "Check for violations every 20 minutes"
+LLM:  "I'd like to set that up, but job creation requires an authorized approver.
+       Please ask admin@company.com or ops-lead@company.com to approve this."
+```
+
+**Protection rules:**
+
+- **Config-defined jobs** (from `config.yaml`) are read-only — they can be paused/resumed by anyone, but never deleted or modified via conversation.
+- **Dynamic jobs** (created via chat) can only be created/deleted/updated by approved users when `approvers` is set.
+- **Per-user limits** — `max_jobs_per_user` prevents any single user from creating too many periodic jobs.
+- **Job ownership** — every dynamic job tracks who created it (`created_by` field), visible in `scheduler.list_jobs`.
+
+### How the LLM decides to suggest scheduling
+
+The orchestrator includes built-in scheduling rules:
+
+1. **Proactive suggestion** — after performing a monitoring-type action (upload, scan), the LLM suggests setting up a recurring check.
+2. **Never auto-create** — the LLM always asks for approval and lets the user adjust the interval before creating a job.
+3. **Sensible defaults** — suggests intervals based on action type (15-30m for active monitoring, 1-4h for periodic checks, 24h for summaries).
+4. **Channel routing** — notifications go to the channel the user is currently talking on.
+5. **Config protection** — config-defined jobs are read-only; the LLM never tries to delete or modify them.
+6. **Approver awareness** — when approvers are configured, the LLM tells unauthorized users to contact an approver.
+
+These rules are defined in `internal/orchestrator/rules.go` and can be extended via `config.yaml`:
+
+```yaml
+orchestrator:
+  rules:
+    - "For content protection, always suggest 30-minute checks first."
+    - "Never schedule more frequently than every 10 minutes."
+```
+
 ## Conversation examples
 
 The user interacts entirely via WhatsApp — no dashboard, no browser needed:
 
 | User says | What happens |
 |---|---|
-| *sends 5 photos* "Protect these" | Upload to Ipossum, start monitoring, confirm |
+| *sends 5 photos* "Protect these" | Upload to Ipossum, start monitoring, suggest scheduling |
+| "Yes, check every 30m" | Create scheduled job via `scheduler.create_job` |
 | "Any violations?" | Check Ipossum, report findings or "all clear" |
 | "TAKEDOWN ALL" | Initiate takedowns for all current violations |
 | "Only remove #1 and #3" | Selective takedown for specific violations |
 | "Status update?" | Check pending takedowns, report progress |
+| "What jobs are running?" | List scheduled jobs via `scheduler.list_jobs` |
+| "Pause the checks" | Pause job via `scheduler.pause_job` |
 | "How many violations this month?" | Call `get_stats`, summarize |
 | "Add this video too" *sends video* | Upload new content, add to monitoring |
 | "Stop monitoring photo1.jpg" | Remove content from Ipossum watch list |

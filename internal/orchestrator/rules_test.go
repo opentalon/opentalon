@@ -50,6 +50,17 @@ func TestDefaultRulesContainMultipleLanguages(t *testing.T) {
 	}
 }
 
+func TestDefaultRulesContainSchedulingRules(t *testing.T) {
+	rc := DefaultRulesConfig()
+	prompt := rc.BuildPromptSection()
+	if !strings.Contains(prompt, "SCHEDULING RULES") {
+		t.Error("default rules should contain scheduling rules")
+	}
+	if !strings.Contains(prompt, "NEVER create a scheduled job without explicit user approval") {
+		t.Error("default rules should contain approval requirement")
+	}
+}
+
 func TestCustomRulesAppended(t *testing.T) {
 	custom := []string{
 		"Never send PII to external plugins",
@@ -58,8 +69,9 @@ func TestCustomRulesAppended(t *testing.T) {
 	rc := NewRulesConfig(custom)
 
 	rules := rc.Rules()
-	if len(rules) != len(defaultRules)+2 {
-		t.Errorf("expected %d rules, got %d", len(defaultRules)+2, len(rules))
+	expected := builtinRuleCount() + 2
+	if len(rules) != expected {
+		t.Errorf("expected %d rules, got %d", expected, len(rules))
 	}
 
 	found := 0
@@ -77,14 +89,15 @@ func TestCustomRulesEmptyStringsIgnored(t *testing.T) {
 	custom := []string{"valid rule", "", "  ", "another rule"}
 	rc := NewRulesConfig(custom)
 	rules := rc.Rules()
-	if len(rules) != len(defaultRules)+2 {
-		t.Errorf("empty strings should be ignored, got %d rules", len(rules))
+	expected := builtinRuleCount() + 2
+	if len(rules) != expected {
+		t.Errorf("empty strings should be ignored, expected %d got %d rules", expected, len(rules))
 	}
 }
 
 func TestCustomRulesNilPreservesDefaults(t *testing.T) {
 	rc := NewRulesConfig(nil)
-	if len(rc.Rules()) != len(defaultRules) {
+	if len(rc.Rules()) != builtinRuleCount() {
 		t.Errorf("nil custom rules should preserve defaults, got %d", len(rc.Rules()))
 	}
 }

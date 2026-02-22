@@ -16,6 +16,22 @@ type Config struct {
 	State        StateConfig              `yaml:"state"`
 	Orchestrator OrchestratorConfig       `yaml:"orchestrator"`
 	Channels     map[string]ChannelConfig `yaml:"channels"`
+	Scheduler    SchedulerConfig          `yaml:"scheduler"`
+}
+
+type SchedulerConfig struct {
+	Jobs           []JobConfig `yaml:"jobs"`
+	Approvers      []string    `yaml:"approvers,omitempty"`
+	MaxJobsPerUser int         `yaml:"max_jobs_per_user,omitempty"`
+}
+
+type JobConfig struct {
+	Name          string            `yaml:"name"`
+	Interval      string            `yaml:"interval"`
+	Action        string            `yaml:"action"`
+	Args          map[string]string `yaml:"args,omitempty"`
+	NotifyChannel string            `yaml:"notify_channel,omitempty"`
+	Enabled       *bool             `yaml:"enabled,omitempty"`
 }
 
 type ChannelConfig struct {
