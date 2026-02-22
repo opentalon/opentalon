@@ -30,23 +30,11 @@ func TestDefaultRulesContainEnglish(t *testing.T) {
 	}
 }
 
-func TestDefaultRulesContainMultipleLanguages(t *testing.T) {
+func TestDefaultRulesContainEnglishSafetyRule(t *testing.T) {
 	rc := DefaultRulesConfig()
 	prompt := rc.BuildPromptSection()
-	languages := []struct {
-		name    string
-		keyword string
-	}{
-		{"Spanish", "REGLA DE SEGURIDAD"},
-		{"German", "SICHERHEITSREGEL"},
-		{"French", "RÈGLE DE SÉCURITÉ"},
-		{"Chinese", "安全规则"},
-		{"Japanese", "セキュリティルール"},
-	}
-	for _, lang := range languages {
-		if !strings.Contains(prompt, lang.keyword) {
-			t.Errorf("rules should contain %s rule (%s)", lang.name, lang.keyword)
-		}
+	if !strings.Contains(prompt, "CRITICAL SAFETY RULE") {
+		t.Error("rules should contain English safety rule (CRITICAL SAFETY RULE)")
 	}
 }
 
@@ -143,7 +131,7 @@ func TestRulesInjectedIntoSystemPrompt(t *testing.T) {
 		captured: &capturedMessages,
 	}
 
-	orch := NewWithRules(capturingLLM, parser, registry, memory, sessions, []string{"org-specific rule"})
+	orch := NewWithRules(capturingLLM, parser, registry, memory, sessions, []string{"org-specific rule"}, nil)
 	_, err := orch.Run(context.Background(), "s1", "hello")
 	if err != nil {
 		t.Fatal(err)
@@ -162,9 +150,6 @@ func TestRulesInjectedIntoSystemPrompt(t *testing.T) {
 	}
 	if !strings.Contains(systemPrompt, "org-specific rule") {
 		t.Error("system prompt should contain custom rule")
-	}
-	if !strings.Contains(systemPrompt, "安全规则") {
-		t.Error("system prompt should contain Chinese rule")
 	}
 }
 

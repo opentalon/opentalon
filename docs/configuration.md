@@ -14,14 +14,14 @@ models:
       api: anthropic-messages
 ```
 
-Set your key and run:
+Set your key and run with the **console channel** in your config (see [Bundler-style plugins and channels](#bundler-style-plugins-and-channels) below). Example:
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
-opentalon
+opentalon -config config.yaml
 ```
 
-That's it. OpenTalon will use Anthropic's default models.
+With the console channel enabled, you get an interactive prompt: type a message, press Enter, and the LLM replies. Ctrl+C or Ctrl+D to exit. OpenTalon uses the provider and model from your config (e.g. `routing.primary`). Without the console channel, the process may run other channels only and not show a prompt.
 
 ## Adding Providers
 
@@ -231,6 +231,71 @@ Override with an environment variable:
 state:
   data_dir: "${OPENTALON_DATA_DIR}"
 ```
+
+## Orchestrator
+
+Control how the LLM is prompted and how user input is pre-processed.
+
+### Rules
+
+Optional custom rules appended to the system prompt (e.g. compliance, terminology):
+
+```yaml
+orchestrator:
+  rules:
+    - "Never send PII to external plugins"
+    - "All financial data must stay internal"
+```
+
+### Content preparers
+
+Plugin actions that run **before** the first LLM call. Their output becomes the user message sent to the LLM (or they can block the LLM and return a message to the user).
+
+```yaml
+orchestrator:
+  rules: []
+  content_preparers:
+    - plugin: hello-world
+      action: prepare
+      arg_key: text    # optional; default is "text"
+```
+
+- **Normal case**: the preparer returns a string → that string is the user message for the LLM. Content preparers are **not** listed as callable tools; the LLM does not see or call them.
+- **Guard case**: the preparer returns JSON `{"send_to_llm": false, "message": "..."}` → the orchestrator skips the LLM and sends that message to the user.
+
+See [Hello World plugin](plugins/hello-world-plugin.md) for an example.
+
+## Bundler-style plugins and channels
+
+Instead of a local `path`, you can point a plugin or channel at a GitHub repo and a **ref** (branch, tag, or commit). OpenTalon will clone the repo, build it, and pin the resolved commit in a lock file so installs are reproducible.
+
+| Field   | Description |
+|--------|-------------|
+| `github` | Repo in the form `owner/repo` (e.g. `opentalon/hello-world-plugin`). |
+| `ref`    | Branch, tag, or commit SHA (e.g. `main`, `v1.0.0`, or `abc123def`). |
+
+**Plugins** — use either `path` or `github` + `ref`:
+
+```yaml
+plugins:
+  hello-world:
+    enabled: true
+    github: "opentalon/hello-world-plugin"
+    ref: "master"
+```
+
+**Channels** — use either `plugin` (path or `grpc://...`) or `github` + `ref`:
+
+```yaml
+channels:
+  slack:
+    enabled: true
+    github: "opentalon/slack-channel"
+    ref: "v0.1.0"
+```
+
+- The first run resolves `ref` to a commit, clones into `<state_dir>/plugins/<name>/` or `<state_dir>/channels/<name>/`, runs `go build`, and writes **`plugins.lock`** or **`channels.lock`** under the state dir with the resolved commit and binary path.
+- Later runs reuse the locked version until you change `ref` or delete the lock entry. Requires `git` and `go` on the host.
 
 ## Full Example
 

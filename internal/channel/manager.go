@@ -10,7 +10,7 @@ import (
 // ChannelEntry holds the config for one channel.
 type ChannelEntry struct {
 	Name    string
-	Plugin  string
+	Path    string // path to binary or grpc://...
 	Enabled bool
 	Config  map[string]interface{}
 }
@@ -48,9 +48,9 @@ func (m *Manager) LoadAll(ctx context.Context, entries []ChannelEntry) error {
 	return nil
 }
 
-// Load connects a single channel and registers it.
+// Load connects a single channel and registers it. The connector launches the binary or dials gRPC.
 func (m *Manager) Load(ctx context.Context, entry ChannelEntry) error {
-	ch, err := m.connector.Connect(ctx, entry.Name, entry.Plugin)
+	ch, err := m.connector.Connect(ctx, entry.Name, entry.Path)
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,8 @@ func (m *Manager) Load(ctx context.Context, entry ChannelEntry) error {
 		return fmt.Errorf("register channel %s: %w", entry.Name, err)
 	}
 
-	log.Printf("channel-manager: loaded %s via %s", entry.Name, DetectMode(entry.Plugin))
+	modeStr := DetectMode(entry.Path).String()
+	log.Printf("channel-manager: loaded %s via %s", entry.Name, modeStr)
 	return nil
 }
 
