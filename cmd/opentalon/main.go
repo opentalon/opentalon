@@ -184,7 +184,8 @@ func main() {
 			ArgKey: p.ArgKey,
 		})
 	}
-	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, cfg.Orchestrator.Rules, contentPreparers)
+	luaScriptPaths := buildLuaScriptPaths(ctx, dataDir, cfg)
+	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, cfg.Orchestrator.Rules, contentPreparers, luaScriptPaths)
 
 	ensureSession := func(sessionKey string) {
 		if _, err := sessions.Get(sessionKey); err != nil {
@@ -259,6 +260,63 @@ func (c *defaultModelClient) Complete(ctx context.Context, req *provider.Complet
 		}
 	}
 	return c.provider.Complete(ctx, req)
+}
+
+// buildLuaScriptPaths returns a map of Lua plugin name -> path to .lua script,
+// from local scripts_dir and from plugins downloaded from GitHub.
+func buildLuaScriptPaths(ctx context.Context, dataDir string, cfg *config.Config) map[string]string {
+	paths := make(map[string]string)
+	if cfg.Lua == nil {
+		return paths
+	}
+	// Local scripts_dir: each .lua file -> name (without extension) -> path
+	if cfg.Lua.ScriptsDir != "" {
+		dir := cfg.Lua.ScriptsDir
+		if strings.HasPrefix(dir, "~") {
+			home, _ := os.UserHomeDir()
+			rest := strings.TrimPrefix(strings.TrimPrefix(dir, "~"), "/")
+			dir = filepath.Join(home, rest)
+		}
+		entries, err := os.ReadDir(dir)
+		if err == nil {
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				name := e.Name()
+				if strings.HasSuffix(name, ".lua") {
+					pluginName := strings.TrimSuffix(name, ".lua")
+					paths[pluginName] = filepath.Join(dir, name)
+				}
+			}
+		}
+	}
+	// Downloaded plugins: default repo (subdir/name.lua) or per-plugin repo (name.lua at root)
+	var defaultRepoPath string
+	if cfg.Lua.DefaultGitHub != "" && cfg.Lua.DefaultRef != "" {
+		p, err := bundle.EnsureLuaPluginsRepo(ctx, dataDir, cfg.Lua.DefaultGitHub, cfg.Lua.DefaultRef)
+		if err != nil {
+			log.Printf("Warning: Lua plugins repo %s: %v", cfg.Lua.DefaultGitHub, err)
+		} else {
+			defaultRepoPath = p
+		}
+	}
+	for _, plug := range cfg.Lua.Plugins {
+		if plug.Name == "" {
+			continue
+		}
+		if plug.GitHub != "" && plug.Ref != "" {
+			pluginDir, err := bundle.EnsureLuaPluginDir(ctx, dataDir, plug.Name, plug.GitHub, plug.Ref)
+			if err != nil {
+				log.Printf("Warning: Lua plugin %s: %v", plug.Name, err)
+				continue
+			}
+			paths[plug.Name] = filepath.Join(pluginDir, plug.Name+".lua")
+		} else if defaultRepoPath != "" {
+			paths[plug.Name] = filepath.Join(defaultRepoPath, plug.Name, plug.Name+".lua")
+		}
+	}
+	return paths
 }
 
 // buildProvider returns a provider and the default model ID from config.

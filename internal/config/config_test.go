@@ -745,3 +745,41 @@ request_packages:
 		t.Errorf("skill[2] = name %q github %q ref %q", rp.Skills[2].Name, rp.Skills[2].GitHub, rp.Skills[2].Ref)
 	}
 }
+
+func TestParseLuaPlugins(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+lua:
+  scripts_dir: ./scripts
+  default_github: opentalon/lua-plugins
+  default_ref: master
+  plugins:
+    - hello-world
+    - name: custom-lua
+      github: myorg/my-lua-plugins
+      ref: main
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Lua == nil {
+		t.Fatal("expected lua config")
+	}
+	if cfg.Lua.ScriptsDir != "./scripts" {
+		t.Errorf("scripts_dir = %q", cfg.Lua.ScriptsDir)
+	}
+	if cfg.Lua.DefaultGitHub != "opentalon/lua-plugins" || cfg.Lua.DefaultRef != "master" {
+		t.Errorf("default_github = %q, default_ref = %q", cfg.Lua.DefaultGitHub, cfg.Lua.DefaultRef)
+	}
+	if len(cfg.Lua.Plugins) != 2 {
+		t.Fatalf("expected 2 plugins, got %d", len(cfg.Lua.Plugins))
+	}
+	if cfg.Lua.Plugins[0].Name != "hello-world" || cfg.Lua.Plugins[0].GitHub != "" {
+		t.Errorf("plugin[0] = name %q github %q", cfg.Lua.Plugins[0].Name, cfg.Lua.Plugins[0].GitHub)
+	}
+	if cfg.Lua.Plugins[1].Name != "custom-lua" || cfg.Lua.Plugins[1].GitHub != "myorg/my-lua-plugins" || cfg.Lua.Plugins[1].Ref != "main" {
+		t.Errorf("plugin[1] = name %q github %q ref %q", cfg.Lua.Plugins[1].Name, cfg.Lua.Plugins[1].GitHub, cfg.Lua.Plugins[1].Ref)
+	}
+}

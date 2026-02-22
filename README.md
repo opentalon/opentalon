@@ -204,7 +204,7 @@ I/O adapters for messaging platforms. Written in any language, deployed as separ
 
 Pre/post processing hooks run **before and after** the main LLM. Two options:
 
-- **Lua scripts** (embedded) — hot-reloadable, sandboxed, zero deployment overhead. Ideal for simple rules, filters, and quick customizations. Can call a small/local LLM via `ctx.llm()` for lightweight AI tasks. Inspired by **Nginx/OpenResty**, **Kong**, and **Redis**.
+- **Lua scripts** (embedded) — hot-reloadable, sandboxed, zero deployment overhead. Ideal for simple rules, filters, and quick customizations. Can call a small/local LLM via `ctx.llm()` for lightweight AI tasks. See [Lua scripts](docs/lua-scripts.md) for a full hello-world example. Inspired by **Nginx/OpenResty**, **Kong**, and **Redis**.
 - **gRPC hook plugins** (any language) — for complex business logic that needs databases, APIs, or custom libraries. Same process isolation and language flexibility as tool plugins.
 
 ### Company Rules, Context & Vocabulary — Without Burning LLM Tokens
@@ -242,7 +242,7 @@ All three categories share the same set of extension points:
 
 - **Example: [Hello World plugin](https://github.com/opentalon/hellow-world-plugin)** — build your first tool plugin (hello→world + optional prompt fragment), then run OpenTalon with DeepSeek or any provider.
 - **gRPC Plugin SDK** — scaffolding CLI, example plugins, and integration test helpers. Works for tool plugins, channel plugins, and gRPC hooks.
-- **Lua API reference** — documentation, example scripts, and a REPL for interactive testing
+- **Lua scripts** — [Lua scripts guide](docs/lua-scripts.md) with a hello-world example; API reference, example scripts, and a REPL for interactive testing
 
 > For the full architecture, see [docs/design/plugins.md](docs/design/plugins.md) and [docs/design/channels.md](docs/design/channels.md). For real-world workflow examples, see [examples/](examples/).
 

@@ -233,6 +233,94 @@ func EnsureSkillsRepo(ctx context.Context, stateDir, github, ref string) (string
 	return repoDir, nil
 }
 
+// EnsureLuaPluginsRepo ensures the default Lua plugins repo is present under stateDir/lua_plugins/<repo-name>/,
+// clones only, updates lua_plugins.lock Repo, and returns the repo root path.
+func EnsureLuaPluginsRepo(ctx context.Context, stateDir, github, ref string) (string, error) {
+	if github == "" || ref == "" {
+		return "", fmt.Errorf("github and ref are required for Lua plugins repo")
+	}
+	lock, err := LoadLuaPluginsLock(stateDir)
+	if err != nil {
+		return "", err
+	}
+	entry := lock.Repo
+	if entry != nil && entry.GitHub == github && entry.Ref == ref && entry.Resolved != "" && entry.Path != "" {
+		absPath := entry.Path
+		if !filepath.IsAbs(absPath) {
+			absPath = filepath.Join(stateDir, entry.Path)
+		}
+		if _, err := os.Stat(absPath); err == nil {
+			return absPath, nil
+		}
+	}
+	resolved, err := ResolveRef(ctx, github, ref)
+	if err != nil {
+		return "", fmt.Errorf("resolve ref %q: %w", ref, err)
+	}
+	repoDir := filepath.Join(stateDir, "lua_plugins", sanitizeRepoName(github))
+	if err := CloneOnly(ctx, github, ref, resolved, repoDir); err != nil {
+		return "", err
+	}
+	relPath, _ := filepath.Rel(stateDir, repoDir)
+	if relPath == "" || strings.HasPrefix(relPath, "..") {
+		relPath = repoDir
+	}
+	lock.Repo = &LockEntry{
+		GitHub:   github,
+		Ref:      ref,
+		Resolved: resolved,
+		Path:     relPath,
+	}
+	if err := SaveLuaPluginsLock(stateDir, lock); err != nil {
+		return "", err
+	}
+	return repoDir, nil
+}
+
+// EnsureLuaPluginDir ensures a single Lua plugin repo is present under stateDir/lua_plugins/<name>/,
+// clones only, updates lua_plugins.lock, and returns the plugin directory path.
+func EnsureLuaPluginDir(ctx context.Context, stateDir, name, github, ref string) (string, error) {
+	if github == "" || ref == "" {
+		return "", fmt.Errorf("github and ref are required for Lua plugin %q", name)
+	}
+	lock, err := LoadLuaPluginsLock(stateDir)
+	if err != nil {
+		return "", err
+	}
+	entry, locked := lock.Plugins[name]
+	if locked && entry.GitHub == github && entry.Ref == ref && entry.Resolved != "" && entry.Path != "" {
+		absPath := entry.Path
+		if !filepath.IsAbs(absPath) {
+			absPath = filepath.Join(stateDir, entry.Path)
+		}
+		if _, err := os.Stat(absPath); err == nil {
+			return absPath, nil
+		}
+	}
+	resolved, err := ResolveRef(ctx, github, ref)
+	if err != nil {
+		return "", fmt.Errorf("resolve ref %q: %w", ref, err)
+	}
+	pluginDir := filepath.Join(stateDir, "lua_plugins", name)
+	if err := CloneOnly(ctx, github, ref, resolved, pluginDir); err != nil {
+		return "", err
+	}
+	relPath, _ := filepath.Rel(stateDir, pluginDir)
+	if relPath == "" || strings.HasPrefix(relPath, "..") {
+		relPath = pluginDir
+	}
+	lock.Plugins[name] = LockEntry{
+		GitHub:   github,
+		Ref:      ref,
+		Resolved: resolved,
+		Path:     relPath,
+	}
+	if err := SaveLuaPluginsLock(stateDir, lock); err != nil {
+		return "", err
+	}
+	return pluginDir, nil
+}
+
 // EnsurePlugin ensures the plugin is present under stateDir/plugins/<name>/,
 // resolves ref to a commit, clones and builds if needed, updates plugins.lock, and returns the path to the binary.
 func EnsurePlugin(ctx context.Context, stateDir, name, github, ref string) (path string, err error) {
