@@ -507,6 +507,72 @@ channels:
 	}
 }
 
+func TestParsePlugins(t *testing.T) {
+	t.Setenv("GITLAB_TOKEN", "glpat-test")
+	yaml := `
+models:
+  providers: {}
+plugins:
+  gitlab:
+    enabled: true
+    path: "./plugins/opentalon-gitlab"
+    config:
+      token: "${GITLAB_TOKEN}"
+      url: "https://gitlab.company.com"
+  jira:
+    enabled: true
+    path: "grpc://jira-plugin.internal:9002"
+  disabled-plug:
+    enabled: false
+    path: "./plugins/old-plugin"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Plugins) != 3 {
+		t.Fatalf("expected 3 plugins, got %d", len(cfg.Plugins))
+	}
+
+	gl := cfg.Plugins["gitlab"]
+	if !gl.Enabled {
+		t.Error("gitlab should be enabled")
+	}
+	if gl.Path != "./plugins/opentalon-gitlab" {
+		t.Errorf("gitlab path = %q", gl.Path)
+	}
+	if gl.Config["token"] != "glpat-test" {
+		t.Errorf("gitlab token = %q, want glpat-test", gl.Config["token"])
+	}
+	if gl.Config["url"] != "https://gitlab.company.com" {
+		t.Errorf("gitlab url = %q", gl.Config["url"])
+	}
+
+	jira := cfg.Plugins["jira"]
+	if jira.Path != "grpc://jira-plugin.internal:9002" {
+		t.Errorf("jira path = %q", jira.Path)
+	}
+
+	disabled := cfg.Plugins["disabled-plug"]
+	if disabled.Enabled {
+		t.Error("disabled-plug should be disabled")
+	}
+}
+
+func TestParseNoPlugins(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Plugins) != 0 {
+		t.Errorf("expected 0 plugins when omitted, got %d", len(cfg.Plugins))
+	}
+}
+
 func TestParseSchedulerJobs(t *testing.T) {
 	yaml := `
 models:

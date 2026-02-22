@@ -255,15 +255,16 @@ The `PluginStateStore` enforces isolation at the API level:
 
 #### 5. Strict gRPC Contract
 
-The plugin gRPC interface exposes exactly one method:
+The plugin gRPC interface (see `proto/plugin.proto`) exposes exactly two methods:
 
 ```protobuf
-service Plugin {
+service PluginService {
     rpc Execute(ToolCallRequest) returns (ToolResultResponse);
+    rpc Capabilities(google.protobuf.Empty) returns (PluginCapabilities);
 }
 ```
 
-There is no method to list plugins, query the registry, access other plugins, or call the orchestrator. The plugin receives a task and returns a result. That is the entire surface.
+There is no method to list plugins, query the registry, access other plugins, or call the orchestrator. The plugin receives a task and returns a result. `Capabilities` is called once at startup for registration. That is the entire surface.
 
 ### Guard Flow
 
