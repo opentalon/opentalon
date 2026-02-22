@@ -146,6 +146,24 @@ Plugin                             Core
 
 After connecting, the plugin sends an `identify` frame with its channel ID. Then both sides exchange `InboundMessage` / `OutboundMessage` JSON frames.
 
+## Pre-LLM processing (content preparers)
+
+Before the first LLM call, the user message can be **transformed or blocked** so the LLM only sees the right content—or the request never reaches the LLM. This avoids burning tokens on guard logic and keeps company rules out of the prompt.
+
+**Two layers:**
+
+1. **Channel-level preparer** (optional) — A channel plugin can register a `ContentPreparer` for its channel ID (see `pkg/channel`: `RegisterContentPreparer`). When a message arrives, the handler runs this preparer first. It receives the raw content and can call plugin actions or Lua; it returns the string that is then passed to the orchestrator. Used for channel-specific normalization or guards.
+
+2. **Orchestrator content preparers** (config-driven) — In `orchestrator.content_preparers` you list plugin actions or Lua scripts that run **in order** before the LLM. Each entry is either:
+   - A **tool plugin** action (e.g. `plugin: hello-world`, `action: prepare`): the core invokes that action with the current content (e.g. as `args.text`). The plugin returns either new content (string) or a JSON object `{"send_to_llm": false, "message": "..."}` to skip the LLM and show a message to the user.
+   - A **Lua script** (e.g. `plugin: lua:hello-world`): the core runs the script’s `prepare(text)` function; it returns a string (new content) or a table `{ send_to_llm = false, message = "..." }` to block.
+
+The output of one preparer becomes the input of the next. If any preparer returns “do not send to LLM”, the pipeline stops and the user sees the given message—no LLM call. Otherwise the final string is what the LLM sees as the user message.
+
+This is where company rules, vocabulary enforcement, and compliance checks can run **without burning LLM tokens**. See the [Lua scripts](../lua-scripts.md) guide and the [hello-world plugin](https://github.com/opentalon/hellow-world-plugin) for examples.
+
+**How this fits with orchestration:** The only place the core does a **pre-check call** to a plugin (or Lua) before the LLM is this content-preparer pipeline. All other plugin invocations are **orchestration-driven**: the LLM decides which tools to call during the turn, and the core runs those actions in the agent loop. There is no separate “after” hook—the response to the user is the LLM’s final output (and any tool results). So “before” in config is the only special pipeline that runs plugins/Lua ahead of the LLM; everything else is normal tool use decided by the LLM.
+
 ## Session mapping
 
 Each unique conversation thread maps to one orchestrator session:
