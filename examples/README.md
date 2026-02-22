@@ -8,7 +8,6 @@ Real-world workflow examples showing how OpenTalon plugins work together, orches
 |---|---|---|
 | [Jira + GitLab](workflow-jira-gitlab/) | `jira`, `gitlab` | Turn a Jira ticket into a GitLab merge request — read ticket, create branch, commit, open MR, link back to Jira |
 | [Jira + GitHub](workflow-jira-github/) | `jira`, `github` | Same flow but for GitHub — read ticket, create branch, commit, open PR, link back to Jira |
-| [Ipossum + WhatsApp](workflow-ipossum-whatsapp/) | `ipossum` + WhatsApp channel | Content protection via chat — send photos on WhatsApp, monitor the web for unauthorized copies, get alerts, approve takedowns from the conversation |
 
 ## How workflows work
 

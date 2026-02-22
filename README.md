@@ -374,8 +374,6 @@ Users can also create jobs by talking to the LLM:
 - **Per-user limits** — `max_jobs_per_user` prevents any single user from creating excessive jobs
 - **Full CRUD** — list, pause, resume, update, and delete jobs through the LLM or directly via the scheduler API
 
-> For a detailed walkthrough of scheduler-driven workflows, see [examples/workflow-ipossum-whatsapp](examples/workflow-ipossum-whatsapp/).
-
 ## Build locally with plugins
 
 Build the core, then reference the **hello-world plugin** and **console channel** from GitHub so OpenTalon fetches and builds them on first run (or use local paths).
