@@ -301,7 +301,7 @@ OpenTalon supports multiple AI providers out of the box, with a unified configur
 - **Auth profile rotation** — multiple API keys or OAuth tokens per provider, with automatic round-robin and cooldown on rate limits
 - **Two-stage failover** — first rotate credentials within a provider, then fall back to the next model in the chain. Exponential backoff on failures.
 
-> For the full architecture, see [docs/design/providers.md](docs/design/providers.md).
+> **Getting started?** See the [Configuration Guide](docs/configuration.md) for step-by-step setup instructions. For the full architecture, see [docs/design/providers.md](docs/design/providers.md).
 
 ## Scheduler
 
