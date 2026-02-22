@@ -96,6 +96,143 @@ func CloneAndBuild(ctx context.Context, repo, ref, resolvedSHA, dir, binaryName 
 	return binaryPath, nil
 }
 
+// CloneOnly clones the repo at ref into dir and checkouts resolvedSHA (no build).
+func CloneOnly(ctx context.Context, repo, ref, resolvedSHA, dir string) error {
+	if err := os.MkdirAll(filepath.Dir(dir), 0755); err != nil {
+		return fmt.Errorf("create parent dir: %w", err)
+	}
+	_ = os.RemoveAll(dir)
+
+	repoURL := repoURL(repo)
+	isCommit := commitSHARegex.MatchString(ref)
+
+	var cloneCmd *exec.Cmd
+	if isCommit {
+		cloneCmd = exec.CommandContext(ctx, gitBin, "clone", "--depth", "1", repoURL, dir)
+	} else {
+		cloneCmd = exec.CommandContext(ctx, gitBin, "clone", "--depth", "1", "--branch", ref, repoURL, dir)
+	}
+	if output, err := cloneCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git clone: %w (output: %s)", err, string(output))
+	}
+
+	checkoutTarget := resolvedSHA
+	if checkoutTarget == "" {
+		checkoutTarget = ref
+	}
+	if checkoutTarget != "" {
+		checkout := exec.CommandContext(ctx, gitBin, "checkout", checkoutTarget)
+		checkout.Dir = dir
+		if output, err := checkout.CombinedOutput(); err != nil {
+			return fmt.Errorf("git checkout %s: %w (output: %s)", checkoutTarget, err, string(output))
+		}
+	}
+	return nil
+}
+
+// EnsureSkillDir ensures a single-skill repo is present under stateDir/skills/<name>/,
+// clones only (no build), updates skills.lock, and returns the path to the skill directory.
+func EnsureSkillDir(ctx context.Context, stateDir, name, github, ref string) (string, error) {
+	if github == "" || ref == "" {
+		return "", fmt.Errorf("github and ref are required for skill %q", name)
+	}
+
+	lock, err := LoadSkillsLock(stateDir)
+	if err != nil {
+		return "", err
+	}
+
+	entry, locked := lock.Skills[name]
+	if locked && entry.GitHub == github && entry.Ref == ref && entry.Resolved != "" && entry.Path != "" {
+		absPath := entry.Path
+		if !filepath.IsAbs(absPath) {
+			absPath = filepath.Join(stateDir, entry.Path)
+		}
+		if _, err := os.Stat(absPath); err == nil {
+			return absPath, nil
+		}
+	}
+
+	resolved, err := ResolveRef(ctx, github, ref)
+	if err != nil {
+		return "", fmt.Errorf("resolve ref %q: %w", ref, err)
+	}
+
+	skillDir := filepath.Join(stateDir, "skills", name)
+	if err := CloneOnly(ctx, github, ref, resolved, skillDir); err != nil {
+		return "", err
+	}
+
+	relPath, _ := filepath.Rel(stateDir, skillDir)
+	if relPath == "" || strings.HasPrefix(relPath, "..") {
+		relPath = skillDir
+	}
+	lock.Skills[name] = LockEntry{
+		GitHub:   github,
+		Ref:      ref,
+		Resolved: resolved,
+		Path:     relPath,
+	}
+	if err := SaveSkillsLock(stateDir, lock); err != nil {
+		return "", err
+	}
+	return skillDir, nil
+}
+
+// sanitizeRepoName returns a dir-safe name for the repo (e.g. "owner/repo" -> "owner-repo").
+func sanitizeRepoName(repo string) string {
+	return strings.ReplaceAll(strings.TrimSpace(repo), "/", "-")
+}
+
+// EnsureSkillsRepo ensures the default monorepo (one repo with many skill subdirs) is present
+// under stateDir/skills/<repo-name>/, clones only, updates skills.lock Repo, and returns the repo root path.
+func EnsureSkillsRepo(ctx context.Context, stateDir, github, ref string) (string, error) {
+	if github == "" || ref == "" {
+		return "", fmt.Errorf("github and ref are required for skills repo")
+	}
+
+	lock, err := LoadSkillsLock(stateDir)
+	if err != nil {
+		return "", err
+	}
+
+	entry := lock.Repo
+	if entry != nil && entry.GitHub == github && entry.Ref == ref && entry.Resolved != "" && entry.Path != "" {
+		absPath := entry.Path
+		if !filepath.IsAbs(absPath) {
+			absPath = filepath.Join(stateDir, entry.Path)
+		}
+		if _, err := os.Stat(absPath); err == nil {
+			return absPath, nil
+		}
+	}
+
+	resolved, err := ResolveRef(ctx, github, ref)
+	if err != nil {
+		return "", fmt.Errorf("resolve ref %q: %w", ref, err)
+	}
+
+	repoDir := filepath.Join(stateDir, "skills", sanitizeRepoName(github))
+	if err := CloneOnly(ctx, github, ref, resolved, repoDir); err != nil {
+		return "", err
+	}
+
+	relPath, _ := filepath.Rel(stateDir, repoDir)
+	if relPath == "" || strings.HasPrefix(relPath, "..") {
+		relPath = repoDir
+	}
+	lock.Repo = &LockEntry{
+		GitHub:   github,
+		Ref:      ref,
+		Resolved: resolved,
+		Path:     relPath,
+	}
+	if err := SaveSkillsLock(stateDir, lock); err != nil {
+		return "", err
+	}
+	return repoDir, nil
+}
+
 // EnsurePlugin ensures the plugin is present under stateDir/plugins/<name>/,
 // resolves ref to a commit, clones and builds if needed, updates plugins.lock, and returns the path to the binary.
 func EnsurePlugin(ctx context.Context, stateDir, name, github, ref string) (path string, err error) {

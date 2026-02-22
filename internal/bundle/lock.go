@@ -97,3 +97,45 @@ func SaveChannelsLock(stateDir string, lock *ChannelsLock) error {
 	}
 	return os.WriteFile(channelsLockPath(stateDir), data, 0644)
 }
+
+// SkillsLock is the content of skills.lock (resolved refs for downloaded OpenClaw-style skills).
+type SkillsLock struct {
+	Repo   *LockEntry            `yaml:"repo,omitempty"`   // default monorepo (one repo, many skill subdirs)
+	Skills map[string]LockEntry  `yaml:"skills,omitempty"` // per-skill repos (name -> entry, Path = skill dir)
+}
+
+func skillsLockPath(stateDir string) string {
+	return filepath.Join(stateDir, "skills.lock")
+}
+
+// LoadSkillsLock reads skills.lock from the state directory.
+func LoadSkillsLock(stateDir string) (*SkillsLock, error) {
+	p := skillsLockPath(stateDir)
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &SkillsLock{Skills: make(map[string]LockEntry)}, nil
+		}
+		return nil, fmt.Errorf("read skills.lock: %w", err)
+	}
+	var lock SkillsLock
+	if err := yaml.Unmarshal(data, &lock); err != nil {
+		return nil, fmt.Errorf("parse skills.lock: %w", err)
+	}
+	if lock.Skills == nil {
+		lock.Skills = make(map[string]LockEntry)
+	}
+	return &lock, nil
+}
+
+// SaveSkillsLock writes skills.lock to the state directory.
+func SaveSkillsLock(stateDir string, lock *SkillsLock) error {
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+	data, err := yaml.Marshal(lock)
+	if err != nil {
+		return fmt.Errorf("marshal skills.lock: %w", err)
+	}
+	return os.WriteFile(skillsLockPath(stateDir), data, 0644)
+}

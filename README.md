@@ -422,6 +422,33 @@ Build the core, then reference the **hello-world plugin** and **console channel*
 
    The first run resolves the refs, clones [opentalon/console-channel](https://github.com/opentalon/console-channel) and [opentalon/hello-world-plugin](https://github.com/opentalon/hello-world-plugin), builds them, and writes `channels.lock` and `plugins.lock`. Later runs reuse the locked versions until you change `ref` or delete the lock entries.
 
+### Reusable skills from OpenClaw
+
+You can add **request packages** — skill-style API calls with no compiled plugin. The core runs HTTP requests from templates (`{{env.VAR}}`, `{{args.param}}`), with optional guardrails (`required_env`). This is a good fit for OpenClaw/ClawHub-style skills: each skill is a directory with a `SKILL.md` (and optionally `request.yaml`), and OpenTalon can **download skills by name** so you only specify the skill name in config.
+
+**Download skills by name** — set a default repo and list the skill names you want. The core clones the repo once (or one repo per skill if you override), parses each skill’s `SKILL.md`, and registers them as tools. No build step.
+
+```yaml
+request_packages:
+  default_skill_github: openclaw/skills    # one repo, many skill subdirs
+  default_skill_ref: main
+  skills:
+    - jira-create-issue
+    - slack-send
+```
+
+For a skill from a different repo, use the object form:
+
+```yaml
+request_packages:
+  skills:
+    - name: my-custom-skill
+      github: myorg/my-skills
+      ref: v1
+```
+
+Downloaded skills are stored under `state.data_dir` and pinned in `skills.lock` (same idea as `plugins.lock`). You can also use a **local directory** of skills with `skills_path`, or define **inline** request packages in config — see `config.example.yaml` for the full `request_packages` options.
+
 ## Contributing
 
 We welcome contributions of all kinds — bug reports, feature requests, documentation improvements, and code.
