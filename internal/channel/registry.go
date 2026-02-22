@@ -5,45 +5,33 @@ import (
 	"fmt"
 	"log"
 	"sync"
+
+	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
-
-// SessionKey builds a deterministic session identifier from the
-// channel, conversation, and thread triple.
-func SessionKey(channelID, conversationID, threadID string) string {
-	if threadID == "" {
-		return fmt.Sprintf("%s:%s", channelID, conversationID)
-	}
-	return fmt.Sprintf("%s:%s:%s", channelID, conversationID, threadID)
-}
-
-// MessageHandler is called by the registry when an inbound message
-// arrives. The implementation is responsible for feeding the message
-// to the orchestrator and returning the response.
-type MessageHandler func(ctx context.Context, sessionKey string, msg InboundMessage) (OutboundMessage, error)
 
 // Registry manages channel lifecycle, dispatches inbound messages to
 // the orchestrator, and routes responses back to the originating channel.
 type Registry struct {
 	mu       sync.RWMutex
-	channels map[string]Channel
-	handler  MessageHandler
+	channels map[string]pkg.Channel
+	handler  pkg.MessageHandler
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-func NewRegistry(handler MessageHandler) *Registry {
+func NewRegistry(handler pkg.MessageHandler) *Registry {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Registry{
-		channels: make(map[string]Channel),
+		channels: make(map[string]pkg.Channel),
 		handler:  handler,
 		ctx:      ctx,
 		cancel:   cancel,
 	}
 }
 
-func (r *Registry) Register(ch Channel) error {
+func (r *Registry) Register(ch pkg.Channel) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -53,7 +41,7 @@ func (r *Registry) Register(ch Channel) error {
 	}
 	r.channels[id] = ch
 
-	inbox := make(chan InboundMessage, 64)
+	inbox := make(chan pkg.InboundMessage, 64)
 	if err := ch.Start(r.ctx, inbox); err != nil {
 		delete(r.channels, id)
 		return fmt.Errorf("starting channel %q: %w", id, err)
@@ -78,18 +66,18 @@ func (r *Registry) Deregister(id string) error {
 	return ch.Stop()
 }
 
-func (r *Registry) Get(id string) (Channel, bool) {
+func (r *Registry) Get(id string) (pkg.Channel, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	ch, ok := r.channels[id]
 	return ch, ok
 }
 
-func (r *Registry) List() []Channel {
+func (r *Registry) List() []pkg.Channel {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	out := make([]Channel, 0, len(r.channels))
+	out := make([]pkg.Channel, 0, len(r.channels))
 	for _, ch := range r.channels {
 		out = append(out, ch)
 	}
@@ -97,7 +85,7 @@ func (r *Registry) List() []Channel {
 }
 
 // Send routes an outbound message to a specific channel.
-func (r *Registry) Send(ctx context.Context, channelID string, msg OutboundMessage) error {
+func (r *Registry) Send(ctx context.Context, channelID string, msg pkg.OutboundMessage) error {
 	r.mu.RLock()
 	ch, ok := r.channels[channelID]
 	r.mu.RUnlock()
@@ -113,7 +101,7 @@ func (r *Registry) StopAll() {
 	r.cancel()
 
 	r.mu.RLock()
-	channels := make([]Channel, 0, len(r.channels))
+	channels := make([]pkg.Channel, 0, len(r.channels))
 	for _, ch := range r.channels {
 		channels = append(channels, ch)
 	}
@@ -127,7 +115,7 @@ func (r *Registry) StopAll() {
 	r.wg.Wait()
 }
 
-func (r *Registry) dispatch(ch Channel, inbox <-chan InboundMessage) {
+func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 	defer r.wg.Done()
 
 	for {
@@ -138,7 +126,7 @@ func (r *Registry) dispatch(ch Channel, inbox <-chan InboundMessage) {
 			if !ok {
 				return
 			}
-			sessionKey := SessionKey(ch.ID(), msg.ConversationID, msg.ThreadID)
+			sessionKey := pkg.SessionKey(ch.ID(), msg.ConversationID, msg.ThreadID)
 			resp, err := r.handler(r.ctx, sessionKey, msg)
 			if err != nil {
 				log.Printf("handling message on channel %q session %q: %v", ch.ID(), sessionKey, err)

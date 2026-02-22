@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
 const (
@@ -39,14 +41,14 @@ func NewConnector() *Connector {
 // Connect creates a Channel from the given plugin reference string.
 // For binary mode, it launches the binary and connects over Unix socket.
 // For remote gRPC mode, it dials the remote address directly.
-func (c *Connector) Connect(ctx context.Context, id, pluginRef string) (Channel, error) {
-	mode := DetectMode(pluginRef)
+func (c *Connector) Connect(ctx context.Context, id, pluginRef string) (pkg.Channel, error) {
+	mode := pkg.DetectMode(pluginRef)
 
 	switch mode {
-	case ModeBinary:
+	case pkg.ModeBinary:
 		return c.connectBinary(ctx, id, pluginRef)
-	case ModeGRPC:
-		_, addr := ParsePluginAddress(pluginRef)
+	case pkg.ModeGRPC:
+		_, addr := pkg.ParsePluginAddress(pluginRef)
 		return c.connectRemote(id, addr)
 	default:
 		return nil, fmt.Errorf("channel %q: connection mode %s not yet implemented", id, mode)
@@ -56,7 +58,7 @@ func (c *Connector) Connect(ctx context.Context, id, pluginRef string) (Channel,
 // sockFileName is the Unix socket filename used when OPENTALON_CHANNEL_SOCK_DIR is set.
 const sockFileName = "channel.sock"
 
-func (c *Connector) connectBinary(ctx context.Context, id, binaryPath string) (Channel, error) {
+func (c *Connector) connectBinary(ctx context.Context, id, binaryPath string) (pkg.Channel, error) {
 	absPath, err := filepath.Abs(binaryPath)
 	if err != nil {
 		return nil, fmt.Errorf("channel %q path: %w", id, err)
@@ -119,7 +121,7 @@ func (c *Connector) connectBinary(ctx context.Context, id, binaryPath string) (C
 	return client, nil
 }
 
-func (c *Connector) connectRemote(id, address string) (Channel, error) {
+func (c *Connector) connectRemote(id, address string) (pkg.Channel, error) {
 	client, err := DialChannel("tcp", address, defaultDialTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("connect remote channel %q at %s: %w", id, address, err)

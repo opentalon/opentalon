@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"strings"
+
+	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
 // ChannelEntry holds the config for one channel.
@@ -63,7 +65,7 @@ func (m *Manager) Load(ctx context.Context, entry ChannelEntry) error {
 		return fmt.Errorf("register channel %s: %w", entry.Name, err)
 	}
 
-	modeStr := DetectMode(entry.Path).String()
+	modeStr := pkg.DetectMode(entry.Path).String()
 	log.Printf("channel-manager: loaded %s via %s", entry.Name, modeStr)
 	return nil
 }

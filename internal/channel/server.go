@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+
+	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
 const socketFileName = "channel.sock"
@@ -18,7 +20,7 @@ const socketFileName = "channel.sock"
 // stdin/stdout for the terminal. Otherwise it creates a temp dir and prints
 // id|unix|path to stdout for the host to connect.
 // Serve blocks until the connection is closed or the context is cancelled.
-func Serve(ctx context.Context, ch Channel) error {
+func Serve(ctx context.Context, ch pkg.Channel) error {
 	var sockDir string
 	if envDir := os.Getenv("OPENTALON_CHANNEL_SOCK_DIR"); envDir != "" {
 		sockDir = envDir
@@ -51,18 +53,18 @@ func Serve(ctx context.Context, ch Channel) error {
 	}
 	defer func() { _ = conn.Close() }()
 
-	reqCh := make(chan *ChannelRequest, 8)
+	reqCh := make(chan *pkg.ChannelRequest, 8)
 	go func() {
 		for {
-			var req ChannelRequest
-			if err := readMsg(conn, &req); err != nil {
+			var req pkg.ChannelRequest
+			if err := pkg.ReadMessage(conn, &req); err != nil {
 				return
 			}
 			reqCh <- &req
 		}
 	}()
 
-	var inbox chan InboundMessage
+	var inbox chan pkg.InboundMessage
 	for {
 		if inbox == nil {
 			req, ok := <-reqCh
@@ -71,7 +73,7 @@ func Serve(ctx context.Context, ch Channel) error {
 			}
 			resp, startInbox := handleRequest(ctx, ch, req, nil)
 			if resp != nil {
-				if err := writeMsg(conn, resp); err != nil {
+				if err := pkg.WriteMessage(conn, resp); err != nil {
 					log.Printf("channel server: write: %v", err)
 					return err
 				}
@@ -87,7 +89,7 @@ func Serve(ctx context.Context, ch Channel) error {
 				}
 				resp, _ := handleRequest(ctx, ch, req, nil)
 				if resp != nil {
-					if err := writeMsg(conn, resp); err != nil {
+					if err := pkg.WriteMessage(conn, resp); err != nil {
 						log.Printf("channel server: write: %v", err)
 						return err
 					}
@@ -97,7 +99,7 @@ func Serve(ctx context.Context, ch Channel) error {
 					inbox = nil
 					continue
 				}
-				if err := writeMsg(conn, &ChannelResponse{Msg: &msg}); err != nil {
+				if err := pkg.WriteMessage(conn, &pkg.ChannelResponse{Msg: &msg}); err != nil {
 					log.Printf("channel server: write inbound: %v", err)
 					return err
 				}
@@ -110,26 +112,26 @@ func Serve(ctx context.Context, ch Channel) error {
 
 // handleRequest processes one ChannelRequest. Returns response to send and,
 // for "start", the inbox channel to read from.
-func handleRequest(ctx context.Context, ch Channel, req *ChannelRequest, _ chan InboundMessage) (*ChannelResponse, chan InboundMessage) {
+func handleRequest(ctx context.Context, ch pkg.Channel, req *pkg.ChannelRequest, _ chan pkg.InboundMessage) (*pkg.ChannelResponse, chan pkg.InboundMessage) {
 	switch req.Method {
 	case "capabilities":
 		caps := ch.Capabilities()
-		return &ChannelResponse{Caps: &caps}, nil
+		return &pkg.ChannelResponse{Caps: &caps}, nil
 	case "start":
-		inbox := make(chan InboundMessage, 32)
+		inbox := make(chan pkg.InboundMessage, 32)
 		if err := ch.Start(ctx, inbox); err != nil {
-			return &ChannelResponse{Error: err.Error()}, nil
+			return &pkg.ChannelResponse{Error: err.Error()}, nil
 		}
-		return &ChannelResponse{}, inbox
+		return &pkg.ChannelResponse{}, inbox
 	case "send":
 		if req.Msg == nil {
-			return &ChannelResponse{Error: "send: missing msg"}, nil
+			return &pkg.ChannelResponse{Error: "send: missing msg"}, nil
 		}
 		if err := ch.Send(ctx, *req.Msg); err != nil {
-			return &ChannelResponse{Error: err.Error()}, nil
+			return &pkg.ChannelResponse{Error: err.Error()}, nil
 		}
-		return &ChannelResponse{}, nil
+		return &pkg.ChannelResponse{}, nil
 	default:
-		return &ChannelResponse{Error: "unknown method " + req.Method}, nil
+		return &pkg.ChannelResponse{Error: "unknown method " + req.Method}, nil
 	}
 }
