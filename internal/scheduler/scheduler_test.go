@@ -224,7 +224,9 @@ func TestSchedulerPauseResume(t *testing.T) {
 	}
 	defer s.Stop()
 
-	s.AddJob(Job{Name: "pr1", Interval: "50ms", Action: "test.act"}, "user1")
+	if err := s.AddJob(Job{Name: "pr1", Interval: "50ms", Action: "test.act"}, "user1"); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(120 * time.Millisecond)
 
 	before := runner.callCount()
@@ -307,7 +309,9 @@ func TestSchedulerBadInterval(t *testing.T) {
 func TestSchedulerEmptyName(t *testing.T) {
 	runner := &fakeRunner{}
 	s := New(runner, nil, "")
-	s.Start(nil)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
 	err := s.AddJob(Job{Name: "", Interval: "1h", Action: "a.b"}, "user1")
@@ -321,9 +325,15 @@ func TestSchedulerPersistence(t *testing.T) {
 	runner := &fakeRunner{}
 
 	s1 := New(runner, nil, dir)
-	s1.Start(nil)
-	s1.AddJob(Job{Name: "persist1", Interval: "1h", Action: "p.a"}, "user1")
-	s1.AddJob(Job{Name: "persist2", Interval: "2h", Action: "q.b"}, "user1")
+	if err := s1.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.AddJob(Job{Name: "persist1", Interval: "1h", Action: "p.a"}, "user1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.AddJob(Job{Name: "persist2", Interval: "2h", Action: "q.b"}, "user1"); err != nil {
+		t.Fatal(err)
+	}
 	s1.Stop()
 
 	data, err := os.ReadFile(filepath.Join(dir, "scheduler", "jobs.yaml"))
@@ -335,7 +345,9 @@ func TestSchedulerPersistence(t *testing.T) {
 	}
 
 	s2 := New(runner, nil, dir)
-	s2.Start(nil)
+	if err := s2.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s2.Stop()
 
 	jobs := s2.ListJobs()
@@ -349,14 +361,20 @@ func TestSchedulerStaticJobsNotPersisted(t *testing.T) {
 	runner := &fakeRunner{}
 
 	s := New(runner, nil, dir)
-	s.Start([]Job{
+	if err := s.Start([]Job{
 		{Name: "static1", Interval: "1h", Action: "a.b"},
-	})
-	s.AddJob(Job{Name: "dyn1", Interval: "1h", Action: "c.d"}, "user1")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddJob(Job{Name: "dyn1", Interval: "1h", Action: "c.d"}, "user1"); err != nil {
+		t.Fatal(err)
+	}
 	s.Stop()
 
 	s2 := New(runner, nil, dir)
-	s2.Start(nil) // no static jobs this time
+	if err := s2.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s2.Stop()
 
 	jobs := s2.ListJobs()
@@ -372,10 +390,12 @@ func TestSchedulerStopDrainsGoroutines(t *testing.T) {
 	runner := &fakeRunner{}
 	s := New(runner, nil, "")
 
-	s.Start([]Job{
+	if err := s.Start([]Job{
 		{Name: "drain1", Interval: "50ms", Action: "a.b"},
 		{Name: "drain2", Interval: "50ms", Action: "c.d"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	time.Sleep(80 * time.Millisecond)
 
@@ -396,10 +416,14 @@ func TestSchedulerUpdateJob(t *testing.T) {
 	runner := &fakeRunner{}
 	dir := t.TempDir()
 	s := New(runner, nil, dir)
-	s.Start(nil)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
-	s.AddJob(Job{Name: "upd1", Interval: "1h", Action: "a.b", NotifyChannel: "slack"}, "user1")
+	if err := s.AddJob(Job{Name: "upd1", Interval: "1h", Action: "a.b", NotifyChannel: "slack"}, "user1"); err != nil {
+		t.Fatal(err)
+	}
 
 	newInterval := "30m"
 	if err := s.UpdateJob("upd1", "user1", &newInterval, nil); err != nil {
@@ -431,9 +455,11 @@ func TestSchedulerRunnerError(t *testing.T) {
 	runner := &fakeRunner{err: fmt.Errorf("plugin crashed")}
 	s := New(runner, nil, "")
 
-	s.Start([]Job{
+	if err := s.Start([]Job{
 		{Name: "err-test", Interval: "50ms", Action: "crash.now"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	time.Sleep(120 * time.Millisecond)
 	s.Stop()
@@ -446,10 +472,14 @@ func TestSchedulerRunnerError(t *testing.T) {
 func TestSchedulerResumeNonPaused(t *testing.T) {
 	runner := &fakeRunner{}
 	s := New(runner, nil, "")
-	s.Start(nil)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
-	s.AddJob(Job{Name: "np1", Interval: "1h", Action: "a.b"}, "user1")
+	if err := s.AddJob(Job{Name: "np1", Interval: "1h", Action: "a.b"}, "user1"); err != nil {
+		t.Fatal(err)
+	}
 
 	err := s.ResumeJob("np1")
 	if err == nil {
@@ -460,7 +490,9 @@ func TestSchedulerResumeNonPaused(t *testing.T) {
 func TestSchedulerRemoveNonexistent(t *testing.T) {
 	runner := &fakeRunner{}
 	s := New(runner, nil, "")
-	s.Start(nil)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
 	if err := s.RemoveJob("ghost", "user1"); err == nil {
@@ -473,9 +505,11 @@ func TestSchedulerRemoveNonexistent(t *testing.T) {
 func TestSchedulerConfigJobCannotBeRemoved(t *testing.T) {
 	runner := &fakeRunner{}
 	s := New(runner, nil, "")
-	s.Start([]Job{
+	if err := s.Start([]Job{
 		{Name: "static1", Interval: "1h", Action: "a.b"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
 	err := s.RemoveJob("static1", "admin")
@@ -492,9 +526,11 @@ func TestSchedulerConfigJobCannotBeRemoved(t *testing.T) {
 func TestSchedulerConfigJobCannotBeUpdated(t *testing.T) {
 	runner := &fakeRunner{}
 	s := New(runner, nil, "")
-	s.Start([]Job{
+	if err := s.Start([]Job{
 		{Name: "static1", Interval: "1h", Action: "a.b"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
 	newInterval := "30m"
@@ -512,9 +548,11 @@ func TestSchedulerConfigJobCannotBeUpdated(t *testing.T) {
 func TestSchedulerConfigJobCanBePaused(t *testing.T) {
 	runner := &fakeRunner{}
 	s := New(runner, nil, "")
-	s.Start([]Job{
+	if err := s.Start([]Job{
 		{Name: "static1", Interval: "50ms", Action: "a.b"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
 	if err := s.PauseJob("static1"); err != nil {
@@ -536,7 +574,9 @@ func TestSchedulerConfigJobCanBePaused(t *testing.T) {
 func TestSchedulerApproverRequired(t *testing.T) {
 	runner := &fakeRunner{}
 	s := NewWithPolicy(runner, nil, "", []string{"admin@co.com"}, 0)
-	s.Start(nil)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
 	err := s.AddJob(Job{Name: "j1", Interval: "1h", Action: "a.b"}, "random@co.com")
@@ -553,10 +593,14 @@ func TestSchedulerApproverRequired(t *testing.T) {
 func TestSchedulerApproverDeleteRequired(t *testing.T) {
 	runner := &fakeRunner{}
 	s := NewWithPolicy(runner, nil, "", []string{"admin@co.com"}, 0)
-	s.Start(nil)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
-	s.AddJob(Job{Name: "j1", Interval: "1h", Action: "a.b"}, "admin@co.com")
+	if err := s.AddJob(Job{Name: "j1", Interval: "1h", Action: "a.b"}, "admin@co.com"); err != nil {
+		t.Fatal(err)
+	}
 
 	err := s.RemoveJob("j1", "random@co.com")
 	if err != ErrNotAuthorized {
@@ -572,10 +616,14 @@ func TestSchedulerApproverDeleteRequired(t *testing.T) {
 func TestSchedulerApproverUpdateRequired(t *testing.T) {
 	runner := &fakeRunner{}
 	s := NewWithPolicy(runner, nil, "", []string{"admin@co.com"}, 0)
-	s.Start(nil)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
-	s.AddJob(Job{Name: "j1", Interval: "1h", Action: "a.b"}, "admin@co.com")
+	if err := s.AddJob(Job{Name: "j1", Interval: "1h", Action: "a.b"}, "admin@co.com"); err != nil {
+		t.Fatal(err)
+	}
 
 	newInterval := "30m"
 	err := s.UpdateJob("j1", "random@co.com", &newInterval, nil)
@@ -592,7 +640,9 @@ func TestSchedulerApproverUpdateRequired(t *testing.T) {
 func TestSchedulerNoApproversAllowsEveryone(t *testing.T) {
 	runner := &fakeRunner{}
 	s := New(runner, nil, "")
-	s.Start(nil)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
 	err := s.AddJob(Job{Name: "j1", Interval: "1h", Action: "a.b"}, "anyone")
@@ -609,7 +659,9 @@ func TestSchedulerNoApproversAllowsEveryone(t *testing.T) {
 func TestSchedulerMultipleApprovers(t *testing.T) {
 	runner := &fakeRunner{}
 	s := NewWithPolicy(runner, nil, "", []string{"admin@co.com", "ops@co.com"}, 0)
-	s.Start(nil)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
 	err := s.AddJob(Job{Name: "j1", Interval: "1h", Action: "a.b"}, "ops@co.com")
@@ -623,11 +675,17 @@ func TestSchedulerMultipleApprovers(t *testing.T) {
 func TestSchedulerMaxJobsPerUser(t *testing.T) {
 	runner := &fakeRunner{}
 	s := NewWithPolicy(runner, nil, "", nil, 2)
-	s.Start(nil)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
-	s.AddJob(Job{Name: "j1", Interval: "1h", Action: "a.b"}, "diana")
-	s.AddJob(Job{Name: "j2", Interval: "1h", Action: "a.b"}, "diana")
+	if err := s.AddJob(Job{Name: "j1", Interval: "1h", Action: "a.b"}, "diana"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddJob(Job{Name: "j2", Interval: "1h", Action: "a.b"}, "diana"); err != nil {
+		t.Fatal(err)
+	}
 
 	err := s.AddJob(Job{Name: "j3", Interval: "1h", Action: "a.b"}, "diana")
 	if err == nil {
@@ -646,7 +704,9 @@ func TestSchedulerMaxJobsPerUser(t *testing.T) {
 func TestSchedulerMaxJobsZeroMeansUnlimited(t *testing.T) {
 	runner := &fakeRunner{}
 	s := NewWithPolicy(runner, nil, "", nil, 0)
-	s.Start(nil)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
 	for i := 0; i < 10; i++ {
@@ -664,10 +724,12 @@ func TestSchedulerMaxJobsZeroMeansUnlimited(t *testing.T) {
 func TestSchedulerMaxJobsConfigJobsNotCounted(t *testing.T) {
 	runner := &fakeRunner{}
 	s := NewWithPolicy(runner, nil, "", nil, 1)
-	s.Start([]Job{
+	if err := s.Start([]Job{
 		{Name: "config1", Interval: "1h", Action: "a.b"},
 		{Name: "config2", Interval: "1h", Action: "c.d"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
 	err := s.AddJob(Job{Name: "dyn1", Interval: "1h", Action: "a.b"}, "diana")
@@ -679,10 +741,14 @@ func TestSchedulerMaxJobsConfigJobsNotCounted(t *testing.T) {
 func TestSchedulerCreatedByTracked(t *testing.T) {
 	runner := &fakeRunner{}
 	s := New(runner, nil, "")
-	s.Start(nil)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
 	defer s.Stop()
 
-	s.AddJob(Job{Name: "owned", Interval: "1h", Action: "a.b"}, "diana@co.com")
+	if err := s.AddJob(Job{Name: "owned", Interval: "1h", Action: "a.b"}, "diana@co.com"); err != nil {
+		t.Fatal(err)
+	}
 
 	j, ok := s.GetJob("owned")
 	if !ok {
@@ -710,9 +776,11 @@ func newTestToolWithConfigJob(t *testing.T) *SchedulerTool {
 	t.Helper()
 	runner := &fakeRunner{}
 	sched := New(runner, nil, "")
-	sched.Start([]Job{
+	if err := sched.Start([]Job{
 		{Name: "config-job", Interval: "1h", Action: "a.b"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(sched.Stop)
 	return NewSchedulerTool(sched)
 }
