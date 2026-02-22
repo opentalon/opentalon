@@ -15,8 +15,15 @@ type Config struct {
 	Auth         AuthConfig               `yaml:"auth"`
 	State        StateConfig              `yaml:"state"`
 	Orchestrator OrchestratorConfig       `yaml:"orchestrator"`
+	Plugins      map[string]PluginConfig  `yaml:"plugins"`
 	Channels     map[string]ChannelConfig `yaml:"channels"`
 	Scheduler    SchedulerConfig          `yaml:"scheduler"`
+}
+
+type PluginConfig struct {
+	Enabled bool                   `yaml:"enabled"`
+	Path    string                 `yaml:"path"`
+	Config  map[string]interface{} `yaml:"config,omitempty"`
 }
 
 type SchedulerConfig struct {
@@ -138,6 +145,7 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	expandEnvInProviders(&cfg)
+	expandEnvInPlugins(&cfg)
 	expandEnvInChannels(&cfg)
 	if cfg.State.DataDir == "" {
 		home, _ := os.UserHomeDir()
@@ -146,6 +154,18 @@ func Parse(data []byte) (*Config, error) {
 		cfg.State.DataDir = expandEnv(cfg.State.DataDir)
 	}
 	return &cfg, nil
+}
+
+func expandEnvInPlugins(cfg *Config) {
+	for name, p := range cfg.Plugins {
+		p.Path = expandEnv(p.Path)
+		for k, v := range p.Config {
+			if s, ok := v.(string); ok {
+				p.Config[k] = expandEnv(s)
+			}
+		}
+		cfg.Plugins[name] = p
+	}
 }
 
 func expandEnvInChannels(cfg *Config) {

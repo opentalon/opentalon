@@ -40,11 +40,12 @@ Heavy, standalone extensions such as auth providers, storage backends, CI/CD int
 
 ### gRPC contract
 
-Each tool plugin exposes exactly one RPC method:
+The gRPC service defined in `proto/plugin.proto`:
 
 ```protobuf
 service PluginService {
     rpc Execute(ToolCallRequest) returns (ToolResultResponse);
+    rpc Capabilities(google.protobuf.Empty) returns (PluginCapabilities);
 }
 
 message ToolCallRequest {
@@ -58,6 +59,25 @@ message ToolResultResponse {
     string call_id = 1;
     string content = 2;
     string error = 3;
+}
+
+message PluginCapabilities {
+    string name = 1;
+    string description = 2;
+    repeated Action actions = 3;
+}
+
+message Action {
+    string name = 1;
+    string description = 2;
+    repeated Parameter parameters = 3;
+}
+
+message Parameter {
+    string name = 1;
+    string description = 2;
+    string type = 3;
+    bool required = 4;
 }
 ```
 

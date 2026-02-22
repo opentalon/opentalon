@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package opentalon.plugin.v1;
+
+option go_package = "github.com/opentalon/opentalon/proto/pluginpb";
+
+import "google/protobuf/empty.proto";
+
+service PluginService {
+  rpc Execute(ToolCallRequest) returns (ToolResultResponse);
+  rpc Capabilities(google.protobuf.Empty) returns (PluginCapabilities);
+}
+
+message ToolCallRequest {
+  string id = 1;
+  string plugin = 2;
+  string action = 3;
+  map<string, string> args = 4;
+}
+
+message ToolResultResponse {
+  string call_id = 1;
+  string content = 2;
+  string error = 3;
+}
+
+message PluginCapabilities {
+  string name = 1;
+  string description = 2;
+  repeated Action actions = 3;
+}
+
+message Action {
+  string name = 1;
+  string description = 2;
+  repeated Parameter parameters = 3;
+}
+
+message Parameter {
+  string name = 1;
+  string description = 2;
+  string type = 3;
+  bool required = 4;
+}
