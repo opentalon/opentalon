@@ -21,6 +21,8 @@ Existing solutions often suffer from:
 - **Repeatable bugs** — the same classes of issues resurfacing release after release
 - **Hard to extend** — adding features means forking or fighting the architecture
 - **No smart model routing** — you either pick one model and overpay, or manually juggle providers yourself
+- **Every rule burns LLM tokens** — business vocabulary, compliance checks, and formatting rules all get stuffed into the prompt, inflating cost and latency on every single request
+- **No separation of business logic from AI** — company-specific transformations (terminology, routing, validation) are tangled into prompts instead of handled by deterministic, testable code
 
 OpenTalon is engineered for long-term quality from day one. Every architectural decision is made with maintainability, security, and stability in mind — so the project stays healthy as it grows.
 
