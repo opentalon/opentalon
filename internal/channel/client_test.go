@@ -147,6 +147,9 @@ func TestChannelClientSend(t *testing.T) {
 	client := NewClientWithConn(clientConn, handler.caps)
 	defer func() { _ = client.Stop() }()
 
+	// Capture channel before handler runs so we don't race on handler.sendDone (handler sets it to nil).
+	sendDone := handler.sendDone
+
 	inbox := make(chan InboundMessage, 1)
 	if err := client.Start(context.Background(), inbox); err != nil {
 		t.Fatal(err)
@@ -163,7 +166,7 @@ func TestChannelClientSend(t *testing.T) {
 
 	// Wait for server to handle "send" before asserting (channel sync pattern).
 	select {
-	case <-handler.sendDone:
+	case <-sendDone:
 	case <-time.After(time.Second):
 		t.Fatal("timeout: server did not handle send")
 	}
