@@ -59,8 +59,8 @@ func TestHandshakeString(t *testing.T) {
 
 func TestWriteReadMessage(t *testing.T) {
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	sent := Request{Method: "execute", ID: "call-1", Plugin: "gitlab", Action: "list_mrs", Args: map[string]string{"project": "myapp"}}
 
@@ -96,8 +96,8 @@ func TestWriteReadMessage(t *testing.T) {
 
 func TestWriteReadResponse(t *testing.T) {
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	sent := Response{
 		CallID:  "call-1",
@@ -120,8 +120,8 @@ func TestWriteReadResponse(t *testing.T) {
 
 func TestCapabilitiesRoundTrip(t *testing.T) {
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	sent := Response{
 		Caps: &CapabilitiesMsg{

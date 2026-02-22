@@ -29,7 +29,7 @@ func Dial(network, address string, timeout time.Duration) (*Client, error) {
 
 	c := &Client{conn: conn}
 	if err := c.fetchCapabilities(); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 	return c, nil

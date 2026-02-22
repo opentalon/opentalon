@@ -17,7 +17,7 @@ type fakeChannelHandler struct {
 }
 
 func (h *fakeChannelHandler) serve(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	for {
 		var req ChannelRequest
 		if err := readMsg(conn, &req); err != nil {
@@ -68,7 +68,7 @@ func fakeChannelServer(t *testing.T, handler *fakeChannelHandler) (network, addr
 
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		t.Fatal(err)
 	}
 
@@ -83,8 +83,8 @@ func fakeChannelServer(t *testing.T, handler *fakeChannelHandler) (network, addr
 	}()
 
 	return "unix", sockPath, func() {
-		ln.Close()
-		os.RemoveAll(dir)
+		_ = ln.Close()
+		_ = os.RemoveAll(dir)
 	}
 }
 
@@ -106,7 +106,7 @@ func TestChannelClientCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Stop()
+	defer func() { _ = client.Stop() }()
 
 	if client.ID() != "test-slack" {
 		t.Errorf("id = %q, want test-slack", client.ID())
@@ -139,7 +139,7 @@ func TestChannelClientSend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Stop()
+	defer func() { _ = client.Stop() }()
 
 	msg := OutboundMessage{
 		ConversationID: "conv-1",
@@ -170,7 +170,7 @@ func TestChannelClientReceive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Stop()
+	defer func() { _ = client.Stop() }()
 
 	inbox := make(chan InboundMessage, 10)
 	if err := client.Start(context.Background(), inbox); err != nil {
@@ -202,8 +202,8 @@ func TestChannelClientDialFailure(t *testing.T) {
 
 func TestChannelProtocolRoundTrip(t *testing.T) {
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	sent := ChannelRequest{
 		Method: "send",

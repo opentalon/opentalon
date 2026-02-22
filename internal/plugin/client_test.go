@@ -22,7 +22,7 @@ func fakePluginServer(t *testing.T, handler Handler) (network, address string, c
 
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		t.Fatal(err)
 	}
 
@@ -36,7 +36,10 @@ func fakePluginServer(t *testing.T, handler Handler) (network, address string, c
 		}
 	}()
 
-	return "unix", sockPath, func() { ln.Close(); os.RemoveAll(dir) }
+	return "unix", sockPath, func() {
+		_ = ln.Close()
+		_ = os.RemoveAll(dir)
+	}
 }
 
 type echoHandler struct{}
@@ -73,7 +76,7 @@ func TestClientDialAndCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if client.Name() != "echo" {
 		t.Errorf("name = %q, want echo", client.Name())
@@ -105,7 +108,7 @@ func TestClientExecute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	result := client.Execute(orchestrator.ToolCall{
 		ID:     "c1",
@@ -133,7 +136,7 @@ func TestClientExecuteError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	result := client.Execute(orchestrator.ToolCall{
 		ID:     "c2",
@@ -155,7 +158,7 @@ func TestClientMultipleCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	for i := 0; i < 10; i++ {
 		result := client.Execute(orchestrator.ToolCall{
@@ -216,7 +219,7 @@ func TestManagerLoadAndUnload(t *testing.T) {
 
 	_ = entry // used for verification
 	registry.Deregister("echo")
-	client.Close()
+	_ = client.Close()
 
 	_, ok = registry.GetExecutor("echo")
 	if ok {

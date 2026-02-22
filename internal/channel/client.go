@@ -30,7 +30,7 @@ func DialChannel(network, address string, timeout time.Duration) (*PluginClient,
 
 	c := &PluginClient{conn: conn}
 	if err := c.fetchCapabilities(); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 	return c, nil

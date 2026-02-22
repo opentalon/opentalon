@@ -57,9 +57,9 @@ func (m *Manager) Load(ctx context.Context, entry ChannelEntry) error {
 
 	if err := m.registry.Register(ch); err != nil {
 		if pc, ok := ch.(*PluginClient); ok {
-			pc.Stop()
+			_ = pc.Stop()
 		}
-		m.connector.StopProcess(entry.Name)
+		_ = m.connector.StopProcess(entry.Name)
 		return fmt.Errorf("register channel %s: %w", entry.Name, err)
 	}
 

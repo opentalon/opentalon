@@ -155,7 +155,7 @@ func (m *Manager) Unload(name string) error {
 	m.registry.Deregister(name)
 
 	if mg.client != nil {
-		mg.client.Close()
+		_ = mg.client.Close()
 	}
 	if mg.process != nil {
 		return mg.process.Stop(defaultStopGrace)

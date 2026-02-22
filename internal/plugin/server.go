@@ -30,11 +30,13 @@ func Serve(handler Handler) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	defer ln.Close()
-	defer os.RemoveAll(sockDir)
+	defer func() { _ = ln.Close() }()
+	defer func() { _ = os.RemoveAll(sockDir) }()
 
 	hs := Handshake{Version: HandshakeVersion, Network: "unix", Address: sockPath}
-	fmt.Fprintln(os.Stdout, hs.String())
+	if _, err := fmt.Fprintln(os.Stdout, hs.String()); err != nil {
+		return fmt.Errorf("write handshake: %w", err)
+	}
 
 	for {
 		conn, err := ln.Accept()
@@ -46,7 +48,7 @@ func Serve(handler Handler) error {
 }
 
 func serveConn(handler Handler, conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	for {
 		var req Request
 		if err := ReadMessage(conn, &req); err != nil {
