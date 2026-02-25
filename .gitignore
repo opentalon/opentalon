@@ -46,10 +46,9 @@ config.local.yaml
 /tmp/
 *.log
 
-Makefile
-./channels
-!./channels/.gitkeep
+channels/*
+!channels/.gitkeep
 
-./plugins
-!./plugins/.gitkeep
+plugins/*
+!plugins/.gitkeep
 

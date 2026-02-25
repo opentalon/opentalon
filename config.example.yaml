@@ -49,7 +49,9 @@ orchestrator:
 channels:
   console:
     enabled: true
-    path: "./channels/console"
+    # Local path (after running: make setup)
+    path: "./channels/console-channel/console"
+    # Or use GitHub refs — core auto-fetches, builds, and pins in channels.lock:
     # github: "opentalon/console-channel"
     # ref: "master"
     config: {}
@@ -57,10 +59,10 @@ channels:
 plugins:
   hello-world:
     enabled: true
-    # Option A: local path (build with: make plugin)
-    path: "./plugins/hello-world-plugin/hello-world-plugin"
-    # Option B: bundler-style — download from GitHub, pin in plugins.lock (ref: branch, tag, or commit)
-    # github: "opentalon/hello-world-plugin"
+    # Local path (after running: make setup)
+    path: "./plugins/hellow-world-plugin/hello-world-plugin"
+    # Or use GitHub refs — core auto-fetches, builds, and pins in plugins.lock:
+    # github: "opentalon/hellow-world-plugin"
     # ref: "master"
     config: {}
 

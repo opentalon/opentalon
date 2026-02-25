@@ -31,9 +31,10 @@ OpenTalon is engineered for long-term quality from day one. Every architectural 
 Run OpenTalon in the terminal with the **console channel** and the **hello-world plugin**. When you type a message containing "hello", the plugin runs first (concatenates " world" and adds a random prompt fragment), then the LLM replies.
 
 ```bash
+git clone https://github.com/opentalon/opentalon.git && cd opentalon
 cp config.example.yaml config.yaml
 export DEEPSEEK_API_KEY="your-key"   # or any OpenAI-compatible API key
-make all
+make build setup                     # build core + clone & build plugin and channel
 ./opentalon -config config.yaml
 ```
 
@@ -378,51 +379,58 @@ Users can also create jobs by talking to the LLM:
 
 ## Build locally with plugins
 
-Build the core, then reference the **hello-world plugin** and **console channel** from GitHub so OpenTalon fetches and builds them on first run (or use local paths).
+**Prerequisites:** Go 1.22+, git.
 
-1. Clone and build the core:
+### Quick start (recommended)
 
-   ```bash
-   git clone https://github.com/opentalon/opentalon.git
-   cd opentalon
-   go build -o opentalon ./cmd/opentalon
-   ```
+```bash
+git clone https://github.com/opentalon/opentalon.git
+cd opentalon
+cp config.example.yaml config.yaml
+# Set your API key (DeepSeek, OpenAI, or any compatible provider):
+export DEEPSEEK_API_KEY="your-key"
 
-2. Create `config.yaml` (copy from `config.example.yaml`) and set your API key. Use GitHub refs for the plugin and console channel:
+make build setup   # build core binary + clone & build hello-world plugin and console channel
+./opentalon -config config.yaml
+```
 
-   ```yaml
-   orchestrator:
-     rules: []
-     content_preparers:
-       - plugin: hello-world
-         action: prepare
-         arg_key: text
+`make setup` clones [opentalon/console-channel](https://github.com/opentalon/console-channel) into `channels/` and [opentalon/hellow-world-plugin](https://github.com/opentalon/hellow-world-plugin) into `plugins/`, then builds both. The binaries land at `channels/console-channel/console` and `plugins/hellow-world-plugin/hello-world-plugin` — matching the paths in `config.example.yaml`.
 
-   channels:
-     console:
-       enabled: true
-       github: "opentalon/console-channel"
-       config: {}
+Other useful Make targets:
 
-   plugins:
-     hello-world:
-       enabled: true
-       github: "opentalon/hello-world-plugin"
-       config: {}
+| Target | What it does |
+|---|---|
+| `make build` | Build the core binary |
+| `make setup` | Clone and build the hello-world plugin and console channel |
+| `make plugin` | Clone and build only the hello-world plugin |
+| `make channel` | Clone and build only the console channel |
+| `make run` | Build + setup + start OpenTalon |
+| `make test` | Run tests with race detector |
+| `make lint` | Run golangci-lint |
+| `make all` | deps + build + test + lint |
+| `make clean` | Remove built binaries |
 
-   state:
-     data_dir: ~/.opentalon
-   # ... add models.providers and routing (see config.example.yaml)
-   ```
+### Alternative: GitHub auto-fetch (bundler)
 
-3. Run OpenTalon:
+Instead of building locally, you can let OpenTalon fetch and build plugins/channels on first run. In `config.yaml`, replace `path:` with `github:` and `ref:`:
 
-   ```bash
-   export DEEPSEEK_API_KEY="your-key"   # or OPENAI_API_KEY, etc.
-   ./opentalon -config config.yaml
-   ```
+```yaml
+channels:
+  console:
+    enabled: true
+    github: "opentalon/console-channel"
+    ref: "master"
+    config: {}
 
-   The first run resolves the refs, clones [opentalon/console-channel](https://github.com/opentalon/console-channel) and [opentalon/hello-world-plugin](https://github.com/opentalon/hello-world-plugin), builds them, and writes `channels.lock` and `plugins.lock`. Later runs reuse the locked versions until you change `ref` or delete the lock entries.
+plugins:
+  hello-world:
+    enabled: true
+    github: "opentalon/hellow-world-plugin"
+    ref: "master"
+    config: {}
+```
+
+The first run resolves the refs, clones and builds, and writes `channels.lock` and `plugins.lock` under `state.data_dir` (default `~/.opentalon`). Later runs reuse the locked versions until you change `ref` or delete the lock entries.
 
 ### Reusable skills from OpenClaw
 
