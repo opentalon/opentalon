@@ -93,10 +93,35 @@ type RunResult struct {
 	Results         []ToolResult
 }
 
-// preparerResponse is the optional JSON shape from a content preparer (guard behavior).
+// InvokeStep is one step in a preparer-driven invoke (run this plugin action without LLM).
+type InvokeStep struct {
+	Plugin string            `json:"plugin"`
+	Action string            `json:"action"`
+	Args   map[string]string `json:"args"`
+}
+
+// invokeStepsUnmarshal accepts "invoke" as either a single object or an array of steps.
+type invokeStepsUnmarshal []InvokeStep
+
+func (s *invokeStepsUnmarshal) UnmarshalJSON(data []byte) error {
+	var arr []InvokeStep
+	if err := json.Unmarshal(data, &arr); err == nil {
+		*s = arr
+		return nil
+	}
+	var single InvokeStep
+	if err := json.Unmarshal(data, &single); err == nil {
+		*s = []InvokeStep{single}
+		return nil
+	}
+	return fmt.Errorf("invoke must be an object or array of { plugin, action, args }")
+}
+
+// preparerResponse is the optional JSON shape from a content preparer (guard or invoke).
 type preparerResponse struct {
-	SendToLLM *bool  `json:"send_to_llm"`
-	Message   string `json:"message"`
+	SendToLLM *bool                `json:"send_to_llm"`
+	Message   string               `json:"message"`
+	Invoke    invokeStepsUnmarshal `json:"invoke"`
 }
 
 func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (*RunResult, error) {
@@ -123,6 +148,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 				continue
 			}
 			if !result.SendToLLM {
+				if len(result.InvokeSteps) > 0 {
+					steps := make([]InvokeStep, len(result.InvokeSteps))
+					for i, s := range result.InvokeSteps {
+						steps[i] = InvokeStep{Plugin: s.Plugin, Action: s.Action, Args: s.Args}
+					}
+					return o.runInvokeSteps(ctx, steps)
+				}
 				msg := result.Content
 				if msg == "" {
 					msg = "Request not sent to LLM (Lua guard)."
@@ -149,10 +181,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 		if toolResult.Error != "" {
 			continue
 		}
-		// Preparer response convention: JSON with send_to_llm and optional message.
-		// When send_to_llm is false we skip the LLM and return this message to the channel.
+		// Preparer response convention: JSON with send_to_llm, optional message, optional invoke (single or list).
 		var pr preparerResponse
 		if err := json.Unmarshal([]byte(toolResult.Content), &pr); err == nil && pr.SendToLLM != nil && !*pr.SendToLLM {
+			if len(pr.Invoke) > 0 {
+				// Run invoke steps in order; pass previous step output as previous_result to next step.
+				return o.runInvokeSteps(ctx, pr.Invoke)
+			}
 			msg := pr.Message
 			if msg == "" {
 				msg = toolResult.Content
@@ -309,6 +344,58 @@ func filterByTag(memories []*state.Memory, tag string) []*state.Memory {
 		}
 	}
 	return result
+}
+
+// runInvokeSteps runs a list of plugin actions in order without calling the LLM.
+// Each step's result content is passed to the next step as args["previous_result"].
+func (o *Orchestrator) runInvokeSteps(ctx context.Context, steps []InvokeStep) (*RunResult, error) {
+	const previousResultKey = "previous_result"
+	var lastContent string
+	var toolCalls []ToolCall
+	var results []ToolResult
+	for i, step := range steps {
+		if step.Plugin == "" || step.Action == "" {
+			log.Printf("Warning: invoke step %d missing plugin or action", i+1)
+			continue
+		}
+		if !o.registry.HasAction(step.Plugin, step.Action) {
+			log.Printf("Warning: invoke step %d: unknown action %s.%s", i+1, step.Plugin, step.Action)
+			continue
+		}
+		args := make(map[string]string)
+		for k, v := range step.Args {
+			args[k] = v
+		}
+		if i > 0 && lastContent != "" {
+			args[previousResultKey] = lastContent
+		}
+		call := ToolCall{
+			ID:     fmt.Sprintf("invoke-%d-%s-%s", i+1, step.Plugin, step.Action),
+			Plugin: step.Plugin,
+			Action: step.Action,
+			Args:   args,
+		}
+		toolResult := o.executeCall(ctx, call)
+		toolCalls = append(toolCalls, call)
+		results = append(results, toolResult)
+		if toolResult.Error != "" {
+			return &RunResult{
+				Response:  "Invoke step failed: " + toolResult.Error,
+				ToolCalls: toolCalls,
+				Results:   results,
+			}, nil
+		}
+		lastContent = toolResult.Content
+	}
+	if lastContent == "" {
+		lastContent = "(No output from invoke steps.)"
+	}
+	return &RunResult{
+		Response:        lastContent,
+		ToolCalls:       toolCalls,
+		Results:         results,
+		InputForDisplay: lastContent,
+	}, nil
 }
 
 func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResult {

@@ -160,6 +160,13 @@ Before the first LLM call, the user message can be **transformed or blocked** so
 
 The output of one preparer becomes the input of the next. If any preparer returns “do not send to LLM”, the pipeline stops and the user sees the given message—no LLM call. Otherwise the final string is what the LLM sees as the user message.
 
+**Invoke (skip LLM, run plugin steps):** A preparer can also tell the orchestrator to **skip the LLM** and run one or more **plugin actions** directly. Return `send_to_llm: false` and an `invoke` value:
+
+- **Plugin (JSON):** `{"send_to_llm": false, "invoke": {"plugin": "gitlab", "action": "deploy", "args": {"branch": "one", "env": "staging"}}}` for a single step, or `"invoke": [ step1, step2, ... ]` for multiple steps.
+- **Lua:** Return a table with `send_to_llm = false` and `invoke = { plugin = "...", action = "...", args = { ... } }` (single step) or `invoke = { step1, step2, ... }` (array of step tables). Each step table has `plugin`, `action`, and optional `args` (table of string key/value).
+
+The orchestrator runs each step in order. The **output (content) of the previous step** is injected into the next step's args under the reserved key **`previous_result`**. The final step's content is shown to the user. Invalid or missing plugin/action for a step is skipped (logged); on step error, the user sees that error. This supports flows like "rebase branch with master and deploy to staging" where a preparer (or Lua) owns context and drives a short pipeline without the LLM.
+
 This is where company rules, vocabulary enforcement, and compliance checks can run **without burning LLM tokens**. See the [Lua scripts](../lua-scripts.md) guide and the [hello-world plugin](https://github.com/opentalon/hellow-world-plugin) for examples.
 
 **How this fits with orchestration:** The only place the core does a **pre-check call** to a plugin (or Lua) before the LLM is this content-preparer pipeline. All other plugin invocations are **orchestration-driven**: the LLM decides which tools to call during the turn, and the core runs those actions in the agent loop. There is no separate “after” hook—the response to the user is the LLM’s final output (and any tool results). So “before” in config is the only special pipeline that runs plugins/Lua ahead of the LLM; everything else is normal tool use decided by the LLM.
