@@ -37,13 +37,8 @@ $(CONSOLE_BIN):
 		echo "Cloning console channel..."; \
 		git clone --depth 1 $(CONSOLE_REPO) $(CONSOLE_DIR); \
 	fi
-	@if [ ! -f "$(CONSOLE_DIR)/cmd/main.go" ]; then \
-		echo "Creating console channel entrypoint (cmd/main.go)..."; \
-		mkdir -p $(CONSOLE_DIR)/cmd; \
-		printf 'package main\n\nimport (\n\t"context"\n\t"log"\n\t"os/signal"\n\t"syscall"\n\n\tconsolechannel "github.com/opentalon/console-channel"\n\t"github.com/opentalon/opentalon/pkg/channel"\n)\n\nfunc main() {\n\tctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)\n\tdefer stop()\n\n\tch := consolechannel.New()\n\tif err := channel.Serve(ctx, ch); err != nil {\n\t\tlog.Fatalf("console-channel: %%v", err)\n\t}\n}\n' > $(CONSOLE_DIR)/cmd/main.go; \
-	fi
 	@echo "Building console channel..."
-	@cd $(CONSOLE_DIR) && go build -o console ./cmd/
+	@cd $(CONSOLE_DIR) && go build -o console ./cmd/console
 
 # ── Core ────────────────────────────────────────────────────────────────────
 
