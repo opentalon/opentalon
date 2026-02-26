@@ -50,7 +50,9 @@ orchestrator:
 channels:
   console:
     enabled: true
-    path: "./channels/console"
+    # Local path (after running: make setup)
+    path: "./channels/console-channel/console"
+    # Or use GitHub refs — core auto-fetches, builds, and pins in channels.lock:
     # github: "opentalon/console-channel"
     # ref: "master"
     config: {}
