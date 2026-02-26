@@ -18,9 +18,10 @@ const maxAgentLoopIterations = 20
 
 // ContentPreparerEntry configures a plugin action to run before the first LLM call.
 type ContentPreparerEntry struct {
-	Plugin string
-	Action string
-	ArgKey string // optional, default "text"
+	Plugin   string
+	Action   string
+	ArgKey   string // optional, default "text"
+	Insecure bool   // if true (default), this preparer cannot run invoke steps; if false (trusted), can invoke
 }
 
 type LLMClient interface {
@@ -185,6 +186,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 		var pr preparerResponse
 		if err := json.Unmarshal([]byte(toolResult.Content), &pr); err == nil && pr.SendToLLM != nil && !*pr.SendToLLM {
 			if len(pr.Invoke) > 0 {
+				if prep.Insecure {
+					log.Printf("Warning: insecure preparer %s.%s cannot run invoke; ignoring", prep.Plugin, prep.Action)
+					continue
+				}
 				// Run invoke steps in order; pass previous step output as previous_result to next step.
 				return o.runInvokeSteps(ctx, pr.Invoke)
 			}

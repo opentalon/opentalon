@@ -555,7 +555,7 @@ func TestPreparerReturnsInvokeSingle(t *testing.T) {
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1")
-	preparers := []ContentPreparerEntry{{Plugin: "invoker", Action: "prepare"}}
+	preparers := []ContentPreparerEntry{{Plugin: "invoker", Action: "prepare", Insecure: false}} // trusted: can invoke
 	orch := NewWithRules(&fakeLLM{responses: []string{"LLM reply"}}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, nil, preparers, nil)
 
 	result, err := orch.Run(context.Background(), "s1", "deploy branch one")
@@ -593,7 +593,7 @@ func TestPreparerReturnsInvokeArray(t *testing.T) {
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1")
-	preparers := []ContentPreparerEntry{{Plugin: "invoker", Action: "prepare"}}
+	preparers := []ContentPreparerEntry{{Plugin: "invoker", Action: "prepare", Insecure: false}} // trusted: can invoke
 	orch := NewWithRules(&fakeLLM{responses: []string{"LLM reply"}}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, nil, preparers, nil)
 
 	result, err := orch.Run(context.Background(), "s1", "analyze and create issue")
@@ -634,5 +634,39 @@ func TestInvokeStepsUnmarshalSingleAndArray(t *testing.T) {
 	}
 	if pr.Invoke[1].Plugin != "p2" {
 		t.Errorf("second step plugin = %q", pr.Invoke[1].Plugin)
+	}
+}
+
+func TestInsecurePreparerCannotInvoke(t *testing.T) {
+	// Insecure preparer returns send_to_llm: false + invoke; we must not run invoke, request continues to LLM.
+	invokeJSON := `{"send_to_llm": false, "invoke": {"plugin": "gitlab", "action": "analyze_code"}}`
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "insecure-preparer", Description: "Insecure",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: invokeJSON})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze"}},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	llm := &fakeLLM{responses: []string{"LLM reply"}}
+	preparers := []ContentPreparerEntry{
+		{Plugin: "insecure-preparer", Action: "prepare", Insecure: true},
+	}
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, nil, preparers, nil)
+
+	result, err := orch.Run(context.Background(), "s1", "deploy branch one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Invoke must not run; we get LLM response instead of invoke output.
+	if result.Response != "LLM reply" {
+		t.Errorf("Response = %q (expected LLM reply; insecure preparer must not run invoke)", result.Response)
+	}
+	if len(result.ToolCalls) != 0 {
+		t.Errorf("expected 0 tool calls (invoke ignored), got %d", len(result.ToolCalls))
 	}
 }
