@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -39,6 +40,26 @@ func (e *echoExecutor) Execute(call ToolCall) ToolResult {
 		CallID:  call.ID,
 		Content: fmt.Sprintf("executed %s.%s", call.Plugin, call.Action),
 	}
+}
+
+// fixedResultExecutor returns fixed content (for preparers that return JSON).
+type fixedResultExecutor struct {
+	content string
+}
+
+func (e *fixedResultExecutor) Execute(call ToolCall) ToolResult {
+	return ToolResult{CallID: call.ID, Content: e.content}
+}
+
+// previousResultExecutor returns args["previous_result"] so tests can assert it was passed.
+type previousResultExecutor struct{}
+
+func (e *previousResultExecutor) Execute(call ToolCall) ToolResult {
+	prev := call.Args["previous_result"]
+	if prev == "" {
+		prev = "(none)"
+	}
+	return ToolResult{CallID: call.ID, Content: "got: " + prev}
 }
 
 func setupOrchestrator(llm LLMClient, parser ToolCallParser) (*Orchestrator, string) {
@@ -396,5 +417,256 @@ func TestFilterByTagNone(t *testing.T) {
 	got := filterByTag(memories, "workflow")
 	if len(got) != 0 {
 		t.Errorf("expected 0, got %d", len(got))
+	}
+}
+
+// --- Invoke steps (preparer-driven plugin runs without LLM) ---
+
+func TestRunInvokeStepsSingleStep(t *testing.T) {
+	llm := &fakeLLM{responses: []string{"ignored"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	orch, _ := setupOrchestrator(llm, parser)
+	steps := []InvokeStep{
+		{Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{"repo": "r1"}},
+	}
+	result, err := orch.runInvokeSteps(context.Background(), steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "executed gitlab.analyze_code" {
+		t.Errorf("Response = %q", result.Response)
+	}
+	if len(result.ToolCalls) != 1 {
+		t.Errorf("expected 1 tool call, got %d", len(result.ToolCalls))
+	}
+	// LLM should not have been called
+	if llm.callCount != 0 {
+		t.Errorf("LLM should not be called for invoke steps, callCount = %d", llm.callCount)
+	}
+}
+
+func TestRunInvokeStepsMultiStepPreviousResult(t *testing.T) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "first", Description: "First",
+		Actions: []Action{{Name: "run", Description: "Run"}},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name: "second", Description: "Second",
+		Actions: []Action{{Name: "run", Description: "Run"}},
+	}, &previousResultExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	orch := New(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions)
+
+	steps := []InvokeStep{
+		{Plugin: "first", Action: "run", Args: nil},
+		{Plugin: "second", Action: "run", Args: nil},
+	}
+	result, err := orch.runInvokeSteps(context.Background(), steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Second step receives previous_result = "executed first.run"
+	if result.Response != "got: executed first.run" {
+		t.Errorf("Response = %q (expected previous_result from first step)", result.Response)
+	}
+	if len(result.ToolCalls) != 2 {
+		t.Errorf("expected 2 tool calls, got %d", len(result.ToolCalls))
+	}
+}
+
+func TestRunInvokeStepsSkipsInvalidStep(t *testing.T) {
+	llm := &fakeLLM{responses: []string{"ignored"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	orch, _ := setupOrchestrator(llm, parser)
+	steps := []InvokeStep{
+		{Plugin: "gitlab", Action: "analyze_code", Args: nil},
+		{Plugin: "", Action: "missing", Args: nil},                 // skipped: no plugin
+		{Plugin: "unknown", Action: "do_thing", Args: nil},         // skipped: unknown plugin
+		{Plugin: "gitlab", Action: "delete_everything", Args: nil}, // skipped: unknown action
+		{Plugin: "jira", Action: "create_issue", Args: nil},
+	}
+	result, err := orch.runInvokeSteps(context.Background(), steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only gitlab.analyze_code and jira.create_issue run
+	if len(result.ToolCalls) != 2 {
+		t.Errorf("expected 2 tool calls (invalid steps skipped), got %d", len(result.ToolCalls))
+	}
+	if result.Response != "executed jira.create_issue" {
+		t.Errorf("Response = %q", result.Response)
+	}
+}
+
+func TestRunInvokeStepsStopsOnError(t *testing.T) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "fail", Description: "Fail",
+		Actions: []Action{{Name: "run", Description: "Run"}},
+	}, &errorReturningExecutor{err: "step failed"})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze"}},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	orch := New(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions)
+
+	steps := []InvokeStep{
+		{Plugin: "fail", Action: "run", Args: nil},
+		{Plugin: "gitlab", Action: "analyze_code", Args: nil},
+	}
+	result, err := orch.runInvokeSteps(context.Background(), steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Response, "Invoke step failed") || !strings.Contains(result.Response, "step failed") {
+		t.Errorf("Response should mention invoke step failure: %q", result.Response)
+	}
+	if len(result.ToolCalls) != 1 {
+		t.Errorf("expected 1 tool call (stop on first error), got %d", len(result.ToolCalls))
+	}
+}
+
+type errorReturningExecutor struct{ err string }
+
+func (e *errorReturningExecutor) Execute(call ToolCall) ToolResult {
+	return ToolResult{CallID: call.ID, Error: e.err}
+}
+
+func TestPreparerReturnsInvokeSingle(t *testing.T) {
+	// Preparer plugin returns JSON: send_to_llm false + invoke single step -> runInvokeSteps runs once
+	invokeJSON := `{"send_to_llm": false, "invoke": {"plugin": "gitlab", "action": "analyze_code", "args": {"repo": "r1"}}}`
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "invoker", Description: "Invoker",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: invokeJSON})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze"}},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	preparers := []ContentPreparerEntry{{Plugin: "invoker", Action: "prepare", Insecure: false}} // trusted: can invoke
+	orch := NewWithRules(&fakeLLM{responses: []string{"LLM reply"}}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, nil, preparers, nil)
+
+	result, err := orch.Run(context.Background(), "s1", "deploy branch one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should run invoke step, not LLM
+	if result.Response != "executed gitlab.analyze_code" {
+		t.Errorf("Response = %q (expected invoke step result)", result.Response)
+	}
+	if len(result.ToolCalls) != 1 {
+		t.Errorf("expected 1 tool call from invoke, got %d", len(result.ToolCalls))
+	}
+}
+
+func TestPreparerReturnsInvokeArray(t *testing.T) {
+	// Preparer returns invoke as array of steps -> runInvokeSteps runs both
+	invokeJSON := `{"send_to_llm": false, "invoke": [
+		{"plugin": "gitlab", "action": "analyze_code"},
+		{"plugin": "jira", "action": "create_issue", "args": {}}
+	]}`
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "invoker", Description: "Invoker",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: invokeJSON})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze"}},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name: "jira", Description: "Jira",
+		Actions: []Action{{Name: "create_issue", Description: "Create"}},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	preparers := []ContentPreparerEntry{{Plugin: "invoker", Action: "prepare", Insecure: false}} // trusted: can invoke
+	orch := NewWithRules(&fakeLLM{responses: []string{"LLM reply"}}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, nil, preparers, nil)
+
+	result, err := orch.Run(context.Background(), "s1", "analyze and create issue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "executed jira.create_issue" {
+		t.Errorf("Response = %q (expected last invoke step)", result.Response)
+	}
+	if len(result.ToolCalls) != 2 {
+		t.Errorf("expected 2 tool calls, got %d", len(result.ToolCalls))
+	}
+}
+
+func TestInvokeStepsUnmarshalSingleAndArray(t *testing.T) {
+	// invokeStepsUnmarshal accepts both single object and array (used by preparer JSON)
+	var pr preparerResponse
+	sendFalse := false
+	pr.SendToLLM = &sendFalse
+
+	// Single object
+	if err := json.Unmarshal([]byte(`{"send_to_llm": false, "invoke": {"plugin": "p", "action": "a"}}`), &pr); err != nil {
+		t.Fatal(err)
+	}
+	if len(pr.Invoke) != 1 {
+		t.Fatalf("single invoke: expected 1 step, got %d", len(pr.Invoke))
+	}
+	if pr.Invoke[0].Plugin != "p" || pr.Invoke[0].Action != "a" {
+		t.Errorf("single invoke step = %+v", pr.Invoke[0])
+	}
+
+	// Array
+	if err := json.Unmarshal([]byte(`{"send_to_llm": false, "invoke": [{"plugin": "p1", "action": "a1"}, {"plugin": "p2", "action": "a2"}]}`), &pr); err != nil {
+		t.Fatal(err)
+	}
+	if len(pr.Invoke) != 2 {
+		t.Fatalf("array invoke: expected 2 steps, got %d", len(pr.Invoke))
+	}
+	if pr.Invoke[1].Plugin != "p2" {
+		t.Errorf("second step plugin = %q", pr.Invoke[1].Plugin)
+	}
+}
+
+func TestInsecurePreparerCannotInvoke(t *testing.T) {
+	// Insecure preparer returns send_to_llm: false + invoke; we must not run invoke, request continues to LLM.
+	invokeJSON := `{"send_to_llm": false, "invoke": {"plugin": "gitlab", "action": "analyze_code"}}`
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "insecure-preparer", Description: "Insecure",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: invokeJSON})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze"}},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	llm := &fakeLLM{responses: []string{"LLM reply"}}
+	preparers := []ContentPreparerEntry{
+		{Plugin: "insecure-preparer", Action: "prepare", Insecure: true},
+	}
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, nil, preparers, nil)
+
+	result, err := orch.Run(context.Background(), "s1", "deploy branch one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Invoke must not run; we get LLM response instead of invoke output.
+	if result.Response != "LLM reply" {
+		t.Errorf("Response = %q (expected LLM reply; insecure preparer must not run invoke)", result.Response)
+	}
+	if len(result.ToolCalls) != 0 {
+		t.Errorf("expected 0 tool calls (invoke ignored), got %d", len(result.ToolCalls))
 	}
 }

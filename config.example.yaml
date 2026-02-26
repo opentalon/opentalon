@@ -41,6 +41,7 @@ routing:
 orchestrator:
   rules: []
   # Run these plugin actions before the first LLM call; their output becomes the user message (or they can block with send_to_llm: false).
+  # List order = execution order: the first entry runs first and receives the user message; each preparer's output is the next one's input.
   content_preparers:
     - plugin: hello-world
       action: prepare
@@ -57,6 +58,7 @@ channels:
 plugins:
   hello-world:
     enabled: true
+    # insecure: false  # set to false to allow this preparer to run invoke steps; default is true (cannot invoke)
     # Option A: local path (build with: make plugin)
     path: "./plugins/hello-world-plugin/hello-world-plugin"
     # Option B: bundler-style — download from GitHub, pin in plugins.lock (ref: branch, tag, or commit)
