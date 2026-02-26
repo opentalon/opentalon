@@ -40,6 +40,7 @@ routing:
 
 orchestrator:
   rules: []
+  # permission_plugin: permission   # optional; core calls this plugin with action "check"(actor, plugin) before running a tool
   # Run these plugin actions before the first LLM call; their output becomes the user message (or they can block with send_to_llm: false).
   # List order = execution order: the first entry runs first and receives the user message; each preparer's output is the next one's input.
   content_preparers:
@@ -120,6 +121,14 @@ plugins:
 
 state:
   data_dir: ~/.opentalon
+  # session limits and optional summarization (SQLite store only)
+  # session:
+  #   max_messages: 50           # cap messages per conversation (0 = no cap)
+  #   max_idle_days: 30          # delete sessions not updated in N days (0 = don't prune)
+  #   summarize_after_messages: 10   # run LLM summarization after N messages (0 = off)
+  #   max_messages_after_summary: 6  # keep this many messages after summarization
+  #   summarize_prompt: "Summarize the following conversation in a short paragraph."  # any language
+  #   summarize_update_prompt: "Update the given conversation summary with the following new exchange. Keep the result to a short paragraph."
 
 # When LOG_LEVEL=debug, what we send to the LLM is logged (helps verify plugin output).
 log:

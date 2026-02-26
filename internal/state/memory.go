@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,6 +56,16 @@ func (s *MemoryStore) Add(content string, tags ...string) *Memory {
 	s.nextID++
 	s.memories = append(s.memories, m)
 	return m
+}
+
+// AddScoped is for the scoped memory interface; actorID is ignored for in-memory store.
+func (s *MemoryStore) AddScoped(ctx context.Context, actorID string, content string, tags ...string) (*Memory, error) {
+	return s.Add(content, tags...), nil
+}
+
+// MemoriesForContext returns memories for prompt building. For in-memory store, returns SearchByTag(tag).
+func (s *MemoryStore) MemoriesForContext(ctx context.Context, tag string) ([]*Memory, error) {
+	return s.SearchByTag(tag), nil
 }
 
 func (s *MemoryStore) Get(id string) (*Memory, error) {

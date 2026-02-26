@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 
+	"github.com/opentalon/opentalon/internal/actor"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
@@ -22,6 +23,8 @@ func NewMessageHandler(
 		if prep := pkg.GetContentPreparer(msg.ChannelID); prep != nil {
 			content = prep(ctx, content, runAction, hasAction)
 		}
+		actorID := msg.ChannelID + ":" + msg.SenderID
+		ctx = actor.WithActor(ctx, actorID)
 		response, inputForDisplay, err := runner.Run(ctx, sessionKey, content)
 		if err != nil {
 			log.Printf("handler: run: %v", err)

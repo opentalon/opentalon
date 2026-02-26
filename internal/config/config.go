@@ -175,10 +175,22 @@ type ContentPreparerEntry struct {
 type OrchestratorConfig struct {
 	Rules            []string               `yaml:"rules"`
 	ContentPreparers []ContentPreparerEntry `yaml:"content_preparers,omitempty"`
+	PermissionPlugin string                 `yaml:"permission_plugin,omitempty"` // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
 }
 
 type StateConfig struct {
-	DataDir string `yaml:"data_dir"`
+	DataDir string        `yaml:"data_dir"`
+	Session SessionConfig `yaml:"session,omitempty"`
+}
+
+// SessionConfig limits session size and optional idle pruning.
+type SessionConfig struct {
+	MaxMessages             int    `yaml:"max_messages"`               // cap messages per session (0 = no cap)
+	MaxIdleDays             int    `yaml:"max_idle_days"`              // delete sessions not updated in N days (0 = don't prune)
+	SummarizeAfter          int    `yaml:"summarize_after_messages"`   // run summarization after N messages (0 = off)
+	MaxMessagesAfterSummary int    `yaml:"max_messages_after_summary"` // keep this many messages after summarization
+	SummarizePrompt         string `yaml:"summarize_prompt"`           // system prompt for initial summarization (any language); empty = default English
+	SummarizeUpdatePrompt   string `yaml:"summarize_update_prompt"`    // system prompt for updating existing summary (any language); empty = default English
 }
 
 type ModelsConfig struct {
