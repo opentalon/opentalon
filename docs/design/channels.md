@@ -173,6 +173,14 @@ This is where company rules, vocabulary enforcement, and compliance checks can r
 
 **How this fits with orchestration:** The only place the core does a **pre-check call** to a plugin (or Lua) before the LLM is this content-preparer pipeline. All other plugin invocations are **orchestration-driven**: the LLM decides which tools to call during the turn, and the core runs those actions in the agent loop. There is no separate “after” hook—the response to the user is the LLM’s final output (and any tool results). So “before” in config is the only special pipeline that runs plugins/Lua ahead of the LLM; everything else is normal tool use decided by the LLM.
 
+## Actor and permission plugin
+
+Every request that comes from a channel carries an **actor** identifier (who is acting). The actor is channel-specific: e.g. Slack user ID, Teams user ID, Discord ID, WhatsApp phone number. The core derives it from the inbound message as `channel_id:sender_id` and attaches it to the request context. When a request does not come from a channel (e.g. scheduler or RunAction), no actor is set.
+
+**Permission plugin:** The core can be configured with a **permission plugin** (e.g. `orchestrator.permission_plugin: permission`). Before running any tool, the core calls this plugin with a fixed action name (`check`) and args `actor`, `plugin` (the plugin the actor wants to use). The permission plugin **gets the request** and decides using its own config or code (e.g. who can use which plugin); it returns allow or deny. The core enforces the result: if deny, the tool is not run and the user sees "permission denied". If no permission plugin is configured, all tool runs are allowed. If no actor is set (e.g. scheduler), the permission check is skipped and the run is allowed. The permission plugin itself is never gated by permission.
+
+**Contract:** The permission plugin exposes an action (the core uses the fixed name `check`). Input args: `actor` (string), `plugin` (string). Output: a string interpreted as allow or deny; `"true"` or JSON `{"allowed": true}` = allow, otherwise deny. On plugin error or timeout, the core denies the run.
+
 ## Session mapping
 
 Each unique conversation thread maps to one orchestrator session:
@@ -267,3 +275,12 @@ Your platform SDK               Your plugin binary              OpenTalon Core
 ```
 
 This pattern applies identically to Slack, Teams, Telegram, WhatsApp, Discord, Jira, Matrix, email, SMS, or any custom system.
+
+## State and memory
+
+When `state.data_dir` is set, OpenTalon uses a SQLite database (`state.db`) for **memories** and **sessions**. Both persist across restarts.
+
+- **Memories** are scoped as **general** (shared; `actor_id` NULL) or **per-actor** (one row per actor). The LLM receives general context (config rules, general stored rules, tools, workflow memories) plus the current actor’s stored rules. Workflow summaries are stored per-actor by default. General memory is the place for **admin-created shared rules**; the write path for general memory (config bootstrap, permission plugin, or admin API) can be restricted in a future release.
+- **Sessions** are one per conversation (e.g. channel + conversation or thread). Each session holds message history (and an optional **summary** after summarization). Session limits: `session.max_messages` (cap messages per session), `session.max_idle_days` (prune idle sessions on startup). Optional **summarization**: after `session.summarize_after_messages` messages, the LLM compresses history into a summary and only the last `session.max_messages_after_summary` messages are kept, so token usage stays bounded. The summarization prompts are configurable (`session.summarize_prompt` and `session.summarize_update_prompt`) so they can be in any language; if empty, default English is used.
+
+Plugins can have their own SQLite DB under `data_dir/plugin_data/<name>.db` and optional migrations in `<plugin_path>/migrations/*.sql`; the core runs those migrations at load and never gives plugins access to the main `state.db`.

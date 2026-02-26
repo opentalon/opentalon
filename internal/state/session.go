@@ -14,6 +14,7 @@ import (
 type Session struct {
 	ID          string             `yaml:"id"`
 	Messages    []provider.Message `yaml:"messages"`
+	Summary     string             `yaml:"summary,omitempty"` // compressed history when summarization is used
 	ActiveModel provider.ModelRef  `yaml:"active_model,omitempty"`
 	Metadata    map[string]string  `yaml:"metadata,omitempty"`
 	CreatedAt   time.Time          `yaml:"created_at"`
@@ -82,6 +83,21 @@ func (s *SessionStore) SetModel(id string, model provider.ModelRef) error {
 		return fmt.Errorf("session %q not found", id)
 	}
 	sess.ActiveModel = model
+	sess.UpdatedAt = time.Now()
+	return nil
+}
+
+// SetSummary updates the session summary and trims messages to the given slice (for summarization).
+func (s *SessionStore) SetSummary(id string, summary string, messages []provider.Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[id]
+	if !ok {
+		return fmt.Errorf("session %q not found", id)
+	}
+	sess.Summary = summary
+	sess.Messages = messages
 	sess.UpdatedAt = time.Now()
 	return nil
 }

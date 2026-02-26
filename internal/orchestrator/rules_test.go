@@ -131,7 +131,7 @@ func TestRulesInjectedIntoSystemPrompt(t *testing.T) {
 		captured: &capturedMessages,
 	}
 
-	orch := NewWithRules(capturingLLM, parser, registry, memory, sessions, []string{"org-specific rule"}, nil, nil)
+	orch := NewWithRules(capturingLLM, parser, registry, memory, sessions, []string{"org-specific rule"}, nil, nil, nil, "", 0, 0, "", "")
 	_, err := orch.Run(context.Background(), "s1", "hello")
 	if err != nil {
 		t.Fatal(err)

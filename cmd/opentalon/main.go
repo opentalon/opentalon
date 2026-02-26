@@ -18,6 +18,7 @@ import (
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/requestpkg"
 	"github.com/opentalon/opentalon/internal/state"
+	"github.com/opentalon/opentalon/internal/state/store"
 	"github.com/opentalon/opentalon/internal/version"
 )
 
@@ -70,9 +71,31 @@ func main() {
 	llm := &defaultModelClient{provider: prov, model: defaultModel}
 
 	dataDir := cfg.State.DataDir
-	sessions := state.NewSessionStore(dataDir)
-	memory := state.NewMemoryStore(dataDir)
-	_ = memory.Load()
+	var memory orchestrator.MemoryStoreInterface
+	var sessions orchestrator.SessionStoreInterface
+	if dataDir != "" {
+		db, err := store.Open(dataDir)
+		if err != nil {
+			log.Printf("Warning: state store open: %v; using in-memory state", err)
+			mem := state.NewMemoryStore("")
+			_ = mem.Load()
+			memory = mem
+			sessions = state.NewSessionStore("")
+		} else {
+			defer db.Close()
+			memory = store.NewMemoryStore(db)
+			sessStore := store.NewSessionStore(db, cfg.State.Session.MaxMessages, cfg.State.Session.MaxIdleDays)
+			if err := sessStore.PruneIdleSessions(); err != nil {
+				log.Printf("Warning: session prune: %v", err)
+			}
+			sessions = sessStore
+		}
+	} else {
+		mem := state.NewMemoryStore("")
+		_ = mem.Load()
+		memory = mem
+		sessions = state.NewSessionStore("")
+	}
 
 	// Sessions created on first message per channel (session key from channel ID)
 
@@ -98,6 +121,13 @@ func main() {
 		pluginEntries = append(pluginEntries, plugin.PluginEntry{
 			Name: name, Path: path, Enabled: p.Enabled, Config: p.Config,
 		})
+	}
+	for _, e := range pluginEntries {
+		if e.Enabled && dataDir != "" {
+			if err := store.RunPluginMigrations(dataDir, e.Name, e.Path); err != nil {
+				log.Printf("Warning: plugin %s migrations: %v", e.Name, err)
+			}
+		}
 	}
 	pluginManager := plugin.NewManager(toolRegistry)
 	if err := pluginManager.LoadAll(ctx, pluginEntries); err != nil {
@@ -192,7 +222,12 @@ func main() {
 		contentPreparers = append(contentPreparers, entry)
 	}
 	luaScriptPaths := buildLuaScriptPaths(ctx, dataDir, cfg)
-	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, cfg.Orchestrator.Rules, contentPreparers, luaScriptPaths)
+	var permChecker orchestrator.PermissionChecker
+	permPluginName := cfg.Orchestrator.PermissionPlugin
+	if permPluginName != "" {
+		permChecker = orchestrator.NewPermissionChecker(toolRegistry, orchestrator.NewGuard(), permPluginName)
+	}
+	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, cfg.Orchestrator.Rules, contentPreparers, luaScriptPaths, permChecker, permPluginName, cfg.State.Session.SummarizeAfter, cfg.State.Session.MaxMessagesAfterSummary, cfg.State.Session.SummarizePrompt, cfg.State.Session.SummarizeUpdatePrompt)
 
 	ensureSession := func(sessionKey string) {
 		if _, err := sessions.Get(sessionKey); err != nil {
