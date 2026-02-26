@@ -48,7 +48,7 @@ func RunPluginMigrations(dataDir, pluginName, pluginPath string) error {
 	if err != nil {
 		return fmt.Errorf("plugin db open: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)"); err != nil {
 		return fmt.Errorf("plugin schema_version: %w", err)
