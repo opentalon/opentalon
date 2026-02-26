@@ -82,7 +82,7 @@ func main() {
 			memory = mem
 			sessions = state.NewSessionStore("")
 		} else {
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			memory = store.NewMemoryStore(db)
 			sessStore := store.NewSessionStore(db, cfg.State.Session.MaxMessages, cfg.State.Session.MaxIdleDays)
 			if err := sessStore.PruneIdleSessions(); err != nil {

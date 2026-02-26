@@ -78,10 +78,10 @@ type Orchestrator struct {
 	luaScriptPaths          map[string]string // optional; plugin name -> path to .lua script (for "lua:name" preparers)
 	permissionChecker       PermissionChecker // optional; when set, executeCall checks permission before running
 	permissionPluginName    string            // name of the permission plugin (skip permission check when executing it)
-	summarizeAfterMessages   int    // 0 = off; after this many messages run summarization
-	maxMessagesAfterSummary  int    // keep this many messages after summarization
-	summarizePrompt          string // system prompt for initial summarization (config; empty = default English)
-	summarizeUpdatePrompt    string // system prompt for updating summary (config; empty = default English)
+	summarizeAfterMessages  int               // 0 = off; after this many messages run summarization
+	maxMessagesAfterSummary int               // keep this many messages after summarization
+	summarizePrompt         string            // system prompt for initial summarization (config; empty = default English)
+	summarizeUpdatePrompt   string            // system prompt for updating summary (config; empty = default English)
 }
 
 const (
@@ -116,20 +116,20 @@ func NewWithRules(
 	summarizeUpdatePrompt string,
 ) *Orchestrator {
 	return &Orchestrator{
-		llm:                      llm,
-		parser:                   parser,
-		registry:                 registry,
-		memory:                   memory,
-		sessions:                 sessions,
-		guard:                    NewGuard(),
-		rules:                    NewRulesConfig(customRules),
-		preparers:                contentPreparers,
-		luaScriptPaths:           luaScriptPaths,
-		permissionChecker:        permissionChecker,
-		permissionPluginName:     permissionPluginName,
-		summarizeAfterMessages:   summarizeAfterMessages,
-		maxMessagesAfterSummary:  maxMessagesAfterSummary,
-		summarizePrompt:          summarizePrompt,
+		llm:                     llm,
+		parser:                  parser,
+		registry:                registry,
+		memory:                  memory,
+		sessions:                sessions,
+		guard:                   NewGuard(),
+		rules:                   NewRulesConfig(customRules),
+		preparers:               contentPreparers,
+		luaScriptPaths:          luaScriptPaths,
+		permissionChecker:       permissionChecker,
+		permissionPluginName:    permissionPluginName,
+		summarizeAfterMessages:  summarizeAfterMessages,
+		maxMessagesAfterSummary: maxMessagesAfterSummary,
+		summarizePrompt:         summarizePrompt,
 		summarizeUpdatePrompt:   summarizeUpdatePrompt,
 	}
 }

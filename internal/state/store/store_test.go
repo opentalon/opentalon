@@ -16,7 +16,7 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	var v int
 	err = db.SQLDB().QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v)
@@ -32,7 +32,7 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open again: %v", err)
 	}
-	defer db2.Close()
+	defer func() { _ = db2.Close() }()
 	err = db2.SQLDB().QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v)
 	if err != nil {
 		t.Fatalf("read schema_version (second open): %v", err)
@@ -48,7 +48,7 @@ func TestMemoryStore_AddScopedAndMemoriesForContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	mem := NewMemoryStore(db)
 	ctx := context.Background()
@@ -93,7 +93,7 @@ func TestSessionStore_PersistAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	sessStore := NewSessionStore(db, 0, 0)
 	sessStore.Create("s1")
@@ -115,9 +115,9 @@ func TestSessionStore_PersistAndGet(t *testing.T) {
 	}
 
 	// Re-open DB and get again: should persist
-	db.Close()
+	_ = db.Close()
 	db2, _ := Open(dir)
-	defer db2.Close()
+	defer func() { _ = db2.Close() }()
 	sessStore2 := NewSessionStore(db2, 0, 0)
 	sess2, err := sessStore2.Get("s1")
 	if err != nil {
@@ -134,7 +134,7 @@ func TestSessionStore_MaxMessagesTrim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	sessStore := NewSessionStore(db, 3, 0) // keep last 3
 	sessStore.Create("s1")
@@ -154,7 +154,7 @@ func TestSessionStore_SetSummaryRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	sessStore := NewSessionStore(db, 0, 0)
 	sessStore.Create("s1")

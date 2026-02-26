@@ -66,7 +66,7 @@ func (s *MemoryStore) MemoriesForContext(ctx context.Context, tag string) ([]*st
 	if err != nil {
 		return nil, fmt.Errorf("memories for context: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []*state.Memory
 	for rows.Next() {
 		var id, content, tagsJSON, createdAt string
@@ -99,7 +99,7 @@ func (s *MemoryStore) Search(query string) []*state.Memory {
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanMemories(rows)
 }
 
@@ -111,7 +111,7 @@ func (s *MemoryStore) SearchByTag(tag string) []*state.Memory {
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanMemories(rows)
 }
 
