@@ -128,6 +128,10 @@ Hooks let organizations enforce their own business rules, terminology, and compl
 
 For ambiguous cases, Lua hooks can call a small/cheap LLM (`ctx.llm()`) for lightweight AI. The main (expensive) LLM only sees clean, pre-processed input.
 
+### State and context persistence
+
+When `state.data_dir` is set, conversation and rules persist across restarts using SQLite (`state.db`). **General** rules (shared) and **per-actor** rules (per user) are stored as memories so multiple users get shared context plus their own. The LLM receives general context (config rules, general stored rules, tools), user/actor context (that actor’s stored rules), and the **session** (conversation history). Sessions are one per channel/conversation or thread; optional **summarization** after N messages compresses history into a summary and keeps only the last few messages, so token usage stays bounded. See [docs/design/channels.md](docs/design/channels.md) (State and memory) and `config.example.yaml` (`state.session`) for details.
+
 ```
 User message ──▶ Pre-hooks (Lua / Go / small LLM) ──▶ Main LLM ──▶ Post-hooks (Lua / Go) ──▶ Response
                   │  zero tokens for rules                │              │

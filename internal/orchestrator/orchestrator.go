@@ -9,12 +9,16 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/lua"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
 
 const maxAgentLoopIterations = 20
+
+// PermissionAction is the fixed action name the core uses when calling the permission plugin.
+const PermissionAction = "check"
 
 // ContentPreparerEntry configures a plugin action to run before the first LLM call.
 type ContentPreparerEntry struct {
@@ -41,49 +45,92 @@ type noopParser struct{}
 
 func (noopParser) Parse(_ string) []ToolCall { return nil }
 
-type Orchestrator struct {
-	mu             sync.Mutex
-	llm            LLMClient
-	parser         ToolCallParser
-	registry       *ToolRegistry
-	memory         *state.MemoryStore
-	sessions       *state.SessionStore
-	guard          *Guard
-	rules          *RulesConfig
-	preparers      []ContentPreparerEntry
-	luaScriptPaths map[string]string // optional; plugin name -> path to .lua script (for "lua:name" preparers)
+// PermissionChecker is called before running a tool to decide if the actor is allowed to use the plugin.
+type PermissionChecker interface {
+	Allowed(ctx context.Context, actorID, plugin string) (bool, error)
 }
+
+// MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
+type MemoryStoreInterface interface {
+	AddScoped(ctx context.Context, actorID string, content string, tags ...string) (*state.Memory, error)
+	MemoriesForContext(ctx context.Context, tag string) ([]*state.Memory, error)
+}
+
+// SessionStoreInterface is the session store (in-memory or SQLite).
+type SessionStoreInterface interface {
+	Get(id string) (*state.Session, error)
+	Create(id string) *state.Session
+	AddMessage(id string, msg provider.Message) error
+	SetModel(id string, model provider.ModelRef) error
+	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op
+}
+
+type Orchestrator struct {
+	mu                      sync.Mutex
+	llm                     LLMClient
+	parser                  ToolCallParser
+	registry                *ToolRegistry
+	memory                  MemoryStoreInterface
+	sessions                SessionStoreInterface
+	guard                   *Guard
+	rules                   *RulesConfig
+	preparers               []ContentPreparerEntry
+	luaScriptPaths          map[string]string // optional; plugin name -> path to .lua script (for "lua:name" preparers)
+	permissionChecker       PermissionChecker // optional; when set, executeCall checks permission before running
+	permissionPluginName    string            // name of the permission plugin (skip permission check when executing it)
+	summarizeAfterMessages   int    // 0 = off; after this many messages run summarization
+	maxMessagesAfterSummary  int    // keep this many messages after summarization
+	summarizePrompt          string // system prompt for initial summarization (config; empty = default English)
+	summarizeUpdatePrompt    string // system prompt for updating summary (config; empty = default English)
+}
+
+const (
+	defaultSummarizePrompt       = "Summarize the following conversation in a short paragraph."
+	defaultSummarizeUpdatePrompt = "Update the given conversation summary with the following new exchange. Keep the result to a short paragraph."
+)
 
 func New(
 	llm LLMClient,
 	parser ToolCallParser,
 	registry *ToolRegistry,
-	memory *state.MemoryStore,
-	sessions *state.SessionStore,
+	memory MemoryStoreInterface,
+	sessions SessionStoreInterface,
 ) *Orchestrator {
-	return NewWithRules(llm, parser, registry, memory, sessions, nil, nil, nil)
+	return NewWithRules(llm, parser, registry, memory, sessions, nil, nil, nil, nil, "", 0, 0, "", "")
 }
 
 func NewWithRules(
 	llm LLMClient,
 	parser ToolCallParser,
 	registry *ToolRegistry,
-	memory *state.MemoryStore,
-	sessions *state.SessionStore,
+	memory MemoryStoreInterface,
+	sessions SessionStoreInterface,
 	customRules []string,
 	contentPreparers []ContentPreparerEntry,
 	luaScriptPaths map[string]string,
+	permissionChecker PermissionChecker,
+	permissionPluginName string,
+	summarizeAfterMessages int,
+	maxMessagesAfterSummary int,
+	summarizePrompt string,
+	summarizeUpdatePrompt string,
 ) *Orchestrator {
 	return &Orchestrator{
-		llm:            llm,
-		parser:         parser,
-		registry:       registry,
-		memory:         memory,
-		sessions:       sessions,
-		guard:          NewGuard(),
-		rules:          NewRulesConfig(customRules),
-		preparers:      contentPreparers,
-		luaScriptPaths: luaScriptPaths,
+		llm:                      llm,
+		parser:                   parser,
+		registry:                 registry,
+		memory:                   memory,
+		sessions:                 sessions,
+		guard:                    NewGuard(),
+		rules:                    NewRulesConfig(customRules),
+		preparers:                contentPreparers,
+		luaScriptPaths:           luaScriptPaths,
+		permissionChecker:        permissionChecker,
+		permissionPluginName:     permissionPluginName,
+		summarizeAfterMessages:   summarizeAfterMessages,
+		maxMessagesAfterSummary:  maxMessagesAfterSummary,
+		summarizePrompt:          summarizePrompt,
+		summarizeUpdatePrompt:   summarizeUpdatePrompt,
 	}
 }
 
@@ -215,13 +262,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	}); err != nil {
 		return nil, fmt.Errorf("adding user message: %w", err)
 	}
+	o.maybeSummarizeSession(ctx, sessionID)
 
 	result := &RunResult{}
 
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		sess, _ := o.sessions.Get(sessionID)
 
-		messages := o.buildMessages(sess, content)
+		messages := o.buildMessages(ctx, sess, content)
 
 		if os.Getenv("LOG_LEVEL") == "debug" {
 			log.Printf("[LLM request] round %d, %d messages:", i+1, len(messages))
@@ -259,7 +307,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 				Role:    provider.RoleAssistant,
 				Content: resp.Content,
 			})
-			o.maybeRecordWorkflow(result, userMessage)
+			o.maybeRecordWorkflow(ctx, result, userMessage)
 			return result, nil
 		}
 
@@ -282,21 +330,26 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	return nil, fmt.Errorf("agent loop exceeded %d iterations", maxAgentLoopIterations)
 }
 
-func (o *Orchestrator) buildMessages(sess *state.Session, userMessage string) []provider.Message {
-	messages := make([]provider.Message, 0, len(sess.Messages)+3)
+func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string) []provider.Message {
+	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 
-	systemPrompt := o.buildSystemPrompt(userMessage)
+	systemPrompt := o.buildSystemPrompt(ctx, userMessage)
 	messages = append(messages, provider.Message{
 		Role:    provider.RoleSystem,
 		Content: systemPrompt,
 	})
-
+	if sess.Summary != "" {
+		messages = append(messages, provider.Message{
+			Role:    provider.RoleSystem,
+			Content: "Previous conversation summary: " + sess.Summary,
+		})
+	}
 	messages = append(messages, sess.Messages...)
 
 	return messages
 }
 
-func (o *Orchestrator) buildSystemPrompt(userMessage string) string {
+func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string) string {
 	var sb strings.Builder
 	sb.WriteString("You are an AI assistant with access to the following tools.\n\n")
 	sb.WriteString("When you receive plugin or tool results, reply to the user in a brief natural language answer. Do not simply repeat or echo the tool output; use it to answer the user's question or confirm what was done.\n\n")
@@ -327,8 +380,7 @@ func (o *Orchestrator) buildSystemPrompt(userMessage string) string {
 		sb.WriteString("\n")
 	}
 
-	workflows := o.memory.Search(userMessage)
-	workflowMemories := filterByTag(workflows, "workflow")
+	workflowMemories, _ := o.memory.MemoriesForContext(ctx, "workflow")
 	if len(workflowMemories) > 0 {
 		sb.WriteString("## Relevant past workflows\n")
 		for _, m := range workflowMemories {
@@ -418,13 +470,24 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		}
 	}
 
+	actorID := actor.Actor(ctx)
+	if actorID != "" && o.permissionChecker != nil && call.Plugin != o.permissionPluginName {
+		allowed, err := o.permissionChecker.Allowed(ctx, actorID, call.Plugin)
+		if err != nil || !allowed {
+			return ToolResult{
+				CallID: call.ID,
+				Error:  "permission denied",
+			}
+		}
+	}
+
 	result := o.guard.ExecuteWithTimeout(ctx, exec, call)
 	result = o.guard.ValidateResult(call, result)
 	result = o.guard.Sanitize(result)
 	return result
 }
 
-func (o *Orchestrator) maybeRecordWorkflow(result *RunResult, userMessage string) {
+func (o *Orchestrator) maybeRecordWorkflow(ctx context.Context, result *RunResult, userMessage string) {
 	if len(result.ToolCalls) < 2 {
 		return
 	}
@@ -436,7 +499,73 @@ func (o *Orchestrator) maybeRecordWorkflow(result *RunResult, userMessage string
 	}
 	sb.WriteString("outcome: success\n")
 
-	o.memory.Add(sb.String(), "workflow")
+	actorID := actor.Actor(ctx)
+	_, _ = o.memory.AddScoped(ctx, actorID, sb.String(), "workflow")
+}
+
+// maybeSummarizeSession runs summarization when the session has enough messages and config is set.
+func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID string) {
+	if o.summarizeAfterMessages <= 0 || o.maxMessagesAfterSummary <= 0 {
+		return
+	}
+	sess, err := o.sessions.Get(sessionID)
+	if err != nil {
+		return
+	}
+	if len(sess.Messages) < o.summarizeAfterMessages {
+		return
+	}
+	keep := o.maxMessagesAfterSummary
+	if keep > len(sess.Messages) {
+		keep = len(sess.Messages)
+	}
+	toSummarize := sess.Messages[:len(sess.Messages)-keep]
+	keepMessages := sess.Messages[len(sess.Messages)-keep:]
+
+	var sysPrompt, userContent string
+	if sess.Summary != "" {
+		sysPrompt = o.summarizeUpdatePrompt
+		if sysPrompt == "" {
+			sysPrompt = defaultSummarizeUpdatePrompt
+		}
+		var b strings.Builder
+		b.WriteString("Previous summary: ")
+		b.WriteString(sess.Summary)
+		b.WriteString("\n\nNew messages:\n")
+		for _, m := range toSummarize {
+			b.WriteString(string(m.Role) + ": " + m.Content + "\n")
+		}
+		userContent = b.String()
+	} else {
+		sysPrompt = o.summarizePrompt
+		if sysPrompt == "" {
+			sysPrompt = defaultSummarizePrompt
+		}
+		var b strings.Builder
+		for _, m := range toSummarize {
+			b.WriteString(string(m.Role) + ": " + m.Content + "\n")
+		}
+		userContent = b.String()
+	}
+	req := &provider.CompletionRequest{
+		Model: "",
+		Messages: []provider.Message{
+			{Role: provider.RoleSystem, Content: sysPrompt},
+			{Role: provider.RoleUser, Content: userContent},
+		},
+	}
+	resp, err := o.llm.Complete(ctx, req)
+	if err != nil {
+		log.Printf("Warning: session summarization: %v", err)
+		return
+	}
+	newSummary := strings.TrimSpace(resp.Content)
+	if newSummary == "" {
+		return
+	}
+	if err := o.sessions.SetSummary(sessionID, newSummary, keepMessages); err != nil {
+		log.Printf("Warning: set session summary: %v", err)
+	}
 }
 
 // RunAction executes a single plugin action directly, bypassing the LLM loop.
@@ -479,4 +608,55 @@ func formatToolResultMessage(result ToolResult) string {
 		return fmt.Sprintf("[tool_result] error: %s", result.Error)
 	}
 	return fmt.Sprintf("[tool_result] %s", result.Content)
+}
+
+// permissionCheckerImpl invokes the permission plugin with action "check" and args actor, plugin.
+type permissionCheckerImpl struct {
+	registry   *ToolRegistry
+	guard      *Guard
+	pluginName string
+}
+
+// NewPermissionChecker returns a PermissionChecker that calls the given plugin with action PermissionAction.
+func NewPermissionChecker(registry *ToolRegistry, guard *Guard, pluginName string) PermissionChecker {
+	if pluginName == "" {
+		return nil
+	}
+	return &permissionCheckerImpl{registry: registry, guard: guard, pluginName: pluginName}
+}
+
+func (p *permissionCheckerImpl) Allowed(ctx context.Context, actorID, plugin string) (bool, error) {
+	if !p.registry.HasAction(p.pluginName, PermissionAction) {
+		return false, nil // deny if permission plugin doesn't expose the action
+	}
+	exec, ok := p.registry.GetExecutor(p.pluginName)
+	if !ok {
+		return false, nil
+	}
+	call := ToolCall{
+		ID:     fmt.Sprintf("permission-check-%s-%s", actorID, plugin),
+		Plugin: p.pluginName,
+		Action: PermissionAction,
+		Args:   map[string]string{"actor": actorID, "plugin": plugin},
+	}
+	result := p.guard.ExecuteWithTimeout(ctx, exec, call)
+	if result.Error != "" {
+		return false, nil // deny on error
+	}
+	return parsePermissionResult(result.Content), nil
+}
+
+// parsePermissionResult interprets permission plugin output: "true" or JSON {"allowed": true} -> true.
+func parsePermissionResult(content string) bool {
+	content = strings.TrimSpace(content)
+	if strings.EqualFold(content, "true") {
+		return true
+	}
+	var v struct {
+		Allowed bool `json:"allowed"`
+	}
+	if err := json.Unmarshal([]byte(content), &v); err == nil && v.Allowed {
+		return true
+	}
+	return false
 }

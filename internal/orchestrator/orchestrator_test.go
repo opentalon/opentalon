@@ -556,7 +556,7 @@ func TestPreparerReturnsInvokeSingle(t *testing.T) {
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1")
 	preparers := []ContentPreparerEntry{{Plugin: "invoker", Action: "prepare", Insecure: false}} // trusted: can invoke
-	orch := NewWithRules(&fakeLLM{responses: []string{"LLM reply"}}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, nil, preparers, nil)
+	orch := NewWithRules(&fakeLLM{responses: []string{"LLM reply"}}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, nil, preparers, nil, nil, "", 0, 0, "", "")
 
 	result, err := orch.Run(context.Background(), "s1", "deploy branch one")
 	if err != nil {
@@ -594,7 +594,7 @@ func TestPreparerReturnsInvokeArray(t *testing.T) {
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1")
 	preparers := []ContentPreparerEntry{{Plugin: "invoker", Action: "prepare", Insecure: false}} // trusted: can invoke
-	orch := NewWithRules(&fakeLLM{responses: []string{"LLM reply"}}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, nil, preparers, nil)
+	orch := NewWithRules(&fakeLLM{responses: []string{"LLM reply"}}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, nil, preparers, nil, nil, "", 0, 0, "", "")
 
 	result, err := orch.Run(context.Background(), "s1", "analyze and create issue")
 	if err != nil {
@@ -656,7 +656,7 @@ func TestInsecurePreparerCannotInvoke(t *testing.T) {
 	preparers := []ContentPreparerEntry{
 		{Plugin: "insecure-preparer", Action: "prepare", Insecure: true},
 	}
-	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, nil, preparers, nil)
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, nil, preparers, nil, nil, "", 0, 0, "", "")
 
 	result, err := orch.Run(context.Background(), "s1", "deploy branch one")
 	if err != nil {
