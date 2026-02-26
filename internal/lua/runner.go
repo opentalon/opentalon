@@ -9,10 +9,18 @@ import (
 	lua "github.com/yuin/gopher-lua"
 )
 
+// InvokeStep is one step for preparer-driven invoke (run this plugin action without LLM).
+type InvokeStep struct {
+	Plugin string
+	Action string
+	Args   map[string]string
+}
+
 // PrepareResult is the result of running a Lua content preparer script.
 type PrepareResult struct {
-	Content   string // transformed content (or message when SendToLLM is false)
-	SendToLLM bool   // if false, skip LLM and return Content to the user
+	Content     string       // transformed content (or message when SendToLLM is false)
+	SendToLLM   bool         // if false, skip LLM and return Content or run InvokeSteps
+	InvokeSteps []InvokeStep // optional; when SendToLLM is false, run these steps instead of LLM
 }
 
 // RunPrepare runs the Lua script at scriptPath, calling the global prepare(text) function.
@@ -58,6 +66,7 @@ func RunPrepare(scriptPath, text string) (*PrepareResult, error) {
 		tbl := ret.(*lua.LTable)
 		sendToLLM := true
 		var message string
+		var invokeSteps []InvokeStep
 		tbl.ForEach(func(k, v lua.LValue) {
 			if k.String() == "send_to_llm" && v.Type() == lua.LTBool {
 				sendToLLM = v.(lua.LBool) == lua.LTrue
@@ -65,11 +74,66 @@ func RunPrepare(scriptPath, text string) (*PrepareResult, error) {
 			if k.String() == "message" && v.Type() == lua.LTString {
 				message = v.String()
 			}
+			if k.String() == "invoke" && v.Type() == lua.LTTable {
+				invokeSteps = parseInvokeSteps(v.(*lua.LTable))
+			}
 		})
-		return &PrepareResult{Content: message, SendToLLM: sendToLLM}, nil
+		return &PrepareResult{Content: message, SendToLLM: sendToLLM, InvokeSteps: invokeSteps}, nil
 	default:
 		return nil, fmt.Errorf("prepare() must return string or table { send_to_llm, message }, got %s", ret.Type().String())
 	}
+}
+
+// parseInvokeSteps parses Lua "invoke" as a single step table or array of step tables.
+func parseInvokeSteps(tbl *lua.LTable) []InvokeStep {
+	// Check for array: key "1" present means array of steps
+	if v := tbl.RawGetInt(1); v != lua.LNil {
+		var steps []InvokeStep
+		for i := 1; ; i++ {
+			stepVal := tbl.RawGetInt(i)
+			if stepVal == lua.LNil {
+				break
+			}
+			if stepTbl, ok := stepVal.(*lua.LTable); ok {
+				if s := parseOneInvokeStep(stepTbl); s != nil {
+					steps = append(steps, *s)
+				}
+			}
+		}
+		return steps
+	}
+	// Single step object
+	if s := parseOneInvokeStep(tbl); s != nil {
+		return []InvokeStep{*s}
+	}
+	return nil
+}
+
+func parseOneInvokeStep(tbl *lua.LTable) *InvokeStep {
+	plugin := getTableString(tbl, "plugin")
+	action := getTableString(tbl, "action")
+	if plugin == "" || action == "" {
+		return nil
+	}
+	args := make(map[string]string)
+	if argsVal := tbl.RawGetString("args"); argsVal != lua.LNil {
+		if argsTbl, ok := argsVal.(*lua.LTable); ok {
+			argsTbl.ForEach(func(k, v lua.LValue) {
+				if k.Type() == lua.LTString && v.Type() == lua.LTString {
+					args[k.String()] = v.String()
+				}
+			})
+		}
+	}
+	return &InvokeStep{Plugin: plugin, Action: action, Args: args}
+}
+
+func getTableString(tbl *lua.LTable, key string) string {
+	v := tbl.RawGetString(key)
+	if v != nil && v.Type() == lua.LTString {
+		return v.String()
+	}
+	return ""
 }
 
 // osModuleLoader provides a minimal os module: getenv and time (for math.randomseed).

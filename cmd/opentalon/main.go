@@ -178,11 +178,18 @@ func main() {
 
 	contentPreparers := make([]orchestrator.ContentPreparerEntry, 0, len(cfg.Orchestrator.ContentPreparers))
 	for _, p := range cfg.Orchestrator.ContentPreparers {
-		contentPreparers = append(contentPreparers, orchestrator.ContentPreparerEntry{
-			Plugin: p.Plugin,
-			Action: p.Action,
-			ArgKey: p.ArgKey,
-		})
+		entry := orchestrator.ContentPreparerEntry{
+			Plugin:   p.Plugin,
+			Action:   p.Action,
+			ArgKey:   p.ArgKey,
+			Insecure: true, // default: cannot run invoke
+		}
+		if !strings.HasPrefix(p.Plugin, "lua:") {
+			if plug, ok := cfg.Plugins[p.Plugin]; ok && plug.Insecure != nil && !*plug.Insecure {
+				entry.Insecure = false // trusted: can invoke
+			}
+		}
+		contentPreparers = append(contentPreparers, entry)
 	}
 	luaScriptPaths := buildLuaScriptPaths(ctx, dataDir, cfg)
 	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, cfg.Orchestrator.Rules, contentPreparers, luaScriptPaths)

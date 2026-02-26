@@ -134,11 +134,12 @@ type LogConfig struct {
 }
 
 type PluginConfig struct {
-	Enabled bool                   `yaml:"enabled"`
-	Path    string                 `yaml:"path"`   // local path to binary (optional if github is set)
-	GitHub  string                 `yaml:"github"` // e.g. "owner/repo" (bundler-style)
-	Ref     string                 `yaml:"ref"`    // branch, tag, or commit; resolved and pinned in plugins.lock
-	Config  map[string]interface{} `yaml:"config,omitempty"`
+	Enabled  bool                   `yaml:"enabled"`
+	Insecure *bool                  `yaml:"insecure"` // if true or omitted (default), preparer cannot run invoke; if false (trusted), can invoke
+	Path     string                 `yaml:"path"`     // local path to binary (optional if github is set)
+	GitHub   string                 `yaml:"github"`   // e.g. "owner/repo" (bundler-style)
+	Ref      string                 `yaml:"ref"`      // branch, tag, or commit; resolved and pinned in plugins.lock
+	Config   map[string]interface{} `yaml:"config,omitempty"`
 }
 
 type SchedulerConfig struct {
