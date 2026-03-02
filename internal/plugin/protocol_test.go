@@ -40,7 +40,7 @@ func TestParseHandshakeInvalid(t *testing.T) {
 		"garbage",
 		"2|unix|/tmp/x.sock",    // wrong version
 		"1|http|localhost:8080", // unsupported network
-		"1|unix",               // missing address
+		"1|unix",                // missing address
 	}
 	for _, input := range bad {
 		_, err := pkg.ParseHandshake(input)
