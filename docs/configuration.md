@@ -263,24 +263,24 @@ orchestrator:
 - **Normal case**: the preparer returns a string → that string is the user message for the LLM. Content preparers are **not** listed as callable tools; the LLM does not see or call them.
 - **Guard case**: the preparer returns JSON `{"send_to_llm": false, "message": "..."}` → the orchestrator skips the LLM and sends that message to the user.
 
-See [Hello World plugin](plugins/hello-world-plugin.md) for an example.
+See the [Hello World plugin](https://github.com/opentalon/hellow-world-plugin) for an example.
 
 ## Bundler-style plugins and channels
 
-Instead of a local `path`, you can point a plugin or channel at a GitHub repo and a **ref** (branch, tag, or commit). OpenTalon will clone the repo, build it, and pin the resolved commit in a lock file so installs are reproducible.
+Instead of a local `plugin` path, you can point a plugin or channel at a GitHub repo and a **ref** (branch, tag, or commit). OpenTalon will clone the repo, build it, and pin the resolved commit in a lock file so installs are reproducible.
 
 | Field   | Description |
 |--------|-------------|
-| `github` | Repo in the form `owner/repo` (e.g. `opentalon/hello-world-plugin`). |
+| `github` | Repo in the form `owner/repo` (e.g. `opentalon/hellow-world-plugin`). |
 | `ref`    | Branch, tag, or commit SHA (e.g. `main`, `v1.0.0`, or `abc123def`). |
 
-**Plugins** — use either `path` or `github` + `ref`:
+**Plugins** — use either `plugin` or `github` + `ref`:
 
 ```yaml
 plugins:
   hello-world:
     enabled: true
-    github: "opentalon/hello-world-plugin"
+    github: "opentalon/hellow-world-plugin"
     ref: "master"
 ```
 

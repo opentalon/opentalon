@@ -412,7 +412,7 @@ Other useful Make targets:
 
 ### Alternative: GitHub auto-fetch (bundler)
 
-Instead of building locally, you can let OpenTalon fetch and build plugins/channels on first run. In `config.yaml`, replace `path:` with `github:` and `ref:`:
+Instead of building locally, you can let OpenTalon fetch and build plugins/channels on first run. In `config.yaml`, replace `plugin:` with `github:` and `ref:`:
 
 ```yaml
 channels:
