@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -249,6 +250,14 @@ func expandEnv(s string) string {
 	})
 }
 
+func expandTilde(s string) string {
+	if strings.HasPrefix(s, "~") {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(s, "~"), "/"))
+	}
+	return s
+}
+
 func expandEnvInProviders(cfg *Config) {
 	for name, p := range cfg.Models.Providers {
 		p.BaseURL = expandEnv(p.BaseURL)
@@ -277,14 +286,14 @@ func Parse(data []byte) (*Config, error) {
 		home, _ := os.UserHomeDir()
 		cfg.State.DataDir = filepath.Join(home, ".opentalon")
 	} else {
-		cfg.State.DataDir = expandEnv(cfg.State.DataDir)
+		cfg.State.DataDir = expandTilde(expandEnv(cfg.State.DataDir))
 	}
 	if cfg.Log.File != "" {
-		cfg.Log.File = expandEnv(cfg.Log.File)
+		cfg.Log.File = expandTilde(expandEnv(cfg.Log.File))
 	}
 	if cfg.Lua != nil {
 		if cfg.Lua.ScriptsDir != "" {
-			cfg.Lua.ScriptsDir = expandEnv(cfg.Lua.ScriptsDir)
+			cfg.Lua.ScriptsDir = expandTilde(expandEnv(cfg.Lua.ScriptsDir))
 		}
 		if cfg.Lua.DefaultGitHub != "" {
 			cfg.Lua.DefaultGitHub = expandEnv(cfg.Lua.DefaultGitHub)
