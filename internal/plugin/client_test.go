@@ -1,82 +1,88 @@
 package plugin
 
 import (
+	"context"
 	"net"
-	"os"
-	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
-	pkg "github.com/opentalon/opentalon/pkg/plugin"
+	"github.com/opentalon/opentalon/proto/pluginpb"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-// fakePluginServer runs a plugin server on a Unix socket in the
-// current goroutine. It returns the listener so the caller can
-// close it.
-func fakePluginServer(t *testing.T, handler pkg.Handler) (network, address string, cleanup func()) {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "ot-pl-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sockPath := filepath.Join(dir, "p.sock")
+const bufSize = 1024 * 1024
 
-	ln, err := net.Listen("unix", sockPath)
-	if err != nil {
-		_ = os.RemoveAll(dir)
-		t.Fatal(err)
-	}
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go pkg.ServeConnection(handler, conn)
-		}
-	}()
-
-	return "unix", sockPath, func() {
-		_ = ln.Close()
-		_ = os.RemoveAll(dir)
-	}
+// fakePluginService is a gRPC server-side implementation for tests.
+type fakePluginService struct {
+	pluginpb.UnimplementedPluginServiceServer
 }
 
-type echoHandler struct{}
-
-func (h *echoHandler) Capabilities() pkg.CapabilitiesMsg {
-	return pkg.CapabilitiesMsg{
+func (s *fakePluginService) Capabilities(_ context.Context, _ *emptypb.Empty) (*pluginpb.PluginCapabilities, error) {
+	return &pluginpb.PluginCapabilities{
 		Name:        "echo",
 		Description: "Echoes arguments back",
-		Actions: []pkg.ActionMsg{
+		Actions: []*pluginpb.Action{
 			{
 				Name:        "say",
 				Description: "Echo a message",
-				Parameters: []pkg.ParameterMsg{
+				Parameters: []*pluginpb.Parameter{
 					{Name: "text", Description: "Text to echo", Type: "string", Required: true},
 				},
 			},
 		},
-	}
+	}, nil
 }
 
-func (h *echoHandler) Execute(req pkg.Request) pkg.Response {
+func (s *fakePluginService) Execute(_ context.Context, req *pluginpb.ToolCallRequest) (*pluginpb.ToolResultResponse, error) {
 	text := req.Args["text"]
 	if text == "" {
-		return pkg.Response{CallID: req.ID, Error: "missing text"}
+		return &pluginpb.ToolResultResponse{CallId: req.Id, Error: "missing text"}, nil
 	}
-	return pkg.Response{CallID: req.ID, Content: "echo: " + text}
+	return &pluginpb.ToolResultResponse{CallId: req.Id, Content: "echo: " + text}, nil
 }
 
-func TestClientDialAndCapabilities(t *testing.T) {
-	network, addr, cleanup := fakePluginServer(t, &echoHandler{})
-	defer cleanup()
+func startFakePluginServer(t *testing.T) *grpc.ClientConn {
+	t.Helper()
+	lis := bufconn.Listen(bufSize)
+	srv := grpc.NewServer()
+	pluginpb.RegisterPluginServiceServer(srv, &fakePluginService{})
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(func() { srv.Stop() })
 
-	client, err := Dial(network, addr, defaultDialTimeout)
+	cc, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) {
+			return lis.Dial()
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cc.Close() })
+	return cc
+}
+
+func newTestPluginClient(t *testing.T) *Client {
+	t.Helper()
+	cc := startFakePluginServer(t)
+	c := &Client{
+		conn:   cc,
+		client: pluginpb.NewPluginServiceClient(cc),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.fetchCapabilities(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestClientDialAndCapabilities(t *testing.T) {
+	client := newTestPluginClient(t)
 	defer func() { _ = client.Close() }()
 
 	if client.Name() != "echo" {
@@ -102,13 +108,7 @@ func TestClientDialAndCapabilities(t *testing.T) {
 }
 
 func TestClientExecute(t *testing.T) {
-	network, addr, cleanup := fakePluginServer(t, &echoHandler{})
-	defer cleanup()
-
-	client, err := Dial(network, addr, defaultDialTimeout)
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestPluginClient(t)
 	defer func() { _ = client.Close() }()
 
 	result := client.Execute(orchestrator.ToolCall{
@@ -130,13 +130,7 @@ func TestClientExecute(t *testing.T) {
 }
 
 func TestClientExecuteError(t *testing.T) {
-	network, addr, cleanup := fakePluginServer(t, &echoHandler{})
-	defer cleanup()
-
-	client, err := Dial(network, addr, defaultDialTimeout)
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestPluginClient(t)
 	defer func() { _ = client.Close() }()
 
 	result := client.Execute(orchestrator.ToolCall{
@@ -152,13 +146,7 @@ func TestClientExecuteError(t *testing.T) {
 }
 
 func TestClientMultipleCalls(t *testing.T) {
-	network, addr, cleanup := fakePluginServer(t, &echoHandler{})
-	defer cleanup()
-
-	client, err := Dial(network, addr, defaultDialTimeout)
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestPluginClient(t)
 	defer func() { _ = client.Close() }()
 
 	for i := 0; i < 10; i++ {
@@ -176,6 +164,7 @@ func TestClientMultipleCalls(t *testing.T) {
 
 func TestClientDialFailure(t *testing.T) {
 	_, err := Dial("unix", "/nonexistent/plugin.sock", defaultDialTimeout)
+	// gRPC NewClient is lazy, so dial failure happens on first RPC (fetchCapabilities).
 	if err == nil {
 		t.Error("expected error for nonexistent socket")
 	}
@@ -183,20 +172,15 @@ func TestClientDialFailure(t *testing.T) {
 
 func TestManagerLoadAndUnload(t *testing.T) {
 	registry := orchestrator.NewToolRegistry()
-	mgr := NewManager(registry)
 
-	network, addr, cleanup := fakePluginServer(t, &echoHandler{})
-	defer cleanup()
-
-	entry := PluginEntry{
-		Name:    "echo",
-		Path:    addr,
-		Enabled: true,
+	cc := startFakePluginServer(t)
+	client := &Client{
+		conn:   cc,
+		client: pluginpb.NewPluginServiceClient(cc),
 	}
-
-	// Directly wire up the client (bypass subprocess launch).
-	client, err := Dial(network, addr, defaultDialTimeout)
-	if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.fetchCapabilities(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -218,18 +202,11 @@ func TestManagerLoadAndUnload(t *testing.T) {
 		t.Errorf("content = %q", result.Content)
 	}
 
-	_ = entry // used for verification
 	registry.Deregister("echo")
 	_ = client.Close()
 
 	_, ok = registry.GetExecutor("echo")
 	if ok {
 		t.Error("echo should be deregistered")
-	}
-
-	// Verify manager itself can track.
-	names := mgr.List()
-	if len(names) != 0 {
-		t.Errorf("expected 0 managed plugins, got %d", len(names))
 	}
 }

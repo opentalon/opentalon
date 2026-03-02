@@ -2,104 +2,108 @@ package channel
 
 import (
 	"context"
-	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	pkg "github.com/opentalon/opentalon/pkg/channel"
+	"github.com/opentalon/opentalon/pkg/channel/channelpb"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// fakeChannelHandler simulates a channel plugin on the server side.
-type fakeChannelHandler struct {
-	caps     pkg.Capabilities
-	received []pkg.OutboundMessage
-	sendDone chan struct{} // closed when "send" was handled (for test sync)
+const bufSize = 1024 * 1024
+
+// fakeChannelService is a gRPC server-side implementation for tests.
+type fakeChannelService struct {
+	channelpb.UnimplementedChannelServiceServer
+	caps       *channelpb.ChannelCapabilities
+	tools      []*channelpb.ToolDefinition
+	configSeen map[string]interface{}
+	received   []*channelpb.OutboundMessage
 }
 
-func (h *fakeChannelHandler) serve(conn net.Conn) {
-	defer func() { _ = conn.Close() }()
-	for {
-		var req pkg.ChannelRequest
-		if err := pkg.ReadMessage(conn, &req); err != nil {
-			return
-		}
+func (s *fakeChannelService) Capabilities(_ context.Context, _ *emptypb.Empty) (*channelpb.ChannelCapabilities, error) {
+	return s.caps, nil
+}
 
-		var resp pkg.ChannelResponse
-		switch req.Method {
-		case "capabilities":
-			resp.Caps = &h.caps
-		case "start":
-			// After ack, send a test inbound message.
-			go func() {
-				time.Sleep(20 * time.Millisecond)
-				msg := pkg.ChannelResponse{
-					Msg: &pkg.InboundMessage{
-						ChannelID:      h.caps.ID,
-						ConversationID: "conv-1",
-						SenderID:       "user-1",
-						SenderName:     "Diana",
-						Content:        "hello from plugin",
-						Timestamp:      time.Now(),
-					},
-				}
-				_ = pkg.WriteMessage(conn, &msg)
-			}()
-		case "send":
-			if req.Msg != nil {
-				h.received = append(h.received, *req.Msg)
-			}
-			if h.sendDone != nil {
-				ch := h.sendDone
-				h.sendDone = nil
-				close(ch)
-			}
-		default:
-			resp.Error = fmt.Sprintf("unknown method %q", req.Method)
-		}
-
-		if err := pkg.WriteMessage(conn, &resp); err != nil {
-			return
-		}
+func (s *fakeChannelService) Configure(_ context.Context, req *channelpb.ConfigureRequest) (*channelpb.ConfigureResponse, error) {
+	if req.Config != nil {
+		s.configSeen = req.Config.AsMap()
 	}
+	return &channelpb.ConfigureResponse{}, nil
 }
 
-func fakeChannelServer(t *testing.T, handler *fakeChannelHandler) (network, address string, cleanup func()) {
+func (s *fakeChannelService) Tools(_ context.Context, _ *emptypb.Empty) (*channelpb.ToolsResponse, error) {
+	return &channelpb.ToolsResponse{Tools: s.tools}, nil
+}
+
+func (s *fakeChannelService) Start(_ *emptypb.Empty, stream channelpb.ChannelService_StartServer) error {
+	// Send one test inbound message.
+	msg := &channelpb.InboundMessage{
+		ChannelId:      s.caps.Id,
+		ConversationId: "conv-1",
+		SenderId:       "user-1",
+		SenderName:     "Diana",
+		Content:        "hello from plugin",
+		Timestamp:      timestamppb.Now(),
+	}
+	if err := stream.Send(msg); err != nil {
+		return err
+	}
+	// Keep stream open until cancelled.
+	<-stream.Context().Done()
+	return nil
+}
+
+func (s *fakeChannelService) Send(_ context.Context, msg *channelpb.OutboundMessage) (*channelpb.SendResponse, error) {
+	s.received = append(s.received, msg)
+	return &channelpb.SendResponse{}, nil
+}
+
+func startFakeChannelServer(t *testing.T, svc *fakeChannelService) *grpc.ClientConn {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "ot-ch-*")
+	lis := bufconn.Listen(bufSize)
+	srv := grpc.NewServer()
+	channelpb.RegisterChannelServiceServer(srv, svc)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(func() { srv.Stop() })
+
+	cc, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) {
+			return lis.Dial()
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sockPath := filepath.Join(dir, "ch.sock")
+	t.Cleanup(func() { _ = cc.Close() })
+	return cc
+}
 
-	ln, err := net.Listen("unix", sockPath)
-	if err != nil {
-		_ = os.RemoveAll(dir)
+func newTestClient(t *testing.T, svc *fakeChannelService) *PluginClient {
+	t.Helper()
+	cc := startFakeChannelServer(t, svc)
+	client := &PluginClient{
+		conn:   cc,
+		client: channelpb.NewChannelServiceClient(cc),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.fetchCapabilities(ctx); err != nil {
 		t.Fatal(err)
 	}
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go handler.serve(conn)
-		}
-	}()
-
-	return "unix", sockPath, func() {
-		_ = ln.Close()
-		_ = os.RemoveAll(dir)
-	}
+	return client
 }
 
 func TestChannelClientCapabilities(t *testing.T) {
-	handler := &fakeChannelHandler{
-		caps: pkg.Capabilities{
-			ID:               "test-slack",
+	svc := &fakeChannelService{
+		caps: &channelpb.ChannelCapabilities{
+			Id:               "test-slack",
 			Name:             "Slack",
 			Threads:          true,
 			Files:            true,
@@ -107,13 +111,7 @@ func TestChannelClientCapabilities(t *testing.T) {
 		},
 	}
 
-	network, addr, cleanup := fakeChannelServer(t, handler)
-	defer cleanup()
-
-	client, err := DialChannel(network, addr, defaultDialTimeout)
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, svc)
 	defer func() { _ = client.Stop() }()
 
 	if client.ID() != "test-slack" {
@@ -136,26 +134,12 @@ func TestChannelClientCapabilities(t *testing.T) {
 }
 
 func TestChannelClientSend(t *testing.T) {
-	// net.Pipe() + channel sync: standard Go pattern so test waits for server to process.
-	serverConn, clientConn := net.Pipe()
-	defer func() { _ = serverConn.Close(); _ = clientConn.Close() }()
-
-	handler := &fakeChannelHandler{
-		caps:     pkg.Capabilities{ID: "test-ch", Name: "Test"},
-		sendDone: make(chan struct{}),
+	svc := &fakeChannelService{
+		caps: &channelpb.ChannelCapabilities{Id: "test-ch", Name: "Test"},
 	}
-	go handler.serve(serverConn)
 
-	client := NewClientWithConn(clientConn, handler.caps)
+	client := newTestClient(t, svc)
 	defer func() { _ = client.Stop() }()
-
-	// Capture channel before handler runs so we don't race on handler.sendDone (handler sets it to nil).
-	sendDone := handler.sendDone
-
-	inbox := make(chan pkg.InboundMessage, 1)
-	if err := client.Start(context.Background(), inbox); err != nil {
-		t.Fatal(err)
-	}
 
 	msg := pkg.OutboundMessage{
 		ConversationID: "conv-1",
@@ -166,33 +150,20 @@ func TestChannelClientSend(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait for server to handle "send" before asserting (channel sync pattern).
-	select {
-	case <-sendDone:
-	case <-time.After(time.Second):
-		t.Fatal("timeout: server did not handle send")
+	if len(svc.received) != 1 {
+		t.Fatalf("expected 1 received message, got %d", len(svc.received))
 	}
-
-	if len(handler.received) != 1 {
-		t.Fatalf("expected 1 received message, got %d", len(handler.received))
-	}
-	if handler.received[0].Content != "hello from core" {
-		t.Errorf("content = %q", handler.received[0].Content)
+	if svc.received[0].Content != "hello from core" {
+		t.Errorf("content = %q", svc.received[0].Content)
 	}
 }
 
 func TestChannelClientReceive(t *testing.T) {
-	handler := &fakeChannelHandler{
-		caps: pkg.Capabilities{ID: "recv-ch", Name: "Recv"},
+	svc := &fakeChannelService{
+		caps: &channelpb.ChannelCapabilities{Id: "recv-ch", Name: "Recv"},
 	}
 
-	network, addr, cleanup := fakeChannelServer(t, handler)
-	defer cleanup()
-
-	client, err := DialChannel(network, addr, defaultDialTimeout)
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newTestClient(t, svc)
 	defer func() { _ = client.Stop() }()
 
 	inbox := make(chan pkg.InboundMessage, 10)
@@ -218,37 +189,65 @@ func TestChannelClientReceive(t *testing.T) {
 
 func TestChannelClientDialFailure(t *testing.T) {
 	_, err := DialChannel("unix", "/nonexistent/channel.sock", defaultDialTimeout)
+	// gRPC NewClient is lazy, so dial failure happens on first RPC (fetchCapabilities).
 	if err == nil {
 		t.Error("expected error for nonexistent socket")
 	}
 }
 
-func TestChannelProtocolRoundTrip(t *testing.T) {
-	server, client := net.Pipe()
-	defer func() { _ = server.Close() }()
-	defer func() { _ = client.Close() }()
+func TestChannelClientConfigure(t *testing.T) {
+	svc := &fakeChannelService{
+		caps: &channelpb.ChannelCapabilities{Id: "cfg-ch", Name: "Config"},
+	}
 
-	sent := pkg.ChannelRequest{
-		Method: "send",
-		Msg: &pkg.OutboundMessage{
-			ConversationID: "c1",
-			Content:        "test message",
+	client := newTestClient(t, svc)
+	defer func() { _ = client.Stop() }()
+
+	cfg := map[string]interface{}{
+		"app_token_env": "SLACK_APP_TOKEN",
+		"bot_token_env": "SLACK_BOT_TOKEN",
+	}
+	if err := client.Configure(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if svc.configSeen == nil {
+		t.Fatal("configure was not received by server")
+	}
+	if svc.configSeen["app_token_env"] != "SLACK_APP_TOKEN" {
+		t.Errorf("config app_token_env = %v", svc.configSeen["app_token_env"])
+	}
+}
+
+func TestChannelClientTools(t *testing.T) {
+	svc := &fakeChannelService{
+		caps: &channelpb.ChannelCapabilities{Id: "tools-ch", Name: "Tools"},
+		tools: []*channelpb.ToolDefinition{
+			{
+				Plugin:            "slack",
+				Action:            "post_message",
+				ActionDescription: "Post a message to Slack",
+				Parameters: []*channelpb.ToolParam{
+					{Name: "channel", Required: true},
+					{Name: "text", Required: true},
+				},
+			},
 		},
 	}
 
-	go func() { _ = pkg.WriteMessage(client, &sent) }()
+	client := newTestClient(t, svc)
+	defer func() { _ = client.Stop() }()
 
-	var received pkg.ChannelRequest
-	if err := pkg.ReadMessage(server, &received); err != nil {
+	tools, err := client.Tools()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if received.Method != "send" {
-		t.Errorf("method = %q", received.Method)
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
 	}
-	if received.Msg == nil {
-		t.Fatal("msg is nil")
+	if tools[0].Action != "post_message" {
+		t.Errorf("action = %q", tools[0].Action)
 	}
-	if received.Msg.Content != "test message" {
-		t.Errorf("content = %q", received.Msg.Content)
+	if len(tools[0].Parameters) != 2 {
+		t.Errorf("params = %d", len(tools[0].Parameters))
 	}
 }

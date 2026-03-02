@@ -2,15 +2,50 @@ syntax = "proto3";
 
 package opentalon.channel.v1;
 
-option go_package = "github.com/opentalon/opentalon/proto/channelpb";
+option go_package = "github.com/opentalon/opentalon/pkg/channel/channelpb";
 
 import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
 service ChannelService {
-  rpc ReceiveMessages(stream InboundMessage) returns (stream OutboundMessage);
   rpc Capabilities(google.protobuf.Empty) returns (ChannelCapabilities);
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  rpc Tools(google.protobuf.Empty) returns (ToolsResponse);
+  rpc Start(google.protobuf.Empty) returns (stream InboundMessage);
+  rpc Send(OutboundMessage) returns (SendResponse);
 }
+
+message ConfigureRequest {
+  google.protobuf.Struct config = 1;
+}
+
+message ConfigureResponse {}
+
+message ToolsResponse {
+  repeated ToolDefinition tools = 1;
+}
+
+message ToolDefinition {
+  string plugin = 1;
+  string description = 2;
+  string action = 3;
+  string action_description = 4;
+  string method = 5;
+  string url = 6;
+  string body = 7;
+  map<string, string> headers = 8;
+  repeated string required_env = 9;
+  repeated ToolParam parameters = 10;
+}
+
+message ToolParam {
+  string name = 1;
+  string description = 2;
+  bool required = 3;
+}
+
+message SendResponse {}
 
 message InboundMessage {
   string channel_id = 1;

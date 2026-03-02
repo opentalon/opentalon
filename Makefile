@@ -1,4 +1,4 @@
-.PHONY: all build test lint deps setup plugin channel run clean
+.PHONY: all build test lint deps setup plugin channel run clean proto
 
 BINARY      := opentalon
 CMD_PKG     := ./cmd/opentalon
@@ -39,6 +39,11 @@ $(CONSOLE_BIN):
 	fi
 	@echo "Building console channel..."
 	@cd $(CONSOLE_DIR) && go build -o console ./cmd/console
+
+# ── Proto ───────────────────────────────────────────────────────────────────
+
+proto:
+	buf generate
 
 # ── Core ────────────────────────────────────────────────────────────────────
 

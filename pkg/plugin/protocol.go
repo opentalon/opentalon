@@ -1,22 +1,16 @@
 package plugin
 
 import (
-	"encoding/binary"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net"
 	"strings"
 )
 
 const (
 	// HandshakeVersion is the protocol version in the handshake line.
 	HandshakeVersion = 1
-	// MaxMessageSize is the maximum length of a single protocol message (4 MB).
-	MaxMessageSize = 4 * 1024 * 1024
 )
 
-// Request is the wire format sent from the host to the plugin.
+// Request is the logical request from the host to the plugin.
 type Request struct {
 	Method string            `json:"method"`
 	ID     string            `json:"id,omitempty"`
@@ -25,7 +19,7 @@ type Request struct {
 	Args   map[string]string `json:"args,omitempty"`
 }
 
-// Response is the wire format sent from the plugin back to the host.
+// Response is the logical response from the plugin back to the host.
 type Response struct {
 	CallID  string           `json:"call_id,omitempty"`
 	Content string           `json:"content,omitempty"`
@@ -89,41 +83,4 @@ func ParseHandshake(line string) (Handshake, error) {
 		return Handshake{}, fmt.Errorf("unsupported network %q (want unix or tcp)", h.Network)
 	}
 	return h, nil
-}
-
-// WriteMessage sends a length-prefixed JSON message over a connection.
-func WriteMessage(conn net.Conn, v interface{}) error {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
-	if len(data) > MaxMessageSize {
-		return fmt.Errorf("message too large: %d bytes (max %d)", len(data), MaxMessageSize)
-	}
-	header := make([]byte, 4)
-	binary.BigEndian.PutUint32(header, uint32(len(data)))
-	if _, err := conn.Write(header); err != nil {
-		return fmt.Errorf("write header: %w", err)
-	}
-	if _, err := conn.Write(data); err != nil {
-		return fmt.Errorf("write body: %w", err)
-	}
-	return nil
-}
-
-// ReadMessage reads a length-prefixed JSON message from a connection.
-func ReadMessage(conn net.Conn, v interface{}) error {
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(conn, header); err != nil {
-		return fmt.Errorf("read header: %w", err)
-	}
-	size := binary.BigEndian.Uint32(header)
-	if size > MaxMessageSize {
-		return fmt.Errorf("message too large: %d bytes (max %d)", size, MaxMessageSize)
-	}
-	body := make([]byte, size)
-	if _, err := io.ReadFull(conn, body); err != nil {
-		return fmt.Errorf("read body: %w", err)
-	}
-	return json.Unmarshal(body, v)
 }

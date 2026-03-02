@@ -50,8 +50,14 @@ func (c *Connector) Connect(ctx context.Context, id, pluginRef string) (pkg.Chan
 	case pkg.ModeGRPC:
 		_, addr := pkg.ParsePluginAddress(pluginRef)
 		return c.connectRemote(id, addr)
+	case pkg.ModeDocker:
+		return nil, fmt.Errorf("channel %q: docker:// mode coming soon", id)
+	case pkg.ModeWebhook:
+		return nil, fmt.Errorf("channel %q: webhook (http/https) mode coming soon", id)
+	case pkg.ModeWebSocket:
+		return nil, fmt.Errorf("channel %q: websocket (ws/wss) mode coming soon", id)
 	default:
-		return nil, fmt.Errorf("channel %q: connection mode %s not yet implemented", id, mode)
+		return nil, fmt.Errorf("channel %q: unsupported connection mode %s", id, mode)
 	}
 }
 

@@ -136,7 +136,7 @@ type LogConfig struct {
 type PluginConfig struct {
 	Enabled  bool                   `yaml:"enabled"`
 	Insecure *bool                  `yaml:"insecure"` // if true or omitted (default), preparer cannot run invoke; if false (trusted), can invoke
-	Path     string                 `yaml:"path"`     // local path to binary (optional if github is set)
+	Plugin   string                 `yaml:"plugin"`   // path to binary or grpc://... (optional if github is set)
 	GitHub   string                 `yaml:"github"`   // e.g. "owner/repo" (bundler-style)
 	Ref      string                 `yaml:"ref"`      // branch, tag, or commit; resolved and pinned in plugins.lock
 	Config   map[string]interface{} `yaml:"config,omitempty"`
@@ -159,7 +159,7 @@ type JobConfig struct {
 
 type ChannelConfig struct {
 	Enabled bool                   `yaml:"enabled"`
-	Path    string                 `yaml:"path"`   // path to binary or grpc://... (optional if github is set)
+	Plugin  string                 `yaml:"plugin"` // path to binary or grpc://... (optional if github is set)
 	GitHub  string                 `yaml:"github"` // e.g. "opentalon/slack-channel" (bundler-style)
 	Ref     string                 `yaml:"ref"`    // branch, tag, or commit; pinned in channels.lock
 	Config  map[string]interface{} `yaml:"config"`
@@ -298,7 +298,7 @@ func Parse(data []byte) (*Config, error) {
 
 func expandEnvInPlugins(cfg *Config) {
 	for name, p := range cfg.Plugins {
-		p.Path = expandEnv(p.Path)
+		p.Plugin = expandEnv(p.Plugin)
 		for k, v := range p.Config {
 			if s, ok := v.(string); ok {
 				p.Config[k] = expandEnv(s)
@@ -310,7 +310,7 @@ func expandEnvInPlugins(cfg *Config) {
 
 func expandEnvInChannels(cfg *Config) {
 	for name, ch := range cfg.Channels {
-		ch.Path = expandEnv(ch.Path)
+		ch.Plugin = expandEnv(ch.Plugin)
 		ch.GitHub = expandEnv(ch.GitHub)
 		ch.Ref = expandEnv(ch.Ref)
 		for k, v := range ch.Config {

@@ -2,14 +2,15 @@ package plugin
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
+
+	"github.com/opentalon/opentalon/proto/pluginpb"
+	"google.golang.org/grpc"
 )
 
 // SocketFileName is the Unix socket filename the server listens on.
-// When the host sets OPENTALON_PLUGIN_SOCK_DIR, the server creates the socket there.
 const SocketFileName = "plugin.sock"
 
 // Handler is the interface that plugin authors implement on the
@@ -19,10 +20,9 @@ type Handler interface {
 	Execute(req Request) Response
 }
 
-// Serve starts a Unix socket listener and serves requests from the
-// host using the given handler. It prints the handshake line to
-// stdout so the host can discover the socket. This function blocks
-// until the listener is closed.
+// Serve starts a gRPC server on a Unix socket and serves requests from the
+// host using the given handler. It prints the handshake line to stdout so the
+// host can discover the socket. This function blocks until the server is stopped.
 func Serve(handler Handler) error {
 	sockDir, err := os.MkdirTemp("", "opentalon-plugin-*")
 	if err != nil {
@@ -42,38 +42,8 @@ func Serve(handler Handler) error {
 		return fmt.Errorf("write handshake: %w", err)
 	}
 
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return fmt.Errorf("accept: %w", err)
-		}
-		go ServeConnection(handler, conn)
-	}
-}
+	srv := grpc.NewServer()
+	pluginpb.RegisterPluginServiceServer(srv, &grpcServer{handler: handler})
 
-// ServeConnection handles a single connection (used by Serve and by tests).
-func ServeConnection(handler Handler, conn net.Conn) {
-	defer func() { _ = conn.Close() }()
-	for {
-		var req Request
-		if err := ReadMessage(conn, &req); err != nil {
-			return // connection closed or broken
-		}
-
-		var resp Response
-		switch req.Method {
-		case "capabilities":
-			caps := handler.Capabilities()
-			resp.Caps = &caps
-		case "execute":
-			resp = handler.Execute(req)
-		default:
-			resp.Error = fmt.Sprintf("unknown method %q", req.Method)
-		}
-
-		if err := WriteMessage(conn, &resp); err != nil {
-			log.Printf("plugin server: write response: %v", err)
-			return
-		}
-	}
+	return srv.Serve(ln)
 }

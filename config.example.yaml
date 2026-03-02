@@ -50,8 +50,8 @@ orchestrator:
 channels:
   console:
     enabled: true
-    # Local path (after running: make setup)
-    path: "./channels/console-channel/console"
+    # Local binary (after running: make setup), or grpc://host:port for remote
+    plugin: "./channels/console-channel/console"
     # Or use GitHub refs — core auto-fetches, builds, and pins in channels.lock:
     # github: "opentalon/console-channel"
     # ref: "master"
@@ -61,9 +61,9 @@ plugins:
   hello-world:
     enabled: true
     # insecure: false  # set to false to allow this preparer to run invoke steps; default is true (cannot invoke)
-    # Option A: local path (build with: make plugin)
-    path: "./plugins/hello-world-plugin/hello-world-plugin"
-    # Option B: bundler-style — download from GitHub, pin in plugins.lock (ref: branch, tag, or commit)
+    # Local binary (after running: make setup), or grpc://host:port for remote
+    plugin: "./plugins/hello-world-plugin/hello-world-plugin"
+    # Or use GitHub refs — core auto-fetches, builds, and pins in plugins.lock:
     # github: "opentalon/hello-world-plugin"
     # ref: "master"
     config: {}

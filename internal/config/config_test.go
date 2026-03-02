@@ -398,18 +398,18 @@ models:
 channels:
   my-slack:
     enabled: true
-    path: "./plugins/opentalon-slack"
+    plugin: "./plugins/opentalon-slack"
     config:
       app_token: "${SLACK_APP_TOKEN}"
       bot_token: "${SLACK_BOT_TOKEN}"
   my-telegram:
     enabled: true
-    path: "grpc://telegram.internal:9001"
+    plugin: "grpc://telegram.internal:9001"
     config:
       bot_token: "static-token"
   disabled-channel:
     enabled: false
-    path: "docker://ghcr.io/opentalon/plugin-x:latest"
+    plugin: "docker://ghcr.io/opentalon/plugin-x:latest"
 `
 	cfg, err := Parse([]byte(yaml))
 	if err != nil {
@@ -423,8 +423,8 @@ channels:
 	if !slack.Enabled {
 		t.Error("my-slack should be enabled")
 	}
-	if slack.Path != "./plugins/opentalon-slack" {
-		t.Errorf("slack path = %q", slack.Path)
+	if slack.Plugin != "./plugins/opentalon-slack" {
+		t.Errorf("slack plugin = %q", slack.Plugin)
 	}
 	if slack.Config["app_token"] != "xapp-test" {
 		t.Errorf("slack app_token = %q, want xapp-test", slack.Config["app_token"])
@@ -434,8 +434,8 @@ channels:
 	}
 
 	tg := cfg.Channels["my-telegram"]
-	if tg.Path != "grpc://telegram.internal:9001" {
-		t.Errorf("telegram path = %q", tg.Path)
+	if tg.Plugin != "grpc://telegram.internal:9001" {
+		t.Errorf("telegram plugin = %q", tg.Plugin)
 	}
 
 	disabled := cfg.Channels["disabled-channel"]
@@ -452,14 +452,14 @@ models:
 channels:
   dynamic:
     enabled: true
-    path: "grpc://${MY_PLUGIN_HOST}:9001"
+    plugin: "grpc://${MY_PLUGIN_HOST}:9001"
 `
 	cfg, err := Parse([]byte(yaml))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Channels["dynamic"].Path != "grpc://myhost.internal:9001" {
-		t.Errorf("path = %q, want grpc://myhost.internal:9001", cfg.Channels["dynamic"].Path)
+	if cfg.Channels["dynamic"].Plugin != "grpc://myhost.internal:9001" {
+		t.Errorf("plugin = %q, want grpc://myhost.internal:9001", cfg.Channels["dynamic"].Plugin)
 	}
 }
 
@@ -484,19 +484,19 @@ models:
 channels:
   binary:
     enabled: true
-    path: "./plugins/my-plugin"
+    plugin: "./plugins/my-plugin"
   grpc:
     enabled: true
-    path: "grpc://host:9001"
+    plugin: "grpc://host:9001"
   docker:
     enabled: true
-    path: "docker://img:tag"
+    plugin: "docker://img:tag"
   webhook:
     enabled: true
-    path: "https://example.com/hook"
+    plugin: "https://example.com/hook"
   websocket:
     enabled: true
-    path: "wss://ws.example.com/ch"
+    plugin: "wss://ws.example.com/ch"
 `
 	cfg, err := Parse([]byte(yaml))
 	if err != nil {
@@ -515,16 +515,16 @@ models:
 plugins:
   gitlab:
     enabled: true
-    path: "./plugins/opentalon-gitlab"
+    plugin: "./plugins/opentalon-gitlab"
     config:
       token: "${GITLAB_TOKEN}"
       url: "https://gitlab.company.com"
   jira:
     enabled: true
-    path: "grpc://jira-plugin.internal:9002"
+    plugin: "grpc://jira-plugin.internal:9002"
   disabled-plug:
     enabled: false
-    path: "./plugins/old-plugin"
+    plugin: "./plugins/old-plugin"
 `
 	cfg, err := Parse([]byte(yaml))
 	if err != nil {
@@ -538,8 +538,8 @@ plugins:
 	if !gl.Enabled {
 		t.Error("gitlab should be enabled")
 	}
-	if gl.Path != "./plugins/opentalon-gitlab" {
-		t.Errorf("gitlab path = %q", gl.Path)
+	if gl.Plugin != "./plugins/opentalon-gitlab" {
+		t.Errorf("gitlab plugin = %q", gl.Plugin)
 	}
 	if gl.Config["token"] != "glpat-test" {
 		t.Errorf("gitlab token = %q, want glpat-test", gl.Config["token"])
@@ -549,8 +549,8 @@ plugins:
 	}
 
 	jira := cfg.Plugins["jira"]
-	if jira.Path != "grpc://jira-plugin.internal:9002" {
-		t.Errorf("jira path = %q", jira.Path)
+	if jira.Plugin != "grpc://jira-plugin.internal:9002" {
+		t.Errorf("jira plugin = %q", jira.Plugin)
 	}
 
 	disabled := cfg.Plugins["disabled-plug"]
