@@ -20,21 +20,6 @@ func capabilitiesToProto(c Capabilities) *channelpb.ChannelCapabilities {
 	}
 }
 
-func capabilitiesFromProto(pb *channelpb.ChannelCapabilities) Capabilities {
-	if pb == nil {
-		return Capabilities{}
-	}
-	return Capabilities{
-		ID:               pb.Id,
-		Name:             pb.Name,
-		Threads:          pb.Threads,
-		Files:            pb.Files,
-		Reactions:        pb.Reactions,
-		Edits:            pb.Edits,
-		MaxMessageLength: pb.MaxMessageLength,
-	}
-}
-
 // --- InboundMessage ---
 
 func inboundToProto(m InboundMessage) *channelpb.InboundMessage {
@@ -54,42 +39,7 @@ func inboundToProto(m InboundMessage) *channelpb.InboundMessage {
 	return pb
 }
 
-func inboundFromProto(pb *channelpb.InboundMessage) InboundMessage {
-	if pb == nil {
-		return InboundMessage{}
-	}
-	m := InboundMessage{
-		ChannelID:      pb.ChannelId,
-		ConversationID: pb.ConversationId,
-		ThreadID:       pb.ThreadId,
-		SenderID:       pb.SenderId,
-		SenderName:     pb.SenderName,
-		Content:        pb.Content,
-		Metadata:       pb.Metadata,
-	}
-	if pb.Timestamp != nil {
-		m.Timestamp = pb.Timestamp.AsTime()
-	}
-	for _, f := range pb.Files {
-		m.Files = append(m.Files, fileFromProto(f))
-	}
-	return m
-}
-
 // --- OutboundMessage ---
-
-func outboundToProto(m OutboundMessage) *channelpb.OutboundMessage {
-	pb := &channelpb.OutboundMessage{
-		ConversationId: m.ConversationID,
-		ThreadId:       m.ThreadID,
-		Content:        m.Content,
-		Metadata:       m.Metadata,
-	}
-	for _, f := range m.Files {
-		pb.Files = append(pb.Files, fileToProto(f))
-	}
-	return pb
-}
 
 func outboundFromProto(pb *channelpb.OutboundMessage) OutboundMessage {
 	if pb == nil {
@@ -159,45 +109,7 @@ func toolsToProto(tools []ToolDefinition) []*channelpb.ToolDefinition {
 	return out
 }
 
-func toolsFromProto(pbs []*channelpb.ToolDefinition) []ToolDefinition {
-	out := make([]ToolDefinition, len(pbs))
-	for i, pb := range pbs {
-		params := make([]ToolParam, len(pb.Parameters))
-		for j, p := range pb.Parameters {
-			params[j] = ToolParam{
-				Name:        p.Name,
-				Description: p.Description,
-				Required:    p.Required,
-			}
-		}
-		out[i] = ToolDefinition{
-			Plugin:      pb.Plugin,
-			Description: pb.Description,
-			Action:      pb.Action,
-			ActionDesc:  pb.ActionDescription,
-			Method:      pb.Method,
-			URL:         pb.Url,
-			Body:        pb.Body,
-			Headers:     pb.Headers,
-			RequiredEnv: pb.RequiredEnv,
-			Parameters:  params,
-		}
-	}
-	return out
-}
-
 // --- Config helpers ---
-
-func configToStruct(cfg map[string]interface{}) *structpb.Struct {
-	if cfg == nil {
-		return nil
-	}
-	s, err := structpb.NewStruct(cfg)
-	if err != nil {
-		return nil
-	}
-	return s
-}
 
 func configFromStruct(s *structpb.Struct) map[string]interface{} {
 	if s == nil {

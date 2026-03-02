@@ -98,7 +98,6 @@ func (c *PluginClient) Tools() ([]pkg.ToolDefinition, error) {
 	return toolsFromProto(resp.Tools), nil
 }
 
-
 // Start begins listening for inbound messages from the channel plugin.
 // Messages are pushed into the provided inbox channel.
 func (c *PluginClient) Start(ctx context.Context, inbox chan<- pkg.InboundMessage) error {

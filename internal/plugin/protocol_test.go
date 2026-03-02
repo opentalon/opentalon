@@ -38,7 +38,7 @@ func TestParseHandshakeInvalid(t *testing.T) {
 	bad := []string{
 		"",
 		"garbage",
-		"2|unix|/tmp/x.sock",   // wrong version
+		"2|unix|/tmp/x.sock",    // wrong version
 		"1|http|localhost:8080", // unsupported network
 		"1|unix",               // missing address
 	}
