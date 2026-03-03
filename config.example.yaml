@@ -57,6 +57,16 @@ channels:
     # ref: "master"
     config: {}
 
+  # YAML-driven channel (no compiled binary — runs in-process from channel.yaml spec)
+  # slack:
+  #   enabled: true
+  #   plugin: "./channels/slack/channel.yaml"   # .yaml → YAML runtime (in-process)
+  #   github: "opentalon/slack-channel"          # auto-fetches channel.yaml + tools.yaml
+  #   ref: "master"
+  #   config:
+  #     ack_reaction: eyes
+  #     done_reaction: white_check_mark
+
 plugins:
   hello-world:
     enabled: true

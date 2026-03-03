@@ -100,6 +100,7 @@ const (
 	ModeDocker                      // Docker container
 	ModeWebhook                     // HTTP webhook
 	ModeWebSocket                   // WebSocket connection
+	ModeYAML                        // YAML-driven channel (in-process)
 )
 
 func (m PluginMode) String() string {
@@ -114,6 +115,8 @@ func (m PluginMode) String() string {
 		return "webhook"
 	case ModeWebSocket:
 		return "websocket"
+	case ModeYAML:
+		return "yaml"
 	default:
 		return "unknown"
 	}

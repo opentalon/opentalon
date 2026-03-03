@@ -203,7 +203,7 @@ func main() {
 	handler := channel.NewMessageHandler(ensureSession, runner, orch.RunAction, toolRegistry.HasAction)
 
 	reg := channel.NewRegistry(handler)
-	channelManager := channel.NewManager(reg)
+	channelManager := channel.NewManager(reg, toolRegistry)
 	channelEntries := make([]channel.ChannelEntry, 0, len(cfg.Channels))
 	for name, ch := range cfg.Channels {
 		pathRef := ch.Plugin
