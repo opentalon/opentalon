@@ -38,10 +38,13 @@ func NewConnector() *Connector {
 	}
 }
 
-// Connect creates a Channel from the given plugin reference string.
+// Connect creates a Channel from the given channel entry.
 // For binary mode, it launches the binary and connects over Unix socket.
 // For remote gRPC mode, it dials the remote address directly.
-func (c *Connector) Connect(ctx context.Context, id, pluginRef string) (pkg.Channel, error) {
+// For YAML mode, it loads the spec and creates an in-process channel.
+func (c *Connector) Connect(ctx context.Context, entry ChannelEntry) (pkg.Channel, error) {
+	id := entry.Name
+	pluginRef := entry.Plugin
 	mode := pkg.DetectMode(pluginRef)
 
 	switch mode {
@@ -50,9 +53,27 @@ func (c *Connector) Connect(ctx context.Context, id, pluginRef string) (pkg.Chan
 	case pkg.ModeGRPC:
 		_, addr := pkg.ParsePluginAddress(pluginRef)
 		return c.connectRemote(id, addr)
+	case pkg.ModeYAML:
+		return c.connectYAML(ctx, entry)
+	case pkg.ModeDocker:
+		return nil, fmt.Errorf("channel %q: docker:// mode coming soon", id)
+	case pkg.ModeWebhook:
+		return nil, fmt.Errorf("channel %q: webhook (http/https) mode coming soon", id)
+	case pkg.ModeWebSocket:
+		return nil, fmt.Errorf("channel %q: websocket (ws/wss) mode coming soon", id)
 	default:
-		return nil, fmt.Errorf("channel %q: connection mode %s not yet implemented", id, mode)
+		return nil, fmt.Errorf("channel %q: unsupported connection mode %s", id, mode)
 	}
+}
+
+func (c *Connector) connectYAML(ctx context.Context, entry ChannelEntry) (pkg.Channel, error) {
+	spec, err := LoadYAMLChannelSpec(entry.Plugin)
+	if err != nil {
+		return nil, fmt.Errorf("channel %q: %w", entry.Name, err)
+	}
+	specDir := specDirFromPath(entry.Plugin)
+	ch := NewYAMLChannel(spec, specDir)
+	return ch, nil
 }
 
 // sockFileName is the Unix socket filename used when OPENTALON_CHANNEL_SOCK_DIR is set.

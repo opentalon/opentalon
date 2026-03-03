@@ -82,7 +82,7 @@ func main() {
 	ctx := context.Background()
 	pluginEntries := make([]plugin.PluginEntry, 0, len(cfg.Plugins))
 	for name, p := range cfg.Plugins {
-		path := p.Path
+		path := p.Plugin
 		if p.GitHub != "" && p.Ref != "" {
 			resolvedPath, err := bundle.EnsurePlugin(ctx, dataDir, name, p.GitHub, p.Ref)
 			if err != nil {
@@ -92,11 +92,11 @@ func main() {
 			path = resolvedPath
 		}
 		if path == "" {
-			log.Printf("Warning: plugin %s has no path and no github/ref", name)
+			log.Printf("Warning: plugin %s has no plugin ref and no github/ref", name)
 			continue
 		}
 		pluginEntries = append(pluginEntries, plugin.PluginEntry{
-			Name: name, Path: path, Enabled: p.Enabled, Config: p.Config,
+			Name: name, Plugin: path, Enabled: p.Enabled, Config: p.Config,
 		})
 	}
 	pluginManager := plugin.NewManager(toolRegistry)
@@ -203,10 +203,10 @@ func main() {
 	handler := channel.NewMessageHandler(ensureSession, runner, orch.RunAction, toolRegistry.HasAction)
 
 	reg := channel.NewRegistry(handler)
-	channelManager := channel.NewManager(reg)
+	channelManager := channel.NewManager(reg, toolRegistry)
 	channelEntries := make([]channel.ChannelEntry, 0, len(cfg.Channels))
 	for name, ch := range cfg.Channels {
-		pathRef := ch.Path
+		pathRef := ch.Plugin
 		if ch.GitHub != "" && ch.Ref != "" {
 			resolvedPath, err := bundle.EnsureChannel(ctx, dataDir, name, ch.GitHub, ch.Ref)
 			if err != nil {
@@ -216,11 +216,11 @@ func main() {
 			pathRef = resolvedPath
 		}
 		if pathRef == "" {
-			log.Printf("Warning: channel %s has no path and no github/ref", name)
+			log.Printf("Warning: channel %s has no plugin ref and no github/ref", name)
 			continue
 		}
 		channelEntries = append(channelEntries, channel.ChannelEntry{
-			Name: name, Path: pathRef, Enabled: ch.Enabled, Config: ch.Config,
+			Name: name, Plugin: pathRef, Enabled: ch.Enabled, Config: ch.Config,
 		})
 	}
 	if err := channelManager.LoadAll(ctx, channelEntries); err != nil {

@@ -1,4 +1,4 @@
-.PHONY: all build test lint deps setup plugin channel run clean
+.PHONY: all build test lint deps setup plugin channel run clean proto
 
 BINARY      := opentalon
 CMD_PKG     := ./cmd/opentalon
@@ -28,7 +28,7 @@ $(HELLO_WORLD_BIN):
 		git clone --depth 1 $(HELLO_WORLD_REPO) $(HELLO_WORLD_DIR); \
 	fi
 	@echo "Building hello-world plugin..."
-	@cd $(HELLO_WORLD_DIR) && go build -o hello-world-plugin .
+	@cd $(HELLO_WORLD_DIR) && go mod edit -replace github.com/opentalon/opentalon=../.. && go mod tidy && go build -o hello-world-plugin .
 
 channel: $(CONSOLE_BIN)
 
@@ -38,7 +38,12 @@ $(CONSOLE_BIN):
 		git clone --depth 1 $(CONSOLE_REPO) $(CONSOLE_DIR); \
 	fi
 	@echo "Building console channel..."
-	@cd $(CONSOLE_DIR) && go build -o console ./cmd/console
+	@cd $(CONSOLE_DIR) && go mod edit -replace github.com/opentalon/opentalon=../.. && go mod tidy && go build -o console ./cmd/console
+
+# ── Proto ───────────────────────────────────────────────────────────────────
+
+proto:
+	buf generate
 
 # ── Core ────────────────────────────────────────────────────────────────────
 

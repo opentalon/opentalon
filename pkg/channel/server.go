@@ -3,10 +3,12 @@ package channel
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
+
+	"github.com/opentalon/opentalon/pkg/channel/channelpb"
+	"google.golang.org/grpc"
 )
 
 // SocketFileName is the Unix socket filename used when OPENTALON_CHANNEL_SOCK_DIR is set.
@@ -14,14 +16,15 @@ import (
 const SocketFileName = "channel.sock"
 
 // Serve runs the channel as a subprocess server. It creates a Unix listener,
-// then accepts one connection and serves the channel protocol: capabilities, start, send.
+// registers the gRPC ChannelService, then serves until the context is cancelled.
 // If OPENTALON_CHANNEL_SOCK_DIR is set (when launched by the host), the socket is
 // created there and no handshake is written to stdout, so the process can use
 // stdin/stdout for the terminal. Otherwise it creates a temp dir and prints
 // id|unix|path to stdout for the host to connect.
-// Serve blocks until the connection is closed or the context is cancelled.
+// Serve blocks until the context is cancelled.
 func Serve(ctx context.Context, ch Channel) error {
 	var sockDir string
+	var cleanup bool
 	if envDir := os.Getenv("OPENTALON_CHANNEL_SOCK_DIR"); envDir != "" {
 		sockDir = envDir
 	} else {
@@ -30,7 +33,12 @@ func Serve(ctx context.Context, ch Channel) error {
 		if err != nil {
 			return fmt.Errorf("create socket dir: %w", err)
 		}
-		defer func() { _ = os.RemoveAll(sockDir) }()
+		cleanup = true
+		defer func() {
+			if cleanup {
+				_ = os.RemoveAll(sockDir)
+			}
+		}()
 	}
 	sockPath := filepath.Join(sockDir, SocketFileName)
 
@@ -47,91 +55,17 @@ func Serve(ctx context.Context, ch Channel) error {
 		}
 	}
 
-	conn, err := ln.Accept()
-	if err != nil {
-		return fmt.Errorf("accept: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
+	srv := grpc.NewServer()
+	channelpb.RegisterChannelServiceServer(srv, &grpcServer{ch: ch})
 
-	reqCh := make(chan *ChannelRequest, 8)
+	// Shut down gracefully when context is cancelled.
 	go func() {
-		for {
-			var req ChannelRequest
-			if err := ReadMessage(conn, &req); err != nil {
-				return
-			}
-			reqCh <- &req
-		}
+		<-ctx.Done()
+		srv.GracefulStop()
 	}()
 
-	var inbox chan InboundMessage
-	for {
-		if inbox == nil {
-			req, ok := <-reqCh
-			if !ok {
-				return nil
-			}
-			resp, startInbox := handleRequest(ctx, ch, req, nil)
-			if resp != nil {
-				if err := WriteMessage(conn, resp); err != nil {
-					log.Printf("channel server: write: %v", err)
-					return err
-				}
-			}
-			if startInbox != nil {
-				inbox = startInbox
-			}
-		} else {
-			select {
-			case req, ok := <-reqCh:
-				if !ok {
-					return nil
-				}
-				resp, _ := handleRequest(ctx, ch, req, nil)
-				if resp != nil {
-					if err := WriteMessage(conn, resp); err != nil {
-						log.Printf("channel server: write: %v", err)
-						return err
-					}
-				}
-			case msg, ok := <-inbox:
-				if !ok {
-					inbox = nil
-					continue
-				}
-				if err := WriteMessage(conn, &ChannelResponse{Msg: &msg}); err != nil {
-					log.Printf("channel server: write inbound: %v", err)
-					return err
-				}
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
+	if err := srv.Serve(ln); err != nil {
+		return fmt.Errorf("serve: %w", err)
 	}
-}
-
-// handleRequest processes one ChannelRequest. Returns response to send and,
-// for "start", the inbox channel to read from.
-func handleRequest(ctx context.Context, ch Channel, req *ChannelRequest, _ chan InboundMessage) (*ChannelResponse, chan InboundMessage) {
-	switch req.Method {
-	case "capabilities":
-		caps := ch.Capabilities()
-		return &ChannelResponse{Caps: &caps}, nil
-	case "start":
-		inbox := make(chan InboundMessage, 32)
-		if err := ch.Start(ctx, inbox); err != nil {
-			return &ChannelResponse{Error: err.Error()}, nil
-		}
-		return &ChannelResponse{}, inbox
-	case "send":
-		if req.Msg == nil {
-			return &ChannelResponse{Error: "send: missing msg"}, nil
-		}
-		if err := ch.Send(ctx, *req.Msg); err != nil {
-			return &ChannelResponse{Error: err.Error()}, nil
-		}
-		return &ChannelResponse{}, nil
-	default:
-		return &ChannelResponse{Error: "unknown method " + req.Method}, nil
-	}
+	return nil
 }

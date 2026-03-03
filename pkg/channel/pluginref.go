@@ -26,6 +26,8 @@ func DetectMode(plugin string) PluginMode {
 		return ModeWebhook
 	case strings.HasPrefix(lower, "ws://"), strings.HasPrefix(lower, "wss://"):
 		return ModeWebSocket
+	case strings.HasSuffix(lower, ".yaml"), strings.HasSuffix(lower, ".yml"):
+		return ModeYAML
 	default:
 		return ModeBinary
 	}

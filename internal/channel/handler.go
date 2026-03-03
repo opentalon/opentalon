@@ -38,6 +38,7 @@ func NewMessageHandler(
 			ConversationID: msg.ConversationID,
 			ThreadID:       msg.ThreadID,
 			Content:        outContent,
+			Metadata:       msg.Metadata,
 		}, nil
 	}
 }

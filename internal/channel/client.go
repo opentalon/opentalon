@@ -3,71 +3,70 @@ package channel
 import (
 	"context"
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
 	pkg "github.com/opentalon/opentalon/pkg/channel"
+	"github.com/opentalon/opentalon/pkg/channel/channelpb"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
-// PluginClient connects to a channel plugin over a Unix socket or TCP
+// PluginClient connects to a channel plugin over gRPC
 // and implements the pkg.Channel interface.
 type PluginClient struct {
-	mu   sync.Mutex
-	conn net.Conn
-	caps pkg.Capabilities
+	conn   *grpc.ClientConn
+	client channelpb.ChannelServiceClient
+	caps   pkg.Capabilities
 
-	inbox  chan<- pkg.InboundMessage
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
-
-	// Single-reader demux: only receiveLoop reads from conn. When Send() is
-	// waiting for an ack, the next response is delivered here so the second
-	// user message is not consumed as a fake ack.
-	ackMu      sync.Mutex
-	pendingAck chan pkg.ChannelResponse
 }
 
-// DialChannel connects to a channel plugin and fetches its capabilities.
+// DialChannel connects to a channel plugin via gRPC and fetches its capabilities.
+// For Unix sockets, use network="unix" and address="/path/to/socket".
+// For TCP, use network="tcp" and address="host:port".
 func DialChannel(network, address string, timeout time.Duration) (*PluginClient, error) {
-	conn, err := net.DialTimeout(network, address, timeout)
+	var target string
+	switch network {
+	case "unix":
+		target = "unix:" + address
+	case "tcp":
+		target = address
+	default:
+		return nil, fmt.Errorf("unsupported network %q", network)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cc, err := grpc.NewClient(target,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("dial channel at %s://%s: %w", network, address, err)
 	}
 
-	c := &PluginClient{conn: conn}
-	if err := c.fetchCapabilities(); err != nil {
-		_ = conn.Close()
+	c := &PluginClient{
+		conn:   cc,
+		client: channelpb.NewChannelServiceClient(cc),
+	}
+	if err := c.fetchCapabilities(ctx); err != nil {
+		_ = cc.Close()
 		return nil, err
 	}
 	return c, nil
 }
 
-// NewClientWithConn is for testing: it creates a client that uses the given conn
-// and caps without dialing. Caller must run the server side on the other end of conn.
-func NewClientWithConn(conn net.Conn, caps pkg.Capabilities) *PluginClient {
-	return &PluginClient{conn: conn, caps: caps}
-}
-
-func (c *PluginClient) fetchCapabilities() error {
-	req := pkg.ChannelRequest{Method: "capabilities"}
-	if err := pkg.WriteMessage(c.conn, &req); err != nil {
-		return fmt.Errorf("request capabilities: %w", err)
+func (c *PluginClient) fetchCapabilities(ctx context.Context) error {
+	resp, err := c.client.Capabilities(ctx, &emptypb.Empty{})
+	if err != nil {
+		return fmt.Errorf("fetch capabilities: %w", err)
 	}
-
-	var resp pkg.ChannelResponse
-	if err := pkg.ReadMessage(c.conn, &resp); err != nil {
-		return fmt.Errorf("read capabilities: %w", err)
-	}
-	if resp.Error != "" {
-		return fmt.Errorf("capabilities error: %s", resp.Error)
-	}
-	if resp.Caps == nil {
-		return fmt.Errorf("channel returned empty capabilities")
-	}
-
-	c.caps = *resp.Caps
+	c.caps = capabilitiesFromProto(resp)
 	return nil
 }
 
@@ -77,116 +76,63 @@ func (c *PluginClient) ID() string { return c.caps.ID }
 // Capabilities returns the channel's declared capabilities.
 func (c *PluginClient) Capabilities() pkg.Capabilities { return c.caps }
 
-// Start begins listening for inbound messages from the channel plugin.
-// Messages are pushed into the provided inbox channel.
-func (c *PluginClient) Start(ctx context.Context, inbox chan<- pkg.InboundMessage) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.inbox = inbox
-	c.ctx, c.cancel = context.WithCancel(ctx)
-
-	// Tell the plugin to start streaming messages.
-	req := pkg.ChannelRequest{Method: "start"}
-	if err := pkg.WriteMessage(c.conn, &req); err != nil {
-		return fmt.Errorf("send start: %w", err)
+// Configure sends channel-specific config to the plugin before start.
+func (c *PluginClient) Configure(config map[string]interface{}) error {
+	s, err := structpb.NewStruct(config)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
 	}
-
-	c.wg.Add(1)
-	go c.receiveLoop()
+	_, err = c.client.Configure(context.Background(), &channelpb.ConfigureRequest{Config: s})
+	if err != nil {
+		return fmt.Errorf("configure: %w", err)
+	}
 	return nil
 }
 
-func (c *PluginClient) receiveLoop() {
+// Tools requests the channel's tool definitions.
+func (c *PluginClient) Tools() ([]pkg.ToolDefinition, error) {
+	resp, err := c.client.Tools(context.Background(), &emptypb.Empty{})
+	if err != nil {
+		return nil, fmt.Errorf("tools: %w", err)
+	}
+	return toolsFromProto(resp.Tools), nil
+}
+
+// Start begins listening for inbound messages from the channel plugin.
+// Messages are pushed into the provided inbox channel.
+func (c *PluginClient) Start(ctx context.Context, inbox chan<- pkg.InboundMessage) error {
+	c.ctx, c.cancel = context.WithCancel(ctx)
+
+	stream, err := c.client.Start(c.ctx, &emptypb.Empty{})
+	if err != nil {
+		return fmt.Errorf("start stream: %w", err)
+	}
+
+	c.wg.Add(1)
+	go c.receiveLoop(stream, inbox)
+	return nil
+}
+
+func (c *PluginClient) receiveLoop(stream channelpb.ChannelService_StartClient, inbox chan<- pkg.InboundMessage) {
 	defer c.wg.Done()
 	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			return
+		}
 		select {
+		case inbox <- inboundFromProto(msg):
 		case <-c.ctx.Done():
 			return
-		default:
-		}
-
-		var resp pkg.ChannelResponse
-		if err := pkg.ReadMessage(c.conn, &resp); err != nil {
-			select {
-			case <-c.ctx.Done():
-				return
-			default:
-			}
-			return
-		}
-
-		// If Send() is waiting for an ack, give it this response so the next
-		// inbound user message is not consumed as the ack.
-		c.ackMu.Lock()
-		pending := c.pendingAck
-		if pending != nil {
-			c.pendingAck = nil
-		}
-		c.ackMu.Unlock()
-		if pending != nil {
-			select {
-			case pending <- resp:
-			case <-c.ctx.Done():
-				return
-			}
-			continue
-		}
-		if resp.Msg != nil {
-			select {
-			case c.inbox <- *resp.Msg:
-			case <-c.ctx.Done():
-				return
-			}
 		}
 	}
 }
 
 // Send dispatches an outbound message to the channel plugin.
-// The ack is received via the single reader (receiveLoop) so the next inbound
-// user message is not mistakenly consumed as the ack.
 func (c *PluginClient) Send(ctx context.Context, msg pkg.OutboundMessage) error {
-	ackCh := make(chan pkg.ChannelResponse, 1)
-	c.ackMu.Lock()
-	if c.pendingAck != nil {
-		c.ackMu.Unlock()
-		return fmt.Errorf("concurrent Send not allowed")
-	}
-	c.pendingAck = ackCh
-	c.ackMu.Unlock()
-
-	c.mu.Lock()
-	req := pkg.ChannelRequest{Method: "send", Msg: &msg}
-	err := pkg.WriteMessage(c.conn, &req)
-	c.mu.Unlock()
+	_, err := c.client.Send(ctx, outboundToProto(msg))
 	if err != nil {
-		c.ackMu.Lock()
-		c.pendingAck = nil
-		c.ackMu.Unlock()
-		return fmt.Errorf("send message: %w", err)
-	}
-
-	var resp pkg.ChannelResponse
-	var done <-chan struct{}
-	if c.ctx != nil {
-		done = c.ctx.Done()
-	}
-	select {
-	case resp = <-ackCh:
-	case <-done:
-		c.ackMu.Lock()
-		c.pendingAck = nil
-		c.ackMu.Unlock()
-		if c.ctx != nil {
-			return c.ctx.Err()
-		}
-		return context.Canceled
-	}
-	c.ackMu.Lock()
-	c.pendingAck = nil
-	c.ackMu.Unlock()
-	if resp.Error != "" {
-		return fmt.Errorf("send error: %s", resp.Error)
+		return fmt.Errorf("send: %w", err)
 	}
 	return nil
 }
@@ -196,8 +142,97 @@ func (c *PluginClient) Stop() error {
 	if c.cancel != nil {
 		c.cancel()
 	}
-	// Close the connection to unblock any pending read in receiveLoop.
-	err := c.conn.Close()
 	c.wg.Wait()
-	return err
+	return c.conn.Close()
+}
+
+// --- Proto conversion helpers (delegate to pkg/channel) ---
+
+func capabilitiesFromProto(pb *channelpb.ChannelCapabilities) pkg.Capabilities {
+	if pb == nil {
+		return pkg.Capabilities{}
+	}
+	return pkg.Capabilities{
+		ID:               pb.Id,
+		Name:             pb.Name,
+		Threads:          pb.Threads,
+		Files:            pb.Files,
+		Reactions:        pb.Reactions,
+		Edits:            pb.Edits,
+		MaxMessageLength: pb.MaxMessageLength,
+	}
+}
+
+func inboundFromProto(pb *channelpb.InboundMessage) pkg.InboundMessage {
+	if pb == nil {
+		return pkg.InboundMessage{}
+	}
+	m := pkg.InboundMessage{
+		ChannelID:      pb.ChannelId,
+		ConversationID: pb.ConversationId,
+		ThreadID:       pb.ThreadId,
+		SenderID:       pb.SenderId,
+		SenderName:     pb.SenderName,
+		Content:        pb.Content,
+		Metadata:       pb.Metadata,
+	}
+	if pb.Timestamp != nil {
+		m.Timestamp = pb.Timestamp.AsTime()
+	}
+	for _, f := range pb.Files {
+		if f != nil {
+			m.Files = append(m.Files, pkg.FileAttachment{
+				Name:     f.Name,
+				MimeType: f.MimeType,
+				Data:     f.Data,
+				Size:     f.Size,
+			})
+		}
+	}
+	return m
+}
+
+func outboundToProto(m pkg.OutboundMessage) *channelpb.OutboundMessage {
+	pb := &channelpb.OutboundMessage{
+		ConversationId: m.ConversationID,
+		ThreadId:       m.ThreadID,
+		Content:        m.Content,
+		Metadata:       m.Metadata,
+	}
+	for _, f := range m.Files {
+		pb.Files = append(pb.Files, &channelpb.FileAttachment{
+			Name:     f.Name,
+			MimeType: f.MimeType,
+			Data:     f.Data,
+			Size:     f.Size,
+		})
+	}
+	return pb
+}
+
+func toolsFromProto(pbs []*channelpb.ToolDefinition) []pkg.ToolDefinition {
+	out := make([]pkg.ToolDefinition, len(pbs))
+	for i, pb := range pbs {
+		params := make([]pkg.ToolParam, len(pb.Parameters))
+		for j, p := range pb.Parameters {
+			params[j] = pkg.ToolParam{
+				Name:        p.Name,
+				Description: p.Description,
+				Required:    p.Required,
+			}
+		}
+		out[i] = pkg.ToolDefinition{
+			Plugin:      pb.Plugin,
+			Description: pb.Description,
+			Action:      pb.Action,
+			ActionDesc:  pb.ActionDescription,
+			Method:      pb.Method,
+			URL:         pb.Url,
+			Body:        pb.Body,
+			Headers:     pb.Headers,
+			RequiredEnv: pb.RequiredEnv,
+			Parameters:  params,
+		}
+	}
+	return out
 }

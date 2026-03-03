@@ -58,6 +58,39 @@ type Channel interface {
 	Stop() error
 }
 
+// ConfigurableChannel is an optional interface that channels can implement
+// to receive config from the host before Start is called.
+type ConfigurableChannel interface {
+	Configure(config map[string]interface{}) error
+}
+
+// ToolProvider is an optional interface that channels can implement
+// to advertise tool definitions (e.g. channel-specific actions).
+type ToolProvider interface {
+	Tools() []ToolDefinition
+}
+
+// ToolDefinition describes one tool action a channel provides.
+type ToolDefinition struct {
+	Plugin      string            `json:"plugin"`
+	Description string            `json:"description"`
+	Action      string            `json:"action"`
+	ActionDesc  string            `json:"action_description"`
+	Method      string            `json:"method"`
+	URL         string            `json:"url"`
+	Body        string            `json:"body"`
+	Headers     map[string]string `json:"headers"`
+	RequiredEnv []string          `json:"required_env"`
+	Parameters  []ToolParam       `json:"parameters"`
+}
+
+// ToolParam describes one parameter of a tool action.
+type ToolParam struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Required    bool   `json:"required"`
+}
+
 // PluginMode identifies how the core connects to a channel plugin.
 type PluginMode int
 
@@ -67,6 +100,7 @@ const (
 	ModeDocker                      // Docker container
 	ModeWebhook                     // HTTP webhook
 	ModeWebSocket                   // WebSocket connection
+	ModeYAML                        // YAML-driven channel (in-process)
 )
 
 func (m PluginMode) String() string {
@@ -81,6 +115,8 @@ func (m PluginMode) String() string {
 		return "webhook"
 	case ModeWebSocket:
 		return "websocket"
+	case ModeYAML:
+		return "yaml"
 	default:
 		return "unknown"
 	}

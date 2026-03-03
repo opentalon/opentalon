@@ -87,13 +87,66 @@ func CloneAndBuild(ctx context.Context, repo, ref, resolvedSHA, dir, binaryName 
 		}
 	}
 
+	// If running from source, point the cloned repo at our local core module
+	// so it builds against the same SDK version we're running. When installed
+	// as a standalone binary (no go.mod nearby), this is a no-op and the repo
+	// uses whatever version is in its own go.mod.
+	if coreRoot := findCoreModuleRoot(); coreRoot != "" {
+		modEdit := exec.CommandContext(ctx, goBin, "mod", "edit",
+			"-replace", "github.com/opentalon/opentalon="+coreRoot)
+		modEdit.Dir = dir
+		if output, err := modEdit.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("go mod edit -replace: %w (output: %s)", err, string(output))
+		}
+		modTidy := exec.CommandContext(ctx, goBin, "mod", "tidy")
+		modTidy.Dir = dir
+		if output, err := modTidy.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("go mod tidy: %w (output: %s)", err, string(output))
+		}
+	}
+
 	binaryPath = filepath.Join(dir, binaryName)
-	buildCmd := exec.CommandContext(ctx, goBin, "build", "-o", binaryName, ".")
-	buildCmd.Dir = dir
-	if output, err := buildCmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("go build: %w (output: %s)", err, string(output))
+
+	// Use the repo's own Makefile if present (it knows the correct build
+	// target, e.g. ./cmd/console for channels with a library root package).
+	// Pass BINARY_NAME so the Makefile writes the binary where we expect it.
+	if _, err := os.Stat(filepath.Join(dir, "Makefile")); err == nil {
+		buildCmd := exec.CommandContext(ctx, "make", "build", "BINARY_NAME="+binaryName)
+		buildCmd.Dir = dir
+		if output, err := buildCmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("make build: %w (output: %s)", err, string(output))
+		}
+	} else {
+		buildCmd := exec.CommandContext(ctx, goBin, "build", "-o", binaryName, ".")
+		buildCmd.Dir = dir
+		if output, err := buildCmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("go build: %w (output: %s)", err, string(output))
+		}
 	}
 	return binaryPath, nil
+}
+
+const coreModule = "github.com/opentalon/opentalon"
+
+// findCoreModuleRoot walks up from the working directory looking for a go.mod
+// that declares the core module. Returns the absolute path to that directory,
+// or "" if not found (e.g. running as an installed binary).
+func findCoreModuleRoot() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		if err == nil && strings.Contains(string(data), "module "+coreModule) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 // CloneOnly clones the repo at ref into dir and checkouts resolvedSHA (no build).

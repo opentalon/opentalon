@@ -20,7 +20,7 @@ const (
 // PluginEntry holds the config for one plugin.
 type PluginEntry struct {
 	Name    string
-	Path    string
+	Plugin  string // path to binary or grpc://...
 	Enabled bool
 	Config  map[string]interface{}
 }
@@ -75,7 +75,7 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 		return fmt.Errorf("plugin %q already loaded", entry.Name)
 	}
 
-	mode := detectPluginMode(entry.Path)
+	mode := detectPluginMode(entry.Plugin)
 
 	var client *Client
 	var proc *Process
@@ -117,7 +117,7 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 }
 
 func (m *Manager) launchBinary(ctx context.Context, entry PluginEntry) (*Process, *Client, error) {
-	proc := NewProcess(entry.Path)
+	proc := NewProcess(entry.Plugin)
 	hs, err := proc.Start(ctx, defaultHandshakeTimeout)
 	if err != nil {
 		return nil, nil, fmt.Errorf("start %s: %w", entry.Name, err)
@@ -133,7 +133,7 @@ func (m *Manager) launchBinary(ctx context.Context, entry PluginEntry) (*Process
 }
 
 func (m *Manager) connectRemote(entry PluginEntry) (*Client, error) {
-	addr := strings.TrimPrefix(entry.Path, "grpc://")
+	addr := strings.TrimPrefix(entry.Plugin, "grpc://")
 	client, err := Dial("tcp", addr, defaultDialTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("connect remote %s at %s: %w", entry.Name, addr, err)

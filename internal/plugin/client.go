@@ -3,34 +3,54 @@ package plugin
 import (
 	"context"
 	"fmt"
-	"net"
-	"sync"
 	"time"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	pkg "github.com/opentalon/opentalon/pkg/plugin"
+	"github.com/opentalon/opentalon/proto/pluginpb"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-// Client connects to a running plugin over a Unix socket or TCP
+// Client connects to a running plugin over gRPC
 // and implements orchestrator.PluginExecutor.
 type Client struct {
-	mu   sync.Mutex
-	conn net.Conn
-	name string
-	caps orchestrator.PluginCapability
+	conn   *grpc.ClientConn
+	client pluginpb.PluginServiceClient
+	name   string
+	caps   orchestrator.PluginCapability
 }
 
-// Dial connects to a plugin at the given network/address and fetches
+// Dial connects to a plugin at the given network/address via gRPC and fetches
 // its capabilities.
 func Dial(network, address string, timeout time.Duration) (*Client, error) {
-	conn, err := net.DialTimeout(network, address, timeout)
+	var target string
+	switch network {
+	case "unix":
+		target = "unix:" + address
+	case "tcp":
+		target = address
+	default:
+		return nil, fmt.Errorf("unsupported network %q", network)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cc, err := grpc.NewClient(target,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("dial plugin at %s://%s: %w", network, address, err)
 	}
 
-	c := &Client{conn: conn}
-	if err := c.fetchCapabilities(); err != nil {
-		_ = conn.Close()
+	c := &Client{
+		conn:   cc,
+		client: pluginpb.NewPluginServiceClient(cc),
+	}
+	if err := c.fetchCapabilities(ctx); err != nil {
+		_ = cc.Close()
 		return nil, err
 	}
 	return c, nil
@@ -41,25 +61,14 @@ func DialFromHandshake(hs pkg.Handshake, timeout time.Duration) (*Client, error)
 	return Dial(hs.Network, hs.Address, timeout)
 }
 
-func (c *Client) fetchCapabilities() error {
-	req := pkg.Request{Method: "capabilities"}
-	if err := pkg.WriteMessage(c.conn, &req); err != nil {
-		return fmt.Errorf("request capabilities: %w", err)
+func (c *Client) fetchCapabilities(ctx context.Context) error {
+	resp, err := c.client.Capabilities(ctx, &emptypb.Empty{})
+	if err != nil {
+		return fmt.Errorf("fetch capabilities: %w", err)
 	}
 
-	var resp pkg.Response
-	if err := pkg.ReadMessage(c.conn, &resp); err != nil {
-		return fmt.Errorf("read capabilities: %w", err)
-	}
-	if resp.Error != "" {
-		return fmt.Errorf("capabilities error: %s", resp.Error)
-	}
-	if resp.Caps == nil {
-		return fmt.Errorf("plugin returned empty capabilities")
-	}
-
-	c.name = resp.Caps.Name
-	c.caps = toPluginCapability(resp.Caps)
+	c.name = resp.Name
+	c.caps = toPluginCapability(resp)
 	return nil
 }
 
@@ -72,56 +81,35 @@ func (c *Client) Capability() orchestrator.PluginCapability { return c.caps }
 // Execute sends a tool call to the plugin and returns the result.
 // It implements orchestrator.PluginExecutor.
 func (c *Client) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return c.ExecuteContext(context.Background(), call)
+}
 
-	req := pkg.Request{
-		Method: "execute",
-		ID:     call.ID,
+// ExecuteContext is like Execute but respects context cancellation.
+func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+	resp, err := c.client.Execute(ctx, &pluginpb.ToolCallRequest{
+		Id:     call.ID,
 		Plugin: call.Plugin,
 		Action: call.Action,
 		Args:   call.Args,
+	})
+	if err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc: %v", err)}
 	}
-
-	if err := pkg.WriteMessage(c.conn, &req); err != nil {
-		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("write: %v", err)}
-	}
-
-	var resp pkg.Response
-	if err := pkg.ReadMessage(c.conn, &resp); err != nil {
-		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("read: %v", err)}
-	}
-
 	return orchestrator.ToolResult{
-		CallID:  resp.CallID,
+		CallID:  resp.CallId,
 		Content: resp.Content,
 		Error:   resp.Error,
 	}
 }
 
-// ExecuteContext is like Execute but respects context cancellation.
-func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
-	done := make(chan orchestrator.ToolResult, 1)
-	go func() { done <- c.Execute(call) }()
-
-	select {
-	case result := <-done:
-		return result
-	case <-ctx.Done():
-		return orchestrator.ToolResult{CallID: call.ID, Error: ctx.Err().Error()}
-	}
-}
-
-// Close terminates the connection.
+// Close terminates the gRPC connection.
 func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	return c.conn.Close()
 }
 
-func toPluginCapability(msg *pkg.CapabilitiesMsg) orchestrator.PluginCapability {
-	actions := make([]orchestrator.Action, len(msg.Actions))
-	for i, a := range msg.Actions {
+func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapability {
+	actions := make([]orchestrator.Action, len(pb.Actions))
+	for i, a := range pb.Actions {
 		params := make([]orchestrator.Parameter, len(a.Parameters))
 		for j, p := range a.Parameters {
 			params[j] = orchestrator.Parameter{
@@ -137,8 +125,8 @@ func toPluginCapability(msg *pkg.CapabilitiesMsg) orchestrator.PluginCapability 
 		}
 	}
 	return orchestrator.PluginCapability{
-		Name:        msg.Name,
-		Description: msg.Description,
+		Name:        pb.Name,
+		Description: pb.Description,
 		Actions:     actions,
 	}
 }

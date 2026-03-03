@@ -1,7 +1,6 @@
 package plugin
 
 import (
-	"net"
 	"testing"
 
 	pkg "github.com/opentalon/opentalon/pkg/plugin"
@@ -56,108 +55,5 @@ func TestHandshakeString(t *testing.T) {
 	got := hs.String()
 	if got != "1|unix|/tmp/p.sock" {
 		t.Errorf("String() = %q", got)
-	}
-}
-
-func TestWriteReadMessage(t *testing.T) {
-	server, client := net.Pipe()
-	defer func() { _ = server.Close() }()
-	defer func() { _ = client.Close() }()
-
-	sent := pkg.Request{Method: "execute", ID: "call-1", Plugin: "gitlab", Action: "list_mrs", Args: map[string]string{"project": "myapp"}}
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- pkg.WriteMessage(client, &sent)
-	}()
-
-	var received pkg.Request
-	if err := pkg.ReadMessage(server, &received); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-errCh; err != nil {
-		t.Fatal(err)
-	}
-
-	if received.Method != "execute" {
-		t.Errorf("method = %q", received.Method)
-	}
-	if received.ID != "call-1" {
-		t.Errorf("id = %q", received.ID)
-	}
-	if received.Plugin != "gitlab" {
-		t.Errorf("plugin = %q", received.Plugin)
-	}
-	if received.Action != "list_mrs" {
-		t.Errorf("action = %q", received.Action)
-	}
-	if received.Args["project"] != "myapp" {
-		t.Errorf("args[project] = %q", received.Args["project"])
-	}
-}
-
-func TestWriteReadResponse(t *testing.T) {
-	server, client := net.Pipe()
-	defer func() { _ = server.Close() }()
-	defer func() { _ = client.Close() }()
-
-	sent := pkg.Response{
-		CallID:  "call-1",
-		Content: "merge request created",
-	}
-
-	go func() { _ = pkg.WriteMessage(server, &sent) }()
-
-	var received pkg.Response
-	if err := pkg.ReadMessage(client, &received); err != nil {
-		t.Fatal(err)
-	}
-	if received.CallID != "call-1" {
-		t.Errorf("call_id = %q", received.CallID)
-	}
-	if received.Content != "merge request created" {
-		t.Errorf("content = %q", received.Content)
-	}
-}
-
-func TestCapabilitiesRoundTrip(t *testing.T) {
-	server, client := net.Pipe()
-	defer func() { _ = server.Close() }()
-	defer func() { _ = client.Close() }()
-
-	sent := pkg.Response{
-		Caps: &pkg.CapabilitiesMsg{
-			Name:        "gitlab",
-			Description: "GitLab integration",
-			Actions: []pkg.ActionMsg{
-				{
-					Name:        "list_mrs",
-					Description: "List merge requests",
-					Parameters: []pkg.ParameterMsg{
-						{Name: "project", Description: "Project ID", Type: "string", Required: true},
-					},
-				},
-			},
-		},
-	}
-
-	go func() { _ = pkg.WriteMessage(server, &sent) }()
-
-	var received pkg.Response
-	if err := pkg.ReadMessage(client, &received); err != nil {
-		t.Fatal(err)
-	}
-
-	if received.Caps == nil {
-		t.Fatal("caps is nil")
-	}
-	if received.Caps.Name != "gitlab" {
-		t.Errorf("name = %q", received.Caps.Name)
-	}
-	if len(received.Caps.Actions) != 1 {
-		t.Fatalf("actions = %d", len(received.Caps.Actions))
-	}
-	if received.Caps.Actions[0].Parameters[0].Required != true {
-		t.Error("parameter should be required")
 	}
 }
