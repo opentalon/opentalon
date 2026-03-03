@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	pkg "github.com/opentalon/opentalon/pkg/channel"
 	"github.com/coder/websocket"
+	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
 // runInit executes the given init steps, storing results in selfVars.
