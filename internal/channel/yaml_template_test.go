@@ -1,7 +1,6 @@
 package channel
 
 import (
-	"os"
 	"testing"
 )
 
@@ -14,9 +13,9 @@ func TestSubstituteTemplate(t *testing.T) {
 	}
 
 	tests := []struct {
-		name   string
-		input  string
-		want   string
+		name  string
+		input string
+		want  string
 	}{
 		{
 			name:  "self namespace",
@@ -71,8 +70,7 @@ func TestSubstituteTemplate(t *testing.T) {
 }
 
 func TestSubstituteTemplateEnv(t *testing.T) {
-	os.Setenv("TEST_YAML_TEMPLATE_VAR", "secret123")
-	defer os.Unsetenv("TEST_YAML_TEMPLATE_VAR")
+	t.Setenv("TEST_YAML_TEMPLATE_VAR", "secret123")
 
 	got := substituteTemplate("Bearer {{env.TEST_YAML_TEMPLATE_VAR}}", nil)
 	want := "Bearer secret123"
@@ -82,7 +80,7 @@ func TestSubstituteTemplateEnv(t *testing.T) {
 }
 
 func TestSubstituteTemplateEnvMissing(t *testing.T) {
-	os.Unsetenv("NONEXISTENT_YAML_VAR_12345")
+	t.Setenv("NONEXISTENT_YAML_VAR_12345", "")
 	got := substituteTemplate("val={{env.NONEXISTENT_YAML_VAR_12345}}", nil)
 	want := "val="
 	if got != want {

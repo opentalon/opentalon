@@ -7,11 +7,11 @@ import (
 
 func TestChunkMessage(t *testing.T) {
 	tests := []struct {
-		name     string
-		msg      string
-		maxLen   int
-		wantN    int
-		wantAll  string // concatenated chunks should equal original
+		name    string
+		msg     string
+		maxLen  int
+		wantN   int
+		wantAll string // concatenated chunks should equal original
 	}{
 		{
 			name:    "fits in one chunk",

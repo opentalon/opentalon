@@ -59,14 +59,14 @@ type ReconnectSpec struct {
 
 // InboundSpec describes how to process incoming WebSocket frames.
 type InboundSpec struct {
-	Ack              AckSpec         `yaml:"ack"`
-	EventPath        string          `yaml:"event_path"`
-	EventTypes       []string        `yaml:"event_types"`
-	AlwaysProcessWhen *FieldMatch    `yaml:"always_process_when"`
-	Skip             []SkipRule      `yaml:"skip"`
-	Mapping          MappingSpec     `yaml:"mapping"`
-	Transforms       []Transform     `yaml:"transforms"`
-	Dedup            DedupSpec       `yaml:"dedup"`
+	Ack               AckSpec     `yaml:"ack"`
+	EventPath         string      `yaml:"event_path"`
+	EventTypes        []string    `yaml:"event_types"`
+	AlwaysProcessWhen *FieldMatch `yaml:"always_process_when"`
+	Skip              []SkipRule  `yaml:"skip"`
+	Mapping           MappingSpec `yaml:"mapping"`
+	Transforms        []Transform `yaml:"transforms"`
+	Dedup             DedupSpec   `yaml:"dedup"`
 }
 
 // AckSpec describes how to acknowledge a frame.

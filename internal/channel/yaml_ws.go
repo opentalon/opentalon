@@ -12,7 +12,7 @@ import (
 	"time"
 
 	pkg "github.com/opentalon/opentalon/pkg/channel"
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // runInit executes the given init steps, storing results in selfVars.
@@ -135,7 +135,7 @@ func (ch *YAMLChannel) connectAndRead() error {
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 
 	log.Printf("yaml-channel: %s connected to WebSocket", ch.spec.ID)
 
