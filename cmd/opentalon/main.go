@@ -124,7 +124,7 @@ func main() {
 	}
 	for _, e := range pluginEntries {
 		if e.Enabled && dataDir != "" {
-			if err := store.RunPluginMigrations(dataDir, e.Name, e.Path); err != nil {
+			if err := store.RunPluginMigrations(dataDir, e.Name, e.Plugin); err != nil {
 				log.Printf("Warning: plugin %s migrations: %v", e.Name, err)
 			}
 		}
