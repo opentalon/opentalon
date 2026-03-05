@@ -51,6 +51,10 @@ type PermissionChecker interface {
 	Allowed(ctx context.Context, actorID, plugin string) (bool, error)
 }
 
+// ContextArgProvider returns a value for a named context arg (e.g. "session_id") from the request context.
+// Used to inject args into tool calls when an action declares InjectContextArgs.
+type ContextArgProvider func(ctx context.Context, name string) string
+
 // OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check, no summarization).
 type OrchestratorOpts struct {
 	CustomRules             []string
@@ -58,6 +62,8 @@ type OrchestratorOpts struct {
 	LuaScriptPaths          map[string]string
 	PermissionChecker       PermissionChecker
 	PermissionPluginName    string
+	RuntimePromptPath       string // optional path to editable prompt file (e.g. data_dir/custom_prompt.txt); appended to system prompt
+	ContextArgProviders     map[string]ContextArgProvider // optional; if nil, default providers (e.g. session_id) are used
 	SummarizeAfterMessages  int    // 0 = off
 	MaxMessagesAfterSummary int    // keep this many messages after summarization
 	SummarizePrompt         string // empty = default English
@@ -79,6 +85,7 @@ type SessionStoreInterface interface {
 	AddMessage(id string, msg provider.Message) error
 	SetModel(id string, model provider.ModelRef) error
 	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op
+	Delete(id string) error // remove session (e.g. for clear_session command)
 }
 
 type Orchestrator struct {
@@ -94,12 +101,14 @@ type Orchestrator struct {
 	luaScriptPaths          map[string]string             // optional; plugin name -> path to .lua script (for "lua:name" preparers)
 	permissionChecker       PermissionChecker             // optional; when set, executeCall checks permission before running
 	permissionPluginName    string                        // name of the permission plugin (skip permission check when executing it)
+	runtimePromptPath       string                        // optional; if set, buildSystemPrompt appends file contents
+	contextArgProviders     map[string]ContextArgProvider  // name -> extract from context; used to inject args per action
 	summarizeAfterMessages  int                           // 0 = off; after this many messages run summarization
 	maxMessagesAfterSummary int                           // keep this many messages after summarization
 	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
 	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
 	planner                 *pipeline.Planner             // nil = pipeline disabled
-	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
+	pendingPipelines        map[string]*pipeline.Pipeline  // sessionID -> pending pipeline
 	pipelineConfig          pipeline.PipelineConfig
 }
 
@@ -107,6 +116,25 @@ const (
 	defaultSummarizePrompt       = "Summarize the following conversation in a short paragraph."
 	defaultSummarizeUpdatePrompt = "Update the given conversation summary with the following new exchange. Keep the result to a short paragraph."
 )
+
+// defaultContextArgProviders returns built-in providers only for opaque identifiers (e.g. session_id).
+// No session messages, conversation text, or other sensitive content is exposed to plugins via this mechanism.
+func defaultContextArgProviders(custom map[string]ContextArgProvider) map[string]ContextArgProvider {
+	builtin := map[string]ContextArgProvider{
+		"session_id": func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
+	}
+	if len(custom) == 0 {
+		return builtin
+	}
+	out := make(map[string]ContextArgProvider, len(builtin)+len(custom))
+	for k, v := range builtin {
+		out[k] = v
+	}
+	for k, v := range custom {
+		out[k] = v
+	}
+	return out
+}
 
 func New(
 	llm LLMClient,
@@ -152,6 +180,8 @@ func NewWithRules(
 		luaScriptPaths:          opts.LuaScriptPaths,
 		permissionChecker:       opts.PermissionChecker,
 		permissionPluginName:    opts.PermissionPluginName,
+		runtimePromptPath:       opts.RuntimePromptPath,
+		contextArgProviders:     defaultContextArgProviders(opts.ContextArgProviders),
 		summarizeAfterMessages:  opts.SummarizeAfterMessages,
 		maxMessagesAfterSummary: opts.MaxMessagesAfterSummary,
 		summarizePrompt:         opts.SummarizePrompt,
@@ -207,6 +237,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	if _, err := o.sessions.Get(sessionID); err != nil {
 		return nil, fmt.Errorf("session lookup: %w", err)
 	}
+	ctx = actor.WithSessionID(ctx, sessionID)
 
 	// Block A: Check for pending pipeline confirmation.
 	if p := o.pendingPipelines[sessionID]; p != nil {
@@ -495,6 +526,14 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 
 	sb.WriteString(o.rules.BuildPromptSection())
 
+	if o.runtimePromptPath != "" {
+		if data, err := os.ReadFile(o.runtimePromptPath); err == nil {
+			sb.WriteString("\n## Additional instructions (editable from chat)\n")
+			sb.WriteString(string(data))
+			sb.WriteString("\n\n")
+		}
+	}
+
 	// Don't list content-preparer actions as tools; they already ran before this turn.
 	preparerAction := make(map[string]bool)
 	for _, prep := range o.preparers {
@@ -606,6 +645,26 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		return ToolResult{
 			CallID: call.ID,
 			Error:  fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin),
+		}
+	}
+	// Inject only declared context arg names that have a provider (e.g. session_id). Plugins never receive session content or message history.
+	if cap, ok := o.registry.GetCapability(call.Plugin); ok {
+		for _, a := range cap.Actions {
+			if a.Name == call.Action && len(a.InjectContextArgs) > 0 {
+				args := make(map[string]string)
+				for k, v := range call.Args {
+					args[k] = v
+				}
+				for _, name := range a.InjectContextArgs {
+					if provide := o.contextArgProviders[name]; provide != nil {
+						if v := provide(ctx, name); v != "" {
+							args[name] = v
+						}
+					}
+				}
+				call.Args = args
+				break
+			}
 		}
 	}
 

@@ -6,10 +6,14 @@ type Parameter struct {
 	Required    bool   `yaml:"required"`
 }
 
+// Action describes one action a plugin supports.
+// InjectContextArgs lists context arg names to inject from the request context (e.g. "session_id")
+// before calling the executor. The orchestrator resolves them via ContextArgProviders.
 type Action struct {
-	Name        string      `yaml:"name"`
-	Description string      `yaml:"description"`
-	Parameters  []Parameter `yaml:"parameters,omitempty"`
+	Name              string      `yaml:"name"`
+	Description       string      `yaml:"description"`
+	Parameters        []Parameter `yaml:"parameters,omitempty"`
+	InjectContextArgs []string    `yaml:"inject_context_args,omitempty"`
 }
 
 type PluginCapability struct {

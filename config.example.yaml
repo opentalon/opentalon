@@ -44,6 +44,10 @@ orchestrator:
   # Run these plugin actions before the first LLM call; their output becomes the user message (or they can block with send_to_llm: false).
   # List order = execution order: the first entry runs first and receives the user message; each preparer's output is the next one's input.
   content_preparers:
+    # Slash commands (/install skill, /show config, /commands, /set prompt, /clear) — run first
+    - plugin: opentalon-commands
+      action: prepare
+      arg_key: text
     - plugin: hello-world
       action: prepare
       arg_key: text
@@ -76,6 +80,14 @@ channels:
   #     done_reaction: white_check_mark
 
 plugins:
+  # Slash commands: /install skill, /show config, /commands, /set prompt, /clear
+  opentalon-commands:
+    enabled: true
+    insecure: false   # required: allows preparer to return invoke for opentalon actions
+    github: "opentalon/opentalon-commands"
+    ref: "master"
+    config: {}
+
   hello-world:
     enabled: true
     # insecure: false  # set to false to allow this preparer to run invoke steps; default is true (cannot invoke)
