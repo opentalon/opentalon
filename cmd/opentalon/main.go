@@ -14,6 +14,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/bundle"
 	"github.com/opentalon/opentalon/internal/channel"
+	"github.com/opentalon/opentalon/internal/commands"
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/pipeline"
@@ -23,7 +24,6 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store"
 	"github.com/opentalon/opentalon/internal/version"
-	"github.com/opentalon/opentalon/internal/commands"
 )
 
 func main() {
