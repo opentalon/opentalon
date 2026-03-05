@@ -31,6 +31,10 @@ func Open(dataDir string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("state store: open db: %w", err)
 	}
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("state store: busy_timeout: %w", err)
+	}
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("state store: WAL: %w", err)

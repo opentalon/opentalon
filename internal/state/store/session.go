@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -26,7 +27,7 @@ func NewSessionStore(db *DB, maxMessages, maxIdleDays int) *SessionStore {
 func (s *SessionStore) Get(id string) (*state.Session, error) {
 	var messagesJSON, summary, activeModel, metadataJSON, createdAt, updatedAt string
 	err := s.db.SQLDB().QueryRow(
-		`SELECT messages, summary, active_model, metadata, created_at, updated_at FROM sessions WHERE id = ?`,
+		`SELECT messages, COALESCE(summary,''), active_model, metadata, created_at, updated_at FROM sessions WHERE id = ?`,
 		id,
 	).Scan(&messagesJSON, &summary, &activeModel, &metadataJSON, &createdAt, &updatedAt)
 	if err != nil {
@@ -82,18 +83,51 @@ func (s *SessionStore) Create(id string) *state.Session {
 }
 
 // AddMessage appends a message and persists. If maxMessages > 0, trims to last maxMessages.
+// Uses a reserved connection and BEGIN IMMEDIATE so the second writer blocks until the first commits.
 func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
-	sess, err := s.Get(id)
+	ctx := context.Background()
+	conn, err := s.db.SQLDB().Conn(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("add message conn: %w", err)
 	}
-	sess.Messages = append(sess.Messages, msg)
-	sess.UpdatedAt = time.Now()
-	if s.maxMessages > 0 && len(sess.Messages) > s.maxMessages {
-		keep := len(sess.Messages) - s.maxMessages
-		sess.Messages = sess.Messages[keep:]
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("add message begin immediate: %w", err)
 	}
-	return s.persist(sess)
+	var messagesJSON string
+	err = conn.QueryRowContext(ctx,
+		`SELECT messages FROM sessions WHERE id = ?`, id).Scan(&messagesJSON)
+	if err != nil {
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		return fmt.Errorf("session %q not found", id)
+	}
+	var messages []provider.Message
+	if messagesJSON != "" {
+		_ = json.Unmarshal([]byte(messagesJSON), &messages)
+	}
+	messages = append(messages, msg)
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	if s.maxMessages > 0 && len(messages) > s.maxMessages {
+		keep := len(messages) - s.maxMessages
+		messages = messages[keep:]
+	}
+	newMessagesJSON, err := json.Marshal(messages)
+	if err != nil {
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		return fmt.Errorf("add message marshal: %w", err)
+	}
+	_, err = conn.ExecContext(ctx,
+		`UPDATE sessions SET messages = ?, updated_at = ? WHERE id = ?`,
+		string(newMessagesJSON), updatedAt, id)
+	if err != nil {
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		return fmt.Errorf("add message update: %w", err)
+	}
+	_, err = conn.ExecContext(ctx, "COMMIT")
+	if err != nil {
+		return fmt.Errorf("add message commit: %w", err)
+	}
+	return nil
 }
 
 // SetModel updates the active model and persists.

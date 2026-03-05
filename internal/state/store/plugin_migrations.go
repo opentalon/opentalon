@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -49,7 +48,9 @@ func RunPluginMigrations(dataDir, pluginName, pluginPath string) error {
 		return fmt.Errorf("plugin db open: %w", err)
 	}
 	defer func() { _ = db.Close() }()
-
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		return fmt.Errorf("plugin db busy_timeout: %w", err)
+	}
 	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)"); err != nil {
 		return fmt.Errorf("plugin schema_version: %w", err)
 	}
@@ -60,7 +61,7 @@ func RunPluginMigrations(dataDir, pluginName, pluginPath string) error {
 	}
 
 	for _, name := range names {
-		n, err := pluginMigrationNumber(name)
+		n, err := migrationNumber(name)
 		if err != nil || n <= 0 {
 			continue
 		}
@@ -93,13 +94,4 @@ func RunPluginMigrations(dataDir, pluginName, pluginPath string) error {
 		}
 	}
 	return nil
-}
-
-func pluginMigrationNumber(name string) (int, error) {
-	base := strings.TrimSuffix(name, ".sql")
-	parts := strings.SplitN(base, "_", 2)
-	if len(parts) < 2 {
-		return 0, fmt.Errorf("invalid name")
-	}
-	return strconv.Atoi(parts[0])
 }

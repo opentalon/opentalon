@@ -50,6 +50,19 @@ type PermissionChecker interface {
 	Allowed(ctx context.Context, actorID, plugin string) (bool, error)
 }
 
+// OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check, no summarization).
+type OrchestratorOpts struct {
+	CustomRules             []string
+	ContentPreparers        []ContentPreparerEntry
+	LuaScriptPaths          map[string]string
+	PermissionChecker       PermissionChecker
+	PermissionPluginName    string
+	SummarizeAfterMessages  int    // 0 = off
+	MaxMessagesAfterSummary int    // keep this many messages after summarization
+	SummarizePrompt         string // empty = default English
+	SummarizeUpdatePrompt   string // empty = default English
+}
+
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
 type MemoryStoreInterface interface {
 	AddScoped(ctx context.Context, actorID string, content string, tags ...string) (*state.Memory, error)
@@ -96,7 +109,7 @@ func New(
 	memory MemoryStoreInterface,
 	sessions SessionStoreInterface,
 ) *Orchestrator {
-	return NewWithRules(llm, parser, registry, memory, sessions, nil, nil, nil, nil, "", 0, 0, "", "")
+	return NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{})
 }
 
 func NewWithRules(
@@ -105,16 +118,14 @@ func NewWithRules(
 	registry *ToolRegistry,
 	memory MemoryStoreInterface,
 	sessions SessionStoreInterface,
-	customRules []string,
-	contentPreparers []ContentPreparerEntry,
-	luaScriptPaths map[string]string,
-	permissionChecker PermissionChecker,
-	permissionPluginName string,
-	summarizeAfterMessages int,
-	maxMessagesAfterSummary int,
-	summarizePrompt string,
-	summarizeUpdatePrompt string,
+	opts OrchestratorOpts,
 ) *Orchestrator {
+	if opts.SummarizePrompt == "" {
+		opts.SummarizePrompt = defaultSummarizePrompt
+	}
+	if opts.SummarizeUpdatePrompt == "" {
+		opts.SummarizeUpdatePrompt = defaultSummarizeUpdatePrompt
+	}
 	return &Orchestrator{
 		llm:                     llm,
 		parser:                  parser,
@@ -122,15 +133,15 @@ func NewWithRules(
 		memory:                  memory,
 		sessions:                sessions,
 		guard:                   NewGuard(),
-		rules:                   NewRulesConfig(customRules),
-		preparers:               contentPreparers,
-		luaScriptPaths:          luaScriptPaths,
-		permissionChecker:       permissionChecker,
-		permissionPluginName:    permissionPluginName,
-		summarizeAfterMessages:  summarizeAfterMessages,
-		maxMessagesAfterSummary: maxMessagesAfterSummary,
-		summarizePrompt:         summarizePrompt,
-		summarizeUpdatePrompt:   summarizeUpdatePrompt,
+		rules:                   NewRulesConfig(opts.CustomRules),
+		preparers:               opts.ContentPreparers,
+		luaScriptPaths:          opts.LuaScriptPaths,
+		permissionChecker:       opts.PermissionChecker,
+		permissionPluginName:    opts.PermissionPluginName,
+		summarizeAfterMessages:  opts.SummarizeAfterMessages,
+		maxMessagesAfterSummary: opts.MaxMessagesAfterSummary,
+		summarizePrompt:         opts.SummarizePrompt,
+		summarizeUpdatePrompt:   opts.SummarizeUpdatePrompt,
 	}
 }
 
@@ -262,7 +273,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	}); err != nil {
 		return nil, fmt.Errorf("adding user message: %w", err)
 	}
-	o.maybeSummarizeSession(ctx, sessionID)
+	// Run summarization asynchronously so it doesn't block the user's request.
+	go o.maybeSummarizeSession(context.Background(), sessionID)
 
 	result := &RunResult{}
 
@@ -473,7 +485,14 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	actorID := actor.Actor(ctx)
 	if actorID != "" && o.permissionChecker != nil && call.Plugin != o.permissionPluginName {
 		allowed, err := o.permissionChecker.Allowed(ctx, actorID, call.Plugin)
-		if err != nil || !allowed {
+		if err != nil {
+			log.Printf("Warning: permission check for actor %s plugin %s: %v", actorID, call.Plugin, err)
+			return ToolResult{
+				CallID: call.ID,
+				Error:  "permission denied",
+			}
+		}
+		if !allowed {
 			return ToolResult{
 				CallID: call.ID,
 				Error:  "permission denied",

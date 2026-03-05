@@ -77,10 +77,7 @@ func main() {
 		db, err := store.Open(dataDir)
 		if err != nil {
 			log.Printf("Warning: state store open: %v; using in-memory state", err)
-			mem := state.NewMemoryStore("")
-			_ = mem.Load()
-			memory = mem
-			sessions = state.NewSessionStore("")
+			memory, sessions = newInMemoryState()
 		} else {
 			defer func() { _ = db.Close() }()
 			memory = store.NewMemoryStore(db)
@@ -91,10 +88,7 @@ func main() {
 			sessions = sessStore
 		}
 	} else {
-		mem := state.NewMemoryStore("")
-		_ = mem.Load()
-		memory = mem
-		sessions = state.NewSessionStore("")
+		memory, sessions = newInMemoryState()
 	}
 
 	// Sessions created on first message per channel (session key from channel ID)
@@ -227,7 +221,17 @@ func main() {
 	if permPluginName != "" {
 		permChecker = orchestrator.NewPermissionChecker(toolRegistry, orchestrator.NewGuard(), permPluginName)
 	}
-	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, cfg.Orchestrator.Rules, contentPreparers, luaScriptPaths, permChecker, permPluginName, cfg.State.Session.SummarizeAfter, cfg.State.Session.MaxMessagesAfterSummary, cfg.State.Session.SummarizePrompt, cfg.State.Session.SummarizeUpdatePrompt)
+	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, orchestrator.OrchestratorOpts{
+		CustomRules:             cfg.Orchestrator.Rules,
+		ContentPreparers:        contentPreparers,
+		LuaScriptPaths:          luaScriptPaths,
+		PermissionChecker:       permChecker,
+		PermissionPluginName:    permPluginName,
+		SummarizeAfterMessages:  cfg.State.Session.SummarizeAfter,
+		MaxMessagesAfterSummary: cfg.State.Session.MaxMessagesAfterSummary,
+		SummarizePrompt:         cfg.State.Session.SummarizePrompt,
+		SummarizeUpdatePrompt:   cfg.State.Session.SummarizeUpdatePrompt,
+	})
 
 	ensureSession := func(sessionKey string) {
 		if _, err := sessions.Get(sessionKey); err != nil {
@@ -270,6 +274,13 @@ func main() {
 
 	channelManager.StopAll()
 	pluginManager.StopAll()
+}
+
+// newInMemoryState returns in-memory memory and session stores (used when data_dir is unset or DB open fails).
+func newInMemoryState() (orchestrator.MemoryStoreInterface, orchestrator.SessionStoreInterface) {
+	mem := state.NewMemoryStore("")
+	_ = mem.Load()
+	return mem, state.NewSessionStore("")
 }
 
 // channelRunner adapts the orchestrator to channel.Runner.

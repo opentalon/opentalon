@@ -46,20 +46,20 @@ func (s *MemoryStore) AddScoped(ctx context.Context, actorID string, content str
 		ID:        id,
 		Content:   content,
 		Tags:      tags,
-		CreatedAt: mustParseTime(now),
+		CreatedAt: parseTimeOrZero(now),
 	}, nil
 }
 
 // MemoriesForContext returns memories visible to the current actor: all general (actor_id IS NULL)
 // plus all for actor.Actor(ctx), optionally filtered by tag. Empty tag means no filter.
+// Tag matching uses json_each for exact tag match (avoids substring false positives like "work" matching "workflow").
 func (s *MemoryStore) MemoriesForContext(ctx context.Context, tag string) ([]*state.Memory, error) {
 	actorID := actor.Actor(ctx)
 	query := `SELECT id, actor_id, content, tags, created_at FROM memories WHERE (actor_id IS NULL OR actor_id = ?)`
 	args := []interface{}{actorID}
 	if tag != "" {
-		query += ` AND (tags LIKE ? OR tags LIKE ? OR tags LIKE ?)`
-		// JSON array: "tag", "tag" at start, or in middle
-		args = append(args, `%"`+tag+`"%`, `"`+tag+`"%`, `%,"`+tag+`"%`)
+		query += ` AND EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?)`
+		args = append(args, tag)
 	}
 	query += ` ORDER BY created_at DESC`
 	rows, err := s.db.SQLDB().QueryContext(ctx, query, args...)
@@ -103,11 +103,11 @@ func (s *MemoryStore) Search(query string) []*state.Memory {
 	return scanMemories(rows)
 }
 
-// SearchByTag returns all memories that have the given tag. No actor scope; global only.
+// SearchByTag returns all memories that have the given tag (exact match via json_each). No actor scope; global only.
 func (s *MemoryStore) SearchByTag(tag string) []*state.Memory {
 	rows, err := s.db.SQLDB().Query(
-		`SELECT id, actor_id, content, tags, created_at FROM memories WHERE tags LIKE ? OR tags LIKE ? OR tags LIKE ? ORDER BY created_at DESC`,
-		`%"`+tag+`"%`, `"`+tag+`"%`, `%,"`+tag+`"%`)
+		`SELECT id, actor_id, content, tags, created_at FROM memories WHERE EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?) ORDER BY created_at DESC`,
+		tag)
 	if err != nil {
 		return nil
 	}
@@ -133,7 +133,7 @@ func scanMemories(rows *sql.Rows) []*state.Memory {
 	return out
 }
 
-func mustParseTime(s string) time.Time {
+func parseTimeOrZero(s string) time.Time {
 	t, _ := time.Parse(time.RFC3339, s)
 	return t
 }
