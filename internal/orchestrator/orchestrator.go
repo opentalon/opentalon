@@ -62,13 +62,13 @@ type OrchestratorOpts struct {
 	LuaScriptPaths          map[string]string
 	PermissionChecker       PermissionChecker
 	PermissionPluginName    string
-	RuntimePromptPath       string // optional path to editable prompt file (e.g. data_dir/custom_prompt.txt); appended to system prompt
+	RuntimePromptPath       string                        // optional path to editable prompt file (e.g. data_dir/custom_prompt.txt); appended to system prompt
 	ContextArgProviders     map[string]ContextArgProvider // optional; if nil, default providers (e.g. session_id) are used
-	SummarizeAfterMessages  int    // 0 = off
-	MaxMessagesAfterSummary int    // keep this many messages after summarization
-	SummarizePrompt         string // empty = default English
-	SummarizeUpdatePrompt   string // empty = default English
-	PipelineEnabled         bool   // when true, create Planner from llm
+	SummarizeAfterMessages  int                           // 0 = off
+	MaxMessagesAfterSummary int                           // keep this many messages after summarization
+	SummarizePrompt         string                        // empty = default English
+	SummarizeUpdatePrompt   string                        // empty = default English
+	PipelineEnabled         bool                          // when true, create Planner from llm
 	PipelineConfig          pipeline.PipelineConfig
 }
 
@@ -85,7 +85,7 @@ type SessionStoreInterface interface {
 	AddMessage(id string, msg provider.Message) error
 	SetModel(id string, model provider.ModelRef) error
 	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op
-	Delete(id string) error // remove session (e.g. for clear_session command)
+	Delete(id string) error                                                  // remove session (e.g. for clear_session command)
 }
 
 type Orchestrator struct {
@@ -102,13 +102,13 @@ type Orchestrator struct {
 	permissionChecker       PermissionChecker             // optional; when set, executeCall checks permission before running
 	permissionPluginName    string                        // name of the permission plugin (skip permission check when executing it)
 	runtimePromptPath       string                        // optional; if set, buildSystemPrompt appends file contents
-	contextArgProviders     map[string]ContextArgProvider  // name -> extract from context; used to inject args per action
+	contextArgProviders     map[string]ContextArgProvider // name -> extract from context; used to inject args per action
 	summarizeAfterMessages  int                           // 0 = off; after this many messages run summarization
 	maxMessagesAfterSummary int                           // keep this many messages after summarization
 	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
 	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
-	planner                 *pipeline.Planner             // nil = pipeline disabled
-	pendingPipelines        map[string]*pipeline.Pipeline  // sessionID -> pending pipeline
+	planner                 *pipeline.Planner              // nil = pipeline disabled
+	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
 	pipelineConfig          pipeline.PipelineConfig
 }
 
@@ -650,21 +650,22 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	// Inject only declared context arg names that have a provider (e.g. session_id). Plugins never receive session content or message history.
 	if cap, ok := o.registry.GetCapability(call.Plugin); ok {
 		for _, a := range cap.Actions {
-			if a.Name == call.Action && len(a.InjectContextArgs) > 0 {
-				args := make(map[string]string)
-				for k, v := range call.Args {
-					args[k] = v
-				}
-				for _, name := range a.InjectContextArgs {
-					if provide := o.contextArgProviders[name]; provide != nil {
-						if v := provide(ctx, name); v != "" {
-							args[name] = v
-						}
+			if a.Name != call.Action || len(a.InjectContextArgs) == 0 {
+				continue
+			}
+			args := make(map[string]string)
+			for k, v := range call.Args {
+				args[k] = v
+			}
+			for _, name := range a.InjectContextArgs {
+				if provide := o.contextArgProviders[name]; provide != nil {
+					if v := provide(ctx, name); v != "" {
+						args[name] = v
 					}
 				}
-				call.Args = args
-				break
 			}
+			call.Args = args
+			break
 		}
 	}
 

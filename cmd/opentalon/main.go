@@ -242,7 +242,7 @@ func main() {
 		Plugin:   "opentalon-commands",
 		Action:   "prepare",
 		ArgKey:   "text",
-		Insecure:  false, // trusted: can return invoke for opentalon actions
+		Insecure: false, // trusted: can return invoke for opentalon actions
 	})
 	for _, p := range cfg.Orchestrator.ContentPreparers {
 		entry := orchestrator.ContentPreparerEntry{
@@ -279,7 +279,7 @@ func main() {
 		LuaScriptPaths:          luaScriptPaths,
 		PermissionChecker:       permChecker,
 		PermissionPluginName:    permPluginName,
-		RuntimePromptPath:      runtimePromptPath,
+		RuntimePromptPath:       runtimePromptPath,
 		SummarizeAfterMessages:  cfg.State.Session.SummarizeAfter,
 		MaxMessagesAfterSummary: cfg.State.Session.MaxMessagesAfterSummary,
 		SummarizePrompt:         cfg.State.Session.SummarizePrompt,

@@ -17,11 +17,11 @@ import (
 const (
 	PluginName = "opentalon"
 
-	ActionInstallSkill  = "install_skill"
-	ActionShowConfig    = "show_config"
-	ActionListCommands  = "list_commands"
-	ActionSetPrompt     = "set_prompt"
-	ActionClearSession  = "clear_session"
+	ActionInstallSkill = "install_skill"
+	ActionShowConfig   = "show_config"
+	ActionListCommands = "list_commands"
+	ActionSetPrompt    = "set_prompt"
+	ActionClearSession = "clear_session"
 )
 
 // Executor runs built-in opentalon actions (install_skill, show_config, list_commands, set_prompt, clear_session).
