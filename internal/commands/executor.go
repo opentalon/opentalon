@@ -40,7 +40,7 @@ func Capability() orchestrator.PluginCapability {
 		Name:        PluginName,
 		Description: "Built-in OpenTalon commands: install skill, show config, list commands, set prompt, clear session.",
 		Actions: []orchestrator.Action{
-			{Name: ActionInstallSkill, Description: "Install a skill from a GitHub URL (e.g. /install skill org/repo).", Parameters: []orchestrator.Parameter{{Name: "url", Description: "GitHub URL or org/repo", Required: true}, {Name: "ref", Description: "Branch or tag (default main)", Required: false}}},
+			{Name: ActionInstallSkill, Description: "Install a skill from a GitHub URL (e.g. /install skill org/repo).", Parameters: []orchestrator.Parameter{{Name: "url", Description: "GitHub URL or org/repo", Required: true}, {Name: "ref", Description: "Branch or tag (default main)", Required: false}}, AuditLog: true},
 			{Name: ActionShowConfig, Description: "Show current config (secrets redacted).", Parameters: nil},
 			{Name: ActionListCommands, Description: "List available slash commands.", Parameters: nil},
 			{Name: ActionSetPrompt, Description: "Set the editable runtime prompt.", Parameters: []orchestrator.Parameter{{Name: "text", Description: "Prompt text", Required: true}}},
@@ -70,6 +70,7 @@ func NewExecutor(
 func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 	switch call.Action {
 	case ActionInstallSkill:
+		// TODO: PluginExecutor.Execute does not receive context; clone cannot be cancelled
 		return e.installSkill(context.Background(), call)
 	case ActionShowConfig:
 		return e.showConfig(call)
@@ -126,6 +127,14 @@ func (e *Executor) installSkill(ctx context.Context, call orchestrator.ToolCall)
 	}
 }
 
+// safeSkillName returns true if name is a single path component with no .. or path separators.
+func safeSkillName(name string) bool {
+	if name == "" || strings.Contains(name, "..") || strings.ContainsAny(name, "/\\") {
+		return false
+	}
+	return filepath.Clean(name) == name && filepath.Base(name) == name
+}
+
 func parseInstallURL(url string) (github, name string) {
 	url = strings.TrimSpace(url)
 	// https://github.com/org/repo or https://github.com/org/repo.git
@@ -133,7 +142,7 @@ func parseInstallURL(url string) (github, name string) {
 		rest := strings.TrimPrefix(url, "https://github.com/")
 		rest = strings.TrimSuffix(rest, ".git")
 		parts := strings.SplitN(rest, "/", 2)
-		if len(parts) == 2 {
+		if len(parts) == 2 && safeSkillName(parts[0]) && safeSkillName(parts[1]) {
 			return parts[0] + "/" + parts[1], parts[1]
 		}
 		return "", ""
@@ -142,7 +151,7 @@ func parseInstallURL(url string) (github, name string) {
 		rest := strings.TrimPrefix(url, "git@github.com:")
 		rest = strings.TrimSuffix(rest, ".git")
 		parts := strings.SplitN(rest, "/", 2)
-		if len(parts) == 2 {
+		if len(parts) == 2 && safeSkillName(parts[0]) && safeSkillName(parts[1]) {
 			return parts[0] + "/" + parts[1], parts[1]
 		}
 		return "", ""
@@ -150,40 +159,44 @@ func parseInstallURL(url string) (github, name string) {
 	// org/repo
 	if strings.Contains(url, "/") {
 		parts := strings.SplitN(url, "/", 2)
-		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
-			name = parts[1]
-			return parts[0] + "/" + parts[1], name
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" && safeSkillName(parts[0]) && safeSkillName(parts[1]) {
+			return parts[0] + "/" + parts[1], parts[1]
 		}
 	}
 	return "", ""
 }
 
-func (e *Executor) showConfig(_ orchestrator.ToolCall) orchestrator.ToolResult {
+func (e *Executor) showConfig(call orchestrator.ToolCall) orchestrator.ToolResult {
 	if e.cfg == nil {
-		return orchestrator.ToolResult{Content: "(config not available)"}
+		return orchestrator.ToolResult{CallID: call.ID, Content: "(config not available)"}
 	}
 	// Redact secrets for display
 	redacted := redactConfig(e.cfg)
 	data, err := yaml.Marshal(redacted)
 	if err != nil {
-		return orchestrator.ToolResult{Error: fmt.Sprintf("marshal config: %v", err)}
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("marshal config: %v", err)}
 	}
-	return orchestrator.ToolResult{Content: string(data)}
+	return orchestrator.ToolResult{CallID: call.ID, Content: string(data)}
 }
 
-func (e *Executor) listCommands(_ orchestrator.ToolCall) orchestrator.ToolResult {
+func (e *Executor) listCommands(call orchestrator.ToolCall) orchestrator.ToolResult {
 	const msg = `/install skill <url> [ref] — Install a skill from a GitHub URL (or org/repo). Optional ref defaults to main.
 /show config — Show current config (secrets redacted).
 /commands — List available commands (this message).
 /set prompt <text> — Set the editable runtime prompt; applies to the next message.
 /clear or /new — Clear the current session.`
-	return orchestrator.ToolResult{Content: msg}
+	return orchestrator.ToolResult{CallID: call.ID, Content: msg}
 }
+
+const maxRuntimePromptBytes = 32 * 1024 // 32KB limit to reduce prompt injection impact (global file, all requests)
 
 func (e *Executor) setPrompt(call orchestrator.ToolCall) orchestrator.ToolResult {
 	text := strings.TrimSpace(call.Args["text"])
 	if e.runtimePromptPath == "" {
 		return orchestrator.ToolResult{CallID: call.ID, Error: "runtime prompt path not configured"}
+	}
+	if len(text) > maxRuntimePromptBytes {
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("prompt text exceeds %d bytes", maxRuntimePromptBytes)}
 	}
 	dir := filepath.Dir(e.runtimePromptPath)
 	if err := os.MkdirAll(dir, 0750); err != nil {
@@ -203,6 +216,7 @@ func (e *Executor) clearSession(call orchestrator.ToolCall) orchestrator.ToolRes
 	if sessionID == "" {
 		return orchestrator.ToolResult{CallID: call.ID, Error: "session_id not set (internal error)"}
 	}
+	// TODO: If the orchestrator maintains pending pipeline state per session, it should be cleared here (e.g. via a ClearSession hook).
 	if err := e.sessions.Delete(sessionID); err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("delete session: %v", err)}
 	}
@@ -213,23 +227,38 @@ func (e *Executor) clearSession(call orchestrator.ToolCall) orchestrator.ToolRes
 	}
 }
 
-// redactConfig returns a copy of config with API keys and secrets redacted for display.
+// redactConfig returns a copy of config with secrets redacted for display (API keys, plugin configs, and fields named secret/token/password).
 func redactConfig(c *config.Config) *config.Config {
 	if c == nil {
 		return nil
 	}
 	out := *c
-	if out.Models.Providers == nil {
-		return &out
-	}
-	provs := make(map[string]config.ProviderConfig)
-	for name, p := range out.Models.Providers {
-		p2 := p
-		if p2.APIKey != "" {
-			p2.APIKey = "[redacted]"
+	// Redact provider API keys
+	if out.Models.Providers != nil {
+		provs := make(map[string]config.ProviderConfig)
+		for name, p := range out.Models.Providers {
+			p2 := p
+			if p2.APIKey != "" {
+				p2.APIKey = "[redacted]"
+			}
+			provs[name] = p2
 		}
-		provs[name] = p2
+		out.Models.Providers = provs
 	}
-	out.Models.Providers = provs
+	// Redact entire plugin config maps (may contain webhook secrets, tokens, etc.)
+	if out.Plugins != nil {
+		redactedPlugins := make(map[string]config.PluginConfig)
+		for name, p := range out.Plugins {
+			redactedPlugins[name] = config.PluginConfig{
+				Enabled:  p.Enabled,
+				Insecure: p.Insecure,
+				Plugin:   p.Plugin,
+				GitHub:   p.GitHub,
+				Ref:      p.Ref,
+				Config:   nil, // omit config for show config
+			}
+		}
+		out.Plugins = redactedPlugins
+	}
 	return &out
 }

@@ -23,7 +23,7 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store"
 	"github.com/opentalon/opentalon/internal/version"
-	"github.com/opentalon/opentalon/pkg/commands"
+	"github.com/opentalon/opentalon/internal/commands"
 )
 
 func main() {
@@ -236,14 +236,7 @@ func main() {
 		log.Printf("Warning: register opentalon commands: %v", err)
 	}
 
-	contentPreparers := make([]orchestrator.ContentPreparerEntry, 0, 1+len(cfg.Orchestrator.ContentPreparers))
-	// Commands preparer runs first so slash commands are handled before the LLM
-	contentPreparers = append(contentPreparers, orchestrator.ContentPreparerEntry{
-		Plugin:   "opentalon-commands",
-		Action:   "prepare",
-		ArgKey:   "text",
-		Insecure: false, // trusted: can return invoke for opentalon actions
-	})
+	contentPreparers := make([]orchestrator.ContentPreparerEntry, 0, len(cfg.Orchestrator.ContentPreparers))
 	for _, p := range cfg.Orchestrator.ContentPreparers {
 		entry := orchestrator.ContentPreparerEntry{
 			Plugin:   p.Plugin,

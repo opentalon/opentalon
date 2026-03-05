@@ -647,6 +647,25 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 			Error:  fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin),
 		}
 	}
+
+	actorID := actor.Actor(ctx)
+	if actorID != "" && o.permissionChecker != nil && call.Plugin != o.permissionPluginName {
+		allowed, err := o.permissionChecker.Allowed(ctx, actorID, call.Plugin)
+		if err != nil {
+			log.Printf("Warning: permission check for actor %s plugin %s: %v", actorID, call.Plugin, err)
+			return ToolResult{
+				CallID: call.ID,
+				Error:  "permission denied",
+			}
+		}
+		if !allowed {
+			return ToolResult{
+				CallID: call.ID,
+				Error:  "permission denied",
+			}
+		}
+	}
+
 	// Inject only declared context arg names that have a provider (e.g. session_id). Plugins never receive session content or message history.
 	if cap, ok := o.registry.GetCapability(call.Plugin); ok {
 		for _, a := range cap.Actions {
@@ -669,20 +688,14 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		}
 	}
 
-	actorID := actor.Actor(ctx)
-	if actorID != "" && o.permissionChecker != nil && call.Plugin != o.permissionPluginName {
-		allowed, err := o.permissionChecker.Allowed(ctx, actorID, call.Plugin)
-		if err != nil {
-			log.Printf("Warning: permission check for actor %s plugin %s: %v", actorID, call.Plugin, err)
-			return ToolResult{
-				CallID: call.ID,
-				Error:  "permission denied",
-			}
-		}
-		if !allowed {
-			return ToolResult{
-				CallID: call.ID,
-				Error:  "permission denied",
+	// Audit log: if the action declares AuditLog, log invocation (no hardcoded plugin/action names).
+	if actorID != "" {
+		if cap, ok := o.registry.GetCapability(call.Plugin); ok {
+			for _, a := range cap.Actions {
+				if a.Name == call.Action && a.AuditLog {
+					log.Printf("audit: actor %s plugin %s action %s args %v", actorID, call.Plugin, call.Action, call.Args)
+					break
+				}
 			}
 		}
 	}
