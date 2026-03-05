@@ -25,9 +25,9 @@ type Executor struct {
 
 // ExecutionResult holds the outcome of a full pipeline execution.
 type ExecutionResult struct {
-	Success   bool
-	Summary   string
-	Steps     []*ExecutedStep
+	Success bool
+	Summary string
+	Steps   []*ExecutedStep
 }
 
 // ExecutedStep records each attempt made during pipeline execution.
@@ -65,7 +65,7 @@ func (e *Executor) Run(ctx context.Context, p *Pipeline) (*ExecutionResult, erro
 			step.State = StepSkipped
 			step.Result = &StepResult{
 				Success: false,
-				Output:  fmt.Sprintf("skipped: dependency not completed"),
+				Output:  "skipped: dependency not completed",
 			}
 			if e.config.FailFast {
 				p.State = StateFailed

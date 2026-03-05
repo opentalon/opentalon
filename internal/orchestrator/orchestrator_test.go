@@ -691,7 +691,7 @@ func TestPipelineDisabledNormalFlow(t *testing.T) {
 func TestPlannerReturnsDirect_FallsThrough(t *testing.T) {
 	// Planner returns "direct" → falls through to normal agent loop
 	llm := &fakeLLM{responses: []string{
-		`{"type": "direct"}`,           // planner response
+		`{"type": "direct"}`,       // planner response
 		"I'll help you with that!", // agent response
 	}}
 

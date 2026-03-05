@@ -91,14 +91,14 @@ type Orchestrator struct {
 	guard                   *Guard
 	rules                   *RulesConfig
 	preparers               []ContentPreparerEntry
-	luaScriptPaths          map[string]string // optional; plugin name -> path to .lua script (for "lua:name" preparers)
-	permissionChecker       PermissionChecker // optional; when set, executeCall checks permission before running
-	permissionPluginName    string            // name of the permission plugin (skip permission check when executing it)
-	summarizeAfterMessages  int               // 0 = off; after this many messages run summarization
-	maxMessagesAfterSummary int               // keep this many messages after summarization
-	summarizePrompt         string            // system prompt for initial summarization (config; empty = default English)
-	summarizeUpdatePrompt   string            // system prompt for updating summary (config; empty = default English)
-	planner                 *pipeline.Planner            // nil = pipeline disabled
+	luaScriptPaths          map[string]string             // optional; plugin name -> path to .lua script (for "lua:name" preparers)
+	permissionChecker       PermissionChecker             // optional; when set, executeCall checks permission before running
+	permissionPluginName    string                        // name of the permission plugin (skip permission check when executing it)
+	summarizeAfterMessages  int                           // 0 = off; after this many messages run summarization
+	maxMessagesAfterSummary int                           // keep this many messages after summarization
+	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
+	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
+	planner                 *pipeline.Planner             // nil = pipeline disabled
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
 	pipelineConfig          pipeline.PipelineConfig
 }
