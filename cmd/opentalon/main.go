@@ -14,6 +14,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/bundle"
 	"github.com/opentalon/opentalon/internal/channel"
+	"github.com/opentalon/opentalon/internal/commands"
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/pipeline"
@@ -185,6 +186,29 @@ func main() {
 		}
 		requestSets = append(requestSets, set)
 	}
+	// Merge installed skills (persisted from /install skill) so they survive restart
+	if installed, err := config.LoadInstalledSkills(dataDir); err == nil {
+		for _, skill := range installed {
+			if skill.Name == "" || skill.GitHub == "" {
+				continue
+			}
+			ref := skill.Ref
+			if ref == "" {
+				ref = "main"
+			}
+			path, err := bundle.EnsureSkillDir(ctx, dataDir, skill.Name, skill.GitHub, ref)
+			if err != nil {
+				log.Printf("Warning: installed skill %s: %v", skill.Name, err)
+				continue
+			}
+			set, err := requestpkg.LoadSkillDir(path)
+			if err != nil {
+				log.Printf("Warning: load installed skill %s: %v", skill.Name, err)
+				continue
+			}
+			requestSets = append(requestSets, set)
+		}
+	}
 	for _, inl := range cfg.RequestPackages.Inline {
 		set := requestpkg.Set{PluginName: inl.Plugin, Description: inl.Description}
 		for _, p := range inl.Packages {
@@ -201,6 +225,15 @@ func main() {
 	}
 	if err := requestpkg.Register(toolRegistry, requestSets); err != nil {
 		log.Printf("Warning: request_packages: %v", err)
+	}
+
+	// Register built-in opentalon plugin (install_skill, show_config, list_commands, set_prompt, clear_session)
+	runtimePromptPath := ""
+	if dataDir != "" {
+		runtimePromptPath = filepath.Join(dataDir, "custom_prompt.txt")
+	}
+	if err := toolRegistry.Register(commands.Capability(), commands.NewExecutor(toolRegistry, sessions, dataDir, cfg, runtimePromptPath)); err != nil {
+		log.Printf("Warning: register opentalon commands: %v", err)
 	}
 
 	contentPreparers := make([]orchestrator.ContentPreparerEntry, 0, len(cfg.Orchestrator.ContentPreparers))
@@ -239,6 +272,7 @@ func main() {
 		LuaScriptPaths:          luaScriptPaths,
 		PermissionChecker:       permChecker,
 		PermissionPluginName:    permPluginName,
+		RuntimePromptPath:       runtimePromptPath,
 		SummarizeAfterMessages:  cfg.State.Session.SummarizeAfter,
 		MaxMessagesAfterSummary: cfg.State.Session.MaxMessagesAfterSummary,
 		SummarizePrompt:         cfg.State.Session.SummarizePrompt,

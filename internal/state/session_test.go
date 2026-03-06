@@ -76,7 +76,9 @@ func TestSessionSetModel(t *testing.T) {
 func TestSessionDelete(t *testing.T) {
 	store := NewSessionStore("")
 	store.Create("sess1")
-	store.Delete("sess1")
+	if err := store.Delete("sess1"); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := store.Get("sess1")
 	if err == nil {

@@ -102,10 +102,11 @@ func (s *SessionStore) SetSummary(id string, summary string, messages []provider
 	return nil
 }
 
-func (s *SessionStore) Delete(id string) {
+func (s *SessionStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sessions, id)
+	return nil
 }
 
 func (s *SessionStore) List() []*Session {

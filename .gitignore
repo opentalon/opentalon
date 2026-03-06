@@ -51,4 +51,4 @@ channels/*
 
 plugins/*
 !plugins/.gitkeep
-
+.cursor/
