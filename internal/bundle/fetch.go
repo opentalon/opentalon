@@ -87,6 +87,16 @@ func CloneAndBuild(ctx context.Context, repo, ref, resolvedSHA, dir, binaryName 
 		}
 	}
 
+	// If this is a YAML-only repo (no go.mod), skip Go build steps entirely
+	// and return the channel.yaml path directly.
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); os.IsNotExist(err) {
+		yamlPath := filepath.Join(dir, "channel.yaml")
+		if _, err := os.Stat(yamlPath); err == nil {
+			return yamlPath, nil
+		}
+		return "", fmt.Errorf("repo has no go.mod and no channel.yaml")
+	}
+
 	// If running from source, point the cloned repo at our local core module
 	// so it builds against the same SDK version we're running. When installed
 	// as a standalone binary (no go.mod nearby), this is a no-op and the repo

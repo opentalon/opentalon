@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -62,6 +63,48 @@ func Substitute(s string, args map[string]string) string {
 	return s
 }
 
+// cleanURLParams removes query parameters whose values still contain
+// unsubstituted {{args.X}} templates. This allows request packages to
+// define optional query parameters that are only included when the
+// caller provides them.
+func cleanURLParams(rawURL string) string {
+	if !strings.Contains(rawURL, "{{args.") {
+		return rawURL
+	}
+	qmark := strings.IndexByte(rawURL, '?')
+	if qmark < 0 {
+		return rawURL
+	}
+	base := rawURL[:qmark]
+	query := rawURL[qmark+1:]
+
+	var kept []string
+	for _, param := range strings.Split(query, "&") {
+		if param == "" {
+			continue
+		}
+		if strings.Contains(param, "{{args.") {
+			continue
+		}
+		kept = append(kept, param)
+	}
+	if len(kept) == 0 {
+		return base
+	}
+	return base + "?" + strings.Join(kept, "&")
+}
+
+// encodeURLParams re-parses the URL and properly encodes query parameter values.
+// This ensures values with spaces or special characters are percent-encoded.
+func encodeURLParams(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	u.RawQuery = u.Query().Encode()
+	return u.String()
+}
+
 // Executor runs request packages for a single plugin. It implements orchestrator.PluginExecutor.
 type Executor struct {
 	pluginName string
@@ -101,7 +144,7 @@ func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 		}
 	}
 
-	url := Substitute(pkg.URL, call.Args)
+	url := encodeURLParams(cleanURLParams(Substitute(pkg.URL, call.Args)))
 	if url == "" {
 		return orchestrator.ToolResult{CallID: call.ID, Error: "URL is empty after substitution"}
 	}
