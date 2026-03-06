@@ -10,10 +10,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"time"
+
 	"github.com/opentalon/opentalon/internal/bundle"
 	"github.com/opentalon/opentalon/internal/channel"
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/plugin"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/requestpkg"
@@ -221,6 +224,15 @@ func main() {
 	if permPluginName != "" {
 		permChecker = orchestrator.NewPermissionChecker(toolRegistry, orchestrator.NewGuard(), permPluginName)
 	}
+	pipelineCfg := pipeline.DefaultConfig()
+	if cfg.Orchestrator.Pipeline.MaxStepRetries > 0 {
+		pipelineCfg.MaxStepRetries = cfg.Orchestrator.Pipeline.MaxStepRetries
+	}
+	if cfg.Orchestrator.Pipeline.StepTimeout != "" {
+		if d, err := time.ParseDuration(cfg.Orchestrator.Pipeline.StepTimeout); err == nil {
+			pipelineCfg.StepTimeout = d
+		}
+	}
 	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, orchestrator.OrchestratorOpts{
 		CustomRules:             cfg.Orchestrator.Rules,
 		ContentPreparers:        contentPreparers,
@@ -231,6 +243,8 @@ func main() {
 		MaxMessagesAfterSummary: cfg.State.Session.MaxMessagesAfterSummary,
 		SummarizePrompt:         cfg.State.Session.SummarizePrompt,
 		SummarizeUpdatePrompt:   cfg.State.Session.SummarizeUpdatePrompt,
+		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
+		PipelineConfig:          pipelineCfg,
 	})
 
 	ensureSession := func(sessionKey string) {

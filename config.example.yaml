@@ -47,6 +47,13 @@ orchestrator:
     - plugin: hello-world
       action: prepare
       arg_key: text
+  # Pipeline execution: LLM-planned multi-step workflows with confirmation and retry.
+  # When enabled, the planner decomposes multi-step requests into a DAG of plugin actions,
+  # asks the user for confirmation, and executes with per-step retry and timeout.
+  # pipeline:
+  #   enabled: true
+  #   max_step_retries: 3    # retries per step before giving up (default 3)
+  #   step_timeout: "60s"    # per-step timeout as Go duration (default "60s")
 
 channels:
   console:

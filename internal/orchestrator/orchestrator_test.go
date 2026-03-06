@@ -637,6 +637,176 @@ func TestInvokeStepsUnmarshalSingleAndArray(t *testing.T) {
 	}
 }
 
+// --- Pipeline integration tests ---
+
+func setupPipelineOrchestrator(plannerLLM *fakeLLM, agentLLM *fakeLLM) (*Orchestrator, string) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:        "appsignal",
+		Description: "AppSignal integration",
+		Actions:     []Action{{Name: "get_error", Description: "Get error details"}},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name:        "jira",
+		Description: "Jira integration",
+		Actions:     []Action{{Name: "create_issue", Description: "Create issue"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("test-session")
+
+	// The planner LLM is used for planning; the agent LLM is used for the normal agent loop.
+	// We use the planner LLM since it's the same LLM interface for both.
+	orch := NewWithRules(plannerLLM, &fakeParser{parseFn: func(response string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		PipelineEnabled: true,
+	})
+
+	return orch, "test-session"
+}
+
+func TestPipelineDisabledNormalFlow(t *testing.T) {
+	// Pipeline disabled → normal agent loop, no planner call
+	llm := &fakeLLM{responses: []string{"Hello!"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		PipelineEnabled: false,
+	})
+
+	result, err := orch.Run(context.Background(), "s1", "Hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "Hello!" {
+		t.Errorf("Response = %q, want Hello!", result.Response)
+	}
+}
+
+func TestPlannerReturnsDirect_FallsThrough(t *testing.T) {
+	// Planner returns "direct" → falls through to normal agent loop
+	llm := &fakeLLM{responses: []string{
+		`{"type": "direct"}`,       // planner response
+		"I'll help you with that!", // agent response
+	}}
+
+	orch, sessID := setupPipelineOrchestrator(llm, llm)
+	result, err := orch.Run(context.Background(), sessID, "simple question")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "I'll help you with that!" {
+		t.Errorf("Response = %q", result.Response)
+	}
+}
+
+func TestPlannerReturnsPipeline_StoresPending(t *testing.T) {
+	planJSON := `{"type": "pipeline", "steps": [
+		{"id": "1", "name": "Get error", "plugin": "appsignal", "action": "get_error", "args": {"error_id": "123"}},
+		{"id": "2", "name": "Create issue", "plugin": "jira", "action": "create_issue", "args": {"title": "Fix it"}, "depends_on": ["1"]}
+	]}`
+	llm := &fakeLLM{responses: []string{planJSON}}
+
+	orch, sessID := setupPipelineOrchestrator(llm, llm)
+	result, err := orch.Run(context.Background(), sessID, "investigate error 123 and create a ticket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should return confirmation text
+	if !strings.Contains(result.Response, "Get error") {
+		t.Errorf("Response should contain step names: %q", result.Response)
+	}
+	if !strings.Contains(result.Response, "(y)es") {
+		t.Errorf("Response should ask for confirmation: %q", result.Response)
+	}
+	// Should have pending pipeline
+	if orch.pendingPipelines[sessID] == nil {
+		t.Error("expected pending pipeline to be stored")
+	}
+}
+
+func TestPipelineConfirmation_Yes(t *testing.T) {
+	planJSON := `{"type": "pipeline", "steps": [
+		{"id": "1", "name": "Get error", "plugin": "appsignal", "action": "get_error"},
+		{"id": "2", "name": "Create issue", "plugin": "jira", "action": "create_issue", "depends_on": ["1"]}
+	]}`
+	llm := &fakeLLM{responses: []string{planJSON}}
+
+	orch, sessID := setupPipelineOrchestrator(llm, llm)
+	// First call: planner returns pipeline, stores pending
+	_, err := orch.Run(context.Background(), sessID, "do stuff")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Second call: user confirms
+	result, err := orch.Run(context.Background(), sessID, "yes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Response, "successfully") {
+		t.Errorf("expected success summary, got: %q", result.Response)
+	}
+	if len(result.ToolCalls) != 2 {
+		t.Errorf("expected 2 tool calls, got %d", len(result.ToolCalls))
+	}
+	// Pending pipeline should be cleared
+	if orch.pendingPipelines[sessID] != nil {
+		t.Error("expected pending pipeline to be cleared after execution")
+	}
+}
+
+func TestPipelineConfirmation_No(t *testing.T) {
+	planJSON := `{"type": "pipeline", "steps": [
+		{"id": "1", "name": "Get error", "plugin": "appsignal", "action": "get_error"},
+		{"id": "2", "name": "Create issue", "plugin": "jira", "action": "create_issue"}
+	]}`
+	llm := &fakeLLM{responses: []string{planJSON, "ok, cancelled."}}
+
+	orch, sessID := setupPipelineOrchestrator(llm, llm)
+	_, _ = orch.Run(context.Background(), sessID, "do stuff")
+
+	result, err := orch.Run(context.Background(), sessID, "no")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Response, "cancelled") {
+		t.Errorf("Response = %q, want cancellation message", result.Response)
+	}
+	if orch.pendingPipelines[sessID] != nil {
+		t.Error("expected pending pipeline to be cleared after rejection")
+	}
+}
+
+func TestPipelineConfirmation_Unrelated(t *testing.T) {
+	// Anything other than y/yes defaults to rejection
+	planJSON := `{"type": "pipeline", "steps": [
+		{"id": "1", "name": "Get error", "plugin": "appsignal", "action": "get_error"},
+		{"id": "2", "name": "Create issue", "plugin": "jira", "action": "create_issue"}
+	]}`
+	llm := &fakeLLM{responses: []string{planJSON}}
+
+	orch, sessID := setupPipelineOrchestrator(llm, llm)
+	_, _ = orch.Run(context.Background(), sessID, "do stuff")
+
+	// Unrelated message → defaults to rejection (not y/yes)
+	result, err := orch.Run(context.Background(), sessID, "what is the weather today")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Response, "cancelled") {
+		t.Errorf("Response = %q, want cancellation message", result.Response)
+	}
+	if orch.pendingPipelines[sessID] != nil {
+		t.Error("expected pending pipeline to be cleared")
+	}
+}
+
 func TestInsecurePreparerCannotInvoke(t *testing.T) {
 	// Insecure preparer returns send_to_llm: false + invoke; we must not run invoke, request continues to LLM.
 	invokeJSON := `{"send_to_llm": false, "invoke": {"plugin": "gitlab", "action": "analyze_code"}}`

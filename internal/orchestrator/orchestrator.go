@@ -11,6 +11,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/lua"
+	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
@@ -61,6 +62,8 @@ type OrchestratorOpts struct {
 	MaxMessagesAfterSummary int    // keep this many messages after summarization
 	SummarizePrompt         string // empty = default English
 	SummarizeUpdatePrompt   string // empty = default English
+	PipelineEnabled         bool   // when true, create Planner from llm
+	PipelineConfig          pipeline.PipelineConfig
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -88,13 +91,16 @@ type Orchestrator struct {
 	guard                   *Guard
 	rules                   *RulesConfig
 	preparers               []ContentPreparerEntry
-	luaScriptPaths          map[string]string // optional; plugin name -> path to .lua script (for "lua:name" preparers)
-	permissionChecker       PermissionChecker // optional; when set, executeCall checks permission before running
-	permissionPluginName    string            // name of the permission plugin (skip permission check when executing it)
-	summarizeAfterMessages  int               // 0 = off; after this many messages run summarization
-	maxMessagesAfterSummary int               // keep this many messages after summarization
-	summarizePrompt         string            // system prompt for initial summarization (config; empty = default English)
-	summarizeUpdatePrompt   string            // system prompt for updating summary (config; empty = default English)
+	luaScriptPaths          map[string]string             // optional; plugin name -> path to .lua script (for "lua:name" preparers)
+	permissionChecker       PermissionChecker             // optional; when set, executeCall checks permission before running
+	permissionPluginName    string                        // name of the permission plugin (skip permission check when executing it)
+	summarizeAfterMessages  int                           // 0 = off; after this many messages run summarization
+	maxMessagesAfterSummary int                           // keep this many messages after summarization
+	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
+	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
+	planner                 *pipeline.Planner             // nil = pipeline disabled
+	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
+	pipelineConfig          pipeline.PipelineConfig
 }
 
 const (
@@ -126,6 +132,14 @@ func NewWithRules(
 	if opts.SummarizeUpdatePrompt == "" {
 		opts.SummarizeUpdatePrompt = defaultSummarizeUpdatePrompt
 	}
+	var planner *pipeline.Planner
+	if opts.PipelineEnabled {
+		planner = pipeline.NewPlanner(&plannerLLMAdapter{llm: llm})
+	}
+	pipelineCfg := opts.PipelineConfig
+	if pipelineCfg.MaxStepRetries == 0 && pipelineCfg.StepTimeout == 0 {
+		pipelineCfg = pipeline.DefaultConfig()
+	}
 	return &Orchestrator{
 		llm:                     llm,
 		parser:                  parser,
@@ -142,6 +156,9 @@ func NewWithRules(
 		maxMessagesAfterSummary: opts.MaxMessagesAfterSummary,
 		summarizePrompt:         opts.SummarizePrompt,
 		summarizeUpdatePrompt:   opts.SummarizeUpdatePrompt,
+		planner:                 planner,
+		pendingPipelines:        make(map[string]*pipeline.Pipeline),
+		pipelineConfig:          pipelineCfg,
 	}
 }
 
@@ -189,6 +206,28 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 
 	if _, err := o.sessions.Get(sessionID); err != nil {
 		return nil, fmt.Errorf("session lookup: %w", err)
+	}
+
+	// Block A: Check for pending pipeline confirmation.
+	if p := o.pendingPipelines[sessionID]; p != nil {
+		decision := pipeline.ParseConfirmation(userMessage)
+		if os.Getenv("LOG_LEVEL") == "debug" {
+			log.Printf("[pipeline] pending pipeline %s for session %s, user input: %q, decision: %d", p.ID, sessionID, userMessage, decision)
+		}
+		delete(o.pendingPipelines, sessionID)
+		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
+		if decision == pipeline.Approved {
+			if os.Getenv("LOG_LEVEL") == "debug" {
+				log.Printf("[pipeline] executing pipeline %s (%d steps)", p.ID, len(p.Steps))
+			}
+			return o.executePipeline(ctx, sessionID, p)
+		}
+		resp := "Pipeline cancelled (expected y/yes to confirm)."
+		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
+		if os.Getenv("LOG_LEVEL") == "debug" {
+			log.Printf("[pipeline] pipeline %s rejected: %q", p.ID, userMessage)
+		}
+		return &RunResult{Response: resp}, nil
 	}
 
 	content := userMessage
@@ -267,6 +306,33 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 		}
 	}
 
+	// Block B: Run planner to check if this requires a multi-step pipeline.
+	if o.planner != nil {
+		if os.Getenv("LOG_LEVEL") == "debug" {
+			log.Printf("[pipeline] running planner for session %s, message: %q", sessionID, content)
+		}
+		planResult, err := o.planner.Plan(ctx, content, capabilitiesToPlannerInfo(o.registry.ListCapabilities()))
+		if err != nil {
+			if os.Getenv("LOG_LEVEL") == "debug" {
+				log.Printf("[pipeline] planner error: %v — falling through to agent loop", err)
+			}
+		} else if os.Getenv("LOG_LEVEL") == "debug" {
+			log.Printf("[pipeline] planner result: type=%s, steps=%d", planResult.Type, len(planResult.Steps))
+		}
+		if err == nil && planResult.Type == "pipeline" && len(planResult.Steps) > 1 {
+			p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
+			o.pendingPipelines[sessionID] = p
+			planText := p.FormatForConfirmation()
+			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
+			if os.Getenv("LOG_LEVEL") == "debug" {
+				log.Printf("[pipeline] stored pending pipeline %s for session %s (%d steps), awaiting confirmation", p.ID, sessionID, len(p.Steps))
+			}
+			return &RunResult{Response: planText}, nil
+		}
+		// If "direct" or error or single step, fall through to normal agent loop
+	}
+
 	if err := o.sessions.AddMessage(sessionID, provider.Message{
 		Role:    provider.RoleUser,
 		Content: content,
@@ -340,6 +406,67 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	}
 
 	return nil, fmt.Errorf("agent loop exceeded %d iterations", maxAgentLoopIterations)
+}
+
+func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p *pipeline.Pipeline) (*RunResult, error) {
+	debug := os.Getenv("LOG_LEVEL") == "debug"
+	runner := func(ctx context.Context, pluginName, action string, args map[string]string) pipeline.StepRunResult {
+		if debug {
+			log.Printf("[pipeline] executing step: %s.%s args=%v", pluginName, action, args)
+		}
+		call := ToolCall{
+			ID:     fmt.Sprintf("pipeline-%s-%s", pluginName, action),
+			Plugin: pluginName,
+			Action: action,
+			Args:   args,
+		}
+		result := o.executeCall(ctx, call)
+		if debug {
+			if result.Error != "" {
+				log.Printf("[pipeline] step %s.%s failed: %s", pluginName, action, result.Error)
+			} else {
+				preview := result.Content
+				if len(preview) > 500 {
+					preview = preview[:500] + "... [truncated]"
+				}
+				log.Printf("[pipeline] step %s.%s succeeded: %s", pluginName, action, preview)
+			}
+		}
+		return pipeline.StepRunResult{Content: result.Content, Error: result.Error}
+	}
+	executor := pipeline.NewExecutor(runner, p.Config)
+	execResult, err := executor.Run(ctx, p)
+	if err != nil {
+		return nil, fmt.Errorf("pipeline execution: %w", err)
+	}
+
+	if debug {
+		log.Printf("[pipeline] execution done: success=%v, steps_executed=%d", execResult.Success, len(execResult.Steps))
+	}
+
+	// Record step results in session history
+	var toolCalls []ToolCall
+	var toolResults []ToolResult
+	for _, es := range execResult.Steps {
+		tc := ToolCall{
+			ID:     fmt.Sprintf("pipeline-%s-%s", es.Plugin, es.Action),
+			Plugin: es.Plugin,
+			Action: es.Action,
+			Args:   es.Args,
+		}
+		tr := ToolResult{CallID: tc.ID, Content: es.Content, Error: es.Error}
+		toolCalls = append(toolCalls, tc)
+		toolResults = append(toolResults, tr)
+		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(tc)})
+		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)})
+	}
+	_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: execResult.Summary})
+
+	return &RunResult{
+		Response:  execResult.Summary,
+		ToolCalls: toolCalls,
+		Results:   toolResults,
+	}, nil
 }
 
 func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string) []provider.Message {
@@ -627,6 +754,40 @@ func formatToolResultMessage(result ToolResult) string {
 		return fmt.Sprintf("[tool_result] error: %s", result.Error)
 	}
 	return fmt.Sprintf("[tool_result] %s", result.Content)
+}
+
+// plannerLLMAdapter adapts orchestrator.LLMClient to pipeline.LLMClient.
+type plannerLLMAdapter struct {
+	llm LLMClient
+}
+
+func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.CompletionRequest) (*pipeline.CompletionResponse, error) {
+	msgs := make([]provider.Message, len(req.Messages))
+	for i, m := range req.Messages {
+		msgs[i] = provider.Message{Role: provider.Role(m.Role), Content: m.Content}
+	}
+	resp, err := a.llm.Complete(ctx, &provider.CompletionRequest{Messages: msgs})
+	if err != nil {
+		return nil, err
+	}
+	return &pipeline.CompletionResponse{Content: resp.Content}, nil
+}
+
+// capabilitiesToPlannerInfo converts orchestrator PluginCapability to pipeline CapabilityInfo.
+func capabilitiesToPlannerInfo(caps []PluginCapability) []pipeline.CapabilityInfo {
+	result := make([]pipeline.CapabilityInfo, len(caps))
+	for i, cap := range caps {
+		actions := make([]pipeline.ActionInfo, len(cap.Actions))
+		for j, a := range cap.Actions {
+			params := make([]pipeline.ParamInfo, len(a.Parameters))
+			for k, p := range a.Parameters {
+				params[k] = pipeline.ParamInfo{Name: p.Name, Description: p.Description, Required: p.Required}
+			}
+			actions[j] = pipeline.ActionInfo{Name: a.Name, Description: a.Description, Parameters: params}
+		}
+		result[i] = pipeline.CapabilityInfo{Name: cap.Name, Description: cap.Description, Actions: actions}
+	}
+	return result
 }
 
 // permissionCheckerImpl invokes the permission plugin with action "check" and args actor, plugin.

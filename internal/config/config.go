@@ -174,9 +174,17 @@ type ContentPreparerEntry struct {
 }
 
 type OrchestratorConfig struct {
-	Rules            []string               `yaml:"rules"`
-	ContentPreparers []ContentPreparerEntry `yaml:"content_preparers,omitempty"`
-	PermissionPlugin string                 `yaml:"permission_plugin,omitempty"` // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
+	Rules            []string                   `yaml:"rules"`
+	ContentPreparers []ContentPreparerEntry     `yaml:"content_preparers,omitempty"`
+	PermissionPlugin string                     `yaml:"permission_plugin,omitempty"` // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
+	Pipeline         PipelineOrchestratorConfig `yaml:"pipeline,omitempty"`
+}
+
+// PipelineOrchestratorConfig enables structured multi-step pipeline execution.
+type PipelineOrchestratorConfig struct {
+	Enabled        bool   `yaml:"enabled"`          // default false
+	MaxStepRetries int    `yaml:"max_step_retries"` // default 3
+	StepTimeout    string `yaml:"step_timeout"`     // Go duration, default "60s"
 }
 
 type StateConfig struct {

@@ -130,13 +130,17 @@ For ambiguous cases, Lua hooks can call a small/cheap LLM (`ctx.llm()`) for ligh
 
 ### State and context persistence
 
-When `state.data_dir` is set, conversation and rules persist across restarts using SQLite (`state.db`). The app uses the **pure-Go** driver [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite), so no system SQLite library is required—it's a normal Go dependency and is compiled into the binary. **General** rules (shared) and **per-actor** rules (per user) are stored as memories so multiple users get shared context plus their own. The LLM receives general context (config rules, general stored rules, tools), user/actor context (that actor’s stored rules), and the **session** (conversation history). Sessions are one per channel/conversation or thread; optional **summarization** after N messages compresses history into a summary and keeps only the last few messages, so token usage stays bounded. See [docs/design/channels.md](docs/design/channels.md) (State and memory) and `config.example.yaml` (`state.session`) for details.
+When `state.data_dir` is set, conversation and rules persist across restarts using SQLite (`state.db`). The app uses the **pure-Go** driver [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite), so no system SQLite library is required—it’s a normal Go dependency and is compiled into the binary. **General** rules (shared) and **per-actor** rules (per user) are stored as memories so multiple users get shared context plus their own. The LLM receives general context (config rules, general stored rules, tools), user/actor context (that actor’s stored rules), and the **session** (conversation history). Sessions are one per channel/conversation or thread; optional **summarization** after N messages compresses history into a summary and keeps only the last few messages, so token usage stays bounded. Pipeline state is currently in-memory only — persistence is planned for Phase 4. See [docs/design/channels.md](docs/design/channels.md) (State and memory) and `config.example.yaml` (`state.session`) for details.
 
 ```
-User message ──▶ Pre-hooks (Lua / Go / small LLM) ──▶ Main LLM ──▶ Post-hooks (Lua / Go) ──▶ Response
-                  │  zero tokens for rules                │              │
-                  │  cheap tokens for small LLM           │              │  enforce vocabulary
-                  │  full power via gRPC plugins          │              │  compliance, transform
+User message ──▶ Pre-hooks (Lua / Go / small LLM) ──▶ Planner ──▶ Main LLM ──▶ Post-hooks (Lua / Go) ──▶ Response
+                  │  zero tokens for rules                │            │              │
+                  │  cheap tokens for small LLM           │            │              │  enforce vocabulary
+                  │  full power via gRPC plugins           │            │              │  compliance, transform
+                                                          │            │
+                                                   multi-step?         │
+                                                    ├─ yes ──▶ Pipeline Executor ──▶ Results
+                                                    └─ no  ──▶ Agent Loop ─────────┘
 ```
 
 ### Stability
@@ -243,6 +247,7 @@ All three categories share the same set of extension points:
 - [Storage backends](docs/design/state.md)
 - [Notification channels](#channel-plugins-grpc--http--ws--any-language)
 - [Scheduled tasks](#scheduler)
+- [Pipeline execution](#pipeline-execution) (multi-step orchestration)
 - Custom API endpoints (inbound via [channels](#channel-plugins-grpc--http--ws--any-language), outbound via [tool plugins](#tool-plugins-grpc--any-language))
 
 ### Developer Experience
@@ -380,6 +385,75 @@ Users can also create jobs by talking to the LLM:
 - **Approvers** — when configured, only designated users can create, update, or delete dynamic jobs
 - **Per-user limits** — `max_jobs_per_user` prevents any single user from creating excessive jobs
 - **Full CRUD** — list, pause, resume, update, and delete jobs through the LLM or directly via the scheduler API
+
+## Pipeline Execution
+
+When a user request involves multiple steps (e.g. "check the bug in AppSignal, create a Jira ticket, and open a merge request"), OpenTalon's pipeline planner decomposes it into a structured plan, asks for confirmation, and executes each step with built-in retry and error reporting.
+
+```mermaid
+flowchart LR
+    User["User Message"] --> Planner["Planner (LLM)"]
+    Planner -->|"multi-step"| Plan["Plan + Confirm"]
+    Plan -->|"approved"| Executor["Pipeline Executor"]
+    Executor --> Results["Results"]
+    Planner -->|"single-step"| AgentLoop["Agent Loop"]
+    AgentLoop --> Results
+```
+
+### How it works
+
+1. **Planner** — a separate LLM call decomposes the user prompt into a DAG of steps with dependencies. If the prompt is a simple single-step request, the normal agent loop handles it (safe degradation).
+2. **Confirmation** — the plan is presented to the user via their channel (Slack, console, etc.). The user approves (`y`/`yes`) or rejects. Nothing executes without explicit approval.
+3. **Executor** — walks the step DAG in dependency order. Each step calls a plugin action via gRPC. Per-step retry with exponential backoff, per-step timeout, and fail-fast or continue-on-error behavior.
+4. **Results** — on completion (or failure), the user sees what succeeded, what failed, and how many retries were attempted. All tool calls and results are recorded in the session history.
+
+### Example conversation
+
+> **User:** _"Check bug #4521 in AppSignal, then create a Jira ticket and open a GitLab MR with the fix"_
+>
+> **OpenTalon:**
+> ```
+> I've created a plan with the following steps:
+>
+> 1. Check bug in AppSignal
+>    Action: appsignal.get_error (error_id=4521)
+> 2. Create Jira bug ticket
+>    Action: jira.create_issue
+>    Depends on: 1
+> 3. Create MR with fix
+>    Action: gitlab.create_mr
+>    Depends on: 1, 2
+>
+> Proceed? (y)es / (n)o
+> ```
+>
+> **User:** _"y"_
+>
+> **OpenTalon:** _"Pipeline complete — 3/3 steps succeeded."_
+
+### Configuration
+
+```yaml
+orchestrator:
+  pipeline:
+    enabled: true          # default false
+    max_step_retries: 3    # retries per step before giving up (default 3)
+    step_timeout: "60s"    # per-step timeout as Go duration (default "60s")
+```
+
+### Debugging
+
+Set `LOG_LEVEL=debug` to see pipeline decisions, planner LLM calls, step execution, and retry attempts — all prefixed with `[pipeline]`.
+
+### Current limitations (Phase 1)
+
+- **In-memory only** — pipeline state is not persisted; a process restart loses pending/running pipelines (persistence planned for Phase 4)
+- **No step output templating** — template references like `{{steps.1.output.id}}` are passed literally to plugins (planned for Phase 3)
+- **Sequential execution only** — steps with independent dependencies run one at a time (parallel execution planned for Phase 3)
+- **LLM quality dependent** — weaker models may return single-step plans for multi-step requests, causing fallback to the agent loop (expected safe degradation)
+- **No recovery advisor** — failed steps are retried as-is without LLM-assisted diagnosis (planned for Phase 2)
+
+> For the full roadmap (recovery advisor, replan, parallel execution, persistence), see [docs/design/pipeline.md](docs/design/pipeline.md).
 
 ## Build locally with plugins
 
