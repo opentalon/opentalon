@@ -30,11 +30,17 @@ func main() {
 	fmt.Fprintln(os.Stderr, "OpenTalon starting...")
 	configPath := flag.String("config", "", "path to config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	cleanFlag := flag.String("clean", "", "clear cached bundles and exit (all, plugins, channels, skills, lua_plugins)")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(version.Get())
 		os.Exit(0)
+	}
+
+	if *cleanFlag != "" {
+		runClean(*configPath, *cleanFlag)
+		return
 	}
 
 	if *configPath == "" {
@@ -418,6 +424,50 @@ func buildLuaScriptPaths(ctx context.Context, dataDir string, cfg *config.Config
 		}
 	}
 	return paths
+}
+
+// runClean clears cached bundles under the state data dir and exits.
+func runClean(configPath, category string) {
+	var dataDir string
+	if configPath != "" {
+		cfg, err := config.Load(configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+			os.Exit(1)
+		}
+		dataDir = cfg.State.DataDir
+	}
+	if dataDir == "" {
+		home, _ := os.UserHomeDir()
+		dataDir = filepath.Join(home, ".opentalon")
+	}
+
+	var err error
+	switch category {
+	case "all":
+		fmt.Fprintf(os.Stderr, "Cleaning all cached bundles in %s...\n", dataDir)
+		err = bundle.CleanAll(dataDir)
+	case "plugins":
+		fmt.Fprintf(os.Stderr, "Cleaning cached plugins in %s...\n", dataDir)
+		err = bundle.CleanPlugins(dataDir)
+	case "channels":
+		fmt.Fprintf(os.Stderr, "Cleaning cached channels in %s...\n", dataDir)
+		err = bundle.CleanChannels(dataDir)
+	case "skills":
+		fmt.Fprintf(os.Stderr, "Cleaning cached skills in %s...\n", dataDir)
+		err = bundle.CleanSkills(dataDir)
+	case "lua_plugins":
+		fmt.Fprintf(os.Stderr, "Cleaning cached Lua plugins in %s...\n", dataDir)
+		err = bundle.CleanLuaPlugins(dataDir)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown clean category %q. Use: all, plugins, channels, skills, lua_plugins\n", category)
+		os.Exit(1)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Clean failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintln(os.Stderr, "Done. Next run will re-download from configured refs.")
 }
 
 // buildProvider returns a provider and the default model ID from config.

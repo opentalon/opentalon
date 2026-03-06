@@ -1,4 +1,4 @@
-.PHONY: all build test lint deps setup plugin channel run clean proto
+.PHONY: all build test lint deps setup plugin channel run clean clean-cache clean-plugins clean-channels clean-skills clean-lua-plugins proto
 
 BINARY      := opentalon
 CMD_PKG     := ./cmd/opentalon
@@ -70,3 +70,20 @@ clean:
 	rm -f $(BINARY)
 	rm -f $(HELLO_WORLD_BIN)
 	rm -f $(CONSOLE_BIN)
+
+# ── Clean cache: clear cached plugins/channels/skills ──────────────────────
+
+clean-cache: build
+	@./$(BINARY) -clean all
+
+clean-plugins: build
+	@./$(BINARY) -clean plugins
+
+clean-channels: build
+	@./$(BINARY) -clean channels
+
+clean-skills: build
+	@./$(BINARY) -clean skills
+
+clean-lua-plugins: build
+	@./$(BINARY) -clean lua_plugins
