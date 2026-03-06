@@ -36,6 +36,65 @@ func TestSubstitute(t *testing.T) {
 	}
 }
 
+func TestCleanURLParams(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"no templates", "https://api.example.com/search?q=cats", "https://api.example.com/search?q=cats"},
+		{"all resolved", "https://api.example.com/search?q=cats&count=5", "https://api.example.com/search?q=cats&count=5"},
+		{"one unresolved", "https://api.example.com/search?q=cats&count={{args.count}}", "https://api.example.com/search?q=cats"},
+		{"multiple unresolved", "https://api.example.com/search?q=cats&count={{args.count}}&lang={{args.lang}}", "https://api.example.com/search?q=cats"},
+		{"all unresolved", "https://api.example.com/search?q={{args.query}}&count={{args.count}}", "https://api.example.com/search"},
+		{"no query string", "https://api.example.com/search", "https://api.example.com/search"},
+		{"mixed resolved and unresolved", "https://api.example.com/search?q=cats&count=5&lang={{args.lang}}&country=US", "https://api.example.com/search?q=cats&count=5&country=US"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cleanURLParams(tt.url)
+			if got != tt.want {
+				t.Errorf("cleanURLParams() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExecutor_Execute_OptionalParams(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("q") != "test" {
+			t.Errorf("q = %q, want %q", q.Get("q"), "test")
+		}
+		// count should be stripped (not provided by caller)
+		if q.Get("count") != "" {
+			t.Errorf("count should be empty, got %q", q.Get("count"))
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer srv.Close()
+
+	exec := NewExecutor("search", []Package{
+		{
+			Action: "search",
+			Method: "GET",
+			URL:    srv.URL + "/search?q={{args.query}}&count={{args.count}}",
+		},
+	})
+
+	result := exec.Execute(orchestrator.ToolCall{
+		ID:     "call-opt",
+		Plugin: "search",
+		Action: "search",
+		Args:   map[string]string{"query": "test"},
+	})
+
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+}
+
 func TestExecutor_Execute(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
