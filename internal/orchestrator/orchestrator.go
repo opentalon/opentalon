@@ -107,7 +107,7 @@ type Orchestrator struct {
 	maxMessagesAfterSummary int                           // keep this many messages after summarization
 	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
 	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
-	planner                 *pipeline.Planner              // nil = pipeline disabled
+	planner                 *pipeline.Planner             // nil = pipeline disabled
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
 	pipelineConfig          pipeline.PipelineConfig
 }
@@ -649,6 +649,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	}
 
 	actorID := actor.Actor(ctx)
+	// permission_plugin gates all plugin actions (including e.g. install_skill); configure it for team deployments.
 	if actorID != "" && o.permissionChecker != nil && call.Plugin != o.permissionPluginName {
 		allowed, err := o.permissionChecker.Allowed(ctx, actorID, call.Plugin)
 		if err != nil {
@@ -666,17 +667,24 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		}
 	}
 
-	// Inject only declared context arg names that have a provider (e.g. session_id). Plugins never receive session content or message history.
+	// Single lookup: get capability and find the action for context injection and audit logging.
+	var action *Action
 	if cap, ok := o.registry.GetCapability(call.Plugin); ok {
-		for _, a := range cap.Actions {
-			if a.Name != call.Action || len(a.InjectContextArgs) == 0 {
-				continue
+		for i := range cap.Actions {
+			if cap.Actions[i].Name == call.Action {
+				action = &cap.Actions[i]
+				break
 			}
+		}
+	}
+	if action != nil {
+		// Inject only declared context arg names that have a provider (e.g. session_id). Plugins never receive session content or message history.
+		if len(action.InjectContextArgs) > 0 {
 			args := make(map[string]string)
 			for k, v := range call.Args {
 				args[k] = v
 			}
-			for _, name := range a.InjectContextArgs {
+			for _, name := range action.InjectContextArgs {
 				if provide := o.contextArgProviders[name]; provide != nil {
 					if v := provide(ctx, name); v != "" {
 						args[name] = v
@@ -684,19 +692,10 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 				}
 			}
 			call.Args = args
-			break
 		}
-	}
-
-	// Audit log: if the action declares AuditLog, log invocation (no hardcoded plugin/action names).
-	if actorID != "" {
-		if cap, ok := o.registry.GetCapability(call.Plugin); ok {
-			for _, a := range cap.Actions {
-				if a.Name == call.Action && a.AuditLog {
-					log.Printf("audit: actor %s plugin %s action %s args %v", actorID, call.Plugin, call.Action, call.Args)
-					break
-				}
-			}
+		// Audit log when the action declares AuditLog (no hardcoded plugin/action names).
+		if actorID != "" && action.AuditLog {
+			log.Printf("audit: actor %s plugin %s action %s args %v", actorID, call.Plugin, call.Action, call.Args)
 		}
 	}
 
