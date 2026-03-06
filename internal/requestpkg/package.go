@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -93,6 +94,17 @@ func cleanURLParams(rawURL string) string {
 	return base + "?" + strings.Join(kept, "&")
 }
 
+// encodeURLParams re-parses the URL and properly encodes query parameter values.
+// This ensures values with spaces or special characters are percent-encoded.
+func encodeURLParams(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	u.RawQuery = u.Query().Encode()
+	return u.String()
+}
+
 // Executor runs request packages for a single plugin. It implements orchestrator.PluginExecutor.
 type Executor struct {
 	pluginName string
@@ -132,7 +144,7 @@ func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 		}
 	}
 
-	url := cleanURLParams(Substitute(pkg.URL, call.Args))
+	url := encodeURLParams(cleanURLParams(Substitute(pkg.URL, call.Args)))
 	if url == "" {
 		return orchestrator.ToolResult{CallID: call.ID, Error: "URL is empty after substitution"}
 	}

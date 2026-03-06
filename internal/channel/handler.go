@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"log"
+	"os"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
@@ -34,7 +35,7 @@ func NewMessageHandler(
 		if outContent == "" {
 			outContent = "(No response)"
 		}
-		if msg.ChannelID == "console" && inputForDisplay != "" {
+		if msg.ChannelID == "console" && inputForDisplay != "" && os.Getenv("LOG_LEVEL") == "debug" {
 			outContent = "Input to LLM:\n" + inputForDisplay + "\n\n---\n\nResponse:\n" + response
 		}
 		return pkg.OutboundMessage{

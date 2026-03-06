@@ -403,11 +403,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 			result.Response = resp.Content
 			if len(result.Results) > 0 {
 				var parts []string
-				for _, r := range result.Results {
+				for i, r := range result.Results {
+					if i < len(result.ToolCalls) {
+						parts = append(parts, formatToolCallMessage(result.ToolCalls[i]))
+					}
 					if r.Error != "" {
-						parts = append(parts, "[error] "+r.Error)
+						parts = append(parts, "[tool_result] error: "+r.Error)
 					} else if r.Content != "" {
-						parts = append(parts, r.Content)
+						preview := r.Content
+						if len(preview) > 500 {
+							preview = preview[:500] + "..."
+						}
+						parts = append(parts, "[tool_result] "+preview)
 					}
 				}
 				result.InputForDisplay = strings.TrimSpace(strings.Join(parts, "\n"))
@@ -424,6 +431,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 			toolResult := o.executeCall(ctx, call)
 			result.ToolCalls = append(result.ToolCalls, call)
 			result.Results = append(result.Results, toolResult)
+
+			if toolResult.Error != "" {
+				log.Printf("[tool_result] %s.%s error: %s", call.Plugin, call.Action, toolResult.Error)
+			}
 
 			_ = o.sessions.AddMessage(sessionID, provider.Message{
 				Role:    provider.RoleAssistant,
@@ -522,6 +533,10 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string) string {
 	var sb strings.Builder
 	sb.WriteString("You are an AI assistant with access to the following tools.\n\n")
+	sb.WriteString("To call a tool, use EXACTLY this format (no other format will be recognized):\n\n")
+	sb.WriteString("[tool_call]\n{\"tool\": \"plugin.action\", \"args\": {\"key\": \"value\"}}\n[/tool_call]\n\n")
+	sb.WriteString("Example:\n[tool_call]\n{\"tool\": \"brave-search.search\", \"args\": {\"query\": \"latest news\"}}\n[/tool_call]\n\n")
+	sb.WriteString("You may include multiple [tool_call]...[/tool_call] blocks in a single response. Any text outside these blocks is ignored when tool calls are present.\n\n")
 	sb.WriteString("When you receive plugin or tool results, reply to the user in a brief natural language answer. Do not simply repeat or echo the tool output; use it to answer the user's question or confirm what was done.\n\n")
 
 	sb.WriteString(o.rules.BuildPromptSection())

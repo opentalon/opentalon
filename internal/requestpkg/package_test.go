@@ -95,6 +95,59 @@ func TestExecutor_Execute_OptionalParams(t *testing.T) {
 	}
 }
 
+func TestEncodeURLParams(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"no encoding needed", "https://api.example.com/search?q=cats", "https://api.example.com/search?q=cats"},
+		{"spaces in value", "https://api.example.com/search?q=SpaceX launch news", "https://api.example.com/search?q=SpaceX+launch+news"},
+		{"multiple params with spaces", "https://api.example.com/search?q=hello world&lang=en", "https://api.example.com/search?lang=en&q=hello+world"},
+		{"no query string", "https://api.example.com/search", "https://api.example.com/search"},
+		{"already encoded", "https://api.example.com/search?q=already%20encoded", "https://api.example.com/search?q=already+encoded"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := encodeURLParams(tt.url)
+			if got != tt.want {
+				t.Errorf("encodeURLParams() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExecutor_Execute_URLEncoding(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("q") != "SpaceX launch news" {
+			t.Errorf("q = %q, want %q", q.Get("q"), "SpaceX launch news")
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer srv.Close()
+
+	exec := NewExecutor("search", []Package{
+		{
+			Action: "search",
+			Method: "GET",
+			URL:    srv.URL + "/search?q={{args.query}}",
+		},
+	})
+
+	result := exec.Execute(orchestrator.ToolCall{
+		ID:     "call-enc",
+		Plugin: "search",
+		Action: "search",
+		Args:   map[string]string{"query": "SpaceX launch news"},
+	})
+
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+}
+
 func TestExecutor_Execute(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
