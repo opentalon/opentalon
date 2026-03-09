@@ -41,8 +41,13 @@ func LoadDir(dir string) ([]Set, error) {
 }
 
 // Register registers each set with the tool registry (capability + executor).
+// Sets with a non-nil MCP field are skipped — their capabilities come from the
+// opentalon-mcp plugin binary, not the built-in HTTP executor.
 func Register(registry *orchestrator.ToolRegistry, sets []Set) error {
 	for _, set := range sets {
+		if set.MCP != nil {
+			continue
+		}
 		cap := ToCapability(set)
 		exec := NewExecutor(set.PluginName, set.Packages)
 		if err := registry.Register(cap, exec); err != nil {
@@ -50,4 +55,17 @@ func Register(registry *orchestrator.ToolRegistry, sets []Set) error {
 		}
 	}
 	return nil
+}
+
+// CollectMCPServers returns the MCPServerConfig from every set that has one.
+// These are serialized as OPENTALON_MCP_SERVERS and injected into the MCP
+// plugin binary's environment before it is launched.
+func CollectMCPServers(sets []Set) []MCPServerConfig {
+	var configs []MCPServerConfig
+	for _, set := range sets {
+		if set.MCP != nil {
+			configs = append(configs, *set.MCP)
+		}
+	}
+	return configs
 }

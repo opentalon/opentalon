@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -126,19 +127,8 @@ func main() {
 			Name: name, Plugin: path, Enabled: p.Enabled, Config: p.Config,
 		})
 	}
-	for _, e := range pluginEntries {
-		if e.Enabled && dataDir != "" {
-			if err := store.RunPluginMigrations(dataDir, e.Name, e.Plugin); err != nil {
-				log.Printf("Warning: plugin %s migrations: %v", e.Name, err)
-			}
-		}
-	}
-	pluginManager := plugin.NewManager(toolRegistry)
-	if err := pluginManager.LoadAll(ctx, pluginEntries); err != nil {
-		log.Printf("Warning: some plugins failed to load: %v", err)
-	}
-
-	// Request packages (skill-style): no compiled plugin, core runs HTTP requests from config/dir
+	// Request packages (skill-style): loaded before plugins so MCP server configs
+	// can be injected into the MCP plugin binary's environment at launch.
 	var requestSets []requestpkg.Set
 	if cfg.RequestPackages.Path != "" {
 		dirSets, err := requestpkg.LoadDir(cfg.RequestPackages.Path)
@@ -229,6 +219,40 @@ func main() {
 		}
 		requestSets = append(requestSets, set)
 	}
+
+	// Collect MCP server configs and inject into the "mcp" plugin entry's environment
+	// before the plugin is launched so the binary knows which servers to connect to.
+	if mcpServers := requestpkg.CollectMCPServers(requestSets); len(mcpServers) > 0 {
+		mcpJSON, err := json.Marshal(mcpServers)
+		if err != nil {
+			log.Printf("Warning: marshal MCP servers: %v", err)
+		} else {
+			injected := false
+			for i, e := range pluginEntries {
+				if e.Name == "mcp" {
+					pluginEntries[i].Env = append(os.Environ(), "OPENTALON_MCP_SERVERS="+string(mcpJSON))
+					injected = true
+					break
+				}
+			}
+			if !injected {
+				log.Printf("Warning: MCP skill configs found but no 'mcp' plugin entry in config")
+			}
+		}
+	}
+
+	for _, e := range pluginEntries {
+		if e.Enabled && dataDir != "" {
+			if err := store.RunPluginMigrations(dataDir, e.Name, e.Plugin); err != nil {
+				log.Printf("Warning: plugin %s migrations: %v", e.Name, err)
+			}
+		}
+	}
+	pluginManager := plugin.NewManager(toolRegistry)
+	if err := pluginManager.LoadAll(ctx, pluginEntries); err != nil {
+		log.Printf("Warning: some plugins failed to load: %v", err)
+	}
+
 	if err := requestpkg.Register(toolRegistry, requestSets); err != nil {
 		log.Printf("Warning: request_packages: %v", err)
 	}

@@ -23,6 +23,7 @@ type PluginEntry struct {
 	Plugin  string // path to binary or grpc://...
 	Enabled bool
 	Config  map[string]interface{}
+	Env     []string // optional: if set, passed as subprocess env (replaces inherited env)
 }
 
 type managed struct {
@@ -118,6 +119,9 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 
 func (m *Manager) launchBinary(ctx context.Context, entry PluginEntry) (*Process, *Client, error) {
 	proc := NewProcess(entry.Plugin)
+	if len(entry.Env) > 0 {
+		proc.SetEnv(entry.Env)
+	}
 	hs, err := proc.Start(ctx, defaultHandshakeTimeout)
 	if err != nil {
 		return nil, nil, fmt.Errorf("start %s: %w", entry.Name, err)

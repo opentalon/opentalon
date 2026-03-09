@@ -20,6 +20,7 @@ type Process struct {
 	mu     sync.Mutex
 	path   string
 	args   []string
+	env    []string // if non-nil, used as cmd.Env (replaces inherited env)
 	cmd    *exec.Cmd
 	hs     pkg.Handshake
 	exited chan struct{}
@@ -33,6 +34,14 @@ func NewProcess(binaryPath string, args ...string) *Process {
 	}
 }
 
+// SetEnv sets the environment for the subprocess. If called before Start,
+// cmd.Env is set to env instead of inheriting the parent process environment.
+func (p *Process) SetEnv(env []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.env = env
+}
+
 // Start launches the plugin binary and reads its handshake line from
 // stdout. The plugin must print "version|network|address\n" within
 // the given timeout.
@@ -42,6 +51,9 @@ func (p *Process) Start(ctx context.Context, timeout time.Duration) (pkg.Handsha
 
 	cmd := exec.CommandContext(ctx, p.path, p.args...)
 	cmd.Stderr = os.Stderr
+	if len(p.env) > 0 {
+		cmd.Env = p.env
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
