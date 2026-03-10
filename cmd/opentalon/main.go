@@ -229,18 +229,20 @@ func main() {
 		} else {
 			injected := false
 			for i, e := range pluginEntries {
-				if e.Name == "mcp" {
-					env := os.Environ()
+				if e.Name != "mcp" {
+					continue
+				}
+				env := os.Environ()
 				filtered := make([]string, 0, len(env)+1)
-				for _, e := range env {
-					if !strings.HasPrefix(e, "OPENTALON_MCP_SERVERS=") {
-						filtered = append(filtered, e)
+				for _, v := range env {
+					if !strings.HasPrefix(v, "OPENTALON_MCP_SERVERS=") {
+						filtered = append(filtered, v)
 					}
 				}
-				pluginEntries[i].Env = append(filtered, "OPENTALON_MCP_SERVERS="+string(mcpJSON))
-					injected = true
-					break
-				}
+				filtered = append(filtered, "OPENTALON_MCP_SERVERS="+string(mcpJSON))
+				pluginEntries[i].Env = filtered
+				injected = true
+				break
 			}
 			if !injected {
 				log.Printf("Warning: MCP skill configs found but no 'mcp' plugin entry in config")
