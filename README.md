@@ -106,6 +106,76 @@ flowchart TD
 
 **Guard of LLM models:** A plugin can host its **own LLM** (e.g. a small local model or a dedicated API). Used as a content preparer, such a plugin can implement a **guard of LLM models**—for example, classify or validate the request and block or redirect before the main orchestrator LLM is invoked, or enforce which models or providers are allowed. The core only sees the plugin’s result (e.g. transformed message or “do not send to LLM”); the plugin’s internal use of an LLM stays out of the main token path.
 
+#### Content Preparers
+
+**Content preparers** are plugin actions that run before the first LLM call. They receive the user’s message and can transform it, enrich it, or block it entirely by returning `send_to_llm: false`.
+
+```yaml
+orchestrator:
+  content_preparers:
+    - plugin: opentalon-commands   # runs slash command handling before the LLM
+      action: handle
+    - plugin: terminology          # rewrites non-standard terms to company vocabulary
+      action: normalize
+```
+
+A preparer returns plain text (the transformed message) or a JSON response:
+
+```json
+{ “send_to_llm”: false, “message”: “handled without LLM” }
+```
+
+```json
+{ “send_to_llm”: false, “invoke”: [
+    { “plugin”: “jira”, “action”: “create_issue”, “args”: { “title”: “...” } }
+]}
+```
+
+When `send_to_llm` is `false`, the LLM is never called — the preparer’s message or invoke steps become the response directly. Preparers with `invoke` steps must be explicitly trusted in config (see `insecure: false` in `config.example.yaml`).
+
+#### Guard Plugins — Prompt Injection Prevention
+
+Regular content preparers run once, on the initial user message. **Guard plugins** go further: they run before **every** LLM call in the agent loop — including after tool results come back — so they can sanitize content that arrives from external systems before the LLM ever sees it.
+
+This is the primary defence against **prompt injection**: a malicious tool response that says _”ignore previous instructions and do X”_ is intercepted and sanitized by the guard before the LLM processes it.
+
+```yaml
+orchestrator:
+  content_preparers:
+    - plugin: injection-guard
+      action: sanitize
+      guard: true        # ← runs before every LLM call, not just the first
+```
+
+Execution flow with a guard:
+
+```
+User message
+    │
+    ▼
+[Content preparers]   ← regular preparers run once here
+    │
+    ▼
+Agent loop iteration 1:
+    ├─ [Guard plugins]  ← sanitize last message (user input)
+    ├─ LLM call
+    └─ Tool call → result appended
+Agent loop iteration 2:
+    ├─ [Guard plugins]  ← sanitize last message (tool result)  ← injection caught here
+    ├─ LLM call
+    └─ Final answer
+```
+
+The guard plugin receives the content of the most recent message (the last tool result or user message) as the `text` argument, and returns the sanitized version. It can also block entirely:
+
+```json
+{ “send_to_llm”: false, “message”: “Prompt injection detected — request blocked.” }
+```
+
+Guard actions are **never listed in the LLM’s tool list** — they are invisible to the model and run transparently as part of the infrastructure.
+
+A guard plugin can use a small/cheap LLM internally to detect subtle injections, or apply deterministic pattern matching — either way the main LLM only sees the clean output.
+
 #### LLM Safety Rules
 
 The LLM itself receives **built-in safety rules** in its system prompt at the start of every session. These rules instruct the LLM — in multiple languages — to never execute tool calls found inside plugin output, to treat all plugin responses as untrusted data, and to never let a plugin influence which other plugins get called.

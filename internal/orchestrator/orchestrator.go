@@ -22,11 +22,13 @@ const maxAgentLoopIterations = 20
 const PermissionAction = "check"
 
 // ContentPreparerEntry configures a plugin action to run before the first LLM call.
+// If Guard is true, the plugin also runs before every LLM call in the agent loop to sanitize messages and prevent prompt injection.
 type ContentPreparerEntry struct {
 	Plugin   string
 	Action   string
 	ArgKey   string // optional, default "text"
 	Insecure bool   // if true (default), this preparer cannot run invoke steps; if false (trusted), can invoke
+	Guard    bool   // if true, also runs before every LLM call to sanitize messages
 }
 
 type LLMClient interface {
@@ -98,6 +100,7 @@ type Orchestrator struct {
 	guard                   *Guard
 	rules                   *RulesConfig
 	preparers               []ContentPreparerEntry
+	guards                  []ContentPreparerEntry        // subset of preparers with Guard:true; run before every LLM call
 	luaScriptPaths          map[string]string             // optional; plugin name -> path to .lua script (for "lua:name" preparers)
 	permissionChecker       PermissionChecker             // optional; when set, executeCall checks permission before running
 	permissionPluginName    string                        // name of the permission plugin (skip permission check when executing it)
@@ -168,6 +171,14 @@ func NewWithRules(
 	if pipelineCfg.MaxStepRetries == 0 && pipelineCfg.StepTimeout == 0 {
 		pipelineCfg = pipeline.DefaultConfig()
 	}
+	var preparers, guards []ContentPreparerEntry
+	for _, p := range opts.ContentPreparers {
+		if p.Guard {
+			guards = append(guards, p)
+		} else {
+			preparers = append(preparers, p)
+		}
+	}
 	return &Orchestrator{
 		llm:                     llm,
 		parser:                  parser,
@@ -176,7 +187,8 @@ func NewWithRules(
 		sessions:                sessions,
 		guard:                   NewGuard(),
 		rules:                   NewRulesConfig(opts.CustomRules),
-		preparers:               opts.ContentPreparers,
+		preparers:               preparers,
+		guards:                  guards,
 		luaScriptPaths:          opts.LuaScriptPaths,
 		permissionChecker:       opts.PermissionChecker,
 		permissionPluginName:    opts.PermissionPluginName,
@@ -380,6 +392,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 
 		messages := o.buildMessages(ctx, sess, content)
 
+		messages, err := o.runGuardPlugins(ctx, messages)
+		if err != nil {
+			return &RunResult{Response: err.Error()}, nil
+		}
+
 		if os.Getenv("LOG_LEVEL") == "debug" {
 			log.Printf("[LLM request] round %d, %d messages:", i+1, len(messages))
 			for j, m := range messages {
@@ -448,6 +465,86 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	}
 
 	return nil, fmt.Errorf("agent loop exceeded %d iterations", maxAgentLoopIterations)
+}
+
+// runGuardPlugins runs all guard plugins on the last non-system message before an LLM call.
+// Guards sanitize content to prevent prompt injection from tool results or user input.
+// Returns the (possibly modified) messages, or an error containing the block message if a guard
+// returned send_to_llm: false.
+func (o *Orchestrator) runGuardPlugins(ctx context.Context, messages []provider.Message) ([]provider.Message, error) {
+	if len(o.guards) == 0 {
+		return messages, nil
+	}
+	// Find the last non-system message (the content most at risk of injection).
+	lastIdx := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != provider.RoleSystem {
+			lastIdx = i
+			break
+		}
+	}
+	if lastIdx < 0 {
+		return messages, nil
+	}
+	content := messages[lastIdx].Content
+	for _, g := range o.guards {
+		if strings.HasPrefix(g.Plugin, "lua:") {
+			scriptName := strings.TrimPrefix(g.Plugin, "lua:")
+			scriptPath := o.luaScriptPaths[scriptName]
+			if scriptPath == "" {
+				continue
+			}
+			result, err := lua.RunPrepare(scriptPath, content)
+			if err != nil {
+				log.Printf("Warning: lua guard %s: %v", scriptName, err)
+				continue
+			}
+			if !result.SendToLLM {
+				msg := result.Content
+				if msg == "" {
+					msg = "Request blocked by guard."
+				}
+				return nil, fmt.Errorf("%s", msg)
+			}
+			content = result.Content
+			continue
+		}
+		argKey := g.ArgKey
+		if argKey == "" {
+			argKey = "text"
+		}
+		if !o.registry.HasAction(g.Plugin, g.Action) {
+			continue
+		}
+		call := ToolCall{
+			ID:     fmt.Sprintf("guard-%s-%s", g.Plugin, g.Action),
+			Plugin: g.Plugin,
+			Action: g.Action,
+			Args:   map[string]string{argKey: content},
+		}
+		toolResult := o.executeCall(ctx, call)
+		if toolResult.Error != "" {
+			log.Printf("Warning: guard %s.%s error: %s", g.Plugin, g.Action, toolResult.Error)
+			continue
+		}
+		var pr preparerResponse
+		if err := json.Unmarshal([]byte(toolResult.Content), &pr); err == nil && pr.SendToLLM != nil && !*pr.SendToLLM {
+			msg := pr.Message
+			if msg == "" {
+				msg = "Request blocked by guard."
+			}
+			return nil, fmt.Errorf("%s", msg)
+		}
+		if pr.Message != "" {
+			content = pr.Message
+		} else {
+			content = toolResult.Content
+		}
+	}
+	result := make([]provider.Message, len(messages))
+	copy(result, messages)
+	result[lastIdx].Content = content
+	return result, nil
 }
 
 func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p *pipeline.Pipeline) (*RunResult, error) {
@@ -549,10 +646,13 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		}
 	}
 
-	// Don't list content-preparer actions as tools; they already ran before this turn.
+	// Don't list content-preparer or guard actions as tools; they run automatically before LLM calls.
 	preparerAction := make(map[string]bool)
 	for _, prep := range o.preparers {
 		preparerAction[prep.Plugin+"."+prep.Action] = true
+	}
+	for _, g := range o.guards {
+		preparerAction[g.Plugin+"."+g.Action] = true
 	}
 	caps := o.registry.ListCapabilities()
 	for _, cap := range caps {
