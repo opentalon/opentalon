@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -172,6 +173,18 @@ func (ch *YAMLChannel) handleFrame(conn *websocket.Conn, data []byte) {
 		}
 	}
 
+	ch.processInboundData(data)
+}
+
+// processInboundData processes raw JSON data received from any inbound source
+// (WebSocket frame or HTTP webhook body).
+func (ch *YAMLChannel) processInboundData(data []byte) {
+	var frame map[string]interface{}
+	if err := json.Unmarshal(data, &frame); err != nil {
+		log.Printf("yaml-channel: %s: invalid JSON: %v", ch.spec.ID, err)
+		return
+	}
+
 	// Navigate to the event object
 	event := navigatePath(frame, ch.spec.Inbound.EventPath)
 	if event == nil {
@@ -328,7 +341,16 @@ func (ch *YAMLChannel) applyTransforms(content string, eventCtx map[string]strin
 		case "replace":
 			pattern := substituteTemplate(t.Pattern, contexts)
 			replacement := substituteTemplate(t.Replacement, contexts)
-			content = strings.ReplaceAll(content, pattern, replacement)
+			if t.Regex {
+				re, err := regexp.Compile(pattern)
+				if err != nil {
+					log.Printf("yaml-channel: %s: invalid regex %q: %v", ch.spec.ID, pattern, err)
+				} else {
+					content = re.ReplaceAllString(content, replacement)
+				}
+			} else {
+				content = strings.ReplaceAll(content, pattern, replacement)
+			}
 		case "trim":
 			content = strings.TrimSpace(content)
 		}
@@ -439,20 +461,27 @@ func navigatePath(obj map[string]interface{}, path string) map[string]interface{
 }
 
 // getStringField extracts a string value from a map by key.
+// Supports dotted paths (e.g. "from.id") for nested lookups.
 func getStringField(m map[string]interface{}, key string) string {
-	val, ok := m[key]
-	if !ok || val == nil {
-		return ""
+	// Try exact key first (handles keys that literally contain dots)
+	if val, ok := m[key]; ok && val != nil {
+		switch v := val.(type) {
+		case string:
+			return v
+		case float64:
+			return fmt.Sprintf("%g", v)
+		default:
+			return fmt.Sprintf("%v", v)
+		}
 	}
-	switch v := val.(type) {
-	case string:
-		return v
-	case float64:
-		// JSON numbers — format without scientific notation
-		return fmt.Sprintf("%g", v)
-	default:
-		return fmt.Sprintf("%v", v)
+	// Navigate dotted path
+	parts := strings.SplitN(key, ".", 2)
+	if len(parts) == 2 {
+		if nested, ok := m[parts[0]].(map[string]interface{}); ok {
+			return getStringField(nested, parts[1])
+		}
 	}
+	return ""
 }
 
 // flattenToStringMap converts a map[string]interface{} to map[string]string,

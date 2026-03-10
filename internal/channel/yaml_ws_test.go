@@ -269,6 +269,59 @@ func TestApplyTransforms(t *testing.T) {
 	}
 }
 
+func TestApplyTransforms_RegexReplace(t *testing.T) {
+	ch := &YAMLChannel{
+		spec: &YAMLChannelSpec{
+			Inbound: InboundSpec{
+				Transforms: []Transform{
+					{Type: "replace", Pattern: `<at>[^<]*</at>\s*`, Replacement: "", Regex: true},
+					{Type: "trim"},
+				},
+			},
+		},
+		selfVars: make(map[string]string),
+		config:   make(map[string]string),
+	}
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"<at>MyBot</at> hello there", "hello there"},
+		{"<at>My Bot Name</at>   please help", "please help"},
+		{"no mention here", "no mention here"},
+		{"  <at>Bot</at> ", ""},
+	}
+
+	for _, tt := range tests {
+		got := ch.applyTransforms(tt.input, map[string]string{})
+		if got != tt.want {
+			t.Errorf("applyTransforms(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestApplyTransforms_InvalidRegex(t *testing.T) {
+	// An invalid regex should log and skip the transform, not panic.
+	ch := &YAMLChannel{
+		spec: &YAMLChannelSpec{
+			Inbound: InboundSpec{
+				Transforms: []Transform{
+					{Type: "replace", Pattern: `[invalid`, Replacement: "", Regex: true},
+				},
+			},
+		},
+		selfVars: make(map[string]string),
+		config:   make(map[string]string),
+	}
+
+	input := "unchanged"
+	got := ch.applyTransforms(input, map[string]string{})
+	if got != input {
+		t.Errorf("applyTransforms with invalid regex changed content: got %q, want %q", got, input)
+	}
+}
+
 func TestExtractMessage(t *testing.T) {
 	ch := &YAMLChannel{
 		spec: &YAMLChannelSpec{

@@ -59,14 +59,15 @@ type ReconnectSpec struct {
 
 // InboundSpec describes how to process incoming WebSocket frames.
 type InboundSpec struct {
-	Ack               AckSpec     `yaml:"ack"`
-	EventPath         string      `yaml:"event_path"`
-	EventTypes        []string    `yaml:"event_types"`
-	AlwaysProcessWhen *FieldMatch `yaml:"always_process_when"`
-	Skip              []SkipRule  `yaml:"skip"`
-	Mapping           MappingSpec `yaml:"mapping"`
-	Transforms        []Transform `yaml:"transforms"`
-	Dedup             DedupSpec   `yaml:"dedup"`
+	HTTPWebhook       *WebhookInboundSpec `yaml:"http_webhook"`
+	Ack               AckSpec             `yaml:"ack"`
+	EventPath         string              `yaml:"event_path"`
+	EventTypes        []string            `yaml:"event_types"`
+	AlwaysProcessWhen *FieldMatch         `yaml:"always_process_when"`
+	Skip              []SkipRule          `yaml:"skip"`
+	Mapping           MappingSpec         `yaml:"mapping"`
+	Transforms        []Transform         `yaml:"transforms"`
+	Dedup             DedupSpec           `yaml:"dedup"`
 }
 
 // AckSpec describes how to acknowledge a frame.
@@ -122,6 +123,18 @@ type Transform struct {
 	Type        string `yaml:"type"`        // "replace" or "trim"
 	Pattern     string `yaml:"pattern"`     // for replace: regex or literal (with templates)
 	Replacement string `yaml:"replacement"` // for replace
+	Regex       bool   `yaml:"regex"`       // if true, treat pattern as regexp
+}
+
+// WebhookInboundSpec configures an inbound HTTP webhook endpoint.
+type WebhookInboundSpec struct {
+	Path         string `yaml:"path"` // e.g. "/api/messages"
+	Port         int    `yaml:"port"` // default 3978
+	ValidateJWT  bool   `yaml:"validate_jwt"`
+	OIDCEndpoint string `yaml:"oidc_endpoint"` // OpenID discovery URL for JWKS
+	Audience     string `yaml:"audience"`      // expected JWT aud claim
+	Issuer       string `yaml:"issuer"`        // expected JWT iss claim
+	ResponseCode int    `yaml:"response_code"` // default 200
 }
 
 // DedupSpec configures event deduplication.
