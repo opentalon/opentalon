@@ -230,7 +230,14 @@ func main() {
 			injected := false
 			for i, e := range pluginEntries {
 				if e.Name == "mcp" {
-					pluginEntries[i].Env = append(os.Environ(), "OPENTALON_MCP_SERVERS="+string(mcpJSON))
+					env := os.Environ()
+				filtered := make([]string, 0, len(env)+1)
+				for _, e := range env {
+					if !strings.HasPrefix(e, "OPENTALON_MCP_SERVERS=") {
+						filtered = append(filtered, e)
+					}
+				}
+				pluginEntries[i].Env = append(filtered, "OPENTALON_MCP_SERVERS="+string(mcpJSON))
 					injected = true
 					break
 				}

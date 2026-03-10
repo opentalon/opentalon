@@ -35,6 +35,9 @@ func LoadDir(dir string) ([]Set, error) {
 		if s.PluginName == "" {
 			return nil, fmt.Errorf("%s: missing plugin name", path)
 		}
+		if s.MCP != nil && s.MCP.URL == "" {
+			return nil, fmt.Errorf("%s: mcp section requires a non-empty url", path)
+		}
 		sets = append(sets, s)
 	}
 	return sets, nil

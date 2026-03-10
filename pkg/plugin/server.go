@@ -21,7 +21,8 @@ type Handler interface {
 }
 
 // ServeListener starts a gRPC server on an existing listener. The caller is
-// responsible for printing the handshake line to stdout before calling this.
+// responsible for printing the handshake line to stdout before calling this,
+// and for closing the listener after ServeListener returns.
 // Useful for TCP mode (MCP_GRPC_PORT).
 func ServeListener(ln net.Listener, handler Handler) error {
 	srv := grpc.NewServer()
