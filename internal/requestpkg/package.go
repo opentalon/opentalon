@@ -16,8 +16,6 @@ import (
 	pkgrpkg "github.com/opentalon/opentalon/pkg/requestpkg"
 )
 
-// MCPServerConfig is an alias for the public MCPServerConfig type so callers
-// of internal/requestpkg don't need to import pkg/requestpkg separately.
 type MCPServerConfig = pkgrpkg.MCPServerConfig
 
 // Package defines a single request package (skill-style): an HTTP request

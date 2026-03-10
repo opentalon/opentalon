@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +24,26 @@ type PluginEntry struct {
 	Plugin  string // path to binary or grpc://...
 	Enabled bool
 	Config  map[string]interface{}
-	Env     []string // optional: if set, passed as subprocess env (replaces inherited env)
+	Env     []string // if non-nil, used as the subprocess env verbatim; use WithEnvOverride to build it
+}
+
+// WithEnvOverride starts from the current process environment (or the entry's
+// existing Env slice) and overrides key to value, replacing any prior value
+// for that key. Safe to call multiple times to layer additional overrides.
+func (e *PluginEntry) WithEnvOverride(key, value string) {
+	base := e.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	prefix := key + "="
+	result := make([]string, 0, len(base)+1)
+	for _, v := range base {
+		if !strings.HasPrefix(v, prefix) {
+			result = append(result, v)
+		}
+	}
+	result = append(result, key+"="+value)
+	e.Env = result
 }
 
 type managed struct {
