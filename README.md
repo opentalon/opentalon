@@ -264,6 +264,33 @@ All three categories share the same set of extension points:
 - [Pipeline execution](#pipeline-execution) (multi-step orchestration)
 - Custom API endpoints (inbound via [channels](#channel-plugins-grpc--http--ws--any-language), outbound via [tool plugins](#tool-plugins-grpc--any-language))
 
+### MCP (Model Context Protocol) Support
+
+OpenTalon supports the **Model Context Protocol (MCP)**, allowing it to connect to any MCP-compatible tool server alongside its native gRPC plugins.
+
+The **[opentalon/mcp-plugin](https://github.com/opentalon/mcp-plugin)** acts as an MCP bridge: it runs as a standard OpenTalon gRPC tool plugin and transparently proxies tool calls to one or more MCP servers over HTTP+SSE. From the core's perspective it is just another plugin; from the MCP server's perspective it is a standard MCP client.
+
+```
+OpenTalon Core  ──gRPC──▶  mcp-plugin  ──HTTP+SSE──▶  MCP Server A
+                                        ──HTTP+SSE──▶  MCP Server B
+```
+
+Configure it like any other plugin:
+
+```yaml
+plugins:
+  mcp:
+    enabled: true
+    github: "opentalon/mcp-plugin"
+    ref: "master"
+    config:
+      servers:
+        - name: my-mcp-server
+          url: "http://localhost:8080/sse"
+```
+
+Each tool exposed by the MCP servers is automatically registered in OpenTalon's tool registry and becomes callable by the LLM. All security guards (response sanitization, size limits, timeouts, namespace isolation) apply to MCP tool results exactly as they do to native gRPC plugins.
+
 ### Developer Experience
 
 - **Example: [Hello World plugin](https://github.com/opentalon/hellow-world-plugin)** — build your first tool plugin (hello→world + optional prompt fragment), then run OpenTalon with DeepSeek or any provider.

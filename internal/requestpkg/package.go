@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	pkgrpkg "github.com/opentalon/opentalon/pkg/requestpkg"
 )
+
+type MCPServerConfig = pkgrpkg.MCPServerConfig
 
 // Package defines a single request package (skill-style): an HTTP request
 // with URL/body/headers templated with {{env.X}} and {{args.Y}}.
@@ -36,10 +39,13 @@ type ParamDefinition struct {
 }
 
 // Set groups request packages by plugin name. Each plugin has a list of actions (packages).
+// If MCP is non-nil, this set is handled by the opentalon-mcp plugin binary instead of
+// the built-in HTTP executor; Packages is ignored in that case.
 type Set struct {
-	PluginName  string    `yaml:"plugin"` // e.g. jira
-	Description string    `yaml:"description"`
-	Packages    []Package `yaml:"packages"`
+	PluginName  string           `yaml:"plugin"` // e.g. jira, or "mcp"
+	Description string           `yaml:"description"`
+	Packages    []Package        `yaml:"packages"`
+	MCP         *MCPServerConfig `yaml:"mcp,omitempty"`
 }
 
 var (

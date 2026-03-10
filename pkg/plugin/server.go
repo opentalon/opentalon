@@ -20,6 +20,16 @@ type Handler interface {
 	Execute(req Request) Response
 }
 
+// ServeListener starts a gRPC server on an existing listener. The caller is
+// responsible for printing the handshake line to stdout before calling this,
+// and for closing the listener after ServeListener returns.
+// Useful for TCP mode (MCP_GRPC_PORT).
+func ServeListener(ln net.Listener, handler Handler) error {
+	srv := grpc.NewServer()
+	pluginpb.RegisterPluginServiceServer(srv, &grpcServer{handler: handler})
+	return srv.Serve(ln)
+}
+
 // Serve starts a gRPC server on a Unix socket and serves requests from the
 // host using the given handler. It prints the handshake line to stdout so the
 // host can discover the socket. This function blocks until the server is stopped.
