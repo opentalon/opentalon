@@ -258,10 +258,12 @@ orchestrator:
     - plugin: hello-world
       action: prepare
       arg_key: text    # optional; default is "text"
+      fail_open: false # optional; default false (fail-closed)
 ```
 
 - **Normal case**: the preparer returns a string → that string is the user message for the LLM. Content preparers are **not** listed as callable tools; the LLM does not see or call them.
 - **Guard case**: the preparer returns JSON `{"send_to_llm": false, "message": "..."}` → the orchestrator skips the LLM and sends that message to the user.
+- **Failure behavior**: defaults to **fail-closed** (`fail_open: false`) — if the preparer/guard errors or is missing, the request is blocked. Set `fail_open: true` only for non-critical cases where skipping is acceptable.
 
 See the [Hello World plugin](https://github.com/opentalon/hellow-world-plugin) for an example.
 

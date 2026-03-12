@@ -167,10 +167,13 @@ type ChannelConfig struct {
 }
 
 // ContentPreparerEntry configures a plugin action to run before the first LLM call; its output becomes the user message (or can block the LLM via send_to_llm: false).
+// If Guard is true, the plugin also runs before every subsequent LLM call (e.g. to sanitize tool results and prevent prompt injection).
 type ContentPreparerEntry struct {
-	Plugin string `yaml:"plugin"`
-	Action string `yaml:"action"`
-	ArgKey string `yaml:"arg_key"` // optional, default "text" — key for passing current content as arg
+	Plugin   string `yaml:"plugin"`
+	Action   string `yaml:"action"`
+	ArgKey   string `yaml:"arg_key"`             // optional, default "text" — key for passing current content as arg
+	Guard    bool   `yaml:"guard"`               // if true, also runs before every LLM call to sanitize messages
+	FailOpen bool   `yaml:"fail_open,omitempty"` // default false (fail-closed): block request if guard/preparer fails
 }
 
 type OrchestratorConfig struct {
