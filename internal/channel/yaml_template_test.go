@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -101,6 +102,62 @@ func TestSubstituteTemplateJSON(t *testing.T) {
 	want := `{"text":"He said \"hello\" and it's fine\nnew line","channel":"C123"}`
 	if got != want {
 		t.Errorf("substituteTemplateJSON:\ngot  %s\nwant %s", got, want)
+	}
+}
+
+func TestStripEmptyJSONValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "removes empty thread_ts",
+			input: `{"channel":"C123","text":"hello","thread_ts":""}`,
+			want:  `{"channel":"C123","text":"hello"}`,
+		},
+		{
+			name:  "keeps non-empty values",
+			input: `{"channel":"C123","text":"hello","thread_ts":"123.456"}`,
+			want:  `{"channel":"C123","text":"hello","thread_ts":"123.456"}`,
+		},
+		{
+			name:  "not valid JSON returns as-is",
+			input: `not json`,
+			want:  `not json`,
+		},
+		{
+			name:  "keeps non-string values",
+			input: `{"count":0,"name":""}`,
+			want:  `{"count":0}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripEmptyJSONValues(tt.input)
+			// Compare as parsed JSON to ignore key ordering
+			if got != tt.want {
+				// Parse both and compare
+				var gotMap, wantMap map[string]interface{}
+				if err1 := json.Unmarshal([]byte(got), &gotMap); err1 == nil {
+					if err2 := json.Unmarshal([]byte(tt.want), &wantMap); err2 == nil {
+						if len(gotMap) == len(wantMap) {
+							match := true
+							for k, v := range wantMap {
+								if gotMap[k] != v {
+									match = false
+									break
+								}
+							}
+							if match {
+								return
+							}
+						}
+					}
+				}
+				t.Errorf("stripEmptyJSONValues(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 

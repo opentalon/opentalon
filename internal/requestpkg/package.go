@@ -55,14 +55,31 @@ var (
 
 // Substitute replaces {{env.X}} and {{args.Y}} in s. Missing env vars are empty; missing args are left as literal.
 func Substitute(s string, args map[string]string) string {
+	return substitute(s, args, false)
+}
+
+// SubstituteJSON is like Substitute but JSON-escapes all substituted values
+// for safe embedding inside JSON string literals.
+func SubstituteJSON(s string, args map[string]string) string {
+	return substitute(s, args, true)
+}
+
+func substitute(s string, args map[string]string, jsonEscape bool) string {
+	escape := func(v string) string {
+		if jsonEscape {
+			b, _ := json.Marshal(v)
+			return string(b[1 : len(b)-1]) // strip surrounding quotes from json.Marshal
+		}
+		return v
+	}
 	s = envRe.ReplaceAllStringFunc(s, func(match string) string {
 		name := envRe.FindStringSubmatch(match)[1]
-		return os.Getenv(name)
+		return escape(os.Getenv(name))
 	})
 	s = argsRe.ReplaceAllStringFunc(s, func(match string) string {
 		name := argsRe.FindStringSubmatch(match)[1]
 		if v, ok := args[name]; ok {
-			return v
+			return escape(v)
 		}
 		return match
 	})
@@ -109,6 +126,27 @@ func encodeURLParams(rawURL string) string {
 	}
 	u.RawQuery = u.Query().Encode()
 	return u.String()
+}
+
+// cleanJSONBody removes top-level keys whose values are empty strings or
+// contain unresolved {{args.X}} templates from a JSON object body. This
+// prevents sending invalid optional parameters to APIs (e.g. Slack rejects
+// "thread_ts":"" as invalid_thread_ts).
+func cleanJSONBody(s string) string {
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(s), &obj); err != nil {
+		return s
+	}
+	for k, v := range obj {
+		if str, ok := v.(string); ok && (str == "" || strings.Contains(str, "{{args.")) {
+			delete(obj, k)
+		}
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return s
+	}
+	return string(out)
 }
 
 // Executor runs request packages for a single plugin. It implements orchestrator.PluginExecutor.
@@ -165,7 +203,16 @@ func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 	}
 
 	if pkg.Body != "" {
-		body := Substitute(pkg.Body, call.Args)
+		// Use JSON-escaping for JSON bodies to handle quotes/newlines in values.
+		ct := req.Header.Get("Content-Type")
+		isJSON := strings.EqualFold(ct, "application/json") || strings.Contains(ct, "json")
+		var body string
+		if isJSON {
+			body = SubstituteJSON(pkg.Body, call.Args)
+			body = cleanJSONBody(body)
+		} else {
+			body = Substitute(pkg.Body, call.Args)
+		}
 		req.Body = io.NopCloser(strings.NewReader(body))
 		req.ContentLength = int64(len(body))
 		if req.Header.Get("Content-Type") == "" {

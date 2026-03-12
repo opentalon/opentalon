@@ -116,7 +116,9 @@ func parseInlineToolCall(body string, callNum int) (ToolCall, bool) {
 			for _, pair := range strings.Split(argsStr, ", ") {
 				eq := strings.IndexByte(pair, '=')
 				if eq > 0 {
-					args[strings.TrimSpace(pair[:eq])] = strings.TrimSpace(pair[eq+1:])
+					val := strings.TrimSpace(pair[eq+1:])
+					val = stripSurroundingQuotes(val)
+					args[strings.TrimSpace(pair[:eq])] = val
 				}
 			}
 		}
@@ -154,6 +156,8 @@ func parseInlineToolCall(body string, callNum int) (ToolCall, bool) {
 }
 
 // toStringMap converts map[string]interface{} to map[string]string.
+// Zero-value non-string types (0, false, nil) are skipped because LLMs
+// often emit them as placeholders for omitted optional parameters.
 func toStringMap(m map[string]interface{}) map[string]string {
 	if m == nil {
 		return make(map[string]string)
@@ -163,11 +167,34 @@ func toStringMap(m map[string]interface{}) map[string]string {
 		switch val := v.(type) {
 		case string:
 			result[k] = val
+		case nil:
+			// skip
+		case float64:
+			if val == 0 {
+				continue
+			}
+			result[k] = fmt.Sprintf("%v", val)
+		case bool:
+			if !val {
+				continue
+			}
+			result[k] = "true"
 		default:
 			result[k] = fmt.Sprintf("%v", val)
 		}
 	}
 	return result
+}
+
+// stripSurroundingQuotes removes matching outer quotes (single or double)
+// that LLMs sometimes wrap around argument values.
+func stripSurroundingQuotes(s string) string {
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
 }
 
 // parseToolName splits "plugin.action" into ("plugin", "action").
