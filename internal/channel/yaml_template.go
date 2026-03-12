@@ -48,3 +48,23 @@ func jsonEscapeString(s string) string {
 	// json.Marshal wraps in quotes: "value" → strip them
 	return string(b[1 : len(b)-1])
 }
+
+// stripEmptyJSONValues removes top-level keys whose values are empty strings
+// from a JSON object body. This prevents sending invalid parameters to APIs
+// (e.g. Slack rejects "thread_ts":"" as invalid_thread_ts).
+func stripEmptyJSONValues(s string) string {
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(s), &obj); err != nil {
+		return s // not valid JSON, return as-is
+	}
+	for k, v := range obj {
+		if str, ok := v.(string); ok && str == "" {
+			delete(obj, k)
+		}
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return s
+	}
+	return string(out)
+}

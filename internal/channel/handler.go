@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
@@ -29,7 +30,12 @@ func NewMessageHandler(
 		response, inputForDisplay, err := runner.Run(ctx, sessionKey, content)
 		if err != nil {
 			log.Printf("handler: run: %v", err)
-			return pkg.OutboundMessage{Content: "Error: " + err.Error()}, nil
+			return pkg.OutboundMessage{
+				ConversationID: msg.ConversationID,
+				ThreadID:       msg.ThreadID,
+				Content:        friendlyError(err),
+				Metadata:       msg.Metadata,
+			}, nil
 		}
 		outContent := response
 		if outContent == "" {
@@ -44,5 +50,20 @@ func NewMessageHandler(
 			Content:        outContent,
 			Metadata:       msg.Metadata,
 		}, nil
+	}
+}
+
+// friendlyError returns a user-facing message for known error conditions.
+func friendlyError(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "maximum context length") || strings.Contains(msg, "context_length_exceeded"):
+		return "Sorry, this conversation has grown too long for the model to process. Please start a new conversation or clear the session."
+	case strings.Contains(msg, "rate_limit") || strings.Contains(msg, "429"):
+		return "I'm being rate-limited right now. Please try again in a moment."
+	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded"):
+		return "The request timed out. Please try again."
+	default:
+		return "Something went wrong processing your message. Please try again or start a new conversation."
 	}
 }

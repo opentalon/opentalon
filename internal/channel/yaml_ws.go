@@ -415,6 +415,7 @@ func (ch *YAMLChannel) doHTTPCall(ctx context.Context, call HTTPCallSpec, contex
 		var resolved string
 		if isJSON {
 			resolved = substituteTemplateJSON(call.Body, contexts)
+			resolved = stripEmptyJSONValues(resolved)
 		} else {
 			resolved = substituteTemplate(call.Body, contexts)
 		}
