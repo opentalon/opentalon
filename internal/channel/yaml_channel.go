@@ -33,17 +33,18 @@ func LoadYAMLChannelSpec(path string) (*YAMLChannelSpec, error) {
 // YAMLChannel implements pkg.Channel, pkg.ConfigurableChannel, and
 // pkg.ToolProvider for YAML-driven channels that run in-process.
 type YAMLChannel struct {
-	spec     *YAMLChannelSpec
-	specDir  string // directory containing the spec file (for resolving tools_file)
-	config   map[string]string
-	selfVars map[string]string
-	dedup    *Deduplicator
-	tools    []pkg.ToolDefinition
-	client   *http.Client
-	inbox    chan<- pkg.InboundMessage
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	spec         *YAMLChannelSpec
+	specDir      string // directory containing the spec file (for resolving tools_file)
+	config       map[string]string
+	selfVars     map[string]string
+	dedup        *Deduplicator
+	tools        []pkg.ToolDefinition
+	client       *http.Client
+	inbox        chan<- pkg.InboundMessage
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	jwtValidator *JWTValidator
 }
 
 // NewYAMLChannel creates a new YAMLChannel from a parsed spec.
@@ -106,8 +107,8 @@ func (ch *YAMLChannel) Tools() []pkg.ToolDefinition {
 	return ch.tools
 }
 
-// Start initializes the channel: runs init steps, connects WebSocket,
-// and starts the read loop.
+// Start initializes the channel: runs init steps, connects WebSocket or
+// registers webhook listener, and starts the read loop.
 func (ch *YAMLChannel) Start(ctx context.Context, inbox chan<- pkg.InboundMessage) error {
 	ch.ctx, ch.cancel = context.WithCancel(ctx)
 	ch.inbox = inbox
@@ -122,12 +123,18 @@ func (ch *YAMLChannel) Start(ctx context.Context, inbox chan<- pkg.InboundMessag
 		return fmt.Errorf("channel %s init: %w", ch.spec.ID, err)
 	}
 
-	// Start WebSocket connection in background
-	ch.wg.Add(1)
-	go func() {
-		defer ch.wg.Done()
-		ch.wsLoop()
-	}()
+	// Start inbound listener — webhook or WebSocket
+	if wh := ch.spec.Inbound.HTTPWebhook; wh != nil {
+		if err := ch.startWebhookInbound(wh); err != nil {
+			return fmt.Errorf("channel %s: start webhook: %w", ch.spec.ID, err)
+		}
+	} else {
+		ch.wg.Add(1)
+		go func() {
+			defer ch.wg.Done()
+			ch.wsLoop()
+		}()
+	}
 
 	log.Printf("yaml-channel: %s started", ch.spec.ID)
 	return nil

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/requestpkg"
@@ -151,4 +152,7 @@ func (m *Manager) Unload(name string) error {
 func (m *Manager) StopAll() {
 	m.registry.StopAll()
 	m.connector.StopAll()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = globalWebhookServer.Shutdown(ctx)
 }

@@ -1,0 +1,85 @@
+package channel
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"sync"
+)
+
+// WebhookServer is a shared HTTP server that multiple YAML channels can
+// register routes on. Only a single port is supported for MVP.
+type WebhookServer struct {
+	mu      sync.Mutex
+	mux     *http.ServeMux
+	server  *http.Server
+	port    int
+	started bool
+}
+
+var globalWebhookServer = &WebhookServer{
+	mux: http.NewServeMux(),
+}
+
+func webhookPortOrDefault(port int) int {
+	if port <= 0 {
+		return 3978
+	}
+	return port
+}
+
+// RegisterWebhookRoute registers an HTTP handler at path on the shared server.
+// The server is started lazily on the first registration.
+// If a different port is already in use, an error is returned.
+func RegisterWebhookRoute(port int, path string, handler http.HandlerFunc) error {
+	port = webhookPortOrDefault(port)
+	return globalWebhookServer.register(port, path, handler)
+}
+
+func (s *WebhookServer) register(port int, path string, handler http.HandlerFunc) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.started && s.port != port {
+		return fmt.Errorf("webhook server already started on port %d; cannot use port %d", s.port, port)
+	}
+
+	s.mux.HandleFunc(path, handler)
+
+	if !s.started {
+		s.port = port
+		server := &http.Server{
+			Addr:    fmt.Sprintf(":%d", port),
+			Handler: s.mux,
+		}
+		s.server = server
+		s.started = true
+		go func(srv *http.Server, p int) {
+			log.Printf("webhook-server: listening on :%d", p)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("webhook-server: error: %v", err)
+			}
+		}(server, port)
+	}
+
+	return nil
+}
+
+// Shutdown gracefully stops the webhook server.
+func (s *WebhookServer) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.started || s.server == nil {
+		return nil
+	}
+	if err := s.server.Shutdown(ctx); err != nil {
+		return err
+	}
+	// Reset server state so routes can be registered again after shutdown.
+	s.started = false
+	s.server = nil
+	s.port = 0
+	s.mux = http.NewServeMux()
+	return nil
+}
