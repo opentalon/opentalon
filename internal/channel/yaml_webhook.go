@@ -20,6 +20,9 @@ func (ch *YAMLChannel) startWebhookInbound(wh *WebhookInboundSpec) error {
 	if path == "" {
 		path = "/api/messages"
 	}
+	if !wh.ValidateJWT {
+		log.Printf("yaml-channel: %s: WARNING webhook endpoint %s has no authentication configured (validate_jwt=false)", ch.spec.ID, path)
+	}
 
 	handler := ch.buildWebhookHandler(wh)
 	return RegisterWebhookRoute(wh.Port, path, handler)
@@ -54,7 +57,6 @@ func (ch *YAMLChannel) buildWebhookHandler(wh *WebhookInboundSpec) http.HandlerF
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		_ = r.Body.Close()
 
 		if os.Getenv("LOG_LEVEL") == "debug" {
 			log.Printf("yaml-channel: %s: webhook %s %s from %s body=%s",
@@ -65,6 +67,10 @@ func (ch *YAMLChannel) buildWebhookHandler(wh *WebhookInboundSpec) http.HandlerF
 		w.WriteHeader(responseCode)
 
 		// Process in goroutine
-		go ch.processInboundData(body)
+		ch.wg.Add(1)
+		go func(payload []byte) {
+			defer ch.wg.Done()
+			ch.processInboundData(payload)
+		}(body)
 	}
 }

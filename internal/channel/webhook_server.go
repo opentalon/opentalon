@@ -22,13 +22,18 @@ var globalWebhookServer = &WebhookServer{
 	mux: http.NewServeMux(),
 }
 
+func webhookPortOrDefault(port int) int {
+	if port <= 0 {
+		return 3978
+	}
+	return port
+}
+
 // RegisterWebhookRoute registers an HTTP handler at path on the shared server.
 // The server is started lazily on the first registration.
 // If a different port is already in use, an error is returned.
 func RegisterWebhookRoute(port int, path string, handler http.HandlerFunc) error {
-	if port <= 0 {
-		port = 3978
-	}
+	port = webhookPortOrDefault(port)
 	return globalWebhookServer.register(port, path, handler)
 }
 
@@ -67,5 +72,13 @@ func (s *WebhookServer) Shutdown(ctx context.Context) error {
 	if !s.started || s.server == nil {
 		return nil
 	}
-	return s.server.Shutdown(ctx)
+	if err := s.server.Shutdown(ctx); err != nil {
+		return err
+	}
+	// Reset server state so routes can be registered again after shutdown.
+	s.started = false
+	s.server = nil
+	s.port = 0
+	s.mux = http.NewServeMux()
+	return nil
 }

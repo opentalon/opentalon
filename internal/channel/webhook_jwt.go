@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rsa"
@@ -176,14 +177,23 @@ func (v *JWTValidator) fetchKeys(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("fetch OIDC config: %w", err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
+	if err != nil {
+		return fmt.Errorf("read OIDC config body: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("fetch OIDC config: HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(body))
+	}
 
 	var oidcConfig struct {
 		JWKSURI string `json:"jwks_uri"`
 	}
 	if err := json.Unmarshal(body, &oidcConfig); err != nil {
 		return fmt.Errorf("parse OIDC config: %w", err)
+	}
+	if oidcConfig.JWKSURI == "" {
+		return fmt.Errorf("parse OIDC config: missing jwks_uri")
 	}
 
 	// Fetch JWKS
@@ -195,8 +205,14 @@ func (v *JWTValidator) fetchKeys(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("fetch JWKS: %w", err)
 	}
-	body, _ = io.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
+	if err != nil {
+		return fmt.Errorf("read JWKS body: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("fetch JWKS: HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(body))
+	}
 
 	var jwks struct {
 		Keys []struct {

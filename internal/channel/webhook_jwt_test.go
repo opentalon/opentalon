@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -307,19 +308,47 @@ func TestJWTValidator_ValidateRequest_ValidToken(t *testing.T) {
 	}
 }
 
+func TestJWTValidator_FetchKeys_OIDCNon2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no oidc doc", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	v := NewJWTValidator(srv.URL, "aud", "iss")
+	err := v.fetchKeys(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("expected HTTP 404 error, got: %v", err)
+	}
+}
+
+func TestJWTValidator_FetchKeys_JWKSNon2xx(t *testing.T) {
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openidconfiguration", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"jwks_uri": srv.URL + "/keys",
+		})
+	})
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "jwks unavailable", http.StatusInternalServerError)
+	})
+	srv = httptest.NewServer(mux)
+	defer srv.Close()
+
+	v := NewJWTValidator(srv.URL+"/openidconfiguration", "aud", "iss")
+	err := v.fetchKeys(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("expected HTTP 500 error, got: %v", err)
+	}
+}
+
 // splitJWT splits a JWT into its three dot-separated parts.
 func splitJWT(token string) []string {
-	parts := make([]string, 3)
-	i := 0
-	for _, ch := range token {
-		if ch == '.' {
-			i++
-			if i > 2 {
-				break
-			}
-			continue
-		}
-		parts[i] += string(ch)
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) < 3 {
+		out := make([]string, 3)
+		copy(out, parts)
+		return out
 	}
 	return parts
 }

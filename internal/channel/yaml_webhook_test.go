@@ -187,25 +187,45 @@ func TestWebhookServer_ConflictingPort(t *testing.T) {
 }
 
 func TestRegisterWebhookRoute_DefaultPort(t *testing.T) {
-	s := newTestWebhookServer()
+	if got := webhookPortOrDefault(0); got != 3978 {
+		t.Fatalf("webhookPortOrDefault(0)=%d, want 3978", got)
+	}
+	if got := webhookPortOrDefault(-1); got != 3978 {
+		t.Fatalf("webhookPortOrDefault(-1)=%d, want 3978", got)
+	}
+	if got := webhookPortOrDefault(4123); got != 4123 {
+		t.Fatalf("webhookPortOrDefault(4123)=%d, want 4123", got)
+	}
+}
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+func TestWebhookServer_ShutdownResetsState(t *testing.T) {
+	s := newTestWebhookServer()
+	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 
 	if err := s.register(0, "/api/messages", handler); err != nil {
-		t.Logf("note: register with 0 does not auto-default (default applied in RegisterWebhookRoute)")
+		t.Fatalf("register: %v", err)
+	}
+	if !s.started || s.server == nil {
+		t.Fatalf("expected started server after register")
 	}
 
-	port := 0
-	if port <= 0 {
-		port = 3978
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
 	}
-	if port != 3978 {
-		t.Errorf("default port should be 3978, got %d", port)
+	if s.started {
+		t.Fatalf("expected started=false after shutdown")
 	}
-
 	if s.server != nil {
-		_ = s.server.Close()
+		t.Fatalf("expected server=nil after shutdown")
 	}
+	if s.port != 0 {
+		t.Fatalf("expected port reset to 0, got %d", s.port)
+	}
+
+	if err := s.register(0, "/api/messages2", handler); err != nil {
+		t.Fatalf("register after shutdown: %v", err)
+	}
+	_ = s.server.Close()
 }
 
 // --- buildWebhookHandler tests ---

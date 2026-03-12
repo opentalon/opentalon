@@ -173,7 +173,7 @@ func (ch *YAMLChannel) handleFrame(conn *websocket.Conn, data []byte) {
 		}
 	}
 
-	ch.processInboundData(data)
+	ch.processInboundFrame(frame)
 }
 
 // processInboundData processes raw JSON data received from any inbound source
@@ -184,7 +184,11 @@ func (ch *YAMLChannel) processInboundData(data []byte) {
 		log.Printf("yaml-channel: %s: invalid JSON: %v", ch.spec.ID, err)
 		return
 	}
+	ch.processInboundFrame(frame)
+}
 
+// processInboundFrame processes a parsed inbound frame from any source.
+func (ch *YAMLChannel) processInboundFrame(frame map[string]interface{}) {
 	// Navigate to the event object
 	event := navigatePath(frame, ch.spec.Inbound.EventPath)
 	if event == nil {
