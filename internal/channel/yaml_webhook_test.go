@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -102,8 +103,28 @@ func newTestWebhookServer() *WebhookServer {
 	}
 }
 
+func reserveFreePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve free port: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener addr type: %T", ln.Addr())
+	}
+	return addr.Port
+}
+
 func TestWebhookServer_SingleRegistration(t *testing.T) {
 	s := newTestWebhookServer()
+	port := reserveFreePort(t)
+	t.Cleanup(func() {
+		if s.server != nil {
+			_ = s.server.Close()
+		}
+	})
 
 	called := false
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -111,7 +132,7 @@ func TestWebhookServer_SingleRegistration(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	if err := s.register(3978, "/api/messages", handler); err != nil {
+	if err := s.register(port, "/api/messages", handler); err != nil {
 		t.Fatalf("unexpected error on first registration: %v", err)
 	}
 
@@ -126,13 +147,16 @@ func TestWebhookServer_SingleRegistration(t *testing.T) {
 		t.Errorf("got status %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	if s.server != nil {
-		_ = s.server.Close()
-	}
 }
 
 func TestWebhookServer_MultipleRegistrationsSamePort(t *testing.T) {
 	s := newTestWebhookServer()
+	port := reserveFreePort(t)
+	t.Cleanup(func() {
+		if s.server != nil {
+			_ = s.server.Close()
+		}
+	})
 
 	handler1 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprint(w, "handler1")
@@ -141,10 +165,10 @@ func TestWebhookServer_MultipleRegistrationsSamePort(t *testing.T) {
 		_, _ = fmt.Fprint(w, "handler2")
 	})
 
-	if err := s.register(3978, "/api/messages", handler1); err != nil {
+	if err := s.register(port, "/api/messages", handler1); err != nil {
 		t.Fatalf("unexpected error on first registration: %v", err)
 	}
-	if err := s.register(3978, "/api/other", handler2); err != nil {
+	if err := s.register(port, "/api/other", handler2); err != nil {
 		t.Fatalf("unexpected error on second registration with same port: %v", err)
 	}
 
@@ -162,27 +186,30 @@ func TestWebhookServer_MultipleRegistrationsSamePort(t *testing.T) {
 		t.Errorf("route /api/other: got %q, want %q", rec2.Body.String(), "handler2")
 	}
 
-	if s.server != nil {
-		_ = s.server.Close()
-	}
 }
 
 func TestWebhookServer_ConflictingPort(t *testing.T) {
 	s := newTestWebhookServer()
+	port1 := reserveFreePort(t)
+	port2 := reserveFreePort(t)
+	if port1 == port2 {
+		port2 = reserveFreePort(t)
+	}
+	t.Cleanup(func() {
+		if s.server != nil {
+			_ = s.server.Close()
+		}
+	})
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 
-	if err := s.register(3978, "/api/messages", handler); err != nil {
+	if err := s.register(port1, "/api/messages", handler); err != nil {
 		t.Fatalf("unexpected error on first registration: %v", err)
 	}
 
-	err := s.register(9999, "/api/other", handler)
+	err := s.register(port2, "/api/other", handler)
 	if err == nil {
 		t.Error("expected error when registering on a different port, got nil")
-	}
-
-	if s.server != nil {
-		_ = s.server.Close()
 	}
 }
 
@@ -200,9 +227,15 @@ func TestRegisterWebhookRoute_DefaultPort(t *testing.T) {
 
 func TestWebhookServer_ShutdownResetsState(t *testing.T) {
 	s := newTestWebhookServer()
+	port := reserveFreePort(t)
+	t.Cleanup(func() {
+		if s.server != nil {
+			_ = s.server.Close()
+		}
+	})
 	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 
-	if err := s.register(0, "/api/messages", handler); err != nil {
+	if err := s.register(port, "/api/messages", handler); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	if !s.started || s.server == nil {
@@ -222,10 +255,9 @@ func TestWebhookServer_ShutdownResetsState(t *testing.T) {
 		t.Fatalf("expected port reset to 0, got %d", s.port)
 	}
 
-	if err := s.register(0, "/api/messages2", handler); err != nil {
+	if err := s.register(port, "/api/messages2", handler); err != nil {
 		t.Fatalf("register after shutdown: %v", err)
 	}
-	_ = s.server.Close()
 }
 
 // --- buildWebhookHandler tests ---
