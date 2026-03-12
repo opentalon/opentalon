@@ -29,6 +29,7 @@ type ContentPreparerEntry struct {
 	ArgKey   string // optional, default "text"
 	Insecure bool   // if true (default), this preparer cannot run invoke steps; if false (trusted), can invoke
 	Guard    bool   // if true, also runs before every LLM call to sanitize messages
+	FailOpen bool   // if true, guard/preparer failures are logged and skipped; default false (fail-closed)
 }
 
 type LLMClient interface {
@@ -242,6 +243,101 @@ type preparerResponse struct {
 	Invoke    invokeStepsUnmarshal `json:"invoke"`
 }
 
+func (o *Orchestrator) handlePreparerFailure(prep ContentPreparerEntry, details string) *RunResult {
+	name := prep.Plugin + "." + prep.Action
+	if strings.HasPrefix(prep.Plugin, "lua:") {
+		name = prep.Plugin
+	}
+	log.Printf("Warning: guard %s failed: %s", name, details)
+	if prep.FailOpen {
+		return nil
+	}
+	return &RunResult{Response: fmt.Sprintf("Request blocked: guard %s failed.", name)}
+}
+
+func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPreparerEntry, content, callPrefix string, allowInvoke bool) (string, *RunResult, error) {
+	if strings.HasPrefix(prep.Plugin, "lua:") {
+		scriptName := strings.TrimPrefix(prep.Plugin, "lua:")
+		scriptPath := o.luaScriptPaths[scriptName]
+		if scriptPath == "" {
+			if blocked := o.handlePreparerFailure(prep, "Lua script path not found"); blocked != nil {
+				return content, blocked, nil
+			}
+			return content, nil, nil
+		}
+		result, err := lua.RunPrepare(scriptPath, content)
+		if err != nil {
+			if blocked := o.handlePreparerFailure(prep, err.Error()); blocked != nil {
+				return content, blocked, nil
+			}
+			return content, nil, nil
+		}
+		if !result.SendToLLM {
+			if allowInvoke && len(result.InvokeSteps) > 0 {
+				steps := make([]InvokeStep, len(result.InvokeSteps))
+				for i, s := range result.InvokeSteps {
+					steps[i] = InvokeStep{Plugin: s.Plugin, Action: s.Action, Args: s.Args}
+				}
+				invokeResult, err := o.runInvokeSteps(ctx, steps)
+				return "", invokeResult, err
+			}
+			msg := result.Content
+			if msg == "" {
+				msg = "Request blocked by guard."
+			}
+			return "", &RunResult{Response: msg}, nil
+		}
+		return result.Content, nil, nil
+	}
+
+	argKey := prep.ArgKey
+	if argKey == "" {
+		argKey = "text"
+	}
+	if !o.registry.HasAction(prep.Plugin, prep.Action) {
+		if blocked := o.handlePreparerFailure(prep, "action not found"); blocked != nil {
+			return content, blocked, nil
+		}
+		return content, nil, nil
+	}
+	call := ToolCall{
+		ID:     fmt.Sprintf("%s-%s-%s", callPrefix, prep.Plugin, prep.Action),
+		Plugin: prep.Plugin,
+		Action: prep.Action,
+		Args:   map[string]string{argKey: content},
+	}
+	toolResult := o.executeCall(ctx, call)
+	if toolResult.Error != "" {
+		if blocked := o.handlePreparerFailure(prep, toolResult.Error); blocked != nil {
+			return content, blocked, nil
+		}
+		return content, nil, nil
+	}
+	var pr preparerResponse
+	if err := json.Unmarshal([]byte(toolResult.Content), &pr); err == nil && pr.SendToLLM != nil && !*pr.SendToLLM {
+		if allowInvoke && len(pr.Invoke) > 0 {
+			if prep.Insecure {
+				log.Printf("Warning: insecure preparer %s.%s cannot run invoke; ignoring", prep.Plugin, prep.Action)
+				return content, nil, nil
+			}
+			invokeResult, err := o.runInvokeSteps(ctx, pr.Invoke)
+			return "", invokeResult, err
+		}
+		msg := pr.Message
+		if msg == "" {
+			msg = toolResult.Content
+		}
+		if msg == "" {
+			msg = "Request blocked by guard."
+		}
+		return "", &RunResult{Response: msg}, nil
+	}
+	if pr.Message != "" {
+		return pr.Message, nil, nil
+	}
+	return toolResult.Content, nil, nil
+}
+
 func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (*RunResult, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -276,77 +372,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	content := userMessage
 	// Run content preparers before the first LLM call (config-driven).
 	for _, prep := range o.preparers {
-		// Lua preparer: plugin "lua:hello-world" runs the script at luaScriptPaths["hello-world"]
-		if strings.HasPrefix(prep.Plugin, "lua:") {
-			scriptName := strings.TrimPrefix(prep.Plugin, "lua:")
-			scriptPath := o.luaScriptPaths[scriptName]
-			if scriptPath == "" {
-				continue
-			}
-			result, err := lua.RunPrepare(scriptPath, content)
-			if err != nil {
-				log.Printf("Warning: lua preparer %s: %v", scriptName, err)
-				continue
-			}
-			if !result.SendToLLM {
-				if len(result.InvokeSteps) > 0 {
-					steps := make([]InvokeStep, len(result.InvokeSteps))
-					for i, s := range result.InvokeSteps {
-						steps[i] = InvokeStep{Plugin: s.Plugin, Action: s.Action, Args: s.Args}
-					}
-					return o.runInvokeSteps(ctx, steps)
-				}
-				msg := result.Content
-				if msg == "" {
-					msg = "Request not sent to LLM (Lua guard)."
-				}
-				return &RunResult{Response: msg}, nil
-			}
-			content = result.Content
-			continue
+		guardedContent, blocked, err := o.runSinglePreparer(ctx, prep, content, "preparer", true)
+		if err != nil {
+			return nil, err
 		}
-		argKey := prep.ArgKey
-		if argKey == "" {
-			argKey = "text"
+		if blocked != nil {
+			return blocked, nil
 		}
-		if !o.registry.HasAction(prep.Plugin, prep.Action) {
-			continue
-		}
-		call := ToolCall{
-			ID:     fmt.Sprintf("preparer-%s-%s", prep.Plugin, prep.Action),
-			Plugin: prep.Plugin,
-			Action: prep.Action,
-			Args:   map[string]string{argKey: content},
-		}
-		toolResult := o.executeCall(ctx, call)
-		if toolResult.Error != "" {
-			continue
-		}
-		// Preparer response convention: JSON with send_to_llm, optional message, optional invoke (single or list).
-		var pr preparerResponse
-		if err := json.Unmarshal([]byte(toolResult.Content), &pr); err == nil && pr.SendToLLM != nil && !*pr.SendToLLM {
-			if len(pr.Invoke) > 0 {
-				if prep.Insecure {
-					log.Printf("Warning: insecure preparer %s.%s cannot run invoke; ignoring", prep.Plugin, prep.Action)
-					continue
-				}
-				// Run invoke steps in order; pass previous step output as previous_result to next step.
-				return o.runInvokeSteps(ctx, pr.Invoke)
-			}
-			msg := pr.Message
-			if msg == "" {
-				msg = toolResult.Content
-			}
-			if msg == "" {
-				msg = "Request not sent to LLM (plugin guard)."
-			}
-			return &RunResult{Response: msg}, nil
-		}
-		if pr.Message != "" {
-			content = pr.Message
-		} else {
-			content = toolResult.Content
-		}
+		content = guardedContent
 	}
 
 	// Block B: Run planner to check if this requires a multi-step pipeline.
@@ -391,15 +424,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 		sess, _ := o.sessions.Get(sessionID)
 
 		messages := o.buildMessages(ctx, sess, content)
-
-		messages, err := o.runGuardPlugins(ctx, messages)
+		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
 		if err != nil {
-			return &RunResult{Response: err.Error()}, nil
+			return nil, err
+		}
+		if blocked != nil {
+			return blocked, nil
 		}
 
 		if os.Getenv("LOG_LEVEL") == "debug" {
-			log.Printf("[LLM request] round %d, %d messages:", i+1, len(messages))
-			for j, m := range messages {
+			log.Printf("[LLM request] round %d, %d messages:", i+1, len(guardedMessages))
+			for j, m := range guardedMessages {
 				preview := m.Content
 				if len(preview) > 2000 {
 					preview = preview[:2000] + "... [truncated]"
@@ -409,7 +444,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 		}
 
 		resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{
-			Messages: messages,
+			Messages: guardedMessages,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
@@ -469,11 +504,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 
 // runGuardPlugins runs all guard plugins on the last non-system message before an LLM call.
 // Guards sanitize content to prevent prompt injection from tool results or user input.
-// Returns the (possibly modified) messages, or an error containing the block message if a guard
-// returned send_to_llm: false.
-func (o *Orchestrator) runGuardPlugins(ctx context.Context, messages []provider.Message) ([]provider.Message, error) {
+func (o *Orchestrator) runGuardPlugins(ctx context.Context, messages []provider.Message) ([]provider.Message, *RunResult, error) {
 	if len(o.guards) == 0 {
-		return messages, nil
+		return messages, nil, nil
 	}
 	// Find the last non-system message (the content most at risk of injection).
 	lastIdx := -1
@@ -484,67 +517,27 @@ func (o *Orchestrator) runGuardPlugins(ctx context.Context, messages []provider.
 		}
 	}
 	if lastIdx < 0 {
-		return messages, nil
+		return messages, nil, nil
 	}
-	content := messages[lastIdx].Content
+	original := messages[lastIdx].Content
+	content := original
 	for _, g := range o.guards {
-		if strings.HasPrefix(g.Plugin, "lua:") {
-			scriptName := strings.TrimPrefix(g.Plugin, "lua:")
-			scriptPath := o.luaScriptPaths[scriptName]
-			if scriptPath == "" {
-				continue
-			}
-			result, err := lua.RunPrepare(scriptPath, content)
-			if err != nil {
-				log.Printf("Warning: lua guard %s: %v", scriptName, err)
-				continue
-			}
-			if !result.SendToLLM {
-				msg := result.Content
-				if msg == "" {
-					msg = "Request blocked by guard."
-				}
-				return nil, fmt.Errorf("%s", msg)
-			}
-			content = result.Content
-			continue
+		nextContent, blocked, err := o.runSinglePreparer(ctx, g, content, "guard", false)
+		if err != nil {
+			return nil, nil, err
 		}
-		argKey := g.ArgKey
-		if argKey == "" {
-			argKey = "text"
+		if blocked != nil {
+			return nil, blocked, nil
 		}
-		if !o.registry.HasAction(g.Plugin, g.Action) {
-			continue
-		}
-		call := ToolCall{
-			ID:     fmt.Sprintf("guard-%s-%s", g.Plugin, g.Action),
-			Plugin: g.Plugin,
-			Action: g.Action,
-			Args:   map[string]string{argKey: content},
-		}
-		toolResult := o.executeCall(ctx, call)
-		if toolResult.Error != "" {
-			log.Printf("Warning: guard %s.%s error: %s", g.Plugin, g.Action, toolResult.Error)
-			continue
-		}
-		var pr preparerResponse
-		if err := json.Unmarshal([]byte(toolResult.Content), &pr); err == nil && pr.SendToLLM != nil && !*pr.SendToLLM {
-			msg := pr.Message
-			if msg == "" {
-				msg = "Request blocked by guard."
-			}
-			return nil, fmt.Errorf("%s", msg)
-		}
-		if pr.Message != "" {
-			content = pr.Message
-		} else {
-			content = toolResult.Content
-		}
+		content = nextContent
+	}
+	if content == original {
+		return messages, nil, nil
 	}
 	result := make([]provider.Message, len(messages))
 	copy(result, messages)
 	result[lastIdx].Content = content
-	return result, nil
+	return result, nil, nil
 }
 
 func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p *pipeline.Pipeline) (*RunResult, error) {

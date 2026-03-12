@@ -274,6 +274,7 @@ func main() {
 			Action:   p.Action,
 			ArgKey:   p.ArgKey,
 			Guard:    p.Guard,
+			FailOpen: p.FailOpen,
 			Insecure: true, // default: cannot run invoke
 		}
 		if !strings.HasPrefix(p.Plugin, "lua:") {

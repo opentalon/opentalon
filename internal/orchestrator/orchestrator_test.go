@@ -684,8 +684,8 @@ func TestGuardRunsBeforeEachLLMCall(t *testing.T) {
 	}
 }
 
-func TestGuardMissingPluginSkipped(t *testing.T) {
-	// Guard references a plugin not in the registry → skipped, LLM still called normally.
+func TestGuardMissingPluginBlocksByDefault(t *testing.T) {
+	// Guard references a plugin not in the registry -> blocked by default (fail-closed).
 	llm := &fakeLLM{responses: []string{"fine"}}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	guards := []ContentPreparerEntry{{Plugin: "nonexistent-guard", Action: "sanitize", Guard: true}}
@@ -700,13 +700,36 @@ func TestGuardMissingPluginSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Response != "fine" {
-		t.Errorf("Response = %q, want LLM response when guard plugin is missing", result.Response)
+	if !strings.Contains(result.Response, "Request blocked: guard nonexistent-guard.sanitize failed.") {
+		t.Errorf("Response = %q, want blocked response when guard plugin is missing", result.Response)
+	}
+	if llm.callCount != 0 {
+		t.Errorf("LLM should not be called when guard is missing and fail_open=false, callCount=%d", llm.callCount)
 	}
 }
 
-func TestGuardErrorSkipped(t *testing.T) {
-	// Guard executor returns an error → guard skipped, LLM still called.
+func TestGuardMissingPluginFailOpenContinues(t *testing.T) {
+	llm := &fakeLLM{responses: []string{"fine"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	guards := []ContentPreparerEntry{{Plugin: "nonexistent-guard", Action: "sanitize", Guard: true, FailOpen: true}}
+
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{ContentPreparers: guards})
+
+	result, err := orch.Run(context.Background(), "s1", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "fine" {
+		t.Errorf("Response = %q, want LLM response when guard plugin is missing and fail_open=true", result.Response)
+	}
+}
+
+func TestGuardErrorBlocksByDefault(t *testing.T) {
+	// Guard executor returns an error -> blocked by default (fail-closed).
 	llm := &fakeLLM{responses: []string{"fine"}}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	guards := []ContentPreparerEntry{{Plugin: "guard-plugin", Action: "sanitize", Guard: true}}
@@ -718,8 +741,29 @@ func TestGuardErrorSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !strings.Contains(result.Response, "Request blocked: guard guard-plugin.sanitize failed.") {
+		t.Errorf("Response = %q, want blocked response when guard errors", result.Response)
+	}
+	if llm.callCount != 0 {
+		t.Errorf("LLM should not be called when guard errors and fail_open=false, callCount=%d", llm.callCount)
+	}
+}
+
+func TestGuardErrorFailOpenContinues(t *testing.T) {
+	// Guard executor returns an error and fail_open=true -> continue to LLM.
+	llm := &fakeLLM{responses: []string{"fine"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	guards := []ContentPreparerEntry{{Plugin: "guard-plugin", Action: "sanitize", Guard: true, FailOpen: true}}
+
+	orch := setupGuardOrchestrator(guards, llm, parser, map[string]PluginExecutor{
+		"guard-plugin": &errorReturningExecutor{err: "guard internal error"},
+	})
+	result, err := orch.Run(context.Background(), "s1", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Response != "fine" {
-		t.Errorf("Response = %q, want LLM response when guard errors", result.Response)
+		t.Errorf("Response = %q, want LLM response when guard errors and fail_open=true", result.Response)
 	}
 }
 
@@ -1089,5 +1133,55 @@ func TestInsecurePreparerCannotInvoke(t *testing.T) {
 	}
 	if len(result.ToolCalls) != 0 {
 		t.Errorf("expected 0 tool calls (invoke ignored), got %d", len(result.ToolCalls))
+	}
+}
+
+func TestPreparerErrorBlocksByDefault(t *testing.T) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "preparer-plugin", Description: "Preparer",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &errorReturningExecutor{err: "preparer unavailable"})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	llm := &fakeLLM{responses: []string{"LLM reply"}}
+	preparers := []ContentPreparerEntry{{Plugin: "preparer-plugin", Action: "prepare"}}
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
+
+	result, err := orch.Run(context.Background(), "s1", "deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Response, "Request blocked: guard preparer-plugin.prepare failed.") {
+		t.Errorf("Response = %q, want blocked response", result.Response)
+	}
+	if llm.callCount != 0 {
+		t.Errorf("LLM should not be called when preparer errors and fail_open=false, callCount=%d", llm.callCount)
+	}
+}
+
+func TestPreparerErrorFailOpenContinues(t *testing.T) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "preparer-plugin", Description: "Preparer",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &errorReturningExecutor{err: "preparer unavailable"})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	llm := &fakeLLM{responses: []string{"LLM reply"}}
+	preparers := []ContentPreparerEntry{{Plugin: "preparer-plugin", Action: "prepare", FailOpen: true}}
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
+
+	result, err := orch.Run(context.Background(), "s1", "deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "LLM reply" {
+		t.Errorf("Response = %q, want LLM reply when fail_open=true", result.Response)
+	}
+	if llm.callCount != 1 {
+		t.Errorf("expected LLM called once when preparer errors and fail_open=true, got %d", llm.callCount)
 	}
 }
