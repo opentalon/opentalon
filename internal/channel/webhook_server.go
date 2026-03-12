@@ -49,17 +49,18 @@ func (s *WebhookServer) register(port int, path string, handler http.HandlerFunc
 
 	if !s.started {
 		s.port = port
-		s.server = &http.Server{
+		server := &http.Server{
 			Addr:    fmt.Sprintf(":%d", port),
 			Handler: s.mux,
 		}
+		s.server = server
 		s.started = true
-		go func() {
-			log.Printf("webhook-server: listening on :%d", port)
-			if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		go func(srv *http.Server, p int) {
+			log.Printf("webhook-server: listening on :%d", p)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("webhook-server: error: %v", err)
 			}
-		}()
+		}(server, port)
 	}
 
 	return nil
