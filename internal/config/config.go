@@ -103,11 +103,20 @@ func (s *SkillEntry) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
+// MCPServerConfigInl is the inline config shape for one MCP server.
+type MCPServerConfigInl struct {
+	Server  string            `yaml:"server"`
+	URL     string            `yaml:"url"`
+	Headers map[string]string `yaml:"headers,omitempty"`
+}
+
 // RequestSetInl is an inline request package set (plugin name + packages).
+// If MCP is set, Packages is ignored — the tools come from the MCP plugin binary.
 type RequestSetInl struct {
 	Plugin      string              `yaml:"plugin"`
 	Description string              `yaml:"description"`
 	Packages    []RequestPackageInl `yaml:"packages"`
+	MCP         *MCPServerConfigInl `yaml:"mcp,omitempty"`
 }
 
 // RequestPackageInl is the config shape for one request package.
