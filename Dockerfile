@@ -39,7 +39,7 @@ RUN CGO_ENABLED=0 go build \
 # ─── Runtime stage ────────────────────────────────────────────────────────────
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates tzdata git \
+RUN apk add --no-cache ca-certificates tzdata git go \
     && addgroup -S opentalon \
     && adduser -S -G opentalon opentalon
 
