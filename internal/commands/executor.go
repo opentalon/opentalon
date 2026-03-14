@@ -22,9 +22,15 @@ const (
 	ActionListCommands = "list_commands"
 	ActionSetPrompt    = "set_prompt"
 	ActionClearSession = "clear_session"
+	ActionReloadMCP    = "reload_mcp"
 )
 
-// Executor runs built-in opentalon actions (install_skill, show_config, list_commands, set_prompt, clear_session).
+// PluginReloader can reload a named plugin subprocess.
+type PluginReloader interface {
+	Reload(ctx context.Context, name string) error
+}
+
+// Executor runs built-in opentalon actions (install_skill, show_config, list_commands, set_prompt, clear_session, reload_mcp).
 // It implements orchestrator.PluginExecutor.
 type Executor struct {
 	registry          *orchestrator.ToolRegistry
@@ -32,19 +38,22 @@ type Executor struct {
 	dataDir           string
 	cfg               *config.Config
 	runtimePromptPath string
+	pluginReloader    PluginReloader // optional; enables reload_mcp
+	mcpCacheDir       string        // optional; mcp-cache dir for cache invalidation on reload
 }
 
 // Capability returns the plugin capability for the opentalon built-in plugin.
 func Capability() orchestrator.PluginCapability {
 	return orchestrator.PluginCapability{
 		Name:        PluginName,
-		Description: "Built-in OpenTalon commands: install skill, show config, list commands, set prompt, clear session.",
+		Description: "Built-in OpenTalon commands: install skill, show config, list commands, set prompt, clear session, reload MCP.",
 		Actions: []orchestrator.Action{
 			{Name: ActionInstallSkill, Description: "Install a skill from a GitHub URL (e.g. /install skill org/repo).", Parameters: []orchestrator.Parameter{{Name: "url", Description: "GitHub URL or org/repo", Required: true}, {Name: "ref", Description: "Branch or tag (default main)", Required: false}}, AuditLog: true},
 			{Name: ActionShowConfig, Description: "Show current config (secrets redacted).", Parameters: nil},
 			{Name: ActionListCommands, Description: "List available slash commands.", Parameters: nil},
 			{Name: ActionSetPrompt, Description: "Set the editable runtime prompt.", Parameters: []orchestrator.Parameter{{Name: "text", Description: "Prompt text", Required: true}}},
 			{Name: ActionClearSession, Description: "Clear the current session.", Parameters: nil, InjectContextArgs: []string{"session_id"}},
+			{Name: ActionReloadMCP, Description: "Reload MCP server connections and refresh available tools. Optionally target one server by name.", Parameters: []orchestrator.Parameter{{Name: "server", Description: "MCP server name to reload (leave empty to reload all)", Required: false}}},
 		},
 	}
 }
@@ -66,6 +75,15 @@ func NewExecutor(
 	}
 }
 
+// WithMCPReload enables the reload_mcp command.
+// reloader restarts the mcp plugin subprocess; cacheDir is the mcp-cache directory
+// (individual server cache files are deleted before reload to force a fresh fetch).
+func (e *Executor) WithMCPReload(reloader PluginReloader, cacheDir string) *Executor {
+	e.pluginReloader = reloader
+	e.mcpCacheDir = cacheDir
+	return e
+}
+
 // Execute implements orchestrator.PluginExecutor.
 func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 	switch call.Action {
@@ -80,6 +98,8 @@ func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 		return e.setPrompt(call)
 	case ActionClearSession:
 		return e.clearSession(call)
+	case ActionReloadMCP:
+		return e.reloadMCP(context.Background(), call)
 	default:
 		return orchestrator.ToolResult{
 			CallID: call.ID,
@@ -192,8 +212,41 @@ func (e *Executor) listCommands(call orchestrator.ToolCall) orchestrator.ToolRes
 /show config — Show current config (secrets redacted).
 /commands — List available commands (this message).
 /set prompt <text> — Set the editable runtime prompt; applies to the next message.
-/clear or /new — Clear the current session.`
+/clear or /new — Clear the current session.
+/reload mcp [server] — Reload MCP server connections and refresh available tools. Optionally name a specific server (e.g. /reload mcp magtuner).`
 	return orchestrator.ToolResult{CallID: call.ID, Content: msg}
+}
+
+func (e *Executor) reloadMCP(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+	if e.pluginReloader == nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: "reload_mcp not available (plugin reloader not configured)"}
+	}
+
+	server := strings.TrimSpace(call.Args["server"])
+
+	// Delete cache file(s) so the plugin fetches a fresh spec.
+	if e.mcpCacheDir != "" {
+		if server != "" {
+			safe := strings.ReplaceAll(server, string(filepath.Separator), "_")
+			_ = os.Remove(filepath.Join(e.mcpCacheDir, safe+".json"))
+		} else {
+			entries, _ := os.ReadDir(e.mcpCacheDir)
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					_ = os.Remove(filepath.Join(e.mcpCacheDir, entry.Name()))
+				}
+			}
+		}
+	}
+
+	if err := e.pluginReloader.Reload(ctx, "mcp"); err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("reload mcp plugin: %v", err)}
+	}
+
+	if server != "" {
+		return orchestrator.ToolResult{CallID: call.ID, Content: fmt.Sprintf("MCP plugin reloaded. Server %q tools refreshed.", server)}
+	}
+	return orchestrator.ToolResult{CallID: call.ID, Content: "MCP plugin reloaded. All server tools refreshed."}
 }
 
 const maxRuntimePromptBytes = 32 * 1024 // 32KB limit to reduce prompt injection impact (global file, all requests)

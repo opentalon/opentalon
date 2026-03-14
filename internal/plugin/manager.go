@@ -165,6 +165,24 @@ func (m *Manager) connectRemote(entry PluginEntry) (*Client, error) {
 	return client, nil
 }
 
+// Reload stops the named plugin and relaunches it with the same entry config.
+// The plugin's capabilities are re-fetched from the subprocess on startup.
+func (m *Manager) Reload(ctx context.Context, name string) error {
+	m.mu.Lock()
+	mg, ok := m.plugins[name]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("plugin %q not loaded", name)
+	}
+	entry := mg.entry
+	m.mu.Unlock()
+
+	if err := m.Unload(name); err != nil {
+		log.Printf("plugin-manager: reload %s: unload: %v", name, err)
+	}
+	return m.Load(ctx, entry)
+}
+
 // Unload stops a plugin and removes it from the registry.
 func (m *Manager) Unload(name string) error {
 	m.mu.Lock()

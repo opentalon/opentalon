@@ -240,6 +240,9 @@ func main() {
 					continue
 				}
 				pluginEntries[i].WithEnvOverride("OPENTALON_MCP_SERVERS", string(mcpJSON))
+				if dataDir != "" {
+					pluginEntries[i].WithEnvOverride("OPENTALON_MCP_CACHE_DIR", filepath.Join(dataDir, "mcp-cache"))
+				}
 				injected = true
 				break
 			}
@@ -265,12 +268,18 @@ func main() {
 		log.Printf("Warning: request_packages: %v", err)
 	}
 
-	// Register built-in opentalon plugin (install_skill, show_config, list_commands, set_prompt, clear_session)
+	// Register built-in opentalon plugin (install_skill, show_config, list_commands, set_prompt, clear_session, reload_mcp)
 	runtimePromptPath := ""
 	if dataDir != "" {
 		runtimePromptPath = filepath.Join(dataDir, "custom_prompt.txt")
 	}
-	if err := toolRegistry.Register(commands.Capability(), commands.NewExecutor(toolRegistry, sessions, dataDir, cfg, runtimePromptPath)); err != nil {
+	mcpCacheDir := ""
+	if dataDir != "" {
+		mcpCacheDir = filepath.Join(dataDir, "mcp-cache")
+	}
+	cmdExecutor := commands.NewExecutor(toolRegistry, sessions, dataDir, cfg, runtimePromptPath).
+		WithMCPReload(pluginManager, mcpCacheDir)
+	if err := toolRegistry.Register(commands.Capability(), cmdExecutor); err != nil {
 		log.Printf("Warning: register opentalon commands: %v", err)
 	}
 
