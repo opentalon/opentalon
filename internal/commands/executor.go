@@ -39,7 +39,7 @@ type Executor struct {
 	cfg               *config.Config
 	runtimePromptPath string
 	pluginReloader    PluginReloader // optional; enables reload_mcp
-	mcpCacheDir       string        // optional; mcp-cache dir for cache invalidation on reload
+	mcpCacheDir       string         // optional; mcp-cache dir for cache invalidation on reload
 }
 
 // Capability returns the plugin capability for the opentalon built-in plugin.
