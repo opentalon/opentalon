@@ -8,7 +8,7 @@
 #   docker build --build-arg VERSION=v1.2.3 .
 #   (VERSION takes precedence over BRANCH when set)
 #
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 ARG BRANCH=master
 ARG VERSION=
@@ -39,7 +39,7 @@ RUN CGO_ENABLED=0 go build \
 # ─── Runtime stage ────────────────────────────────────────────────────────────
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates tzdata \
+RUN apk add --no-cache ca-certificates tzdata git \
     && addgroup -S opentalon \
     && adduser -S -G opentalon opentalon
 
