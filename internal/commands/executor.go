@@ -94,7 +94,8 @@ func (e *Executor) installSkill(ctx context.Context, call orchestrator.ToolCall)
 		return orchestrator.ToolResult{CallID: call.ID, Error: "missing url"}
 	}
 	ref := strings.TrimSpace(call.Args["ref"])
-	if ref == "" {
+	defaultRef := ref == ""
+	if defaultRef {
 		ref = "main"
 	}
 
@@ -104,6 +105,13 @@ func (e *Executor) installSkill(ctx context.Context, call orchestrator.ToolCall)
 	}
 
 	skillDir, err := bundle.EnsureSkillDir(ctx, e.dataDir, name, github, ref)
+	if err != nil && defaultRef {
+		// Fall back to "master" if "main" wasn't found
+		skillDir, err = bundle.EnsureSkillDir(ctx, e.dataDir, name, github, "master")
+		if err == nil {
+			ref = "master"
+		}
+	}
 	if err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("ensure skill dir: %v", err)}
 	}

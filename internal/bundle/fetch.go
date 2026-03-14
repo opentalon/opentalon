@@ -26,6 +26,9 @@ func ResolveRef(ctx context.Context, repo, ref string) (string, error) {
 	cmd := exec.CommandContext(ctx, gitBin, "ls-remote", repoURL, ref)
 	out, err := cmd.Output()
 	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 128 {
+			return "", fmt.Errorf("repository not found or inaccessible: %s", repoURL)
+		}
 		return "", fmt.Errorf("git ls-remote %s %s: %w", repoURL, ref, err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
