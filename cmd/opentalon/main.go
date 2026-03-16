@@ -261,7 +261,6 @@ func main() {
 		}
 	}
 
-
 	for _, e := range pluginEntries {
 		if e.Enabled && dataDir != "" {
 			if err := store.RunPluginMigrations(dataDir, e.Name, e.Plugin); err != nil {
