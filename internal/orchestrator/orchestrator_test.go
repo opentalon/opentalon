@@ -1185,3 +1185,99 @@ func TestPreparerErrorFailOpenContinues(t *testing.T) {
 		t.Errorf("expected LLM called once when preparer errors and fail_open=true, got %d", llm.callCount)
 	}
 }
+
+// --- Context window trimming tests ---
+
+func TestEstimateTokens(t *testing.T) {
+	// 4 chars per token
+	if got := estimateTokens("abcd"); got != 1 {
+		t.Errorf("estimateTokens(4 chars) = %d, want 1", got)
+	}
+	if got := estimateTokens(strings.Repeat("x", 400)); got != 100 {
+		t.Errorf("estimateTokens(400 chars) = %d, want 100", got)
+	}
+	if got := estimateTokens(""); got != 0 {
+		t.Errorf("estimateTokens(empty) = %d, want 0", got)
+	}
+}
+
+func TestTrimToContextWindow_NoTrimNeeded(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: provider.RoleSystem, Content: "system prompt"},
+		{Role: provider.RoleUser, Content: "hello"},
+		{Role: provider.RoleAssistant, Content: "hi there"},
+	}
+	// All messages are tiny, context window is huge — no trimming.
+	result := trimToContextWindow(msgs, 100000)
+	if len(result) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(result))
+	}
+}
+
+func TestTrimToContextWindow_DropsOldConversation(t *testing.T) {
+	// System prompt: 40 chars = ~10 tokens
+	// Each conversation message: 400 chars = ~100 tokens
+	// Total with 5 conv messages: 10 + 500 = 510 tokens
+	// Context window: 400 tokens → max input = 360 (90%)
+	// Need to drop oldest conv messages until it fits.
+	msgs := []provider.Message{
+		{Role: provider.RoleSystem, Content: strings.Repeat("s", 40)},
+		{Role: provider.RoleUser, Content: strings.Repeat("a", 400)},
+		{Role: provider.RoleAssistant, Content: strings.Repeat("b", 400)},
+		{Role: provider.RoleUser, Content: strings.Repeat("c", 400)},
+		{Role: provider.RoleAssistant, Content: strings.Repeat("d", 400)},
+		{Role: provider.RoleUser, Content: strings.Repeat("e", 400)},
+	}
+
+	result := trimToContextWindow(msgs, 400)
+
+	// System message must be preserved.
+	if result[0].Role != provider.RoleSystem {
+		t.Errorf("first message should be system, got %s", result[0].Role)
+	}
+	// Some conversation messages should have been dropped.
+	if len(result) >= len(msgs) {
+		t.Fatalf("expected fewer messages after trim, got %d (was %d)", len(result), len(msgs))
+	}
+	// Last message should be the most recent user message.
+	if result[len(result)-1].Content != strings.Repeat("e", 400) {
+		t.Error("last message should be the most recent conversation message")
+	}
+}
+
+func TestTrimToContextWindow_PreservesSystemMessages(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: provider.RoleSystem, Content: strings.Repeat("s", 40)},
+		{Role: provider.RoleSystem, Content: "Previous conversation summary: stuff"},
+		{Role: provider.RoleUser, Content: strings.Repeat("a", 4000)},
+		{Role: provider.RoleAssistant, Content: strings.Repeat("b", 4000)},
+		{Role: provider.RoleUser, Content: strings.Repeat("c", 400)},
+	}
+
+	result := trimToContextWindow(msgs, 2000)
+
+	// Both system messages should be preserved.
+	systemCount := 0
+	for _, m := range result {
+		if m.Role == provider.RoleSystem {
+			systemCount++
+		}
+	}
+	if systemCount != 2 {
+		t.Errorf("expected 2 system messages preserved, got %d", systemCount)
+	}
+}
+
+func TestTrimToContextWindow_ZeroWindow(t *testing.T) {
+	// contextWindow=0 means no trimming; but trimToContextWindow is only called
+	// when contextWindow > 0. Test that it returns messages unchanged for a
+	// very large window.
+	msgs := []provider.Message{
+		{Role: provider.RoleSystem, Content: "sys"},
+		{Role: provider.RoleUser, Content: "hi"},
+	}
+	result := trimToContextWindow(msgs, 999999)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(result))
+	}
+}

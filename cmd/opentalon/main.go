@@ -81,6 +81,15 @@ func main() {
 	// LLM client that sets default model when orchestrator doesn't
 	llm := &defaultModelClient{provider: prov, model: defaultModel}
 
+	// Look up context window for the default model.
+	var contextWindow int
+	for _, m := range prov.Models() {
+		if m.ID == defaultModel {
+			contextWindow = m.ContextWindow
+			break
+		}
+	}
+
 	dataDir := cfg.State.DataDir
 	var memory orchestrator.MemoryStoreInterface
 	var sessions orchestrator.SessionStoreInterface
@@ -328,6 +337,7 @@ func main() {
 		SummarizeUpdatePrompt:   cfg.State.Session.SummarizeUpdatePrompt,
 		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
 		PipelineConfig:          pipelineCfg,
+		ContextWindow:           contextWindow,
 	})
 
 	ensureSession := func(sessionKey string) {
