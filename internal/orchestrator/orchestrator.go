@@ -73,6 +73,7 @@ type OrchestratorOpts struct {
 	SummarizeUpdatePrompt   string                        // empty = default English
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PipelineConfig          pipeline.PipelineConfig
+	ContextWindow           int // model context window in tokens; 0 = no trimming
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -114,6 +115,7 @@ type Orchestrator struct {
 	planner                 *pipeline.Planner             // nil = pipeline disabled
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
 	pipelineConfig          pipeline.PipelineConfig
+	contextWindow           int // model context window in tokens; 0 = no trimming
 }
 
 const (
@@ -202,6 +204,7 @@ func NewWithRules(
 		planner:                 planner,
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
 		pipelineConfig:          pipelineCfg,
+		contextWindow:           opts.ContextWindow,
 	}
 }
 
@@ -617,7 +620,64 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 	}
 	messages = append(messages, sess.Messages...)
 
+	if o.contextWindow > 0 {
+		messages = trimToContextWindow(messages, o.contextWindow)
+	}
+
 	return messages
+}
+
+// estimateTokens returns a rough token count for a string.
+// Uses ~4 characters per token which is a reasonable average for most LLMs.
+func estimateTokens(s string) int {
+	return len(s) / 4
+}
+
+// trimToContextWindow drops the oldest conversation messages (preserving
+// system messages at the front) until the estimated token count fits within
+// the model's context window. Reserves 10% of the window for the response.
+func trimToContextWindow(messages []provider.Message, contextWindow int) []provider.Message {
+	maxInputTokens := contextWindow * 9 / 10 // reserve 10% for output
+
+	total := 0
+	for _, m := range messages {
+		total += estimateTokens(m.Content)
+	}
+	if total <= maxInputTokens {
+		return messages
+	}
+
+	// Find where conversation messages start (skip leading system messages).
+	convStart := 0
+	for convStart < len(messages) && messages[convStart].Role == provider.RoleSystem {
+		convStart++
+	}
+
+	// Drop oldest conversation messages (pairs of assistant+user typically)
+	// until we fit. Always keep at least the last conversation message.
+	for total > maxInputTokens && convStart < len(messages)-1 {
+		total -= estimateTokens(messages[convStart].Content)
+		convStart++
+	}
+
+	trimmed := make([]provider.Message, 0, len(messages)-convStart+convStart)
+	// Keep system messages.
+	for i := 0; i < len(messages); i++ {
+		if messages[i].Role == provider.RoleSystem {
+			trimmed = append(trimmed, messages[i])
+		} else {
+			break
+		}
+	}
+	// Append remaining conversation messages.
+	trimmed = append(trimmed, messages[convStart:]...)
+
+	if len(trimmed) < len(messages) {
+		log.Printf("context trimming: dropped %d old messages to fit context window (%d tokens, limit %d)",
+			len(messages)-len(trimmed), total, maxInputTokens)
+	}
+
+	return trimmed
 }
 
 func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string) string {
