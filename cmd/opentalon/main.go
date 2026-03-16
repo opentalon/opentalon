@@ -261,6 +261,20 @@ func main() {
 		}
 	}
 
+	// Inject chrome plugin config from the plugin's config: block in config.yaml.
+	for i, e := range pluginEntries {
+		if e.Name != "chrome" {
+			continue
+		}
+		chromeJSON, err := json.Marshal(e.Config)
+		if err != nil {
+			log.Printf("Warning: marshal chrome config: %v", err)
+			break
+		}
+		pluginEntries[i].WithEnvOverride("OPENTALON_CHROME_CONFIG", string(chromeJSON))
+		break
+	}
+
 	for _, e := range pluginEntries {
 		if e.Enabled && dataDir != "" {
 			if err := store.RunPluginMigrations(dataDir, e.Name, e.Plugin); err != nil {
