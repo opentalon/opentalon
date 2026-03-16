@@ -20,6 +20,14 @@ type Handler interface {
 	Execute(req Request) Response
 }
 
+// Configurable may be implemented by a Handler to receive the plugin's config
+// block from the host. The host calls Configure (via the Capabilities RPC)
+// before any Execute calls. configJSON is the JSON-encoded config: block from
+// the host's config.yaml; it is empty when no config block was provided.
+type Configurable interface {
+	Configure(configJSON string) error
+}
+
 // ServeListener starts a gRPC server on an existing listener. The caller is
 // responsible for printing the handshake line to stdout before calling this,
 // and for closing the listener after ServeListener returns.

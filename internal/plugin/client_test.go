@@ -11,7 +11,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
-	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 const bufSize = 1024 * 1024
@@ -21,7 +20,7 @@ type fakePluginService struct {
 	pluginpb.UnimplementedPluginServiceServer
 }
 
-func (s *fakePluginService) Capabilities(_ context.Context, _ *emptypb.Empty) (*pluginpb.PluginCapabilities, error) {
+func (s *fakePluginService) Capabilities(_ context.Context, _ *pluginpb.PluginInitRequest) (*pluginpb.PluginCapabilities, error) {
 	return &pluginpb.PluginCapabilities{
 		Name:        "echo",
 		Description: "Echoes arguments back",
@@ -75,7 +74,7 @@ func newTestPluginClient(t *testing.T) *Client {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := c.fetchCapabilities(ctx); err != nil {
+	if err := c.fetchCapabilities(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
 	return c
@@ -163,7 +162,7 @@ func TestClientMultipleCalls(t *testing.T) {
 }
 
 func TestClientDialFailure(t *testing.T) {
-	_, err := Dial("unix", "/nonexistent/plugin.sock", defaultDialTimeout)
+	_, err := Dial("unix", "/nonexistent/plugin.sock", defaultDialTimeout, "")
 	// gRPC NewClient is lazy, so dial failure happens on first RPC (fetchCapabilities).
 	if err == nil {
 		t.Error("expected error for nonexistent socket")
@@ -180,7 +179,7 @@ func TestManagerLoadAndUnload(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := client.fetchCapabilities(ctx); err != nil {
+	if err := client.fetchCapabilities(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
 

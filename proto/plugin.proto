@@ -4,11 +4,13 @@ package opentalon.plugin.v1;
 
 option go_package = "github.com/opentalon/opentalon/proto/pluginpb";
 
-import "google/protobuf/empty.proto";
-
 service PluginService {
   rpc Execute(ToolCallRequest) returns (ToolResultResponse);
-  rpc Capabilities(google.protobuf.Empty) returns (PluginCapabilities);
+  rpc Capabilities(PluginInitRequest) returns (PluginCapabilities);
+}
+
+message PluginInitRequest {
+  string config_json = 1;
 }
 
 message ToolCallRequest {
