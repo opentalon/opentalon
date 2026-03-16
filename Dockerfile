@@ -42,10 +42,15 @@ FROM golang:1.24-alpine
 RUN apk add --no-cache ca-certificates tzdata git \
     && addgroup -S opentalon \
     && adduser -S -G opentalon opentalon \
-    && mkdir -p /home/opentalon/.cache/go-build /home/opentalon/go \
     && chown -R opentalon:opentalon /home/opentalon
 
 COPY --from=builder /opentalon /usr/local/bin/opentalon
+
+# Ensure Go build cache and module cache use writable paths (works even with
+# read-only root filesystem, since /tmp is typically a tmpfs).
+ENV GOCACHE=/tmp/go-build \
+    GOPATH=/tmp/go \
+    PATH="/usr/local/go/bin:/tmp/go/bin:${PATH}"
 
 # Mount your config.yaml here at runtime (see docker-compose.yml for example).
 # VOLUME ["/config"]
