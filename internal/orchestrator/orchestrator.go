@@ -122,7 +122,8 @@ type Orchestrator struct {
 	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
 	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
 	planner                 *pipeline.Planner             // nil = pipeline disabled
-	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
+	pendingMu               sync.Mutex                    // guards pendingPipelines map
+	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline (access via pendingMu)
 	pipelineConfig          pipeline.PipelineConfig
 	contextWindow           int // model context window in tokens; 0 = no trimming
 }
@@ -387,6 +388,7 @@ func (o *Orchestrator) releaseSessionLock(sessionID string, sm *sessionMutex) {
 }
 
 func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (*RunResult, error) {
+	// Lock ordering: semaphore → per-session mutex. Never acquire in reverse.
 	// Global concurrency cap: block until a slot is available (or context is cancelled).
 	select {
 	case o.semaphore <- struct{}{}:
@@ -405,12 +407,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	ctx = actor.WithSessionID(ctx, sessionID)
 
 	// Block A: Check for pending pipeline confirmation.
-	if p := o.pendingPipelines[sessionID]; p != nil {
+	o.pendingMu.Lock()
+	pendingPipeline := o.pendingPipelines[sessionID]
+	if pendingPipeline != nil {
+		delete(o.pendingPipelines, sessionID)
+	}
+	o.pendingMu.Unlock()
+	if p := pendingPipeline; p != nil {
 		decision := pipeline.ParseConfirmation(userMessage)
 		if os.Getenv("LOG_LEVEL") == "debug" {
 			log.Printf("[pipeline] pending pipeline %s for session %s, user input: %q, decision: %d", p.ID, sessionID, userMessage, decision)
 		}
-		delete(o.pendingPipelines, sessionID)
 		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 		if decision == pipeline.Approved {
 			if os.Getenv("LOG_LEVEL") == "debug" {
@@ -454,7 +461,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 		}
 		if err == nil && planResult.Type == "pipeline" && len(planResult.Steps) > 1 {
 			p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
+			o.pendingMu.Lock()
 			o.pendingPipelines[sessionID] = p
+			o.pendingMu.Unlock()
 			planText := p.FormatForConfirmation()
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})

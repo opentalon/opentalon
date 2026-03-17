@@ -123,11 +123,13 @@ func (r *Registry) StopAll() {
 }
 
 func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
+	// Shutdown ordering: r.cancel() closes r.ctx, the select below returns,
+	// defer wg.Wait() drains in-flight goroutines, then defer r.wg.Done() signals StopAll.
 	defer r.wg.Done()
 
 	sem := make(chan struct{}, r.maxConcurrent)
 	var wg sync.WaitGroup
-	defer wg.Wait() // drain in-flight goroutines on shutdown
+	defer wg.Wait() // drain in-flight goroutines before signalling outer WaitGroup
 
 	for {
 		select {
@@ -156,6 +158,9 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 					log.Printf("handling message on channel %q session %q: %v", ch.ID(), sessionKey, err)
 					return
 				}
+				// Note: concurrent goroutines for different sessions may call ch.Send
+				// in any order. Within a session, the orchestrator's per-session lock
+				// guarantees ordering; across sessions, interleaving is expected.
 				if err := ch.Send(r.ctx, resp); err != nil {
 					log.Printf("sending response on channel %q: %v", ch.ID(), err)
 				}
