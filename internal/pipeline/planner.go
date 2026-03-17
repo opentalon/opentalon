@@ -122,13 +122,13 @@ Available tools:
 `)
 	for _, cap := range capabilities {
 		for _, action := range cap.Actions {
-			sb.WriteString(fmt.Sprintf("- %s.%s: %s\n", cap.Name, action.Name, action.Description))
+			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
 			for _, param := range action.Parameters {
 				req := ""
 				if param.Required {
 					req = " (required)"
 				}
-				sb.WriteString(fmt.Sprintf("  - %s: %s%s\n", param.Name, param.Description, req))
+				fmt.Fprintf(&sb, "  - %s: %s%s\n", param.Name, param.Description, req)
 			}
 		}
 	}

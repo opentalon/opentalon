@@ -23,8 +23,8 @@ type Client struct {
 }
 
 // Dial connects to a plugin at the given network/address via gRPC and fetches
-// its capabilities.
-func Dial(network, address string, timeout time.Duration) (*Client, error) {
+// its capabilities, passing configJSON to the plugin during the handshake.
+func Dial(network, address string, timeout time.Duration, configJSON string) (*Client, error) {
 	var target string
 	switch network {
 	case "unix":
@@ -49,7 +49,7 @@ func Dial(network, address string, timeout time.Duration) (*Client, error) {
 		conn:   cc,
 		client: pluginpb.NewPluginServiceClient(cc),
 	}
-	if err := c.fetchCapabilities(ctx); err != nil {
+	if err := c.fetchCapabilities(ctx, configJSON); err != nil {
 		_ = cc.Close()
 		return nil, err
 	}
@@ -57,11 +57,14 @@ func Dial(network, address string, timeout time.Duration) (*Client, error) {
 }
 
 // DialFromHandshake connects using information from a handshake.
-func DialFromHandshake(hs pkg.Handshake, timeout time.Duration) (*Client, error) {
-	return Dial(hs.Network, hs.Address, timeout)
+func DialFromHandshake(hs pkg.Handshake, timeout time.Duration, configJSON string) (*Client, error) {
+	return Dial(hs.Network, hs.Address, timeout, configJSON)
 }
 
-func (c *Client) fetchCapabilities(ctx context.Context) error {
+func (c *Client) fetchCapabilities(ctx context.Context, configJSON string) error {
+	if _, err := c.client.Init(ctx, &pluginpb.PluginInitRequest{ConfigJson: configJSON}); err != nil {
+		return fmt.Errorf("init plugin: %w", err)
+	}
 	resp, err := c.client.Capabilities(ctx, &emptypb.Empty{})
 	if err != nil {
 		return fmt.Errorf("fetch capabilities: %w", err)

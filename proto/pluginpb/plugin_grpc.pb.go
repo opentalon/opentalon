@@ -20,6 +20,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	PluginService_Init_FullMethodName         = "/opentalon.plugin.v1.PluginService/Init"
 	PluginService_Execute_FullMethodName      = "/opentalon.plugin.v1.PluginService/Execute"
 	PluginService_Capabilities_FullMethodName = "/opentalon.plugin.v1.PluginService/Capabilities"
 )
@@ -28,6 +29,8 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type PluginServiceClient interface {
+	// Init delivers host configuration to the plugin before any other calls.
+	Init(ctx context.Context, in *PluginInitRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Execute(ctx context.Context, in *ToolCallRequest, opts ...grpc.CallOption) (*ToolResultResponse, error)
 	Capabilities(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*PluginCapabilities, error)
 }
@@ -38,6 +41,16 @@ type pluginServiceClient struct {
 
 func NewPluginServiceClient(cc grpc.ClientConnInterface) PluginServiceClient {
 	return &pluginServiceClient{cc}
+}
+
+func (c *pluginServiceClient) Init(ctx context.Context, in *PluginInitRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PluginService_Init_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *pluginServiceClient) Execute(ctx context.Context, in *ToolCallRequest, opts ...grpc.CallOption) (*ToolResultResponse, error) {
@@ -64,6 +77,8 @@ func (c *pluginServiceClient) Capabilities(ctx context.Context, in *emptypb.Empt
 // All implementations must embed UnimplementedPluginServiceServer
 // for forward compatibility.
 type PluginServiceServer interface {
+	// Init delivers host configuration to the plugin before any other calls.
+	Init(context.Context, *PluginInitRequest) (*emptypb.Empty, error)
 	Execute(context.Context, *ToolCallRequest) (*ToolResultResponse, error)
 	Capabilities(context.Context, *emptypb.Empty) (*PluginCapabilities, error)
 	mustEmbedUnimplementedPluginServiceServer()
@@ -76,6 +91,9 @@ type PluginServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedPluginServiceServer struct{}
 
+func (UnimplementedPluginServiceServer) Init(context.Context, *PluginInitRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method Init not implemented")
+}
 func (UnimplementedPluginServiceServer) Execute(context.Context, *ToolCallRequest) (*ToolResultResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Execute not implemented")
 }
@@ -101,6 +119,24 @@ func RegisterPluginServiceServer(s grpc.ServiceRegistrar, srv PluginServiceServe
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&PluginService_ServiceDesc, srv)
+}
+
+func _PluginService_Init_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PluginInitRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).Init(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_Init_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).Init(ctx, req.(*PluginInitRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _PluginService_Execute_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -146,6 +182,10 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "opentalon.plugin.v1.PluginService",
 	HandlerType: (*PluginServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Init",
+			Handler:    _PluginService_Init_Handler,
+		},
 		{
 			MethodName: "Execute",
 			Handler:    _PluginService_Execute_Handler,

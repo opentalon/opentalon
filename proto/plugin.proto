@@ -2,13 +2,19 @@ syntax = "proto3";
 
 package opentalon.plugin.v1;
 
-option go_package = "github.com/opentalon/opentalon/proto/pluginpb";
-
 import "google/protobuf/empty.proto";
 
+option go_package = "github.com/opentalon/opentalon/proto/pluginpb";
+
 service PluginService {
+  // Init delivers host configuration to the plugin before any other calls.
+  rpc Init(PluginInitRequest) returns (google.protobuf.Empty);
   rpc Execute(ToolCallRequest) returns (ToolResultResponse);
   rpc Capabilities(google.protobuf.Empty) returns (PluginCapabilities);
+}
+
+message PluginInitRequest {
+  string config_json = 1;
 }
 
 message ToolCallRequest {

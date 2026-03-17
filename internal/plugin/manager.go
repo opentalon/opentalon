@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -147,7 +148,7 @@ func (m *Manager) launchBinary(ctx context.Context, entry PluginEntry) (*Process
 		return nil, nil, fmt.Errorf("start %s: %w", entry.Name, err)
 	}
 
-	client, err := DialFromHandshake(hs, defaultDialTimeout)
+	client, err := DialFromHandshake(hs, defaultDialTimeout, configJSON(entry))
 	if err != nil {
 		_ = proc.Stop(defaultStopGrace)
 		return nil, nil, fmt.Errorf("dial %s: %w", entry.Name, err)
@@ -158,11 +159,25 @@ func (m *Manager) launchBinary(ctx context.Context, entry PluginEntry) (*Process
 
 func (m *Manager) connectRemote(entry PluginEntry) (*Client, error) {
 	addr := strings.TrimPrefix(entry.Plugin, "grpc://")
-	client, err := Dial("tcp", addr, defaultDialTimeout)
+	client, err := Dial("tcp", addr, defaultDialTimeout, configJSON(entry))
 	if err != nil {
 		return nil, fmt.Errorf("connect remote %s at %s: %w", entry.Name, addr, err)
 	}
 	return client, nil
+}
+
+// configJSON serializes the plugin's Config map to JSON, returning empty string
+// when there is no config or serialization fails.
+func configJSON(entry PluginEntry) string {
+	if len(entry.Config) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(entry.Config)
+	if err != nil {
+		log.Printf("plugin-manager: marshal %s config: %v", entry.Name, err)
+		return ""
+	}
+	return string(b)
 }
 
 // Reload stops the named plugin and relaunches it with the same entry config.
