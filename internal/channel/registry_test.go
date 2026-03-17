@@ -106,7 +106,7 @@ func TestSessionKey(t *testing.T) {
 }
 
 func TestRegistryRegisterAndList(t *testing.T) {
-	reg := NewRegistry(echoHandler, 1)
+	reg := NewRegistry(echoHandler)
 	defer reg.StopAll()
 
 	ch := newMockChannel("slack")
@@ -124,7 +124,7 @@ func TestRegistryRegisterAndList(t *testing.T) {
 }
 
 func TestRegistryDuplicateRegister(t *testing.T) {
-	reg := NewRegistry(echoHandler, 1)
+	reg := NewRegistry(echoHandler)
 	defer reg.StopAll()
 
 	ch1 := newMockChannel("slack")
@@ -139,7 +139,7 @@ func TestRegistryDuplicateRegister(t *testing.T) {
 }
 
 func TestRegistryRegisterStartFailure(t *testing.T) {
-	reg := NewRegistry(echoHandler, 1)
+	reg := NewRegistry(echoHandler)
 	defer reg.StopAll()
 
 	ch := &failStartChannel{mockChannel: mockChannel{id: "bad", caps: pkg.Capabilities{ID: "bad", Name: "bad"}}}
@@ -153,7 +153,7 @@ func TestRegistryRegisterStartFailure(t *testing.T) {
 }
 
 func TestRegistryGet(t *testing.T) {
-	reg := NewRegistry(echoHandler, 1)
+	reg := NewRegistry(echoHandler)
 	defer reg.StopAll()
 
 	ch := newMockChannel("telegram")
@@ -171,7 +171,7 @@ func TestRegistryGet(t *testing.T) {
 }
 
 func TestRegistryDeregister(t *testing.T) {
-	reg := NewRegistry(echoHandler, 1)
+	reg := NewRegistry(echoHandler)
 	defer reg.StopAll()
 
 	ch := newMockChannel("teams")
@@ -189,7 +189,7 @@ func TestRegistryDeregister(t *testing.T) {
 }
 
 func TestRegistryDeregisterNotFound(t *testing.T) {
-	reg := NewRegistry(echoHandler, 1)
+	reg := NewRegistry(echoHandler)
 	defer reg.StopAll()
 
 	if err := reg.Deregister("nope"); err == nil {
@@ -198,7 +198,7 @@ func TestRegistryDeregisterNotFound(t *testing.T) {
 }
 
 func TestRegistrySend(t *testing.T) {
-	reg := NewRegistry(echoHandler, 1)
+	reg := NewRegistry(echoHandler)
 	defer reg.StopAll()
 
 	ch := newMockChannel("whatsapp")
@@ -219,7 +219,7 @@ func TestRegistrySend(t *testing.T) {
 }
 
 func TestRegistrySendNotFound(t *testing.T) {
-	reg := NewRegistry(echoHandler, 1)
+	reg := NewRegistry(echoHandler)
 	defer reg.StopAll()
 
 	if err := reg.Send(context.Background(), "nope", pkg.OutboundMessage{}); err == nil {
@@ -228,7 +228,7 @@ func TestRegistrySendNotFound(t *testing.T) {
 }
 
 func TestRegistryDispatch(t *testing.T) {
-	reg := NewRegistry(echoHandler, 1)
+	reg := NewRegistry(echoHandler)
 	defer reg.StopAll()
 
 	ch := newMockChannel("discord")
@@ -265,7 +265,7 @@ func TestRegistryDispatch(t *testing.T) {
 }
 
 func TestRegistryStopAll(t *testing.T) {
-	reg := NewRegistry(echoHandler, 1)
+	reg := NewRegistry(echoHandler)
 
 	ch1 := newMockChannel("ch1")
 	ch2 := newMockChannel("ch2")
@@ -282,8 +282,9 @@ func TestRegistryStopAll(t *testing.T) {
 	}
 }
 
-// TestRegistryDispatchConcurrent verifies that with maxConcurrent>1, multiple messages
-// are dispatched in parallel (both handlers run at the same time).
+// TestRegistryDispatchConcurrent verifies that multiple messages are dispatched in
+// parallel — the registry spawns a goroutine per message and the handler runs them
+// concurrently. Concurrency limiting is the orchestrator's responsibility.
 func TestRegistryDispatchConcurrent(t *testing.T) {
 	var inflight int32
 	var peak int32
@@ -292,7 +293,6 @@ func TestRegistryDispatchConcurrent(t *testing.T) {
 	slowHandler := func(_ context.Context, _ string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		cur := atomic.AddInt32(&inflight, 1)
 		defer atomic.AddInt32(&inflight, -1)
-		// Update peak.
 		for {
 			old := atomic.LoadInt32(&peak)
 			if cur <= old {
@@ -306,7 +306,7 @@ func TestRegistryDispatchConcurrent(t *testing.T) {
 		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "ok"}, nil
 	}
 
-	reg := NewRegistry(slowHandler, 2) // allow 2 concurrent dispatches
+	reg := NewRegistry(slowHandler)
 	defer reg.StopAll()
 
 	ch := newMockChannel("parallel")
@@ -326,9 +326,8 @@ func TestRegistryDispatchConcurrent(t *testing.T) {
 		}
 	}
 
-	close(unblock) // release both
+	close(unblock)
 
-	// Wait for responses.
 	deadline2 := time.After(2 * time.Second)
 	for len(ch.sentMessages()) < 2 {
 		select {
@@ -344,89 +343,12 @@ func TestRegistryDispatchConcurrent(t *testing.T) {
 	}
 }
 
-// TestRegistryDispatchSequential verifies that with maxConcurrent=1, messages are
-// dispatched one at a time (only one handler runs at a time).
-func TestRegistryDispatchSequential(t *testing.T) {
-	var inflight int32
-	var peak int32
-	var mu sync.Mutex
-	unblocked := false
-	unblock := make(chan struct{})
-
-	slowHandler := func(_ context.Context, _ string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
-		cur := atomic.AddInt32(&inflight, 1)
-		defer atomic.AddInt32(&inflight, -1)
-		for {
-			old := atomic.LoadInt32(&peak)
-			if cur <= old {
-				break
-			}
-			if atomic.CompareAndSwapInt32(&peak, old, cur) {
-				break
-			}
-		}
-		mu.Lock()
-		ready := unblocked
-		mu.Unlock()
-		if !ready {
-			<-unblock
-		}
-		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "ok"}, nil
-	}
-
-	reg := NewRegistry(slowHandler, 1)
-	defer reg.StopAll()
-
-	ch := newMockChannel("sequential")
-	_ = reg.Register(ch)
-
-	ch.pushMessage(pkg.InboundMessage{ConversationID: "c1", Content: "msg1"})
-	ch.pushMessage(pkg.InboundMessage{ConversationID: "c2", Content: "msg2"})
-
-	// Wait until exactly 1 is in-flight (the second is blocked by semaphore).
-	deadline := time.After(2 * time.Second)
-	for atomic.LoadInt32(&inflight) < 1 {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for first message to start")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
-
-	// Second message must not have started yet.
-	time.Sleep(20 * time.Millisecond)
-	if got := atomic.LoadInt32(&inflight); got > 1 {
-		t.Errorf("inflight = %d during sequential dispatch, want 1", got)
-	}
-
-	mu.Lock()
-	unblocked = true
-	mu.Unlock()
-	close(unblock)
-
-	// Wait for both responses.
-	deadline2 := time.After(2 * time.Second)
-	for len(ch.sentMessages()) < 2 {
-		select {
-		case <-deadline2:
-			t.Fatal("timed out waiting for both responses")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-
-	if got := atomic.LoadInt32(&peak); got > 1 {
-		t.Errorf("peak concurrent dispatches = %d, want 1 (sequential)", got)
-	}
-}
-
 func TestRegistryDispatchHandlerError(t *testing.T) {
 	errHandler := func(_ context.Context, _ string, _ pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		return pkg.OutboundMessage{}, fmt.Errorf("handler error")
 	}
 
-	reg := NewRegistry(errHandler, 1)
+	reg := NewRegistry(errHandler)
 	defer reg.StopAll()
 
 	ch := newMockChannel("errch")

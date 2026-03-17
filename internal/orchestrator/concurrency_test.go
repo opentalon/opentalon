@@ -213,6 +213,123 @@ func (l *immediateLLM) Complete(_ context.Context, _ *provider.CompletionRequest
 	return &provider.CompletionResponse{Content: l.resp}, nil
 }
 
+// blockingSetSummaryStore wraps SessionStoreInterface, blocking inside SetSummary until
+// released by the test. It tracks concurrent write operations via atomic counters so
+// the test can detect overlapping AddMessage / SetSummary calls.
+type blockingSetSummaryStore struct {
+	inner             SessionStoreInterface
+	setSummaryStarted chan<- struct{}
+	setSummaryRelease <-chan struct{}
+	inWrite           int32 // atomic: number of write ops currently in-flight
+	maxInWrite        int32 // atomic: peak value of inWrite
+}
+
+func (s *blockingSetSummaryStore) writeStart() {
+	n := atomic.AddInt32(&s.inWrite, 1)
+	for {
+		old := atomic.LoadInt32(&s.maxInWrite)
+		if n <= old || atomic.CompareAndSwapInt32(&s.maxInWrite, old, n) {
+			break
+		}
+	}
+}
+
+func (s *blockingSetSummaryStore) writeEnd() { atomic.AddInt32(&s.inWrite, -1) }
+
+func (s *blockingSetSummaryStore) Get(id string) (*state.Session, error) { return s.inner.Get(id) }
+func (s *blockingSetSummaryStore) Create(id string) *state.Session       { return s.inner.Create(id) }
+func (s *blockingSetSummaryStore) Delete(id string) error                { return s.inner.Delete(id) }
+func (s *blockingSetSummaryStore) SetModel(id string, m provider.ModelRef) error {
+	return s.inner.SetModel(id, m)
+}
+func (s *blockingSetSummaryStore) AddMessage(id string, msg provider.Message) error {
+	s.writeStart()
+	defer s.writeEnd()
+	return s.inner.AddMessage(id, msg)
+}
+func (s *blockingSetSummaryStore) SetSummary(id, summary string, msgs []provider.Message) error {
+	s.writeStart()
+	// Signal the test that we're inside SetSummary, then block until released.
+	select {
+	case s.setSummaryStarted <- struct{}{}:
+	default:
+	}
+	<-s.setSummaryRelease
+	err := s.inner.SetSummary(id, summary, msgs)
+	s.writeEnd()
+	return err
+}
+
+// TestSummarizeGoroutineHoldsSessionLock verifies that the background goroutine spawned
+// by Run() to run maybeSummarizeSession acquires and holds the per-session lock for its
+// entire execution, preventing a concurrent Run() on the same session from interleaving
+// its own session writes with SetSummary.
+func TestSummarizeGoroutineHoldsSessionLock(t *testing.T) {
+	const sessionID = "sess"
+
+	setSummaryStarted := make(chan struct{}, 1)
+	setSummaryRelease := make(chan struct{})
+
+	inner := state.NewSessionStore("")
+	inner.Create(sessionID)
+	ts := &blockingSetSummaryStore{
+		inner:             inner,
+		setSummaryStarted: setSummaryStarted,
+		setSummaryRelease: setSummaryRelease,
+	}
+
+	orch := NewWithRules(
+		&immediateLLM{resp: "reply"},
+		&fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		NewToolRegistry(), state.NewMemoryStore(""), ts,
+		OrchestratorOpts{
+			MaxConcurrentSessions:   2, // both goroutines can run in parallel
+			SummarizeAfterMessages:  1, // trigger summarization after the first message
+			MaxMessagesAfterSummary: 1,
+		},
+	)
+
+	// First Run: returns quickly, then spawns the background summarize goroutine.
+	if _, err := orch.Run(context.Background(), sessionID, "msg1"); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+
+	// Wait until the summarize goroutine is inside SetSummary (holding the session lock).
+	select {
+	case <-setSummaryStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("summarize goroutine never called SetSummary")
+	}
+
+	// Start a second Run on the same session. With the fix it blocks on the per-session
+	// lock; without the fix it would race into AddMessage while SetSummary is blocked.
+	run2Done := make(chan error, 1)
+	go func() {
+		_, err := orch.Run(context.Background(), sessionID, "msg2")
+		run2Done <- err
+	}()
+
+	// Give the second Run time to reach and block on the session lock.
+	time.Sleep(20 * time.Millisecond)
+
+	// Release SetSummary; the goroutine finishes and gives up the session lock,
+	// allowing the second Run to proceed.
+	close(setSummaryRelease)
+
+	select {
+	case err := <-run2Done:
+		if err != nil {
+			t.Fatalf("second Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second Run timed out")
+	}
+
+	if got := atomic.LoadInt32(&ts.maxInWrite); got > 1 {
+		t.Errorf("concurrent session writes detected: maxInWrite = %d, want ≤1", got)
+	}
+}
+
 // TestConcurrencySessionLockCleanup verifies that per-session mutexes are removed from
 // the map after use so it doesn't grow unboundedly.
 func TestConcurrencySessionLockCleanup(t *testing.T) {

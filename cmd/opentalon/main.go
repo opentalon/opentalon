@@ -349,7 +349,7 @@ func main() {
 	runner := &channelRunner{orch: orch}
 	handler := channel.NewMessageHandler(ensureSession, runner, orch.RunAction, toolRegistry.HasAction)
 
-	reg := channel.NewRegistry(handler, cfg.Orchestrator.MaxConcurrentSessions)
+	reg := channel.NewRegistry(handler)
 	channelManager := channel.NewManager(reg, toolRegistry)
 	channelEntries := make([]channel.ChannelEntry, 0, len(cfg.Channels))
 	for name, ch := range cfg.Channels {

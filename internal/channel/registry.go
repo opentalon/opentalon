@@ -11,30 +11,26 @@ import (
 
 // Registry manages channel lifecycle, dispatches inbound messages to
 // the orchestrator, and routes responses back to the originating channel.
+// Concurrency is enforced by the orchestrator (via its semaphore and per-session
+// locks); the registry simply forwards messages and lets the orchestrator block.
 type Registry struct {
-	mu            sync.RWMutex
-	channels      map[string]pkg.Channel
-	handler       pkg.MessageHandler
-	maxConcurrent int // per-channel dispatch concurrency; default 1 (sequential)
+	mu       sync.RWMutex
+	channels map[string]pkg.Channel
+	handler  pkg.MessageHandler
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-// NewRegistry creates a Registry. maxConcurrent controls how many messages per channel
-// can be dispatched concurrently; values <= 1 mean sequential (default).
-func NewRegistry(handler pkg.MessageHandler, maxConcurrent int) *Registry {
-	if maxConcurrent <= 0 {
-		maxConcurrent = 1
-	}
+// NewRegistry creates a Registry.
+func NewRegistry(handler pkg.MessageHandler) *Registry {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Registry{
-		channels:      make(map[string]pkg.Channel),
-		handler:       handler,
-		maxConcurrent: maxConcurrent,
-		ctx:           ctx,
-		cancel:        cancel,
+		channels: make(map[string]pkg.Channel),
+		handler:  handler,
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 }
 
@@ -127,7 +123,6 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 	// defer wg.Wait() drains in-flight goroutines, then defer r.wg.Done() signals StopAll.
 	defer r.wg.Done()
 
-	sem := make(chan struct{}, r.maxConcurrent)
 	var wg sync.WaitGroup
 	defer wg.Wait() // drain in-flight goroutines before signalling outer WaitGroup
 
@@ -140,17 +135,9 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 				return
 			}
 
-			// Acquire a dispatch slot (blocks when at maxConcurrent).
-			select {
-			case sem <- struct{}{}:
-			case <-r.ctx.Done():
-				return
-			}
-
 			wg.Add(1)
 			go func(m pkg.InboundMessage) {
 				defer wg.Done()
-				defer func() { <-sem }()
 
 				sessionKey := pkg.SessionKey(ch.ID(), m.ConversationID, m.ThreadID)
 				resp, err := r.handler(r.ctx, sessionKey, m)
@@ -158,9 +145,6 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 					log.Printf("handling message on channel %q session %q: %v", ch.ID(), sessionKey, err)
 					return
 				}
-				// Note: concurrent goroutines for different sessions may call ch.Send
-				// in any order. Within a session, the orchestrator's per-session lock
-				// guarantees ordering; across sessions, interleaving is expected.
 				if err := ch.Send(r.ctx, resp); err != nil {
 					log.Printf("sending response on channel %q: %v", ch.ID(), err)
 				}

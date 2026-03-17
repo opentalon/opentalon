@@ -388,8 +388,11 @@ func (o *Orchestrator) releaseSessionLock(sessionID string, sm *sessionMutex) {
 }
 
 func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (*RunResult, error) {
-	// Lock ordering: semaphore → per-session mutex. Never acquire in reverse.
-	// Global concurrency cap: block until a slot is available (or context is cancelled).
+	// Lock ordering (must always be acquired in this sequence to prevent deadlock):
+	//   1. semaphore      – global concurrency cap
+	//   2. sessionMuxes   – per-session serialization (via acquireSessionLock)
+	//   3. pendingMu      – pending-pipeline map
+	// Never acquire an earlier lock while holding a later one.
 	select {
 	case o.semaphore <- struct{}{}:
 		defer func() { <-o.semaphore }()
@@ -953,10 +956,14 @@ func (o *Orchestrator) maybeRecordWorkflow(ctx context.Context, result *RunResul
 }
 
 // maybeSummarizeSession runs summarization when the session has enough messages and config is set.
+// It acquires the per-session lock so it cannot race with a concurrent Run() on the same session.
 func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID string) {
 	if o.summarizeAfterMessages <= 0 || o.maxMessagesAfterSummary <= 0 {
 		return
 	}
+	sm := o.acquireSessionLock(sessionID)
+	defer o.releaseSessionLock(sessionID, sm)
+
 	sess, err := o.sessions.Get(sessionID)
 	if err != nil {
 		return
@@ -1019,6 +1026,15 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 
 // RunAction executes a single plugin action directly, bypassing the LLM loop.
 // Used by the scheduler and other subsystems that need to invoke tools programmatically.
+//
+// It intentionally skips the semaphore and session lock:
+//   - It does not read or write session state (o.sessions), so the per-session lock
+//     is not needed and would only cause unnecessary contention.
+//   - Scheduler/system calls are not user sessions and should not compete for the
+//     user-facing concurrency cap enforced by the semaphore.
+//
+// Plugin executors must be safe for concurrent use — the same requirement that applies
+// when multiple sessions call the same plugin in parallel via Run.
 func (o *Orchestrator) RunAction(ctx context.Context, plugin, action string, args map[string]string) (string, error) {
 	call := ToolCall{
 		ID:     fmt.Sprintf("direct-%s-%s", plugin, action),
