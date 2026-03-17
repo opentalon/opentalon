@@ -387,7 +387,7 @@ func (o *Orchestrator) releaseSessionLock(sessionID string, sm *sessionMutex) {
 	sm.mu.Unlock()
 }
 
-func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (*RunResult, error) {
+func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, files ...provider.MessageFile) (*RunResult, error) {
 	// Lock ordering (must always be acquired in this sequence to prevent deadlock):
 	//   1. semaphore      – global concurrency cap
 	//   2. sessionMuxes   – per-session serialization (via acquireSessionLock)
@@ -481,6 +481,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	if err := o.sessions.AddMessage(sessionID, provider.Message{
 		Role:    provider.RoleUser,
 		Content: content,
+		Files:   files,
 	}); err != nil {
 		return nil, fmt.Errorf("adding user message: %w", err)
 	}

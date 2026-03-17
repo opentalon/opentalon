@@ -3,6 +3,7 @@ package provider
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -75,8 +76,8 @@ type anthRequest struct {
 }
 
 type anthMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"` // string for text-only, []anthContentBlock for multipart
 }
 
 type anthResponse struct {
@@ -89,8 +90,15 @@ type anthResponse struct {
 }
 
 type anthContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type   string           `json:"type"`
+	Text   string           `json:"text,omitempty"`
+	Source *anthImageSource `json:"source,omitempty"`
+}
+
+type anthImageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // e.g. "image/png"
+	Data      string `json:"data"`       // base64-encoded bytes
 }
 
 type anthUsage struct {
@@ -169,7 +177,7 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) anthRequest {
 			system = m.Content
 			continue
 		}
-		msgs = append(msgs, anthMessage{Role: string(m.Role), Content: m.Content})
+		msgs = append(msgs, p.toAnthMessage(m))
 	}
 
 	maxTokens := req.MaxTokens
@@ -183,6 +191,33 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) anthRequest {
 		Messages:  msgs,
 		MaxTokens: maxTokens,
 	}
+}
+
+// toAnthMessage converts a provider.Message to an anthMessage.
+// When the message has file attachments, the content becomes a JSON array of
+// content blocks (images first, then the text block); otherwise it is a plain string.
+func (p *AnthropicProvider) toAnthMessage(m Message) anthMessage {
+	if len(m.Files) == 0 {
+		raw, _ := json.Marshal(m.Content)
+		return anthMessage{Role: string(m.Role), Content: raw}
+	}
+
+	var blocks []anthContentBlock
+	for _, f := range m.Files {
+		blocks = append(blocks, anthContentBlock{
+			Type: "image",
+			Source: &anthImageSource{
+				Type:      "base64",
+				MediaType: f.MimeType,
+				Data:      base64.StdEncoding.EncodeToString(f.Data),
+			},
+		})
+	}
+	if m.Content != "" {
+		blocks = append(blocks, anthContentBlock{Type: "text", Text: m.Content})
+	}
+	raw, _ := json.Marshal(blocks)
+	return anthMessage{Role: string(m.Role), Content: raw}
 }
 
 func (p *AnthropicProvider) extractContent(blocks []anthContentBlock) string {

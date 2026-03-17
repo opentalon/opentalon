@@ -27,7 +27,7 @@ func NewMessageHandler(
 		}
 		actorID := msg.ChannelID + ":" + msg.SenderID
 		ctx = actor.WithActor(ctx, actorID)
-		response, inputForDisplay, err := runner.Run(ctx, sessionKey, content)
+		response, inputForDisplay, err := runner.Run(ctx, sessionKey, content, msg.Files...)
 		if err != nil {
 			log.Printf("handler: run: %v", err)
 			return pkg.OutboundMessage{

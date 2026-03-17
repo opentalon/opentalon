@@ -3,6 +3,7 @@ package channel
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -322,7 +323,53 @@ func (ch *YAMLChannel) extractMessage(event map[string]interface{}, eventCtx map
 		}
 	}
 
+	if ch.spec.Inbound.Mapping.Files != "" {
+		if raw, ok := event[ch.spec.Inbound.Mapping.Files]; ok {
+			if arr, ok := raw.([]interface{}); ok {
+				for _, item := range arr {
+					if fileMap, ok := item.(map[string]interface{}); ok {
+						if fa := decodeFileAttachment(fileMap); fa != nil {
+							msg.Files = append(msg.Files, *fa)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return msg
+}
+
+// decodeFileAttachment parses a file object from an inbound JSON event.
+// The object must have name, mime_type, and data (base64-encoded) fields.
+func decodeFileAttachment(m map[string]interface{}) *pkg.FileAttachment {
+	name, _ := m["name"].(string)
+	mimeType, _ := m["mime_type"].(string)
+	dataStr, _ := m["data"].(string)
+	sizeF, _ := m["size"].(float64)
+
+	if dataStr == "" {
+		return nil
+	}
+	data, err := base64.StdEncoding.DecodeString(dataStr)
+	if err != nil {
+		// Try URL-safe base64 (no padding)
+		data, err = base64.RawURLEncoding.DecodeString(dataStr)
+		if err != nil {
+			log.Printf("yaml-channel: file attachment decode error: %v", err)
+			return nil
+		}
+	}
+	size := int64(sizeF)
+	if size == 0 {
+		size = int64(len(data))
+	}
+	return &pkg.FileAttachment{
+		Name:     name,
+		MimeType: mimeType,
+		Data:     data,
+		Size:     size,
+	}
 }
 
 // getMappedField resolves a MappingField against an event object.

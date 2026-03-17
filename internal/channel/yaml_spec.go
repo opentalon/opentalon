@@ -116,6 +116,9 @@ type MappingSpec struct {
 	Content        MappingField      `yaml:"content"`
 	ThreadID       MappingField      `yaml:"thread_id"`
 	Metadata       map[string]string `yaml:"metadata"` // key = metadata key, value = event field name
+	// Files is the event field name whose value is an array of file objects.
+	// Each object must have: name (string), mime_type (string), data (base64 string), size (number).
+	Files string `yaml:"files"`
 }
 
 // Transform describes a text transformation step.
