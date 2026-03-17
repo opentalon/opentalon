@@ -338,6 +338,7 @@ func main() {
 		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
 		PipelineConfig:          pipelineCfg,
 		ContextWindow:           contextWindow,
+		MaxConcurrentSessions:   cfg.Orchestrator.MaxConcurrentSessions,
 	})
 
 	ensureSession := func(sessionKey string) {

@@ -11,6 +11,8 @@ import (
 
 // Registry manages channel lifecycle, dispatches inbound messages to
 // the orchestrator, and routes responses back to the originating channel.
+// Concurrency is enforced by the orchestrator (via its semaphore and per-session
+// locks); the registry simply forwards messages and lets the orchestrator block.
 type Registry struct {
 	mu       sync.RWMutex
 	channels map[string]pkg.Channel
@@ -21,6 +23,7 @@ type Registry struct {
 	wg     sync.WaitGroup
 }
 
+// NewRegistry creates a Registry.
 func NewRegistry(handler pkg.MessageHandler) *Registry {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Registry{
@@ -116,7 +119,12 @@ func (r *Registry) StopAll() {
 }
 
 func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
+	// Shutdown ordering: r.cancel() closes r.ctx, the select below returns,
+	// defer wg.Wait() drains in-flight goroutines, then defer r.wg.Done() signals StopAll.
 	defer r.wg.Done()
+
+	var wg sync.WaitGroup
+	defer wg.Wait() // drain in-flight goroutines before signalling outer WaitGroup
 
 	for {
 		select {
@@ -126,15 +134,21 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 			if !ok {
 				return
 			}
-			sessionKey := pkg.SessionKey(ch.ID(), msg.ConversationID, msg.ThreadID)
-			resp, err := r.handler(r.ctx, sessionKey, msg)
-			if err != nil {
-				log.Printf("handling message on channel %q session %q: %v", ch.ID(), sessionKey, err)
-				continue
-			}
-			if err := ch.Send(r.ctx, resp); err != nil {
-				log.Printf("sending response on channel %q: %v", ch.ID(), err)
-			}
+
+			wg.Add(1)
+			go func(m pkg.InboundMessage) {
+				defer wg.Done()
+
+				sessionKey := pkg.SessionKey(ch.ID(), m.ConversationID, m.ThreadID)
+				resp, err := r.handler(r.ctx, sessionKey, m)
+				if err != nil {
+					log.Printf("handling message on channel %q session %q: %v", ch.ID(), sessionKey, err)
+					return
+				}
+				if err := ch.Send(r.ctx, resp); err != nil {
+					log.Printf("sending response on channel %q: %v", ch.ID(), err)
+				}
+			}(msg)
 		}
 	}
 }
