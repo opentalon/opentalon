@@ -103,6 +103,7 @@ flowchart TD
 | Plugin tries to read another plugin's state | State store enforces namespace isolation — pluginID is set by the core, not the plugin |
 | Plugin tries to discover or call other plugins | gRPC contract exposes exactly one method: `Execute`. No registry, no peer discovery |
 | Plugin runs forever or consumes all resources | Per-call timeout (configurable) + OS-level resource limits |
+| LLM autonomously installs or modifies skills/plugins | `user_only` actions are hidden from the LLM system prompt and blocked if invoked via an LLM-generated tool call |
 
 **Guard of LLM models:** A plugin can host its **own LLM** (e.g. a small local model or a dedicated API). Used as a content preparer, such a plugin can implement a **guard of LLM models**—for example, classify or validate the request and block or redirect before the main orchestrator LLM is invoked, or enforce which models or providers are allowed. The core only sees the plugin’s result (e.g. transformed message or “do not send to LLM”); the plugin’s internal use of an LLM stays out of the main token path.
 
@@ -298,6 +299,7 @@ For standalone capabilities the LLM calls: integrations, actions, data retrieval
 - **Security boundary** — strict protobuf contracts; plugins cannot access other plugins, the registry, or core internals
 - **Discovery and lifecycle** — registered via config or auto-discovered from a directory, health-checked, and restarted on failure
 - Same proven pattern behind **Terraform**, **Vault**, and **Nomad**
+- **`user_only` actions** — set `user_only: true` on any action in `Capabilities()` to hide it from the LLM and allow it only via direct user invocation (e.g. slash commands). The core enforces this: LLM-generated calls to `user_only` actions are rejected. Built-in example: `/install skill` is `user_only` so only the user can install skills, not the LLM.
 
 ### Channel Plugins (gRPC / HTTP / WS — any language)
 

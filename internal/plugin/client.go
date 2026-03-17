@@ -125,6 +125,7 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 			Name:        a.Name,
 			Description: a.Description,
 			Parameters:  params,
+			UserOnly:    a.UserOnly,
 		}
 	}
 	return orchestrator.PluginCapability{
