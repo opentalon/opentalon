@@ -74,6 +74,7 @@ type OrchestratorOpts struct {
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PipelineConfig          pipeline.PipelineConfig
 	ContextWindow           int // model context window in tokens; 0 = no trimming
+	MaxConcurrentSessions   int // max sessions running in parallel; default 1 (sequential)
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -92,8 +93,16 @@ type SessionStoreInterface interface {
 	Delete(id string) error                                                  // remove session (e.g. for clear_session command)
 }
 
+// sessionMutex is a per-session lock with reference counting for cleanup.
+type sessionMutex struct {
+	mu       sync.Mutex
+	refCount int // goroutines currently waiting or holding this lock
+}
+
 type Orchestrator struct {
-	mu                      sync.Mutex
+	sessionMuxMu            sync.Mutex               // guards sessionMuxes map
+	sessionMuxes            map[string]*sessionMutex // per-session serialization
+	semaphore               chan struct{}            // nil = unlimited; cap = MaxConcurrentSessions
 	llm                     LLMClient
 	parser                  ToolCallParser
 	registry                *ToolRegistry
@@ -182,7 +191,16 @@ func NewWithRules(
 			preparers = append(preparers, p)
 		}
 	}
+	maxConcurrent := opts.MaxConcurrentSessions
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
+	// Always create a semaphore. cap=1 = sequential (default); cap=N = N parallel sessions.
+	semaphore := make(chan struct{}, maxConcurrent)
+
 	return &Orchestrator{
+		sessionMuxes:            make(map[string]*sessionMutex),
+		semaphore:               semaphore,
 		llm:                     llm,
 		parser:                  parser,
 		registry:                registry,
@@ -341,9 +359,45 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 	return toolResult.Content, nil, nil
 }
 
+// acquireSessionLock returns the per-session mutex for sessionID, locked.
+func (o *Orchestrator) acquireSessionLock(sessionID string) *sessionMutex {
+	o.sessionMuxMu.Lock()
+	sm, ok := o.sessionMuxes[sessionID]
+	if !ok {
+		sm = &sessionMutex{}
+		o.sessionMuxes[sessionID] = sm
+	}
+	sm.refCount++
+	o.sessionMuxMu.Unlock()
+
+	sm.mu.Lock()
+	return sm
+}
+
+// releaseSessionLock unlocks sm and removes it from the map if no other goroutine holds a reference.
+func (o *Orchestrator) releaseSessionLock(sessionID string, sm *sessionMutex) {
+	o.sessionMuxMu.Lock()
+	sm.refCount--
+	if sm.refCount == 0 {
+		delete(o.sessionMuxes, sessionID)
+	}
+	o.sessionMuxMu.Unlock()
+
+	sm.mu.Unlock()
+}
+
 func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (*RunResult, error) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
+	// Global concurrency cap: block until a slot is available (or context is cancelled).
+	select {
+	case o.semaphore <- struct{}{}:
+		defer func() { <-o.semaphore }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	// Per-session lock: serializes concurrent messages for the same session.
+	sm := o.acquireSessionLock(sessionID)
+	defer o.releaseSessionLock(sessionID, sm)
 
 	if _, err := o.sessions.Get(sessionID); err != nil {
 		return nil, fmt.Errorf("session lookup: %w", err)

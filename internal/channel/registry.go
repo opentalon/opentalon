@@ -12,22 +12,29 @@ import (
 // Registry manages channel lifecycle, dispatches inbound messages to
 // the orchestrator, and routes responses back to the originating channel.
 type Registry struct {
-	mu       sync.RWMutex
-	channels map[string]pkg.Channel
-	handler  pkg.MessageHandler
+	mu            sync.RWMutex
+	channels      map[string]pkg.Channel
+	handler       pkg.MessageHandler
+	maxConcurrent int // per-channel dispatch concurrency; default 1 (sequential)
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-func NewRegistry(handler pkg.MessageHandler) *Registry {
+// NewRegistry creates a Registry. maxConcurrent controls how many messages per channel
+// can be dispatched concurrently; values <= 1 mean sequential (default).
+func NewRegistry(handler pkg.MessageHandler, maxConcurrent int) *Registry {
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Registry{
-		channels: make(map[string]pkg.Channel),
-		handler:  handler,
-		ctx:      ctx,
-		cancel:   cancel,
+		channels:      make(map[string]pkg.Channel),
+		handler:       handler,
+		maxConcurrent: maxConcurrent,
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 }
 
@@ -118,6 +125,10 @@ func (r *Registry) StopAll() {
 func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 	defer r.wg.Done()
 
+	sem := make(chan struct{}, r.maxConcurrent)
+	var wg sync.WaitGroup
+	defer wg.Wait() // drain in-flight goroutines on shutdown
+
 	for {
 		select {
 		case <-r.ctx.Done():
@@ -126,15 +137,29 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 			if !ok {
 				return
 			}
-			sessionKey := pkg.SessionKey(ch.ID(), msg.ConversationID, msg.ThreadID)
-			resp, err := r.handler(r.ctx, sessionKey, msg)
-			if err != nil {
-				log.Printf("handling message on channel %q session %q: %v", ch.ID(), sessionKey, err)
-				continue
+
+			// Acquire a dispatch slot (blocks when at maxConcurrent).
+			select {
+			case sem <- struct{}{}:
+			case <-r.ctx.Done():
+				return
 			}
-			if err := ch.Send(r.ctx, resp); err != nil {
-				log.Printf("sending response on channel %q: %v", ch.ID(), err)
-			}
+
+			wg.Add(1)
+			go func(m pkg.InboundMessage) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				sessionKey := pkg.SessionKey(ch.ID(), m.ConversationID, m.ThreadID)
+				resp, err := r.handler(r.ctx, sessionKey, m)
+				if err != nil {
+					log.Printf("handling message on channel %q session %q: %v", ch.ID(), sessionKey, err)
+					return
+				}
+				if err := ch.Send(r.ctx, resp); err != nil {
+					log.Printf("sending response on channel %q: %v", ch.ID(), err)
+				}
+			}(msg)
 		}
 	}
 }

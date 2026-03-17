@@ -338,6 +338,7 @@ func main() {
 		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
 		PipelineConfig:          pipelineCfg,
 		ContextWindow:           contextWindow,
+		MaxConcurrentSessions:   cfg.Orchestrator.MaxConcurrentSessions,
 	})
 
 	ensureSession := func(sessionKey string) {
@@ -348,7 +349,7 @@ func main() {
 	runner := &channelRunner{orch: orch}
 	handler := channel.NewMessageHandler(ensureSession, runner, orch.RunAction, toolRegistry.HasAction)
 
-	reg := channel.NewRegistry(handler)
+	reg := channel.NewRegistry(handler, cfg.Orchestrator.MaxConcurrentSessions)
 	channelManager := channel.NewManager(reg, toolRegistry)
 	channelEntries := make([]channel.ChannelEntry, 0, len(cfg.Channels))
 	for name, ch := range cfg.Channels {
