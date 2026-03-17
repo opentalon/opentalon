@@ -76,7 +76,10 @@ type OrchestratorOpts struct {
 	PipelineConfig          pipeline.PipelineConfig
 	ContextWindow           int                 // model context window in tokens; 0 = no trimming
 	SessionLogManager       *sessionlog.Manager // optional; when set, per-session debug logs go to individual files
+<<<<<<< HEAD
 	MaxConcurrentSessions   int                 // max sessions running in parallel; default 1 (sequential)
+=======
+>>>>>>> 94934b9 (Add per-session log files for debug output)
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -417,6 +420,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	// A nil *sessionlog.Logger falls back to global log; a nil check gates debug-only output.
 	var slog *sessionlog.Logger
 	if o.sessionLog != nil {
+<<<<<<< HEAD
 		slog = o.sessionLog.Get(sessionID, userMessage)
 	}
 
@@ -424,6 +428,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	o.pendingMu.Lock()
 	pendingPipeline := o.pendingPipelines[sessionID]
 	if pendingPipeline != nil {
+=======
+		slog = o.sessionLog.Get(sessionID)
+	}
+
+	// Block A: Check for pending pipeline confirmation.
+	if p := o.pendingPipelines[sessionID]; p != nil {
+		decision := pipeline.ParseConfirmation(userMessage)
+		if slog != nil {
+			slog.Printf("[pipeline] pending pipeline %s for session %s, user input: %q, decision: %d", p.ID, sessionID, userMessage, decision)
+		}
+>>>>>>> 94934b9 (Add per-session log files for debug output)
 		delete(o.pendingPipelines, sessionID)
 	}
 	o.pendingMu.Unlock()
@@ -567,6 +582,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 			if toolResult.Error != "" {
 				// Always log tool errors (nil slog falls back to global log).
 				slog.Printf("[tool_result] %s.%s error: %s", call.Plugin, call.Action, toolResult.Error)
+<<<<<<< HEAD
 			}
 
 			// When the session is cleared, close the per-session log so the
@@ -574,6 +590,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 			if call.Action == "clear_session" && toolResult.Error == "" && o.sessionLog != nil {
 				o.sessionLog.Close(sessionID)
 				slog = nil
+=======
+>>>>>>> 94934b9 (Add per-session log files for debug output)
 			}
 
 			_ = o.sessions.AddMessage(sessionID, provider.Message{
