@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/opentalon/opentalon/actions/workflows/ci.yml/badge.svg)](https://github.com/opentalon/opentalon/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Go](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.24+-00ADD8.svg)](https://go.dev)
 
 ---
 
@@ -568,7 +568,7 @@ Set `LOG_LEVEL=debug` to see pipeline decisions, planner LLM calls, step executi
 
 ## Build locally with plugins
 
-**Prerequisites:** Go 1.22+, git.
+**Prerequisites:** Go 1.24+, git.
 
 ### Quick start (recommended)
 

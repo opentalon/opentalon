@@ -21,9 +21,9 @@ type Handler interface {
 }
 
 // Configurable may be implemented by a Handler to receive the plugin's config
-// block from the host. The host calls Configure (via the Capabilities RPC)
-// before any Execute calls. configJSON is the JSON-encoded config: block from
-// the host's config.yaml; it is empty when no config block was provided.
+// block from the host. The host calls Configure via the Init RPC before any
+// Execute calls. configJSON is the JSON-encoded config block from the host's
+// config.yaml; it is empty when no config block was provided.
 type Configurable interface {
 	Configure(configJSON string) error
 }

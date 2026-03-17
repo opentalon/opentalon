@@ -2,9 +2,11 @@ package plugin
 
 import (
 	"context"
-	"log"
 
 	"github.com/opentalon/opentalon/proto/pluginpb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // grpcServer implements pluginpb.PluginServiceServer by delegating to a Handler.
@@ -13,12 +15,16 @@ type grpcServer struct {
 	handler Handler
 }
 
-func (s *grpcServer) Capabilities(_ context.Context, req *pluginpb.PluginInitRequest) (*pluginpb.PluginCapabilities, error) {
+func (s *grpcServer) Init(_ context.Context, req *pluginpb.PluginInitRequest) (*emptypb.Empty, error) {
 	if c, ok := s.handler.(Configurable); ok {
 		if err := c.Configure(req.GetConfigJson()); err != nil {
-			log.Printf("plugin: configure: %v", err)
+			return nil, status.Errorf(codes.InvalidArgument, "configure: %v", err)
 		}
 	}
+	return &emptypb.Empty{}, nil
+}
+
+func (s *grpcServer) Capabilities(_ context.Context, _ *emptypb.Empty) (*pluginpb.PluginCapabilities, error) {
 	caps := s.handler.Capabilities()
 	return capsToProto(caps), nil
 }

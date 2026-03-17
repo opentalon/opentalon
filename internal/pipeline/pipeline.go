@@ -61,9 +61,9 @@ func (p *Pipeline) FormatForConfirmation() string {
 	var sb strings.Builder
 	sb.WriteString("I've created a plan with the following steps:\n\n")
 	for i, step := range p.Steps {
-		sb.WriteString(fmt.Sprintf("%d. **%s**\n", i+1, step.Name))
+		fmt.Fprintf(&sb, "%d. **%s**\n", i+1, step.Name)
 		if step.Command != nil {
-			sb.WriteString(fmt.Sprintf("   Action: `%s.%s`\n", step.Command.Plugin, step.Command.Action))
+			fmt.Fprintf(&sb, "   Action: `%s.%s`\n", step.Command.Plugin, step.Command.Action)
 			if len(step.Command.Args) > 0 {
 				sb.WriteString("   Args: ")
 				parts := make([]string, 0, len(step.Command.Args))
@@ -75,7 +75,7 @@ func (p *Pipeline) FormatForConfirmation() string {
 			}
 		}
 		if len(step.DependsOn) > 0 {
-			sb.WriteString(fmt.Sprintf("   Depends on: %s\n", strings.Join(step.DependsOn, ", ")))
+			fmt.Fprintf(&sb, "   Depends on: %s\n", strings.Join(step.DependsOn, ", "))
 		}
 	}
 	sb.WriteString("\nProceed? (y)es / (n)o")

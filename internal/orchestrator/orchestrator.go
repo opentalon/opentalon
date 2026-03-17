@@ -709,18 +709,18 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	}
 	caps := o.registry.ListCapabilities()
 	for _, cap := range caps {
-		sb.WriteString(fmt.Sprintf("## %s\n%s\n", cap.Name, cap.Description))
+		fmt.Fprintf(&sb, "## %s\n%s\n", cap.Name, cap.Description)
 		for _, action := range cap.Actions {
 			if preparerAction[cap.Name+"."+action.Name] {
 				continue
 			}
-			sb.WriteString(fmt.Sprintf("- %s.%s: %s\n", cap.Name, action.Name, action.Description))
+			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
 			for _, p := range action.Parameters {
 				req := ""
 				if p.Required {
 					req = " (required)"
 				}
-				sb.WriteString(fmt.Sprintf("  - %s: %s%s\n", p.Name, p.Description, req))
+				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 			}
 		}
 		sb.WriteString("\n")
@@ -879,9 +879,9 @@ func (o *Orchestrator) maybeRecordWorkflow(ctx context.Context, result *RunResul
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("trigger: %s\nsteps:\n", userMessage))
+	fmt.Fprintf(&sb, "trigger: %s\nsteps:\n", userMessage)
 	for i, call := range result.ToolCalls {
-		sb.WriteString(fmt.Sprintf("  - plugin: %s, action: %s, order: %d\n", call.Plugin, call.Action, i+1))
+		fmt.Fprintf(&sb, "  - plugin: %s, action: %s, order: %d\n", call.Plugin, call.Action, i+1)
 	}
 	sb.WriteString("outcome: success\n")
 
@@ -973,7 +973,7 @@ func (o *Orchestrator) RunAction(ctx context.Context, plugin, action string, arg
 
 func formatToolCallMessage(call ToolCall) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("[tool_call] %s.%s", call.Plugin, call.Action))
+	fmt.Fprintf(&sb, "[tool_call] %s.%s", call.Plugin, call.Action)
 	if len(call.Args) > 0 {
 		sb.WriteString("(")
 		first := true
@@ -981,7 +981,7 @@ func formatToolCallMessage(call ToolCall) string {
 			if !first {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(fmt.Sprintf("%s=%s", k, v))
+			fmt.Fprintf(&sb, "%s=%s", k, v)
 			first = false
 		}
 		sb.WriteString(")")

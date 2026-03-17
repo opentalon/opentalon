@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 const bufSize = 1024 * 1024
@@ -20,7 +21,11 @@ type fakePluginService struct {
 	pluginpb.UnimplementedPluginServiceServer
 }
 
-func (s *fakePluginService) Capabilities(_ context.Context, _ *pluginpb.PluginInitRequest) (*pluginpb.PluginCapabilities, error) {
+func (s *fakePluginService) Init(_ context.Context, _ *pluginpb.PluginInitRequest) (*emptypb.Empty, error) {
+	return &emptypb.Empty{}, nil
+}
+
+func (s *fakePluginService) Capabilities(_ context.Context, _ *emptypb.Empty) (*pluginpb.PluginCapabilities, error) {
 	return &pluginpb.PluginCapabilities{
 		Name:        "echo",
 		Description: "Echoes arguments back",
