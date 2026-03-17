@@ -52,11 +52,13 @@ func (ch *YAMLChannel) runInit(steps []InitStep) error {
 			if err := json.Unmarshal(respBody, &result); err != nil {
 				return fmt.Errorf("init %s: parse response: %w", step.Name, err)
 			}
+			ch.selfMu.Lock()
 			for selfKey, jsonField := range step.Store {
 				if val, ok := result[jsonField]; ok {
 					ch.selfVars[selfKey] = fmt.Sprintf("%v", val)
 				}
 			}
+			ch.selfMu.Unlock()
 		}
 
 		log.Printf("yaml-channel: init %s done", step.Name)
