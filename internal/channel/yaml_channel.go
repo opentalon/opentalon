@@ -208,7 +208,11 @@ func encodeFilesJSON(files []pkg.FileAttachment) string {
 			Size:     f.Size,
 		}
 	}
-	b, _ := json.Marshal(out)
+	b, err := json.Marshal(out)
+	if err != nil {
+		log.Printf("yaml-channel: encodeFilesJSON: marshal error: %v", err)
+		return "[]"
+	}
 	return string(b)
 }
 

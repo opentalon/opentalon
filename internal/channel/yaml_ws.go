@@ -381,8 +381,12 @@ func (ch *YAMLChannel) extractMessage(event map[string]interface{}, eventCtx map
 	return msg
 }
 
+// maxFileAttachmentSize is the maximum allowed size for a decoded file attachment.
+// Base64 encoding adds ~33% overhead, so the encoded string can be up to 4/3 this size.
+const maxFileAttachmentSize = 20 * 1024 * 1024 // 20 MB decoded
+
 // decodeFileAttachment parses a file object from an inbound JSON event.
-// The object must have name, mime_type, and data (base64-encoded) fields.
+// The object must have mime_type and data (base64-encoded) fields; name is optional.
 func decodeFileAttachment(m map[string]interface{}) *pkg.FileAttachment {
 	name, _ := m["name"].(string)
 	mimeType, _ := m["mime_type"].(string)
@@ -390,6 +394,16 @@ func decodeFileAttachment(m map[string]interface{}) *pkg.FileAttachment {
 	sizeF, _ := m["size"].(float64)
 
 	if dataStr == "" {
+		return nil
+	}
+	if mimeType == "" {
+		log.Printf("yaml-channel: file attachment missing mime_type, skipping")
+		return nil
+	}
+	// Enforce size limit before decoding to prevent large allocations.
+	// Base64 encodes 3 bytes as 4 chars, so encoded length ≈ decoded * 4/3.
+	if len(dataStr) > maxFileAttachmentSize*4/3 {
+		log.Printf("yaml-channel: file attachment too large (%d encoded bytes), skipping", len(dataStr))
 		return nil
 	}
 	data, err := base64.StdEncoding.DecodeString(dataStr)

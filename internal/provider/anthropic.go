@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -113,7 +114,10 @@ type anthError struct {
 
 // Complete sends a non-streaming completion request.
 func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
-	anthReq := p.toAnthRequest(req)
+	anthReq, err := p.toAnthRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
 
 	body, err := json.Marshal(anthReq)
 	if err != nil {
@@ -168,7 +172,7 @@ func (p *AnthropicProvider) Stream(_ context.Context, _ *CompletionRequest) (Res
 	return nil, fmt.Errorf("streaming not yet implemented for provider %s", p.id)
 }
 
-func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) anthRequest {
+func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, error) {
 	var system string
 	msgs := make([]anthMessage, 0, len(req.Messages))
 
@@ -177,7 +181,11 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) anthRequest {
 			system = m.Content
 			continue
 		}
-		msgs = append(msgs, p.toAnthMessage(m))
+		msg, err := p.toAnthMessage(m)
+		if err != nil {
+			return anthRequest{}, err
+		}
+		msgs = append(msgs, msg)
 	}
 
 	maxTokens := req.MaxTokens
@@ -190,22 +198,30 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) anthRequest {
 		System:    system,
 		Messages:  msgs,
 		MaxTokens: maxTokens,
-	}
+	}, nil
 }
 
 // toAnthMessage converts a provider.Message to an anthMessage.
 // When the message has file attachments, the content becomes a JSON array of
-// content blocks (images first, then the text block); otherwise it is a plain string.
-func (p *AnthropicProvider) toAnthMessage(m Message) anthMessage {
+// content blocks (files first, then the text block); otherwise it is a plain string.
+// Image mime types map to "image" blocks; all others map to "document" blocks.
+func (p *AnthropicProvider) toAnthMessage(m Message) (anthMessage, error) {
 	if len(m.Files) == 0 {
-		raw, _ := json.Marshal(m.Content)
-		return anthMessage{Role: string(m.Role), Content: raw}
+		raw, err := json.Marshal(m.Content)
+		if err != nil {
+			return anthMessage{}, fmt.Errorf("marshal message content: %w", err)
+		}
+		return anthMessage{Role: string(m.Role), Content: raw}, nil
 	}
 
 	var blocks []anthContentBlock
 	for _, f := range m.Files {
+		blockType := "document"
+		if strings.HasPrefix(f.MimeType, "image/") {
+			blockType = "image"
+		}
 		blocks = append(blocks, anthContentBlock{
-			Type: "image",
+			Type: blockType,
 			Source: &anthImageSource{
 				Type:      "base64",
 				MediaType: f.MimeType,
@@ -216,8 +232,11 @@ func (p *AnthropicProvider) toAnthMessage(m Message) anthMessage {
 	if m.Content != "" {
 		blocks = append(blocks, anthContentBlock{Type: "text", Text: m.Content})
 	}
-	raw, _ := json.Marshal(blocks)
-	return anthMessage{Role: string(m.Role), Content: raw}
+	raw, err := json.Marshal(blocks)
+	if err != nil {
+		return anthMessage{}, fmt.Errorf("marshal multipart message: %w", err)
+	}
+	return anthMessage{Role: string(m.Role), Content: raw}, nil
 }
 
 func (p *AnthropicProvider) extractContent(blocks []anthContentBlock) string {
