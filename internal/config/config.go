@@ -141,6 +141,7 @@ type RequestParamInl struct {
 // LogConfig holds logging options. When LOG_LEVEL=debug, LLM request payloads are logged.
 type LogConfig struct {
 	File string `yaml:"file"` // optional path to log file (env-expanded)
+	Dir  string `yaml:"dir"`  // optional path to per-session log directory; default {data_dir}/logs when LOG_LEVEL=debug
 }
 
 type PluginConfig struct {
@@ -323,6 +324,9 @@ func Parse(data []byte) (*Config, error) {
 	}
 	if cfg.Log.File != "" {
 		cfg.Log.File = expandTilde(expandEnv(cfg.Log.File))
+	}
+	if cfg.Log.Dir != "" {
+		cfg.Log.Dir = expandTilde(expandEnv(cfg.Log.Dir))
 	}
 	if cfg.Lua != nil {
 		if cfg.Lua.ScriptsDir != "" {
