@@ -124,11 +124,17 @@ func (ch *YAMLChannel) Start(ctx context.Context, inbox chan<- pkg.InboundMessag
 		return fmt.Errorf("channel %s init: %w", ch.spec.ID, err)
 	}
 
-	// Start inbound listener — webhook or WebSocket
+	// Start inbound listener — webhook, polling, or WebSocket
 	if wh := ch.spec.Inbound.HTTPWebhook; wh != nil {
 		if err := ch.startWebhookInbound(wh); err != nil {
 			return fmt.Errorf("channel %s: start webhook: %w", ch.spec.ID, err)
 		}
+	} else if poll := ch.spec.Inbound.Polling; poll != nil {
+		ch.wg.Add(1)
+		go func() {
+			defer ch.wg.Done()
+			ch.pollingLoop()
+		}()
 	} else {
 		ch.wg.Add(1)
 		go func() {

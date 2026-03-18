@@ -57,17 +57,46 @@ type ReconnectSpec struct {
 	ReInit         []string      `yaml:"re_init"` // init step names to re-run before reconnect
 }
 
-// InboundSpec describes how to process incoming WebSocket frames.
+// InboundSpec describes how to process incoming messages from any source.
 type InboundSpec struct {
 	HTTPWebhook       *WebhookInboundSpec `yaml:"http_webhook"`
+	Polling           *PollingInboundSpec `yaml:"polling"`
 	Ack               AckSpec             `yaml:"ack"`
 	EventPath         string              `yaml:"event_path"`
 	EventTypes        []string            `yaml:"event_types"`
 	AlwaysProcessWhen *FieldMatch         `yaml:"always_process_when"`
+	ProcessWhen       []ProcessRule       `yaml:"process_when"`
 	Skip              []SkipRule          `yaml:"skip"`
 	Mapping           MappingSpec         `yaml:"mapping"`
 	Transforms        []Transform         `yaml:"transforms"`
 	Dedup             DedupSpec           `yaml:"dedup"`
+}
+
+// ProcessRule defines when to process an event (allowlist). If any
+// process_when rules are configured, at least one must match for the
+// event to be processed. Rules are OR'd together.
+type ProcessRule struct {
+	Field    string `yaml:"field"`
+	Equals   string `yaml:"equals"`    // match exact value (supports templates)
+	Contains string `yaml:"contains"`  // match substring (supports templates)
+	NotEmpty *bool  `yaml:"not_empty"` // match if field is non-empty
+}
+
+// PollingInboundSpec configures an HTTP polling loop for inbound messages.
+type PollingInboundSpec struct {
+	Method   string            `yaml:"method"` // HTTP method (default GET)
+	URL      string            `yaml:"url"`    // endpoint to poll (supports templates)
+	Headers  map[string]string `yaml:"headers"`
+	Body     string            `yaml:"body"`     // for POST requests
+	Interval time.Duration     `yaml:"interval"` // poll frequency (default 1s)
+	// ResultPath navigates into the response JSON to find the array of events.
+	// e.g. "result" for Telegram's {"ok":true,"result":[...]}
+	ResultPath string `yaml:"result_path"`
+	// CursorField is the event field used for offset/cursor tracking.
+	// After each poll, the max value of this field + 1 is stored in
+	// self.poll_offset, which the URL template can reference.
+	// e.g. "update_id" for Telegram's getUpdates API.
+	CursorField string `yaml:"cursor_field"`
 }
 
 // AckSpec describes how to acknowledge a frame.
