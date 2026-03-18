@@ -13,6 +13,7 @@ import (
 	"github.com/opentalon/opentalon/internal/lua"
 	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/provider"
+	"github.com/opentalon/opentalon/internal/sessionlog"
 	"github.com/opentalon/opentalon/internal/state"
 )
 
@@ -73,8 +74,9 @@ type OrchestratorOpts struct {
 	SummarizeUpdatePrompt   string                        // empty = default English
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PipelineConfig          pipeline.PipelineConfig
-	ContextWindow           int // model context window in tokens; 0 = no trimming
-	MaxConcurrentSessions   int // max sessions running in parallel; default 1 (sequential)
+	ContextWindow           int                 // model context window in tokens; 0 = no trimming
+	SessionLogManager       *sessionlog.Manager // optional; when set, per-session debug logs go to individual files
+	MaxConcurrentSessions   int                 // max sessions running in parallel; default 1 (sequential)
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -125,7 +127,8 @@ type Orchestrator struct {
 	pendingMu               sync.Mutex                    // guards pendingPipelines map
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline (access via pendingMu)
 	pipelineConfig          pipeline.PipelineConfig
-	contextWindow           int // model context window in tokens; 0 = no trimming
+	contextWindow           int                 // model context window in tokens; 0 = no trimming
+	sessionLog              *sessionlog.Manager // optional; per-session log file manager
 }
 
 const (
@@ -224,6 +227,7 @@ func NewWithRules(
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
 		pipelineConfig:          pipelineCfg,
 		contextWindow:           opts.ContextWindow,
+		sessionLog:              opts.SessionLogManager,
 	}
 }
 
@@ -409,6 +413,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	}
 	ctx = actor.WithSessionID(ctx, sessionID)
 
+	// Get per-session logger (nil when session log manager is not configured).
+	// A nil *sessionlog.Logger falls back to global log; a nil check gates debug-only output.
+	var slog *sessionlog.Logger
+	if o.sessionLog != nil {
+		slog = o.sessionLog.Get(sessionID, userMessage)
+	}
+
 	// Block A: Check for pending pipeline confirmation.
 	o.pendingMu.Lock()
 	pendingPipeline := o.pendingPipelines[sessionID]
@@ -418,20 +429,20 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	o.pendingMu.Unlock()
 	if p := pendingPipeline; p != nil {
 		decision := pipeline.ParseConfirmation(userMessage)
-		if os.Getenv("LOG_LEVEL") == "debug" {
-			log.Printf("[pipeline] pending pipeline %s for session %s, user input: %q, decision: %d", p.ID, sessionID, userMessage, decision)
+		if slog != nil {
+			slog.Printf("[pipeline] pending pipeline %s for session %s, user input: %q, decision: %d", p.ID, sessionID, userMessage, decision)
 		}
 		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 		if decision == pipeline.Approved {
-			if os.Getenv("LOG_LEVEL") == "debug" {
-				log.Printf("[pipeline] executing pipeline %s (%d steps)", p.ID, len(p.Steps))
+			if slog != nil {
+				slog.Printf("[pipeline] executing pipeline %s (%d steps)", p.ID, len(p.Steps))
 			}
-			return o.executePipeline(ctx, sessionID, p)
+			return o.executePipeline(ctx, sessionID, p, slog)
 		}
 		resp := "Pipeline cancelled (expected y/yes to confirm)."
 		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
-		if os.Getenv("LOG_LEVEL") == "debug" {
-			log.Printf("[pipeline] pipeline %s rejected: %q", p.ID, userMessage)
+		if slog != nil {
+			slog.Printf("[pipeline] pipeline %s rejected: %q", p.ID, userMessage)
 		}
 		return &RunResult{Response: resp}, nil
 	}
@@ -451,16 +462,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 
 	// Block B: Run planner to check if this requires a multi-step pipeline.
 	if o.planner != nil {
-		if os.Getenv("LOG_LEVEL") == "debug" {
-			log.Printf("[pipeline] running planner for session %s, message: %q", sessionID, content)
+		if slog != nil {
+			slog.Printf("[pipeline] running planner for session %s, message: %q", sessionID, content)
 		}
 		planResult, err := o.planner.Plan(ctx, content, capabilitiesToPlannerInfo(o.registry.ListCapabilities()))
 		if err != nil {
-			if os.Getenv("LOG_LEVEL") == "debug" {
-				log.Printf("[pipeline] planner error: %v — falling through to agent loop", err)
+			if slog != nil {
+				slog.Printf("[pipeline] planner error: %v — falling through to agent loop", err)
 			}
-		} else if os.Getenv("LOG_LEVEL") == "debug" {
-			log.Printf("[pipeline] planner result: type=%s, steps=%d", planResult.Type, len(planResult.Steps))
+		} else if slog != nil {
+			slog.Printf("[pipeline] planner result: type=%s, steps=%d", planResult.Type, len(planResult.Steps))
 		}
 		if err == nil && planResult.Type == "pipeline" && len(planResult.Steps) > 1 {
 			p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
@@ -470,8 +481,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 			planText := p.FormatForConfirmation()
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
-			if os.Getenv("LOG_LEVEL") == "debug" {
-				log.Printf("[pipeline] stored pending pipeline %s for session %s (%d steps), awaiting confirmation", p.ID, sessionID, len(p.Steps))
+			if slog != nil {
+				slog.Printf("[pipeline] stored pending pipeline %s for session %s (%d steps), awaiting confirmation", p.ID, sessionID, len(p.Steps))
 			}
 			return &RunResult{Response: planText}, nil
 		}
@@ -492,7 +503,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		sess, _ := o.sessions.Get(sessionID)
 
-		messages := o.buildMessages(ctx, sess, content)
+		messages := o.buildMessages(ctx, sess, content, slog)
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
 		if err != nil {
 			return nil, err
@@ -501,14 +512,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 			return blocked, nil
 		}
 
-		if os.Getenv("LOG_LEVEL") == "debug" {
-			log.Printf("[LLM request] round %d, %d messages:", i+1, len(guardedMessages))
+		if slog != nil {
+			slog.Printf("[LLM request] round %d, %d messages:", i+1, len(guardedMessages))
 			for j, m := range guardedMessages {
 				preview := m.Content
 				if len(preview) > 2000 {
 					preview = preview[:2000] + "... [truncated]"
 				}
-				log.Printf("[LLM request]   [%d] %s: %s", j+1, m.Role, preview)
+				slog.Printf("[LLM request]   [%d] %s: %s", j+1, m.Role, preview)
 			}
 		}
 
@@ -554,7 +565,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 			result.Results = append(result.Results, toolResult)
 
 			if toolResult.Error != "" {
-				log.Printf("[tool_result] %s.%s error: %s", call.Plugin, call.Action, toolResult.Error)
+				// Always log tool errors (nil slog falls back to global log).
+				slog.Printf("[tool_result] %s.%s error: %s", call.Plugin, call.Action, toolResult.Error)
+			}
+
+			// When the session is cleared, close the per-session log so the
+			// next Run() creates a fresh file for the new conversation.
+			if call.Action == "clear_session" && toolResult.Error == "" && o.sessionLog != nil {
+				o.sessionLog.Close(sessionID)
+				slog = nil
 			}
 
 			_ = o.sessions.AddMessage(sessionID, provider.Message{
@@ -609,11 +628,10 @@ func (o *Orchestrator) runGuardPlugins(ctx context.Context, messages []provider.
 	return result, nil, nil
 }
 
-func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p *pipeline.Pipeline) (*RunResult, error) {
-	debug := os.Getenv("LOG_LEVEL") == "debug"
+func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p *pipeline.Pipeline, slog *sessionlog.Logger) (*RunResult, error) {
 	runner := func(ctx context.Context, pluginName, action string, args map[string]string) pipeline.StepRunResult {
-		if debug {
-			log.Printf("[pipeline] executing step: %s.%s args=%v", pluginName, action, args)
+		if slog != nil {
+			slog.Printf("[pipeline] executing step: %s.%s args=%v", pluginName, action, args)
 		}
 		call := ToolCall{
 			ID:     fmt.Sprintf("pipeline-%s-%s", pluginName, action),
@@ -622,15 +640,15 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 			Args:   args,
 		}
 		result := o.executeCall(ctx, call)
-		if debug {
+		if slog != nil {
 			if result.Error != "" {
-				log.Printf("[pipeline] step %s.%s failed: %s", pluginName, action, result.Error)
+				slog.Printf("[pipeline] step %s.%s failed: %s", pluginName, action, result.Error)
 			} else {
 				preview := result.Content
 				if len(preview) > 500 {
 					preview = preview[:500] + "... [truncated]"
 				}
-				log.Printf("[pipeline] step %s.%s succeeded: %s", pluginName, action, preview)
+				slog.Printf("[pipeline] step %s.%s succeeded: %s", pluginName, action, preview)
 			}
 		}
 		return pipeline.StepRunResult{Content: result.Content, Error: result.Error}
@@ -641,8 +659,8 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 		return nil, fmt.Errorf("pipeline execution: %w", err)
 	}
 
-	if debug {
-		log.Printf("[pipeline] execution done: success=%v, steps_executed=%d", execResult.Success, len(execResult.Steps))
+	if slog != nil {
+		slog.Printf("[pipeline] execution done: success=%v, steps_executed=%d", execResult.Success, len(execResult.Steps))
 	}
 
 	// Record step results in session history
@@ -670,7 +688,7 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 	}, nil
 }
 
-func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string) []provider.Message {
+func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, slog *sessionlog.Logger) []provider.Message {
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 
 	systemPrompt := o.buildSystemPrompt(ctx, userMessage)
@@ -687,7 +705,7 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 	messages = append(messages, sess.Messages...)
 
 	if o.contextWindow > 0 {
-		messages = trimToContextWindow(messages, o.contextWindow)
+		messages = trimToContextWindow(messages, o.contextWindow, slog)
 	}
 
 	return messages
@@ -702,7 +720,7 @@ func estimateTokens(s string) int {
 // trimToContextWindow drops the oldest conversation messages (preserving
 // system messages at the front) until the estimated token count fits within
 // the model's context window. Reserves 10% of the window for the response.
-func trimToContextWindow(messages []provider.Message, contextWindow int) []provider.Message {
+func trimToContextWindow(messages []provider.Message, contextWindow int, slog *sessionlog.Logger) []provider.Message {
 	maxInputTokens := contextWindow * 9 / 10 // reserve 10% for output
 
 	total := 0
@@ -739,7 +757,8 @@ func trimToContextWindow(messages []provider.Message, contextWindow int) []provi
 	trimmed = append(trimmed, messages[convStart:]...)
 
 	if len(trimmed) < len(messages) {
-		log.Printf("context trimming: dropped %d old messages to fit context window (%d tokens, limit %d)",
+		// Always log trimming (nil slog falls back to global log).
+		slog.Printf("context trimming: dropped %d old messages to fit context window (%d tokens, limit %d)",
 			len(messages)-len(trimmed), total, maxInputTokens)
 	}
 

@@ -22,6 +22,7 @@ import (
 	"github.com/opentalon/opentalon/internal/plugin"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/requestpkg"
+	"github.com/opentalon/opentalon/internal/sessionlog"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store"
 	"github.com/opentalon/opentalon/internal/version"
@@ -57,18 +58,27 @@ func main() {
 	}
 
 	// When LOG_LEVEL=debug, optionally send logs to a file (so you can see what we send to the LLM).
-	if os.Getenv("LOG_LEVEL") == "debug" && cfg.Log.File != "" {
-		logPath := cfg.Log.File
-		if strings.HasPrefix(logPath, "~") {
-			home, _ := os.UserHomeDir()
-			rest := strings.TrimPrefix(strings.TrimPrefix(logPath, "~"), "/")
-			logPath = filepath.Join(home, rest)
-		}
-		if err := os.MkdirAll(filepath.Dir(logPath), 0750); err == nil {
-			if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); err == nil {
-				log.SetOutput(f)
+	var sessionLogMgr *sessionlog.Manager
+	if os.Getenv("LOG_LEVEL") == "debug" {
+		if cfg.Log.File != "" {
+			logPath := cfg.Log.File
+			if strings.HasPrefix(logPath, "~") {
+				home, _ := os.UserHomeDir()
+				rest := strings.TrimPrefix(strings.TrimPrefix(logPath, "~"), "/")
+				logPath = filepath.Join(home, rest)
+			}
+			if err := os.MkdirAll(filepath.Dir(logPath), 0750); err == nil {
+				if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); err == nil {
+					log.SetOutput(f)
+				}
 			}
 		}
+		// Per-session log files for debug output.
+		logsDir := cfg.Log.Dir
+		if logsDir == "" {
+			logsDir = filepath.Join(cfg.State.DataDir, "logs")
+		}
+		sessionLogMgr = sessionlog.NewManager(logsDir)
 	}
 
 	// Build LLM provider and default model from config
@@ -76,6 +86,10 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error building provider: %v\n", err)
 		os.Exit(1)
+	}
+
+	if sessionLogMgr != nil {
+		defer sessionLogMgr.CloseAll()
 	}
 
 	// LLM client that sets default model when orchestrator doesn't
@@ -338,6 +352,7 @@ func main() {
 		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
 		PipelineConfig:          pipelineCfg,
 		ContextWindow:           contextWindow,
+		SessionLogManager:       sessionLogMgr,
 		MaxConcurrentSessions:   cfg.Orchestrator.MaxConcurrentSessions,
 	})
 
