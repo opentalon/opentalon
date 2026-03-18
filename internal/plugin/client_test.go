@@ -174,6 +174,28 @@ func TestClientDialFailure(t *testing.T) {
 	}
 }
 
+func TestUserOnlyMappedFromProto(t *testing.T) {
+	// Verify that user_only=true in the proto Action is carried through to orchestrator.Action.
+	pb := &pluginpb.PluginCapabilities{
+		Name:        "myplugin",
+		Description: "Test plugin",
+		Actions: []*pluginpb.Action{
+			{Name: "public_action", Description: "Public", UserOnly: false},
+			{Name: "admin_action", Description: "Admin only", UserOnly: true},
+		},
+	}
+	cap := toPluginCapability(pb)
+	if len(cap.Actions) != 2 {
+		t.Fatalf("expected 2 actions, got %d", len(cap.Actions))
+	}
+	if cap.Actions[0].UserOnly {
+		t.Error("public_action should have UserOnly=false")
+	}
+	if !cap.Actions[1].UserOnly {
+		t.Error("admin_action should have UserOnly=true")
+	}
+}
+
 func TestManagerLoadAndUnload(t *testing.T) {
 	registry := orchestrator.NewToolRegistry()
 

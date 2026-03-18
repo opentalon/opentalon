@@ -48,7 +48,7 @@ func Capability() orchestrator.PluginCapability {
 		Name:        PluginName,
 		Description: "Built-in OpenTalon commands: install skill, show config, list commands, set prompt, clear session, reload MCP.",
 		Actions: []orchestrator.Action{
-			{Name: ActionInstallSkill, Description: "Install a skill from a GitHub URL (e.g. /install skill org/repo).", Parameters: []orchestrator.Parameter{{Name: "url", Description: "GitHub URL or org/repo", Required: true}, {Name: "ref", Description: "Branch or tag (default main)", Required: false}}, AuditLog: true},
+			{Name: ActionInstallSkill, Description: "Install a skill from a GitHub URL (e.g. /install skill org/repo).", Parameters: []orchestrator.Parameter{{Name: "url", Description: "GitHub URL or org/repo", Required: true}, {Name: "ref", Description: "Branch or tag (default main)", Required: false}}, AuditLog: true, UserOnly: true},
 			{Name: ActionShowConfig, Description: "Show current config (secrets redacted).", Parameters: nil},
 			{Name: ActionListCommands, Description: "List available slash commands.", Parameters: nil},
 			{Name: ActionSetPrompt, Description: "Set the editable runtime prompt.", Parameters: []orchestrator.Parameter{{Name: "text", Description: "Prompt text", Required: true}}},
