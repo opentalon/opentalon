@@ -178,13 +178,13 @@ func buildSummary(p *Pipeline, success bool) string {
 	}
 	for i, step := range p.Steps {
 		status := string(step.State)
-		sb.WriteString(fmt.Sprintf("%d. %s — %s", i+1, step.Name, status))
+		fmt.Fprintf(&sb, "%d. %s — %s", i+1, step.Name, status)
 		if step.Result != nil && step.Result.Output != "" {
 			output := step.Result.Output
 			if len(output) > 200 {
 				output = output[:200] + "..."
 			}
-			sb.WriteString(fmt.Sprintf(": %s", output))
+			fmt.Fprintf(&sb, ": %s", output)
 		}
 		sb.WriteString("\n")
 	}

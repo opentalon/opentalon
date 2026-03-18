@@ -50,6 +50,12 @@ type Capabilities struct {
 // Channel is the interface that external channel plugins implement.
 // The core uses this interface regardless of the underlying transport
 // (binary subprocess, remote gRPC, Docker, webhook, or WebSocket).
+//
+// Concurrency contract: the registry dispatches responses in separate goroutines,
+// so Send may be called concurrently from multiple goroutines. Implementations
+// must make Send safe for concurrent use (e.g. a gRPC stub or HTTP client that
+// serialises internally). ID, Capabilities, and Stop are called from a single
+// goroutine and have no concurrency requirement.
 type Channel interface {
 	ID() string
 	Capabilities() Capabilities

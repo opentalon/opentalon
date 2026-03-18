@@ -187,10 +187,11 @@ type ContentPreparerEntry struct {
 }
 
 type OrchestratorConfig struct {
-	Rules            []string                   `yaml:"rules"`
-	ContentPreparers []ContentPreparerEntry     `yaml:"content_preparers,omitempty"`
-	PermissionPlugin string                     `yaml:"permission_plugin,omitempty"` // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
-	Pipeline         PipelineOrchestratorConfig `yaml:"pipeline,omitempty"`
+	Rules                 []string                   `yaml:"rules"`
+	ContentPreparers      []ContentPreparerEntry     `yaml:"content_preparers,omitempty"`
+	PermissionPlugin      string                     `yaml:"permission_plugin,omitempty"`       // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
+	MaxConcurrentSessions int                        `yaml:"max_concurrent_sessions,omitempty"` // max sessions running in parallel (default 1 = sequential)
+	Pipeline              PipelineOrchestratorConfig `yaml:"pipeline,omitempty"`
 }
 
 // PipelineOrchestratorConfig enables structured multi-step pipeline execution.

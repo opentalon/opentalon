@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -278,6 +279,67 @@ func TestRegistryStopAll(t *testing.T) {
 	}
 	if !ch2.stopped() {
 		t.Error("ch2 should be stopped")
+	}
+}
+
+// TestRegistryDispatchConcurrent verifies that multiple messages are dispatched in
+// parallel — the registry spawns a goroutine per message and the handler runs them
+// concurrently. Concurrency limiting is the orchestrator's responsibility.
+func TestRegistryDispatchConcurrent(t *testing.T) {
+	var inflight int32
+	var peak int32
+	unblock := make(chan struct{})
+
+	slowHandler := func(_ context.Context, _ string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
+		cur := atomic.AddInt32(&inflight, 1)
+		defer atomic.AddInt32(&inflight, -1)
+		for {
+			old := atomic.LoadInt32(&peak)
+			if cur <= old {
+				break
+			}
+			if atomic.CompareAndSwapInt32(&peak, old, cur) {
+				break
+			}
+		}
+		<-unblock
+		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "ok"}, nil
+	}
+
+	reg := NewRegistry(slowHandler)
+	defer reg.StopAll()
+
+	ch := newMockChannel("parallel")
+	_ = reg.Register(ch)
+
+	ch.pushMessage(pkg.InboundMessage{ConversationID: "c1", Content: "msg1"})
+	ch.pushMessage(pkg.InboundMessage{ConversationID: "c2", Content: "msg2"})
+
+	// Wait until both are in-flight.
+	deadline := time.After(2 * time.Second)
+	for atomic.LoadInt32(&inflight) < 2 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for both messages to be dispatched concurrently")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	close(unblock)
+
+	deadline2 := time.After(2 * time.Second)
+	for len(ch.sentMessages()) < 2 {
+		select {
+		case <-deadline2:
+			t.Fatal("timed out waiting for both responses")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if got := atomic.LoadInt32(&peak); got < 2 {
+		t.Errorf("peak concurrent dispatches = %d, want ≥2", got)
 	}
 }
 

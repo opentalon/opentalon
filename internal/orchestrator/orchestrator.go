@@ -76,6 +76,7 @@ type OrchestratorOpts struct {
 	PipelineConfig          pipeline.PipelineConfig
 	ContextWindow           int                 // model context window in tokens; 0 = no trimming
 	SessionLogManager       *sessionlog.Manager // optional; when set, per-session debug logs go to individual files
+	MaxConcurrentSessions   int                 // max sessions running in parallel; default 1 (sequential)
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -94,8 +95,16 @@ type SessionStoreInterface interface {
 	Delete(id string) error                                                  // remove session (e.g. for clear_session command)
 }
 
+// sessionMutex is a per-session lock with reference counting for cleanup.
+type sessionMutex struct {
+	mu       sync.Mutex
+	refCount int // goroutines currently waiting or holding this lock
+}
+
 type Orchestrator struct {
-	mu                      sync.Mutex
+	sessionMuxMu            sync.Mutex               // guards sessionMuxes map
+	sessionMuxes            map[string]*sessionMutex // per-session serialization
+	semaphore               chan struct{}            // nil = unlimited; cap = MaxConcurrentSessions
 	llm                     LLMClient
 	parser                  ToolCallParser
 	registry                *ToolRegistry
@@ -115,7 +124,8 @@ type Orchestrator struct {
 	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
 	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
 	planner                 *pipeline.Planner             // nil = pipeline disabled
-	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
+	pendingMu               sync.Mutex                    // guards pendingPipelines map
+	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline (access via pendingMu)
 	pipelineConfig          pipeline.PipelineConfig
 	contextWindow           int                 // model context window in tokens; 0 = no trimming
 	sessionLog              *sessionlog.Manager // optional; per-session log file manager
@@ -185,7 +195,16 @@ func NewWithRules(
 			preparers = append(preparers, p)
 		}
 	}
+	maxConcurrent := opts.MaxConcurrentSessions
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
+	// Always create a semaphore. cap=1 = sequential (default); cap=N = N parallel sessions.
+	semaphore := make(chan struct{}, maxConcurrent)
+
 	return &Orchestrator{
+		sessionMuxes:            make(map[string]*sessionMutex),
+		semaphore:               semaphore,
 		llm:                     llm,
 		parser:                  parser,
 		registry:                registry,
@@ -345,9 +364,49 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 	return toolResult.Content, nil, nil
 }
 
+// acquireSessionLock returns the per-session mutex for sessionID, locked.
+func (o *Orchestrator) acquireSessionLock(sessionID string) *sessionMutex {
+	o.sessionMuxMu.Lock()
+	sm, ok := o.sessionMuxes[sessionID]
+	if !ok {
+		sm = &sessionMutex{}
+		o.sessionMuxes[sessionID] = sm
+	}
+	sm.refCount++
+	o.sessionMuxMu.Unlock()
+
+	sm.mu.Lock()
+	return sm
+}
+
+// releaseSessionLock unlocks sm and removes it from the map if no other goroutine holds a reference.
+func (o *Orchestrator) releaseSessionLock(sessionID string, sm *sessionMutex) {
+	o.sessionMuxMu.Lock()
+	sm.refCount--
+	if sm.refCount == 0 {
+		delete(o.sessionMuxes, sessionID)
+	}
+	o.sessionMuxMu.Unlock()
+
+	sm.mu.Unlock()
+}
+
 func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (*RunResult, error) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
+	// Lock ordering (must always be acquired in this sequence to prevent deadlock):
+	//   1. semaphore      – global concurrency cap
+	//   2. sessionMuxes   – per-session serialization (via acquireSessionLock)
+	//   3. pendingMu      – pending-pipeline map
+	// Never acquire an earlier lock while holding a later one.
+	select {
+	case o.semaphore <- struct{}{}:
+		defer func() { <-o.semaphore }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	// Per-session lock: serializes concurrent messages for the same session.
+	sm := o.acquireSessionLock(sessionID)
+	defer o.releaseSessionLock(sessionID, sm)
 
 	if _, err := o.sessions.Get(sessionID); err != nil {
 		return nil, fmt.Errorf("session lookup: %w", err)
@@ -362,12 +421,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	}
 
 	// Block A: Check for pending pipeline confirmation.
-	if p := o.pendingPipelines[sessionID]; p != nil {
+	o.pendingMu.Lock()
+	pendingPipeline := o.pendingPipelines[sessionID]
+	if pendingPipeline != nil {
+		delete(o.pendingPipelines, sessionID)
+	}
+	o.pendingMu.Unlock()
+	if p := pendingPipeline; p != nil {
 		decision := pipeline.ParseConfirmation(userMessage)
 		if slog != nil {
 			slog.Printf("[pipeline] pending pipeline %s for session %s, user input: %q, decision: %d", p.ID, sessionID, userMessage, decision)
 		}
-		delete(o.pendingPipelines, sessionID)
 		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 		if decision == pipeline.Approved {
 			if slog != nil {
@@ -411,7 +475,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 		}
 		if err == nil && planResult.Type == "pipeline" && len(planResult.Steps) > 1 {
 			p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
+			o.pendingMu.Lock()
 			o.pendingPipelines[sessionID] = p
+			o.pendingMu.Unlock()
 			planText := p.FormatForConfirmation()
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
@@ -728,18 +794,18 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	}
 	caps := o.registry.ListCapabilities()
 	for _, cap := range caps {
-		sb.WriteString(fmt.Sprintf("## %s\n%s\n", cap.Name, cap.Description))
+		fmt.Fprintf(&sb, "## %s\n%s\n", cap.Name, cap.Description)
 		for _, action := range cap.Actions {
 			if preparerAction[cap.Name+"."+action.Name] {
 				continue
 			}
-			sb.WriteString(fmt.Sprintf("- %s.%s: %s\n", cap.Name, action.Name, action.Description))
+			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
 			for _, p := range action.Parameters {
 				req := ""
 				if p.Required {
 					req = " (required)"
 				}
-				sb.WriteString(fmt.Sprintf("  - %s: %s%s\n", p.Name, p.Description, req))
+				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 			}
 		}
 		sb.WriteString("\n")
@@ -898,9 +964,9 @@ func (o *Orchestrator) maybeRecordWorkflow(ctx context.Context, result *RunResul
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("trigger: %s\nsteps:\n", userMessage))
+	fmt.Fprintf(&sb, "trigger: %s\nsteps:\n", userMessage)
 	for i, call := range result.ToolCalls {
-		sb.WriteString(fmt.Sprintf("  - plugin: %s, action: %s, order: %d\n", call.Plugin, call.Action, i+1))
+		fmt.Fprintf(&sb, "  - plugin: %s, action: %s, order: %d\n", call.Plugin, call.Action, i+1)
 	}
 	sb.WriteString("outcome: success\n")
 
@@ -909,10 +975,14 @@ func (o *Orchestrator) maybeRecordWorkflow(ctx context.Context, result *RunResul
 }
 
 // maybeSummarizeSession runs summarization when the session has enough messages and config is set.
+// It acquires the per-session lock so it cannot race with a concurrent Run() on the same session.
 func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID string) {
 	if o.summarizeAfterMessages <= 0 || o.maxMessagesAfterSummary <= 0 {
 		return
 	}
+	sm := o.acquireSessionLock(sessionID)
+	defer o.releaseSessionLock(sessionID, sm)
+
 	sess, err := o.sessions.Get(sessionID)
 	if err != nil {
 		return
@@ -975,6 +1045,15 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 
 // RunAction executes a single plugin action directly, bypassing the LLM loop.
 // Used by the scheduler and other subsystems that need to invoke tools programmatically.
+//
+// It intentionally skips the semaphore and session lock:
+//   - It does not read or write session state (o.sessions), so the per-session lock
+//     is not needed and would only cause unnecessary contention.
+//   - Scheduler/system calls are not user sessions and should not compete for the
+//     user-facing concurrency cap enforced by the semaphore.
+//
+// Plugin executors must be safe for concurrent use — the same requirement that applies
+// when multiple sessions call the same plugin in parallel via Run.
 func (o *Orchestrator) RunAction(ctx context.Context, plugin, action string, args map[string]string) (string, error) {
 	call := ToolCall{
 		ID:     fmt.Sprintf("direct-%s-%s", plugin, action),
@@ -992,7 +1071,7 @@ func (o *Orchestrator) RunAction(ctx context.Context, plugin, action string, arg
 
 func formatToolCallMessage(call ToolCall) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("[tool_call] %s.%s", call.Plugin, call.Action))
+	fmt.Fprintf(&sb, "[tool_call] %s.%s", call.Plugin, call.Action)
 	if len(call.Args) > 0 {
 		sb.WriteString("(")
 		first := true
@@ -1000,7 +1079,7 @@ func formatToolCallMessage(call ToolCall) string {
 			if !first {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(fmt.Sprintf("%s=%s", k, v))
+			fmt.Fprintf(&sb, "%s=%s", k, v)
 			first = false
 		}
 		sb.WriteString(")")

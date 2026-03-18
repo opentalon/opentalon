@@ -37,6 +37,7 @@ type YAMLChannel struct {
 	specDir      string // directory containing the spec file (for resolving tools_file)
 	config       map[string]string
 	selfVars     map[string]string
+	selfMu       sync.RWMutex // protects selfVars (written by reRunInit, read by buildContexts)
 	dedup        *Deduplicator
 	tools        []pkg.ToolDefinition
 	client       *http.Client
@@ -181,9 +182,18 @@ func (ch *YAMLChannel) Stop() error {
 
 // buildContexts returns the standard template contexts (env is handled
 // directly by substituteTemplate, so not included here).
+// selfVars is snapshotted under RLock so callers receive a stable copy that
+// is not affected by concurrent reRunInit writes.
 func (ch *YAMLChannel) buildContexts() map[string]map[string]string {
+	ch.selfMu.RLock()
+	selfSnapshot := make(map[string]string, len(ch.selfVars))
+	for k, v := range ch.selfVars {
+		selfSnapshot[k] = v
+	}
+	ch.selfMu.RUnlock()
+
 	return map[string]map[string]string{
-		"self":   ch.selfVars,
+		"self":   selfSnapshot,
 		"config": ch.config,
 	}
 }

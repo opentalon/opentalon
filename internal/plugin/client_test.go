@@ -21,6 +21,10 @@ type fakePluginService struct {
 	pluginpb.UnimplementedPluginServiceServer
 }
 
+func (s *fakePluginService) Init(_ context.Context, _ *pluginpb.PluginInitRequest) (*emptypb.Empty, error) {
+	return &emptypb.Empty{}, nil
+}
+
 func (s *fakePluginService) Capabilities(_ context.Context, _ *emptypb.Empty) (*pluginpb.PluginCapabilities, error) {
 	return &pluginpb.PluginCapabilities{
 		Name:        "echo",
@@ -75,7 +79,7 @@ func newTestPluginClient(t *testing.T) *Client {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := c.fetchCapabilities(ctx); err != nil {
+	if err := c.fetchCapabilities(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
 	return c
@@ -163,7 +167,7 @@ func TestClientMultipleCalls(t *testing.T) {
 }
 
 func TestClientDialFailure(t *testing.T) {
-	_, err := Dial("unix", "/nonexistent/plugin.sock", defaultDialTimeout)
+	_, err := Dial("unix", "/nonexistent/plugin.sock", defaultDialTimeout, "")
 	// gRPC NewClient is lazy, so dial failure happens on first RPC (fetchCapabilities).
 	if err == nil {
 		t.Error("expected error for nonexistent socket")
@@ -180,7 +184,7 @@ func TestManagerLoadAndUnload(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := client.fetchCapabilities(ctx); err != nil {
+	if err := client.fetchCapabilities(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
 
