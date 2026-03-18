@@ -550,9 +550,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 
 		for i := range calls {
 			calls[i].FromLLM = true
-		}
-		for _, call := range calls {
-			toolResult := o.executeCall(ctx, call)
+			toolResult := o.executeCall(ctx, calls[i])
+			call := calls[i]
 			result.ToolCalls = append(result.ToolCalls, call)
 			result.Results = append(result.Results, toolResult)
 
@@ -915,6 +914,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		}
 	}
 	if call.FromLLM && action != nil && action.UserOnly {
+		log.Printf("audit: BLOCKED LLM attempt to invoke user_only action: actor %s plugin %s action %s args %v", actorID, call.Plugin, call.Action, call.Args)
 		return ToolResult{
 			CallID: call.ID,
 			Error:  fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
