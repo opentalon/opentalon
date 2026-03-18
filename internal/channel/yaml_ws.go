@@ -47,7 +47,7 @@ func (ch *YAMLChannel) runInit(steps []InitStep) error {
 			return fmt.Errorf("init %s: HTTP %d: %s", step.Name, resp.StatusCode, bytes.TrimSpace(respBody))
 		}
 
-		// Parse JSON response and store fields
+		// Parse JSON response and store fields (supports dotted paths like "result.id")
 		if len(step.Store) > 0 {
 			var result map[string]interface{}
 			if err := json.Unmarshal(respBody, &result); err != nil {
@@ -55,8 +55,9 @@ func (ch *YAMLChannel) runInit(steps []InitStep) error {
 			}
 			ch.selfMu.Lock()
 			for selfKey, jsonField := range step.Store {
-				if val, ok := result[jsonField]; ok {
-					ch.selfVars[selfKey] = fmt.Sprintf("%v", val)
+				val := getStringField(result, jsonField)
+				if val != "" {
+					ch.selfVars[selfKey] = val
 				}
 			}
 			ch.selfMu.Unlock()
@@ -204,6 +205,11 @@ func (ch *YAMLChannel) processInboundFrame(frame map[string]interface{}) {
 		return
 	}
 
+	// Apply process_when allowlist (if configured, at least one must match)
+	if !ch.matchesProcessWhen(event) {
+		return
+	}
+
 	// Apply skip rules
 	if ch.shouldSkip(event) {
 		return
@@ -262,6 +268,41 @@ func (ch *YAMLChannel) shouldProcess(event map[string]interface{}, eventType str
 
 	for _, t := range ch.spec.Inbound.EventTypes {
 		if eventType == t {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesProcessWhen checks process_when allowlist rules. If no rules are
+// configured, returns true (process everything). If rules are configured,
+// at least one must match (OR logic).
+func (ch *YAMLChannel) matchesProcessWhen(event map[string]interface{}) bool {
+	rules := ch.spec.Inbound.ProcessWhen
+	if len(rules) == 0 {
+		return true // no allowlist = process all
+	}
+
+	contexts := ch.buildContexts()
+
+	for _, rule := range rules {
+		val := getStringField(event, rule.Field)
+
+		if rule.Equals != "" {
+			expected := substituteTemplate(rule.Equals, contexts)
+			if val == expected {
+				return true
+			}
+		}
+
+		if rule.Contains != "" {
+			needle := substituteTemplate(rule.Contains, contexts)
+			if strings.Contains(val, needle) {
+				return true
+			}
+		}
+
+		if rule.NotEmpty != nil && *rule.NotEmpty && val != "" {
 			return true
 		}
 	}
@@ -523,6 +564,9 @@ func getStringField(m map[string]interface{}, key string) string {
 		case string:
 			return v
 		case float64:
+			if v == float64(int64(v)) {
+				return fmt.Sprintf("%.0f", v)
+			}
 			return fmt.Sprintf("%g", v)
 		default:
 			return fmt.Sprintf("%v", v)
@@ -547,7 +591,11 @@ func flattenToStringMap(m map[string]interface{}) map[string]string {
 		case string:
 			result[k] = val
 		case float64:
-			result[k] = fmt.Sprintf("%g", val)
+			if val == float64(int64(val)) {
+				result[k] = fmt.Sprintf("%.0f", val)
+			} else {
+				result[k] = fmt.Sprintf("%g", val)
+			}
 		case bool:
 			result[k] = fmt.Sprintf("%t", val)
 		case nil:
