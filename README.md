@@ -403,6 +403,40 @@ channels:
 
 The `config` block is **opaque to the core** — forwarded to the plugin without interpretation. Each plugin interprets its own config however it needs.
 
+### Built-in YAML Channels (no plugin binary needed)
+
+For simple integrations like Telegram's HTTP long-polling API, you can define the channel entirely in YAML — no Go/gRPC plugin required. Configure the polling endpoint, response mapping, and reply endpoint in config, and OpenTalon handles the poll loop, cursor tracking, and message dispatch.
+
+```yaml
+# channels/telegram-channel/channel.yaml
+id: telegram
+name: Telegram
+
+inbound:
+  polling:
+    method: GET
+    url: "https://api.telegram.org/bot{{env.TELEGRAM_BOT_TOKEN}}/getUpdates?timeout=30&offset={{self.poll_offset}}"
+    interval: 1s
+    result_path: result        # where the update array lives in the JSON response
+    cursor_field: update_id    # tracked automatically; next poll uses max(update_id)+1
+
+  event_path: "message"        # extract the message object from each update
+  mapping:
+    conversation_id: "chat.id"
+    sender_id: "from.id"
+    content: "text"
+
+outbound:
+  send:
+    method: POST
+    url: "https://api.telegram.org/bot{{env.TELEGRAM_BOT_TOKEN}}/sendMessage"
+    headers:
+      Content-Type: application/json
+    body: '{"chat_id":"{{msg.conversation_id}}","text":"{{msg.content}}"}'
+```
+
+YAML channels support filtering (`process_when`, `skip`), content transforms (regex replace, trim), deduplication, and response chunking — all declarative, no code.
+
 ## Smart Model Routing
 
 OpenTalon includes a **weighted smart router** that automatically picks the best AI model for each task — optimizing for cost without sacrificing quality.
