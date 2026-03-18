@@ -586,6 +586,16 @@ Set `max_concurrent_sessions` to match your LLM provider's rate limits and expec
 
 Set `LOG_LEVEL=debug` to see pipeline decisions, planner LLM calls, step execution, and retry attempts — all prefixed with `[pipeline]`.
 
+When debug is enabled, each conversation also writes to its own log file under `{data_dir}/logs/` (default `~/.opentalon/logs/`). Files are named by timestamp and the first message, e.g. `20260318_093609_wazzup.log`, so you can quickly find and read logs for a specific chat. Non-ASCII first messages (emoji, cyrillic) use a short hash instead. Override the directory with `log.dir`:
+
+```yaml
+log:
+  file: ~/.opentalon/opentalon.log   # global log file (all sessions)
+  dir: ~/.opentalon/logs             # per-session log directory (optional, defaults to {data_dir}/logs)
+```
+
+Log files older than 7 days are cleaned up automatically on startup.
+
 ### Current limitations (Phase 1)
 
 - **In-memory only** — pipeline state is not persisted; a process restart loses pending/running pipelines (persistence planned for Phase 4)
