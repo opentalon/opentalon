@@ -358,7 +358,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 	// A nil *sessionlog.Logger falls back to global log; a nil check gates debug-only output.
 	var slog *sessionlog.Logger
 	if o.sessionLog != nil {
-		slog = o.sessionLog.Get(sessionID)
+		slog = o.sessionLog.Get(sessionID, userMessage)
 	}
 
 	// Block A: Check for pending pipeline confirmation.
@@ -501,6 +501,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 			if toolResult.Error != "" {
 				// Always log tool errors (nil slog falls back to global log).
 				slog.Printf("[tool_result] %s.%s error: %s", call.Plugin, call.Action, toolResult.Error)
+			}
+
+			// When the session is cleared, close the per-session log so the
+			// next Run() creates a fresh file for the new conversation.
+			if call.Action == "clear_session" && toolResult.Error == "" && o.sessionLog != nil {
+				o.sessionLog.Close(sessionID)
+				slog = nil
 			}
 
 			_ = o.sessions.AddMessage(sessionID, provider.Message{

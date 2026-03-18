@@ -1,6 +1,8 @@
 package sessionlog
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -49,19 +51,23 @@ func NewManager(logsDir string) *Manager {
 
 var unsafeChars = regexp.MustCompile(`[^a-zA-Z0-9_\-]`)
 
-// sanitizeKey replaces : with _, strips other unsafe chars, and truncates to 50 chars.
-func sanitizeKey(key string) string {
-	s := strings.ReplaceAll(key, ":", "_")
+// sanitize replaces unsafe filesystem chars and truncates to maxLen.
+func sanitize(s string, maxLen int) string {
+	s = strings.ReplaceAll(s, ":", "_")
+	s = strings.ReplaceAll(s, " ", "_")
 	s = unsafeChars.ReplaceAllString(s, "")
-	if len(s) > 50 {
-		s = s[:50]
+	s = strings.Trim(s, "_")
+	if len(s) > maxLen {
+		s = s[:maxLen]
 	}
 	return s
 }
 
 // Get returns a per-session logger, creating the log file on first call for a
-// given session key. Subsequent calls with the same key return the cached logger.
-func (m *Manager) Get(sessionKey string) *Logger {
+// given session key. firstMessage is used in the filename only on first call
+// (when the file is created) so you can identify conversations at a glance.
+// Subsequent calls with the same key return the cached logger.
+func (m *Manager) Get(sessionKey, firstMessage string) *Logger {
 	// Fast path: read lock for cache hit (common case).
 	m.mu.RLock()
 	if l, ok := m.loggers[sessionKey]; ok {
@@ -79,9 +85,20 @@ func (m *Manager) Get(sessionKey string) *Logger {
 		return l
 	}
 
-	sanitized := sanitizeKey(sessionKey)
 	ts := time.Now().Format("20060102_150405")
-	filename := fmt.Sprintf("%s_%s.log", ts, sanitized)
+	msgHint := sanitize(firstMessage, 25)
+	if msgHint == "" && firstMessage != "" {
+		// Non-ASCII message (emoji, cyrillic, etc.) — use short hash so
+		// filenames stay unique across conversations with the same session key.
+		h := sha256.Sum256([]byte(firstMessage))
+		msgHint = hex.EncodeToString(h[:4]) // 8 hex chars
+	}
+	var filename string
+	if msgHint != "" {
+		filename = fmt.Sprintf("%s_%s.log", ts, msgHint)
+	} else {
+		filename = fmt.Sprintf("%s_%s.log", ts, sanitize(sessionKey, 50))
+	}
 	path := filepath.Join(m.dir, filename)
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)

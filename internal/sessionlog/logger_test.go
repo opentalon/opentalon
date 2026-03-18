@@ -9,22 +9,26 @@ import (
 	"time"
 )
 
-func TestSanitizeKey(t *testing.T) {
+func TestSanitize(t *testing.T) {
 	tests := []struct {
-		input string
-		want  string
+		input  string
+		maxLen int
+		want   string
 	}{
-		{"console:general", "console_general"},
-		{"slack:C12345", "slack_C12345"},
-		{"simple", "simple"},
-		{"a/b\\c?d*e", "abcde"},
-		{strings.Repeat("x", 100), strings.Repeat("x", 50)},
-		{"with spaces", "withspaces"},
+		{"console:general", 50, "console_general"},
+		{"slack:C12345", 50, "slack_C12345"},
+		{"simple", 50, "simple"},
+		{"a/b\\c?d*e", 50, "abcde"},
+		{strings.Repeat("x", 100), 50, strings.Repeat("x", 50)},
+		{"with spaces", 50, "with_spaces"},
+		{"hello world", 25, "hello_world"},
+		{"Как дела?", 25, ""},
+		{strings.Repeat("a", 30), 25, strings.Repeat("a", 25)},
 	}
 	for _, tt := range tests {
-		got := sanitizeKey(tt.input)
+		got := sanitize(tt.input, tt.maxLen)
 		if got != tt.want {
-			t.Errorf("sanitizeKey(%q) = %q, want %q", tt.input, got, tt.want)
+			t.Errorf("sanitize(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
 		}
 	}
 }
@@ -34,18 +38,18 @@ func TestManagerGetCreatesCachedLogger(t *testing.T) {
 	m := NewManager(dir)
 	defer m.CloseAll()
 
-	l1 := m.Get("test-session")
+	l1 := m.Get("test-session", "hello")
 	if l1 == nil {
 		t.Fatal("expected non-nil logger")
 	}
 
-	l2 := m.Get("test-session")
+	l2 := m.Get("test-session", "different message")
 	if l1 != l2 {
 		t.Error("expected same logger instance for same session key")
 	}
 
 	// Different session key should get a different logger.
-	l3 := m.Get("other-session")
+	l3 := m.Get("other-session", "hi there")
 	if l3 == nil {
 		t.Fatal("expected non-nil logger for other session")
 	}
@@ -58,7 +62,7 @@ func TestLoggerPrintf_WritesToFile(t *testing.T) {
 	dir := t.TempDir()
 	m := NewManager(dir)
 
-	l := m.Get("write-test")
+	l := m.Get("write-test", "hello world")
 	if l == nil {
 		t.Fatal("expected non-nil logger")
 	}
@@ -80,6 +84,10 @@ func TestLoggerPrintf_WritesToFile(t *testing.T) {
 	if logFile == "" {
 		t.Fatal("no log file created")
 	}
+	// Filename should contain the first message hint.
+	if !strings.Contains(filepath.Base(logFile), "hello_world") {
+		t.Errorf("expected filename to contain message hint, got %s", filepath.Base(logFile))
+	}
 
 	data, err := os.ReadFile(logFile)
 	if err != nil {
@@ -100,7 +108,7 @@ func TestManagerClose(t *testing.T) {
 	dir := t.TempDir()
 	m := NewManager(dir)
 
-	l := m.Get("close-test")
+	l := m.Get("close-test", "first conversation")
 	if l == nil {
 		t.Fatal("expected non-nil logger")
 	}
@@ -108,7 +116,7 @@ func TestManagerClose(t *testing.T) {
 	m.Close("close-test")
 
 	// After close, Get should create a new logger.
-	l2 := m.Get("close-test")
+	l2 := m.Get("close-test", "second conversation")
 	if l2 == nil {
 		t.Fatal("expected non-nil logger after re-get")
 	}
@@ -161,7 +169,7 @@ func TestManagerGet_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			loggers[i] = m.Get("shared-key")
+			loggers[i] = m.Get("shared-key", "concurrent test")
 		}(i)
 	}
 	wg.Wait()
