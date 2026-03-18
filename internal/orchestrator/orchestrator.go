@@ -559,8 +559,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string) (
 			return result, nil
 		}
 
-		for _, call := range calls {
-			toolResult := o.executeCall(ctx, call)
+		for i := range calls {
+			calls[i].FromLLM = true
+			toolResult := o.executeCall(ctx, calls[i])
+			call := calls[i]
 			result.ToolCalls = append(result.ToolCalls, call)
 			result.Results = append(result.Results, toolResult)
 
@@ -796,7 +798,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	for _, cap := range caps {
 		fmt.Fprintf(&sb, "## %s\n%s\n", cap.Name, cap.Description)
 		for _, action := range cap.Actions {
-			if preparerAction[cap.Name+"."+action.Name] {
+			if preparerAction[cap.Name+"."+action.Name] || action.UserOnly {
 				continue
 			}
 			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
@@ -920,7 +922,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		}
 	}
 
-	// Single lookup: get capability and find the action for context injection and audit logging.
+	// Single lookup: get capability and find the action for context injection, audit logging, and UserOnly enforcement.
 	var action *Action
 	if cap, ok := o.registry.GetCapability(call.Plugin); ok {
 		for i := range cap.Actions {
@@ -928,6 +930,13 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 				action = &cap.Actions[i]
 				break
 			}
+		}
+	}
+	if call.FromLLM && action != nil && action.UserOnly {
+		log.Printf("audit: BLOCKED LLM attempt to invoke user_only action: actor %s plugin %s action %s args %v", actorID, call.Plugin, call.Action, call.Args)
+		return ToolResult{
+			CallID: call.ID,
+			Error:  fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
 		}
 	}
 	if action != nil {
@@ -1115,8 +1124,14 @@ func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.Completi
 func capabilitiesToPlannerInfo(caps []PluginCapability) []pipeline.CapabilityInfo {
 	result := make([]pipeline.CapabilityInfo, len(caps))
 	for i, cap := range caps {
-		actions := make([]pipeline.ActionInfo, len(cap.Actions))
-		for j, a := range cap.Actions {
+		var filteredActions []Action
+		for _, a := range cap.Actions {
+			if !a.UserOnly {
+				filteredActions = append(filteredActions, a)
+			}
+		}
+		actions := make([]pipeline.ActionInfo, len(filteredActions))
+		for j, a := range filteredActions {
 			params := make([]pipeline.ParamInfo, len(a.Parameters))
 			for k, p := range a.Parameters {
 				params[k] = pipeline.ParamInfo{Name: p.Name, Description: p.Description, Required: p.Required}

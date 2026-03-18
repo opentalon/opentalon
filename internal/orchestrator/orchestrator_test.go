@@ -1281,3 +1281,153 @@ func TestTrimToContextWindow_ZeroWindow(t *testing.T) {
 		t.Fatalf("expected 2 messages, got %d", len(result))
 	}
 }
+
+// --- UserOnly tests ---
+
+func setupUserOnlyOrchestrator(parser ToolCallParser) *Orchestrator {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:        "tools",
+		Description: "Mixed tools",
+		Actions: []Action{
+			{Name: "normal_action", Description: "A normal LLM-callable action"},
+			{Name: "privileged_action", Description: "User-only action", UserOnly: true},
+		},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	return New(&fakeLLM{responses: []string{"ok"}}, parser, registry, memory, sessions)
+}
+
+func TestUserOnlyActionHiddenFromSystemPrompt(t *testing.T) {
+	orch := setupUserOnlyOrchestrator(&fakeParser{parseFn: func(string) []ToolCall { return nil }})
+	prompt := orch.buildSystemPrompt(context.Background(), "test")
+
+	if !strings.Contains(prompt, "tools.normal_action") {
+		t.Error("normal action should appear in system prompt")
+	}
+	if strings.Contains(prompt, "tools.privileged_action") {
+		t.Error("user_only action must not appear in system prompt")
+	}
+}
+
+func TestUserOnlyActionBlockedFromLLM(t *testing.T) {
+	// LLM returns a tool call for a user_only action; the orchestrator must reject it.
+	// Two LLM responses: one that triggers the tool call, one for the final answer.
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:        "tools",
+		Description: "Mixed tools",
+		Actions: []Action{
+			{Name: "normal_action", Description: "A normal action"},
+			{Name: "privileged_action", Description: "User-only action", UserOnly: true},
+		},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	callNum := 0
+	parser := &fakeParser{parseFn: func(string) []ToolCall {
+		callNum++
+		if callNum == 1 {
+			return []ToolCall{{ID: "c1", Plugin: "tools", Action: "privileged_action"}}
+		}
+		return nil
+	}}
+	orch := New(&fakeLLM{responses: []string{"[tool]", "sorry, cannot do that"}}, parser, registry, memory, sessions)
+
+	result, err := orch.Run(context.Background(), "s1", "do the privileged thing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) == 0 {
+		t.Fatal("expected a tool result")
+	}
+	if result.Results[0].Error == "" {
+		t.Error("expected an error for user_only action called from LLM")
+	}
+	if !strings.Contains(result.Results[0].Error, "only be invoked by the user") {
+		t.Errorf("unexpected error message: %q", result.Results[0].Error)
+	}
+}
+
+func TestUserOnlyActionAllowedViaRunAction(t *testing.T) {
+	// RunAction (direct user invocation) must succeed for user_only actions.
+	orch := setupUserOnlyOrchestrator(&fakeParser{parseFn: func(string) []ToolCall { return nil }})
+
+	content, err := orch.RunAction(context.Background(), "tools", "privileged_action", nil)
+	if err != nil {
+		t.Fatalf("RunAction on user_only action should succeed, got: %v", err)
+	}
+	if content != "executed tools.privileged_action" {
+		t.Errorf("content = %q", content)
+	}
+}
+
+func TestUserOnlyFromLLMFlagSetOnParsedCalls(t *testing.T) {
+	// Verify that calls coming from the LLM have FromLLM=true by checking a
+	// normal action also gets the flag (the block only triggers for UserOnly,
+	// but the flag must be set regardless).
+	var capturedCall ToolCall
+	captureExec := &capturingExecutor{fn: func(c ToolCall) ToolResult {
+		capturedCall = c
+		return ToolResult{CallID: c.ID, Content: "ok"}
+	}}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "tools", Description: "Tools",
+		Actions: []Action{{Name: "normal_action", Description: "Normal"}},
+	}, captureExec)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	callNum := 0
+	parser := &fakeParser{parseFn: func(string) []ToolCall {
+		callNum++
+		if callNum == 1 {
+			return []ToolCall{{ID: "c1", Plugin: "tools", Action: "normal_action"}}
+		}
+		return nil
+	}}
+	orch := New(&fakeLLM{responses: []string{"[tool]", "done"}}, parser, registry, memory, sessions)
+	_, err := orch.Run(context.Background(), "s1", "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !capturedCall.FromLLM {
+		t.Error("FromLLM should be true for calls parsed from LLM output")
+	}
+}
+
+func TestCapabilitiesToPlannerInfoSkipsUserOnly(t *testing.T) {
+	caps := []PluginCapability{
+		{
+			Name:        "tools",
+			Description: "Mixed tools",
+			Actions: []Action{
+				{Name: "normal", Description: "Normal action"},
+				{Name: "privileged", Description: "Privileged action", UserOnly: true},
+			},
+		},
+	}
+	info := capabilitiesToPlannerInfo(caps)
+	if len(info) != 1 {
+		t.Fatalf("expected 1 capability, got %d", len(info))
+	}
+	if len(info[0].Actions) != 1 {
+		t.Fatalf("expected 1 action (user_only filtered), got %d", len(info[0].Actions))
+	}
+	if info[0].Actions[0].Name != "normal" {
+		t.Errorf("expected normal action, got %q", info[0].Actions[0].Name)
+	}
+}
+
+// capturingExecutor records the last ToolCall it received.
+type capturingExecutor struct {
+	fn func(ToolCall) ToolResult
+}
+
+func (e *capturingExecutor) Execute(call ToolCall) ToolResult {
+	return e.fn(call)
+}
