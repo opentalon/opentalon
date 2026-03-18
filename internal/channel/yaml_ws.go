@@ -3,6 +3,7 @@ package channel
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -363,7 +364,67 @@ func (ch *YAMLChannel) extractMessage(event map[string]interface{}, eventCtx map
 		}
 	}
 
+	if ch.spec.Inbound.Mapping.Files != "" {
+		if raw, ok := event[ch.spec.Inbound.Mapping.Files]; ok {
+			if arr, ok := raw.([]interface{}); ok {
+				for _, item := range arr {
+					if fileMap, ok := item.(map[string]interface{}); ok {
+						if fa := decodeFileAttachment(fileMap); fa != nil {
+							msg.Files = append(msg.Files, *fa)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return msg
+}
+
+// maxFileAttachmentSize is the maximum allowed size for a decoded file attachment.
+// Base64 encoding adds ~33% overhead, so the encoded string can be up to 4/3 this size.
+const maxFileAttachmentSize = 20 * 1024 * 1024 // 20 MB decoded
+
+// decodeFileAttachment parses a file object from an inbound JSON event.
+// The object must have mime_type and data (base64-encoded) fields; name is optional.
+func decodeFileAttachment(m map[string]interface{}) *pkg.FileAttachment {
+	name, _ := m["name"].(string)
+	mimeType, _ := m["mime_type"].(string)
+	dataStr, _ := m["data"].(string)
+	sizeF, _ := m["size"].(float64)
+
+	if dataStr == "" {
+		return nil
+	}
+	if mimeType == "" {
+		log.Printf("yaml-channel: file attachment missing mime_type, skipping")
+		return nil
+	}
+	// Enforce size limit before decoding to prevent large allocations.
+	// Base64 encodes 3 bytes as 4 chars, so encoded length ≈ decoded * 4/3.
+	if len(dataStr) > maxFileAttachmentSize*4/3 {
+		log.Printf("yaml-channel: file attachment too large (%d encoded bytes), skipping", len(dataStr))
+		return nil
+	}
+	data, err := base64.StdEncoding.DecodeString(dataStr)
+	if err != nil {
+		// Try URL-safe base64 (no padding)
+		data, err = base64.RawURLEncoding.DecodeString(dataStr)
+		if err != nil {
+			log.Printf("yaml-channel: file attachment decode error: %v", err)
+			return nil
+		}
+	}
+	size := int64(sizeF)
+	if size == 0 {
+		size = int64(len(data))
+	}
+	return &pkg.FileAttachment{
+		Name:     name,
+		MimeType: mimeType,
+		Data:     data,
+		Size:     size,
+	}
 }
 
 // getMappedField resolves a MappingField against an event object.

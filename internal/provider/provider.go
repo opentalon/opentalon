@@ -10,9 +10,17 @@ const (
 	RoleAssistant Role = "assistant"
 )
 
+// MessageFile is a binary file (image, document, etc.) attached to a message.
+// Only the MimeType and raw Data are required; the provider decides how to encode it.
+type MessageFile struct {
+	MimeType string `json:"mime_type"`
+	Data     []byte `json:"data"`
+}
+
 type Message struct {
-	Role    Role   `json:"role"`
-	Content string `json:"content"`
+	Role    Role          `json:"role"`
+	Content string        `json:"content"`
+	Files   []MessageFile `json:"files,omitempty"`
 }
 
 type CompletionRequest struct {

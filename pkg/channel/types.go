@@ -130,8 +130,9 @@ func (m PluginMode) String() string {
 
 // Runner runs a user message through the orchestrator and returns the response.
 // InputForDisplay is optional (e.g. what was sent to the LLM); channels may use it for display.
+// Files are optional binary attachments (images, documents, etc.) to include with the message.
 type Runner interface {
-	Run(ctx context.Context, sessionKey, content string) (response string, inputForDisplay string, err error)
+	Run(ctx context.Context, sessionKey, content string, files ...FileAttachment) (response string, inputForDisplay string, err error)
 }
 
 // RunActionFunc runs a single plugin action. Used by channel-specific preparers.

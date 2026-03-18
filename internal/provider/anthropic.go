@@ -3,10 +3,12 @@ package provider
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -75,8 +77,8 @@ type anthRequest struct {
 }
 
 type anthMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"` // string for text-only, []anthContentBlock for multipart
 }
 
 type anthResponse struct {
@@ -89,8 +91,15 @@ type anthResponse struct {
 }
 
 type anthContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type   string           `json:"type"`
+	Text   string           `json:"text,omitempty"`
+	Source *anthImageSource `json:"source,omitempty"`
+}
+
+type anthImageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // e.g. "image/png"
+	Data      string `json:"data"`       // base64-encoded bytes
 }
 
 type anthUsage struct {
@@ -105,7 +114,10 @@ type anthError struct {
 
 // Complete sends a non-streaming completion request.
 func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
-	anthReq := p.toAnthRequest(req)
+	anthReq, err := p.toAnthRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
 
 	body, err := json.Marshal(anthReq)
 	if err != nil {
@@ -160,7 +172,7 @@ func (p *AnthropicProvider) Stream(_ context.Context, _ *CompletionRequest) (Res
 	return nil, fmt.Errorf("streaming not yet implemented for provider %s", p.id)
 }
 
-func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) anthRequest {
+func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, error) {
 	var system string
 	msgs := make([]anthMessage, 0, len(req.Messages))
 
@@ -169,7 +181,11 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) anthRequest {
 			system = m.Content
 			continue
 		}
-		msgs = append(msgs, anthMessage{Role: string(m.Role), Content: m.Content})
+		msg, err := p.toAnthMessage(m)
+		if err != nil {
+			return anthRequest{}, err
+		}
+		msgs = append(msgs, msg)
 	}
 
 	maxTokens := req.MaxTokens
@@ -182,7 +198,45 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) anthRequest {
 		System:    system,
 		Messages:  msgs,
 		MaxTokens: maxTokens,
+	}, nil
+}
+
+// toAnthMessage converts a provider.Message to an anthMessage.
+// When the message has file attachments, the content becomes a JSON array of
+// content blocks (files first, then the text block); otherwise it is a plain string.
+// Image mime types map to "image" blocks; all others map to "document" blocks.
+func (p *AnthropicProvider) toAnthMessage(m Message) (anthMessage, error) {
+	if len(m.Files) == 0 {
+		raw, err := json.Marshal(m.Content)
+		if err != nil {
+			return anthMessage{}, fmt.Errorf("marshal message content: %w", err)
+		}
+		return anthMessage{Role: string(m.Role), Content: raw}, nil
 	}
+
+	var blocks []anthContentBlock
+	for _, f := range m.Files {
+		blockType := "document"
+		if strings.HasPrefix(f.MimeType, "image/") {
+			blockType = "image"
+		}
+		blocks = append(blocks, anthContentBlock{
+			Type: blockType,
+			Source: &anthImageSource{
+				Type:      "base64",
+				MediaType: f.MimeType,
+				Data:      base64.StdEncoding.EncodeToString(f.Data),
+			},
+		})
+	}
+	if m.Content != "" {
+		blocks = append(blocks, anthContentBlock{Type: "text", Text: m.Content})
+	}
+	raw, err := json.Marshal(blocks)
+	if err != nil {
+		return anthMessage{}, fmt.Errorf("marshal multipart message: %w", err)
+	}
+	return anthMessage{Role: string(m.Role), Content: raw}, nil
 }
 
 func (p *AnthropicProvider) extractContent(blocks []anthContentBlock) string {

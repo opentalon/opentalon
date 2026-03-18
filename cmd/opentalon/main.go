@@ -26,6 +26,7 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store"
 	"github.com/opentalon/opentalon/internal/version"
+	chanpkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
 func main() {
@@ -411,8 +412,12 @@ type channelRunner struct {
 	orch *orchestrator.Orchestrator
 }
 
-func (r *channelRunner) Run(ctx context.Context, sessionKey, content string) (string, string, error) {
-	result, err := r.orch.Run(ctx, sessionKey, content)
+func (r *channelRunner) Run(ctx context.Context, sessionKey, content string, files ...chanpkg.FileAttachment) (string, string, error) {
+	providerFiles := make([]provider.MessageFile, len(files))
+	for i, f := range files {
+		providerFiles[i] = provider.MessageFile{MimeType: f.MimeType, Data: f.Data}
+	}
+	result, err := r.orch.Run(ctx, sessionKey, content, providerFiles...)
 	if err != nil {
 		return "", "", err
 	}

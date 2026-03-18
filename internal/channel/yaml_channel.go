@@ -2,6 +2,8 @@ package channel
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -155,9 +157,21 @@ func (ch *YAMLChannel) Send(ctx context.Context, msg pkg.OutboundMessage) error 
 	msgCtx := map[string]string{
 		"conversation_id": msg.ConversationID,
 		"thread_id":       msg.ThreadID,
+		"has_files":       fmt.Sprintf("%t", len(msg.Files) > 0),
+		"file_count":      fmt.Sprintf("%d", len(msg.Files)),
 	}
 	for k, v := range msg.Metadata {
 		msgCtx["metadata."+k] = v
+	}
+	if len(msg.Files) > 0 {
+		msgCtx["files_json"] = encodeFilesJSON(msg.Files)
+		for i, f := range msg.Files {
+			prefix := fmt.Sprintf("file_%d_", i)
+			msgCtx[prefix+"name"] = f.Name
+			msgCtx[prefix+"mime_type"] = f.MimeType
+			msgCtx[prefix+"size"] = fmt.Sprintf("%d", f.Size)
+			msgCtx[prefix+"data"] = base64.StdEncoding.EncodeToString(f.Data)
+		}
 	}
 
 	for _, chunk := range chunks {
@@ -174,6 +188,32 @@ func (ch *YAMLChannel) Send(ctx context.Context, msg pkg.OutboundMessage) error 
 	ch.runHooks(ch.spec.Hooks.OnResponse, msgCtx)
 
 	return nil
+}
+
+// encodeFilesJSON serialises a slice of FileAttachments as a JSON array with
+// base64-encoded data fields, suitable for embedding in outbound templates.
+func encodeFilesJSON(files []pkg.FileAttachment) string {
+	type jsonFile struct {
+		Name     string `json:"name"`
+		MimeType string `json:"mime_type"`
+		Data     string `json:"data"` // base64
+		Size     int64  `json:"size"`
+	}
+	out := make([]jsonFile, len(files))
+	for i, f := range files {
+		out[i] = jsonFile{
+			Name:     f.Name,
+			MimeType: f.MimeType,
+			Data:     base64.StdEncoding.EncodeToString(f.Data),
+			Size:     f.Size,
+		}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		log.Printf("yaml-channel: encodeFilesJSON: marshal error: %v", err)
+		return "[]"
+	}
+	return string(b)
 }
 
 // Stop gracefully shuts down the channel.
