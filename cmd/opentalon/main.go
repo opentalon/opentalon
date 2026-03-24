@@ -58,23 +58,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	// When LOG_LEVEL=debug, optionally send logs to a file (so you can see what we send to the LLM).
-	var sessionLogMgr *sessionlog.Manager
-	if os.Getenv("LOG_LEVEL") == "debug" {
-		if cfg.Log.File != "" {
-			logPath := cfg.Log.File
-			if strings.HasPrefix(logPath, "~") {
-				home, _ := os.UserHomeDir()
-				rest := strings.TrimPrefix(strings.TrimPrefix(logPath, "~"), "/")
-				logPath = filepath.Join(home, rest)
-			}
-			if err := os.MkdirAll(filepath.Dir(logPath), 0750); err == nil {
-				if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); err == nil {
-					log.SetOutput(f)
-				}
+	// Always send log.Printf output to the configured log file (plugin-manager, warnings, etc.).
+	if cfg.Log.File != "" {
+		logPath := cfg.Log.File
+		if strings.HasPrefix(logPath, "~") {
+			home, _ := os.UserHomeDir()
+			rest := strings.TrimPrefix(strings.TrimPrefix(logPath, "~"), "/")
+			logPath = filepath.Join(home, rest)
+		}
+		if err := os.MkdirAll(filepath.Dir(logPath), 0750); err == nil {
+			if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); err == nil {
+				log.SetOutput(f)
 			}
 		}
-		// Per-session log files for debug output.
+	}
+
+	// Per-session LLM request/response logging is debug-only.
+	var sessionLogMgr *sessionlog.Manager
+	if os.Getenv("LOG_LEVEL") == "debug" {
 		logsDir := cfg.Log.Dir
 		if logsDir == "" {
 			logsDir = filepath.Join(cfg.State.DataDir, "logs")

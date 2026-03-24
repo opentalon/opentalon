@@ -1,0 +1,179 @@
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opentalon-operator-system
+
+---
+# ServiceAccount — no token automount, zero RBAC bindings = no API access
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opentalon
+  namespace: opentalon-operator-system
+automountServiceAccountToken: false
+
+---
+
+# PersistentVolumeClaim — OVH Managed Kubernetes (csi-cinder-high-speed), 1Gi
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: opentalon-data
+  namespace: opentalon-operator-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: csi-cinder-high-speed
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opentalon
+  namespace: opentalon-operator-system
+  labels:
+    app: opentalon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opentalon
+  template:
+    metadata:
+      labels:
+        app: opentalon
+    spec:
+      serviceAccountName: opentalon
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: regcred
+
+      # Dockerfile creates system user 'opentalon' via adduser -S in Alpine.
+      # Alpine system users start at UID/GID 100.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: opentalon
+          image: registry.gitlab.com/magtuner/opentalon:latest
+          imagePullPolicy: Always
+          envFrom:
+            - secretRef:
+                name: opentalon-secrets
+          env:
+            - name: LOG_LEVEL
+              value: "debug"
+          args:
+            - "-config"
+            - "/config/config.yaml"
+          ports:
+            - name: http
+              containerPort: 3978
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # ConfigMap → /config/config.yaml (read-only)
+            - name: config
+              mountPath: /config
+              readOnly: true
+            # PVC → persistent state, session history, plugins, logs
+            - name: data
+              mountPath: /home/opentalon/.opentalon
+            # Writable /tmp for read-only root FS
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+      volumes:
+        - name: config
+          configMap:
+            name: opentalon-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: opentalon-data
+        - name: tmp
+          emptyDir: {}
+
+---
+# Service — ClusterIP only, no Ingress
+apiVersion: v1
+kind: Service
+metadata:
+  name: opentalon
+  namespace: opentalon-operator-system
+  labels:
+    app: opentalon
+spec:
+  type: ClusterIP
+  selector:
+    app: opentalon
+  ports:
+    - name: http
+      port: 3978
+      targetPort: http
+      protocol: TCP
+
+---
+# NetworkPolicy — deny all by default, then allow only what's needed.
+# This blocks the pod from reaching the Kubernetes API server and cluster resources.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opentalon-network-policy
+  namespace: opentalon-operator-system
+spec:
+  podSelector:
+    matchLabels:
+      app: opentalon
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Accept traffic on the app port from within the cluster only
+    - ports:
+        - port: 3978
+          protocol: TCP
+  egress:
+    # DNS resolution
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # External HTTPS — LLM API calls (DeepSeek, Anthropic, etc.)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              # Block access to common Kubernetes API server addresses.
+              # Adjust these CIDRs to match your OVH cluster's internal ranges.
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 80
+          protocol: TCP
