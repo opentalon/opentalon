@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -63,7 +63,7 @@ func (ch *YAMLChannel) runInit(steps []InitStep) error {
 			ch.selfMu.Unlock()
 		}
 
-		log.Printf("yaml-channel: init %s done", step.Name)
+		slog.Info("yaml-channel init step done", "step", step.Name)
 	}
 	return nil
 }
@@ -101,11 +101,11 @@ func (ch *YAMLChannel) wsLoop() {
 		}
 
 		if !ch.spec.Connection.Reconnect.Enabled {
-			log.Printf("yaml-channel: %s disconnected (reconnect disabled): %v", ch.spec.ID, err)
+			slog.Warn("yaml-channel disconnected, reconnect disabled", "channel", ch.spec.ID, "error", err)
 			return
 		}
 
-		log.Printf("yaml-channel: %s disconnected, reconnecting in %v: %v", ch.spec.ID, backoff, err)
+		slog.Warn("yaml-channel disconnected, reconnecting", "channel", ch.spec.ID, "backoff", backoff, "error", err)
 
 		select {
 		case <-ch.ctx.Done():
@@ -116,7 +116,7 @@ func (ch *YAMLChannel) wsLoop() {
 		// Re-run specified init steps to get fresh connection URL
 		if len(ch.spec.Connection.Reconnect.ReInit) > 0 {
 			if err := ch.reRunInit(ch.spec.Connection.Reconnect.ReInit); err != nil {
-				log.Printf("yaml-channel: %s re-init failed: %v", ch.spec.ID, err)
+				slog.Warn("yaml-channel re-init failed", "channel", ch.spec.ID, "error", err)
 				// Continue with backoff
 			}
 		}
@@ -142,7 +142,7 @@ func (ch *YAMLChannel) connectAndRead() error {
 	}
 	defer func() { _ = conn.CloseNow() }()
 
-	log.Printf("yaml-channel: %s connected to WebSocket", ch.spec.ID)
+	slog.Info("yaml-channel connected to WebSocket", "channel", ch.spec.ID)
 
 	for {
 		_, data, err := conn.Read(ch.ctx)
@@ -158,7 +158,7 @@ func (ch *YAMLChannel) connectAndRead() error {
 func (ch *YAMLChannel) handleFrame(conn *websocket.Conn, data []byte) {
 	var frame map[string]interface{}
 	if err := json.Unmarshal(data, &frame); err != nil {
-		log.Printf("yaml-channel: %s: invalid JSON frame: %v", ch.spec.ID, err)
+		slog.Warn("yaml-channel invalid JSON frame", "channel", ch.spec.ID, "error", err)
 		return
 	}
 
@@ -172,7 +172,7 @@ func (ch *YAMLChannel) handleFrame(conn *websocket.Conn, data []byte) {
 			contexts["frame"] = frameCtx
 			ackPayload := substituteTemplate(ch.spec.Inbound.Ack.Send, contexts)
 			if err := conn.Write(ch.ctx, websocket.MessageText, []byte(ackPayload)); err != nil {
-				log.Printf("yaml-channel: %s: ack write error: %v", ch.spec.ID, err)
+				slog.Warn("yaml-channel ack write error", "channel", ch.spec.ID, "error", err)
 			}
 		}
 	}
@@ -185,7 +185,7 @@ func (ch *YAMLChannel) handleFrame(conn *websocket.Conn, data []byte) {
 func (ch *YAMLChannel) processInboundData(data []byte) {
 	var frame map[string]interface{}
 	if err := json.Unmarshal(data, &frame); err != nil {
-		log.Printf("yaml-channel: %s: invalid JSON: %v", ch.spec.ID, err)
+		slog.Warn("yaml-channel invalid JSON", "channel", ch.spec.ID, "error", err)
 		return
 	}
 	ch.processInboundFrame(frame)
@@ -397,13 +397,13 @@ func decodeFileAttachment(m map[string]interface{}) *pkg.FileAttachment {
 		return nil
 	}
 	if mimeType == "" {
-		log.Printf("yaml-channel: file attachment missing mime_type, skipping")
+		slog.Warn("yaml-channel file attachment missing mime_type, skipping")
 		return nil
 	}
 	// Enforce size limit before decoding to prevent large allocations.
 	// Base64 encodes 3 bytes as 4 chars, so encoded length ≈ decoded * 4/3.
 	if len(dataStr) > maxFileAttachmentSize*4/3 {
-		log.Printf("yaml-channel: file attachment too large (%d encoded bytes), skipping", len(dataStr))
+		slog.Warn("yaml-channel file attachment too large, skipping", "encoded_bytes", len(dataStr))
 		return nil
 	}
 	data, err := base64.StdEncoding.DecodeString(dataStr)
@@ -411,7 +411,7 @@ func decodeFileAttachment(m map[string]interface{}) *pkg.FileAttachment {
 		// Try URL-safe base64 (no padding)
 		data, err = base64.RawURLEncoding.DecodeString(dataStr)
 		if err != nil {
-			log.Printf("yaml-channel: file attachment decode error: %v", err)
+			slog.Warn("yaml-channel file attachment decode error", "error", err)
 			return nil
 		}
 	}
@@ -452,7 +452,7 @@ func (ch *YAMLChannel) applyTransforms(content string, eventCtx map[string]strin
 			if t.Regex {
 				re, err := regexp.Compile(pattern)
 				if err != nil {
-					log.Printf("yaml-channel: %s: invalid regex %q: %v", ch.spec.ID, pattern, err)
+					slog.Warn("yaml-channel invalid regex", "channel", ch.spec.ID, "pattern", pattern, "error", err)
 				} else {
 					content = re.ReplaceAllString(content, replacement)
 				}
@@ -493,7 +493,7 @@ func (ch *YAMLChannel) runHooks(hooks []HTTPCallSpec, msgCtx map[string]string) 
 			}
 
 			if err := ch.doHTTPCall(ch.ctx, hook, contexts); err != nil {
-				log.Printf("yaml-channel: %s hook error: %v", ch.spec.ID, err)
+				slog.Warn("yaml-channel hook error", "channel", ch.spec.ID, "error", err)
 			}
 		}
 	}()

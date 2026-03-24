@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,12 +17,12 @@ import (
 	"github.com/opentalon/opentalon/internal/channel"
 	"github.com/opentalon/opentalon/internal/commands"
 	"github.com/opentalon/opentalon/internal/config"
+	"github.com/opentalon/opentalon/internal/logger"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/plugin"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/requestpkg"
-	"github.com/opentalon/opentalon/internal/sessionlog"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store"
 	"github.com/opentalon/opentalon/internal/version"
@@ -58,39 +58,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// When LOG_LEVEL=debug, optionally send logs to a file (so you can see what we send to the LLM).
-	var sessionLogMgr *sessionlog.Manager
-	if os.Getenv("LOG_LEVEL") == "debug" {
-		if cfg.Log.File != "" {
-			logPath := cfg.Log.File
-			if strings.HasPrefix(logPath, "~") {
-				home, _ := os.UserHomeDir()
-				rest := strings.TrimPrefix(strings.TrimPrefix(logPath, "~"), "/")
-				logPath = filepath.Join(home, rest)
-			}
-			if err := os.MkdirAll(filepath.Dir(logPath), 0750); err == nil {
-				if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); err == nil {
-					log.SetOutput(f)
-				}
-			}
-		}
-		// Per-session log files for debug output.
-		logsDir := cfg.Log.Dir
-		if logsDir == "" {
-			logsDir = filepath.Join(cfg.State.DataDir, "logs")
-		}
-		sessionLogMgr = sessionlog.NewManager(logsDir)
+	// Configure structured logging (stdout/stderr, level-filtered).
+	logLevel := cfg.Log.Level
+	if env := os.Getenv("LOG_LEVEL"); env != "" {
+		logLevel = env
 	}
+	logger.Setup(logLevel)
 
 	// Build LLM provider and default model from config
 	prov, defaultModel, err := buildProvider(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error building provider: %v\n", err)
 		os.Exit(1)
-	}
-
-	if sessionLogMgr != nil {
-		defer sessionLogMgr.CloseAll()
 	}
 
 	// LLM client that sets default model when orchestrator doesn't
@@ -111,14 +90,14 @@ func main() {
 	if dataDir != "" {
 		db, err := store.Open(dataDir)
 		if err != nil {
-			log.Printf("Warning: state store open: %v; using in-memory state", err)
+			slog.Warn("state store open failed, using in-memory state", "error", err)
 			memory, sessions = newInMemoryState()
 		} else {
 			defer func() { _ = db.Close() }()
 			memory = store.NewMemoryStore(db)
 			sessStore := store.NewSessionStore(db, cfg.State.Session.MaxMessages, cfg.State.Session.MaxIdleDays)
 			if err := sessStore.PruneIdleSessions(); err != nil {
-				log.Printf("Warning: session prune: %v", err)
+				slog.Warn("session prune failed", "error", err)
 			}
 			sessions = sessStore
 		}
@@ -138,13 +117,13 @@ func main() {
 		if p.GitHub != "" && p.Ref != "" {
 			resolvedPath, err := bundle.EnsurePlugin(ctx, dataDir, name, p.GitHub, p.Ref)
 			if err != nil {
-				log.Printf("Warning: bundle plugin %s: %v", name, err)
+				slog.Warn("bundle plugin failed", "plugin", name, "error", err)
 				continue
 			}
 			path = resolvedPath
 		}
 		if path == "" {
-			log.Printf("Warning: plugin %s has no plugin ref and no github/ref", name)
+			slog.Warn("plugin has no plugin ref and no github/ref", "plugin", name)
 			continue
 		}
 		pluginEntries = append(pluginEntries, plugin.PluginEntry{
@@ -157,7 +136,7 @@ func main() {
 	if cfg.RequestPackages.Path != "" {
 		dirSets, err := requestpkg.LoadDir(cfg.RequestPackages.Path)
 		if err != nil {
-			log.Printf("Warning: request_packages path %q: %v", cfg.RequestPackages.Path, err)
+			slog.Warn("request_packages path failed", "path", cfg.RequestPackages.Path, "error", err)
 		} else {
 			requestSets = append(requestSets, dirSets...)
 		}
@@ -165,7 +144,7 @@ func main() {
 	if cfg.RequestPackages.SkillsPath != "" {
 		skillSets, err := requestpkg.LoadSkillsDir(cfg.RequestPackages.SkillsPath)
 		if err != nil {
-			log.Printf("Warning: request_packages skills_path %q: %v", cfg.RequestPackages.SkillsPath, err)
+			slog.Warn("request_packages skills_path failed", "path", cfg.RequestPackages.SkillsPath, "error", err)
 		} else {
 			requestSets = append(requestSets, skillSets...)
 		}
@@ -175,7 +154,7 @@ func main() {
 	if cfg.RequestPackages.DefaultSkillGitHub != "" && cfg.RequestPackages.DefaultSkillRef != "" {
 		p, err := bundle.EnsureSkillsRepo(ctx, dataDir, cfg.RequestPackages.DefaultSkillGitHub, cfg.RequestPackages.DefaultSkillRef)
 		if err != nil {
-			log.Printf("Warning: skills repo %s: %v", cfg.RequestPackages.DefaultSkillGitHub, err)
+			slog.Warn("skills repo failed", "repo", cfg.RequestPackages.DefaultSkillGitHub, "error", err)
 		} else {
 			defaultRepoPath = p
 		}
@@ -189,19 +168,19 @@ func main() {
 		case skill.GitHub != "" && skill.Ref != "":
 			path, err := bundle.EnsureSkillDir(ctx, dataDir, skill.Name, skill.GitHub, skill.Ref)
 			if err != nil {
-				log.Printf("Warning: skill %s: %v", skill.Name, err)
+				slog.Warn("skill bundle failed", "skill", skill.Name, "error", err)
 				continue
 			}
 			skillDir = path
 		case defaultRepoPath != "":
 			skillDir = filepath.Join(defaultRepoPath, skill.Name)
 		default:
-			log.Printf("Warning: skill %s has no github/ref and no default_skill_github/ref", skill.Name)
+			slog.Warn("skill has no github/ref and no default_skill_github/ref", "skill", skill.Name)
 			continue
 		}
 		set, err := requestpkg.LoadSkillDir(skillDir)
 		if err != nil {
-			log.Printf("Warning: load skill %s from %s: %v", skill.Name, skillDir, err)
+			slog.Warn("load skill failed", "skill", skill.Name, "dir", skillDir, "error", err)
 			continue
 		}
 		requestSets = append(requestSets, set)
@@ -218,12 +197,12 @@ func main() {
 			}
 			path, err := bundle.EnsureSkillDir(ctx, dataDir, skill.Name, skill.GitHub, ref)
 			if err != nil {
-				log.Printf("Warning: installed skill %s: %v", skill.Name, err)
+				slog.Warn("installed skill bundle failed", "skill", skill.Name, "error", err)
 				continue
 			}
 			set, err := requestpkg.LoadSkillDir(path)
 			if err != nil {
-				log.Printf("Warning: load installed skill %s: %v", skill.Name, err)
+				slog.Warn("load installed skill failed", "skill", skill.Name, "error", err)
 				continue
 			}
 			requestSets = append(requestSets, set)
@@ -256,7 +235,7 @@ func main() {
 	if mcpServers := requestpkg.CollectMCPServers(requestSets); len(mcpServers) > 0 {
 		mcpJSON, err := json.Marshal(mcpServers)
 		if err != nil {
-			log.Printf("Warning: marshal MCP servers: %v", err)
+			slog.Warn("marshal MCP servers failed", "error", err)
 		} else {
 			injected := false
 			for i, e := range pluginEntries {
@@ -271,7 +250,7 @@ func main() {
 				break
 			}
 			if !injected {
-				log.Printf("Warning: MCP skill configs found but no 'mcp' plugin entry in config")
+				slog.Warn("MCP skill configs found but no 'mcp' plugin entry in config")
 			}
 		}
 	}
@@ -279,17 +258,17 @@ func main() {
 	for _, e := range pluginEntries {
 		if e.Enabled && dataDir != "" {
 			if err := store.RunPluginMigrations(dataDir, e.Name, e.Plugin); err != nil {
-				log.Printf("Warning: plugin %s migrations: %v", e.Name, err)
+				slog.Warn("plugin migrations failed", "plugin", e.Name, "error", err)
 			}
 		}
 	}
 	pluginManager := plugin.NewManager(toolRegistry)
 	if err := pluginManager.LoadAll(ctx, pluginEntries); err != nil {
-		log.Printf("Warning: some plugins failed to load: %v", err)
+		slog.Warn("some plugins failed to load", "error", err)
 	}
 
 	if err := requestpkg.Register(toolRegistry, requestSets); err != nil {
-		log.Printf("Warning: request_packages: %v", err)
+		slog.Warn("request_packages registration failed", "error", err)
 	}
 
 	// Register built-in opentalon plugin (install_skill, show_config, list_commands, set_prompt, clear_session, reload_mcp)
@@ -304,7 +283,7 @@ func main() {
 	cmdExecutor := commands.NewExecutor(toolRegistry, sessions, dataDir, cfg, runtimePromptPath).
 		WithMCPReload(pluginManager, mcpCacheDir)
 	if err := toolRegistry.Register(commands.Capability(), cmdExecutor); err != nil {
-		log.Printf("Warning: register opentalon commands: %v", err)
+		slog.Warn("register opentalon commands failed", "error", err)
 	}
 
 	contentPreparers := make([]orchestrator.ContentPreparerEntry, 0, len(cfg.Orchestrator.ContentPreparers))
@@ -353,7 +332,6 @@ func main() {
 		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
 		PipelineConfig:          pipelineCfg,
 		ContextWindow:           contextWindow,
-		SessionLogManager:       sessionLogMgr,
 		MaxConcurrentSessions:   cfg.Orchestrator.MaxConcurrentSessions,
 	})
 
@@ -373,13 +351,13 @@ func main() {
 		if ch.GitHub != "" && ch.Ref != "" {
 			resolvedPath, err := bundle.EnsureChannel(ctx, dataDir, name, ch.GitHub, ch.Ref)
 			if err != nil {
-				log.Printf("Warning: bundle channel %s: %v", name, err)
+				slog.Warn("bundle channel failed", "channel", name, "error", err)
 				continue
 			}
 			pathRef = resolvedPath
 		}
 		if pathRef == "" {
-			log.Printf("Warning: channel %s has no plugin ref and no github/ref", name)
+			slog.Warn("channel has no plugin ref and no github/ref", "channel", name)
 			continue
 		}
 		channelEntries = append(channelEntries, channel.ChannelEntry{
@@ -387,9 +365,9 @@ func main() {
 		})
 	}
 	if err := channelManager.LoadAll(ctx, channelEntries); err != nil {
-		log.Printf("Warning: some channels failed to load: %v", err)
+		slog.Warn("some channels failed to load", "error", err)
 	} else {
-		log.Printf("Channels loaded. Use the console prompt below (or Ctrl+C to stop).")
+		slog.Info("channels loaded")
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -477,7 +455,7 @@ func buildLuaScriptPaths(ctx context.Context, dataDir string, cfg *config.Config
 	if cfg.Lua.DefaultGitHub != "" && cfg.Lua.DefaultRef != "" {
 		p, err := bundle.EnsureLuaPluginsRepo(ctx, dataDir, cfg.Lua.DefaultGitHub, cfg.Lua.DefaultRef)
 		if err != nil {
-			log.Printf("Warning: Lua plugins repo %s: %v", cfg.Lua.DefaultGitHub, err)
+			slog.Warn("Lua plugins repo failed", "repo", cfg.Lua.DefaultGitHub, "error", err)
 		} else {
 			defaultRepoPath = p
 		}
@@ -489,7 +467,7 @@ func buildLuaScriptPaths(ctx context.Context, dataDir string, cfg *config.Config
 		if plug.GitHub != "" && plug.Ref != "" {
 			pluginDir, err := bundle.EnsureLuaPluginDir(ctx, dataDir, plug.Name, plug.GitHub, plug.Ref)
 			if err != nil {
-				log.Printf("Warning: Lua plugin %s: %v", plug.Name, err)
+				slog.Warn("Lua plugin failed", "plugin", plug.Name, "error", err)
 				continue
 			}
 			paths[plug.Name] = filepath.Join(pluginDir, plug.Name+".lua")

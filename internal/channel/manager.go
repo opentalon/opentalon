@@ -3,7 +3,7 @@ package channel
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -43,7 +43,7 @@ func (m *Manager) LoadAll(ctx context.Context, entries []ChannelEntry) error {
 	var errs []string
 	for _, e := range entries {
 		if !e.Enabled {
-			log.Printf("channel-manager: %s disabled, skipping", e.Name)
+			slog.Info("channel disabled, skipping", "channel", e.Name)
 			continue
 		}
 		if err := m.Load(ctx, e); err != nil {
@@ -76,7 +76,7 @@ func (m *Manager) Load(ctx context.Context, entry ChannelEntry) error {
 	if tp, ok := ch.(pkg.ToolProvider); ok && m.toolRegistry != nil {
 		if tools := tp.Tools(); len(tools) > 0 {
 			if err := m.registerChannelTools(ch.ID(), tools); err != nil {
-				log.Printf("channel-manager: %s: register tools: %v", entry.Name, err)
+				slog.Warn("channel register tools failed", "channel", entry.Name, "error", err)
 			}
 		}
 	}
@@ -90,7 +90,7 @@ func (m *Manager) Load(ctx context.Context, entry ChannelEntry) error {
 	}
 
 	modeStr := pkg.DetectMode(entry.Plugin).String()
-	log.Printf("channel-manager: loaded %s via %s", entry.Name, modeStr)
+	slog.Info("channel loaded", "channel", entry.Name, "mode", modeStr)
 	return nil
 }
 

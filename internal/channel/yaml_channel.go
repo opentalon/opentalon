@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -145,7 +145,7 @@ func (ch *YAMLChannel) Start(ctx context.Context, inbox chan<- pkg.InboundMessag
 		}()
 	}
 
-	log.Printf("yaml-channel: %s started", ch.spec.ID)
+	slog.Info("yaml-channel started", "channel", ch.spec.ID)
 	return nil
 }
 
@@ -210,7 +210,7 @@ func encodeFilesJSON(files []pkg.FileAttachment) string {
 	}
 	b, err := json.Marshal(out)
 	if err != nil {
-		log.Printf("yaml-channel: encodeFilesJSON: marshal error: %v", err)
+		slog.Warn("yaml-channel encodeFilesJSON marshal error", "error", err)
 		return "[]"
 	}
 	return string(b)
@@ -222,7 +222,7 @@ func (ch *YAMLChannel) Stop() error {
 		ch.cancel()
 	}
 	ch.wg.Wait()
-	log.Printf("yaml-channel: %s stopped", ch.spec.ID)
+	slog.Info("yaml-channel stopped", "channel", ch.spec.ID)
 	return nil
 }
 

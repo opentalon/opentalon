@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -51,7 +51,7 @@ func (ch *YAMLChannel) doPollOnce(method string, client *http.Client) {
 
 	url := substituteTemplate(poll.URL, contexts)
 	if url == "" {
-		log.Printf("yaml-channel: %s: polling URL is empty after template substitution", ch.spec.ID)
+		slog.Warn("yaml-channel polling URL is empty after template substitution", "channel", ch.spec.ID)
 		return
 	}
 
@@ -62,7 +62,7 @@ func (ch *YAMLChannel) doPollOnce(method string, client *http.Client) {
 
 	req, err := http.NewRequestWithContext(ch.ctx, method, url, bodyReader)
 	if err != nil {
-		log.Printf("yaml-channel: %s: poll build request: %v", ch.spec.ID, err)
+		slog.Warn("yaml-channel poll build request failed", "channel", ch.spec.ID, "error", err)
 		return
 	}
 	for k, v := range poll.Headers {
@@ -74,28 +74,28 @@ func (ch *YAMLChannel) doPollOnce(method string, client *http.Client) {
 		if ch.ctx.Err() != nil {
 			return // shutting down
 		}
-		log.Printf("yaml-channel: %s: poll request: %v", ch.spec.ID, err)
+		slog.Warn("yaml-channel poll request failed", "channel", ch.spec.ID, "error", err)
 		return
 	}
 	respBody, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("yaml-channel: %s: poll HTTP %d: %s", ch.spec.ID, resp.StatusCode, respBody)
+		slog.Warn("yaml-channel poll HTTP error", "channel", ch.spec.ID, "status", resp.StatusCode, "body", string(respBody))
 		return
 	}
 
 	// Parse JSON response
 	var raw map[string]interface{}
 	if err := json.Unmarshal(respBody, &raw); err != nil {
-		log.Printf("yaml-channel: %s: poll parse response: %v", ch.spec.ID, err)
+		slog.Warn("yaml-channel poll parse response failed", "channel", ch.spec.ID, "error", err)
 		return
 	}
 
 	// Navigate to result array
 	events, err := ch.extractEvents(raw, poll.ResultPath)
 	if err != nil {
-		log.Printf("yaml-channel: %s: %v", ch.spec.ID, err)
+		slog.Warn("yaml-channel poll extract events failed", "channel", ch.spec.ID, "error", err)
 		return
 	}
 

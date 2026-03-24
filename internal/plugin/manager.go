@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -75,7 +75,7 @@ func (m *Manager) LoadAll(ctx context.Context, entries []PluginEntry) error {
 	var errs []string
 	for _, e := range entries {
 		if !e.Enabled {
-			log.Printf("plugin-manager: %s disabled, skipping", e.Name)
+			slog.Info("plugin-manager: plugin disabled, skipping", "plugin", e.Name)
 			continue
 		}
 		if err := m.Load(ctx, e); err != nil {
@@ -134,7 +134,7 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 		client:  client,
 	}
 
-	log.Printf("plugin-manager: loaded %s (%s, %d actions)", entry.Name, mode, len(cap.Actions))
+	slog.Info("plugin-manager: loaded plugin", "plugin", entry.Name, "mode", mode, "actions", len(cap.Actions))
 	return nil
 }
 
@@ -174,7 +174,7 @@ func configJSON(entry PluginEntry) string {
 	}
 	b, err := json.Marshal(entry.Config)
 	if err != nil {
-		log.Printf("plugin-manager: marshal %s config: %v", entry.Name, err)
+		slog.Warn("plugin-manager: failed to marshal config", "plugin", entry.Name, "error", err)
 		return ""
 	}
 	return string(b)
@@ -193,7 +193,7 @@ func (m *Manager) Reload(ctx context.Context, name string) error {
 	m.mu.Unlock()
 
 	if err := m.Unload(name); err != nil {
-		log.Printf("plugin-manager: reload %s: unload: %v", name, err)
+		slog.Warn("plugin-manager: reload unload failed", "plugin", name, "error", err)
 	}
 	return m.Load(ctx, entry)
 }
@@ -231,7 +231,7 @@ func (m *Manager) StopAll() {
 
 	for _, name := range names {
 		if err := m.Unload(name); err != nil {
-			log.Printf("plugin-manager: unload %s: %v", name, err)
+			slog.Warn("plugin-manager: unload failed", "plugin", name, "error", err)
 		}
 	}
 }

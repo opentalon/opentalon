@@ -1208,7 +1208,7 @@ func TestTrimToContextWindow_NoTrimNeeded(t *testing.T) {
 		{Role: provider.RoleAssistant, Content: "hi there"},
 	}
 	// All messages are tiny, context window is huge — no trimming.
-	result := trimToContextWindow(msgs, 100000, nil)
+	result := trimToContextWindow(context.Background(), msgs, 100000)
 	if len(result) != 3 {
 		t.Fatalf("expected 3 messages, got %d", len(result))
 	}
@@ -1229,7 +1229,7 @@ func TestTrimToContextWindow_DropsOldConversation(t *testing.T) {
 		{Role: provider.RoleUser, Content: strings.Repeat("e", 400)},
 	}
 
-	result := trimToContextWindow(msgs, 400, nil)
+	result := trimToContextWindow(context.Background(), msgs, 400)
 
 	// System message must be preserved.
 	if result[0].Role != provider.RoleSystem {
@@ -1254,7 +1254,7 @@ func TestTrimToContextWindow_PreservesSystemMessages(t *testing.T) {
 		{Role: provider.RoleUser, Content: strings.Repeat("c", 400)},
 	}
 
-	result := trimToContextWindow(msgs, 2000, nil)
+	result := trimToContextWindow(context.Background(), msgs, 2000)
 
 	// Both system messages should be preserved.
 	systemCount := 0
@@ -1276,7 +1276,7 @@ func TestTrimToContextWindow_ZeroWindow(t *testing.T) {
 		{Role: provider.RoleSystem, Content: "sys"},
 		{Role: provider.RoleUser, Content: "hi"},
 	}
-	result := trimToContextWindow(msgs, 999999, nil)
+	result := trimToContextWindow(context.Background(), msgs, 999999)
 	if len(result) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(result))
 	}

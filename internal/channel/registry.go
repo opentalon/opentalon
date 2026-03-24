@@ -3,9 +3,10 @@ package channel
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 
+	"github.com/opentalon/opentalon/internal/logger"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
@@ -112,7 +113,7 @@ func (r *Registry) StopAll() {
 
 	for _, ch := range channels {
 		if err := ch.Stop(); err != nil {
-			log.Printf("stopping channel %q: %v", ch.ID(), err)
+			slog.Warn("stopping channel failed", "channel", ch.ID(), "error", err)
 		}
 	}
 	r.wg.Wait()
@@ -140,13 +141,15 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 				defer wg.Done()
 
 				sessionKey := pkg.SessionKey(ch.ID(), m.ConversationID, m.ThreadID)
-				resp, err := r.handler(r.ctx, sessionKey, m)
+				traceID := logger.TraceIDFromSessionKey(sessionKey)
+				ctx := logger.WithTraceID(r.ctx, traceID)
+				resp, err := r.handler(ctx, sessionKey, m)
 				if err != nil {
-					log.Printf("handling message on channel %q session %q: %v", ch.ID(), sessionKey, err)
+					logger.FromContext(ctx).Error("handling message failed", "channel", ch.ID(), "session", sessionKey, "error", err)
 					return
 				}
-				if err := ch.Send(r.ctx, resp); err != nil {
-					log.Printf("sending response on channel %q: %v", ch.ID(), err)
+				if err := ch.Send(ctx, resp); err != nil {
+					logger.FromContext(ctx).Error("sending response failed", "channel", ch.ID(), "error", err)
 				}
 			}(msg)
 		}

@@ -3,7 +3,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,18 +120,18 @@ func (s *Scheduler) Start(staticJobs []Job) error {
 	for i := range staticJobs {
 		staticJobs[i].Source = "config"
 		if err := s.addJobLocked(staticJobs[i]); err != nil {
-			log.Printf("scheduler: skipping static job %q: %v", staticJobs[i].Name, err)
+			slog.Warn("scheduler: skipping static job", "job", staticJobs[i].Name, "error", err)
 		}
 	}
 
 	dynamicJobs, err := s.loadDynamic()
 	if err != nil {
-		log.Printf("scheduler: loading dynamic jobs: %v", err)
+		slog.Error("scheduler: loading dynamic jobs", "error", err)
 	}
 	for _, j := range dynamicJobs {
 		j.Source = "dynamic"
 		if err := s.addJobLocked(j); err != nil {
-			log.Printf("scheduler: skipping dynamic job %q: %v", j.Name, err)
+			slog.Warn("scheduler: skipping dynamic job", "job", j.Name, "error", err)
 		}
 	}
 
@@ -337,7 +337,7 @@ func (s *Scheduler) runJob(ctx context.Context, rj *runningJob) {
 	job := s.snapshotJob(rj)
 	dur, err := job.parseDuration()
 	if err != nil {
-		log.Printf("scheduler: job %q invalid interval: %v", job.Name, err)
+		slog.Error("scheduler: job invalid interval", "job", job.Name, "error", err)
 		return
 	}
 
@@ -359,20 +359,20 @@ func (s *Scheduler) executeJob(rj *runningJob) {
 
 	plugin, action, err := job.parseAction()
 	if err != nil {
-		log.Printf("scheduler: job %q bad action: %v", job.Name, err)
+		slog.Error("scheduler: job bad action", "job", job.Name, "error", err)
 		return
 	}
 
 	result, err := s.runner.RunAction(s.ctx, plugin, action, job.Args)
 	if err != nil {
-		log.Printf("scheduler: job %q execution error: %v", job.Name, err)
+		slog.Error("scheduler: job execution error", "job", job.Name, "error", err)
 		return
 	}
 
 	if job.NotifyChannel != "" && s.notifier != nil {
 		msg := fmt.Sprintf("[scheduled: %s] %s", job.Name, result)
 		if err := s.notifier.Notify(s.ctx, job.NotifyChannel, msg); err != nil {
-			log.Printf("scheduler: job %q notify error: %v", job.Name, err)
+			slog.Error("scheduler: job notify error", "job", job.Name, "error", err)
 		}
 	}
 }
