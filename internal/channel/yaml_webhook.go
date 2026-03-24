@@ -4,7 +4,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 )
 
 // startWebhookInbound registers the HTTP webhook handler and starts the
@@ -58,9 +57,7 @@ func (ch *YAMLChannel) buildWebhookHandler(wh *WebhookInboundSpec) http.HandlerF
 			return
 		}
 
-		if os.Getenv("LOG_LEVEL") == "debug" {
-			slog.Debug("yaml-channel webhook received", "channel", ch.spec.ID, "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "body", string(body))
-		}
+		slog.Debug("yaml-channel webhook received", "channel", ch.spec.ID, "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "body", string(body))
 
 		// Respond immediately (Teams requires fast ack)
 		w.WriteHeader(responseCode)

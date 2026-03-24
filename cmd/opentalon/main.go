@@ -250,7 +250,7 @@ func main() {
 				break
 			}
 			if !injected {
-				slog.Warn("MCP skill configs found but no 'mcp' plugin entry in config")
+				slog.Warn("MCP skill configs found but no 'mcp' plugin entry in config", "component", "mcp")
 			}
 		}
 	}
