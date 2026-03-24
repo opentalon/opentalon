@@ -159,9 +159,8 @@ state:
   #   summarize_prompt: "Summarize the following conversation in a short paragraph."  # any language
   #   summarize_update_prompt: "Update the given conversation summary with the following new exchange. Keep the result to a short paragraph."
 
-# When LOG_LEVEL=debug, what we send to the LLM is logged (helps verify plugin output).
-# Per-session log files are written to {data_dir}/logs/ (one file per conversation,
-# named by timestamp + first message). Override the directory with log.dir.
+# Log level: debug, info, warn, error. Env var LOG_LEVEL overrides this.
+# All logs go to stderr (k8s-friendly). Debug includes LLM request/response details.
+# Each session gets a trace_id for correlation in kubectl logs / Grafana.
 log:
-  file: ~/.opentalon/opentalon.log
-  # dir: ~/.opentalon/logs           # optional; defaults to {data_dir}/logs
+  level: info

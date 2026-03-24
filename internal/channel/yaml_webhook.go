@@ -2,7 +2,7 @@ package channel
 
 import (
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 )
@@ -21,7 +21,7 @@ func (ch *YAMLChannel) startWebhookInbound(wh *WebhookInboundSpec) error {
 		path = "/api/messages"
 	}
 	if !wh.ValidateJWT {
-		log.Printf("yaml-channel: %s: WARNING webhook endpoint %s has no authentication configured (validate_jwt=false)", ch.spec.ID, path)
+		slog.Warn("yaml-channel webhook endpoint has no authentication configured", "channel", ch.spec.ID, "path", path)
 	}
 
 	handler := ch.buildWebhookHandler(wh)
@@ -44,7 +44,7 @@ func (ch *YAMLChannel) buildWebhookHandler(wh *WebhookInboundSpec) http.HandlerF
 		// JWT validation
 		if wh.ValidateJWT && ch.jwtValidator != nil {
 			if err := ch.jwtValidator.ValidateRequest(r); err != nil {
-				log.Printf("yaml-channel: %s: JWT validation failed: %v", ch.spec.ID, err)
+				slog.Warn("yaml-channel JWT validation failed", "channel", ch.spec.ID, "error", err)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -53,14 +53,13 @@ func (ch *YAMLChannel) buildWebhookHandler(wh *WebhookInboundSpec) http.HandlerF
 		// Read body with 1MB cap
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		if err != nil {
-			log.Printf("yaml-channel: %s: read webhook body: %v", ch.spec.ID, err)
+			slog.Warn("yaml-channel read webhook body failed", "channel", ch.spec.ID, "error", err)
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 
 		if os.Getenv("LOG_LEVEL") == "debug" {
-			log.Printf("yaml-channel: %s: webhook %s %s from %s body=%s",
-				ch.spec.ID, r.Method, r.URL.Path, r.RemoteAddr, body)
+			slog.Debug("yaml-channel webhook received", "channel", ch.spec.ID, "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "body", string(body))
 		}
 
 		// Respond immediately (Teams requires fast ack)

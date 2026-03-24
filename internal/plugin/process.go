@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -121,7 +121,7 @@ func (p *Process) Stop(grace time.Duration) error {
 	}
 
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
-		log.Printf("plugin: interrupt %s: %v, killing", p.path, err)
+		slog.Warn("plugin: interrupt failed, killing", "path", p.path, "error", err)
 		return cmd.Process.Kill()
 	}
 
@@ -129,7 +129,7 @@ func (p *Process) Stop(grace time.Duration) error {
 	case <-exited:
 		return nil
 	case <-time.After(grace):
-		log.Printf("plugin: %s did not exit after %s, killing", p.path, grace)
+		slog.Warn("plugin: did not exit in time, killing", "path", p.path, "grace", grace)
 		return cmd.Process.Kill()
 	}
 }

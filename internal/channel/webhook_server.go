@@ -3,7 +3,7 @@ package channel
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 )
@@ -56,9 +56,9 @@ func (s *WebhookServer) register(port int, path string, handler http.HandlerFunc
 		s.server = server
 		s.started = true
 		go func(srv *http.Server, p int) {
-			log.Printf("webhook-server: listening on :%d", p)
+			slog.Info("webhook-server listening", "port", p)
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("webhook-server: error: %v", err)
+				slog.Error("webhook-server error", "error", err)
 			}
 		}(server, port)
 	}

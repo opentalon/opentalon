@@ -3,7 +3,7 @@ package channel
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -171,7 +171,7 @@ func (c *Connector) StopProcess(id string) error {
 	case <-proc.exited:
 		return nil
 	case <-time.After(defaultStopGrace):
-		log.Printf("channel: %s did not exit gracefully, killing", id)
+		slog.Warn("channel did not exit gracefully, killing", "channel", id)
 		return proc.cmd.Process.Kill()
 	}
 }
@@ -187,7 +187,7 @@ func (c *Connector) StopAll() {
 
 	for _, id := range ids {
 		if err := c.StopProcess(id); err != nil {
-			log.Printf("channel: stop %s: %v", id, err)
+			slog.Warn("channel stop failed", "channel", id, "error", err)
 		}
 	}
 }

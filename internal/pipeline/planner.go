@@ -4,8 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
-	"os"
+	"log/slog"
 	"strings"
 )
 
@@ -86,12 +85,8 @@ type planStepJSON struct {
 // Plan asks the LLM whether the user's message requires a multi-step pipeline or a direct action.
 func (p *Planner) Plan(ctx context.Context, message string, capabilities []CapabilityInfo) (*PlanResult, error) {
 	systemPrompt := buildPlannerPrompt(capabilities)
-	debug := os.Getenv("LOG_LEVEL") == "debug"
-
-	if debug {
-		log.Printf("[pipeline:planner] system prompt:\n%s", systemPrompt)
-		log.Printf("[pipeline:planner] user message: %q", message)
-	}
+	slog.Debug("planner system prompt", "prompt", systemPrompt)
+	slog.Debug("planner user message", "message", message)
 
 	resp, err := p.llm.Complete(ctx, &CompletionRequest{
 		Messages: []Message{
@@ -103,9 +98,7 @@ func (p *Planner) Plan(ctx context.Context, message string, capabilities []Capab
 		return nil, fmt.Errorf("planner LLM call: %w", err)
 	}
 
-	if debug {
-		log.Printf("[pipeline:planner] LLM response: %s", resp.Content)
-	}
+	slog.Debug("planner LLM response", "content", resp.Content)
 
 	return parsePlanResponse(resp.Content)
 }

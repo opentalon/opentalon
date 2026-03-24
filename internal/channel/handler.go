@@ -2,11 +2,11 @@ package channel
 
 import (
 	"context"
-	"log"
 	"os"
 	"strings"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/logger"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
@@ -29,7 +29,7 @@ func NewMessageHandler(
 		ctx = actor.WithActor(ctx, actorID)
 		response, inputForDisplay, err := runner.Run(ctx, sessionKey, content, msg.Files...)
 		if err != nil {
-			log.Printf("handler: run: %v", err)
+			logger.FromContext(ctx).Error("handler run failed", "error", err)
 			return pkg.OutboundMessage{
 				ConversationID: msg.ConversationID,
 				ThreadID:       msg.ThreadID,

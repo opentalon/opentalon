@@ -138,10 +138,9 @@ type RequestParamInl struct {
 	Required    bool   `yaml:"required"`
 }
 
-// LogConfig holds logging options. When LOG_LEVEL=debug, LLM request payloads are logged.
+// LogConfig holds logging options. Level can be overridden by the LOG_LEVEL env var.
 type LogConfig struct {
-	File string `yaml:"file"` // optional path to log file (env-expanded)
-	Dir  string `yaml:"dir"`  // optional path to per-session log directory; default {data_dir}/logs when LOG_LEVEL=debug
+	Level string `yaml:"level"` // debug, info, warn, error; default info; overridden by LOG_LEVEL env var
 }
 
 type PluginConfig struct {
@@ -322,11 +321,8 @@ func Parse(data []byte) (*Config, error) {
 	} else {
 		cfg.State.DataDir = expandTilde(expandEnv(cfg.State.DataDir))
 	}
-	if cfg.Log.File != "" {
-		cfg.Log.File = expandTilde(expandEnv(cfg.Log.File))
-	}
-	if cfg.Log.Dir != "" {
-		cfg.Log.Dir = expandTilde(expandEnv(cfg.Log.Dir))
+	if cfg.Log.Level != "" {
+		cfg.Log.Level = expandEnv(cfg.Log.Level)
 	}
 	if cfg.Lua != nil {
 		if cfg.Lua.ScriptsDir != "" {
