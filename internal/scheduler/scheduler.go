@@ -120,18 +120,18 @@ func (s *Scheduler) Start(staticJobs []Job) error {
 	for i := range staticJobs {
 		staticJobs[i].Source = "config"
 		if err := s.addJobLocked(staticJobs[i]); err != nil {
-			slog.Warn("scheduler: skipping static job", "job", staticJobs[i].Name, "error", err)
+			slog.Warn("skipping static job", "component", "scheduler", "job", staticJobs[i].Name, "error", err)
 		}
 	}
 
 	dynamicJobs, err := s.loadDynamic()
 	if err != nil {
-		slog.Error("scheduler: loading dynamic jobs", "error", err)
+		slog.Warn("loading dynamic jobs failed", "component", "scheduler", "error", err)
 	}
 	for _, j := range dynamicJobs {
 		j.Source = "dynamic"
 		if err := s.addJobLocked(j); err != nil {
-			slog.Warn("scheduler: skipping dynamic job", "job", j.Name, "error", err)
+			slog.Warn("skipping dynamic job", "component", "scheduler", "job", j.Name, "error", err)
 		}
 	}
 
@@ -337,7 +337,7 @@ func (s *Scheduler) runJob(ctx context.Context, rj *runningJob) {
 	job := s.snapshotJob(rj)
 	dur, err := job.parseDuration()
 	if err != nil {
-		slog.Error("scheduler: job invalid interval", "job", job.Name, "error", err)
+		slog.Warn("job invalid interval", "component", "scheduler", "job", job.Name, "error", err)
 		return
 	}
 
@@ -359,20 +359,20 @@ func (s *Scheduler) executeJob(rj *runningJob) {
 
 	plugin, action, err := job.parseAction()
 	if err != nil {
-		slog.Error("scheduler: job bad action", "job", job.Name, "error", err)
+		slog.Warn("job bad action", "component", "scheduler", "job", job.Name, "error", err)
 		return
 	}
 
 	result, err := s.runner.RunAction(s.ctx, plugin, action, job.Args)
 	if err != nil {
-		slog.Error("scheduler: job execution error", "job", job.Name, "error", err)
+		slog.Warn("job execution failed", "component", "scheduler", "job", job.Name, "error", err)
 		return
 	}
 
 	if job.NotifyChannel != "" && s.notifier != nil {
 		msg := fmt.Sprintf("[scheduled: %s] %s", job.Name, result)
 		if err := s.notifier.Notify(s.ctx, job.NotifyChannel, msg); err != nil {
-			slog.Error("scheduler: job notify error", "job", job.Name, "error", err)
+			slog.Warn("job notify failed", "component", "scheduler", "job", job.Name, "error", err)
 		}
 	}
 }
