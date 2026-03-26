@@ -44,8 +44,15 @@ The gRPC service defined in `proto/plugin.proto`:
 
 ```protobuf
 service PluginService {
+    // Init delivers host configuration to the plugin before any other calls.
+    // Required — plugins that do not implement Init will fail to load.
+    rpc Init(PluginInitRequest) returns (google.protobuf.Empty);
     rpc Execute(ToolCallRequest) returns (ToolResultResponse);
     rpc Capabilities(google.protobuf.Empty) returns (PluginCapabilities);
+}
+
+message PluginInitRequest {
+    string config_json = 1; // JSON-encoded config block from the host's config.yaml
 }
 
 message ToolCallRequest {
@@ -71,6 +78,7 @@ message Action {
     string name = 1;
     string description = 2;
     repeated Parameter parameters = 3;
+    bool user_only = 4;
 }
 
 message Parameter {
@@ -82,6 +90,18 @@ message Parameter {
 ```
 
 There is no method to list other plugins, query the registry, access peer state, or call the orchestrator. The surface is deliberately minimal.
+
+### Init and the Configurable interface
+
+The `Init` RPC is called once before `Capabilities` and passes the plugin's config block as JSON. On the Go SDK side, plugins receive this automatically — implement the `Configurable` interface on your `Handler` to process the config:
+
+```go
+type Configurable interface {
+    Configure(configJSON string) error
+}
+```
+
+If your handler implements `Configurable`, the SDK calls `Configure` during `Init`. If not, `Init` succeeds as a no-op. All plugins must be built against a SDK version that includes `Init` — the core will reject plugins that do not implement it.
 
 ### Plugin capabilities
 
@@ -463,13 +483,12 @@ The `PluginStateStore` enforces isolation at the API level:
 
 #### 5. Strict gRPC contract
 
-The plugin gRPC interface exposes exactly one method: `Execute`. There is no method to:
+The plugin gRPC interface exposes three methods: `Init`, `Execute`, and `Capabilities`. There is no method to:
 
 - List other plugins
 - Query the registry
 - Access peer state
 - Call the orchestrator
-- Discover capabilities
 
 ### Guard flow
 
