@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,6 +164,57 @@ func TestClientMultipleCalls(t *testing.T) {
 		if result.Content != "echo: ping" {
 			t.Fatalf("call %d: content = %q", i, result.Content)
 		}
+	}
+}
+
+// legacyPluginService does NOT implement Init — simulates plugins built
+// against an older SDK (before Init was added).
+type legacyPluginService struct {
+	pluginpb.UnimplementedPluginServiceServer
+}
+
+func (s *legacyPluginService) Capabilities(_ context.Context, _ *emptypb.Empty) (*pluginpb.PluginCapabilities, error) {
+	return &pluginpb.PluginCapabilities{
+		Name:        "legacy",
+		Description: "Plugin without Init",
+		Actions: []*pluginpb.Action{
+			{Name: "ping", Description: "Ping"},
+		},
+	}, nil
+}
+
+func (s *legacyPluginService) Execute(_ context.Context, req *pluginpb.ToolCallRequest) (*pluginpb.ToolResultResponse, error) {
+	return &pluginpb.ToolResultResponse{CallId: req.Id, Content: "pong"}, nil
+}
+
+func TestClientRejectsPluginWithoutInit(t *testing.T) {
+	lis := bufconn.Listen(bufSize)
+	srv := grpc.NewServer()
+	pluginpb.RegisterPluginServiceServer(srv, &legacyPluginService{})
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(func() { srv.Stop() })
+
+	cc, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) {
+			return lis.Dial()
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cc.Close() })
+
+	c := &Client{conn: cc, client: pluginpb.NewPluginServiceClient(cc)}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = c.fetchCapabilities(ctx, "")
+	if err == nil {
+		t.Fatal("expected error for plugin without Init")
+	}
+	if got := err.Error(); !strings.Contains(got, "does not implement Init") {
+		t.Errorf("error = %q, want message about missing Init", got)
 	}
 }
 

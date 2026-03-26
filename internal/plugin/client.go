@@ -9,7 +9,9 @@ import (
 	pkg "github.com/opentalon/opentalon/pkg/plugin"
 	"github.com/opentalon/opentalon/proto/pluginpb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -63,6 +65,9 @@ func DialFromHandshake(hs pkg.Handshake, timeout time.Duration, configJSON strin
 
 func (c *Client) fetchCapabilities(ctx context.Context, configJSON string) error {
 	if _, err := c.client.Init(ctx, &pluginpb.PluginInitRequest{ConfigJson: configJSON}); err != nil {
+		if s, ok := status.FromError(err); ok && s.Code() == codes.Unimplemented {
+			return fmt.Errorf("init plugin: plugin does not implement Init — update the plugin to the latest SDK (go get github.com/opentalon/opentalon@latest)")
+		}
 		return fmt.Errorf("init plugin: %w", err)
 	}
 	resp, err := c.client.Capabilities(ctx, &emptypb.Empty{})
