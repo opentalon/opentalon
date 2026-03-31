@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -218,6 +219,11 @@ func (ch *YAMLChannel) processInboundFrame(frame map[string]interface{}) {
 	// Extract fields via mapping
 	eventCtx := flattenToStringMap(event)
 	msg := ch.extractMessage(event, eventCtx)
+
+	// Resolve media: detect non-text messages, download files or inject descriptions
+	if len(ch.spec.Inbound.Media) > 0 {
+		ch.resolveMedia(event, eventCtx, &msg)
+	}
 
 	// Apply transforms
 	msg.Content = ch.applyTransforms(msg.Content, eventCtx)
@@ -592,8 +598,179 @@ func getStringField(m map[string]interface{}, key string) string {
 		if nested, ok := m[parts[0]].(map[string]interface{}); ok {
 			return getStringField(nested, parts[1])
 		}
+		// Array indexing: "photo.-1.file_id" or "photo.0.width"
+		if arr, ok := m[parts[0]].([]interface{}); ok {
+			subParts := strings.SplitN(parts[1], ".", 2)
+			idx, err := strconv.Atoi(subParts[0])
+			if err == nil {
+				if idx < 0 {
+					idx = len(arr) + idx
+				}
+				if idx >= 0 && idx < len(arr) {
+					if len(subParts) == 2 {
+						if nested, ok := arr[idx].(map[string]interface{}); ok {
+							return getStringField(nested, subParts[1])
+						}
+					}
+					return fmt.Sprintf("%v", arr[idx])
+				}
+			}
+		}
 	}
 	return ""
+}
+
+// navigateToValue checks whether a dotted path leads to any non-nil value
+// (including objects and arrays that getStringField would return "" for).
+func navigateToValue(m map[string]interface{}, path string) (interface{}, bool) {
+	if val, ok := m[path]; ok && val != nil {
+		return val, true
+	}
+	parts := strings.SplitN(path, ".", 2)
+	if len(parts) == 2 {
+		if nested, ok := m[parts[0]].(map[string]interface{}); ok {
+			return navigateToValue(nested, parts[1])
+		}
+		// Check arrays too (e.g. "photo" is []interface{})
+		if arr, ok := m[parts[0]].([]interface{}); ok && len(arr) > 0 {
+			return arr, true
+		}
+	}
+	return nil, false
+}
+
+// resolveMedia processes media rules for an inbound event. It detects non-text
+// message types, downloads binary data (if configured), and injects a text
+// description so the LLM can respond naturally to unsupported media types.
+// The first matching rule wins.
+func (ch *YAMLChannel) resolveMedia(event map[string]interface{}, eventCtx map[string]string, msg *pkg.InboundMessage) {
+	for _, rule := range ch.spec.Inbound.Media {
+		if _, exists := navigateToValue(event, rule.When); !exists {
+			continue
+		}
+		// Pre-resolve {{event.X.Y.Z}} template references against the raw event,
+		// because flattenToStringMap only captures top-level keys.
+		enrichEventCtx(event, eventCtx, rule)
+
+		contexts := ch.buildContexts()
+		contexts["event"] = eventCtx
+
+		if rule.Resolve != nil {
+			file, err := ch.resolveFile(rule.Resolve, contexts, event, eventCtx)
+			if err != nil {
+				slog.Warn("yaml-channel media resolve failed, falling back to description",
+					"channel", ch.spec.ID, "when", rule.When, "error", err)
+			} else if file != nil {
+				msg.Files = append(msg.Files, *file)
+			}
+		}
+		// Inject description as content if text is still empty
+		if msg.Content == "" && rule.Description != "" {
+			msg.Content = substituteTemplate(rule.Description, contexts)
+		}
+		return
+	}
+}
+
+// enrichEventCtx pre-resolves nested event paths referenced in a media rule's
+// templates so that {{event.photo.-1.file_id}} works in the template engine
+// (which only does flat map lookups). It scans all template strings in the rule
+// for {{event.X}} references and resolves them via getStringField on the raw event.
+func enrichEventCtx(event map[string]interface{}, eventCtx map[string]string, rule MediaRule) {
+	// Collect all template strings from the rule
+	templates := []string{rule.Description}
+	if rule.Resolve != nil {
+		templates = append(templates, rule.Resolve.MimeType, rule.Resolve.Name)
+		for _, step := range rule.Resolve.Steps {
+			templates = append(templates, step.URL)
+			for _, v := range step.Headers {
+				templates = append(templates, v)
+			}
+		}
+	}
+	for _, tmpl := range templates {
+		for _, match := range contextRe.FindAllStringSubmatch(tmpl, -1) {
+			if len(match) == 3 && match[1] == "event" {
+				key := match[2]
+				if _, exists := eventCtx[key]; !exists {
+					if val := getStringField(event, key); val != "" {
+						eventCtx[key] = val
+					}
+				}
+			}
+		}
+	}
+}
+
+// resolveFile executes the resolve steps to download binary media data.
+// Intermediate steps (with Store) parse JSON responses; the final step (without
+// Store) captures the raw body. Returns nil if no binary data was obtained.
+func (ch *YAMLChannel) resolveFile(spec *MediaResolveSpec, contexts map[string]map[string]string, event map[string]interface{}, eventCtx map[string]string) (*pkg.FileAttachment, error) {
+	resolveCtx := make(map[string]string)
+	contexts["resolve"] = resolveCtx
+
+	var data []byte
+	for _, step := range spec.Steps {
+		url := substituteTemplate(step.URL, contexts)
+		if url == "" {
+			return nil, fmt.Errorf("empty URL after template substitution")
+		}
+
+		method := strings.ToUpper(step.Method)
+		if method == "" {
+			method = "GET"
+		}
+
+		req, err := http.NewRequestWithContext(ch.ctx, method, url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build request: %w", err)
+		}
+		for k, v := range step.Headers {
+			req.Header.Set(k, substituteTemplate(v, contexts))
+		}
+
+		resp, err := ch.client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("request %s: %w", url, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, url, bytes.TrimSpace(body))
+		}
+
+		if len(step.Store) > 0 {
+			var result map[string]interface{}
+			if err := json.Unmarshal(body, &result); err != nil {
+				return nil, fmt.Errorf("parse response from %s: %w", url, err)
+			}
+			for selfKey, jsonField := range step.Store {
+				if val := getStringField(result, jsonField); val != "" {
+					resolveCtx[selfKey] = val
+				}
+			}
+		} else {
+			data = body
+		}
+	}
+
+	if data == nil {
+		return nil, fmt.Errorf("no binary data from resolve steps")
+	}
+	if len(data) > maxFileAttachmentSize {
+		return nil, fmt.Errorf("file too large (%d bytes, max %d)", len(data), maxFileAttachmentSize)
+	}
+
+	mimeType := substituteTemplate(spec.MimeType, contexts)
+	name := substituteTemplate(spec.Name, contexts)
+
+	return &pkg.FileAttachment{
+		Name:     name,
+		MimeType: mimeType,
+		Data:     data,
+		Size:     int64(len(data)),
+	}, nil
 }
 
 // flattenToStringMap converts a map[string]interface{} to map[string]string,

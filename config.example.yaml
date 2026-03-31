@@ -69,15 +69,43 @@ channels:
     # ref: "master"
     config: {}
 
-  # YAML-driven channel (no compiled binary — runs in-process from channel.yaml spec)
+  # YAML-driven channels (no compiled binary — run in-process from channel.yaml spec)
   # slack:
   #   enabled: true
-  #   plugin: "./channels/slack/channel.yaml"   # .yaml → YAML runtime (in-process)
-  #   github: "opentalon/slack-channel"          # auto-fetches channel.yaml + tools.yaml
-  #   ref: "master"
+  #   plugin: "./channels/slack-channel/channel.yaml"
   #   config:
   #     ack_reaction: eyes
   #     done_reaction: white_check_mark
+
+  # telegram:
+  #   enabled: true
+  #   plugin: "./channels/telegram-channel/channel.yaml"
+  #   config: {}
+
+  # --- Inbound media handling ---
+  #
+  # YAML channels support non-text messages (photos, voice, stickers, documents, etc.)
+  # via an `inbound.media` section in the channel's channel.yaml file.
+  #
+  # Each rule has three fields:
+  #   when:        event field whose presence triggers this rule (e.g. "photo", "voice")
+  #   description: text injected as message content — LLM sees this and responds naturally
+  #   resolve:     (optional) HTTP steps to download binary for LLM-supported types (images, PDFs)
+  #
+  # For LLM-supported types (images, PDFs): resolve downloads binary, attaches it as a file,
+  # and the LLM processes it natively via vision/document understanding.
+  # For unsupported types (voice, video, stickers): no resolve — the description tells the LLM
+  # what was sent, and it responds naturally. No hardcoded error messages.
+  #
+  # resolve steps run sequentially:
+  #   - Intermediate steps (with `store:`) parse JSON response and store fields
+  #   - The final step (without `store:`) captures raw binary
+  #   - Templates: {{event.*}}, {{env.*}}, {{resolve.*}}, {{self.*}}
+  #
+  # Content mapping supports fallback: `content: { field: "text", fallback: "caption" }`
+  #
+  # Working examples: channels/telegram-channel/channel.yaml, channels/slack-channel/channel.yaml
+  # NOTE: Outbound media (sending images/documents back) is planned for the next release.
 
 plugins:
   # Slash commands: /install skill, /show config, /commands, /set prompt, /clear

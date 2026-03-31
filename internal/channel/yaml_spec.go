@@ -68,8 +68,45 @@ type InboundSpec struct {
 	ProcessWhen       []ProcessRule       `yaml:"process_when"`
 	Skip              []SkipRule          `yaml:"skip"`
 	Mapping           MappingSpec         `yaml:"mapping"`
+	Media             []MediaRule         `yaml:"media"` // detect non-text messages, resolve files or inject descriptions
 	Transforms        []Transform         `yaml:"transforms"`
 	Dedup             DedupSpec           `yaml:"dedup"`
+}
+
+// MediaRule describes how to handle a non-text message type (e.g. photo, voice, sticker).
+// Rules are evaluated in order; the first matching rule wins.
+type MediaRule struct {
+	// When is the event field whose presence triggers this rule (e.g. "photo", "voice", "sticker").
+	When string `yaml:"when"`
+	// Description is a template injected as message content when the original text is empty.
+	// The LLM sees this and responds naturally. Supports {{event.*}} templates.
+	Description string `yaml:"description"`
+	// Resolve optionally downloads binary data (images, documents) to attach as a file.
+	// When absent, only the description text is injected (for unsupported types like voice/video).
+	Resolve *MediaResolveSpec `yaml:"resolve"`
+}
+
+// MediaResolveSpec describes how to download a media file via HTTP.
+type MediaResolveSpec struct {
+	// MimeType of the resolved file. Static (e.g. "image/jpeg") or template (e.g. "{{event.document.mime_type}}").
+	MimeType string `yaml:"mime_type"`
+	// Name of the resolved file. Optional template (e.g. "{{event.document.file_name}}").
+	Name string `yaml:"name"`
+	// Steps are sequential HTTP calls to resolve a file reference to binary data.
+	// Intermediate steps (with Store) parse JSON and store fields in a "resolve" template context.
+	// The final step (without Store) captures the raw response body as binary.
+	Steps []MediaResolveStep `yaml:"steps"`
+}
+
+// MediaResolveStep is one HTTP call in a media resolution chain.
+type MediaResolveStep struct {
+	Method  string            `yaml:"method"`
+	URL     string            `yaml:"url"`
+	Headers map[string]string `yaml:"headers"`
+	// Store maps self-var names to JSON response fields (like init step Store).
+	// When present, the response is parsed as JSON. When absent, the response
+	// body is treated as raw binary (this should be the final step).
+	Store map[string]string `yaml:"store"`
 }
 
 // ProcessRule defines when to process an event (allowlist). If any
