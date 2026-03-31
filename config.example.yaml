@@ -98,6 +98,19 @@ plugins:
     # ref: "master"
     config: {}
 
+  # MCP bridge: connects to MCP-compatible tool servers.
+  # Config block is passed to the plugin via the Init RPC.
+  # mcp:
+  #   enabled: true
+  #   github: "opentalon/mcp-plugin"
+  #   ref: "master"
+  #   config:
+  #     servers:
+  #       - name: my-mcp-server
+  #         url: "https://mcp.example.com/sse"
+  #         headers:
+  #           Authorization: "Bearer {{env.MCP_TOKEN}}"
+
 # Request packages: skill-style API calls (no compiled plugin). Core runs HTTP requests from templates.
 # Use {{env.VAR}} and {{args.param}} in url/body/headers. Guardrails: required_env validated before request.
 # To reuse OpenClaw/ClawHub skills you can:

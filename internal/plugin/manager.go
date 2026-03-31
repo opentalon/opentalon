@@ -166,16 +166,16 @@ func (m *Manager) connectRemote(entry PluginEntry) (*Client, error) {
 	return client, nil
 }
 
-// configJSON serializes the plugin's Config map to JSON, returning empty string
+// configJSON serializes the plugin's Config map to JSON, returning "{}"
 // when there is no config or serialization fails.
 func configJSON(entry PluginEntry) string {
 	if len(entry.Config) == 0 {
-		return ""
+		return "{}"
 	}
 	b, err := json.Marshal(entry.Config)
 	if err != nil {
 		slog.Warn("failed to marshal config", "component", "plugin-manager", "plugin", entry.Name, "error", err)
-		return ""
+		return "{}"
 	}
 	return string(b)
 }
