@@ -45,6 +45,7 @@ type WhoAmIConfig struct {
 	EntityIDField string `yaml:"entity_id_field"` // JSON field in response; default "entity_id"
 	GroupField    string `yaml:"group_field"`     // JSON field in response; default "group"
 	PluginsField  string `yaml:"plugins_field"`   // optional JSON field for plugin list; default "plugins"
+	ModelField    string `yaml:"model_field"`     // optional JSON field for model override; default "model"
 }
 
 // GroupConfig is a static baseline of plugin IDs for a group.

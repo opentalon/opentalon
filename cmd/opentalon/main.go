@@ -342,6 +342,7 @@ func main() {
 			EntityIDField: cfg.Profiles.WhoAmI.EntityIDField,
 			GroupField:    cfg.Profiles.WhoAmI.GroupField,
 			PluginsField:  cfg.Profiles.WhoAmI.PluginsField,
+			ModelField:    cfg.Profiles.WhoAmI.ModelField,
 		}
 		if d, err := time.ParseDuration(cfg.Profiles.WhoAmI.Timeout); err == nil {
 			vcfg.Timeout = d
@@ -356,7 +357,7 @@ func main() {
 	// Build orchestrator usage recorder adapter (nil when usageStore is nil).
 	var usageRecorder orchestrator.UsageRecorder
 	if usageStore != nil {
-		usageRecorder = &usageRecorderAdapter{store: usageStore}
+		usageRecorder = &usageRecorderAdapter{store: usageStore, provider: prov}
 	}
 
 	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, orchestrator.OrchestratorOpts{
@@ -439,18 +440,33 @@ func seedGroupPlugins(ctx context.Context, gps *store.GroupPluginStore, groups m
 
 // usageRecorderAdapter adapts store.UsageStore to orchestrator.UsageRecorder.
 type usageRecorderAdapter struct {
-	store *store.UsageStore
+	store    *store.UsageStore
+	provider provider.Provider
 }
 
-func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID string, inputTokens, outputTokens, toolCalls int) {
+func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int) {
+	var inputCostUSD, outputCostUSD float64
+	if modelID != "" && a.provider != nil {
+		for _, m := range a.provider.Models() {
+			if m.ID == modelID {
+				// Cost is configured per million tokens.
+				inputCostUSD = float64(inputTokens) * m.Cost.Input / 1_000_000
+				outputCostUSD = float64(outputTokens) * m.Cost.Output / 1_000_000
+				break
+			}
+		}
+	}
 	if err := a.store.Record(ctx, store.UsageRecord{
-		EntityID:     entityID,
-		GroupID:      groupID,
-		ChannelID:    channelID,
-		SessionID:    sessionID,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-		ToolCalls:    toolCalls,
+		EntityID:      entityID,
+		GroupID:       groupID,
+		ChannelID:     channelID,
+		SessionID:     sessionID,
+		ModelID:       modelID,
+		InputTokens:   inputTokens,
+		OutputTokens:  outputTokens,
+		ToolCalls:     toolCalls,
+		InputCost:  inputCostUSD,
+		OutputCost: outputCostUSD,
 	}); err != nil {
 		slog.Warn("usage record failed", "entity", entityID, "error", err)
 	}

@@ -37,6 +37,7 @@ type VerifierConfig struct {
 	EntityIDField string        // default "entity_id"
 	GroupField    string        // default "group"
 	PluginsField  string        // default "plugins"
+	ModelField    string        // optional JSON field for model override; default "model"
 }
 
 func (c *VerifierConfig) setDefaults() {
@@ -63,6 +64,9 @@ func (c *VerifierConfig) setDefaults() {
 	}
 	if c.PluginsField == "" {
 		c.PluginsField = "plugins"
+	}
+	if c.ModelField == "" {
+		c.ModelField = "model"
 	}
 }
 
@@ -170,11 +174,14 @@ func (v *Verifier) callServer(ctx context.Context, token string) (*Profile, erro
 		_ = json.Unmarshal(praw, &plugins)
 	}
 
+	model := jsonString(raw[v.cfg.ModelField])
+
 	return &Profile{
 		EntityID: entityID,
 		Group:    group,
 		Token:    token,
 		Plugins:  plugins,
+		Model:    model,
 	}, nil
 }
 

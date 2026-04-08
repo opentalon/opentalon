@@ -69,7 +69,7 @@ type GroupPluginLookup interface {
 
 // UsageRecorder records LLM usage statistics after an orchestrator run.
 type UsageRecorder interface {
-	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID string, inputTokens, outputTokens, toolCalls int)
+	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int)
 }
 
 // OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check, no summarization).
@@ -503,12 +503,23 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 	result := &RunResult{}
 
+	// Resolve profile model override: strip the provider prefix if present (e.g. "anthropic/claude-3-5" -> "claude-3-5").
+	profileModel := ""
+	if p := profile.FromContext(ctx); p != nil && p.Model != "" {
+		if idx := strings.Index(p.Model, "/"); idx >= 0 {
+			profileModel = p.Model[idx+1:]
+		} else {
+			profileModel = p.Model
+		}
+	}
+
 	var totalInputTokens, totalOutputTokens, totalToolCalls int
+	var modelUsed string
 	defer func() {
 		if o.usageRecorder != nil {
 			if p := profile.FromContext(ctx); p != nil {
 				o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group,
-					p.ChannelID, sessionID,
+					p.ChannelID, sessionID, modelUsed,
 					totalInputTokens, totalOutputTokens, totalToolCalls)
 			}
 		}
@@ -535,13 +546,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("LLM request message", "index", j+1, "role", m.Role, "content", preview)
 		}
 
-		resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{
-			Messages: guardedMessages,
-		})
+		req := &provider.CompletionRequest{Messages: guardedMessages}
+		if profileModel != "" {
+			req.Model = profileModel
+		}
+		resp, err := o.llm.Complete(ctx, req)
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
 
+		if modelUsed == "" {
+			modelUsed = resp.Model
+		}
 		totalInputTokens += resp.Usage.InputTokens
 		totalOutputTokens += resp.Usage.OutputTokens
 

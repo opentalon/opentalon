@@ -23,8 +23,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 2 {
-		t.Errorf("schema_version = %d, want 2", v)
+	if v != 3 {
+		t.Errorf("schema_version = %d, want 3", v)
 	}
 
 	// Re-open: idempotent, no error
@@ -37,8 +37,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version (second open): %v", err)
 	}
-	if v != 2 {
-		t.Errorf("schema_version after re-open = %d, want 2", v)
+	if v != 3 {
+		t.Errorf("schema_version after re-open = %d, want 3", v)
 	}
 }
 
@@ -79,11 +79,11 @@ func TestMemoryStore_AddScopedAndMemoriesForContext(t *testing.T) {
 		t.Fatalf("MemoriesForContext: %v", err)
 	}
 	if len(list) != 2 {
-		t.Errorf("MemoriesForContext(workflow) for U1: got %d, want 2 (general + U1)", len(list))
+		t.Errorf("MemoriesForContext(workflow) for U1: got %d, want 3 (general + U1)", len(list))
 	}
 	list, _ = mem.MemoriesForContext(ctxB, "workflow")
 	if len(list) != 2 {
-		t.Errorf("MemoriesForContext(workflow) for U2: got %d, want 2 (general + U2)", len(list))
+		t.Errorf("MemoriesForContext(workflow) for U2: got %d, want 3 (general + U2)", len(list))
 	}
 }
 
@@ -111,7 +111,7 @@ func TestSessionStore_PersistAndGet(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	if len(sess.Messages) != 2 {
-		t.Errorf("len(Messages) = %d, want 2", len(sess.Messages))
+		t.Errorf("len(Messages) = %d, want 3", len(sess.Messages))
 	}
 
 	// Re-open DB and get again: should persist
@@ -124,7 +124,7 @@ func TestSessionStore_PersistAndGet(t *testing.T) {
 		t.Fatalf("Get after reopen: %v", err)
 	}
 	if len(sess2.Messages) != 2 {
-		t.Errorf("after reopen len(Messages) = %d, want 2", len(sess2.Messages))
+		t.Errorf("after reopen len(Messages) = %d, want 3", len(sess2.Messages))
 	}
 }
 
@@ -172,7 +172,7 @@ func TestSessionStore_SetSummaryRoundTrip(t *testing.T) {
 		t.Errorf("Summary = %q", sess.Summary)
 	}
 	if len(sess.Messages) != 2 {
-		t.Errorf("len(Messages) = %d, want 2", len(sess.Messages))
+		t.Errorf("len(Messages) = %d, want 3", len(sess.Messages))
 	}
 }
 

@@ -40,7 +40,8 @@ Authorization: Bearer <token>
 {
   "entity_id": "user-abc123",
   "group": "team-a",
-  "plugins": ["jira", "github"]
+  "plugins": ["jira", "github"],
+  "model": "anthropic/claude-3-5-sonnet-20241022"
 }
 ```
 
@@ -49,6 +50,7 @@ Authorization: Bearer <token>
 | `entity_id` | Yes | Stable unique identifier. Used to scope sessions, memories, and plugin state. |
 | `group` | No | Group name. Used to look up allowed plugins in the `group_plugins` table. |
 | `plugins` | No | Plugin IDs allowed for this group. Auto-saved to DB (see [Dynamic plugin assignments](#dynamic-plugin-assignments)). |
+| `model` | No | Model override for this profile (e.g. `"anthropic/claude-3-5-sonnet-20241022"`). Overrides the server default for this request. |
 
 ### Full WhoAmI config
 
@@ -64,6 +66,7 @@ profiles:
     entity_id_field: entity_id    # JSON key for entity ID; default "entity_id"
     group_field: group            # JSON key for group; default "group"
     plugins_field: plugins        # JSON key for plugin list; default "plugins"
+    model_field: model            # JSON key for model override; default "model"
 ```
 
 ## Dynamic plugin assignments
@@ -160,7 +163,9 @@ GROUP BY entity_id
 ORDER BY SUM(input_tokens) DESC;
 ```
 
-Fields: `id`, `entity_id`, `group_id`, `channel_id`, `session_id`, `input_tokens`, `output_tokens`, `tool_calls`, `created_at`.
+Fields: `id`, `entity_id`, `group_id`, `channel_id`, `session_id`, `model_id`, `input_tokens`, `output_tokens`, `tool_calls`, `input_cost`, `output_cost`, `created_at`.
+
+`input_cost` and `output_cost` are computed from the model's configured price per million tokens (set in `models.providers.<id>.models[].cost`). They will be zero if the model has no cost configured or if no model was recorded.
 
 ## Channel plugin integration
 

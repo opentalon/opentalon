@@ -11,4 +11,5 @@ type Profile struct {
 	Token     string   // original bearer token (may be forwarded to MCP servers)
 	Plugins   []string // plugin IDs returned by WhoAmI (auto-saved to group_plugins table)
 	ChannelID string   // set by the handler; used for usage statistics
+	Model     string   // optional model override returned by WhoAmI (e.g. "anthropic/claude-3-5-sonnet-20241022")
 }
