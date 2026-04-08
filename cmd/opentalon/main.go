@@ -457,14 +457,14 @@ func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupI
 		}
 	}
 	if err := a.store.Record(ctx, store.UsageRecord{
-		EntityID:      entityID,
-		GroupID:       groupID,
-		ChannelID:     channelID,
-		SessionID:     sessionID,
-		ModelID:       modelID,
-		InputTokens:   inputTokens,
-		OutputTokens:  outputTokens,
-		ToolCalls:     toolCalls,
+		EntityID:     entityID,
+		GroupID:      groupID,
+		ChannelID:    channelID,
+		SessionID:    sessionID,
+		ModelID:      modelID,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		ToolCalls:    toolCalls,
 		InputCost:    inputCostUSD,
 		OutputCost:   outputCostUSD,
 	}); err != nil {
