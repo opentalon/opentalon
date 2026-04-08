@@ -525,6 +525,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 	}()
 
+	// Resolve allowed plugins once per Run call and cache in ctx so that
+	// buildSystemPrompt and executeCall share the result without a second DB hit.
+	ctx = withAllowedPlugins(ctx, o.resolveAllowedPlugins(ctx))
+
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		sess, _ := o.sessions.Get(sessionID)
 
@@ -1143,9 +1147,24 @@ func formatToolResultMessage(result ToolResult) string {
 	return fmt.Sprintf("[tool_result] %s", result.Content)
 }
 
+// allowedPluginsKey is the context key for the per-Run allowed-plugin cache.
+type allowedPluginsKey struct{}
+
+// cachedAllowedPlugins wraps the map so a nil map (no restrictions) is
+// distinguishable from an absent cache entry.
+type cachedAllowedPlugins struct{ m map[string]bool }
+
+func withAllowedPlugins(ctx context.Context, m map[string]bool) context.Context {
+	return context.WithValue(ctx, allowedPluginsKey{}, cachedAllowedPlugins{m})
+}
+
 // resolveAllowedPlugins returns the set of plugin IDs allowed for the current profile's group.
 // Returns nil when no profile is set or no group plugin lookup is configured (= no restrictions).
+// The result is cached in ctx by Run; within a single Run call this never hits the DB twice.
 func (o *Orchestrator) resolveAllowedPlugins(ctx context.Context) map[string]bool {
+	if cached, ok := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins); ok {
+		return cached.m
+	}
 	if o.groupPluginLookup == nil {
 		return nil
 	}

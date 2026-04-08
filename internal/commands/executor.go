@@ -105,11 +105,10 @@ func (e *Executor) WithProfileStore(m GroupPluginManager) *Executor {
 }
 
 // Execute implements orchestrator.PluginExecutor.
-func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
+func (e *Executor) Execute(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 	switch call.Action {
 	case ActionInstallSkill:
-		// TODO: PluginExecutor.Execute does not receive context; clone cannot be cancelled
-		return e.installSkill(context.Background(), call)
+		return e.installSkill(ctx, call)
 	case ActionShowConfig:
 		return e.showConfig(call)
 	case ActionListCommands:
@@ -119,13 +118,13 @@ func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 	case ActionClearSession:
 		return e.clearSession(call)
 	case ActionReloadMCP:
-		return e.reloadMCP(context.Background(), call)
+		return e.reloadMCP(ctx, call)
 	case ActionProfileAssign:
-		return e.profileAssign(context.Background(), call)
+		return e.profileAssign(ctx, call)
 	case ActionProfileRevoke:
-		return e.profileRevoke(context.Background(), call)
+		return e.profileRevoke(ctx, call)
 	case ActionProfileListGroup:
-		return e.profileListGroup(context.Background(), call)
+		return e.profileListGroup(ctx, call)
 	default:
 		return orchestrator.ToolResult{
 			CallID: call.ID,

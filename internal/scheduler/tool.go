@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -76,7 +77,7 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 	}
 }
 
-func (t *SchedulerTool) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
+func (t *SchedulerTool) Execute(_ context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 	switch call.Action {
 	case "create_job":
 		return t.createJob(call)

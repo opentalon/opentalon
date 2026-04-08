@@ -35,7 +35,7 @@ func (p *fakeParser) Parse(response string) []ToolCall {
 
 type echoExecutor struct{}
 
-func (e *echoExecutor) Execute(call ToolCall) ToolResult {
+func (e *echoExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 	return ToolResult{
 		CallID:  call.ID,
 		Content: fmt.Sprintf("executed %s.%s", call.Plugin, call.Action),
@@ -47,14 +47,14 @@ type fixedResultExecutor struct {
 	content string
 }
 
-func (e *fixedResultExecutor) Execute(call ToolCall) ToolResult {
+func (e *fixedResultExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 	return ToolResult{CallID: call.ID, Content: e.content}
 }
 
 // previousResultExecutor returns args["previous_result"] so tests can assert it was passed.
 type previousResultExecutor struct{}
 
-func (e *previousResultExecutor) Execute(call ToolCall) ToolResult {
+func (e *previousResultExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 	prev := call.Args["previous_result"]
 	if prev == "" {
 		prev = "(none)"
@@ -536,7 +536,7 @@ func TestRunInvokeStepsStopsOnError(t *testing.T) {
 
 type errorReturningExecutor struct{ err string }
 
-func (e *errorReturningExecutor) Execute(call ToolCall) ToolResult {
+func (e *errorReturningExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 	return ToolResult{CallID: call.ID, Error: e.err}
 }
 
@@ -562,7 +562,7 @@ type countingExecutor struct {
 	count int
 }
 
-func (e *countingExecutor) Execute(call ToolCall) ToolResult {
+func (e *countingExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 	e.count++
 	return ToolResult{CallID: call.ID, Content: call.Args["text"]}
 }
@@ -570,7 +570,7 @@ func (e *countingExecutor) Execute(call ToolCall) ToolResult {
 // prefixingExecutor prepends a prefix to the "text" arg, returning it as the result.
 type prefixingExecutor struct{ prefix string }
 
-func (e *prefixingExecutor) Execute(call ToolCall) ToolResult {
+func (e *prefixingExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 	return ToolResult{CallID: call.ID, Content: e.prefix + call.Args["text"]}
 }
 
@@ -1428,6 +1428,6 @@ type capturingExecutor struct {
 	fn func(ToolCall) ToolResult
 }
 
-func (e *capturingExecutor) Execute(call ToolCall) ToolResult {
+func (e *capturingExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 	return e.fn(call)
 }

@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -44,7 +45,7 @@ func TestToolCapability(t *testing.T) {
 func TestToolCreateAndListJobs(t *testing.T) {
 	tool := newTestTool(t)
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID:     "1",
 		Plugin: ToolName,
 		Action: "create_job",
@@ -63,7 +64,7 @@ func TestToolCreateAndListJobs(t *testing.T) {
 		t.Errorf("content = %q", result.Content)
 	}
 
-	listResult := tool.Execute(orchestrator.ToolCall{
+	listResult := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "list_jobs",
 	})
 	if listResult.Error != "" {
@@ -77,12 +78,12 @@ func TestToolCreateAndListJobs(t *testing.T) {
 func TestToolCreateDuplicate(t *testing.T) {
 	tool := newTestTool(t)
 
-	tool.Execute(orchestrator.ToolCall{
+	tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{"name": "dup", "interval": "1h", "action": "a.b", "user_id": "diana"},
 	})
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{"name": "dup", "interval": "1h", "action": "a.b", "user_id": "diana"},
 	})
@@ -94,7 +95,7 @@ func TestToolCreateDuplicate(t *testing.T) {
 func TestToolCreateMissingFields(t *testing.T) {
 	tool := newTestTool(t)
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{"name": "x"},
 	})
@@ -106,7 +107,7 @@ func TestToolCreateMissingFields(t *testing.T) {
 func TestToolCreateWithArgs(t *testing.T) {
 	tool := newTestTool(t)
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{
 			"name":     "args-job",
@@ -132,7 +133,7 @@ func TestToolCreateWithArgs(t *testing.T) {
 func TestToolCreateBadArgsJSON(t *testing.T) {
 	tool := newTestTool(t)
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{
 			"name": "bad", "interval": "1h", "action": "a.b",
@@ -147,12 +148,12 @@ func TestToolCreateBadArgsJSON(t *testing.T) {
 func TestToolDeleteJob(t *testing.T) {
 	tool := newTestTool(t)
 
-	tool.Execute(orchestrator.ToolCall{
+	tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{"name": "del", "interval": "1h", "action": "a.b", "user_id": "diana"},
 	})
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "delete_job",
 		Args: map[string]string{"name": "del", "user_id": "diana"},
 	})
@@ -160,7 +161,7 @@ func TestToolDeleteJob(t *testing.T) {
 		t.Errorf("delete error: %s", result.Error)
 	}
 
-	result = tool.Execute(orchestrator.ToolCall{
+	result = tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "3", Plugin: ToolName, Action: "delete_job",
 		Args: map[string]string{"name": "del", "user_id": "diana"},
 	})
@@ -172,12 +173,12 @@ func TestToolDeleteJob(t *testing.T) {
 func TestToolPauseResumeJob(t *testing.T) {
 	tool := newTestTool(t)
 
-	tool.Execute(orchestrator.ToolCall{
+	tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{"name": "pr", "interval": "1h", "action": "a.b", "user_id": "diana"},
 	})
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "pause_job",
 		Args: map[string]string{"name": "pr"},
 	})
@@ -185,7 +186,7 @@ func TestToolPauseResumeJob(t *testing.T) {
 		t.Errorf("pause error: %s", result.Error)
 	}
 
-	result = tool.Execute(orchestrator.ToolCall{
+	result = tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "3", Plugin: ToolName, Action: "resume_job",
 		Args: map[string]string{"name": "pr"},
 	})
@@ -197,12 +198,12 @@ func TestToolPauseResumeJob(t *testing.T) {
 func TestToolUpdateJob(t *testing.T) {
 	tool := newTestTool(t)
 
-	tool.Execute(orchestrator.ToolCall{
+	tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{"name": "upd", "interval": "1h", "action": "a.b", "user_id": "diana"},
 	})
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "update_job",
 		Args: map[string]string{"name": "upd", "interval": "30m", "user_id": "diana"},
 	})
@@ -219,12 +220,12 @@ func TestToolUpdateJob(t *testing.T) {
 func TestToolUpdateNoFields(t *testing.T) {
 	tool := newTestTool(t)
 
-	tool.Execute(orchestrator.ToolCall{
+	tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{"name": "nf", "interval": "1h", "action": "a.b", "user_id": "diana"},
 	})
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "update_job",
 		Args: map[string]string{"name": "nf", "user_id": "diana"},
 	})
@@ -235,7 +236,7 @@ func TestToolUpdateNoFields(t *testing.T) {
 
 func TestToolUnknownAction(t *testing.T) {
 	tool := newTestTool(t)
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "fly_to_moon",
 	})
 	if result.Error == "" {
@@ -245,7 +246,7 @@ func TestToolUnknownAction(t *testing.T) {
 
 func TestToolListEmpty(t *testing.T) {
 	tool := newTestTool(t)
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "list_jobs",
 	})
 	if result.Error != "" {
@@ -260,7 +261,7 @@ func TestToolMissingName(t *testing.T) {
 	tool := newTestTool(t)
 
 	for _, action := range []string{"delete_job", "pause_job", "resume_job", "update_job"} {
-		result := tool.Execute(orchestrator.ToolCall{
+		result := tool.Execute(context.Background(), orchestrator.ToolCall{
 			ID: "1", Plugin: ToolName, Action: action,
 			Args: map[string]string{},
 		})

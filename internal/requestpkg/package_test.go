@@ -1,6 +1,7 @@
 package requestpkg
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	"github.com/opentalon/opentalon/internal/profile"
 )
 
 func TestSubstitute(t *testing.T) {
@@ -83,7 +85,7 @@ func TestExecutor_Execute_OptionalParams(t *testing.T) {
 		},
 	})
 
-	result := exec.Execute(orchestrator.ToolCall{
+	result := exec.Execute(context.Background(), orchestrator.ToolCall{
 		ID:     "call-opt",
 		Plugin: "search",
 		Action: "search",
@@ -136,7 +138,7 @@ func TestExecutor_Execute_URLEncoding(t *testing.T) {
 		},
 	})
 
-	result := exec.Execute(orchestrator.ToolCall{
+	result := exec.Execute(context.Background(), orchestrator.ToolCall{
 		ID:     "call-enc",
 		Plugin: "search",
 		Action: "search",
@@ -178,7 +180,7 @@ func TestExecutor_Execute(t *testing.T) {
 	}
 	exec := NewExecutor("jira", packages)
 
-	result := exec.Execute(orchestrator.ToolCall{
+	result := exec.Execute(context.Background(), orchestrator.ToolCall{
 		ID:     "call-1",
 		Plugin: "jira",
 		Action: "create_issue",
@@ -207,11 +209,72 @@ func TestExecutor_Execute_RequiredEnv(t *testing.T) {
 			RequiredEnv: []string{"MISSING_VAR"},
 		},
 	})
-	result := exec.Execute(orchestrator.ToolCall{ID: "1", Plugin: "test", Action: "do"})
+	result := exec.Execute(context.Background(), orchestrator.ToolCall{ID: "1", Plugin: "test", Action: "do"})
 	if result.Error == "" {
 		t.Error("expected error when required env missing")
 	}
 	if result.Error != "required env \"MISSING_VAR\" is not set" {
 		t.Errorf("Error = %q", result.Error)
+	}
+}
+
+func TestExecutor_Execute_ProfileToken(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	exec := NewExecutor("myapi", []Package{
+		{
+			Action:  "call",
+			Method:  "GET",
+			URL:     srv.URL + "/resource",
+			Headers: map[string]string{"Authorization": "Bearer {{profile.token}}"},
+		},
+	})
+
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{
+		EntityID: "user-1",
+		Token:    "tok-abc123",
+	})
+
+	result := exec.Execute(ctx, orchestrator.ToolCall{ID: "pt-1", Plugin: "myapi", Action: "call"})
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if gotAuth != "Bearer tok-abc123" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer tok-abc123")
+	}
+}
+
+func TestExecutor_Execute_ProfileToken_NoProfile(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	exec := NewExecutor("myapi", []Package{
+		{
+			Action:  "call",
+			Method:  "GET",
+			URL:     srv.URL + "/resource",
+			Headers: map[string]string{"Authorization": "Bearer {{profile.token}}"},
+		},
+	})
+
+	// No profile in context: {{profile.token}} should expand to empty string.
+	result := exec.Execute(context.Background(), orchestrator.ToolCall{ID: "pt-2", Plugin: "myapi", Action: "call"})
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	// net/http trims trailing whitespace from header values, so an empty token yields "Bearer".
+	if gotAuth != "Bearer" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer")
 	}
 }

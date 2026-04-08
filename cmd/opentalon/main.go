@@ -91,14 +91,12 @@ func main() {
 	var groupPluginStore *store.GroupPluginStore
 	var usageStore *store.UsageStore
 	var entityStore *store.EntityStore
-	var stateDB *store.DB
 	if dataDir != "" {
 		db, err := store.Open(dataDir)
 		if err != nil {
 			slog.Warn("state store open failed, using in-memory state", "error", err)
 			memory, sessions = newInMemoryState()
 		} else {
-			stateDB = db
 			defer func() { _ = db.Close() }()
 			memory = store.NewMemoryStore(db)
 			sessStore := store.NewSessionStore(db, cfg.State.Session.MaxMessages, cfg.State.Session.MaxIdleDays)
@@ -115,7 +113,6 @@ func main() {
 	} else {
 		memory, sessions = newInMemoryState()
 	}
-	_ = stateDB // used indirectly via stores
 
 	// Sessions created on first message per channel (session key from channel ID)
 

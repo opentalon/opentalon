@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -28,16 +29,17 @@ type EntityUpserter interface {
 
 // VerifierConfig holds configuration parsed from config.WhoAmIConfig.
 type VerifierConfig struct {
-	URL           string
-	Method        string        // "GET" or "POST"; default "POST"
-	TokenHeader   string        // default "Authorization"
-	TokenPrefix   string        // default "Bearer "
-	Timeout       time.Duration // default 5s
-	CacheTTL      time.Duration // default 60s
-	EntityIDField string        // default "entity_id"
-	GroupField    string        // default "group"
-	PluginsField  string        // default "plugins"
-	ModelField    string        // optional JSON field for model override; default "model"
+	URL              string
+	Method           string        // "GET" or "POST"; default "POST"
+	TokenHeader      string        // default "Authorization"
+	TokenPrefix      string        // default "Bearer "
+	Timeout          time.Duration // default 5s
+	CacheTTL         time.Duration // default 60s
+	NegativeCacheTTL time.Duration // default 15s; caches explicit server rejections (4xx)
+	EntityIDField    string        // default "entity_id"
+	GroupField       string        // default "group"
+	PluginsField     string        // default "plugins"
+	ModelField       string        // optional JSON field for model override; default "model"
 }
 
 func (c *VerifierConfig) setDefaults() {
@@ -56,6 +58,9 @@ func (c *VerifierConfig) setDefaults() {
 	if c.CacheTTL == 0 {
 		c.CacheTTL = 60 * time.Second
 	}
+	if c.NegativeCacheTTL == 0 {
+		c.NegativeCacheTTL = 15 * time.Second
+	}
 	if c.EntityIDField == "" {
 		c.EntityIDField = "entity_id"
 	}
@@ -70,8 +75,16 @@ func (c *VerifierConfig) setDefaults() {
 	}
 }
 
+// rejectedError wraps ErrAuthFailed for explicit server rejections (non-2xx HTTP status).
+// Only this type of failure is eligible for negative caching; transient errors are not.
+type rejectedError struct{ err error }
+
+func (e rejectedError) Error() string { return e.err.Error() }
+func (e rejectedError) Unwrap() error { return e.err }
+
 type cacheEntry struct {
 	profile   *Profile
+	err       error // non-nil for negative cache entries
 	expiresAt time.Time
 }
 
@@ -106,31 +119,48 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*Profile, error) {
 	v.mu.Lock()
 	if e, ok := v.cache[key]; ok && time.Now().Before(e.expiresAt) {
 		v.mu.Unlock()
-		return e.profile, nil
+		return e.profile, e.err
 	}
 	v.mu.Unlock()
 
 	p, err := v.callServer(ctx, token)
 	if err != nil {
+		var rejected rejectedError
+		if errors.As(err, &rejected) {
+			v.mu.Lock()
+			now := time.Now()
+			for k, e := range v.cache {
+				if now.After(e.expiresAt) {
+					delete(v.cache, k)
+				}
+			}
+			v.cache[key] = cacheEntry{err: err, expiresAt: now.Add(v.cfg.NegativeCacheTTL)}
+			v.mu.Unlock()
+		}
 		return nil, err
 	}
 
 	// Auto-save group→plugin assignments.
 	if v.groupStore != nil && len(p.Plugins) > 0 {
 		if serr := v.groupStore.UpsertGroupPlugins(ctx, p.Group, p.Plugins, "whoami"); serr != nil {
-			// Non-fatal: log but don't fail the request.
-			_ = serr
+			slog.Warn("auto-save group plugins failed", "group", p.Group, "error", serr)
 		}
 	}
 	// Track entity.
 	if v.entityStore != nil {
 		if serr := v.entityStore.Upsert(ctx, p.EntityID, p.Group); serr != nil {
-			_ = serr
+			slog.Warn("auto-save entity failed", "entity_id", p.EntityID, "group", p.Group, "error", serr)
 		}
 	}
 
 	v.mu.Lock()
-	v.cache[key] = cacheEntry{profile: p, expiresAt: time.Now().Add(v.cfg.CacheTTL)}
+	now := time.Now()
+	for k, e := range v.cache {
+		if now.After(e.expiresAt) {
+			delete(v.cache, k)
+		}
+	}
+	v.cache[key] = cacheEntry{profile: p, expiresAt: now.Add(v.cfg.CacheTTL)}
 	v.mu.Unlock()
 
 	return p, nil
@@ -150,7 +180,7 @@ func (v *Verifier) callServer(ctx context.Context, token string) (*Profile, erro
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%w: status %d", ErrAuthFailed, resp.StatusCode)
+		return nil, rejectedError{fmt.Errorf("%w: status %d", ErrAuthFailed, resp.StatusCode)}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))

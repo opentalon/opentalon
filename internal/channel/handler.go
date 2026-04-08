@@ -61,7 +61,7 @@ func NewMessageHandler(
 				ConversationID: msg.ConversationID,
 				ThreadID:       msg.ThreadID,
 				Content:        friendlyError(err),
-				Metadata:       msg.Metadata,
+				Metadata:       safeMetadata(msg.Metadata),
 			}, nil
 		}
 		outContent := response
@@ -75,7 +75,7 @@ func NewMessageHandler(
 			ConversationID: msg.ConversationID,
 			ThreadID:       msg.ThreadID,
 			Content:        outContent,
-			Metadata:       msg.Metadata,
+			Metadata:       safeMetadata(msg.Metadata),
 		}, nil
 	}
 }
@@ -85,8 +85,21 @@ func errorResponse(msg pkg.InboundMessage, text string) pkg.OutboundMessage {
 		ConversationID: msg.ConversationID,
 		ThreadID:       msg.ThreadID,
 		Content:        text,
-		Metadata:       msg.Metadata,
+		Metadata:       safeMetadata(msg.Metadata),
 	}
+}
+
+// safeMetadata returns a copy of m with sensitive keys removed.
+func safeMetadata(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return m
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	delete(out, "profile_token")
+	return out
 }
 
 // friendlyError returns a user-facing message for known error conditions.

@@ -83,7 +83,7 @@ func (g *Guard) ExecuteWithTimeout(ctx context.Context, exec PluginExecutor, cal
 
 	done := make(chan ToolResult, 1)
 	go func() {
-		done <- exec.Execute(call)
+		done <- exec.Execute(callCtx, call)
 	}()
 
 	select {

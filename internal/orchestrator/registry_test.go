@@ -1,12 +1,15 @@
 package orchestrator
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 type mockExecutor struct {
 	result ToolResult
 }
 
-func (m *mockExecutor) Execute(call ToolCall) ToolResult {
+func (m *mockExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 	m.result.CallID = call.ID
 	return m.result
 }
@@ -81,7 +84,7 @@ func TestRegistryGetExecutor(t *testing.T) {
 	if !ok {
 		t.Fatal("expected to find executor")
 	}
-	result := got.Execute(ToolCall{ID: "1"})
+	result := got.Execute(context.Background(), ToolCall{ID: "1"})
 	if result.Content != "done" {
 		t.Errorf("Content = %q, want done", result.Content)
 	}

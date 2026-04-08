@@ -2,6 +2,7 @@ package requestpkg
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	"github.com/opentalon/opentalon/internal/profile"
 	pkgrpkg "github.com/opentalon/opentalon/pkg/requestpkg"
 )
 
@@ -171,7 +173,9 @@ func NewExecutor(pluginName string, packages []Package) *Executor {
 }
 
 // Execute runs the request package for call.Action and returns a ToolResult.
-func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
+// If the context carries a Profile, {{profile.token}} in any URL, header, or body
+// template is replaced with the profile's bearer token before other substitutions.
+func (e *Executor) Execute(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 	pkg, ok := e.packages[call.Action]
 	if !ok {
 		return orchestrator.ToolResult{
@@ -189,18 +193,30 @@ func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 		}
 	}
 
-	url := encodeURLParams(cleanURLParams(Substitute(pkg.URL, call.Args)))
+	// Resolve profile token once; used to expand {{profile.token}} in templates.
+	profileToken := ""
+	if p := profile.FromContext(ctx); p != nil {
+		profileToken = p.Token
+	}
+	injectToken := func(s string) string {
+		if !strings.Contains(s, "{{profile.token}}") {
+			return s
+		}
+		return strings.ReplaceAll(s, "{{profile.token}}", profileToken)
+	}
+
+	url := encodeURLParams(cleanURLParams(Substitute(injectToken(pkg.URL), call.Args)))
 	if url == "" {
 		return orchestrator.ToolResult{CallID: call.ID, Error: "URL is empty after substitution"}
 	}
 
-	req, err := http.NewRequest(strings.ToUpper(pkg.Method), url, nil)
+	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(pkg.Method), url, nil)
 	if err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("build request: %v", err)}
 	}
 
 	for k, v := range pkg.Headers {
-		req.Header.Set(k, Substitute(v, call.Args))
+		req.Header.Set(k, Substitute(injectToken(v), call.Args))
 	}
 
 	if pkg.Body != "" {
@@ -209,10 +225,10 @@ func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 		isJSON := strings.EqualFold(ct, "application/json") || strings.Contains(ct, "json")
 		var body string
 		if isJSON {
-			body = SubstituteJSON(pkg.Body, call.Args)
+			body = SubstituteJSON(injectToken(pkg.Body), call.Args)
 			body = cleanJSONBody(body)
 		} else {
-			body = Substitute(pkg.Body, call.Args)
+			body = Substitute(injectToken(pkg.Body), call.Args)
 		}
 		req.Body = io.NopCloser(strings.NewReader(body))
 		req.ContentLength = int64(len(body))

@@ -7,13 +7,6 @@ import (
 	"time"
 )
 
-// sourcePriority maps source name to numeric priority. Higher = harder to overwrite.
-var sourcePriority = map[string]int{
-	"config": 1,
-	"whoami": 2,
-	"admin":  3,
-}
-
 // GroupPluginStore persists group → plugin assignments to SQLite.
 type GroupPluginStore struct {
 	db *sql.DB
@@ -44,35 +37,46 @@ func (s *GroupPluginStore) PluginsForGroup(ctx context.Context, groupID string) 
 }
 
 // UpsertGroupPlugins upserts the given plugin IDs for groupID with the given source.
-// It will not downgrade an existing row to a lower-priority source.
+// It will not downgrade an existing row to a lower-priority source (config < whoami < admin).
+// All writes are batched in a single transaction using a prepared statement.
 func (s *GroupPluginStore) UpsertGroupPlugins(ctx context.Context, groupID string, pluginIDs []string, source string) error {
-	newPri := sourcePriority[source]
+	if len(pluginIDs) == 0 {
+		return nil
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Priority is encoded directly in SQL so no per-row SELECT is needed.
+	// The ON CONFLICT WHERE clause only performs the UPDATE when the incoming
+	// source has equal or higher priority than the stored one.
+	const upsertSQL = `
+INSERT INTO group_plugins (group_id, plugin_id, source, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (group_id, plugin_id) DO UPDATE SET
+    source     = excluded.source,
+    updated_at = excluded.updated_at
+WHERE CASE excluded.source WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END
+   >= CASE source           WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END`
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("group_plugins: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx, upsertSQL)
+	if err != nil {
+		return fmt.Errorf("group_plugins: prepare: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
 	for _, pid := range pluginIDs {
-		// Check existing priority.
-		var existingSource string
-		err := s.db.QueryRowContext(ctx,
-			`SELECT source FROM group_plugins WHERE group_id = ? AND plugin_id = ?`, groupID, pid,
-		).Scan(&existingSource)
-		if err != nil && err != sql.ErrNoRows {
-			return fmt.Errorf("group_plugins: check existing: %w", err)
-		}
-		if err == nil && sourcePriority[existingSource] > newPri {
-			// Existing row has higher priority — do not downgrade.
-			continue
-		}
-		if err == sql.ErrNoRows {
-			_, err = s.db.ExecContext(ctx,
-				`INSERT INTO group_plugins (group_id, plugin_id, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
-				groupID, pid, source, now, now)
-		} else {
-			_, err = s.db.ExecContext(ctx,
-				`UPDATE group_plugins SET source = ?, updated_at = ? WHERE group_id = ? AND plugin_id = ?`,
-				source, now, groupID, pid)
-		}
-		if err != nil {
+		if _, err := stmt.ExecContext(ctx, groupID, pid, source, now, now); err != nil {
 			return fmt.Errorf("group_plugins: upsert %s/%s: %w", groupID, pid, err)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("group_plugins: commit: %w", err)
 	}
 	return nil
 }
