@@ -13,6 +13,7 @@ import (
 	"github.com/opentalon/opentalon/internal/logger"
 	"github.com/opentalon/opentalon/internal/lua"
 	"github.com/opentalon/opentalon/internal/pipeline"
+	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
@@ -59,6 +60,18 @@ type PermissionChecker interface {
 // Used to inject args into tool calls when an action declares InjectContextArgs.
 type ContextArgProvider func(ctx context.Context, name string) string
 
+// GroupPluginLookup returns the plugin IDs allowed for a group.
+// It is called per-request when a profile is present to filter the tool list.
+// An empty slice means the group has no assignments (all restricted plugins are hidden).
+type GroupPluginLookup interface {
+	PluginsForGroup(ctx context.Context, groupID string) ([]string, error)
+}
+
+// UsageRecorder records LLM usage statistics after an orchestrator run.
+type UsageRecorder interface {
+	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int)
+}
+
 // OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check, no summarization).
 type OrchestratorOpts struct {
 	CustomRules             []string
@@ -74,8 +87,10 @@ type OrchestratorOpts struct {
 	SummarizeUpdatePrompt   string                        // empty = default English
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PipelineConfig          pipeline.PipelineConfig
-	ContextWindow           int // model context window in tokens; 0 = no trimming
-	MaxConcurrentSessions   int // max sessions running in parallel; default 1 (sequential)
+	ContextWindow           int               // model context window in tokens; 0 = no trimming
+	MaxConcurrentSessions   int               // max sessions running in parallel; default 1 (sequential)
+	GroupPluginLookup       GroupPluginLookup // optional; when set, filters tool list by profile group
+	UsageRecorder           UsageRecorder     // optional; when set, records LLM usage after each run
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -126,7 +141,9 @@ type Orchestrator struct {
 	pendingMu               sync.Mutex                    // guards pendingPipelines map
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline (access via pendingMu)
 	pipelineConfig          pipeline.PipelineConfig
-	contextWindow           int // model context window in tokens; 0 = no trimming
+	contextWindow           int               // model context window in tokens; 0 = no trimming
+	groupPluginLookup       GroupPluginLookup // optional; nil = no group-based filtering
+	usageRecorder           UsageRecorder     // optional; nil = no usage tracking
 }
 
 const (
@@ -225,6 +242,8 @@ func NewWithRules(
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
 		pipelineConfig:          pipelineCfg,
 		contextWindow:           opts.ContextWindow,
+		groupPluginLookup:       opts.GroupPluginLookup,
+		usageRecorder:           opts.UsageRecorder,
 	}
 }
 
@@ -484,6 +503,32 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 	result := &RunResult{}
 
+	// Resolve profile model override: strip the provider prefix if present (e.g. "anthropic/claude-3-5" -> "claude-3-5").
+	profileModel := ""
+	if p := profile.FromContext(ctx); p != nil && p.Model != "" {
+		if idx := strings.Index(p.Model, "/"); idx >= 0 {
+			profileModel = p.Model[idx+1:]
+		} else {
+			profileModel = p.Model
+		}
+	}
+
+	var totalInputTokens, totalOutputTokens, totalToolCalls int
+	var modelUsed string
+	defer func() {
+		if o.usageRecorder != nil {
+			if p := profile.FromContext(ctx); p != nil {
+				o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group,
+					p.ChannelID, sessionID, modelUsed,
+					totalInputTokens, totalOutputTokens, totalToolCalls)
+			}
+		}
+	}()
+
+	// Resolve allowed plugins once per Run call and cache in ctx so that
+	// buildSystemPrompt and executeCall share the result without a second DB hit.
+	ctx = withAllowedPlugins(ctx, o.resolveAllowedPlugins(ctx))
+
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		sess, _ := o.sessions.Get(sessionID)
 
@@ -505,12 +550,20 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("LLM request message", "index", j+1, "role", m.Role, "content", preview)
 		}
 
-		resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{
-			Messages: guardedMessages,
-		})
+		req := &provider.CompletionRequest{Messages: guardedMessages}
+		if profileModel != "" {
+			req.Model = profileModel
+		}
+		resp, err := o.llm.Complete(ctx, req)
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
+
+		if modelUsed == "" {
+			modelUsed = resp.Model
+		}
+		totalInputTokens += resp.Usage.InputTokens
+		totalOutputTokens += resp.Usage.OutputTokens
 
 		calls := o.parser.Parse(resp.Content)
 		if calls == nil {
@@ -547,6 +600,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			call := calls[i]
 			result.ToolCalls = append(result.ToolCalls, call)
 			result.Results = append(result.Results, toolResult)
+			totalToolCalls++
 
 			if toolResult.Error != "" {
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
@@ -761,8 +815,15 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	for _, g := range o.guards {
 		preparerAction[g.Plugin+"."+g.Action] = true
 	}
+
+	// Resolve the set of plugins allowed for the current profile group (if any).
+	allowedPlugins := o.resolveAllowedPlugins(ctx)
+
 	caps := o.registry.ListCapabilities()
 	for _, cap := range caps {
+		if !o.pluginAllowed(cap, allowedPlugins) {
+			continue
+		}
 		fmt.Fprintf(&sb, "## %s\n%s\n", cap.Name, cap.Description)
 		for _, action := range cap.Actions {
 			if preparerAction[cap.Name+"."+action.Name] || action.UserOnly {
@@ -891,7 +952,9 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 
 	// Single lookup: get capability and find the action for context injection, audit logging, and UserOnly enforcement.
 	var action *Action
+	var capForCheck PluginCapability
 	if cap, ok := o.registry.GetCapability(call.Plugin); ok {
+		capForCheck = cap
 		for i := range cap.Actions {
 			if cap.Actions[i].Name == call.Action {
 				action = &cap.Actions[i]
@@ -899,6 +962,20 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 			}
 		}
 	}
+
+	// Defense-in-depth: block restricted plugins when a profile is active but the plugin is not allowed.
+	// This mirrors the filtering done in buildSystemPrompt; protects against crafted tool calls.
+	if len(capForCheck.AllowedGroups) > 0 {
+		allowedPlugins := o.resolveAllowedPlugins(ctx)
+		if !o.pluginAllowed(capForCheck, allowedPlugins) {
+			slog.Warn("BLOCKED tool call for restricted plugin", "plugin", call.Plugin, "action", call.Action)
+			return ToolResult{
+				CallID: call.ID,
+				Error:  fmt.Sprintf("plugin %q is not available for this profile", call.Plugin),
+			}
+		}
+	}
+
 	if call.FromLLM && action != nil && action.UserOnly {
 		slog.Warn("BLOCKED LLM attempt to invoke user_only action", "actor", actorID, "plugin", call.Plugin, "action", call.Action, "args", call.Args)
 		return ToolResult{
@@ -1068,6 +1145,69 @@ func formatToolResultMessage(result ToolResult) string {
 		return fmt.Sprintf("[tool_result] error: %s", result.Error)
 	}
 	return fmt.Sprintf("[tool_result] %s", result.Content)
+}
+
+// allowedPluginsKey is the context key for the per-Run allowed-plugin cache.
+type allowedPluginsKey struct{}
+
+// cachedAllowedPlugins wraps the map so a nil map (no restrictions) is
+// distinguishable from an absent cache entry.
+type cachedAllowedPlugins struct{ m map[string]bool }
+
+func withAllowedPlugins(ctx context.Context, m map[string]bool) context.Context {
+	return context.WithValue(ctx, allowedPluginsKey{}, cachedAllowedPlugins{m})
+}
+
+// resolveAllowedPlugins returns the set of plugin IDs allowed for the current profile's group.
+// Returns nil when no profile is set or no group plugin lookup is configured (= no restrictions).
+// Returns an empty map when a profile is present but has no group (= all restricted plugins blocked).
+// The result is cached in ctx by Run; within a single Run call this never hits the DB twice.
+func (o *Orchestrator) resolveAllowedPlugins(ctx context.Context) map[string]bool {
+	if cached, ok := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins); ok {
+		return cached.m
+	}
+	if o.groupPluginLookup == nil {
+		return nil
+	}
+	p := profile.FromContext(ctx)
+	if p == nil {
+		return nil
+	}
+	if p.Group == "" {
+		// Profile is present but has no group: deny all restricted plugins.
+		return map[string]bool{}
+	}
+	ids, err := o.groupPluginLookup.PluginsForGroup(ctx, p.Group)
+	if err != nil {
+		slog.Warn("group plugin lookup failed", "group", p.Group, "error", err)
+		return nil
+	}
+	if len(ids) == 0 {
+		return map[string]bool{} // group exists but has no plugins — return empty (all restricted plugins blocked)
+	}
+	m := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		m[id] = true
+	}
+	return m
+}
+
+// pluginAllowed reports whether a capability may be shown to the current profile.
+// allowedPlugins is the result of resolveAllowedPlugins: nil = no restrictions.
+// A capability is blocked when:
+//   - allowedPlugins is non-nil (profile-mode active) AND
+//   - the capability has AllowedGroups set (meaning it is restricted) AND
+//   - the plugin name is not in allowedPlugins.
+func (o *Orchestrator) pluginAllowed(cap PluginCapability, allowedPlugins map[string]bool) bool {
+	if allowedPlugins == nil {
+		// No profile / no lookup configured — unrestricted.
+		return true
+	}
+	if len(cap.AllowedGroups) == 0 {
+		// Capability has no group restriction — always visible.
+		return true
+	}
+	return allowedPlugins[cap.Name]
 }
 
 // plannerLLMAdapter adapts orchestrator.LLMClient to pipeline.LLMClient.

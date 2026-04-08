@@ -116,7 +116,7 @@ func TestClientExecute(t *testing.T) {
 	client := newTestPluginClient(t)
 	defer func() { _ = client.Close() }()
 
-	result := client.Execute(orchestrator.ToolCall{
+	result := client.Execute(context.Background(), orchestrator.ToolCall{
 		ID:     "c1",
 		Plugin: "echo",
 		Action: "say",
@@ -138,7 +138,7 @@ func TestClientExecuteError(t *testing.T) {
 	client := newTestPluginClient(t)
 	defer func() { _ = client.Close() }()
 
-	result := client.Execute(orchestrator.ToolCall{
+	result := client.Execute(context.Background(), orchestrator.ToolCall{
 		ID:     "c2",
 		Plugin: "echo",
 		Action: "say",
@@ -155,7 +155,7 @@ func TestClientMultipleCalls(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	for i := 0; i < 10; i++ {
-		result := client.Execute(orchestrator.ToolCall{
+		result := client.Execute(context.Background(), orchestrator.ToolCall{
 			ID:     "multi",
 			Plugin: "echo",
 			Action: "say",
@@ -272,7 +272,7 @@ func TestManagerLoadAndUnload(t *testing.T) {
 		t.Fatal("echo not in registry")
 	}
 
-	result := exec.Execute(orchestrator.ToolCall{
+	result := exec.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "m1", Plugin: "echo", Action: "say",
 		Args: map[string]string{"text": "from manager"},
 	})

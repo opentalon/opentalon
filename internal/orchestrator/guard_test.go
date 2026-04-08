@@ -134,7 +134,7 @@ type slowExecutor struct {
 	delay time.Duration
 }
 
-func (s *slowExecutor) Execute(call ToolCall) ToolResult {
+func (s *slowExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 	time.Sleep(s.delay)
 	return ToolResult{CallID: call.ID, Content: "done"}
 }

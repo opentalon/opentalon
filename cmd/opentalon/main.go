@@ -21,6 +21,7 @@ import (
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/plugin"
+	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/requestpkg"
 	"github.com/opentalon/opentalon/internal/state"
@@ -87,6 +88,9 @@ func main() {
 	dataDir := cfg.State.DataDir
 	var memory orchestrator.MemoryStoreInterface
 	var sessions orchestrator.SessionStoreInterface
+	var groupPluginStore *store.GroupPluginStore
+	var usageStore *store.UsageStore
+	var entityStore *store.EntityStore
 	if dataDir != "" {
 		db, err := store.Open(dataDir)
 		if err != nil {
@@ -100,6 +104,11 @@ func main() {
 				slog.Warn("session prune failed", "error", err)
 			}
 			sessions = sessStore
+			groupPluginStore = store.NewGroupPluginStore(db)
+			usageStore = store.NewUsageStore(db)
+			entityStore = store.NewEntityStore(db)
+			// Seed static group→plugin assignments from config (source="config"; does not overwrite whoami/admin).
+			seedGroupPlugins(context.Background(), groupPluginStore, cfg.Profiles.Groups)
 		}
 	} else {
 		memory, sessions = newInMemoryState()
@@ -209,7 +218,7 @@ func main() {
 		}
 	}
 	for _, inl := range cfg.RequestPackages.Inline {
-		set := requestpkg.Set{PluginName: inl.Plugin, Description: inl.Description}
+		set := requestpkg.Set{PluginName: inl.Plugin, Description: inl.Description, AllowedGroups: inl.AllowedGroups}
 		if inl.MCP != nil {
 			set.MCP = &requestpkg.MCPServerConfig{
 				Server:  inl.MCP.Server,
@@ -281,7 +290,8 @@ func main() {
 		mcpCacheDir = filepath.Join(dataDir, "mcp-cache")
 	}
 	cmdExecutor := commands.NewExecutor(toolRegistry, sessions, dataDir, cfg, runtimePromptPath).
-		WithMCPReload(pluginManager, mcpCacheDir)
+		WithMCPReload(pluginManager, mcpCacheDir).
+		WithProfileStore(groupPluginStore)
 	if err := toolRegistry.Register(commands.Capability(), cmdExecutor); err != nil {
 		slog.Warn("register opentalon commands failed", "error", err)
 	}
@@ -318,6 +328,35 @@ func main() {
 			pipelineCfg.StepTimeout = d
 		}
 	}
+	// Build profile verifier (nil when profiles.who_am_i.url is not configured).
+	var profileVerifier channel.ProfileVerifier
+	if cfg.Profiles.WhoAmI.URL != "" {
+		vcfg := profile.VerifierConfig{
+			URL:           cfg.Profiles.WhoAmI.URL,
+			Method:        cfg.Profiles.WhoAmI.Method,
+			TokenHeader:   cfg.Profiles.WhoAmI.TokenHeader,
+			TokenPrefix:   cfg.Profiles.WhoAmI.TokenPrefix,
+			EntityIDField: cfg.Profiles.WhoAmI.EntityIDField,
+			GroupField:    cfg.Profiles.WhoAmI.GroupField,
+			PluginsField:  cfg.Profiles.WhoAmI.PluginsField,
+			ModelField:    cfg.Profiles.WhoAmI.ModelField,
+		}
+		if d, err := time.ParseDuration(cfg.Profiles.WhoAmI.Timeout); err == nil {
+			vcfg.Timeout = d
+		}
+		if d, err := time.ParseDuration(cfg.Profiles.WhoAmI.CacheTTL); err == nil {
+			vcfg.CacheTTL = d
+		}
+		profileVerifier = profile.NewVerifier(vcfg, groupPluginStore, entityStore)
+		slog.Info("profile verification enabled", "url", cfg.Profiles.WhoAmI.URL)
+	}
+
+	// Build orchestrator usage recorder adapter (nil when usageStore is nil).
+	var usageRecorder orchestrator.UsageRecorder
+	if usageStore != nil {
+		usageRecorder = &usageRecorderAdapter{store: usageStore, provider: prov}
+	}
+
 	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, orchestrator.OrchestratorOpts{
 		CustomRules:             cfg.Orchestrator.Rules,
 		ContentPreparers:        contentPreparers,
@@ -333,6 +372,8 @@ func main() {
 		PipelineConfig:          pipelineCfg,
 		ContextWindow:           contextWindow,
 		MaxConcurrentSessions:   cfg.Orchestrator.MaxConcurrentSessions,
+		GroupPluginLookup:       groupPluginStore,
+		UsageRecorder:           usageRecorder,
 	})
 
 	ensureSession := func(sessionKey string) {
@@ -341,7 +382,7 @@ func main() {
 		}
 	}
 	runner := &channelRunner{orch: orch}
-	handler := channel.NewMessageHandler(ensureSession, runner, orch.RunAction, toolRegistry.HasAction)
+	handler := channel.NewMessageHandler(ensureSession, runner, orch.RunAction, toolRegistry.HasAction, profileVerifier)
 
 	reg := channel.NewRegistry(handler)
 	channelManager := channel.NewManager(reg, toolRegistry)
@@ -376,6 +417,56 @@ func main() {
 
 	channelManager.StopAll()
 	pluginManager.StopAll()
+}
+
+// seedGroupPlugins seeds the static group→plugin config baseline to the DB.
+// Rows with source="config" are inserted only when no row exists yet for that group+plugin pair.
+func seedGroupPlugins(ctx context.Context, gps *store.GroupPluginStore, groups map[string]config.GroupConfig) {
+	if gps == nil || len(groups) == 0 {
+		return
+	}
+	for groupID, gc := range groups {
+		if len(gc.Plugins) == 0 {
+			continue
+		}
+		if err := gps.UpsertGroupPlugins(ctx, groupID, gc.Plugins, "config"); err != nil {
+			slog.Warn("seed group plugins failed", "group", groupID, "error", err)
+		}
+	}
+}
+
+// usageRecorderAdapter adapts store.UsageStore to orchestrator.UsageRecorder.
+type usageRecorderAdapter struct {
+	store    *store.UsageStore
+	provider provider.Provider
+}
+
+func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int) {
+	var inputCostUSD, outputCostUSD float64
+	if modelID != "" && a.provider != nil {
+		for _, m := range a.provider.Models() {
+			if m.ID == modelID {
+				// Cost is configured per million tokens.
+				inputCostUSD = float64(inputTokens) * m.Cost.Input / 1_000_000
+				outputCostUSD = float64(outputTokens) * m.Cost.Output / 1_000_000
+				break
+			}
+		}
+	}
+	if err := a.store.Record(ctx, store.UsageRecord{
+		EntityID:     entityID,
+		GroupID:      groupID,
+		ChannelID:    channelID,
+		SessionID:    sessionID,
+		ModelID:      modelID,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		ToolCalls:    toolCalls,
+		InputCost:    inputCostUSD,
+		OutputCost:   outputCostUSD,
+	}); err != nil {
+		slog.Warn("usage record failed", "entity", entityID, "error", err)
+	}
 }
 
 // newInMemoryState returns in-memory memory and session stores (used when data_dir is unset or DB open fails).

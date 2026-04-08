@@ -1,12 +1,13 @@
 package orchestrator
 
 import (
+	"context"
 	"fmt"
 	"sync"
 )
 
 type PluginExecutor interface {
-	Execute(call ToolCall) ToolResult
+	Execute(ctx context.Context, call ToolCall) ToolResult
 }
 
 type ToolRegistry struct {

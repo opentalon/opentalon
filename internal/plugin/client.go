@@ -88,8 +88,8 @@ func (c *Client) Capability() orchestrator.PluginCapability { return c.caps }
 
 // Execute sends a tool call to the plugin and returns the result.
 // It implements orchestrator.PluginExecutor.
-func (c *Client) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
-	return c.ExecuteContext(context.Background(), call)
+func (c *Client) Execute(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+	return c.ExecuteContext(ctx, call)
 }
 
 // ExecuteContext is like Execute but respects context cancellation.

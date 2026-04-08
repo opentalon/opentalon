@@ -22,6 +22,36 @@ type Config struct {
 	Scheduler       SchedulerConfig          `yaml:"scheduler"`
 	RequestPackages RequestPackagesConfig    `yaml:"request_packages"`
 	Lua             *LuaConfig               `yaml:"lua,omitempty"`
+	Profiles        ProfilesConfig           `yaml:"profiles,omitempty"`
+}
+
+// ProfilesConfig enables profile-based multi-tenancy.
+// When who_am_i.url is set, every inbound message must carry a profile token in
+// InboundMessage.Metadata["profile_token"]. The token is verified against the WhoAmI
+// server; on failure the request is blocked.
+type ProfilesConfig struct {
+	WhoAmI WhoAmIConfig           `yaml:"who_am_i"`
+	Groups map[string]GroupConfig `yaml:"groups,omitempty"` // optional static baseline seeded to DB on startup
+}
+
+// WhoAmIConfig configures the external identity-verification server.
+type WhoAmIConfig struct {
+	URL           string `yaml:"url"`             // required to enable profile verification
+	Method        string `yaml:"method"`          // GET or POST; default POST
+	TokenHeader   string `yaml:"token_header"`    // header sent to server; default "Authorization"
+	TokenPrefix   string `yaml:"token_prefix"`    // value prefix; default "Bearer "
+	Timeout       string `yaml:"timeout"`         // Go duration; default "5s"
+	CacheTTL      string `yaml:"cache_ttl"`       // Go duration; default "60s"
+	EntityIDField string `yaml:"entity_id_field"` // JSON field in response; default "entity_id"
+	GroupField    string `yaml:"group_field"`     // JSON field in response; default "group"
+	PluginsField  string `yaml:"plugins_field"`   // optional JSON field for plugin list; default "plugins"
+	ModelField    string `yaml:"model_field"`     // optional JSON field for model override; default "model"
+}
+
+// GroupConfig is a static baseline of plugin IDs for a group.
+// Seeded to group_plugins on startup with source="config"; never overwrites "whoami" or "admin" rows.
+type GroupConfig struct {
+	Plugins []string `yaml:"plugins"`
 }
 
 // LuaConfig configures embedded Lua plugins (content preparers). Use scripts_dir for local .lua files,
@@ -113,10 +143,11 @@ type MCPServerConfigInl struct {
 // RequestSetInl is an inline request package set (plugin name + packages).
 // If MCP is set, Packages is ignored — the tools come from the MCP plugin binary.
 type RequestSetInl struct {
-	Plugin      string              `yaml:"plugin"`
-	Description string              `yaml:"description"`
-	Packages    []RequestPackageInl `yaml:"packages"`
-	MCP         *MCPServerConfigInl `yaml:"mcp,omitempty"`
+	Plugin        string              `yaml:"plugin"`
+	Description   string              `yaml:"description"`
+	Packages      []RequestPackageInl `yaml:"packages"`
+	MCP           *MCPServerConfigInl `yaml:"mcp,omitempty"`
+	AllowedGroups []string            `yaml:"groups,omitempty"` // restrict to these profile groups
 }
 
 // RequestPackageInl is the config shape for one request package.

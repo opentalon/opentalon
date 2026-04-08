@@ -788,7 +788,7 @@ func newTestToolWithConfigJob(t *testing.T) *SchedulerTool {
 func TestToolDeleteConfigJobRejected(t *testing.T) {
 	tool := newTestToolWithConfigJob(t)
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "delete_job",
 		Args: map[string]string{"name": "config-job", "user_id": "admin"},
 	})
@@ -803,7 +803,7 @@ func TestToolDeleteConfigJobRejected(t *testing.T) {
 func TestToolUpdateConfigJobRejected(t *testing.T) {
 	tool := newTestToolWithConfigJob(t)
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "update_job",
 		Args: map[string]string{"name": "config-job", "interval": "30m", "user_id": "admin"},
 	})
@@ -818,7 +818,7 @@ func TestToolUpdateConfigJobRejected(t *testing.T) {
 func TestToolApproverEnforced(t *testing.T) {
 	tool := newTestToolWithPolicy(t, []string{"admin@co.com"}, 0)
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{
 			"name": "j1", "interval": "1h", "action": "a.b",
@@ -832,7 +832,7 @@ func TestToolApproverEnforced(t *testing.T) {
 		t.Errorf("error should mention authorization: %s", result.Error)
 	}
 
-	result = tool.Execute(orchestrator.ToolCall{
+	result = tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{
 			"name": "j1", "interval": "1h", "action": "a.b",
@@ -847,7 +847,7 @@ func TestToolApproverEnforced(t *testing.T) {
 func TestToolListShowsSourceAndCreator(t *testing.T) {
 	tool := newTestToolWithConfigJob(t)
 
-	tool.Execute(orchestrator.ToolCall{
+	tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{
 			"name": "dyn1", "interval": "1h", "action": "a.b",
@@ -855,7 +855,7 @@ func TestToolListShowsSourceAndCreator(t *testing.T) {
 		},
 	})
 
-	result := tool.Execute(orchestrator.ToolCall{
+	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "list_jobs",
 	})
 
