@@ -42,10 +42,11 @@ type ParamDefinition struct {
 // If MCP is non-nil, this set is handled by the opentalon-mcp plugin binary instead of
 // the built-in HTTP executor; Packages is ignored in that case.
 type Set struct {
-	PluginName  string           `yaml:"plugin"` // e.g. jira, or "mcp"
-	Description string           `yaml:"description"`
-	Packages    []Package        `yaml:"packages"`
-	MCP         *MCPServerConfig `yaml:"mcp,omitempty"`
+	PluginName    string           `yaml:"plugin"` // e.g. jira, or "mcp"
+	Description   string           `yaml:"description"`
+	Packages      []Package        `yaml:"packages"`
+	MCP           *MCPServerConfig `yaml:"mcp,omitempty"`
+	AllowedGroups []string         `yaml:"groups,omitempty"` // restrict to these profile groups; empty = unrestricted
 }
 
 var (
@@ -275,8 +276,9 @@ func ToCapability(set Set) orchestrator.PluginCapability {
 		})
 	}
 	return orchestrator.PluginCapability{
-		Name:        set.PluginName,
-		Description: set.Description,
-		Actions:     actions,
+		Name:          set.PluginName,
+		Description:   set.Description,
+		Actions:       actions,
+		AllowedGroups: set.AllowedGroups,
 	}
 }

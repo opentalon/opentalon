@@ -7,26 +7,53 @@ import (
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/logger"
+	"github.com/opentalon/opentalon/internal/profile"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
-// NewMessageHandler returns a MessageHandler that: ensures session, runs channel-specific
-// content preparer (if registered), then runs the message through the Runner and returns the response.
-// All handler logic lives in the channel package; main only passes dependencies.
+// ProfileVerifier is the subset of profile.Verifier used by the handler.
+type ProfileVerifier interface {
+	Verify(ctx context.Context, token string) (*profile.Profile, error)
+}
+
+// NewMessageHandler returns a MessageHandler that: ensures session, verifies profile token (if
+// verifier is non-nil), runs channel-specific content preparer (if registered), then runs the
+// message through the Runner and returns the response.
 func NewMessageHandler(
 	ensureSession pkg.EnsureSessionFunc,
 	runner pkg.Runner,
 	runAction pkg.RunActionFunc,
 	hasAction pkg.HasActionFunc,
+	verifier ProfileVerifier,
 ) pkg.MessageHandler {
 	return func(ctx context.Context, sessionKey string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
+		// Profile verification: required when verifier is configured.
+		if verifier != nil {
+			token := msg.Metadata["profile_token"]
+			if token == "" {
+				return errorResponse(msg, "profile token required"), nil
+			}
+			p, err := verifier.Verify(ctx, token)
+			if err != nil {
+				slog.Warn("profile verification failed", "error", err, "channel", msg.ChannelID)
+				return errorResponse(msg, "authentication failed"), nil
+			}
+			p.ChannelID = msg.ChannelID
+			ctx = profile.WithProfile(ctx, p)
+			// Scope session to entity so profiles cannot access each other's history.
+			sessionKey = p.EntityID + ":" + sessionKey
+			// Use entity ID as actor for memory scoping and permission checks.
+			ctx = actor.WithActor(ctx, p.EntityID)
+		} else {
+			// No profile system: use the classic channel:sender actor.
+			ctx = actor.WithActor(ctx, msg.ChannelID+":"+msg.SenderID)
+		}
+
 		ensureSession(sessionKey)
 		content := msg.Content
 		if prep := pkg.GetContentPreparer(msg.ChannelID); prep != nil {
 			content = prep(ctx, content, runAction, hasAction)
 		}
-		actorID := msg.ChannelID + ":" + msg.SenderID
-		ctx = actor.WithActor(ctx, actorID)
 		response, inputForDisplay, err := runner.Run(ctx, sessionKey, content, msg.Files...)
 		if err != nil {
 			logger.FromContext(ctx).Error("handler run failed", "error", err)
@@ -50,6 +77,15 @@ func NewMessageHandler(
 			Content:        outContent,
 			Metadata:       msg.Metadata,
 		}, nil
+	}
+}
+
+func errorResponse(msg pkg.InboundMessage, text string) pkg.OutboundMessage {
+	return pkg.OutboundMessage{
+		ConversationID: msg.ConversationID,
+		ThreadID:       msg.ThreadID,
+		Content:        text,
+		Metadata:       msg.Metadata,
 	}
 }
 

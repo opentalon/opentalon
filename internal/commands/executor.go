@@ -17,12 +17,15 @@ import (
 const (
 	PluginName = "opentalon"
 
-	ActionInstallSkill = "install_skill"
-	ActionShowConfig   = "show_config"
-	ActionListCommands = "list_commands"
-	ActionSetPrompt    = "set_prompt"
-	ActionClearSession = "clear_session"
-	ActionReloadMCP    = "reload_mcp"
+	ActionInstallSkill     = "install_skill"
+	ActionShowConfig       = "show_config"
+	ActionListCommands     = "list_commands"
+	ActionSetPrompt        = "set_prompt"
+	ActionClearSession     = "clear_session"
+	ActionReloadMCP        = "reload_mcp"
+	ActionProfileAssign    = "profile_assign"
+	ActionProfileRevoke    = "profile_revoke"
+	ActionProfileListGroup = "profile_list_group"
 )
 
 // PluginReloader can reload a named plugin subprocess.
@@ -30,23 +33,31 @@ type PluginReloader interface {
 	Reload(ctx context.Context, name string) error
 }
 
+// GroupPluginManager manages group→plugin assignments (admin commands).
+type GroupPluginManager interface {
+	PluginsForGroup(ctx context.Context, groupID string) ([]string, error)
+	UpsertGroupPlugins(ctx context.Context, groupID string, pluginIDs []string, source string) error
+	RevokePlugin(ctx context.Context, groupID, pluginID string) error
+}
+
 // Executor runs built-in opentalon actions (install_skill, show_config, list_commands, set_prompt, clear_session, reload_mcp).
 // It implements orchestrator.PluginExecutor.
 type Executor struct {
-	registry          *orchestrator.ToolRegistry
-	sessions          orchestrator.SessionStoreInterface
-	dataDir           string
-	cfg               *config.Config
-	runtimePromptPath string
-	pluginReloader    PluginReloader // optional; enables reload_mcp
-	mcpCacheDir       string         // optional; mcp-cache dir for cache invalidation on reload
+	registry           *orchestrator.ToolRegistry
+	sessions           orchestrator.SessionStoreInterface
+	dataDir            string
+	cfg                *config.Config
+	runtimePromptPath  string
+	pluginReloader     PluginReloader     // optional; enables reload_mcp
+	mcpCacheDir        string             // optional; mcp-cache dir for cache invalidation on reload
+	groupPluginManager GroupPluginManager // optional; enables profile_assign/revoke/list_group
 }
 
 // Capability returns the plugin capability for the opentalon built-in plugin.
 func Capability() orchestrator.PluginCapability {
 	return orchestrator.PluginCapability{
 		Name:        PluginName,
-		Description: "Built-in OpenTalon commands: install skill, show config, list commands, set prompt, clear session, reload MCP.",
+		Description: "Built-in OpenTalon commands: install skill, show config, list commands, set prompt, clear session, reload MCP, profile management.",
 		Actions: []orchestrator.Action{
 			{Name: ActionInstallSkill, Description: "Install a skill from a GitHub URL (e.g. /install skill org/repo).", Parameters: []orchestrator.Parameter{{Name: "url", Description: "GitHub URL or org/repo", Required: true}, {Name: "ref", Description: "Branch or tag (default main)", Required: false}}, AuditLog: true, UserOnly: true},
 			{Name: ActionShowConfig, Description: "Show current config (secrets redacted).", Parameters: nil},
@@ -54,6 +65,9 @@ func Capability() orchestrator.PluginCapability {
 			{Name: ActionSetPrompt, Description: "Set the editable runtime prompt.", Parameters: []orchestrator.Parameter{{Name: "text", Description: "Prompt text", Required: true}}},
 			{Name: ActionClearSession, Description: "Clear the current session.", Parameters: nil, InjectContextArgs: []string{"session_id"}},
 			{Name: ActionReloadMCP, Description: "Reload MCP server connections and refresh available tools. Optionally target one server by name.", Parameters: []orchestrator.Parameter{{Name: "server", Description: "MCP server name to reload (leave empty to reload all)", Required: false}}},
+			{Name: ActionProfileAssign, Description: "Assign a plugin to a profile group (admin). Source is set to 'admin' and cannot be overwritten by WhoAmI.", Parameters: []orchestrator.Parameter{{Name: "group", Description: "Group name", Required: true}, {Name: "plugin", Description: "Plugin ID", Required: true}}, AuditLog: true, UserOnly: true},
+			{Name: ActionProfileRevoke, Description: "Revoke a plugin from a profile group (admin).", Parameters: []orchestrator.Parameter{{Name: "group", Description: "Group name", Required: true}, {Name: "plugin", Description: "Plugin ID", Required: true}}, AuditLog: true, UserOnly: true},
+			{Name: ActionProfileListGroup, Description: "List plugins assigned to a profile group.", Parameters: []orchestrator.Parameter{{Name: "group", Description: "Group name", Required: true}}, UserOnly: true},
 		},
 	}
 }
@@ -84,6 +98,12 @@ func (e *Executor) WithMCPReload(reloader PluginReloader, cacheDir string) *Exec
 	return e
 }
 
+// WithProfileStore enables profile admin commands (profile_assign, profile_revoke, profile_list_group).
+func (e *Executor) WithProfileStore(m GroupPluginManager) *Executor {
+	e.groupPluginManager = m
+	return e
+}
+
 // Execute implements orchestrator.PluginExecutor.
 func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 	switch call.Action {
@@ -100,12 +120,66 @@ func (e *Executor) Execute(call orchestrator.ToolCall) orchestrator.ToolResult {
 		return e.clearSession(call)
 	case ActionReloadMCP:
 		return e.reloadMCP(context.Background(), call)
+	case ActionProfileAssign:
+		return e.profileAssign(context.Background(), call)
+	case ActionProfileRevoke:
+		return e.profileRevoke(context.Background(), call)
+	case ActionProfileListGroup:
+		return e.profileListGroup(context.Background(), call)
 	default:
 		return orchestrator.ToolResult{
 			CallID: call.ID,
 			Error:  fmt.Sprintf("unknown action %q", call.Action),
 		}
 	}
+}
+
+func (e *Executor) profileAssign(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+	if e.groupPluginManager == nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: "profile store not configured"}
+	}
+	group := strings.TrimSpace(call.Args["group"])
+	plug := strings.TrimSpace(call.Args["plugin"])
+	if group == "" || plug == "" {
+		return orchestrator.ToolResult{CallID: call.ID, Error: "group and plugin are required"}
+	}
+	if err := e.groupPluginManager.UpsertGroupPlugins(ctx, group, []string{plug}, "admin"); err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("assign failed: %v", err)}
+	}
+	return orchestrator.ToolResult{CallID: call.ID, Content: fmt.Sprintf("Plugin %q assigned to group %q.", plug, group)}
+}
+
+func (e *Executor) profileRevoke(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+	if e.groupPluginManager == nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: "profile store not configured"}
+	}
+	group := strings.TrimSpace(call.Args["group"])
+	plug := strings.TrimSpace(call.Args["plugin"])
+	if group == "" || plug == "" {
+		return orchestrator.ToolResult{CallID: call.ID, Error: "group and plugin are required"}
+	}
+	if err := e.groupPluginManager.RevokePlugin(ctx, group, plug); err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("revoke failed: %v", err)}
+	}
+	return orchestrator.ToolResult{CallID: call.ID, Content: fmt.Sprintf("Plugin %q revoked from group %q.", plug, group)}
+}
+
+func (e *Executor) profileListGroup(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+	if e.groupPluginManager == nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: "profile store not configured"}
+	}
+	group := strings.TrimSpace(call.Args["group"])
+	if group == "" {
+		return orchestrator.ToolResult{CallID: call.ID, Error: "group is required"}
+	}
+	plugins, err := e.groupPluginManager.PluginsForGroup(ctx, group)
+	if err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("list failed: %v", err)}
+	}
+	if len(plugins) == 0 {
+		return orchestrator.ToolResult{CallID: call.ID, Content: fmt.Sprintf("Group %q has no plugins assigned.", group)}
+	}
+	return orchestrator.ToolResult{CallID: call.ID, Content: fmt.Sprintf("Group %q plugins: %s", group, strings.Join(plugins, ", "))}
 }
 
 func (e *Executor) installSkill(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {

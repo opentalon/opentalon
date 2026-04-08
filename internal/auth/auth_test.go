@@ -255,6 +255,7 @@ func TestStoreAddAndGet(t *testing.T) {
 	p := store.Get("openai:default")
 	if p == nil {
 		t.Fatal("Get returned nil")
+		return
 	}
 	if p.ProviderID != "openai" {
 		t.Errorf("ProviderID = %q, want openai", p.ProviderID)
@@ -317,6 +318,7 @@ func TestStoreYAMLRoundTrip(t *testing.T) {
 	p := loaded.Get("anthropic:default")
 	if p == nil {
 		t.Fatal("expected anthropic profile")
+		return
 	}
 	if p.Key != "" {
 		t.Errorf("Key should NOT be persisted, got %q", p.Key)
@@ -328,6 +330,7 @@ func TestStoreYAMLRoundTrip(t *testing.T) {
 	p2 := loaded.Get("openai:default")
 	if p2 == nil {
 		t.Fatal("expected openai profile")
+		return
 	}
 	if p2.Type != AuthTypeOAuth {
 		t.Errorf("Type = %q, want oauth", p2.Type)
