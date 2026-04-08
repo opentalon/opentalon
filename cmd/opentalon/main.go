@@ -465,8 +465,8 @@ func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupI
 		InputTokens:   inputTokens,
 		OutputTokens:  outputTokens,
 		ToolCalls:     toolCalls,
-		InputCost:  inputCostUSD,
-		OutputCost: outputCostUSD,
+		InputCost:    inputCostUSD,
+		OutputCost:   outputCostUSD,
 	}); err != nil {
 		slog.Warn("usage record failed", "entity", entityID, "error", err)
 	}
