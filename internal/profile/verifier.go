@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 )
@@ -88,6 +87,10 @@ type cacheEntry struct {
 	expiresAt time.Time
 }
 
+// maxCacheEntries is the upper bound on in-memory cache size.
+// When the cap is reached, the entry expiring soonest is evicted to make room.
+const maxCacheEntries = 10_000
+
 // Verifier verifies bearer tokens against a WhoAmI HTTP server and caches results.
 type Verifier struct {
 	cfg         VerifierConfig
@@ -97,17 +100,50 @@ type Verifier struct {
 
 	mu    sync.Mutex
 	cache map[[32]byte]cacheEntry
+
+	done chan struct{}
 }
 
 // NewVerifier creates a Verifier. groupStore and entityStore may be nil (auto-save disabled).
+// Call Close when the Verifier is no longer needed to stop the background cleanup goroutine.
 func NewVerifier(cfg VerifierConfig, groupStore GroupPluginSaver, entityStore EntityUpserter) *Verifier {
 	cfg.setDefaults()
-	return &Verifier{
+	v := &Verifier{
 		cfg:         cfg,
 		client:      &http.Client{Timeout: cfg.Timeout},
 		groupStore:  groupStore,
 		entityStore: entityStore,
 		cache:       make(map[[32]byte]cacheEntry),
+		done:        make(chan struct{}),
+	}
+	go v.cleanupLoop()
+	return v
+}
+
+// Close stops the background cache cleanup goroutine.
+func (v *Verifier) Close() {
+	close(v.done)
+}
+
+// cleanupLoop periodically evicts expired cache entries off the hot path.
+// It ticks at NegativeCacheTTL so entries never linger more than 2× their TTL.
+func (v *Verifier) cleanupLoop() {
+	ticker := time.NewTicker(v.cfg.NegativeCacheTTL)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-v.done:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			v.mu.Lock()
+			for k, e := range v.cache {
+				if now.After(e.expiresAt) {
+					delete(v.cache, k)
+				}
+			}
+			v.mu.Unlock()
+		}
 	}
 }
 
@@ -128,13 +164,8 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*Profile, error) {
 		var rejected rejectedError
 		if errors.As(err, &rejected) {
 			v.mu.Lock()
-			now := time.Now()
-			for k, e := range v.cache {
-				if now.After(e.expiresAt) {
-					delete(v.cache, k)
-				}
-			}
-			v.cache[key] = cacheEntry{err: err, expiresAt: now.Add(v.cfg.NegativeCacheTTL)}
+			v.evictLocked()
+			v.cache[key] = cacheEntry{err: err, expiresAt: time.Now().Add(v.cfg.NegativeCacheTTL)}
 			v.mu.Unlock()
 		}
 		return nil, err
@@ -154,16 +185,33 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*Profile, error) {
 	}
 
 	v.mu.Lock()
-	now := time.Now()
-	for k, e := range v.cache {
-		if now.After(e.expiresAt) {
-			delete(v.cache, k)
-		}
-	}
-	v.cache[key] = cacheEntry{profile: p, expiresAt: now.Add(v.cfg.CacheTTL)}
+	v.evictLocked()
+	v.cache[key] = cacheEntry{profile: p, expiresAt: time.Now().Add(v.cfg.CacheTTL)}
 	v.mu.Unlock()
 
 	return p, nil
+}
+
+// evictLocked enforces the hard cap by evicting the soonest-expiring entry when
+// the cache is full. Expired-entry sweeps happen in cleanupLoop instead.
+// Must be called with v.mu held.
+func (v *Verifier) evictLocked() {
+	if len(v.cache) < maxCacheEntries {
+		return
+	}
+	var victim [32]byte
+	var victimExp time.Time
+	first := true
+	for k, e := range v.cache {
+		if first || e.expiresAt.Before(victimExp) {
+			victim = k
+			victimExp = e.expiresAt
+			first = false
+		}
+	}
+	if !first {
+		delete(v.cache, victim)
+	}
 }
 
 func (v *Verifier) callServer(ctx context.Context, token string) (*Profile, error) {
@@ -221,7 +269,7 @@ func jsonString(raw json.RawMessage) string {
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err != nil {
-		return strings.Trim(string(raw), `"`)
+		return ""
 	}
 	return s
 }

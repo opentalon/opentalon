@@ -1160,6 +1160,7 @@ func withAllowedPlugins(ctx context.Context, m map[string]bool) context.Context 
 
 // resolveAllowedPlugins returns the set of plugin IDs allowed for the current profile's group.
 // Returns nil when no profile is set or no group plugin lookup is configured (= no restrictions).
+// Returns an empty map when a profile is present but has no group (= all restricted plugins blocked).
 // The result is cached in ctx by Run; within a single Run call this never hits the DB twice.
 func (o *Orchestrator) resolveAllowedPlugins(ctx context.Context) map[string]bool {
 	if cached, ok := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins); ok {
@@ -1169,8 +1170,12 @@ func (o *Orchestrator) resolveAllowedPlugins(ctx context.Context) map[string]boo
 		return nil
 	}
 	p := profile.FromContext(ctx)
-	if p == nil || p.Group == "" {
+	if p == nil {
 		return nil
+	}
+	if p.Group == "" {
+		// Profile is present but has no group: deny all restricted plugins.
+		return map[string]bool{}
 	}
 	ids, err := o.groupPluginLookup.PluginsForGroup(ctx, p.Group)
 	if err != nil {

@@ -90,21 +90,3 @@ func (s *GroupPluginStore) RevokePlugin(ctx context.Context, groupID, pluginID s
 	}
 	return nil
 }
-
-// ListGroups returns all group IDs that have at least one plugin assigned.
-func (s *GroupPluginStore) ListGroups(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT group_id FROM group_plugins ORDER BY group_id`)
-	if err != nil {
-		return nil, fmt.Errorf("group_plugins: list groups: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	var out []string
-	for rows.Next() {
-		var g string
-		if err := rows.Scan(&g); err != nil {
-			return nil, err
-		}
-		out = append(out, g)
-	}
-	return out, rows.Err()
-}
