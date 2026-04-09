@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -239,30 +238,7 @@ func main() {
 		requestSets = append(requestSets, set)
 	}
 
-	// Collect MCP server configs and inject into the "mcp" plugin entry's environment
-	// before the plugin is launched so the binary knows which servers to connect to.
-	if mcpServers := requestpkg.CollectMCPServers(requestSets); len(mcpServers) > 0 {
-		mcpJSON, err := json.Marshal(mcpServers)
-		if err != nil {
-			slog.Warn("marshal MCP servers failed", "error", err)
-		} else {
-			injected := false
-			for i, e := range pluginEntries {
-				if e.Name != "mcp" {
-					continue
-				}
-				pluginEntries[i].WithEnvOverride("OPENTALON_MCP_SERVERS", string(mcpJSON))
-				if dataDir != "" {
-					pluginEntries[i].WithEnvOverride("OPENTALON_MCP_CACHE_DIR", filepath.Join(dataDir, "mcp-cache"))
-				}
-				injected = true
-				break
-			}
-			if !injected {
-				slog.Warn("MCP skill configs found but no 'mcp' plugin entry in config", "component", "mcp")
-			}
-		}
-	}
+	injectMCPServers(pluginEntries, requestpkg.CollectMCPServers(requestSets), dataDir)
 
 	for _, e := range pluginEntries {
 		if e.Enabled && dataDir != "" {
