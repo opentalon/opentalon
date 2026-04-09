@@ -141,14 +141,45 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 		return fmt.Errorf("register %s: %w", entry.Name, err)
 	}
 
-	m.plugins[entry.Name] = &managed{
+	mg := &managed{
 		entry:   entry,
 		process: proc,
 		client:  client,
 	}
+	m.plugins[entry.Name] = mg
+
+	if proc != nil {
+		m.watchProcess(ctx, entry.Name, proc)
+	}
 
 	slog.Info("loaded plugin", "component", "plugin-manager", "plugin", entry.Name, "mode", mode, "actions", len(cap.Actions))
 	return nil
+}
+
+// watchProcess monitors a plugin process and cleans up if it exits unexpectedly.
+// It compares the stored process pointer to guard against races with Reload.
+func (m *Manager) watchProcess(ctx context.Context, name string, proc *Process) {
+	go func() {
+		select {
+		case <-proc.Exited():
+			slog.Warn("plugin exited unexpectedly, will retry", "component", "plugin-manager", "plugin", name)
+			m.mu.Lock()
+			current, ok := m.plugins[name]
+			if ok && current.process == proc {
+				delete(m.plugins, name)
+			} else {
+				ok = false
+			}
+			m.mu.Unlock()
+			if ok {
+				if current.client != nil {
+					_ = current.client.Close()
+				}
+				m.registry.Deregister(name)
+			}
+		case <-ctx.Done():
+		}
+	}()
 }
 
 func (m *Manager) dialTimeout(entry PluginEntry) time.Duration {
