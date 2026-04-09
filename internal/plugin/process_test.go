@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,6 +67,79 @@ func TestProcess_ExitErrCapturedFromRealProcess(t *testing.T) {
 
 	if err := proc.ExitErr(); err == nil {
 		t.Error("ExitErr() = nil, want exit error from process that exited with code 1")
+	}
+}
+
+// TestProcessSurvivesContextCancelAfterHandshake is the regression test for the
+// reload_mcp bug: when exec.CommandContext was used, cancelling the caller's
+// context (e.g. when a reload tool-call request completed) would kill the
+// freshly-started plugin process, causing subsequent tool calls to fail with
+// "connection refused". The process must outlive the context that launched it.
+func TestProcessSurvivesContextCancelAfterHandshake(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Subprocess that prints a valid handshake then loops forever, simulating a
+	// long-running plugin. The address is a fake path — Start only parses the
+	// handshake line and does not attempt to connect.
+	// Using a shell loop instead of "sleep 60" so that SIGINT (from Stop) exits
+	// the process cleanly without leaving an orphaned sleep child.
+	proc := NewProcess("sh", "-c", `echo "1|unix|/tmp/fake-plugin-test.sock"; while true; do sleep 1; done`)
+
+	hs, err := proc.Start(ctx, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if hs.Network != "unix" {
+		t.Errorf("network = %q, want unix", hs.Network)
+	}
+
+	// Cancel the context AFTER the handshake has been received.
+	cancel()
+
+	// Allow time for exec.CommandContext to kill the process if it were still
+	// wired to ctx. 150 ms is ample; the old (buggy) code killed immediately.
+	time.Sleep(150 * time.Millisecond)
+
+	if !proc.Running() {
+		t.Error("process was killed after context cancel — plugin must outlive the caller's context")
+	}
+
+	_ = proc.Stop(500 * time.Millisecond)
+}
+
+// TestProcessKilledOnContextCancelDuringHandshake verifies that if the context
+// is cancelled while Start is still waiting for the handshake line, Start kills
+// the subprocess and returns an error. This ensures the cancel-during-startup
+// path is still handled correctly after the exec.CommandContext → exec.Command
+// change.
+func TestProcessKilledOnContextCancelDuringHandshake(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Subprocess that never prints a handshake.
+	proc := NewProcess("sh", "-c", "sleep 60")
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := proc.Start(ctx, 10*time.Second)
+		errCh <- err
+	}()
+
+	// Cancel while Start is still waiting.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected error when context cancelled before handshake, got nil")
+		}
+		if !strings.Contains(err.Error(), "context") {
+			t.Errorf("error = %q, want message about context cancellation", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not return after context cancel")
 	}
 }
 
