@@ -50,7 +50,11 @@ func (p *Process) Start(ctx context.Context, timeout time.Duration) (pkg.Handsha
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	cmd := exec.CommandContext(ctx, p.path, p.args...)
+	// Use exec.Command (not CommandContext) so the subprocess is not killed when
+	// the caller's context expires. Plugin processes must outlive individual
+	// request contexts (e.g. a reload_mcp tool call). Cancellation of ctx is
+	// respected only during the handshake phase below.
+	cmd := exec.Command(p.path, p.args...)
 	cmd.Stderr = os.Stderr
 	if len(p.env) > 0 {
 		cmd.Env = p.env
@@ -109,6 +113,9 @@ func (p *Process) Start(ctx context.Context, timeout time.Duration) (pkg.Handsha
 		return pkg.Handshake{}, fmt.Errorf("handshake timeout after %s for %s", timeout, p.path)
 	case <-p.exited:
 		return pkg.Handshake{}, fmt.Errorf("plugin exited before handshake: %s", p.path)
+	case <-ctx.Done():
+		_ = cmd.Process.Kill()
+		return pkg.Handshake{}, fmt.Errorf("context cancelled waiting for handshake from %s: %w", p.path, ctx.Err())
 	}
 }
 
