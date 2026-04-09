@@ -21,11 +21,12 @@ const (
 
 // PluginEntry holds the config for one plugin.
 type PluginEntry struct {
-	Name    string
-	Plugin  string // path to binary or grpc://...
-	Enabled bool
-	Config  map[string]interface{}
-	Env     []string // if non-nil, used as the subprocess env verbatim; use WithEnvOverride to build it
+	Name        string
+	Plugin      string // path to binary or grpc://...
+	Enabled     bool
+	Config      map[string]interface{}
+	Env         []string      // if non-nil, used as the subprocess env verbatim; use WithEnvOverride to build it
+	DialTimeout time.Duration // overrides defaultDialTimeout for the gRPC Init call (0 = use default)
 }
 
 // WithEnvOverride starts from the current process environment (or the entry's
@@ -58,6 +59,7 @@ type managed struct {
 type Manager struct {
 	mu       sync.Mutex
 	plugins  map[string]*managed
+	known    map[string]PluginEntry // all configured entries, including those that failed to load
 	registry *orchestrator.ToolRegistry
 }
 
@@ -66,12 +68,23 @@ type Manager struct {
 func NewManager(registry *orchestrator.ToolRegistry) *Manager {
 	return &Manager{
 		plugins:  make(map[string]*managed),
+		known:    make(map[string]PluginEntry),
 		registry: registry,
 	}
 }
 
-// LoadAll launches all enabled plugins and registers them.
+// LoadAll launches all enabled plugins and registers them. Plugins that fail
+// to load are recorded in the known map so they can be retried via Reload.
 func (m *Manager) LoadAll(ctx context.Context, entries []PluginEntry) error {
+	// Record all enabled entries upfront so Reload can retry failures.
+	m.mu.Lock()
+	for _, e := range entries {
+		if e.Enabled {
+			m.known[e.Name] = e
+		}
+	}
+	m.mu.Unlock()
+
 	var errs []string
 	for _, e := range entries {
 		if !e.Enabled {
@@ -138,6 +151,13 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 	return nil
 }
 
+func (m *Manager) dialTimeout(entry PluginEntry) time.Duration {
+	if entry.DialTimeout > 0 {
+		return entry.DialTimeout
+	}
+	return defaultDialTimeout
+}
+
 func (m *Manager) launchBinary(ctx context.Context, entry PluginEntry) (*Process, *Client, error) {
 	proc := NewProcess(entry.Plugin)
 	if len(entry.Env) > 0 {
@@ -148,7 +168,7 @@ func (m *Manager) launchBinary(ctx context.Context, entry PluginEntry) (*Process
 		return nil, nil, fmt.Errorf("start %s: %w", entry.Name, err)
 	}
 
-	client, err := DialFromHandshake(hs, defaultDialTimeout, configJSON(entry))
+	client, err := DialFromHandshake(hs, m.dialTimeout(entry), configJSON(entry))
 	if err != nil {
 		_ = proc.Stop(defaultStopGrace)
 		return nil, nil, fmt.Errorf("dial %s: %w", entry.Name, err)
@@ -159,7 +179,7 @@ func (m *Manager) launchBinary(ctx context.Context, entry PluginEntry) (*Process
 
 func (m *Manager) connectRemote(entry PluginEntry) (*Client, error) {
 	addr := strings.TrimPrefix(entry.Plugin, "grpc://")
-	client, err := Dial("tcp", addr, defaultDialTimeout, configJSON(entry))
+	client, err := Dial("tcp", addr, m.dialTimeout(entry), configJSON(entry))
 	if err != nil {
 		return nil, fmt.Errorf("connect remote %s at %s: %w", entry.Name, addr, err)
 	}
@@ -182,18 +202,25 @@ func configJSON(entry PluginEntry) string {
 
 // Reload stops the named plugin and relaunches it with the same entry config.
 // The plugin's capabilities are re-fetched from the subprocess on startup.
+// If the plugin was never loaded (e.g. failed at startup), Reload attempts a
+// fresh load using the entry recorded in the known map.
 func (m *Manager) Reload(ctx context.Context, name string) error {
 	m.mu.Lock()
-	mg, ok := m.plugins[name]
-	if !ok {
-		m.mu.Unlock()
-		return fmt.Errorf("plugin %q not loaded", name)
+	mg, loaded := m.plugins[name]
+	entry, known := m.known[name]
+	if loaded {
+		entry = mg.entry
 	}
-	entry := mg.entry
 	m.mu.Unlock()
 
-	if err := m.Unload(name); err != nil {
-		slog.Warn("reload unload failed", "component", "plugin-manager", "plugin", name, "error", err)
+	if !loaded && !known {
+		return fmt.Errorf("plugin %q not loaded", name)
+	}
+
+	if loaded {
+		if err := m.Unload(name); err != nil {
+			slog.Warn("reload unload failed", "component", "plugin-manager", "plugin", name, "error", err)
+		}
 	}
 	return m.Load(ctx, entry)
 }
@@ -218,6 +245,39 @@ func (m *Manager) Unload(name string) error {
 		return mg.process.Stop(defaultStopGrace)
 	}
 	return nil
+}
+
+// StartRetryLoop starts a background goroutine that periodically retries
+// loading any plugin recorded in the known map that is not currently loaded.
+// This recovers from transient startup failures (e.g. a remote MCP server
+// that wasn't ready yet). The loop stops when ctx is cancelled.
+func (m *Manager) StartRetryLoop(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.mu.Lock()
+				var pending []PluginEntry
+				for name, entry := range m.known {
+					if _, loaded := m.plugins[name]; !loaded {
+						pending = append(pending, entry)
+					}
+				}
+				m.mu.Unlock()
+
+				for _, entry := range pending {
+					slog.Info("retrying failed plugin load", "component", "plugin-manager", "plugin", entry.Name)
+					if err := m.Load(ctx, entry); err != nil {
+						slog.Warn("plugin retry failed", "component", "plugin-manager", "plugin", entry.Name, "error", err)
+					}
+				}
+			}
+		}
+	}()
 }
 
 // StopAll gracefully shuts down all managed plugins.

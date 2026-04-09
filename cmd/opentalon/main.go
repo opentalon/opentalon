@@ -134,9 +134,17 @@ func main() {
 			slog.Warn("plugin has no plugin ref and no github/ref", "plugin", name)
 			continue
 		}
-		pluginEntries = append(pluginEntries, plugin.PluginEntry{
+		entry := plugin.PluginEntry{
 			Name: name, Plugin: path, Enabled: p.Enabled, Config: p.Config,
-		})
+		}
+		if p.DialTimeout != "" {
+			if d, err := time.ParseDuration(p.DialTimeout); err == nil {
+				entry.DialTimeout = d
+			} else {
+				slog.Warn("invalid dial_timeout for plugin, using default", "plugin", name, "value", p.DialTimeout)
+			}
+		}
+		pluginEntries = append(pluginEntries, entry)
 	}
 	// Request packages (skill-style): loaded before plugins so MCP server configs
 	// can be injected into the MCP plugin binary's environment at launch.
@@ -248,9 +256,12 @@ func main() {
 		}
 	}
 	pluginManager := plugin.NewManager(toolRegistry)
+	retryCtx, retryCancel := context.WithCancel(ctx)
+	defer retryCancel()
 	if err := pluginManager.LoadAll(ctx, pluginEntries); err != nil {
 		slog.Warn("some plugins failed to load", "error", err)
 	}
+	pluginManager.StartRetryLoop(retryCtx, 30*time.Second)
 
 	if err := requestpkg.Register(toolRegistry, requestSets); err != nil {
 		slog.Warn("request_packages registration failed", "error", err)
