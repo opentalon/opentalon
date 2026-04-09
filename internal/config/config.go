@@ -370,6 +370,37 @@ func Parse(data []byte) (*Config, error) {
 	return &cfg, nil
 }
 
+// ResolveStateDataDir returns an absolute path for state data storage.
+// If state.data_dir is relative, it is resolved against the directory
+// containing configFile. configFile should be an absolute path; if it is not,
+// its directory is absolutized when possible. Absolute data_dir values are
+// returned cleaned.
+func ResolveStateDataDir(cfg *Config, configFile string) string {
+	d := cfg.State.DataDir
+	if d == "" {
+		return ""
+	}
+	if filepath.IsAbs(d) {
+		return filepath.Clean(d)
+	}
+	if configFile == "" {
+		abs, err := filepath.Abs(d)
+		if err != nil {
+			return filepath.Clean(d)
+		}
+		return abs
+	}
+	cfgDir := filepath.Dir(configFile)
+	if !filepath.IsAbs(cfgDir) {
+		var err error
+		cfgDir, err = filepath.Abs(cfgDir)
+		if err != nil {
+			return filepath.Clean(filepath.Join(filepath.Dir(configFile), d))
+		}
+	}
+	return filepath.Clean(filepath.Join(cfgDir, d))
+}
+
 func expandEnvInPlugins(cfg *Config) {
 	for name, p := range cfg.Plugins {
 		p.Plugin = expandEnv(p.Plugin)

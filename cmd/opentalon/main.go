@@ -33,7 +33,7 @@ func main() {
 	fmt.Fprintln(os.Stderr, "OpenTalon starting...")
 	configPath := flag.String("config", "", "path to config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
-	cleanFlag := flag.String("clean", "", "clear cached bundles and exit (all, plugins, channels, skills, lua_plugins)")
+	cleanFlag := flag.String("clean", "", "clear cached bundles and exit (all, plugins, channels, skills, lua_plugins); requires -config")
 	flag.Parse()
 
 	if *showVersion {
@@ -57,6 +57,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
+	absConfigPath, err := filepath.Abs(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving config path: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.State.DataDir = config.ResolveStateDataDir(cfg, absConfigPath)
 
 	// Configure structured logging (stdout/stderr, level-filtered).
 	logLevel := cfg.Log.Level
@@ -558,21 +564,23 @@ func buildLuaScriptPaths(ctx context.Context, dataDir string, cfg *config.Config
 
 // runClean clears cached bundles under the state data dir and exits.
 func runClean(configPath, category string) {
-	var dataDir string
-	if configPath != "" {
-		cfg, err := config.Load(configPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-			os.Exit(1)
-		}
-		dataDir = cfg.State.DataDir
+	if configPath == "" {
+		fmt.Fprintln(os.Stderr, "Error: -clean requires -config <path> so state.data_dir matches your deployment.")
+		fmt.Fprintln(os.Stderr, "Example: opentalon -config /data/opentalon/config.yaml -clean plugins")
+		os.Exit(1)
 	}
-	if dataDir == "" {
-		home, _ := os.UserHomeDir()
-		dataDir = filepath.Join(home, ".opentalon")
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
 	}
+	absConfigPath, err := filepath.Abs(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving config path: %v\n", err)
+		os.Exit(1)
+	}
+	dataDir := config.ResolveStateDataDir(cfg, absConfigPath)
 
-	var err error
 	switch category {
 	case "all":
 		fmt.Fprintf(os.Stderr, "Cleaning all cached bundles in %s...\n", dataDir)
