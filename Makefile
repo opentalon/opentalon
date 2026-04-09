@@ -74,16 +74,16 @@ clean:
 # ── Clean cache: clear cached plugins/channels/skills ──────────────────────
 
 clean-cache: build
-	@./$(BINARY) -clean all
+	@./$(BINARY) -config config.yaml -clean all
 
 clean-plugins: build
-	@./$(BINARY) -clean plugins
+	@./$(BINARY) -config config.yaml -clean plugins
 
 clean-channels: build
-	@./$(BINARY) -clean channels
+	@./$(BINARY) -config config.yaml -clean channels
 
 clean-skills: build
-	@./$(BINARY) -clean skills
+	@./$(BINARY) -config config.yaml -clean skills
 
 clean-lua-plugins: build
-	@./$(BINARY) -clean lua_plugins
+	@./$(BINARY) -config config.yaml -clean lua_plugins

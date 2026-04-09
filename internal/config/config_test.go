@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -262,6 +263,55 @@ state:
 	}
 	if cfg.State.DataDir != "/custom/data" {
 		t.Errorf("data_dir = %q, want /custom/data", cfg.State.DataDir)
+	}
+}
+
+func TestResolveStateDataDirAbsoluteUnchanged(t *testing.T) {
+	cfg, err := Parse([]byte(testYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ResolveStateDataDir(cfg, "/any/path/config.yaml")
+	if got != "/var/lib/opentalon" {
+		t.Errorf("ResolveStateDataDir = %q, want /var/lib/opentalon", got)
+	}
+}
+
+func TestResolveStateDataDirRelativeToConfigDir(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+state:
+  data_dir: opentalon-data
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configFile := filepath.Join("/etc", "opentalon", "config.yaml")
+	want := filepath.Clean(filepath.Join("/etc", "opentalon", "opentalon-data"))
+	got := ResolveStateDataDir(cfg, configFile)
+	if got != want {
+		t.Errorf("ResolveStateDataDir = %q, want %q", got, want)
+	}
+}
+
+func TestResolveStateDataDirDotMeansConfigDir(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+state:
+  data_dir: .
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configFile := filepath.Join("/data", "opentalon", "config.yaml")
+	want := filepath.Clean(filepath.Join("/data", "opentalon"))
+	got := ResolveStateDataDir(cfg, configFile)
+	if got != want {
+		t.Errorf("ResolveStateDataDir = %q, want %q", got, want)
 	}
 }
 
