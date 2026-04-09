@@ -491,6 +491,19 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// If "direct" or error or single step, fall through to normal agent loop
 	}
 
+	// Guard: never send empty user content to the LLM (would cause API errors).
+	// Channels with media rules should always produce non-empty content, but this
+	// catches misconfigured channels or unexpected message types.
+	if content == "" && len(files) == 0 {
+		log.Debug("empty content and no files, returning fallback")
+		return &RunResult{
+			Response: "I received your message but couldn't read its content. Could you try sending it as text?",
+		}, nil
+	}
+	if content == "" && len(files) > 0 {
+		content = "[The user sent a file attachment.]"
+	}
+
 	if err := o.sessions.AddMessage(sessionID, provider.Message{
 		Role:    provider.RoleUser,
 		Content: content,
