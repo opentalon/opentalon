@@ -17,14 +17,14 @@ import (
 
 // Process manages the lifecycle of a plugin subprocess.
 type Process struct {
-	mu       sync.Mutex
-	path     string
-	args     []string
-	env      []string // if non-nil, used as cmd.Env (replaces inherited env)
-	cmd      *exec.Cmd
-	hs       pkg.Handshake
-	exited   chan struct{}
-	exitErr  error // set before exited is closed
+	mu      sync.Mutex
+	path    string
+	args    []string
+	env     []string // if non-nil, used as cmd.Env (replaces inherited env)
+	cmd     *exec.Cmd
+	hs      pkg.Handshake
+	exited  chan struct{}
+	exitErr error // set before exited is closed
 }
 
 // NewProcess creates a process handle without starting it.

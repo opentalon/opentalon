@@ -252,11 +252,9 @@ func TestStoreAddAndGet(t *testing.T) {
 		t.Errorf("ForProvider(anthropic) = %d profiles, want 1", len(got))
 	}
 
-	p := store.Get("openai:default")
-	if p == nil {
+	if p := store.Get("openai:default"); p == nil {
 		t.Fatal("Get returned nil")
-	}
-	if p.ProviderID != "openai" {
+	} else if p.ProviderID != "openai" {
 		t.Errorf("ProviderID = %q, want openai", p.ProviderID)
 	}
 
@@ -314,26 +312,26 @@ func TestStoreYAMLRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := loaded.Get("anthropic:default")
-	if p == nil {
+	if p := loaded.Get("anthropic:default"); p == nil {
 		t.Fatal("expected anthropic profile")
-	}
-	if p.Key != "" {
-		t.Errorf("Key should NOT be persisted, got %q", p.Key)
-	}
-	if p.Type != AuthTypeAPIKey {
-		t.Errorf("Type = %q, want api_key", p.Type)
+	} else {
+		if p.Key != "" {
+			t.Errorf("Key should NOT be persisted, got %q", p.Key)
+		}
+		if p.Type != AuthTypeAPIKey {
+			t.Errorf("Type = %q, want api_key", p.Type)
+		}
 	}
 
-	p2 := loaded.Get("openai:default")
-	if p2 == nil {
+	if p2 := loaded.Get("openai:default"); p2 == nil {
 		t.Fatal("expected openai profile")
-	}
-	if p2.Type != AuthTypeOAuth {
-		t.Errorf("Type = %q, want oauth", p2.Type)
-	}
-	if p2.OAuthToken != "oauth-token-123" {
-		t.Errorf("OAuthToken = %q, want oauth-token-123", p2.OAuthToken)
+	} else {
+		if p2.Type != AuthTypeOAuth {
+			t.Errorf("Type = %q, want oauth", p2.Type)
+		}
+		if p2.OAuthToken != "oauth-token-123" {
+			t.Errorf("OAuthToken = %q, want oauth-token-123", p2.OAuthToken)
+		}
 	}
 }
 
