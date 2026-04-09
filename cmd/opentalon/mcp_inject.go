@@ -26,7 +26,7 @@ func injectMCPServers(entries []plugin.PluginEntry, servers []requestpkg.MCPServ
 		// Build server list in the format the plugin expects: {name, url, headers?}
 		inlineServers := make([]map[string]interface{}, len(servers))
 		for j, s := range servers {
-			srv := map[string]interface{}{"name": s.Server, "url": s.URL}
+			srv := map[string]interface{}{"server": s.Server, "url": s.URL}
 			if len(s.Headers) > 0 {
 				srv["headers"] = s.Headers
 			}

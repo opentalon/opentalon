@@ -17,13 +17,14 @@ import (
 
 // Process manages the lifecycle of a plugin subprocess.
 type Process struct {
-	mu     sync.Mutex
-	path   string
-	args   []string
-	env    []string // if non-nil, used as cmd.Env (replaces inherited env)
-	cmd    *exec.Cmd
-	hs     pkg.Handshake
-	exited chan struct{}
+	mu      sync.Mutex
+	path    string
+	args    []string
+	env     []string // if non-nil, used as cmd.Env (replaces inherited env)
+	cmd     *exec.Cmd
+	hs      pkg.Handshake
+	exited  chan struct{}
+	exitErr error // set before exited is closed
 }
 
 // NewProcess creates a process handle without starting it.
@@ -67,7 +68,10 @@ func (p *Process) Start(ctx context.Context, timeout time.Duration) (pkg.Handsha
 	p.exited = make(chan struct{})
 
 	go func() {
-		_ = cmd.Wait()
+		err := cmd.Wait()
+		p.mu.Lock()
+		p.exitErr = err
+		p.mu.Unlock()
 		close(p.exited)
 	}()
 
@@ -139,6 +143,14 @@ func (p *Process) Exited() <-chan struct{} {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.exited
+}
+
+// ExitErr returns the error from cmd.Wait() after the process has exited.
+// Returns nil if the process has not yet exited or exited with code 0.
+func (p *Process) ExitErr() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.exitErr
 }
 
 // Running reports whether the process is still alive.
