@@ -31,8 +31,8 @@ func TestInjectMCPServers_InjectsIntoConfig(t *testing.T) {
 	}
 	for i, srv := range got {
 		m := srv.(map[string]interface{})
-		if m["name"] != servers[i].Server {
-			t.Errorf("entry %d: name = %q, want %q", i, m["name"], servers[i].Server)
+		if m["server"] != servers[i].Server {
+			t.Errorf("entry %d: server = %q, want %q", i, m["server"], servers[i].Server)
 		}
 		if m["url"] != servers[i].URL {
 			t.Errorf("entry %d: url = %q, want %q", i, m["url"], servers[i].URL)
@@ -40,7 +40,7 @@ func TestInjectMCPServers_InjectsIntoConfig(t *testing.T) {
 	}
 }
 
-func TestInjectMCPServers_MapsServerFieldToName(t *testing.T) {
+func TestInjectMCPServers_UsesServerKey(t *testing.T) {
 	entries := []plugin.PluginEntry{{Name: "mcp"}}
 	servers := []requestpkg.MCPServerConfig{{Server: "appsignal", URL: "http://localhost:9000/sse"}}
 
@@ -48,11 +48,11 @@ func TestInjectMCPServers_MapsServerFieldToName(t *testing.T) {
 
 	got := entries[0].Config["servers"].([]interface{})
 	m := got[0].(map[string]interface{})
-	if _, hasServer := m["server"]; hasServer {
-		t.Error("Config entry should use 'name' key, not 'server'")
+	if _, hasName := m["name"]; hasName {
+		t.Error("Config entry should use 'server' key (matching plugin config schema), not 'name'")
 	}
-	if m["name"] != "appsignal" {
-		t.Errorf("name = %q, want %q", m["name"], "appsignal")
+	if m["server"] != "appsignal" {
+		t.Errorf("server = %q, want %q", m["server"], "appsignal")
 	}
 }
 
@@ -78,7 +78,7 @@ func TestInjectMCPServers_PreservesStaticServers(t *testing.T) {
 	if got[0].(map[string]interface{})["name"] != "static-server" {
 		t.Error("static server should come first")
 	}
-	if got[1].(map[string]interface{})["name"] != "inline-server" {
+	if got[1].(map[string]interface{})["server"] != "inline-server" {
 		t.Error("inline server should be appended")
 	}
 }
