@@ -15,7 +15,7 @@ import (
 
 const (
 	defaultHandshakeTimeout = 60 * time.Second
-	defaultDialTimeout      = 5 * time.Second
+	defaultDialTimeout      = 120 * time.Second
 	defaultStopGrace        = 5 * time.Second
 )
 
