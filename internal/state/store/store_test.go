@@ -176,13 +176,50 @@ func TestSessionStore_SetSummaryRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRunPluginMigrations_BinaryPath ensures that passing the directory of the
+// plugin binary (filepath.Dir(binaryPath)) finds migrations correctly. Previously
+// the binary path itself was passed, causing migrations to be looked up under
+// e.g. /plugins/myplugin/myplugin/migrations instead of /plugins/myplugin/migrations.
+func TestRunPluginMigrations_BinaryPath(t *testing.T) {
+	pluginDir := t.TempDir()
+	// Simulate a plugin binary sitting inside pluginDir
+	binaryPath := filepath.Join(pluginDir, "opentalon-mcp")
+	if err := os.WriteFile(binaryPath, []byte("fake binary"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(pluginDir, "migrations"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	sql := `CREATE TABLE IF NOT EXISTS mcp_data (id TEXT PRIMARY KEY);`
+	if err := os.WriteFile(filepath.Join(pluginDir, "migrations", "001_init.sql"), []byte(sql), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	// Must use filepath.Dir(binaryPath), not binaryPath itself
+	if err := RunPluginMigrations(dataDir, "opentalon-mcp", filepath.Dir(binaryPath)); err != nil {
+		t.Fatalf("RunPluginMigrations with Dir(binaryPath): %v", err)
+	}
+	dbPath := filepath.Join(dataDir, "plugin_data", "opentalon-mcp.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Errorf("plugin db not created: %v", err)
+	}
+}
+
 func TestRunPluginMigrations_NoMigrationsDir(t *testing.T) {
-	dir := t.TempDir()
-	err := RunPluginMigrations(dir, "myplugin", dir)
-	if err != nil {
+	pluginDir := t.TempDir()
+	binaryPath := filepath.Join(pluginDir, "myplugin")
+	if err := os.WriteFile(binaryPath, []byte("fake binary"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	if err := RunPluginMigrations(dataDir, "myplugin", filepath.Dir(binaryPath)); err != nil {
 		t.Fatalf("RunPluginMigrations (no migrations dir): %v", err)
 	}
-	// Should create plugin_data/myplugin.db with schema_version if we had run any migration; with no dir it's no-op
+	// No migrations dir → no-op: DB must not be created
+	dbPath := filepath.Join(dataDir, "plugin_data", "myplugin.db")
+	if _, err := os.Stat(dbPath); err == nil {
+		t.Error("plugin db should not be created when there are no migrations")
+	}
 }
 
 func TestRunPluginMigrations_WithMigrations(t *testing.T) {
