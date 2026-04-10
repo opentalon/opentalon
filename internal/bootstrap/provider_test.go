@@ -142,7 +142,6 @@ func TestFetch_CustomTokenHeader(t *testing.T) {
 	}
 }
 
-
 func TestFetch_RetriesOn5xx(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
