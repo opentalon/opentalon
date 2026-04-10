@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/textproto"
 	"os"
 	"sync"
 	"time"
@@ -40,7 +41,7 @@ type VerifierConfig struct {
 	GroupField       string            // default "group"
 	PluginsField     string            // default "plugins"
 	ModelField       string            // optional JSON field for model override; default "model"
-	ExtraHeaders     map[string]string // static headers sent on every WhoAmI call; values are os.ExpandEnv-expanded
+	ExtraHeaders     map[string]string // static headers sent on every WhoAmI call; ${ENV_VAR} expanded once at construction
 }
 
 func (c *VerifierConfig) setDefaults() {
@@ -75,6 +76,26 @@ func (c *VerifierConfig) setDefaults() {
 	}
 	if c.ModelField == "" {
 		c.ModelField = "model"
+	}
+	// Expand env vars in ExtraHeaders once at construction time so values are
+	// immutable for the verifier's lifetime and can't drift mid-run. Also guard
+	// against keys that collide with TokenHeader — they would silently overwrite
+	// the auth token on every request.
+	if len(c.ExtraHeaders) > 0 {
+		canonicalToken := textproto.CanonicalMIMEHeaderKey(c.TokenHeader)
+		expanded := make(map[string]string, len(c.ExtraHeaders))
+		for k, v := range c.ExtraHeaders {
+			if textproto.CanonicalMIMEHeaderKey(k) == canonicalToken {
+				slog.Warn("whoami extra_header collides with token_header and will be ignored", "header", k, "token_header", c.TokenHeader)
+				continue
+			}
+			val := os.ExpandEnv(v)
+			if val == "" && v != "" {
+				slog.Warn("whoami extra_header resolved to empty string — check env var", "header", k, "template", v)
+			}
+			expanded[k] = val
+		}
+		c.ExtraHeaders = expanded
 	}
 }
 
@@ -225,7 +246,7 @@ func (v *Verifier) callServer(ctx context.Context, token string) (*Profile, erro
 	}
 	req.Header.Set(v.cfg.TokenHeader, v.cfg.TokenPrefix+token)
 	for k, val := range v.cfg.ExtraHeaders {
-		req.Header.Set(k, os.ExpandEnv(val))
+		req.Header.Set(k, val)
 	}
 
 	resp, err := v.client.Do(req)

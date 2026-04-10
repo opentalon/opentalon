@@ -113,6 +113,8 @@ inbound:
 
 `extra_headers` values support `${ENV_VAR}` expansion. The headers are added to every WhoAmI call alongside the main token header.
 
+> **TLS in production:** the shared secret prevents forged requests, but without TLS it is visible in transit and replayable. Use `https://` when the WhoAmI server is reachable from outside the cluster. Within a Kubernetes cluster (pod-to-pod over the cluster network), `http://` is acceptable — the network is already isolated and the secret never leaves the cluster.
+
 ## Dynamic plugin assignments
 
 Plugin access for a group is stored in the `group_plugins` database table. There are three ways to add assignments, with a clear priority order:

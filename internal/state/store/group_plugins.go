@@ -54,8 +54,8 @@ VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (group_id, plugin_id) DO UPDATE SET
     source     = excluded.source,
     updated_at = excluded.updated_at
-WHERE CASE excluded.source WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END
-   >= CASE source           WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END`
+WHERE CASE excluded.source WHEN 'config' THEN 1 WHEN 'bootstrap' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END
+   >= CASE source           WHEN 'config' THEN 1 WHEN 'bootstrap' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END`
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

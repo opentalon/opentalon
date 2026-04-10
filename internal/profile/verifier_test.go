@@ -3,6 +3,7 @@ package profile
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -73,8 +74,8 @@ func TestVerifier_AuthFailed_NonOK(t *testing.T) {
 
 	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
 	_, err := v.Verify(context.Background(), "bad-token")
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	if !errors.Is(err, ErrAuthFailed) {
+		t.Fatalf("expected ErrAuthFailed, got %v", err)
 	}
 }
 
@@ -86,8 +87,8 @@ func TestVerifier_AuthFailed_MissingEntityID(t *testing.T) {
 
 	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
 	_, err := v.Verify(context.Background(), "tok")
-	if err == nil {
-		t.Fatal("expected error for missing entity_id")
+	if !errors.Is(err, ErrAuthFailed) {
+		t.Fatalf("expected ErrAuthFailed, got %v", err)
 	}
 }
 
@@ -146,8 +147,109 @@ func TestVerifier_ExtraHeaders_WrongSecret(t *testing.T) {
 		ExtraHeaders: map[string]string{"X-Security-Token": "${TEST_WHOAMI_SECRET}"},
 	}, nil, nil)
 	_, err := v.Verify(context.Background(), "U123")
-	if err == nil {
-		t.Fatal("expected error for wrong secret, got nil")
+	if !errors.Is(err, ErrAuthFailed) {
+		t.Fatalf("expected ErrAuthFailed, got %v", err)
+	}
+}
+
+// TestVerifier_ExtraHeaders_ExpandedAtConstruction verifies that env vars in
+// ExtraHeaders are expanded once when NewVerifier is called, not per-request.
+// A mid-run change to the env var must not affect in-flight or cached calls.
+func TestVerifier_ExtraHeaders_ExpandedAtConstruction(t *testing.T) {
+	t.Setenv("TEST_WHOAMI_HEADER", "initial-value")
+
+	received := make(chan string, 10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Get("X-Snapshot")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"entity_id": "u1", "group": "g1"})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{
+		URL:          srv.URL,
+		CacheTTL:     10 * time.Second,
+		ExtraHeaders: map[string]string{"X-Snapshot": "${TEST_WHOAMI_HEADER}"},
+	}, nil, nil)
+	defer v.Close()
+
+	// First call — env var is "initial-value" at construction time.
+	if _, err := v.Verify(context.Background(), "tok1"); err != nil {
+		t.Fatalf("first Verify: %v", err)
+	}
+
+	// Change the env var after construction.
+	t.Setenv("TEST_WHOAMI_HEADER", "changed-value")
+
+	// Second call with a different token (bypasses cache) — header must still be "initial-value".
+	if _, err := v.Verify(context.Background(), "tok2"); err != nil {
+		t.Fatalf("second Verify: %v", err)
+	}
+
+	close(received)
+	for val := range received {
+		if val != "initial-value" {
+			t.Errorf("X-Snapshot header = %q, want initial-value (expanded at construction, not per-call)", val)
+		}
+	}
+}
+
+// TestVerifier_ExtraHeaders_UnsetVar verifies that a ${VAR} that resolves to empty
+// sends an empty header value (not the literal "${VAR}" string). The warning is
+// logged but the request still proceeds.
+func TestVerifier_ExtraHeaders_UnsetVar(t *testing.T) {
+	// Ensure the var is unset.
+	t.Setenv("TEST_WHOAMI_UNSET_VAR", "")
+
+	received := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Get("X-Empty")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"entity_id": "u1", "group": "g1"})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{
+		URL:          srv.URL,
+		ExtraHeaders: map[string]string{"X-Empty": "${TEST_WHOAMI_UNSET_VAR}"},
+	}, nil, nil)
+	defer v.Close()
+
+	if _, err := v.Verify(context.Background(), "tok"); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	if val := <-received; val != "" {
+		t.Errorf("X-Empty = %q, want empty string when env var is unset", val)
+	}
+}
+
+// TestVerifier_ExtraHeaders_CollisionWithTokenHeader verifies that an extra_header
+// whose canonical name matches token_header is silently dropped (not applied),
+// preventing a misconfigured entry from overwriting the auth token.
+func TestVerifier_ExtraHeaders_CollisionWithTokenHeader(t *testing.T) {
+	authValues := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authValues <- r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"entity_id": "u1", "group": "g1"})
+	}))
+	defer srv.Close()
+
+	// "authorization" and "Authorization" are the same canonical header.
+	// The extra_header must not overwrite the token.
+	v := NewVerifier(VerifierConfig{
+		URL: srv.URL,
+		ExtraHeaders: map[string]string{
+			"authorization": "should-not-overwrite",
+		},
+	}, nil, nil)
+	defer v.Close()
+
+	if _, err := v.Verify(context.Background(), "real-token"); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	got := <-authValues
+	if got != "Bearer real-token" {
+		t.Errorf("Authorization header = %q, want %q — extra_header must not overwrite token_header", got, "Bearer real-token")
 	}
 }
 
