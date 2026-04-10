@@ -122,8 +122,8 @@ func main() {
 	var groupPluginStore *store.GroupPluginStore
 	var usageStore *store.UsageStore
 	var entityStore *store.EntityStore
-	if dataDir != "" {
-		db, err := store.Open(dataDir)
+	if dataDir != "" || cfg.State.DB.Driver == "postgres" {
+		db, err := store.Open(cfg.State.DB, dataDir)
 		if err != nil {
 			slog.Warn("state store open failed, using in-memory state", "error", err)
 			memory, sessions = newInMemoryState()
