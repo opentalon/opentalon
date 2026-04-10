@@ -23,6 +23,20 @@ type Config struct {
 	RequestPackages RequestPackagesConfig    `yaml:"request_packages"`
 	Lua             *LuaConfig               `yaml:"lua,omitempty"`
 	Profiles        ProfilesConfig           `yaml:"profiles,omitempty"`
+	Bootstrap       BootstrapConfig          `yaml:"bootstrap,omitempty"`
+}
+
+// BootstrapConfig configures a remote HTTP endpoint that is called once at startup
+// to fetch additional channels, plugins, and group_plugins. Remote entries are merged
+// into the static config (static wins on key conflicts).
+type BootstrapConfig struct {
+	URL         string `yaml:"url"`          // required to enable bootstrap
+	Token       string `yaml:"token"`        // bearer token; supports ${ENV_VAR}
+	TokenHeader string `yaml:"token_header"` // default "Authorization"
+	TokenPrefix string `yaml:"token_prefix"` // default "Bearer "
+	Timeout     string `yaml:"timeout"`      // Go duration; default "30s"
+	Retries     int    `yaml:"retries"`      // retries on transient error; default 3
+	Required    bool   `yaml:"required"`     // if true, fail startup when fetch fails
 }
 
 // ProfilesConfig enables profile-based multi-tenancy.
@@ -36,16 +50,17 @@ type ProfilesConfig struct {
 
 // WhoAmIConfig configures the external identity-verification server.
 type WhoAmIConfig struct {
-	URL           string `yaml:"url"`             // required to enable profile verification
-	Method        string `yaml:"method"`          // GET or POST; default POST
-	TokenHeader   string `yaml:"token_header"`    // header sent to server; default "Authorization"
-	TokenPrefix   string `yaml:"token_prefix"`    // value prefix; default "Bearer "
-	Timeout       string `yaml:"timeout"`         // Go duration; default "5s"
-	CacheTTL      string `yaml:"cache_ttl"`       // Go duration; default "60s"
-	EntityIDField string `yaml:"entity_id_field"` // JSON field in response; default "entity_id"
-	GroupField    string `yaml:"group_field"`     // JSON field in response; default "group"
-	PluginsField  string `yaml:"plugins_field"`   // optional JSON field for plugin list; default "plugins"
-	ModelField    string `yaml:"model_field"`     // optional JSON field for model override; default "model"
+	URL           string            `yaml:"url"`                     // required to enable profile verification
+	Method        string            `yaml:"method"`                  // GET or POST; default POST
+	TokenHeader   string            `yaml:"token_header"`            // header sent to server; default "Authorization"
+	TokenPrefix   string            `yaml:"token_prefix"`            // value prefix; default "Bearer "
+	Timeout       string            `yaml:"timeout"`                 // Go duration; default "5s"
+	CacheTTL      string            `yaml:"cache_ttl"`               // Go duration; default "60s"
+	EntityIDField string            `yaml:"entity_id_field"`         // JSON field in response; default "entity_id"
+	GroupField    string            `yaml:"group_field"`             // JSON field in response; default "group"
+	PluginsField  string            `yaml:"plugins_field"`           // optional JSON field for plugin list; default "plugins"
+	ModelField    string            `yaml:"model_field"`             // optional JSON field for model override; default "model"
+	ExtraHeaders  map[string]string `yaml:"extra_headers,omitempty"` // static headers added to every WhoAmI call; values support ${ENV_VAR}
 }
 
 // GroupConfig is a static baseline of plugin IDs for a group.
@@ -347,6 +362,7 @@ func Parse(data []byte) (*Config, error) {
 	expandEnvInProviders(&cfg)
 	expandEnvInPlugins(&cfg)
 	expandEnvInChannels(&cfg)
+	expandEnvInBootstrap(&cfg)
 	if cfg.State.DataDir == "" {
 		home, _ := os.UserHomeDir()
 		cfg.State.DataDir = filepath.Join(home, ".opentalon")
@@ -411,6 +427,14 @@ func expandEnvInPlugins(cfg *Config) {
 		}
 		cfg.Plugins[name] = p
 	}
+}
+
+func expandEnvInBootstrap(cfg *Config) {
+	cfg.Bootstrap.URL = expandEnv(cfg.Bootstrap.URL)
+	cfg.Bootstrap.Token = expandEnv(cfg.Bootstrap.Token)
+	cfg.Bootstrap.TokenHeader = expandEnv(cfg.Bootstrap.TokenHeader)
+	cfg.Bootstrap.TokenPrefix = expandEnv(cfg.Bootstrap.TokenPrefix)
+	cfg.Bootstrap.Timeout = expandEnv(cfg.Bootstrap.Timeout)
 }
 
 func expandEnvInChannels(cfg *Config) {

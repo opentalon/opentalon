@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/textproto"
+	"os"
 	"sync"
 	"time"
 )
@@ -29,16 +31,17 @@ type EntityUpserter interface {
 // VerifierConfig holds configuration parsed from config.WhoAmIConfig.
 type VerifierConfig struct {
 	URL              string
-	Method           string        // "GET" or "POST"; default "POST"
-	TokenHeader      string        // default "Authorization"
-	TokenPrefix      string        // default "Bearer "
-	Timeout          time.Duration // default 5s
-	CacheTTL         time.Duration // default 60s
-	NegativeCacheTTL time.Duration // default 15s; caches explicit server rejections (4xx)
-	EntityIDField    string        // default "entity_id"
-	GroupField       string        // default "group"
-	PluginsField     string        // default "plugins"
-	ModelField       string        // optional JSON field for model override; default "model"
+	Method           string            // "GET" or "POST"; default "POST"
+	TokenHeader      string            // default "Authorization"
+	TokenPrefix      string            // default "Bearer "
+	Timeout          time.Duration     // default 5s
+	CacheTTL         time.Duration     // default 60s
+	NegativeCacheTTL time.Duration     // default 15s; caches explicit server rejections (4xx)
+	EntityIDField    string            // default "entity_id"
+	GroupField       string            // default "group"
+	PluginsField     string            // default "plugins"
+	ModelField       string            // optional JSON field for model override; default "model"
+	ExtraHeaders     map[string]string // static headers sent on every WhoAmI call; ${ENV_VAR} expanded once at construction
 }
 
 func (c *VerifierConfig) setDefaults() {
@@ -46,10 +49,12 @@ func (c *VerifierConfig) setDefaults() {
 		c.Method = "POST"
 	}
 	if c.TokenHeader == "" {
+		// Apply defaults only when the header is unconfigured.
+		// If a custom TokenHeader is set, TokenPrefix defaults to "" (no prefix).
 		c.TokenHeader = "Authorization"
-	}
-	if c.TokenPrefix == "" {
-		c.TokenPrefix = "Bearer "
+		if c.TokenPrefix == "" {
+			c.TokenPrefix = "Bearer "
+		}
 	}
 	if c.Timeout == 0 {
 		c.Timeout = 5 * time.Second
@@ -71,6 +76,26 @@ func (c *VerifierConfig) setDefaults() {
 	}
 	if c.ModelField == "" {
 		c.ModelField = "model"
+	}
+	// Expand env vars in ExtraHeaders once at construction time so values are
+	// immutable for the verifier's lifetime and can't drift mid-run. Also guard
+	// against keys that collide with TokenHeader — they would silently overwrite
+	// the auth token on every request.
+	if len(c.ExtraHeaders) > 0 {
+		canonicalToken := textproto.CanonicalMIMEHeaderKey(c.TokenHeader)
+		expanded := make(map[string]string, len(c.ExtraHeaders))
+		for k, v := range c.ExtraHeaders {
+			if textproto.CanonicalMIMEHeaderKey(k) == canonicalToken {
+				slog.Warn("whoami extra_header collides with token_header and will be ignored", "header", k, "token_header", c.TokenHeader)
+				continue
+			}
+			val := os.ExpandEnv(v)
+			if val == "" && v != "" {
+				slog.Warn("whoami extra_header resolved to empty string — check env var", "header", k, "template", v)
+			}
+			expanded[k] = val
+		}
+		c.ExtraHeaders = expanded
 	}
 }
 
@@ -220,6 +245,9 @@ func (v *Verifier) callServer(ctx context.Context, token string) (*Profile, erro
 		return nil, fmt.Errorf("%w: build request: %v", ErrAuthFailed, err)
 	}
 	req.Header.Set(v.cfg.TokenHeader, v.cfg.TokenPrefix+token)
+	for k, val := range v.cfg.ExtraHeaders {
+		req.Header.Set(k, val)
+	}
 
 	resp, err := v.client.Do(req)
 	if err != nil {

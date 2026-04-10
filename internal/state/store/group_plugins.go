@@ -48,14 +48,15 @@ func (s *GroupPluginStore) UpsertGroupPlugins(ctx context.Context, groupID strin
 	// Priority is encoded directly in SQL so no per-row SELECT is needed.
 	// The ON CONFLICT WHERE clause only performs the UPDATE when the incoming
 	// source has equal or higher priority than the stored one.
+	// Priority ladder: bootstrap(0) < config(1) < whoami(2) < admin(3).
 	const upsertSQL = `
 INSERT INTO group_plugins (group_id, plugin_id, source, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (group_id, plugin_id) DO UPDATE SET
     source     = excluded.source,
     updated_at = excluded.updated_at
-WHERE CASE excluded.source WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END
-   >= CASE source           WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END`
+WHERE CASE excluded.source WHEN 'bootstrap' THEN 0 WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END
+   >= CASE source           WHEN 'bootstrap' THEN 0 WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END`
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

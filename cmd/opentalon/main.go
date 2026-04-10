@@ -12,6 +12,7 @@ import (
 
 	"time"
 
+	"github.com/opentalon/opentalon/internal/bootstrap"
 	"github.com/opentalon/opentalon/internal/bundle"
 	"github.com/opentalon/opentalon/internal/channel"
 	"github.com/opentalon/opentalon/internal/commands"
@@ -71,6 +72,31 @@ func main() {
 	}
 	logger.Setup(logLevel)
 
+	// Fetch remote bootstrap config (if configured) and merge into static config.
+	// Remote entries are additive — static config wins on key conflicts.
+	var bootstrapGroupPlugins map[string][]string
+	if bsProvider := bootstrap.New(cfg.Bootstrap); bsProvider != nil {
+		bsCtx, bsCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		remoteResp, err := bsProvider.Fetch(bsCtx)
+		bsCancel()
+		if err != nil {
+			if cfg.Bootstrap.Required {
+				fmt.Fprintf(os.Stderr, "Error fetching bootstrap config (required=true): %v\n", err)
+				os.Exit(1)
+			}
+			slog.Warn("bootstrap fetch failed, proceeding with static config only", "error", err)
+		} else {
+			cfg = bootstrap.Merge(cfg, remoteResp)
+			bootstrapGroupPlugins = remoteResp.GroupPlugins
+			slog.Info("bootstrap config merged",
+				"url", cfg.Bootstrap.URL,
+				"channels", len(remoteResp.Channels),
+				"plugins", len(remoteResp.Plugins),
+				"group_plugins", len(remoteResp.GroupPlugins),
+			)
+		}
+	}
+
 	// Build LLM provider and default model from config
 	prov, defaultModel, err := buildProvider(cfg)
 	if err != nil {
@@ -114,6 +140,8 @@ func main() {
 			entityStore = store.NewEntityStore(db)
 			// Seed static group→plugin assignments from config (source="config"; does not overwrite whoami/admin).
 			seedGroupPlugins(context.Background(), groupPluginStore, cfg.Profiles.Groups)
+			// Seed group→plugin assignments from remote bootstrap response (source="bootstrap"; lower priority than "config", does not overwrite whoami/admin).
+			seedBootstrapGroupPlugins(context.Background(), groupPluginStore, bootstrapGroupPlugins)
 		}
 	} else {
 		memory, sessions = newInMemoryState()
@@ -333,6 +361,7 @@ func main() {
 			GroupField:    cfg.Profiles.WhoAmI.GroupField,
 			PluginsField:  cfg.Profiles.WhoAmI.PluginsField,
 			ModelField:    cfg.Profiles.WhoAmI.ModelField,
+			ExtraHeaders:  cfg.Profiles.WhoAmI.ExtraHeaders,
 		}
 		if d, err := time.ParseDuration(cfg.Profiles.WhoAmI.Timeout); err == nil {
 			vcfg.Timeout = d
@@ -424,6 +453,22 @@ func seedGroupPlugins(ctx context.Context, gps *store.GroupPluginStore, groups m
 		}
 		if err := gps.UpsertGroupPlugins(ctx, groupID, gc.Plugins, "config"); err != nil {
 			slog.Warn("seed group plugins failed", "group", groupID, "error", err)
+		}
+	}
+}
+
+// seedBootstrapGroupPlugins seeds group→plugin assignments fetched from the remote bootstrap
+// endpoint. Uses source="bootstrap" which has the same priority as "config" in the DB.
+func seedBootstrapGroupPlugins(ctx context.Context, gps *store.GroupPluginStore, groups map[string][]string) {
+	if gps == nil || len(groups) == 0 {
+		return
+	}
+	for groupID, plugins := range groups {
+		if len(plugins) == 0 {
+			continue
+		}
+		if err := gps.UpsertGroupPlugins(ctx, groupID, plugins, "bootstrap"); err != nil {
+			slog.Warn("seed bootstrap group plugins failed", "group", groupID, "error", err)
 		}
 	}
 }

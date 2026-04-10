@@ -78,6 +78,44 @@ func TestGroupPluginStore_Revoke(t *testing.T) {
 	}
 }
 
+func TestGroupPluginStore_ConfigWinsOverBootstrap(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	s := NewGroupPluginStore(db)
+	ctx := context.Background()
+
+	// Bootstrap seeds first.
+	if err := s.UpsertGroupPlugins(ctx, "g", []string{"jira"}, "bootstrap"); err != nil {
+		t.Fatal(err)
+	}
+	// Config should overwrite bootstrap.
+	if err := s.UpsertGroupPlugins(ctx, "g", []string{"jira"}, "config"); err != nil {
+		t.Fatal(err)
+	}
+	var src string
+	if err := db.db.QueryRow(`SELECT source FROM group_plugins WHERE group_id='g' AND plugin_id='jira'`).Scan(&src); err != nil {
+		t.Fatal(err)
+	}
+	if src != "config" {
+		t.Errorf("source = %q, want config (config must win over bootstrap)", src)
+	}
+
+	// Now verify bootstrap cannot overwrite config.
+	if err := s.UpsertGroupPlugins(ctx, "g", []string{"jira"}, "bootstrap"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.db.QueryRow(`SELECT source FROM group_plugins WHERE group_id='g' AND plugin_id='jira'`).Scan(&src); err != nil {
+		t.Fatal(err)
+	}
+	if src != "config" {
+		t.Errorf("source = %q, want config (bootstrap must not overwrite config)", src)
+	}
+}
+
 func TestGroupPluginStore_WhoAmIUpgradesConfig(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {

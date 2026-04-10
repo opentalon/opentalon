@@ -67,7 +67,53 @@ profiles:
     group_field: group            # JSON key for group; default "group"
     plugins_field: plugins        # JSON key for plugin list; default "plugins"
     model_field: model            # JSON key for model override; default "model"
+    extra_headers: {}             # static headers added to every WhoAmI call (see below)
 ```
+
+### Using platform user IDs as the token
+
+For channels like Slack or Teams the platform already provides a stable per-user ID (`U123456` for Slack, `from.id` for Teams). You can use that ID directly as the profile token instead of requiring users to manage separate bearer tokens.
+
+Because platform user IDs are not secret, you should also send a shared server-side secret so your WhoAmI server can verify the request really came from OpenTalon. Use `extra_headers` for this:
+
+```yaml
+profiles:
+  who_am_i:
+    url: "https://auth.example.com/whoami"
+    token_header: "X-User-ID"
+    token_prefix: ""                            # no prefix — send the raw user ID
+    extra_headers:
+      X-Security-Token: "${WHOAMI_SECRET}"      # env var expanded at runtime
+```
+
+Your WhoAmI server then receives two headers per call:
+
+```
+X-User-ID: U123456
+X-Security-Token: <secret>
+```
+
+It should verify the secret before looking up the user, then return the usual `entity_id` / `group` / `plugins` response.
+
+On the channel side, map the platform user ID into `profile_token` via the `metadata` mapping in `channel.yaml`:
+
+```yaml
+# slack-channel/channel.yaml
+inbound:
+  mapping:
+    metadata:
+      profile_token: "user"   # Slack user ID → profile_token
+
+# msteams-channel/channel.yaml
+inbound:
+  mapping:
+    metadata:
+      profile_token: "from.id"   # Teams user ID → profile_token
+```
+
+`extra_headers` values support `${ENV_VAR}` expansion. The headers are added to every WhoAmI call alongside the main token header.
+
+> **TLS in production:** the shared secret prevents forged requests, but without TLS it is visible in transit and replayable. Use `https://` when the WhoAmI server is reachable from outside the cluster. Within a Kubernetes cluster (pod-to-pod over the cluster network), `http://` is acceptable — the network is already isolated and the secret never leaves the cluster.
 
 ## Dynamic plugin assignments
 
