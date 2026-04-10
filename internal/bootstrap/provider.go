@@ -71,7 +71,7 @@ func New(cfg config.BootstrapConfig) *Provider {
 
 // Fetch calls the remote endpoint and returns the parsed Response.
 // On transient errors it retries up to cfg.Retries times with linear backoff.
-// 4xx HTTP responses are treated as terminal (no retry).
+// 4xx HTTP responses are treated as terminal (no retry); 5xx responses are retried.
 func (p *Provider) Fetch(ctx context.Context) (*Response, error) {
 	var lastErr error
 	for attempt := 0; attempt <= p.cfg.Retries; attempt++ {
@@ -110,8 +110,11 @@ func (p *Provider) doFetch(ctx context.Context) (*Response, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 		return nil, &terminalError{fmt.Errorf("bootstrap: HTTP %d from %s", resp.StatusCode, p.cfg.URL)}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("bootstrap: HTTP %d from %s", resp.StatusCode, p.cfg.URL)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
@@ -128,12 +131,11 @@ func (p *Provider) doFetch(ctx context.Context) (*Response, error) {
 
 // Merge merges the remote Response into the static config and returns a new Config.
 // Static config entries always win on key conflicts — remote entries are purely additive.
-// GroupPlugins from the remote response is not merged into the config struct; callers
-// handle seeding it to the DB separately via the returned Response.GroupPlugins field.
-// Merge merges the remote Response into the static config and returns a new Config.
-// Static config entries always win on key conflicts — remote entries are purely additive.
 // The static config is never mutated. GroupPlugins from the response is not merged into
 // the returned Config; callers seed it to the DB separately.
+//
+// Only Channels and Plugins are deep-copied; all other fields (Models, Routing, Lua, etc.)
+// are shallow-copied from static. Do not mutate those fields on the returned Config.
 func Merge(static *config.Config, remote *Response) *config.Config {
 	if remote == nil {
 		return static

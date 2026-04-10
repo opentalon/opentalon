@@ -434,6 +434,7 @@ func expandEnvInBootstrap(cfg *Config) {
 	cfg.Bootstrap.Token = expandEnv(cfg.Bootstrap.Token)
 	cfg.Bootstrap.TokenHeader = expandEnv(cfg.Bootstrap.TokenHeader)
 	cfg.Bootstrap.TokenPrefix = expandEnv(cfg.Bootstrap.TokenPrefix)
+	cfg.Bootstrap.Timeout = expandEnv(cfg.Bootstrap.Timeout)
 }
 
 func expandEnvInChannels(cfg *Config) {

@@ -140,7 +140,7 @@ func main() {
 			entityStore = store.NewEntityStore(db)
 			// Seed static group→plugin assignments from config (source="config"; does not overwrite whoami/admin).
 			seedGroupPlugins(context.Background(), groupPluginStore, cfg.Profiles.Groups)
-			// Seed group→plugin assignments from remote bootstrap response (same priority as "config").
+			// Seed group→plugin assignments from remote bootstrap response (source="bootstrap"; lower priority than "config", does not overwrite whoami/admin).
 			seedBootstrapGroupPlugins(context.Background(), groupPluginStore, bootstrapGroupPlugins)
 		}
 	} else {

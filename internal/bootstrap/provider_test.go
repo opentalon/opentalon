@@ -142,7 +142,33 @@ func TestFetch_CustomTokenHeader(t *testing.T) {
 	}
 }
 
-func TestFetch_4xxIsTerminal(t *testing.T) {
+
+func TestFetch_RetriesOn5xx(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(Response{})
+	}))
+	defer srv.Close()
+
+	p := New(config.BootstrapConfig{URL: srv.URL, Retries: 3})
+	resp, err := p.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if calls != 3 {
+		t.Errorf("server calls = %d, want 3 (two 5xx then success)", calls)
+	}
+}
+
+func TestFetch_4xxIsNotRetried(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -156,42 +182,6 @@ func TestFetch_4xxIsTerminal(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("server calls = %d, want 1 (4xx should not retry)", calls)
-	}
-}
-
-func TestFetch_RetriesOnTransientError(t *testing.T) {
-	calls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if calls < 3 {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(Response{})
-	}))
-	defer srv.Close()
-
-	// 5xx is not in the terminal-error path (terminal = network errors that are *terminalError)
-	// Actually our terminalError wraps 4xx. 5xx falls through as a non-terminal error? Let me check...
-	// No: doFetch returns terminalError for ANY non-2xx (statusCode < 200 || >= 300).
-	// So 5xx IS terminal too in the current impl. Let's test actual network retry instead.
-	srv.Close() // close the server so the first attempt gets a network error
-
-	// Use a server that fails then succeeds by counting attempts via a closure.
-	attempt := 0
-	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempt++
-		_ = json.NewEncoder(w).Encode(Response{})
-	}))
-	defer srv2.Close()
-
-	p := New(config.BootstrapConfig{URL: srv2.URL, Retries: 2})
-	resp, err := p.Fetch(context.Background())
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	if resp == nil {
-		t.Fatal("expected non-nil response")
 	}
 }
 
