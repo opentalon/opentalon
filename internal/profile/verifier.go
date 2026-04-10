@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
@@ -29,16 +30,17 @@ type EntityUpserter interface {
 // VerifierConfig holds configuration parsed from config.WhoAmIConfig.
 type VerifierConfig struct {
 	URL              string
-	Method           string        // "GET" or "POST"; default "POST"
-	TokenHeader      string        // default "Authorization"
-	TokenPrefix      string        // default "Bearer "
-	Timeout          time.Duration // default 5s
-	CacheTTL         time.Duration // default 60s
-	NegativeCacheTTL time.Duration // default 15s; caches explicit server rejections (4xx)
-	EntityIDField    string        // default "entity_id"
-	GroupField       string        // default "group"
-	PluginsField     string        // default "plugins"
-	ModelField       string        // optional JSON field for model override; default "model"
+	Method           string            // "GET" or "POST"; default "POST"
+	TokenHeader      string            // default "Authorization"
+	TokenPrefix      string            // default "Bearer "
+	Timeout          time.Duration     // default 5s
+	CacheTTL         time.Duration     // default 60s
+	NegativeCacheTTL time.Duration     // default 15s; caches explicit server rejections (4xx)
+	EntityIDField    string            // default "entity_id"
+	GroupField       string            // default "group"
+	PluginsField     string            // default "plugins"
+	ModelField       string            // optional JSON field for model override; default "model"
+	ExtraHeaders     map[string]string // static headers sent on every WhoAmI call; values are os.ExpandEnv-expanded
 }
 
 func (c *VerifierConfig) setDefaults() {
@@ -46,10 +48,12 @@ func (c *VerifierConfig) setDefaults() {
 		c.Method = "POST"
 	}
 	if c.TokenHeader == "" {
+		// Apply defaults only when the header is unconfigured.
+		// If a custom TokenHeader is set, TokenPrefix defaults to "" (no prefix).
 		c.TokenHeader = "Authorization"
-	}
-	if c.TokenPrefix == "" {
-		c.TokenPrefix = "Bearer "
+		if c.TokenPrefix == "" {
+			c.TokenPrefix = "Bearer "
+		}
 	}
 	if c.Timeout == 0 {
 		c.Timeout = 5 * time.Second
@@ -220,6 +224,9 @@ func (v *Verifier) callServer(ctx context.Context, token string) (*Profile, erro
 		return nil, fmt.Errorf("%w: build request: %v", ErrAuthFailed, err)
 	}
 	req.Header.Set(v.cfg.TokenHeader, v.cfg.TokenPrefix+token)
+	for k, val := range v.cfg.ExtraHeaders {
+		req.Header.Set(k, os.ExpandEnv(val))
+	}
 
 	resp, err := v.client.Do(req)
 	if err != nil {

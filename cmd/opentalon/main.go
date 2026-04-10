@@ -333,6 +333,7 @@ func main() {
 			GroupField:    cfg.Profiles.WhoAmI.GroupField,
 			PluginsField:  cfg.Profiles.WhoAmI.PluginsField,
 			ModelField:    cfg.Profiles.WhoAmI.ModelField,
+			ExtraHeaders:  cfg.Profiles.WhoAmI.ExtraHeaders,
 		}
 		if d, err := time.ParseDuration(cfg.Profiles.WhoAmI.Timeout); err == nil {
 			vcfg.Timeout = d

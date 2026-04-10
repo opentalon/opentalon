@@ -42,10 +42,11 @@ type WhoAmIConfig struct {
 	TokenPrefix   string `yaml:"token_prefix"`    // value prefix; default "Bearer "
 	Timeout       string `yaml:"timeout"`         // Go duration; default "5s"
 	CacheTTL      string `yaml:"cache_ttl"`       // Go duration; default "60s"
-	EntityIDField string `yaml:"entity_id_field"` // JSON field in response; default "entity_id"
-	GroupField    string `yaml:"group_field"`     // JSON field in response; default "group"
-	PluginsField  string `yaml:"plugins_field"`   // optional JSON field for plugin list; default "plugins"
-	ModelField    string `yaml:"model_field"`     // optional JSON field for model override; default "model"
+	EntityIDField string            `yaml:"entity_id_field"`        // JSON field in response; default "entity_id"
+	GroupField    string            `yaml:"group_field"`            // JSON field in response; default "group"
+	PluginsField  string            `yaml:"plugins_field"`          // optional JSON field for plugin list; default "plugins"
+	ModelField    string            `yaml:"model_field"`            // optional JSON field for model override; default "model"
+	ExtraHeaders  map[string]string `yaml:"extra_headers,omitempty"` // static headers added to every WhoAmI call; values support ${ENV_VAR}
 }
 
 // GroupConfig is a static baseline of plugin IDs for a group.

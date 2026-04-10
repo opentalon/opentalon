@@ -91,6 +91,66 @@ func TestVerifier_AuthFailed_MissingEntityID(t *testing.T) {
 	}
 }
 
+func TestVerifier_ExtraHeaders(t *testing.T) {
+	t.Setenv("TEST_WHOAMI_SECRET", "s3cr3t")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-User-ID") != "U123" {
+			http.Error(w, "missing user id", http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("X-Security-Token") != "s3cr3t" {
+			http.Error(w, "bad security token", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"entity_id": "user-123",
+			"group":     "team-a",
+		})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{
+		URL:         srv.URL,
+		TokenHeader: "X-User-ID",
+		TokenPrefix: "",
+		ExtraHeaders: map[string]string{
+			"X-Security-Token": "${TEST_WHOAMI_SECRET}",
+		},
+	}, nil, nil)
+	p, err := v.Verify(context.Background(), "U123")
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if p.EntityID != "user-123" {
+		t.Errorf("EntityID = %q, want user-123", p.EntityID)
+	}
+}
+
+func TestVerifier_ExtraHeaders_WrongSecret(t *testing.T) {
+	t.Setenv("TEST_WHOAMI_SECRET", "wrong")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Security-Token") != "s3cr3t" {
+			http.Error(w, "bad security token", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"entity_id": "u1"})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{
+		URL:          srv.URL,
+		TokenHeader:  "X-User-ID",
+		TokenPrefix:  "",
+		ExtraHeaders: map[string]string{"X-Security-Token": "${TEST_WHOAMI_SECRET}"},
+	}, nil, nil)
+	_, err := v.Verify(context.Background(), "U123")
+	if err == nil {
+		t.Fatal("expected error for wrong secret, got nil")
+	}
+}
+
 // stubGroupSaver records calls to UpsertGroupPlugins for test assertions.
 type stubGroupSaver struct {
 	saved map[string][]string
