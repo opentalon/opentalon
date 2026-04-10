@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/opentalon/opentalon/internal/config"
 	_ "github.com/lib/pq"
+	"github.com/opentalon/opentalon/internal/config"
 	_ "modernc.org/sqlite"
 )
 
