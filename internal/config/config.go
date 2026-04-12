@@ -24,6 +24,23 @@ type Config struct {
 	Lua             *LuaConfig               `yaml:"lua,omitempty"`
 	Profiles        ProfilesConfig           `yaml:"profiles,omitempty"`
 	Bootstrap       BootstrapConfig          `yaml:"bootstrap,omitempty"`
+	Cluster         ClusterConfig            `yaml:"cluster,omitempty"`
+}
+
+// ClusterConfig enables Redis-backed message deduplication for multi-pod deployments.
+// When enabled: every inbound message acquires a Redis lock before processing, so only
+// one pod handles each unique message even when multiple pods receive it simultaneously.
+//
+// Standalone mode: set redis_url only.
+// Sentinel mode:   set master_name + sentinels (redis_url is ignored).
+type ClusterConfig struct {
+	Enabled          bool     `yaml:"enabled"`
+	RedisURL         string   `yaml:"redis_url"`         // standalone: redis://[:pass@]host:port/db
+	MasterName       string   `yaml:"master_name"`       // sentinel: name of the master
+	Sentinels        []string `yaml:"sentinels"`         // sentinel: list of host:port addresses
+	Password         string   `yaml:"password"`          // Redis master password (sentinel mode; standalone uses URL)
+	SentinelPassword string   `yaml:"sentinel_password"` // optional: Sentinel ACL password
+	DedupTTL         string   `yaml:"dedup_ttl"`         // Go duration for dedup lock TTL; default "5m"
 }
 
 // BootstrapConfig configures a remote HTTP endpoint that is called once at startup
@@ -371,6 +388,7 @@ func Parse(data []byte) (*Config, error) {
 	expandEnvInPlugins(&cfg)
 	expandEnvInChannels(&cfg)
 	expandEnvInBootstrap(&cfg)
+	expandEnvInCluster(&cfg)
 	if cfg.State.DataDir == "" {
 		home, _ := os.UserHomeDir()
 		cfg.State.DataDir = filepath.Join(home, ".opentalon")
@@ -443,6 +461,17 @@ func expandEnvInBootstrap(cfg *Config) {
 	cfg.Bootstrap.TokenHeader = expandEnv(cfg.Bootstrap.TokenHeader)
 	cfg.Bootstrap.TokenPrefix = expandEnv(cfg.Bootstrap.TokenPrefix)
 	cfg.Bootstrap.Timeout = expandEnv(cfg.Bootstrap.Timeout)
+}
+
+func expandEnvInCluster(cfg *Config) {
+	cfg.Cluster.RedisURL = expandEnv(cfg.Cluster.RedisURL)
+	cfg.Cluster.MasterName = expandEnv(cfg.Cluster.MasterName)
+	cfg.Cluster.Password = expandEnv(cfg.Cluster.Password)
+	cfg.Cluster.SentinelPassword = expandEnv(cfg.Cluster.SentinelPassword)
+	cfg.Cluster.DedupTTL = expandEnv(cfg.Cluster.DedupTTL)
+	for i, s := range cfg.Cluster.Sentinels {
+		cfg.Cluster.Sentinels[i] = expandEnv(s)
+	}
 }
 
 func expandEnvInChannels(cfg *Config) {

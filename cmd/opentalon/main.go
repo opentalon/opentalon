@@ -17,6 +17,7 @@ import (
 	"github.com/opentalon/opentalon/internal/channel"
 	"github.com/opentalon/opentalon/internal/commands"
 	"github.com/opentalon/opentalon/internal/config"
+	"github.com/opentalon/opentalon/internal/dedup"
 	"github.com/opentalon/opentalon/internal/logger"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/pipeline"
@@ -407,6 +408,34 @@ func main() {
 	handler := channel.NewMessageHandler(ensureSession, runner, orch.RunAction, toolRegistry.HasAction, profileVerifier)
 
 	reg := channel.NewRegistry(handler)
+	if cfg.Cluster.Enabled {
+		dedupTTL := 5 * time.Minute
+		if cfg.Cluster.DedupTTL != "" {
+			if d, err := time.ParseDuration(cfg.Cluster.DedupTTL); err == nil {
+				dedupTTL = d
+			} else {
+				slog.Warn("invalid cluster.dedup_ttl, using default 5m", "value", cfg.Cluster.DedupTTL)
+			}
+		}
+		var dedupClient dedup.Deduplicator
+		var dedupErr error
+		if len(cfg.Cluster.Sentinels) > 0 {
+			dedupClient, dedupErr = dedup.NewSentinel(cfg.Cluster.MasterName, cfg.Cluster.Sentinels, cfg.Cluster.Password, cfg.Cluster.SentinelPassword)
+		} else {
+			dedupClient, dedupErr = dedup.NewStandalone(cfg.Cluster.RedisURL)
+		}
+		if dedupErr != nil {
+			fmt.Fprintf(os.Stderr, "Error connecting to Redis for deduplication: %v\n", dedupErr)
+			return
+		}
+		defer func() {
+			if err := dedupClient.Close(); err != nil {
+				slog.Warn("dedup client close failed", "error", err)
+			}
+		}()
+		reg.SetDeduplicator(dedupClient, dedupTTL)
+		slog.Info("cluster deduplication enabled", "ttl", dedupTTL, "sentinel", len(cfg.Cluster.Sentinels) > 0)
+	}
 	channelManager := channel.NewManager(reg, toolRegistry)
 	channelEntries := make([]channel.ChannelEntry, 0, len(cfg.Channels))
 	for name, ch := range cfg.Channels {
