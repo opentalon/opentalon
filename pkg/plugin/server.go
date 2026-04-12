@@ -10,6 +10,15 @@ import (
 	"google.golang.org/grpc"
 )
 
+// httpAddrFromEnv returns the HTTP address the plugin wants to expose, if any.
+// Plugins set OPENTALON_HTTP_PORT (e.g. "9091") to opt in to the reverse proxy.
+func httpAddrFromEnv() string {
+	if port := os.Getenv("OPENTALON_HTTP_PORT"); port != "" {
+		return "127.0.0.1:" + port
+	}
+	return ""
+}
+
 // SocketFileName is the Unix socket filename the server listens on.
 const SocketFileName = "plugin.sock"
 
@@ -55,7 +64,7 @@ func Serve(handler Handler) error {
 	defer func() { _ = ln.Close() }()
 	defer func() { _ = os.RemoveAll(sockDir) }()
 
-	hs := Handshake{Version: HandshakeVersion, Network: "unix", Address: sockPath}
+	hs := Handshake{Version: HandshakeVersion, Network: "unix", Address: sockPath, HTTPAddr: httpAddrFromEnv()}
 	if _, err := fmt.Fprintln(os.Stdout, hs.String()); err != nil {
 		return fmt.Errorf("write handshake: %w", err)
 	}

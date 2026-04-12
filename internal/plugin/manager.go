@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opentalon/opentalon/internal/channel"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 )
 
@@ -150,6 +151,16 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 
 	if proc != nil {
 		m.watchProcess(ctx, entry.Name, proc)
+	}
+
+	// If the plugin declared an HTTP address in its handshake, register a reverse proxy
+	// on the shared webhook server so its REST API is accessible at /{plugin-name}/*.
+	if httpAddr := client.HTTPAddr(); httpAddr != "" {
+		if err := channel.RegisterReverseProxy(0, entry.Name, httpAddr); err != nil {
+			slog.Warn("plugin http proxy registration failed", "component", "plugin-manager", "plugin", entry.Name, "error", err)
+		} else {
+			slog.Info("plugin http proxy registered", "component", "plugin-manager", "plugin", entry.Name, "target", httpAddr)
+		}
 	}
 
 	slog.Info("loaded plugin", "component", "plugin-manager", "plugin", entry.Name, "mode", mode, "actions", len(cap.Actions))

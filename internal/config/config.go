@@ -25,6 +25,14 @@ type Config struct {
 	Profiles        ProfilesConfig           `yaml:"profiles,omitempty"`
 	Bootstrap       BootstrapConfig          `yaml:"bootstrap,omitempty"`
 	Cluster         ClusterConfig            `yaml:"cluster,omitempty"`
+	PluginExec      PluginExecConfig         `yaml:"plugin_exec,omitempty"`
+}
+
+// PluginExecConfig enables trusted plugins to execute ToolRegistry actions via a Redis stream.
+// Requires cluster.redis_url (or sentinel config) to be set.
+// See docs/workflows.md for details.
+type PluginExecConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // ClusterConfig enables Redis-backed message deduplication for multi-pod deployments.

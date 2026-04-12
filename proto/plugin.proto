@@ -34,6 +34,9 @@ message PluginCapabilities {
   string name = 1;
   string description = 2;
   repeated Action actions = 3;
+  // Optional text injected into the LLM system prompt when this plugin is loaded.
+  // Use it to surface context the LLM should know about (e.g. API base URLs, capability notes).
+  string system_prompt_addition = 4;
 }
 
 message Action {

@@ -851,6 +851,10 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 			}
 		}
+		if cap.SystemPromptAddition != "" {
+			sb.WriteString(cap.SystemPromptAddition)
+			sb.WriteString("\n")
+		}
 		sb.WriteString("\n")
 	}
 

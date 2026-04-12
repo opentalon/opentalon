@@ -462,6 +462,32 @@ func main() {
 		slog.Info("channels loaded")
 	}
 
+	// Start plugin exec dispatcher (allows trusted plugins to execute ToolRegistry actions via Redis).
+	// Requires plugin_exec.enabled: true and a configured Redis URL (from cluster config).
+	if cfg.PluginExec.Enabled {
+		redisURL := cfg.Cluster.RedisURL
+		if redisURL != "" || len(cfg.Cluster.Sentinels) > 0 {
+			execClient, err := plugin.NewExecRedisClient(
+				redisURL,
+				cfg.Cluster.MasterName,
+				cfg.Cluster.Sentinels,
+				cfg.Cluster.Password,
+				cfg.Cluster.SentinelPassword,
+			)
+			if err != nil {
+				slog.Warn("plugin exec dispatcher: redis connect failed, exec disabled", "error", err)
+			} else {
+				dispatcher := plugin.NewExecDispatcher(execClient, orch)
+				dispatchCtx, dispatchCancel := context.WithCancel(ctx)
+				defer dispatchCancel()
+				defer func() { _ = execClient.Close() }()
+				go dispatcher.Start(dispatchCtx)
+			}
+		} else {
+			slog.Warn("plugin_exec.enabled is true but no redis_url configured, exec disabled")
+		}
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
 	<-sigCh

@@ -25,9 +25,10 @@ func capsToProto(c CapabilitiesMsg) *pluginpb.PluginCapabilities {
 		}
 	}
 	return &pluginpb.PluginCapabilities{
-		Name:        c.Name,
-		Description: c.Description,
-		Actions:     actions,
+		Name:                 c.Name,
+		Description:          c.Description,
+		Actions:              actions,
+		SystemPromptAddition: c.SystemPromptAddition,
 	}
 }
 
