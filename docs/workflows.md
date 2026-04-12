@@ -14,7 +14,7 @@ cluster:
   redis_url: "redis://localhost:6379"   # also used for cluster deduplication
 ```
 
-This lets trusted plugins (such as `opentalon-workflows`) execute actions through OpenTalon's ToolRegistry via an internal Redis stream. Redis is required.
+This lets trusted plugins execute actions through OpenTalon's ToolRegistry via an internal Redis stream. Redis is required.
 
 With a workflow plugin installed, users can create and manage multi-step automated workflows — for example, fetching Jira issues every morning and posting a summary to Slack — directly through chat or a REST API.
 
