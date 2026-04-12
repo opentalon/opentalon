@@ -93,7 +93,7 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	}
 	defer cleanup()
 	var messagesJSON string
-	err = etx.QueryRowContext(ctx, d.Rebind(`SELECT messages FROM sessions WHERE id = ?`), id).Scan(&messagesJSON)
+	err = etx.QueryRowContext(ctx, d.Rebind(`SELECT messages FROM sessions WHERE id = ?`+d.ForUpdate()), id).Scan(&messagesJSON)
 	if err != nil {
 		_ = etx.Rollback()
 		return fmt.Errorf("session %q not found", id)

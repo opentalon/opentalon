@@ -16,6 +16,7 @@ var (
 )
 
 // Rebind converts ? placeholders to $1, $2, … for PostgreSQL; no-op for SQLite.
+// Not quote-aware: do not use literal '?' inside SQL string constants or LIKE patterns.
 func (d Dialect) Rebind(query string) string {
 	if d.name != "postgres" {
 		return query
@@ -45,6 +46,15 @@ func (d Dialect) TagMatch(column string) string {
 	return fmt.Sprintf("EXISTS (SELECT 1 FROM json_each(%s) WHERE json_each.value = ?)", column)
 }
 
+// ForUpdate returns "FOR UPDATE" on Postgres (row-level write lock) or "" on SQLite
+// (which uses BEGIN IMMEDIATE for write serialisation instead).
+func (d Dialect) ForUpdate() string {
+	if d.name == "postgres" {
+		return " FOR UPDATE"
+	}
+	return ""
+}
+
 // ExclusiveTx is a write-serialised transaction for read-modify-write operations.
 // Both *sql.Tx (postgres) and sqliteConnTx (sqlite BEGIN IMMEDIATE) satisfy this interface.
 type ExclusiveTx interface {
@@ -54,14 +64,14 @@ type ExclusiveTx interface {
 	Rollback() error
 }
 
-// BeginExclusive starts a serialised write transaction.
+// BeginExclusive starts a write transaction.
 // The returned cleanup func must be deferred by the caller to release connection resources.
 //
 //	SQLite:   dedicated Conn + BEGIN IMMEDIATE (blocks concurrent writers at start)
-//	Postgres: db.BeginTx with LevelSerializable
+//	Postgres: regular read-committed tx (caller must use FOR UPDATE on the SELECT)
 func (d Dialect) BeginExclusive(ctx context.Context, db *sql.DB) (ExclusiveTx, func(), error) {
 	if d.name == "postgres" {
-		tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return nil, func() {}, fmt.Errorf("begin exclusive: %w", err)
 		}
