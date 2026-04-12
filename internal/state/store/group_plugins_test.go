@@ -3,10 +3,12 @@ package store
 import (
 	"context"
 	"testing"
+
+	"github.com/opentalon/opentalon/internal/config"
 )
 
 func TestGroupPluginStore_UpsertAndQuery(t *testing.T) {
-	db, err := Open(t.TempDir())
+	db, err := Open(config.DBConfig{}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +31,7 @@ func TestGroupPluginStore_UpsertAndQuery(t *testing.T) {
 }
 
 func TestGroupPluginStore_PriorityNotDowngraded(t *testing.T) {
-	db, err := Open(t.TempDir())
+	db, err := Open(config.DBConfig{}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +59,7 @@ func TestGroupPluginStore_PriorityNotDowngraded(t *testing.T) {
 }
 
 func TestGroupPluginStore_Revoke(t *testing.T) {
-	db, err := Open(t.TempDir())
+	db, err := Open(config.DBConfig{}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +81,7 @@ func TestGroupPluginStore_Revoke(t *testing.T) {
 }
 
 func TestGroupPluginStore_ConfigWinsOverBootstrap(t *testing.T) {
-	db, err := Open(t.TempDir())
+	db, err := Open(config.DBConfig{}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +119,7 @@ func TestGroupPluginStore_ConfigWinsOverBootstrap(t *testing.T) {
 }
 
 func TestGroupPluginStore_WhoAmIUpgradesConfig(t *testing.T) {
-	db, err := Open(t.TempDir())
+	db, err := Open(config.DBConfig{}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

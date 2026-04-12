@@ -249,7 +249,15 @@ type PipelineOrchestratorConfig struct {
 
 type StateConfig struct {
 	DataDir string        `yaml:"data_dir"`
+	DB      DBConfig      `yaml:"db,omitempty"`
 	Session SessionConfig `yaml:"session,omitempty"`
+}
+
+// DBConfig selects the database backend. Driver defaults to "sqlite".
+// For postgres, set driver: "postgres" and provide a DSN.
+type DBConfig struct {
+	Driver string `yaml:"driver"` // "sqlite" (default) or "postgres"
+	DSN    string `yaml:"dsn"`    // postgres only: e.g. "postgres://user:pass@host:5432/dbname?sslmode=require"
 }
 
 // SessionConfig limits session size and optional idle pruning.

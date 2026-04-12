@@ -191,7 +191,12 @@ plugins:
 
 state:
   data_dir: ~/.opentalon
-  # session limits and optional summarization (SQLite store only)
+  # db selects the database backend. Defaults to sqlite (single-node).
+  # For multi-pod / horizontal scaling use postgres and omit data_dir (or keep it for plugin data).
+  # db:
+  #   driver: sqlite    # "sqlite" (default) or "postgres"
+  #   # dsn: postgres://user:pass@localhost:5432/opentalon?sslmode=require
+  # session limits and optional summarization
   # session:
   #   max_messages: 50           # cap messages per conversation (0 = no cap)
   #   max_idle_days: 30          # delete sessions not updated in N days (0 = don't prune)

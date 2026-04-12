@@ -7,12 +7,13 @@ import (
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/provider"
 )
 
 func TestOpenAndMigrations(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Open(dir)
+	db, err := Open(config.DBConfig{}, dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -28,7 +29,7 @@ func TestOpenAndMigrations(t *testing.T) {
 	}
 
 	// Re-open: idempotent, no error
-	db2, err := Open(dir)
+	db2, err := Open(config.DBConfig{}, dir)
 	if err != nil {
 		t.Fatalf("Open again: %v", err)
 	}
@@ -44,7 +45,7 @@ func TestOpenAndMigrations(t *testing.T) {
 
 func TestMemoryStore_AddScopedAndMemoriesForContext(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Open(dir)
+	db, err := Open(config.DBConfig{}, dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestMemoryStore_AddScopedAndMemoriesForContext(t *testing.T) {
 
 func TestSessionStore_PersistAndGet(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Open(dir)
+	db, err := Open(config.DBConfig{}, dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -116,7 +117,7 @@ func TestSessionStore_PersistAndGet(t *testing.T) {
 
 	// Re-open DB and get again: should persist
 	_ = db.Close()
-	db2, _ := Open(dir)
+	db2, _ := Open(config.DBConfig{}, dir)
 	defer func() { _ = db2.Close() }()
 	sessStore2 := NewSessionStore(db2, 0, 0)
 	sess2, err := sessStore2.Get("s1")
@@ -130,7 +131,7 @@ func TestSessionStore_PersistAndGet(t *testing.T) {
 
 func TestSessionStore_MaxMessagesTrim(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Open(dir)
+	db, err := Open(config.DBConfig{}, dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestSessionStore_MaxMessagesTrim(t *testing.T) {
 
 func TestSessionStore_SetSummaryRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Open(dir)
+	db, err := Open(config.DBConfig{}, dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

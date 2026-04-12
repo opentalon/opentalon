@@ -13,7 +13,7 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
-// MemoryStore is the SQLite-backed memory store with general (actor_id NULL) and per-actor scope.
+// MemoryStore is the database-backed memory store with general (actor_id NULL) and per-actor scope.
 type MemoryStore struct {
 	db *DB
 }
@@ -37,7 +37,7 @@ func (s *MemoryStore) AddScoped(ctx context.Context, actorID string, content str
 		aid = &actorID
 	}
 	_, err = s.db.SQLDB().ExecContext(ctx,
-		`INSERT INTO memories (id, actor_id, content, tags, created_at) VALUES (?, ?, ?, ?, ?)`,
+		s.db.Dialect().Rebind(`INSERT INTO memories (id, actor_id, content, tags, created_at) VALUES (?, ?, ?, ?, ?)`),
 		id, aid, content, string(tagsJSON), now)
 	if err != nil {
 		return nil, fmt.Errorf("memory add: %w", err)
@@ -52,17 +52,18 @@ func (s *MemoryStore) AddScoped(ctx context.Context, actorID string, content str
 
 // MemoriesForContext returns memories visible to the current actor: all general (actor_id IS NULL)
 // plus all for actor.Actor(ctx), optionally filtered by tag. Empty tag means no filter.
-// Tag matching uses json_each for exact tag match (avoids substring false positives like "work" matching "workflow").
+// Tag matching uses an exact JSON array element match (avoids substring false positives like "work" matching "workflow").
 func (s *MemoryStore) MemoriesForContext(ctx context.Context, tag string) ([]*state.Memory, error) {
 	actorID := actor.Actor(ctx)
+	d := s.db.Dialect()
 	query := `SELECT id, actor_id, content, tags, created_at FROM memories WHERE (actor_id IS NULL OR actor_id = ?)`
 	args := []interface{}{actorID}
 	if tag != "" {
-		query += ` AND EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?)`
+		query += ` AND ` + d.TagMatch("memories.tags")
 		args = append(args, tag)
 	}
 	query += ` ORDER BY created_at DESC`
-	rows, err := s.db.SQLDB().QueryContext(ctx, query, args...)
+	rows, err := s.db.SQLDB().QueryContext(ctx, d.Rebind(query), args...)
 	if err != nil {
 		return nil, fmt.Errorf("memories for context: %w", err)
 	}
@@ -94,7 +95,7 @@ func (s *MemoryStore) MemoriesForContext(ctx context.Context, tag string) ([]*st
 func (s *MemoryStore) Search(query string) []*state.Memory {
 	lower := strings.ToLower(query)
 	rows, err := s.db.SQLDB().Query(
-		`SELECT id, actor_id, content, tags, created_at FROM memories WHERE LOWER(content) LIKE ? ORDER BY created_at DESC`,
+		s.db.Dialect().Rebind(`SELECT id, actor_id, content, tags, created_at FROM memories WHERE LOWER(content) LIKE ? ORDER BY created_at DESC`),
 		"%"+lower+"%")
 	if err != nil {
 		return nil
@@ -103,11 +104,11 @@ func (s *MemoryStore) Search(query string) []*state.Memory {
 	return scanMemories(rows)
 }
 
-// SearchByTag returns all memories that have the given tag (exact match via json_each). No actor scope; global only.
+// SearchByTag returns all memories that have the given tag (exact match). No actor scope; global only.
 func (s *MemoryStore) SearchByTag(tag string) []*state.Memory {
-	rows, err := s.db.SQLDB().Query(
-		`SELECT id, actor_id, content, tags, created_at FROM memories WHERE EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?) ORDER BY created_at DESC`,
-		tag)
+	d := s.db.Dialect()
+	q := d.Rebind(`SELECT id, actor_id, content, tags, created_at FROM memories WHERE ` + d.TagMatch("memories.tags") + ` ORDER BY created_at DESC`)
+	rows, err := s.db.SQLDB().Query(q, tag)
 	if err != nil {
 		return nil
 	}

@@ -2,25 +2,24 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"time"
 )
 
-// GroupPluginStore persists group → plugin assignments to SQLite.
+// GroupPluginStore persists group → plugin assignments.
 type GroupPluginStore struct {
-	db *sql.DB
+	db *DB
 }
 
 // NewGroupPluginStore returns a GroupPluginStore backed by db.
 func NewGroupPluginStore(db *DB) *GroupPluginStore {
-	return &GroupPluginStore{db: db.db}
+	return &GroupPluginStore{db: db}
 }
 
 // PluginsForGroup returns all plugin IDs assigned to groupID.
 func (s *GroupPluginStore) PluginsForGroup(ctx context.Context, groupID string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT plugin_id FROM group_plugins WHERE group_id = ?`, groupID)
+	rows, err := s.db.SQLDB().QueryContext(ctx,
+		s.db.Dialect().Rebind(`SELECT plugin_id FROM group_plugins WHERE group_id = ?`), groupID)
 	if err != nil {
 		return nil, fmt.Errorf("group_plugins: query: %w", err)
 	}
@@ -49,16 +48,16 @@ func (s *GroupPluginStore) UpsertGroupPlugins(ctx context.Context, groupID strin
 	// The ON CONFLICT WHERE clause only performs the UPDATE when the incoming
 	// source has equal or higher priority than the stored one.
 	// Priority ladder: bootstrap(0) < config(1) < whoami(2) < admin(3).
-	const upsertSQL = `
+	upsertSQL := s.db.Dialect().Rebind(`
 INSERT INTO group_plugins (group_id, plugin_id, source, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (group_id, plugin_id) DO UPDATE SET
     source     = excluded.source,
     updated_at = excluded.updated_at
 WHERE CASE excluded.source WHEN 'bootstrap' THEN 0 WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END
-   >= CASE source           WHEN 'bootstrap' THEN 0 WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END`
+   >= CASE source           WHEN 'bootstrap' THEN 0 WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END`)
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.SQLDB().BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("group_plugins: begin tx: %w", err)
 	}
@@ -84,8 +83,8 @@ WHERE CASE excluded.source WHEN 'bootstrap' THEN 0 WHEN 'config' THEN 1 WHEN 'wh
 
 // RevokePlugin removes a specific plugin from a group.
 func (s *GroupPluginStore) RevokePlugin(ctx context.Context, groupID, pluginID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM group_plugins WHERE group_id = ? AND plugin_id = ?`, groupID, pluginID)
+	_, err := s.db.SQLDB().ExecContext(ctx,
+		s.db.Dialect().Rebind(`DELETE FROM group_plugins WHERE group_id = ? AND plugin_id = ?`), groupID, pluginID)
 	if err != nil {
 		return fmt.Errorf("group_plugins: revoke %s/%s: %w", groupID, pluginID, err)
 	}

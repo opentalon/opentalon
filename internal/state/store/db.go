@@ -11,50 +11,94 @@ import (
 	"strconv"
 	"strings"
 
+	_ "github.com/lib/pq"
+	"github.com/opentalon/opentalon/internal/config"
 	_ "modernc.org/sqlite"
 )
 
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// Open opens the SQLite database at dataDir/state.db, creating dataDir if needed.
-// It enables WAL mode and runs pending migrations. Caller must call Close when done.
-func Open(dataDir string) (*DB, error) {
-	if dataDir == "" {
-		return nil, fmt.Errorf("state store: data_dir is required")
+// Open opens the database described by cfg.
+// For sqlite (default): opens dataDir/state.db with WAL mode.
+// For postgres: connects to cfg.DSN (dataDir is unused for the main connection but
+// still needed for plugin databases).
+// Caller must call Close when done.
+func Open(cfg config.DBConfig, dataDir string) (*DB, error) {
+	driver := cfg.Driver
+	if driver == "" {
+		driver = "sqlite"
 	}
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
-		return nil, fmt.Errorf("state store: %w", err)
+
+	var (
+		rawDB   *sql.DB
+		dialect Dialect
+		err     error
+	)
+
+	switch driver {
+	case "sqlite":
+		dialect = SQLiteDialect
+		if dataDir == "" {
+			return nil, fmt.Errorf("state store: data_dir is required for sqlite")
+		}
+		if err = os.MkdirAll(dataDir, 0700); err != nil {
+			return nil, fmt.Errorf("state store: %w", err)
+		}
+		dbPath := filepath.Join(dataDir, "state.db")
+		rawDB, err = sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+		if err != nil {
+			return nil, fmt.Errorf("state store: open db: %w", err)
+		}
+		if _, err = rawDB.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+			_ = rawDB.Close()
+			return nil, fmt.Errorf("state store: busy_timeout: %w", err)
+		}
+		if _, err = rawDB.Exec("PRAGMA journal_mode=WAL"); err != nil {
+			_ = rawDB.Close()
+			return nil, fmt.Errorf("state store: WAL: %w", err)
+		}
+
+	case "postgres":
+		dialect = PostgresDialect
+		if cfg.DSN == "" {
+			return nil, fmt.Errorf("state store: dsn is required for postgres")
+		}
+		rawDB, err = sql.Open("postgres", cfg.DSN)
+		if err != nil {
+			return nil, fmt.Errorf("state store: open db: %w", err)
+		}
+		if err = rawDB.Ping(); err != nil {
+			_ = rawDB.Close()
+			return nil, fmt.Errorf("state store: ping postgres: %w", err)
+		}
+
+	default:
+		return nil, fmt.Errorf("state store: unsupported driver %q (use \"sqlite\" or \"postgres\")", driver)
 	}
-	dbPath := filepath.Join(dataDir, "state.db")
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
-	if err != nil {
-		return nil, fmt.Errorf("state store: open db: %w", err)
-	}
-	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("state store: busy_timeout: %w", err)
-	}
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("state store: WAL: %w", err)
-	}
-	d := &DB{db: db}
+
+	d := &DB{db: rawDB, dialect: dialect}
 	if err := d.runMigrations(); err != nil {
-		_ = db.Close()
+		_ = rawDB.Close()
 		return nil, err
 	}
 	return d, nil
 }
 
-// DB holds the SQLite connection and runs migrations on Open.
+// DB holds the database connection and dialect.
 type DB struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect Dialect
 }
 
-// DB returns the underlying *sql.DB for use by stores. Do not close it directly; use Close on DB.
+// SQLDB returns the underlying *sql.DB. Do not close it directly; use Close on DB.
 func (d *DB) SQLDB() *sql.DB {
 	return d.db
+}
+
+// Dialect returns the dialect for this connection.
+func (d *DB) Dialect() Dialect {
+	return d.dialect
 }
 
 // Close closes the database connection.
@@ -83,7 +127,7 @@ func (d *DB) runMigrations() error {
 		if n <= current {
 			continue
 		}
-		sql, err := migrationSQL(name)
+		sqlStr, err := migrationSQL(name)
 		if err != nil {
 			return fmt.Errorf("migration %s: %w", name, err)
 		}
@@ -91,7 +135,7 @@ func (d *DB) runMigrations() error {
 		if err != nil {
 			return fmt.Errorf("migration %s: begin: %w", name, err)
 		}
-		if _, err := tx.Exec(sql); err != nil {
+		if _, err := tx.Exec(sqlStr); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("migration %s: %w", name, err)
 		}
@@ -99,7 +143,7 @@ func (d *DB) runMigrations() error {
 			_ = tx.Rollback()
 			return fmt.Errorf("migration %s: clear version: %w", name, err)
 		}
-		if _, err := tx.Exec("INSERT INTO schema_version (version) VALUES (?)", n); err != nil {
+		if _, err := tx.Exec(d.dialect.Rebind("INSERT INTO schema_version (version) VALUES (?)"), n); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("migration %s: set version: %w", name, err)
 		}

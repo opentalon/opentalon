@@ -10,7 +10,7 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
-// SessionStore is the SQLite-backed session store.
+// SessionStore is the database-backed session store.
 type SessionStore struct {
 	db          *DB
 	maxMessages int // 0 = no cap
@@ -27,7 +27,7 @@ func NewSessionStore(db *DB, maxMessages, maxIdleDays int) *SessionStore {
 func (s *SessionStore) Get(id string) (*state.Session, error) {
 	var messagesJSON, summary, activeModel, metadataJSON, createdAt, updatedAt string
 	err := s.db.SQLDB().QueryRow(
-		`SELECT messages, COALESCE(summary,''), active_model, metadata, created_at, updated_at FROM sessions WHERE id = ?`,
+		s.db.Dialect().Rebind(`SELECT messages, COALESCE(summary,''), active_model, metadata, created_at, updated_at FROM sessions WHERE id = ?`),
 		id,
 	).Scan(&messagesJSON, &summary, &activeModel, &metadataJSON, &createdAt, &updatedAt)
 	if err != nil {
@@ -58,7 +58,7 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 func (s *SessionStore) Create(id string) *state.Session {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.SQLDB().Exec(
-		`INSERT INTO sessions (id, messages, summary, active_model, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		s.db.Dialect().Rebind(`INSERT INTO sessions (id, messages, summary, active_model, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`),
 		id, "[]", "", "", "{}", now, now)
 	if err != nil {
 		if existing, e := s.Get(id); e == nil {
@@ -83,22 +83,19 @@ func (s *SessionStore) Create(id string) *state.Session {
 }
 
 // AddMessage appends a message and persists. If maxMessages > 0, trims to last maxMessages.
-// Uses a reserved connection and BEGIN IMMEDIATE so the second writer blocks until the first commits.
+// Uses an exclusive transaction so concurrent writers are serialised.
 func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	ctx := context.Background()
-	conn, err := s.db.SQLDB().Conn(ctx)
+	d := s.db.Dialect()
+	etx, cleanup, err := d.BeginExclusive(ctx, s.db.SQLDB())
 	if err != nil {
-		return fmt.Errorf("add message conn: %w", err)
+		return fmt.Errorf("add message begin: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return fmt.Errorf("add message begin immediate: %w", err)
-	}
+	defer cleanup()
 	var messagesJSON string
-	err = conn.QueryRowContext(ctx,
-		`SELECT messages FROM sessions WHERE id = ?`, id).Scan(&messagesJSON)
+	err = etx.QueryRowContext(ctx, d.Rebind(`SELECT messages FROM sessions WHERE id = ?`+d.ForUpdate()), id).Scan(&messagesJSON)
 	if err != nil {
-		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		_ = etx.Rollback()
 		return fmt.Errorf("session %q not found", id)
 	}
 	var messages []provider.Message
@@ -113,18 +110,17 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	}
 	newMessagesJSON, err := json.Marshal(messages)
 	if err != nil {
-		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		_ = etx.Rollback()
 		return fmt.Errorf("add message marshal: %w", err)
 	}
-	_, err = conn.ExecContext(ctx,
-		`UPDATE sessions SET messages = ?, updated_at = ? WHERE id = ?`,
+	_, err = etx.ExecContext(ctx,
+		d.Rebind(`UPDATE sessions SET messages = ?, updated_at = ? WHERE id = ?`),
 		string(newMessagesJSON), updatedAt, id)
 	if err != nil {
-		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		_ = etx.Rollback()
 		return fmt.Errorf("add message update: %w", err)
 	}
-	_, err = conn.ExecContext(ctx, "COMMIT")
-	if err != nil {
+	if err := etx.Commit(); err != nil {
 		return fmt.Errorf("add message commit: %w", err)
 	}
 	return nil
@@ -164,7 +160,7 @@ func (s *SessionStore) persist(sess *state.Session) error {
 	}
 	updatedAt := sess.UpdatedAt.UTC().Format(time.RFC3339)
 	_, err = s.db.SQLDB().Exec(
-		`UPDATE sessions SET messages = ?, summary = ?, active_model = ?, metadata = ?, updated_at = ? WHERE id = ?`,
+		s.db.Dialect().Rebind(`UPDATE sessions SET messages = ?, summary = ?, active_model = ?, metadata = ?, updated_at = ? WHERE id = ?`),
 		string(messagesJSON), sess.Summary, string(sess.ActiveModel), string(metadataJSON), updatedAt, sess.ID)
 	if err != nil {
 		return fmt.Errorf("session persist: %w", err)
@@ -192,7 +188,7 @@ func (s *SessionStore) List() ([]string, error) {
 
 // Delete removes a session (for tests or admin).
 func (s *SessionStore) Delete(id string) error {
-	_, err := s.db.SQLDB().Exec(`DELETE FROM sessions WHERE id = ?`, id)
+	_, err := s.db.SQLDB().Exec(s.db.Dialect().Rebind(`DELETE FROM sessions WHERE id = ?`), id)
 	return err
 }
 
@@ -203,6 +199,6 @@ func (s *SessionStore) PruneIdleSessions() error {
 		return nil
 	}
 	cutoff := time.Now().AddDate(0, 0, -s.maxIdleDays).UTC().Format(time.RFC3339)
-	_, err := s.db.SQLDB().Exec(`DELETE FROM sessions WHERE updated_at < ?`, cutoff)
+	_, err := s.db.SQLDB().Exec(s.db.Dialect().Rebind(`DELETE FROM sessions WHERE updated_at < ?`), cutoff)
 	return err
 }
