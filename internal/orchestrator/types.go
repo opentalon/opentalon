@@ -24,7 +24,7 @@ type PluginCapability struct {
 	Name                 string   `yaml:"name"`
 	Description          string   `yaml:"description"`
 	Actions              []Action `yaml:"actions"`
-	AllowedGroups        []string `yaml:"allowed_groups,omitempty"`        // empty = unrestricted; when set, only listed groups can use this plugin
+	AllowedGroups        []string `yaml:"allowed_groups,omitempty"`         // empty = unrestricted; when set, only listed groups can use this plugin
 	SystemPromptAddition string   `yaml:"system_prompt_addition,omitempty"` // optional text appended to LLM system prompt when this plugin is loaded
 }
 
