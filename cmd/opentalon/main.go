@@ -170,7 +170,7 @@ func main() {
 			continue
 		}
 		entry := plugin.PluginEntry{
-			Name: name, Plugin: path, Enabled: p.Enabled, Config: p.Config,
+			Name: name, Plugin: path, Enabled: p.Enabled, Config: p.Config, ExposeHTTP: p.ExposeHTTP,
 		}
 		if p.DialTimeout != "" {
 			if d, err := time.ParseDuration(p.DialTimeout); err == nil {
@@ -426,7 +426,7 @@ func main() {
 		}
 		if dedupErr != nil {
 			fmt.Fprintf(os.Stderr, "Error connecting to Redis for deduplication: %v\n", dedupErr)
-			return
+			os.Exit(1) //nolint:gocritic
 		}
 		defer func() {
 			if err := dedupClient.Close(); err != nil {

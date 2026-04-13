@@ -28,6 +28,7 @@ type PluginEntry struct {
 	Config      map[string]interface{}
 	Env         []string      // if non-nil, used as the subprocess env verbatim; use WithEnvOverride to build it
 	DialTimeout time.Duration // overrides defaultDialTimeout for the gRPC Init call (0 = use default)
+	ExposeHTTP  bool          // operator opt-in: reverse-proxy /{name}/* through the webhook server
 }
 
 // WithEnvOverride starts from the current process environment (or the entry's
@@ -153,9 +154,11 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 		m.watchProcess(ctx, entry.Name, proc)
 	}
 
-	// If the plugin declared an HTTP address in its handshake, register a reverse proxy
-	// on the shared webhook server so its REST API is accessible at /{plugin-name}/*.
-	if httpAddr := client.HTTPAddr(); httpAddr != "" {
+	// Reverse-proxy /{plugin-name}/* through the shared webhook server only when the
+	// operator explicitly opts in via expose_http: true. The plugin's declared HTTPAddr
+	// alone is not sufficient — the operator must have the final say since the webhook
+	// server is typically internet-facing.
+	if httpAddr := client.HTTPAddr(); httpAddr != "" && entry.ExposeHTTP {
 		if err := channel.RegisterReverseProxy(0, entry.Name, httpAddr); err != nil {
 			slog.Warn("plugin http proxy registration failed", "component", "plugin-manager", "plugin", entry.Name, "error", err)
 		} else {

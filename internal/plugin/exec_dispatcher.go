@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -14,12 +16,18 @@ import (
 )
 
 const (
-	execStream      = "opentalon:plugin-exec"
-	replyStreamFmt  = "opentalon:plugin-exec-reply:%s"
-	consumerGroup   = "opentalon-dispatcher"
-	consumerName    = "dispatcher"
-	execReadTimeout = 5 * time.Second
-	replyTTL        = 5 * time.Minute
+	execStream     = "opentalon:plugin-exec"
+	replyStreamFmt = "opentalon:plugin-exec-reply:%s"
+	consumerGroup  = "opentalon-dispatcher"
+
+	execReadTimeout   = 5 * time.Second
+	replyTTL          = 5 * time.Minute
+	autoclaimMinIdle  = 2 * time.Minute
+	autoclaimInterval = 30 * time.Second
+
+	// maxConcurrentHandlers caps the number of plugin-exec requests handled in
+	// parallel. Prevents unbounded goroutine growth under stream bursts.
+	maxConcurrentHandlers = 32
 )
 
 // ExecActionRunner executes a named plugin action. Implemented by orchestrator.Orchestrator.
@@ -28,12 +36,18 @@ type ExecActionRunner interface {
 }
 
 // ExecDispatcher reads plugin-exec requests from a Redis stream and dispatches them through
-// the ToolRegistry. Trusted plugins (e.g. opentalon-workflows) write requests to the stream;
-// the dispatcher executes them with the correct actor/profile context and writes results to
-// a per-request reply stream that the plugin reads.
+// the ToolRegistry. Plugins write requests to the stream; the dispatcher executes them with
+// the correct actor/profile context and writes results to a per-request reply stream.
+//
+// Security: the opentalon:plugin-exec stream is the trust boundary. Any process with
+// XADD on this stream can execute plugin actions impersonating any entity_id / group_id.
+// The Redis instance used here MUST be network-isolated (not shared with external services)
+// and its credentials must be treated as high-privilege secrets.
 type ExecDispatcher struct {
-	client redis.UniversalClient
-	runner ExecActionRunner
+	client     redis.UniversalClient
+	runner     ExecActionRunner
+	consumerID string        // unique per process; e.g. "hostname" or "hostname-fallback"
+	sem        chan struct{} // bounds concurrent handlers
 }
 
 type execRequest struct {
@@ -49,7 +63,16 @@ type execRequest struct {
 
 // NewExecDispatcher creates a dispatcher backed by the given Redis client.
 func NewExecDispatcher(client redis.UniversalClient, runner ExecActionRunner) *ExecDispatcher {
-	return &ExecDispatcher{client: client, runner: runner}
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = fmt.Sprintf("pod-%d", os.Getpid())
+	}
+	return &ExecDispatcher{
+		client:     client,
+		runner:     runner,
+		consumerID: hostname,
+		sem:        make(chan struct{}, maxConcurrentHandlers),
+	}
 }
 
 // NewExecRedisClient creates a Redis client for the exec dispatcher.
@@ -80,6 +103,7 @@ func NewExecRedisClient(redisURL, masterName string, sentinels []string, passwor
 }
 
 // Start runs the dispatcher loop until ctx is cancelled.
+// It blocks until all in-flight handlers finish before returning.
 func (d *ExecDispatcher) Start(ctx context.Context) {
 	if err := d.client.XGroupCreateMkStream(ctx, execStream, consumerGroup, "$").Err(); err != nil {
 		// BUSYGROUP means the group already exists — that's fine.
@@ -88,11 +112,22 @@ func (d *ExecDispatcher) Start(ctx context.Context) {
 			return
 		}
 	}
-	slog.Info("plugin exec dispatcher started", "stream", execStream)
+	slog.Info("plugin exec dispatcher started", "stream", execStream, "consumer", d.consumerID)
+
+	var wg sync.WaitGroup
+	defer wg.Wait() // drain in-flight handlers before returning
+
+	// Reclaim stale pending entries from dead consumers periodically.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.autoclaimLoop(ctx, &wg)
+	}()
+
 	for {
 		streams, err := d.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group:    consumerGroup,
-			Consumer: consumerName,
+			Consumer: d.consumerID,
 			Streams:  []string{execStream, ">"},
 			Count:    10,
 			Block:    execReadTimeout,
@@ -110,15 +145,59 @@ func (d *ExecDispatcher) Start(ctx context.Context) {
 		}
 		for _, stream := range streams {
 			for _, msg := range stream.Messages {
-				go d.handle(ctx, msg)
+				d.sem <- struct{}{} // acquire semaphore; blocks if at capacity
+				wg.Add(1)
+				go func(m redis.XMessage) {
+					defer wg.Done()
+					defer func() { <-d.sem }()
+					d.handle(ctx, m)
+				}(msg)
+			}
+		}
+	}
+}
+
+// autoclaimLoop periodically reclaims pending entries that have been idle
+// longer than autoclaimMinIdle (i.e. owned by a consumer that died).
+func (d *ExecDispatcher) autoclaimLoop(ctx context.Context, wg *sync.WaitGroup) {
+	ticker := time.NewTicker(autoclaimInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			msgs, _, err := d.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+				Stream:   execStream,
+				Group:    consumerGroup,
+				Consumer: d.consumerID,
+				MinIdle:  autoclaimMinIdle,
+				Start:    "0-0",
+			}).Result()
+			if err != nil {
+				slog.Warn("plugin exec: xautoclaim failed", "error", err)
+				continue
+			}
+			for _, msg := range msgs {
+				d.sem <- struct{}{}
+				wg.Add(1)
+				go func(m redis.XMessage) {
+					defer wg.Done()
+					defer func() { <-d.sem }()
+					d.handle(ctx, m)
+				}(msg)
 			}
 		}
 	}
 }
 
 func (d *ExecDispatcher) handle(ctx context.Context, msg redis.XMessage) {
+	// Use a fresh context for XAck so it succeeds even if ctx was cancelled
+	// (e.g. during graceful shutdown — work is done, we still need to ack).
 	defer func() {
-		if err := d.client.XAck(ctx, execStream, consumerGroup, msg.ID).Err(); err != nil {
+		ackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := d.client.XAck(ackCtx, execStream, consumerGroup, msg.ID).Err(); err != nil {
 			slog.Warn("plugin exec: ack failed", "msg_id", msg.ID, "error", err)
 		}
 	}()
@@ -159,7 +238,7 @@ func (d *ExecDispatcher) handle(ctx context.Context, msg redis.XMessage) {
 		slog.Warn("plugin exec: write reply failed", "req_id", req.ID, "error", err)
 		return
 	}
-	d.client.Expire(ctx, replyStream, replyTTL)
+	d.client.Expire(ctx, replyStream, replyTTL) //nolint:errcheck
 }
 
 func parseExecRequest(msg redis.XMessage) (execRequest, error) {

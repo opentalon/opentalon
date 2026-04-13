@@ -222,6 +222,7 @@ type PluginConfig struct {
 	Ref         string                 `yaml:"ref"`      // branch, tag, or commit; resolved and pinned in plugins.lock
 	Config      map[string]interface{} `yaml:"config,omitempty"`
 	DialTimeout string                 `yaml:"dial_timeout,omitempty"` // e.g. "30s"; overrides the default 5s gRPC init timeout
+	ExposeHTTP  bool                   `yaml:"expose_http,omitempty"`  // opt-in: reverse-proxy /{plugin-name}/* through the webhook server
 }
 
 type SchedulerConfig struct {

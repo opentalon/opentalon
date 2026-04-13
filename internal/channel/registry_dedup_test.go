@@ -59,6 +59,19 @@ func newMsg(channelID, convID string, ts time.Time) pkg.InboundMessage {
 	}
 }
 
+// waitHandled blocks until handled.Load() >= want, or fails the test after 2 s.
+func waitHandled(t *testing.T, handled *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if handled.Load() >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Errorf("timed out: handled = %d, want %d", handled.Load(), want)
+}
+
 func TestRegistryDedup_WinsOnce(t *testing.T) {
 	var handled atomic.Int32
 	handler := func(_ context.Context, _ string, _ pkg.InboundMessage) (pkg.OutboundMessage, error) {
@@ -82,9 +95,7 @@ func TestRegistryDedup_WinsOnce(t *testing.T) {
 	ch.inbox <- msg
 	ch.inbox <- msg
 
-	// Give dispatch goroutines time to process.
-	time.Sleep(100 * time.Millisecond)
-
+	waitHandled(t, &handled, 1)
 	reg.StopAll()
 
 	if got := handled.Load(); got != 1 {
@@ -112,7 +123,7 @@ func TestRegistryDedup_DifferentMessagesAllHandled(t *testing.T) {
 	ch.inbox <- newMsg("slack", "C456", now)
 	ch.inbox <- newMsg("slack", "C123", now.Add(time.Second))
 
-	time.Sleep(100 * time.Millisecond)
+	waitHandled(t, &handled, 3)
 	reg.StopAll()
 
 	if got := handled.Load(); got != 3 {
@@ -138,7 +149,7 @@ func TestRegistryDedup_ZeroTimestampProcessesAnyway(t *testing.T) {
 	// Zero timestamp: dedup is skipped, message must still be processed.
 	ch.inbox <- newMsg("slack", "C123", time.Time{})
 
-	time.Sleep(100 * time.Millisecond)
+	waitHandled(t, &handled, 1)
 	reg.StopAll()
 
 	if got := handled.Load(); got != 1 {
@@ -165,7 +176,7 @@ func TestRegistryDedup_RedisErrorFallsThrough(t *testing.T) {
 
 	ch.inbox <- newMsg("slack", "C123", time.Now())
 
-	time.Sleep(100 * time.Millisecond)
+	waitHandled(t, &handled, 1)
 	reg.StopAll()
 
 	// Must still process when Redis is down.
@@ -192,7 +203,7 @@ func TestRegistryDedup_DisabledWhenNotSet(t *testing.T) {
 	ch.inbox <- newMsg("slack", "C123", ts)
 	ch.inbox <- newMsg("slack", "C123", ts) // same key, but no dedup configured
 
-	time.Sleep(100 * time.Millisecond)
+	waitHandled(t, &handled, 2)
 	reg.StopAll()
 
 	if got := handled.Load(); got != 2 {

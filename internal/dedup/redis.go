@@ -6,6 +6,7 @@ package dedup
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -20,7 +21,8 @@ type Deduplicator interface {
 }
 
 type redisDedup struct {
-	client redis.UniversalClient
+	client   redis.UniversalClient
+	ownerVal string // stored as the lock value; aids debugging ("who owns this key?")
 }
 
 // NewStandalone returns a Deduplicator backed by a single Redis instance.
@@ -60,12 +62,18 @@ func newDedup(client redis.UniversalClient) (Deduplicator, error) {
 		_ = client.Close()
 		return nil, fmt.Errorf("dedup: connecting to redis: %w", err)
 	}
-	return &redisDedup{client: client}, nil
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = fmt.Sprintf("pid-%d", os.Getpid())
+	}
+	return &redisDedup{client: client, ownerVal: hostname}, nil
 }
 
 // TryAcquire sets key with NX+EX. Returns true if this call created the key (won the lock).
+// The value stored is the pod's hostname so operators can inspect who holds a lock via
+// `redis-cli GET <key>`.
 func (d *redisDedup) TryAcquire(ctx context.Context, key string, ttl time.Duration) (bool, error) {
-	return d.client.SetNX(ctx, key, 1, ttl).Result()
+	return d.client.SetNX(ctx, key, d.ownerVal, ttl).Result()
 }
 
 func (d *redisDedup) Close() error {

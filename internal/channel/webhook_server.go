@@ -80,10 +80,19 @@ func RegisterReverseProxy(port int, prefix, targetAddr string) error {
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	pattern := "/" + strings.Trim(prefix, "/") + "/"
+	stripPrefix := "/" + strings.Trim(prefix, "/")
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.URL.Path = strings.TrimPrefix(r.URL.Path, "/"+strings.Trim(prefix, "/"))
+		r.URL.Path = strings.TrimPrefix(r.URL.Path, stripPrefix)
 		if r.URL.Path == "" {
 			r.URL.Path = "/"
+		}
+		// RawPath is used by httputil when set; clear it in sync with Path so
+		// percent-encoded paths (e.g. containing %2F) are forwarded correctly.
+		if r.URL.RawPath != "" {
+			r.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, stripPrefix)
+			if r.URL.RawPath == "" {
+				r.URL.RawPath = "/"
+			}
 		}
 		proxy.ServeHTTP(w, r)
 	})
