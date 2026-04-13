@@ -34,6 +34,13 @@ message PluginCapabilities {
   string name = 1;
   string description = 2;
   repeated Action actions = 3;
+  // Optional text injected into the LLM system prompt when this plugin is loaded.
+  // Use it to surface context the LLM should know about (e.g. API base URLs, capability notes).
+  //
+  // Security: plugins are currently trusted subprocesses (operator-installed, same host).
+  // If plugin trust is ever relaxed (e.g. third-party marketplace), this field becomes a
+  // prompt-injection vector and must be sanitised or sandboxed before inclusion.
+  string system_prompt_addition = 4;
 }
 
 message Action {

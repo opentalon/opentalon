@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strings"
 	"sync"
 )
 
@@ -64,6 +67,24 @@ func (s *WebhookServer) register(port int, path string, handler http.HandlerFunc
 	}
 
 	return nil
+}
+
+// RegisterReverseProxy registers a reverse proxy on the shared webhook server.
+// All requests to /{prefix}/* are forwarded to http://{targetAddr}/* with the
+// prefix stripped. The server is started lazily on the first registration.
+func RegisterReverseProxy(port int, prefix, targetAddr string) error {
+	port = webhookPortOrDefault(port)
+	target, err := url.Parse("http://" + targetAddr)
+	if err != nil {
+		return fmt.Errorf("invalid proxy target %q: %w", targetAddr, err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	stripPrefix := "/" + strings.Trim(prefix, "/")
+	pattern := stripPrefix + "/"
+	// http.StripPrefix handles both URL.Path and URL.RawPath (percent-encoded
+	// paths like %2F) correctly and avoids mutating the original request.
+	handler := http.HandlerFunc(http.StripPrefix(stripPrefix, proxy).ServeHTTP)
+	return globalWebhookServer.register(port, pattern, handler)
 }
 
 // Shutdown gracefully stops the webhook server.

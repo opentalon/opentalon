@@ -851,6 +851,10 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 			}
 		}
+		if cap.SystemPromptAddition != "" {
+			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---", cap.Name, cap.SystemPromptAddition, cap.Name)
+			sb.WriteString("\n")
+		}
 		sb.WriteString("\n")
 	}
 

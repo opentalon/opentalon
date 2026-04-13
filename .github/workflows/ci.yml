@@ -38,6 +38,96 @@ jobs:
       - name: Run tests
         run: go test -race -v ./...
 
+  test-redis:
+    name: Test (Redis integration)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Run Redis integration tests
+        env:
+          REDIS_URL: redis://localhost:6379/0
+        run: go test -tags redis -race -v -run TestRedisDedup ./internal/dedup/
+
+  test-sentinel:
+    name: Test (Redis Sentinel integration)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      sentinel:
+        image: bitnami/redis-sentinel:latest
+        ports:
+          - 26379:26379
+        env:
+          REDIS_SENTINEL_ANNOUNCE_IP: "127.0.0.1"
+          REDIS_MASTER_HOST: "redis"
+          REDIS_MASTER_PORT_NUMBER: "6379"
+          REDIS_MASTER_SET: "mymaster"
+        options: >-
+          --health-cmd "redis-cli -p 26379 ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Run Sentinel integration tests
+        env:
+          REDIS_SENTINEL_ADDRS: "localhost:26379"
+          REDIS_SENTINEL_MASTER: "mymaster"
+        run: go test -tags redis -race -v -run TestRedisDedupSentinel ./internal/dedup/
+
+  test-exec-dispatcher:
+    name: Test (exec dispatcher integration)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Run exec dispatcher integration tests
+        env:
+          REDIS_URL: redis://localhost:6379/0
+        run: go test -tags redis -race -v -run TestExecDispatcher ./internal/plugin/
+
   docker:
     name: Docker
     runs-on: ubuntu-latest

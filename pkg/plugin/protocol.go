@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"net"
 	"strings"
 )
 
@@ -29,9 +30,10 @@ type Response struct {
 
 // CapabilitiesMsg carries the plugin's self-description.
 type CapabilitiesMsg struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	Actions     []ActionMsg `json:"actions"`
+	Name                 string      `json:"name"`
+	Description          string      `json:"description"`
+	Actions              []ActionMsg `json:"actions"`
+	SystemPromptAddition string      `json:"system_prompt_addition,omitempty"` // optional text appended to the LLM system prompt
 }
 
 // ActionMsg describes one action a plugin supports.
@@ -50,23 +52,32 @@ type ParameterMsg struct {
 }
 
 // Handshake is the first line a plugin binary writes to stdout.
-// Format: "<version>|<network>|<address>\n"
+// Format: "<version>|<network>|<address>[|<http_addr>]\n"
 // Example: "1|unix|/tmp/plugin-gitlab.sock"
+// Example with HTTP: "1|unix|/tmp/plugin-workflows.sock|127.0.0.1:9091"
+//
+// http_addr is optional. When present, the host registers a reverse proxy at
+// /{plugin-name}/* that forwards requests to http://<http_addr>/*.
+// Plugins set OPENTALON_HTTP_PORT to opt in; the Serve helper handles the rest.
 type Handshake struct {
-	Version int
-	Network string // "unix" or "tcp"
-	Address string // socket path or host:port
+	Version  int
+	Network  string // "unix" or "tcp"
+	Address  string // socket path or host:port
+	HTTPAddr string // optional: host:port for the plugin's own HTTP server
 }
 
 func (h Handshake) String() string {
+	if h.HTTPAddr != "" {
+		return fmt.Sprintf("%d|%s|%s|%s", h.Version, h.Network, h.Address, h.HTTPAddr)
+	}
 	return fmt.Sprintf("%d|%s|%s", h.Version, h.Network, h.Address)
 }
 
 // ParseHandshake parses a handshake line from a plugin.
 func ParseHandshake(line string) (Handshake, error) {
-	parts := strings.SplitN(strings.TrimSpace(line), "|", 3)
-	if len(parts) != 3 {
-		return Handshake{}, fmt.Errorf("invalid handshake %q: expected version|network|address", line)
+	parts := strings.SplitN(strings.TrimSpace(line), "|", 4)
+	if len(parts) < 3 {
+		return Handshake{}, fmt.Errorf("invalid handshake %q: expected version|network|address[|http_addr]", line)
 	}
 
 	var h Handshake
@@ -75,6 +86,17 @@ func ParseHandshake(line string) (Handshake, error) {
 	}
 	h.Network = parts[1]
 	h.Address = parts[2]
+	if len(parts) == 4 {
+		h.HTTPAddr = parts[3]
+		host, _, err := net.SplitHostPort(h.HTTPAddr)
+		if err != nil {
+			return Handshake{}, fmt.Errorf("invalid handshake http_addr %q: %w", h.HTTPAddr, err)
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return Handshake{}, fmt.Errorf("handshake http_addr %q must be a loopback address (127.x.x.x or ::1)", h.HTTPAddr)
+		}
+	}
 
 	if h.Version != HandshakeVersion {
 		return Handshake{}, fmt.Errorf("unsupported handshake version %d (want %d)", h.Version, HandshakeVersion)

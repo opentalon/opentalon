@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opentalon/opentalon/internal/channel"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 )
 
@@ -27,6 +28,7 @@ type PluginEntry struct {
 	Config      map[string]interface{}
 	Env         []string      // if non-nil, used as the subprocess env verbatim; use WithEnvOverride to build it
 	DialTimeout time.Duration // overrides defaultDialTimeout for the gRPC Init call (0 = use default)
+	ExposeHTTP  bool          // operator opt-in: reverse-proxy /{name}/* through the webhook server
 }
 
 // WithEnvOverride starts from the current process environment (or the entry's
@@ -150,6 +152,32 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 
 	if proc != nil {
 		m.watchProcess(ctx, entry.Name, proc)
+	}
+
+	// Reverse-proxy /{plugin-name}/* through the shared webhook server only when the
+	// operator explicitly opts in via expose_http: true. The plugin's declared HTTPAddr
+	// alone is not sufficient — the operator must have the final say since the webhook
+	// server is typically internet-facing.
+	httpAddr := client.HTTPAddr()
+	switch {
+	case httpAddr != "" && entry.ExposeHTTP:
+		if err := channel.RegisterReverseProxy(0, entry.Name, httpAddr); err != nil {
+			slog.Warn("plugin http proxy registration failed", "component", "plugin-manager", "plugin", entry.Name, "error", err)
+		} else {
+			slog.Info("plugin http proxy registered", "component", "plugin-manager", "plugin", entry.Name, "target", httpAddr)
+		}
+	case httpAddr != "" && !entry.ExposeHTTP:
+		// Plugin is running an HTTP server but expose_http: true is not set, so
+		// it will never receive traffic. Set expose_http: true to proxy it, or
+		// remove OPENTALON_HTTP_PORT from the plugin's environment.
+		slog.Warn("plugin declares an HTTP server but expose_http is not enabled; HTTP server is unused",
+			"component", "plugin-manager", "plugin", entry.Name, "addr", httpAddr)
+	case httpAddr == "" && entry.ExposeHTTP:
+		// Operator set expose_http: true but the plugin did not advertise an HTTP
+		// address (OPENTALON_HTTP_PORT not set or plugin doesn't use it).
+		// No proxy will be registered; the setting has no effect.
+		slog.Warn("expose_http is enabled but plugin did not advertise an HTTP address; no proxy registered",
+			"component", "plugin-manager", "plugin", entry.Name)
 	}
 
 	slog.Info("loaded plugin", "component", "plugin-manager", "plugin", entry.Name, "mode", mode, "actions", len(cap.Actions))

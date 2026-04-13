@@ -5,10 +5,17 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/logger"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
+
+// MessageDeduplicator is implemented by the Redis dedup client.
+// TryAcquire returns true when this pod wins the lock for the given key.
+type MessageDeduplicator interface {
+	TryAcquire(ctx context.Context, key string, ttl time.Duration) (bool, error)
+}
 
 // Registry manages channel lifecycle, dispatches inbound messages to
 // the orchestrator, and routes responses back to the originating channel.
@@ -18,6 +25,9 @@ type Registry struct {
 	mu       sync.RWMutex
 	channels map[string]pkg.Channel
 	handler  pkg.MessageHandler
+
+	dedup    MessageDeduplicator
+	dedupTTL time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -33,6 +43,15 @@ func NewRegistry(handler pkg.MessageHandler) *Registry {
 		ctx:      ctx,
 		cancel:   cancel,
 	}
+}
+
+// SetDeduplicator attaches a Redis-backed deduplicator to the registry.
+// Must be called before any channels are registered.
+func (r *Registry) SetDeduplicator(d MessageDeduplicator, ttl time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dedup = d
+	r.dedupTTL = ttl
 }
 
 func (r *Registry) Register(ch pkg.Channel) error {
@@ -136,6 +155,10 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 				return
 			}
 
+			r.mu.RLock()
+			dedup, dedupTTL := r.dedup, r.dedupTTL
+			r.mu.RUnlock()
+
 			wg.Add(1)
 			go func(m pkg.InboundMessage) {
 				defer wg.Done()
@@ -143,6 +166,25 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 				sessionKey := pkg.SessionKey(ch.ID(), m.ConversationID, m.ThreadID)
 				traceID := logger.TraceIDFromSessionKey(sessionKey)
 				ctx := logger.WithTraceID(r.ctx, traceID)
+
+				// Deduplication: when running multiple pods each pod receives every
+				// inbound message. Only the pod that wins the Redis SET NX lock
+				// processes the message; others silently skip it.
+				if dedup != nil {
+					if m.Timestamp.IsZero() {
+						slog.Warn("dedup skipped: message has no timestamp", "channel", ch.ID(), "session", sessionKey)
+					} else {
+						key := fmt.Sprintf("dedup:%s:%s:%d", m.ChannelID, m.ConversationID, m.Timestamp.UnixNano())
+						won, err := dedup.TryAcquire(ctx, key, dedupTTL)
+						if err != nil {
+							slog.Warn("dedup acquire failed, processing anyway", "channel", ch.ID(), "error", err)
+						} else if !won {
+							slog.Debug("dedup skipped duplicate message", "channel", ch.ID(), "session", sessionKey)
+							return
+						}
+					}
+				}
+
 				resp, err := r.handler(ctx, sessionKey, m)
 				if err != nil {
 					logger.FromContext(ctx).Error("handling message failed", "channel", ch.ID(), "session", sessionKey, "error", err)

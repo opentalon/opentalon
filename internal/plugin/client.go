@@ -18,10 +18,11 @@ import (
 // Client connects to a running plugin over gRPC
 // and implements orchestrator.PluginExecutor.
 type Client struct {
-	conn   *grpc.ClientConn
-	client pluginpb.PluginServiceClient
-	name   string
-	caps   orchestrator.PluginCapability
+	conn     *grpc.ClientConn
+	client   pluginpb.PluginServiceClient
+	name     string
+	caps     orchestrator.PluginCapability
+	httpAddr string // optional HTTP address declared in the plugin handshake
 }
 
 // Dial connects to a plugin at the given network/address via gRPC and fetches
@@ -60,7 +61,12 @@ func Dial(network, address string, timeout time.Duration, configJSON string) (*C
 
 // DialFromHandshake connects using information from a handshake.
 func DialFromHandshake(hs pkg.Handshake, timeout time.Duration, configJSON string) (*Client, error) {
-	return Dial(hs.Network, hs.Address, timeout, configJSON)
+	c, err := Dial(hs.Network, hs.Address, timeout, configJSON)
+	if err != nil {
+		return nil, err
+	}
+	c.httpAddr = hs.HTTPAddr
+	return c, nil
 }
 
 func (c *Client) fetchCapabilities(ctx context.Context, configJSON string) error {
@@ -82,6 +88,10 @@ func (c *Client) fetchCapabilities(ctx context.Context, configJSON string) error
 
 // Name returns the plugin's registered name.
 func (c *Client) Name() string { return c.name }
+
+// HTTPAddr returns the optional HTTP address the plugin declared in its handshake.
+// Empty string means the plugin does not expose an HTTP server.
+func (c *Client) HTTPAddr() string { return c.httpAddr }
 
 // Capability returns the plugin's declared capabilities.
 func (c *Client) Capability() orchestrator.PluginCapability { return c.caps }
@@ -134,8 +144,9 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 		}
 	}
 	return orchestrator.PluginCapability{
-		Name:        pb.Name,
-		Description: pb.Description,
-		Actions:     actions,
+		Name:                 pb.Name,
+		Description:          pb.Description,
+		Actions:              actions,
+		SystemPromptAddition: pb.SystemPromptAddition,
 	}
 }

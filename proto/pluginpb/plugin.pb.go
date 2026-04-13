@@ -195,12 +195,15 @@ func (x *ToolResultResponse) GetError() string {
 }
 
 type PluginCapabilities struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
-	Actions       []*Action              `protobuf:"bytes,3,rep,name=actions,proto3" json:"actions,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Description string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	Actions     []*Action              `protobuf:"bytes,3,rep,name=actions,proto3" json:"actions,omitempty"`
+	// Optional text injected into the LLM system prompt when this plugin is loaded.
+	// Use it to surface context the LLM should know about (e.g. API base URLs, capability notes).
+	SystemPromptAddition string `protobuf:"bytes,4,opt,name=system_prompt_addition,json=systemPromptAddition,proto3" json:"system_prompt_addition,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *PluginCapabilities) Reset() {
@@ -252,6 +255,13 @@ func (x *PluginCapabilities) GetActions() []*Action {
 		return x.Actions
 	}
 	return nil
+}
+
+func (x *PluginCapabilities) GetSystemPromptAddition() string {
+	if x != nil {
+		return x.SystemPromptAddition
+	}
+	return ""
 }
 
 type Action struct {
@@ -409,11 +419,12 @@ const file_plugin_proto_rawDesc = "" +
 	"\x12ToolResultResponse\x12\x17\n" +
 	"\acall_id\x18\x01 \x01(\tR\x06callId\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x14\n" +
-	"\x05error\x18\x03 \x01(\tR\x05error\"\x81\x01\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\"\xb7\x01\n" +
 	"\x12PluginCapabilities\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x125\n" +
-	"\aactions\x18\x03 \x03(\v2\x1b.opentalon.plugin.v1.ActionR\aactions\"\x9b\x01\n" +
+	"\aactions\x18\x03 \x03(\v2\x1b.opentalon.plugin.v1.ActionR\aactions\x124\n" +
+	"\x16system_prompt_addition\x18\x04 \x01(\tR\x14systemPromptAddition\"\x9b\x01\n" +
 	"\x06Action\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12>\n" +
