@@ -26,36 +26,6 @@ type redisDedup struct {
 	owned    bool   // true = this struct owns the client and must close it
 }
 
-// NewStandalone returns a Deduplicator backed by a single Redis instance.
-// redisURL must be a valid redis:// or rediss:// URL (password may be embedded).
-func NewStandalone(redisURL string) (Deduplicator, error) {
-	opts, err := redis.ParseURL(redisURL)
-	if err != nil {
-		return nil, fmt.Errorf("dedup: parsing redis URL: %w", err)
-	}
-	return newDedup(redis.NewClient(opts))
-}
-
-// NewSentinel returns a Deduplicator backed by Redis Sentinel.
-// masterName is the name of the monitored master. sentinels is a list of host:port
-// addresses for the Sentinel nodes. password is the Redis master auth password
-// (empty = no auth). sentinelPassword is the optional Sentinel ACL password.
-func NewSentinel(masterName string, sentinels []string, password, sentinelPassword string) (Deduplicator, error) {
-	if masterName == "" {
-		return nil, fmt.Errorf("dedup: master_name is required for Sentinel mode")
-	}
-	if len(sentinels) == 0 {
-		return nil, fmt.Errorf("dedup: at least one sentinel address is required")
-	}
-	client := redis.NewFailoverClient(&redis.FailoverOptions{
-		MasterName:       masterName,
-		SentinelAddrs:    sentinels,
-		Password:         password,
-		SentinelPassword: sentinelPassword,
-	})
-	return newDedup(client)
-}
-
 // NewFromClient wraps an already-connected redis.UniversalClient.
 // Close is a no-op: the caller owns the client and is responsible for closing it.
 // Use this when the same Redis connection is shared with another subsystem (e.g. the
@@ -66,20 +36,6 @@ func NewFromClient(client redis.UniversalClient) Deduplicator {
 		hostname = fmt.Sprintf("pid-%d", os.Getpid())
 	}
 	return &redisDedup{client: client, ownerVal: hostname, owned: false}
-}
-
-func newDedup(client redis.UniversalClient) (Deduplicator, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := client.Ping(ctx).Err(); err != nil {
-		_ = client.Close()
-		return nil, fmt.Errorf("dedup: connecting to redis: %w", err)
-	}
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = fmt.Sprintf("pid-%d", os.Getpid())
-	}
-	return &redisDedup{client: client, ownerVal: hostname, owned: true}, nil
 }
 
 // TryAcquire sets key with NX+EX. Returns true if this call created the key (won the lock).

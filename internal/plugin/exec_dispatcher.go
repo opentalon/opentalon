@@ -52,6 +52,7 @@ type ExecDispatcher struct {
 	consumerID    string        // unique per process; e.g. "hostname" or "hostname-fallback"
 	sem           chan struct{} // bounds concurrent handlers
 	actionTimeout time.Duration // per-request RunAction deadline
+	done          chan struct{} // closed when Start returns (all in-flight handlers drained)
 }
 
 type execRequest struct {
@@ -81,39 +82,16 @@ func NewExecDispatcher(client redis.UniversalClient, runner ExecActionRunner, ac
 		consumerID:    hostname,
 		sem:           make(chan struct{}, maxConcurrentHandlers),
 		actionTimeout: actionTimeout,
+		done:          make(chan struct{}),
 	}
 }
 
-// NewExecRedisClient creates a Redis client for the exec dispatcher.
-// Accepts the same cluster config values used for deduplication.
-func NewExecRedisClient(redisURL, masterName string, sentinels []string, password, sentinelPassword string) (redis.UniversalClient, error) {
-	var client redis.UniversalClient
-	if len(sentinels) > 0 {
-		client = redis.NewFailoverClient(&redis.FailoverOptions{
-			MasterName:       masterName,
-			SentinelAddrs:    sentinels,
-			Password:         password,
-			SentinelPassword: sentinelPassword,
-		})
-	} else {
-		opts, err := redis.ParseURL(redisURL)
-		if err != nil {
-			return nil, fmt.Errorf("plugin exec: parsing redis URL: %w", err)
-		}
-		client = redis.NewClient(opts)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := client.Ping(ctx).Err(); err != nil {
-		_ = client.Close()
-		return nil, fmt.Errorf("plugin exec: connecting to redis: %w", err)
-	}
-	return client, nil
-}
 
 // Start runs the dispatcher loop until ctx is cancelled.
-// It blocks until all in-flight handlers finish before returning.
+// It blocks until all in-flight handlers finish before returning,
+// then closes the done channel so Wait() callers are unblocked.
 func (d *ExecDispatcher) Start(ctx context.Context) {
+	defer close(d.done)
 	if err := d.client.XGroupCreateMkStream(ctx, execStream, consumerGroup, "$").Err(); err != nil {
 		// BUSYGROUP means the group already exists — that's fine.
 		if err.Error() != "BUSYGROUP Consumer Group name already exists" {
@@ -180,29 +158,47 @@ func (d *ExecDispatcher) autoclaimLoop(ctx context.Context, wg *sync.WaitGroup) 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			msgs, _, err := d.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
-				Stream:   execStream,
-				Group:    consumerGroup,
-				Consumer: d.consumerID,
-				MinIdle:  autoclaimMinIdle,
-				Start:    "0-0",
-			}).Result()
-			if err != nil {
-				slog.Warn("plugin exec: xautoclaim failed", "error", err)
-				continue
-			}
-			for _, msg := range msgs {
+			// Loop until XAutoClaim returns cursor "0-0", meaning the entire PEL
+			// has been scanned. A single call only returns up to COUNT entries
+			// (default 100), so without this loop entries beyond the first page
+			// are never reclaimed within a tick, and because Start always resets
+			// to "0-0" the same head entries can repeatedly starve the tail.
+			cursor := "0-0"
+			for {
+				msgs, next, err := d.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+					Stream:   execStream,
+					Group:    consumerGroup,
+					Consumer: d.consumerID,
+					MinIdle:  autoclaimMinIdle,
+					Start:    cursor,
+				}).Result()
+				if err != nil {
+					slog.Warn("plugin exec: xautoclaim failed", "error", err)
+					break
+				}
+				for _, msg := range msgs {
+					select {
+					case d.sem <- struct{}{}:
+					case <-ctx.Done():
+						return
+					}
+					wg.Add(1)
+					go func(m redis.XMessage) {
+						defer wg.Done()
+						defer func() { <-d.sem }()
+						d.handle(ctx, m)
+					}(msg)
+				}
+				if next == "" || next == "0-0" {
+					break
+				}
+				cursor = next
+				// Yield between pages so the main XReadGroup loop isn't starved.
 				select {
-				case d.sem <- struct{}{}:
 				case <-ctx.Done():
 					return
+				default:
 				}
-				wg.Add(1)
-				go func(m redis.XMessage) {
-					defer wg.Done()
-					defer func() { <-d.sem }()
-					d.handle(ctx, m)
-				}(msg)
 			}
 		}
 	}
@@ -216,13 +212,40 @@ func (d *ExecDispatcher) handle(ctx context.Context, msg redis.XMessage) {
 	replyCtx, replyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer replyCancel()
 
+	// req is declared here so the recover closure below can write the error reply
+	// using req.ID even when the panic occurs after parseExecRequest returns.
+	var req execRequest
+
+	// Recover from panics in RunAction or any downstream code. Registered first so
+	// it fires last (LIFO), after XAck has already removed the message from the PEL.
+	// Without this, a panic kills the process and every plugin waiter hangs until
+	// its own request timeout.
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		slog.Error("plugin exec: panic in handler", "msg_id", msg.ID, "req_id", req.ID, "panic", r)
+		if req.ID == "" {
+			return
+		}
+		replyStream := fmt.Sprintf(replyStreamFmt, req.ID)
+		_ = d.client.XAdd(replyCtx, &redis.XAddArgs{
+			Stream: replyStream,
+			MaxLen: 1,
+			Values: map[string]any{"error": fmt.Sprintf("internal error: %v", r)},
+		}).Err()
+		d.client.Expire(replyCtx, replyStream, replyTTL) //nolint:errcheck
+	}()
+
 	defer func() {
 		if err := d.client.XAck(replyCtx, execStream, consumerGroup, msg.ID).Err(); err != nil {
 			slog.Warn("plugin exec: ack failed", "msg_id", msg.ID, "error", err)
 		}
 	}()
 
-	req, err := parseExecRequest(msg)
+	var err error
+	req, err = parseExecRequest(msg)
 	if err != nil {
 		slog.Warn("plugin exec: invalid request", "msg_id", msg.ID, "error", err)
 		return
@@ -294,6 +317,12 @@ func parseExecRequest(msg redis.XMessage) (execRequest, error) {
 		}
 	}
 	return req, nil
+}
+
+// Wait blocks until Start has returned and all in-flight handlers have finished.
+// Must be called after the context passed to Start is cancelled.
+func (d *ExecDispatcher) Wait() {
+	<-d.done
 }
 
 // Close shuts down the Redis client.

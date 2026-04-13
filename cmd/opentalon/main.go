@@ -26,6 +26,7 @@ import (
 	"github.com/opentalon/opentalon/internal/plugin"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
+	"github.com/opentalon/opentalon/internal/redisclient"
 	"github.com/opentalon/opentalon/internal/requestpkg"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store"
@@ -417,7 +418,7 @@ func main() {
 	var sharedRedis redis.UniversalClient
 	if needsRedis && (cfg.Cluster.RedisURL != "" || len(cfg.Cluster.Sentinels) > 0) {
 		var err error
-		sharedRedis, err = plugin.NewExecRedisClient(
+		sharedRedis, err = redisclient.New(
 			cfg.Cluster.RedisURL,
 			cfg.Cluster.MasterName,
 			cfg.Cluster.Sentinels,
@@ -475,9 +476,12 @@ func main() {
 
 	// Start plugin exec dispatcher (allows trusted plugins to execute ToolRegistry actions via Redis).
 	// Requires plugin_exec.enabled: true and cluster.redis_url (or sentinels) to be set.
+	var dispatcher *plugin.ExecDispatcher
+	var dispatchCancel context.CancelFunc
 	if cfg.PluginExec.Enabled {
 		if sharedRedis == nil {
-			slog.Warn("plugin_exec.enabled is true but no redis_url configured, exec disabled")
+			fmt.Fprintf(os.Stderr, "plugin_exec.enabled requires redis_url or sentinels to be configured\n")
+			os.Exit(1) //nolint:gocritic
 		} else {
 			var actionTimeout time.Duration
 			if cfg.PluginExec.ActionTimeout != "" {
@@ -487,9 +491,9 @@ func main() {
 					slog.Warn("plugin_exec.action_timeout invalid, using default", "value", cfg.PluginExec.ActionTimeout)
 				}
 			}
-			dispatcher := plugin.NewExecDispatcher(sharedRedis, orch, actionTimeout)
-			dispatchCtx, dispatchCancel := context.WithCancel(ctx)
-			defer dispatchCancel()
+			dispatcher = plugin.NewExecDispatcher(sharedRedis, orch, actionTimeout)
+			var dispatchCtx context.Context
+			dispatchCtx, dispatchCancel = context.WithCancel(ctx)
 			go dispatcher.Start(dispatchCtx)
 		}
 	}
@@ -500,6 +504,14 @@ func main() {
 
 	channelManager.StopAll()
 	pluginManager.StopAll()
+
+	// Cancel the dispatcher and wait for all in-flight handlers to finish draining
+	// before the deferred sharedRedis.Close() runs. Without this wait, handlers
+	// mid-flight when the signal arrives would hit XAck/XAdd on a closed client.
+	if dispatcher != nil && dispatchCancel != nil {
+		dispatchCancel()
+		dispatcher.Wait()
+	}
 }
 
 // seedGroupPlugins seeds the static group→plugin config baseline to the DB.

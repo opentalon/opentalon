@@ -88,8 +88,13 @@ func ParseHandshake(line string) (Handshake, error) {
 	h.Address = parts[2]
 	if len(parts) == 4 {
 		h.HTTPAddr = parts[3]
-		if _, _, err := net.SplitHostPort(h.HTTPAddr); err != nil {
+		host, _, err := net.SplitHostPort(h.HTTPAddr)
+		if err != nil {
 			return Handshake{}, fmt.Errorf("invalid handshake http_addr %q: %w", h.HTTPAddr, err)
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return Handshake{}, fmt.Errorf("handshake http_addr %q must be a loopback address (127.x.x.x or ::1)", h.HTTPAddr)
 		}
 	}
 

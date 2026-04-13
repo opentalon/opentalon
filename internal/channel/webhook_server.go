@@ -79,23 +79,11 @@ func RegisterReverseProxy(port int, prefix, targetAddr string) error {
 		return fmt.Errorf("invalid proxy target %q: %w", targetAddr, err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	pattern := "/" + strings.Trim(prefix, "/") + "/"
 	stripPrefix := "/" + strings.Trim(prefix, "/")
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.URL.Path = strings.TrimPrefix(r.URL.Path, stripPrefix)
-		if r.URL.Path == "" {
-			r.URL.Path = "/"
-		}
-		// RawPath is used by httputil when set; clear it in sync with Path so
-		// percent-encoded paths (e.g. containing %2F) are forwarded correctly.
-		if r.URL.RawPath != "" {
-			r.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, stripPrefix)
-			if r.URL.RawPath == "" {
-				r.URL.RawPath = "/"
-			}
-		}
-		proxy.ServeHTTP(w, r)
-	})
+	pattern := stripPrefix + "/"
+	// http.StripPrefix handles both URL.Path and URL.RawPath (percent-encoded
+	// paths like %2F) correctly and avoids mutating the original request.
+	handler := http.HandlerFunc(http.StripPrefix(stripPrefix, proxy).ServeHTTP)
 	return globalWebhookServer.register(port, pattern, handler)
 }
 

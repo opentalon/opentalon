@@ -24,12 +24,28 @@ type Config struct {
 	Lua             *LuaConfig               `yaml:"lua,omitempty"`
 	Profiles        ProfilesConfig           `yaml:"profiles,omitempty"`
 	Bootstrap       BootstrapConfig          `yaml:"bootstrap,omitempty"`
+	Redis           RedisConfig              `yaml:"redis,omitempty"`
 	Cluster         ClusterConfig            `yaml:"cluster,omitempty"`
 	PluginExec      PluginExecConfig         `yaml:"plugin_exec,omitempty"`
 }
 
+// RedisConfig holds the connection details for the shared Redis instance used by
+// cluster deduplication and the plugin exec dispatcher. Having one block avoids
+// operators who want only one subsystem having to fill in a section named after
+// the other.
+//
+// Standalone mode: set redis_url only.
+// Sentinel mode:   set master_name + sentinels (redis_url is ignored).
+type RedisConfig struct {
+	RedisURL         string   `yaml:"redis_url"`         // standalone: redis://[:pass@]host:port/db
+	MasterName       string   `yaml:"master_name"`       // sentinel: name of the master
+	Sentinels        []string `yaml:"sentinels"`         // sentinel: list of host:port addresses
+	Password         string   `yaml:"password"`          // Redis master password (sentinel mode; standalone uses URL)
+	SentinelPassword string   `yaml:"sentinel_password"` // optional: Sentinel ACL password
+}
+
 // PluginExecConfig enables trusted plugins to execute ToolRegistry actions via a Redis stream.
-// Requires cluster.redis_url (or sentinel config) to be set.
+// Requires redis.redis_url (or sentinel config) to be set.
 // See docs/workflows.md for details.
 type PluginExecConfig struct {
 	Enabled       bool   `yaml:"enabled"`
@@ -39,17 +55,10 @@ type PluginExecConfig struct {
 // ClusterConfig enables Redis-backed message deduplication for multi-pod deployments.
 // When enabled: every inbound message acquires a Redis lock before processing, so only
 // one pod handles each unique message even when multiple pods receive it simultaneously.
-//
-// Standalone mode: set redis_url only.
-// Sentinel mode:   set master_name + sentinels (redis_url is ignored).
+// Requires redis.redis_url (or sentinel config) to be set.
 type ClusterConfig struct {
-	Enabled          bool     `yaml:"enabled"`
-	RedisURL         string   `yaml:"redis_url"`         // standalone: redis://[:pass@]host:port/db
-	MasterName       string   `yaml:"master_name"`       // sentinel: name of the master
-	Sentinels        []string `yaml:"sentinels"`         // sentinel: list of host:port addresses
-	Password         string   `yaml:"password"`          // Redis master password (sentinel mode; standalone uses URL)
-	SentinelPassword string   `yaml:"sentinel_password"` // optional: Sentinel ACL password
-	DedupTTL         string   `yaml:"dedup_ttl"`         // Go duration for dedup lock TTL; default "5m"
+	Enabled  bool   `yaml:"enabled"`
+	DedupTTL string `yaml:"dedup_ttl"` // Go duration for dedup lock TTL; default "5m"
 }
 
 // BootstrapConfig configures a remote HTTP endpoint that is called once at startup

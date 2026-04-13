@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/opentalon/opentalon/internal/dedup"
+	"github.com/opentalon/opentalon/internal/redisclient"
 )
 
 // Run with: go test -tags redis -run TestRedisDedup ./internal/dedup/
@@ -25,11 +26,12 @@ func redisURL(t *testing.T) string {
 }
 
 func TestRedisDedupStandalone_TryAcquire(t *testing.T) {
-	d, err := dedup.NewStandalone(redisURL(t))
+	client, err := redisclient.New(redisURL(t), "", nil, "", "")
 	if err != nil {
-		t.Fatalf("NewStandalone: %v", err)
+		t.Fatalf("redisclient.New: %v", err)
 	}
-	defer d.Close()
+	d := dedup.NewFromClient(client)
+	defer client.Close()
 
 	ctx := context.Background()
 	key := "test:dedup:standalone:" + t.Name()
@@ -55,11 +57,12 @@ func TestRedisDedupStandalone_TryAcquire(t *testing.T) {
 }
 
 func TestRedisDedupStandalone_DifferentKeys(t *testing.T) {
-	d, err := dedup.NewStandalone(redisURL(t))
+	client, err := redisclient.New(redisURL(t), "", nil, "", "")
 	if err != nil {
-		t.Fatalf("NewStandalone: %v", err)
+		t.Fatalf("redisclient.New: %v", err)
 	}
-	defer d.Close()
+	d := dedup.NewFromClient(client)
+	defer client.Close()
 
 	ctx := context.Background()
 	prefix := "test:dedup:keys:" + t.Name() + ":"
@@ -77,11 +80,12 @@ func TestRedisDedupStandalone_DifferentKeys(t *testing.T) {
 }
 
 func TestRedisDedupStandalone_TTLExpiry(t *testing.T) {
-	d, err := dedup.NewStandalone(redisURL(t))
+	client, err := redisclient.New(redisURL(t), "", nil, "", "")
 	if err != nil {
-		t.Fatalf("NewStandalone: %v", err)
+		t.Fatalf("redisclient.New: %v", err)
 	}
-	defer d.Close()
+	d := dedup.NewFromClient(client)
+	defer client.Close()
 
 	ctx := context.Background()
 	key := "test:dedup:ttl:" + t.Name()
@@ -106,7 +110,7 @@ func TestRedisDedupStandalone_TTLExpiry(t *testing.T) {
 }
 
 func TestRedisDedupStandalone_InvalidURL(t *testing.T) {
-	_, err := dedup.NewStandalone("not-a-url")
+	_, err := redisclient.New("not-a-url", "", nil, "", "")
 	if err == nil {
 		t.Fatal("expected error for invalid URL")
 	}
@@ -142,11 +146,12 @@ func sentinelMaster(t *testing.T) string {
 }
 
 func TestRedisDedupSentinel_TryAcquire(t *testing.T) {
-	d, err := dedup.NewSentinel(sentinelMaster(t), sentinelAddrs(t), "", "")
+	client, err := redisclient.New("", sentinelMaster(t), sentinelAddrs(t), "", "")
 	if err != nil {
-		t.Fatalf("NewSentinel: %v", err)
+		t.Fatalf("redisclient.New: %v", err)
 	}
-	defer d.Close() //nolint:errcheck
+	d := dedup.NewFromClient(client)
+	defer client.Close()
 
 	ctx := context.Background()
 	key := "test:dedup:sentinel:" + t.Name()
@@ -170,11 +175,12 @@ func TestRedisDedupSentinel_TryAcquire(t *testing.T) {
 }
 
 func TestRedisDedupSentinel_TTLExpiry(t *testing.T) {
-	d, err := dedup.NewSentinel(sentinelMaster(t), sentinelAddrs(t), "", "")
+	client, err := redisclient.New("", sentinelMaster(t), sentinelAddrs(t), "", "")
 	if err != nil {
-		t.Fatalf("NewSentinel: %v", err)
+		t.Fatalf("redisclient.New: %v", err)
 	}
-	defer d.Close() //nolint:errcheck
+	d := dedup.NewFromClient(client)
+	defer client.Close()
 
 	ctx := context.Background()
 	key := "test:dedup:sentinel:ttl:" + t.Name()
@@ -197,14 +203,16 @@ func TestRedisDedupSentinel_TTLExpiry(t *testing.T) {
 }
 
 func TestRedisDedupSentinel_InvalidMaster(t *testing.T) {
-	_, err := dedup.NewSentinel("", sentinelAddrs(t), "", "")
+	sentinelAddrs(t) // skip if REDIS_SENTINEL_ADDRS not set
+	_, err := redisclient.New("", "", []string{"localhost:26379"}, "", "")
 	if err == nil {
 		t.Fatal("expected error for empty master name")
 	}
 }
 
 func TestRedisDedupSentinel_NoSentinels(t *testing.T) {
-	_, err := dedup.NewSentinel("mymaster", nil, "", "")
+	sentinelAddrs(t) // skip if REDIS_SENTINEL_ADDRS not set
+	_, err := redisclient.New("", "mymaster", []string{}, "", "")
 	if err == nil {
 		t.Fatal("expected error for empty sentinel list")
 	}
