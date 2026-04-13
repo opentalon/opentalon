@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"net"
 	"strings"
 )
 
@@ -87,6 +88,9 @@ func ParseHandshake(line string) (Handshake, error) {
 	h.Address = parts[2]
 	if len(parts) == 4 {
 		h.HTTPAddr = parts[3]
+		if _, _, err := net.SplitHostPort(h.HTTPAddr); err != nil {
+			return Handshake{}, fmt.Errorf("invalid handshake http_addr %q: %w", h.HTTPAddr, err)
+		}
 	}
 
 	if h.Version != HandshakeVersion {

@@ -28,6 +28,9 @@ const (
 	// maxConcurrentHandlers caps the number of plugin-exec requests handled in
 	// parallel. Prevents unbounded goroutine growth under stream bursts.
 	maxConcurrentHandlers = 32
+
+	// defaultActionTimeout is used when the operator does not set action_timeout.
+	defaultActionTimeout = 60 * time.Second
 )
 
 // ExecActionRunner executes a named plugin action. Implemented by orchestrator.Orchestrator.
@@ -44,10 +47,11 @@ type ExecActionRunner interface {
 // The Redis instance used here MUST be network-isolated (not shared with external services)
 // and its credentials must be treated as high-privilege secrets.
 type ExecDispatcher struct {
-	client     redis.UniversalClient
-	runner     ExecActionRunner
-	consumerID string        // unique per process; e.g. "hostname" or "hostname-fallback"
-	sem        chan struct{} // bounds concurrent handlers
+	client        redis.UniversalClient
+	runner        ExecActionRunner
+	consumerID    string        // unique per process; e.g. "hostname" or "hostname-fallback"
+	sem           chan struct{} // bounds concurrent handlers
+	actionTimeout time.Duration // per-request RunAction deadline
 }
 
 type execRequest struct {
@@ -62,16 +66,21 @@ type execRequest struct {
 }
 
 // NewExecDispatcher creates a dispatcher backed by the given Redis client.
-func NewExecDispatcher(client redis.UniversalClient, runner ExecActionRunner) *ExecDispatcher {
+// actionTimeout is the per-request deadline for RunAction; 0 uses defaultActionTimeout.
+func NewExecDispatcher(client redis.UniversalClient, runner ExecActionRunner, actionTimeout time.Duration) *ExecDispatcher {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = fmt.Sprintf("pod-%d", os.Getpid())
 	}
+	if actionTimeout <= 0 {
+		actionTimeout = defaultActionTimeout
+	}
 	return &ExecDispatcher{
-		client:     client,
-		runner:     runner,
-		consumerID: hostname,
-		sem:        make(chan struct{}, maxConcurrentHandlers),
+		client:        client,
+		runner:        runner,
+		consumerID:    hostname,
+		sem:           make(chan struct{}, maxConcurrentHandlers),
+		actionTimeout: actionTimeout,
 	}
 }
 
@@ -145,7 +154,11 @@ func (d *ExecDispatcher) Start(ctx context.Context) {
 		}
 		for _, stream := range streams {
 			for _, msg := range stream.Messages {
-				d.sem <- struct{}{} // acquire semaphore; blocks if at capacity
+				select {
+				case d.sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
 				wg.Add(1)
 				go func(m redis.XMessage) {
 					defer wg.Done()
@@ -179,7 +192,11 @@ func (d *ExecDispatcher) autoclaimLoop(ctx context.Context, wg *sync.WaitGroup) 
 				continue
 			}
 			for _, msg := range msgs {
-				d.sem <- struct{}{}
+				select {
+				case d.sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
 				wg.Add(1)
 				go func(m redis.XMessage) {
 					defer wg.Done()
@@ -192,12 +209,15 @@ func (d *ExecDispatcher) autoclaimLoop(ctx context.Context, wg *sync.WaitGroup) 
 }
 
 func (d *ExecDispatcher) handle(ctx context.Context, msg redis.XMessage) {
-	// Use a fresh context for XAck so it succeeds even if ctx was cancelled
-	// (e.g. during graceful shutdown — work is done, we still need to ack).
+	// replyCtx is used for all Redis writes after the action completes (XAdd reply,
+	// Expire, XAck). It must survive parent ctx cancellation so that graceful shutdown
+	// does not silently drop the reply and leave the plugin-side waiter hanging until
+	// its own timeout, while still acking the message (losing the retry).
+	replyCtx, replyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer replyCancel()
+
 	defer func() {
-		ackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := d.client.XAck(ackCtx, execStream, consumerGroup, msg.ID).Err(); err != nil {
+		if err := d.client.XAck(replyCtx, execStream, consumerGroup, msg.ID).Err(); err != nil {
 			slog.Warn("plugin exec: ack failed", "msg_id", msg.ID, "error", err)
 		}
 	}()
@@ -222,7 +242,9 @@ func (d *ExecDispatcher) handle(ctx context.Context, msg redis.XMessage) {
 		reqCtx = actor.WithSessionID(reqCtx, req.SessionID)
 	}
 
-	content, runErr := d.runner.RunAction(reqCtx, req.Plugin, req.Action, req.Args)
+	actionCtx, actionCancel := context.WithTimeout(reqCtx, d.actionTimeout)
+	defer actionCancel()
+	content, runErr := d.runner.RunAction(actionCtx, req.Plugin, req.Action, req.Args)
 
 	fields := map[string]any{"content": content}
 	if runErr != nil {
@@ -230,7 +252,7 @@ func (d *ExecDispatcher) handle(ctx context.Context, msg redis.XMessage) {
 	}
 
 	replyStream := fmt.Sprintf(replyStreamFmt, req.ID)
-	if err := d.client.XAdd(ctx, &redis.XAddArgs{
+	if err := d.client.XAdd(replyCtx, &redis.XAddArgs{
 		Stream: replyStream,
 		MaxLen: 1,
 		Values: fields,
@@ -238,7 +260,7 @@ func (d *ExecDispatcher) handle(ctx context.Context, msg redis.XMessage) {
 		slog.Warn("plugin exec: write reply failed", "req_id", req.ID, "error", err)
 		return
 	}
-	d.client.Expire(ctx, replyStream, replyTTL) //nolint:errcheck
+	d.client.Expire(replyCtx, replyStream, replyTTL) //nolint:errcheck
 }
 
 func parseExecRequest(msg redis.XMessage) (execRequest, error) {

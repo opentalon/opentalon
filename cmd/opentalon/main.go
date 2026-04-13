@@ -12,6 +12,8 @@ import (
 
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/opentalon/opentalon/internal/bootstrap"
 	"github.com/opentalon/opentalon/internal/bundle"
 	"github.com/opentalon/opentalon/internal/channel"
@@ -408,7 +410,32 @@ func main() {
 	handler := channel.NewMessageHandler(ensureSession, runner, orch.RunAction, toolRegistry.HasAction, profileVerifier)
 
 	reg := channel.NewRegistry(handler)
+
+	// Build a single shared Redis client when cluster dedup, plugin exec, or both need it.
+	// Sharing one pool halves connection count compared to opening two clients to the same instance.
+	needsRedis := cfg.Cluster.Enabled || cfg.PluginExec.Enabled
+	var sharedRedis redis.UniversalClient
+	if needsRedis && (cfg.Cluster.RedisURL != "" || len(cfg.Cluster.Sentinels) > 0) {
+		var err error
+		sharedRedis, err = plugin.NewExecRedisClient(
+			cfg.Cluster.RedisURL,
+			cfg.Cluster.MasterName,
+			cfg.Cluster.Sentinels,
+			cfg.Cluster.Password,
+			cfg.Cluster.SentinelPassword,
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error connecting to Redis: %v\n", err)
+			os.Exit(1) //nolint:gocritic
+		}
+		defer func() { _ = sharedRedis.Close() }()
+	}
+
 	if cfg.Cluster.Enabled {
+		if sharedRedis == nil {
+			fmt.Fprintf(os.Stderr, "cluster.enabled requires redis_url or sentinels to be configured\n")
+			os.Exit(1) //nolint:gocritic
+		}
 		dedupTTL := 5 * time.Minute
 		if cfg.Cluster.DedupTTL != "" {
 			if d, err := time.ParseDuration(cfg.Cluster.DedupTTL); err == nil {
@@ -417,23 +444,7 @@ func main() {
 				slog.Warn("invalid cluster.dedup_ttl, using default 5m", "value", cfg.Cluster.DedupTTL)
 			}
 		}
-		var dedupClient dedup.Deduplicator
-		var dedupErr error
-		if len(cfg.Cluster.Sentinels) > 0 {
-			dedupClient, dedupErr = dedup.NewSentinel(cfg.Cluster.MasterName, cfg.Cluster.Sentinels, cfg.Cluster.Password, cfg.Cluster.SentinelPassword)
-		} else {
-			dedupClient, dedupErr = dedup.NewStandalone(cfg.Cluster.RedisURL)
-		}
-		if dedupErr != nil {
-			fmt.Fprintf(os.Stderr, "Error connecting to Redis for deduplication: %v\n", dedupErr)
-			os.Exit(1) //nolint:gocritic
-		}
-		defer func() {
-			if err := dedupClient.Close(); err != nil {
-				slog.Warn("dedup client close failed", "error", err)
-			}
-		}()
-		reg.SetDeduplicator(dedupClient, dedupTTL)
+		reg.SetDeduplicator(dedup.NewFromClient(sharedRedis), dedupTTL)
 		slog.Info("cluster deduplication enabled", "ttl", dedupTTL, "sentinel", len(cfg.Cluster.Sentinels) > 0)
 	}
 	channelManager := channel.NewManager(reg, toolRegistry)
@@ -463,28 +474,23 @@ func main() {
 	}
 
 	// Start plugin exec dispatcher (allows trusted plugins to execute ToolRegistry actions via Redis).
-	// Requires plugin_exec.enabled: true and a configured Redis URL (from cluster config).
+	// Requires plugin_exec.enabled: true and cluster.redis_url (or sentinels) to be set.
 	if cfg.PluginExec.Enabled {
-		redisURL := cfg.Cluster.RedisURL
-		if redisURL != "" || len(cfg.Cluster.Sentinels) > 0 {
-			execClient, err := plugin.NewExecRedisClient(
-				redisURL,
-				cfg.Cluster.MasterName,
-				cfg.Cluster.Sentinels,
-				cfg.Cluster.Password,
-				cfg.Cluster.SentinelPassword,
-			)
-			if err != nil {
-				slog.Warn("plugin exec dispatcher: redis connect failed, exec disabled", "error", err)
-			} else {
-				dispatcher := plugin.NewExecDispatcher(execClient, orch)
-				dispatchCtx, dispatchCancel := context.WithCancel(ctx)
-				defer dispatchCancel()
-				defer func() { _ = execClient.Close() }()
-				go dispatcher.Start(dispatchCtx)
-			}
-		} else {
+		if sharedRedis == nil {
 			slog.Warn("plugin_exec.enabled is true but no redis_url configured, exec disabled")
+		} else {
+			var actionTimeout time.Duration
+			if cfg.PluginExec.ActionTimeout != "" {
+				if d, err := time.ParseDuration(cfg.PluginExec.ActionTimeout); err == nil {
+					actionTimeout = d
+				} else {
+					slog.Warn("plugin_exec.action_timeout invalid, using default", "value", cfg.PluginExec.ActionTimeout)
+				}
+			}
+			dispatcher := plugin.NewExecDispatcher(sharedRedis, orch, actionTimeout)
+			dispatchCtx, dispatchCancel := context.WithCancel(ctx)
+			defer dispatchCancel()
+			go dispatcher.Start(dispatchCtx)
 		}
 	}
 

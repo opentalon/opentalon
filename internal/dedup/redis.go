@@ -23,6 +23,7 @@ type Deduplicator interface {
 type redisDedup struct {
 	client   redis.UniversalClient
 	ownerVal string // stored as the lock value; aids debugging ("who owns this key?")
+	owned    bool   // true = this struct owns the client and must close it
 }
 
 // NewStandalone returns a Deduplicator backed by a single Redis instance.
@@ -55,6 +56,18 @@ func NewSentinel(masterName string, sentinels []string, password, sentinelPasswo
 	return newDedup(client)
 }
 
+// NewFromClient wraps an already-connected redis.UniversalClient.
+// Close is a no-op: the caller owns the client and is responsible for closing it.
+// Use this when the same Redis connection is shared with another subsystem (e.g. the
+// exec dispatcher) to avoid opening a second pool to the same instance.
+func NewFromClient(client redis.UniversalClient) Deduplicator {
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = fmt.Sprintf("pid-%d", os.Getpid())
+	}
+	return &redisDedup{client: client, ownerVal: hostname, owned: false}
+}
+
 func newDedup(client redis.UniversalClient) (Deduplicator, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -66,7 +79,7 @@ func newDedup(client redis.UniversalClient) (Deduplicator, error) {
 	if err != nil {
 		hostname = fmt.Sprintf("pid-%d", os.Getpid())
 	}
-	return &redisDedup{client: client, ownerVal: hostname}, nil
+	return &redisDedup{client: client, ownerVal: hostname, owned: true}, nil
 }
 
 // TryAcquire sets key with NX+EX. Returns true if this call created the key (won the lock).
@@ -77,5 +90,8 @@ func (d *redisDedup) TryAcquire(ctx context.Context, key string, ttl time.Durati
 }
 
 func (d *redisDedup) Close() error {
-	return d.client.Close()
+	if d.owned {
+		return d.client.Close()
+	}
+	return nil
 }

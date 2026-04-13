@@ -41,3 +41,5 @@ plugins:
 ```
 
 The workflow REST API will then be available at `http://<your-host>:3978/opentalon-workflows/v1/workflows`.
+
+Port `3978` is OpenTalon's default webhook port (configurable via `webhook.port` in your config).

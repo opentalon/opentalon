@@ -39,7 +39,7 @@ cluster:
 
 | Mode | When to use | Required fields |
 |---|---|---|
-| Standalone | Single Redis instance or Redis Cluster | `redis_url` |
+| Standalone | Single Redis instance | `redis_url` |
 | Sentinel | High-availability setup with Sentinel failover | `master_name` + `sentinels` |
 
 ## How the dedup key is built

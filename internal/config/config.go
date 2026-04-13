@@ -32,7 +32,8 @@ type Config struct {
 // Requires cluster.redis_url (or sentinel config) to be set.
 // See docs/workflows.md for details.
 type PluginExecConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled       bool   `yaml:"enabled"`
+	ActionTimeout string `yaml:"action_timeout,omitempty"` // e.g. "30s"; max time per RunAction call (default 60s)
 }
 
 // ClusterConfig enables Redis-backed message deduplication for multi-pod deployments.

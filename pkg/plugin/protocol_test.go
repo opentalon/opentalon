@@ -18,6 +18,7 @@ func TestParseHandshakeValid(t *testing.T) {
 		{"1|tcp|127.0.0.1:9001", 1, "tcp", "127.0.0.1:9001", ""},
 		{"1|unix|/tmp/plug.sock|127.0.0.1:9091", 1, "unix", "/tmp/plug.sock", "127.0.0.1:9091"},
 		{"1|tcp|127.0.0.1:9001|127.0.0.1:9091", 1, "tcp", "127.0.0.1:9001", "127.0.0.1:9091"},
+		{"1|unix|/tmp/plug.sock|:9091", 1, "unix", "/tmp/plug.sock", ":9091"}, // all-interfaces bind
 	}
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
@@ -45,9 +46,11 @@ func TestParseHandshakeInvalid(t *testing.T) {
 	bad := []string{
 		"",
 		"garbage",
-		"2|unix|/tmp/x.sock",    // wrong version
-		"1|http|localhost:8080", // unsupported network
-		"1|unix",                // missing address
+		"2|unix|/tmp/x.sock",                 // wrong version
+		"1|http|localhost:8080",              // unsupported network
+		"1|unix",                             // missing address
+		"1|unix|/tmp/p.sock|bad:addr:format", // too many colons
+		"1|unix|/tmp/p.sock|noport",          // missing port
 	}
 	for _, input := range bad {
 		t.Run(input, func(t *testing.T) {

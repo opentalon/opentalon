@@ -114,3 +114,98 @@ func TestRedisDedupStandalone_InvalidURL(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// sentinelAddrs returns the Sentinel address(es) from REDIS_SENTINEL_ADDRS
+// (comma-separated, e.g. "localhost:26379") and skips if not set.
+func sentinelAddrs(t *testing.T) []string {
+	t.Helper()
+	raw := os.Getenv("REDIS_SENTINEL_ADDRS")
+	if raw == "" {
+		t.Skip("REDIS_SENTINEL_ADDRS not set; skipping Sentinel integration tests")
+	}
+	var addrs []string
+	for _, a := range strings.Split(raw, ",") {
+		if s := strings.TrimSpace(a); s != "" {
+			addrs = append(addrs, s)
+		}
+	}
+	return addrs
+}
+
+func sentinelMaster(t *testing.T) string {
+	t.Helper()
+	name := os.Getenv("REDIS_SENTINEL_MASTER")
+	if name == "" {
+		name = "mymaster"
+	}
+	return name
+}
+
+func TestRedisDedupSentinel_TryAcquire(t *testing.T) {
+	d, err := dedup.NewSentinel(sentinelMaster(t), sentinelAddrs(t), "", "")
+	if err != nil {
+		t.Fatalf("NewSentinel: %v", err)
+	}
+	defer d.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	key := "test:dedup:sentinel:" + t.Name()
+	ttl := 10 * time.Second
+
+	won, err := d.TryAcquire(ctx, key, ttl)
+	if err != nil {
+		t.Fatalf("TryAcquire (1): %v", err)
+	}
+	if !won {
+		t.Fatal("expected first TryAcquire to return true")
+	}
+
+	won, err = d.TryAcquire(ctx, key, ttl)
+	if err != nil {
+		t.Fatalf("TryAcquire (2): %v", err)
+	}
+	if won {
+		t.Fatal("expected second TryAcquire to return false")
+	}
+}
+
+func TestRedisDedupSentinel_TTLExpiry(t *testing.T) {
+	d, err := dedup.NewSentinel(sentinelMaster(t), sentinelAddrs(t), "", "")
+	if err != nil {
+		t.Fatalf("NewSentinel: %v", err)
+	}
+	defer d.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	key := "test:dedup:sentinel:ttl:" + t.Name()
+	ttl := 200 * time.Millisecond
+
+	won, err := d.TryAcquire(ctx, key, ttl)
+	if err != nil || !won {
+		t.Fatalf("first acquire failed: won=%v err=%v", won, err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	won, err = d.TryAcquire(ctx, key, ttl)
+	if err != nil {
+		t.Fatalf("TryAcquire after TTL: %v", err)
+	}
+	if !won {
+		t.Fatal("expected TryAcquire to win after TTL expiry")
+	}
+}
+
+func TestRedisDedupSentinel_InvalidMaster(t *testing.T) {
+	_, err := dedup.NewSentinel("", sentinelAddrs(t), "", "")
+	if err == nil {
+		t.Fatal("expected error for empty master name")
+	}
+}
+
+func TestRedisDedupSentinel_NoSentinels(t *testing.T) {
+	_, err := dedup.NewSentinel("mymaster", nil, "", "")
+	if err == nil {
+		t.Fatal("expected error for empty sentinel list")
+	}
+}
