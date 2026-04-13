@@ -407,7 +407,8 @@ func Parse(data []byte) (*Config, error) {
 	expandEnvInPlugins(&cfg)
 	expandEnvInChannels(&cfg)
 	expandEnvInBootstrap(&cfg)
-	expandEnvInCluster(&cfg)
+	expandEnvInRedis(&cfg)
+	cfg.Cluster.DedupTTL = expandEnv(cfg.Cluster.DedupTTL)
 	if cfg.State.DataDir == "" {
 		home, _ := os.UserHomeDir()
 		cfg.State.DataDir = filepath.Join(home, ".opentalon")
@@ -482,14 +483,13 @@ func expandEnvInBootstrap(cfg *Config) {
 	cfg.Bootstrap.Timeout = expandEnv(cfg.Bootstrap.Timeout)
 }
 
-func expandEnvInCluster(cfg *Config) {
-	cfg.Cluster.RedisURL = expandEnv(cfg.Cluster.RedisURL)
-	cfg.Cluster.MasterName = expandEnv(cfg.Cluster.MasterName)
-	cfg.Cluster.Password = expandEnv(cfg.Cluster.Password)
-	cfg.Cluster.SentinelPassword = expandEnv(cfg.Cluster.SentinelPassword)
-	cfg.Cluster.DedupTTL = expandEnv(cfg.Cluster.DedupTTL)
-	for i, s := range cfg.Cluster.Sentinels {
-		cfg.Cluster.Sentinels[i] = expandEnv(s)
+func expandEnvInRedis(cfg *Config) {
+	cfg.Redis.RedisURL = expandEnv(cfg.Redis.RedisURL)
+	cfg.Redis.MasterName = expandEnv(cfg.Redis.MasterName)
+	cfg.Redis.Password = expandEnv(cfg.Redis.Password)
+	cfg.Redis.SentinelPassword = expandEnv(cfg.Redis.SentinelPassword)
+	for i, s := range cfg.Redis.Sentinels {
+		cfg.Redis.Sentinels[i] = expandEnv(s)
 	}
 }
 

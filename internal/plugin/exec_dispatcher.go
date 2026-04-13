@@ -86,7 +86,6 @@ func NewExecDispatcher(client redis.UniversalClient, runner ExecActionRunner, ac
 	}
 }
 
-
 // Start runs the dispatcher loop until ctx is cancelled.
 // It blocks until all in-flight handlers finish before returning,
 // then closes the done channel so Wait() callers are unblocked.

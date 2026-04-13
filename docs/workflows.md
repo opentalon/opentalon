@@ -10,8 +10,8 @@ Add the following to your config:
 plugin_exec:
   enabled: true
 
-cluster:
-  redis_url: "redis://localhost:6379"   # also used for cluster deduplication
+redis:
+  redis_url: "redis://localhost:6379"   # shared with cluster deduplication
 ```
 
 This lets trusted plugins execute actions through OpenTalon's ToolRegistry via an internal Redis stream. Redis is required.

@@ -39,7 +39,7 @@ func TestReverseProxy_PathStripping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if got != "/foo/bar" {
 		t.Errorf("backend received path %q, want /foo/bar", got)
 	}
@@ -62,7 +62,7 @@ func TestReverseProxy_RootPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if got != "/" {
 		t.Errorf("backend received path %q, want /", got)
 	}
@@ -91,7 +91,7 @@ func TestReverseProxy_NoTrailingSlashRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode/100 != 3 {
 		t.Errorf("status = %d, want a 3xx redirect", resp.StatusCode)
 	}
@@ -124,7 +124,7 @@ func TestReverseProxy_EncodedPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if gotRaw != "/a%2Fb" {
 		t.Errorf("backend RawPath = %q, want /a%%2Fb", gotRaw)
 	}

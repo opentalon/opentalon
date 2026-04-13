@@ -416,14 +416,14 @@ func main() {
 	// Sharing one pool halves connection count compared to opening two clients to the same instance.
 	needsRedis := cfg.Cluster.Enabled || cfg.PluginExec.Enabled
 	var sharedRedis redis.UniversalClient
-	if needsRedis && (cfg.Cluster.RedisURL != "" || len(cfg.Cluster.Sentinels) > 0) {
+	if needsRedis && (cfg.Redis.RedisURL != "" || len(cfg.Redis.Sentinels) > 0) {
 		var err error
 		sharedRedis, err = redisclient.New(
-			cfg.Cluster.RedisURL,
-			cfg.Cluster.MasterName,
-			cfg.Cluster.Sentinels,
-			cfg.Cluster.Password,
-			cfg.Cluster.SentinelPassword,
+			cfg.Redis.RedisURL,
+			cfg.Redis.MasterName,
+			cfg.Redis.Sentinels,
+			cfg.Redis.Password,
+			cfg.Redis.SentinelPassword,
 		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error connecting to Redis: %v\n", err)
@@ -434,7 +434,7 @@ func main() {
 
 	if cfg.Cluster.Enabled {
 		if sharedRedis == nil {
-			fmt.Fprintf(os.Stderr, "cluster.enabled requires redis_url or sentinels to be configured\n")
+			fmt.Fprintf(os.Stderr, "cluster.enabled requires redis.redis_url or redis.sentinels to be configured\n")
 			os.Exit(1) //nolint:gocritic
 		}
 		dedupTTL := 5 * time.Minute
@@ -446,7 +446,7 @@ func main() {
 			}
 		}
 		reg.SetDeduplicator(dedup.NewFromClient(sharedRedis), dedupTTL)
-		slog.Info("cluster deduplication enabled", "ttl", dedupTTL, "sentinel", len(cfg.Cluster.Sentinels) > 0)
+		slog.Info("cluster deduplication enabled", "ttl", dedupTTL, "sentinel", len(cfg.Redis.Sentinels) > 0)
 	}
 	channelManager := channel.NewManager(reg, toolRegistry)
 	channelEntries := make([]channel.ChannelEntry, 0, len(cfg.Channels))
@@ -475,12 +475,12 @@ func main() {
 	}
 
 	// Start plugin exec dispatcher (allows trusted plugins to execute ToolRegistry actions via Redis).
-	// Requires plugin_exec.enabled: true and cluster.redis_url (or sentinels) to be set.
+	// Requires plugin_exec.enabled: true and redis.redis_url (or sentinels) to be set.
 	var dispatcher *plugin.ExecDispatcher
 	var dispatchCancel context.CancelFunc
 	if cfg.PluginExec.Enabled {
 		if sharedRedis == nil {
-			fmt.Fprintf(os.Stderr, "plugin_exec.enabled requires redis_url or sentinels to be configured\n")
+			fmt.Fprintf(os.Stderr, "plugin_exec.enabled requires redis.redis_url or redis.sentinels to be configured\n")
 			os.Exit(1) //nolint:gocritic
 		} else {
 			var actionTimeout time.Duration

@@ -6,10 +6,10 @@ Setting `cluster.enabled: true` activates Redis-backed message deduplication. Wh
 
 ## Configuration
 
-```yaml
-cluster:
-  enabled: true
+Redis connection details live in the top-level `redis:` block (shared with other Redis-backed subsystems such as `plugin_exec`):
 
+```yaml
+redis:
   # --- Standalone Redis ---
   redis_url: "redis://:yourpassword@redis-host:6379/0"
 
@@ -22,6 +22,9 @@ cluster:
   # password: "redis-master-password"       # optional
   # sentinel_password: "sentinel-password"  # optional Sentinel ACL password
 
+cluster:
+  enabled: true
+
   # How long to hold the dedup lock. Must be longer than the slowest expected
   # message round-trip. Default: 5m.
   dedup_ttl: "5m"
@@ -30,9 +33,10 @@ cluster:
 All string values support `${ENV_VAR}` substitution:
 
 ```yaml
+redis:
+  redis_url: "${REDIS_URL}"
 cluster:
   enabled: true
-  redis_url: "${REDIS_URL}"
 ```
 
 ## Modes
@@ -102,8 +106,9 @@ spec:
 
 ```yaml
 # config.yaml
+redis:
+  redis_url: "${REDIS_URL}"
 cluster:
   enabled: true
-  redis_url: "${REDIS_URL}"
   dedup_ttl: "5m"
 ```
