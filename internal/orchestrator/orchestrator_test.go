@@ -9,6 +9,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
+	pkgchannel "github.com/opentalon/opentalon/pkg/channel"
 )
 
 type fakeLLM struct {
@@ -1430,4 +1431,118 @@ type capturingExecutor struct {
 
 func (e *capturingExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 	return e.fn(call)
+}
+
+func TestChannelFormatHint(t *testing.T) {
+	tests := []struct {
+		name         string
+		format       pkgchannel.ResponseFormat
+		customPrompt string
+		wantContains string
+		wantEmpty    bool
+	}{
+		{
+			name:         "slack built-in",
+			format:       pkgchannel.FormatSlack,
+			wantContains: "Slack",
+		},
+		{
+			name:         "markdown built-in",
+			format:       pkgchannel.FormatMarkdown,
+			wantContains: "Markdown",
+		},
+		{
+			name:         "html built-in",
+			format:       pkgchannel.FormatHTML,
+			wantContains: "HTML",
+		},
+		{
+			name:         "telegram built-in",
+			format:       pkgchannel.FormatTelegram,
+			wantContains: "Telegram",
+		},
+		{
+			name:         "text built-in",
+			format:       pkgchannel.FormatText,
+			wantContains: "plain text",
+		},
+		{
+			name:      "no format set returns empty",
+			wantEmpty: true,
+		},
+		{
+			name:         "custom prompt overrides built-in",
+			format:       pkgchannel.FormatSlack,
+			customPrompt: "My custom instructions.",
+			wantContains: "My custom instructions.",
+		},
+		{
+			name:         "custom prompt without format set",
+			customPrompt: "Only custom.",
+			wantContains: "Only custom.",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := pkgchannel.WithCapabilities(context.Background(), pkgchannel.Capabilities{
+				ResponseFormat:       tc.format,
+				ResponseFormatPrompt: tc.customPrompt,
+			})
+			got := channelFormatHint(ctx)
+
+			if tc.wantEmpty {
+				if got != "" {
+					t.Errorf("expected empty hint, got %q", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.wantContains) {
+				t.Errorf("hint %q does not contain %q", got, tc.wantContains)
+			}
+			// Custom prompt must not bleed into built-in text.
+			if tc.customPrompt != "" && strings.Contains(got, "Slack mrkdwn") {
+				t.Errorf("custom prompt should suppress built-in hint, got %q", got)
+			}
+		})
+	}
+}
+
+func TestBuildSystemPromptIncludesFormatSection(t *testing.T) {
+	o, sessionID := setupOrchestrator(&fakeLLM{responses: []string{"hello"}}, DefaultParser)
+
+	sess, err := o.sessions.Get(sessionID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+
+	// Without format hint — system prompt must not contain OUTPUT FORMAT.
+	msgs := o.buildMessages(context.Background(), sess, "hi")
+	systemContent := ""
+	for _, m := range msgs {
+		if m.Role == provider.RoleSystem {
+			systemContent = m.Content
+		}
+	}
+	if strings.Contains(systemContent, "OUTPUT FORMAT") {
+		t.Error("system prompt should not contain OUTPUT FORMAT when no format is set")
+	}
+
+	// With Slack format — system prompt must contain the section.
+	ctx := pkgchannel.WithCapabilities(context.Background(), pkgchannel.Capabilities{
+		ResponseFormat: pkgchannel.FormatSlack,
+	})
+	msgs = o.buildMessages(ctx, sess, "hi")
+	systemContent = ""
+	for _, m := range msgs {
+		if m.Role == provider.RoleSystem {
+			systemContent = m.Content
+		}
+	}
+	if !strings.Contains(systemContent, "OUTPUT FORMAT") {
+		t.Error("system prompt should contain OUTPUT FORMAT for Slack channel")
+	}
+	if !strings.Contains(systemContent, "Slack") {
+		t.Error("system prompt should mention Slack formatting")
+	}
 }

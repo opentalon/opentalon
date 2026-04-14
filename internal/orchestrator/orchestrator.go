@@ -16,6 +16,7 @@ import (
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
+	pkgchannel "github.com/opentalon/opentalon/pkg/channel"
 )
 
 const maxAgentLoopIterations = 20
@@ -580,7 +581,23 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 		calls := o.parser.Parse(resp.Content)
 		if calls == nil {
-			result.Response = resp.Content
+			stripped := StripInternalBlocks(resp.Content)
+			if stripped == "" && stripped != resp.Content {
+				// The LLM produced only unparseable tool call blocks — nothing to send
+				// to the user. Store the bad response and ask the LLM to try again in
+				// plain language so the user gets a meaningful reply.
+				_ = o.sessions.AddMessage(sessionID, provider.Message{
+					Role:    provider.RoleAssistant,
+					Content: resp.Content,
+				})
+				_ = o.sessions.AddMessage(sessionID, provider.Message{
+					Role:    provider.RoleUser,
+					Content: "[system] Your previous response contained tool call blocks that could not be executed. Please respond to the user in natural language without tool calls.",
+				})
+				log.Debug("LLM produced only unparseable tool calls, retrying for plain response", "round", i+1)
+				continue
+			}
+			result.Response = stripped
 			if len(result.Results) > 0 {
 				var parts []string
 				for i, r := range result.Results {
@@ -868,7 +885,38 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		sb.WriteString("\n")
 	}
 
+	if hint := channelFormatHint(ctx); hint != "" {
+		sb.WriteString("## OUTPUT FORMAT\n")
+		sb.WriteString(hint)
+		sb.WriteString("\n")
+	}
+
 	return sb.String()
+}
+
+// channelFormatHint returns a formatting instruction string for the LLM based
+// on the ResponseFormat declared in the channel capabilities. If the channel
+// provides a custom ResponseFormatPrompt it takes precedence over the built-in
+// hints. Returns empty string when no format is configured.
+func channelFormatHint(ctx context.Context) string {
+	caps := pkgchannel.CapabilitiesFromContext(ctx)
+	if caps.ResponseFormatPrompt != "" {
+		return caps.ResponseFormatPrompt
+	}
+	switch caps.ResponseFormat {
+	case pkgchannel.FormatSlack:
+		return "You are responding in a Slack channel. Format your reply using Slack mrkdwn: *bold*, _italic_, `inline code`, ```code blocks```, >blockquote, and bullet lists with •. Do not use standard Markdown syntax (no ** or ##)."
+	case pkgchannel.FormatMarkdown:
+		return "You are responding in a Markdown-rendered interface. Format your reply using standard Markdown: **bold**, _italic_, `code`, ```code blocks```, and # headings where appropriate."
+	case pkgchannel.FormatHTML:
+		return "You are responding in an HTML-rendered interface. Format your reply using HTML tags: <b>bold</b>, <i>italic</i>, <code>inline code</code>, <pre>code blocks</pre>."
+	case pkgchannel.FormatTelegram:
+		return "You are responding in a Telegram chat. Format your reply using Telegram's supported HTML: <b>bold</b>, <i>italic</i>, <code>inline code</code>, <pre>code blocks</pre>. Keep responses concise."
+	case pkgchannel.FormatText:
+		return "You are responding in a plain text channel. Do not use any markup or formatting characters. Write in plain prose only."
+	default:
+		return ""
+	}
 }
 
 func filterByTag(memories []*state.Memory, tag string) []*state.Memory {

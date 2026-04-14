@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	pkg "github.com/opentalon/opentalon/pkg/channel"
 	"gopkg.in/yaml.v3"
 )
 
@@ -209,5 +210,49 @@ name: No ID
 	_, err := LoadYAMLChannelSpec(path)
 	if err == nil {
 		t.Fatal("expected error for missing ID")
+	}
+}
+
+func TestCapabilitiesSpecResponseFormat(t *testing.T) {
+	specYAML := `
+kind: channel
+version: 1
+id: slack-test
+name: Slack Test
+capabilities:
+  threads: true
+  response_format: slack
+  response_format_prompt: "Use Slack mrkdwn please."
+`
+	var spec YAMLChannelSpec
+	if err := yaml.Unmarshal([]byte(specYAML), &spec); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if spec.Capabilities.ResponseFormat != pkg.FormatSlack {
+		t.Errorf("ResponseFormat = %q, want %q", spec.Capabilities.ResponseFormat, pkg.FormatSlack)
+	}
+	if spec.Capabilities.ResponseFormatPrompt != "Use Slack mrkdwn please." {
+		t.Errorf("ResponseFormatPrompt = %q, want %q", spec.Capabilities.ResponseFormatPrompt, "Use Slack mrkdwn please.")
+	}
+}
+
+func TestCapabilitiesSpecResponseFormatAbsent(t *testing.T) {
+	specYAML := `
+kind: channel
+version: 1
+id: plain-test
+name: Plain Test
+capabilities:
+  threads: false
+`
+	var spec YAMLChannelSpec
+	if err := yaml.Unmarshal([]byte(specYAML), &spec); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if spec.Capabilities.ResponseFormat != "" {
+		t.Errorf("ResponseFormat should be empty when not set, got %q", spec.Capabilities.ResponseFormat)
+	}
+	if spec.Capabilities.ResponseFormatPrompt != "" {
+		t.Errorf("ResponseFormatPrompt should be empty when not set, got %q", spec.Capabilities.ResponseFormatPrompt)
 	}
 }

@@ -36,15 +36,45 @@ type FileAttachment struct {
 	Size     int64  `yaml:"size" json:"size"`
 }
 
+// ResponseFormat identifies the output format a channel expects.
+// The LLM uses this to format its replies appropriately.
+type ResponseFormat string
+
+const (
+	FormatText     ResponseFormat = "text"     // plain text, no markup
+	FormatMarkdown ResponseFormat = "markdown" // standard CommonMark markdown
+	FormatSlack    ResponseFormat = "slack"    // Slack mrkdwn (*bold*, _italic_, `code`, >quote)
+	FormatHTML     ResponseFormat = "html"     // HTML tags
+	FormatTelegram ResponseFormat = "telegram" // Telegram HTML subset
+)
+
 // Capabilities declares what a channel supports.
 type Capabilities struct {
-	ID               string `yaml:"id" json:"id"`
-	Name             string `yaml:"name" json:"name"`
-	Threads          bool   `yaml:"threads" json:"threads"`
-	Files            bool   `yaml:"files" json:"files"`
-	Reactions        bool   `yaml:"reactions" json:"reactions"`
-	Edits            bool   `yaml:"edits" json:"edits"`
-	MaxMessageLength int64  `yaml:"max_message_length" json:"max_message_length"`
+	ID                   string         `yaml:"id" json:"id"`
+	Name                 string         `yaml:"name" json:"name"`
+	Threads              bool           `yaml:"threads" json:"threads"`
+	Files                bool           `yaml:"files" json:"files"`
+	Reactions            bool           `yaml:"reactions" json:"reactions"`
+	Edits                bool           `yaml:"edits" json:"edits"`
+	MaxMessageLength     int64          `yaml:"max_message_length" json:"max_message_length"`
+	ResponseFormat       ResponseFormat `yaml:"response_format" json:"response_format"`
+	ResponseFormatPrompt string         `yaml:"response_format_prompt" json:"response_format_prompt"`
+}
+
+type contextKey int
+
+const capabilitiesKey contextKey = iota
+
+// WithCapabilities stores channel capabilities in the context.
+func WithCapabilities(ctx context.Context, caps Capabilities) context.Context {
+	return context.WithValue(ctx, capabilitiesKey, caps)
+}
+
+// CapabilitiesFromContext returns the channel capabilities stored in ctx,
+// or zero-value Capabilities if none were set.
+func CapabilitiesFromContext(ctx context.Context) Capabilities {
+	caps, _ := ctx.Value(capabilitiesKey).(Capabilities)
+	return caps
 }
 
 // Channel is the interface that external channel plugins implement.

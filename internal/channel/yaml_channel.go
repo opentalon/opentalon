@@ -69,13 +69,15 @@ func (ch *YAMLChannel) ID() string {
 // Capabilities returns what this channel supports.
 func (ch *YAMLChannel) Capabilities() pkg.Capabilities {
 	return pkg.Capabilities{
-		ID:               ch.spec.ID,
-		Name:             ch.spec.Name,
-		Threads:          ch.spec.Capabilities.Threads,
-		Files:            ch.spec.Capabilities.Files,
-		Reactions:        ch.spec.Capabilities.Reactions,
-		Edits:            ch.spec.Capabilities.Edits,
-		MaxMessageLength: int64(ch.spec.Capabilities.MaxMessageLength),
+		ID:                   ch.spec.ID,
+		Name:                 ch.spec.Name,
+		Threads:              ch.spec.Capabilities.Threads,
+		Files:                ch.spec.Capabilities.Files,
+		Reactions:            ch.spec.Capabilities.Reactions,
+		Edits:                ch.spec.Capabilities.Edits,
+		MaxMessageLength:     int64(ch.spec.Capabilities.MaxMessageLength),
+		ResponseFormat:       ch.spec.Capabilities.ResponseFormat,
+		ResponseFormatPrompt: ch.spec.Capabilities.ResponseFormatPrompt,
 	}
 }
 
