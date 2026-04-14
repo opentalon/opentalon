@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/provider"
@@ -41,6 +42,25 @@ func (e *echoExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 		CallID:  call.ID,
 		Content: fmt.Sprintf("executed %s.%s", call.Plugin, call.Action),
 	}
+}
+
+type fakeObserver struct {
+	mu    sync.Mutex
+	calls []struct {
+		plugin string
+		action string
+		failed bool
+	}
+}
+
+func (f *fakeObserver) ObservePluginCall(plugin, action string, failed bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, struct {
+		plugin string
+		action string
+		failed bool
+	}{plugin, action, failed})
 }
 
 // fixedResultExecutor returns fixed content (for preparers that return JSON).
@@ -1559,5 +1579,165 @@ func TestBuildSystemPromptIncludesFormatSection(t *testing.T) {
 	}
 	if !strings.Contains(systemContent, "Slack") {
 		t.Error("system prompt should mention Slack formatting")
+	}
+}
+
+func setupOrchestratorWithOpts(llm LLMClient, parser ToolCallParser, opts OrchestratorOpts) (*Orchestrator, string) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:        "gitlab",
+		Description: "GitLab integration",
+		Actions: []Action{
+			{Name: "analyze_code", Description: "Analyze code"},
+			{Name: "create_pr", Description: "Create PR"},
+		},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name:        "jira",
+		Description: "Jira integration",
+		Actions:     []Action{{Name: "create_issue", Description: "Create issue"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("test-session-obs")
+
+	opts.UsageRecorder = nil
+	orch := NewWithRules(llm, parser, registry, memory, sessions, opts)
+	return orch, "test-session-obs"
+}
+
+func TestPluginCallObserverCalledOnToolCall(t *testing.T) {
+	llm := &fakeLLM{responses: []string{
+		"[tool] gitlab.analyze_code",
+		"Done!",
+	}}
+	callNum := 0
+	parser := &fakeParser{parseFn: func(_ string) []ToolCall {
+		callNum++
+		if callNum == 1 {
+			return []ToolCall{{ID: "c1", Plugin: "gitlab", Action: "analyze_code"}}
+		}
+		return nil
+	}}
+	obs := &fakeObserver{}
+	orch, sessID := setupOrchestratorWithOpts(llm, parser, OrchestratorOpts{PluginCallObserver: obs})
+
+	if _, err := orch.Run(context.Background(), sessID, "analyze code"); err != nil {
+		t.Fatal(err)
+	}
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	if len(obs.calls) != 1 {
+		t.Fatalf("expected 1 observer call, got %d", len(obs.calls))
+	}
+	if obs.calls[0].plugin != "gitlab" {
+		t.Errorf("plugin = %q, want gitlab", obs.calls[0].plugin)
+	}
+	if obs.calls[0].action != "analyze_code" {
+		t.Errorf("action = %q, want analyze_code", obs.calls[0].action)
+	}
+	if obs.calls[0].failed {
+		t.Error("expected failed=false for successful echoExecutor call")
+	}
+}
+
+func TestPluginCallObserverCalledOnToolCallError(t *testing.T) {
+	llm := &fakeLLM{responses: []string{
+		"[tool] unknown.do_thing",
+		"Sorry.",
+	}}
+	callNum := 0
+	parser := &fakeParser{parseFn: func(_ string) []ToolCall {
+		callNum++
+		if callNum == 1 {
+			return []ToolCall{{ID: "c1", Plugin: "unknown", Action: "do_thing"}}
+		}
+		return nil
+	}}
+	obs := &fakeObserver{}
+	orch, sessID := setupOrchestratorWithOpts(llm, parser, OrchestratorOpts{PluginCallObserver: obs})
+
+	if _, err := orch.Run(context.Background(), sessID, "do something"); err != nil {
+		t.Fatal(err)
+	}
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	if len(obs.calls) != 1 {
+		t.Fatalf("expected 1 observer call, got %d", len(obs.calls))
+	}
+	if !obs.calls[0].failed {
+		t.Error("expected failed=true for unknown plugin call")
+	}
+}
+
+func TestPluginCallObserverNotCalledWhenNil(t *testing.T) {
+	llm := &fakeLLM{responses: []string{
+		"[tool] gitlab.analyze_code",
+		"Done!",
+	}}
+	callNum := 0
+	parser := &fakeParser{parseFn: func(_ string) []ToolCall {
+		callNum++
+		if callNum == 1 {
+			return []ToolCall{{ID: "c1", Plugin: "gitlab", Action: "analyze_code"}}
+		}
+		return nil
+	}}
+	// No observer — should not panic.
+	orch, sessID := setupOrchestratorWithOpts(llm, parser, OrchestratorOpts{})
+	if _, err := orch.Run(context.Background(), sessID, "analyze code"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPluginCallObserverCalledForEachCallInMultiStep(t *testing.T) {
+	llm := &fakeLLM{responses: []string{
+		"[tool] gitlab.analyze_code",
+		"[tool] jira.create_issue",
+		"[tool] gitlab.create_pr",
+		"All done!",
+	}}
+	callNum := 0
+	parser := &fakeParser{parseFn: func(_ string) []ToolCall {
+		callNum++
+		switch callNum {
+		case 1:
+			return []ToolCall{{ID: "c1", Plugin: "gitlab", Action: "analyze_code"}}
+		case 2:
+			return []ToolCall{{ID: "c2", Plugin: "jira", Action: "create_issue"}}
+		case 3:
+			return []ToolCall{{ID: "c3", Plugin: "gitlab", Action: "create_pr"}}
+		default:
+			return nil
+		}
+	}}
+	obs := &fakeObserver{}
+	orch, sessID := setupOrchestratorWithOpts(llm, parser, OrchestratorOpts{PluginCallObserver: obs})
+
+	if _, err := orch.Run(context.Background(), sessID, "do three things"); err != nil {
+		t.Fatal(err)
+	}
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	if len(obs.calls) != 3 {
+		t.Fatalf("expected 3 observer calls, got %d", len(obs.calls))
+	}
+	want := []struct{ plugin, action string }{
+		{"gitlab", "analyze_code"},
+		{"jira", "create_issue"},
+		{"gitlab", "create_pr"},
+	}
+	for i, w := range want {
+		if obs.calls[i].plugin != w.plugin || obs.calls[i].action != w.action {
+			t.Errorf("call[%d] = {%s,%s}, want {%s,%s}", i,
+				obs.calls[i].plugin, obs.calls[i].action, w.plugin, w.action)
+		}
+		if obs.calls[i].failed {
+			t.Errorf("call[%d] failed=true, want false", i)
+		}
 	}
 }

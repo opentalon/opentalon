@@ -14,6 +14,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"net/http"
+
 	"github.com/opentalon/opentalon/internal/bootstrap"
 	"github.com/opentalon/opentalon/internal/bundle"
 	"github.com/opentalon/opentalon/internal/channel"
@@ -21,6 +23,7 @@ import (
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/dedup"
 	"github.com/opentalon/opentalon/internal/logger"
+	"github.com/opentalon/opentalon/internal/metrics"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/plugin"
@@ -75,6 +78,24 @@ func main() {
 		logLevel = env
 	}
 	logger.Setup(logLevel)
+
+	// Start Prometheus metrics server if enabled.
+	var metricsCollector *metrics.Collector
+	if cfg.Metrics.Enabled {
+		metricsCollector = metrics.New()
+		addr := cfg.Metrics.Addr
+		if addr == "" {
+			addr = ":9090"
+		}
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metricsCollector.Handler())
+		go func() {
+			slog.Info("metrics server listening", "addr", addr)
+			if err := http.ListenAndServe(addr, mux); err != nil && err != http.ErrServerClosed {
+				slog.Error("metrics server error", "error", err)
+			}
+		}()
+	}
 
 	// Fetch remote bootstrap config (if configured) and merge into static config.
 	// Remote entries are additive — static config wins on key conflicts.
@@ -377,10 +398,15 @@ func main() {
 		slog.Info("profile verification enabled", "url", cfg.Profiles.WhoAmI.URL)
 	}
 
-	// Build orchestrator usage recorder adapter (nil when usageStore is nil).
+	// Build orchestrator usage recorder adapter (nil when usageStore is nil and metrics disabled).
 	var usageRecorder orchestrator.UsageRecorder
-	if usageStore != nil {
-		usageRecorder = &usageRecorderAdapter{store: usageStore, provider: prov}
+	if usageStore != nil || metricsCollector != nil {
+		usageRecorder = &usageRecorderAdapter{store: usageStore, provider: prov, collector: metricsCollector}
+	}
+	// Avoid non-nil interface wrapping a nil pointer.
+	var pluginObserver orchestrator.PluginCallObserver
+	if metricsCollector != nil {
+		pluginObserver = metricsCollector
 	}
 
 	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, orchestrator.OrchestratorOpts{
@@ -400,6 +426,7 @@ func main() {
 		MaxConcurrentSessions:   cfg.Orchestrator.MaxConcurrentSessions,
 		GroupPluginLookup:       groupPluginStore,
 		UsageRecorder:           usageRecorder,
+		PluginCallObserver:      pluginObserver,
 	})
 
 	ensureSession := func(sessionKey string) {
@@ -548,8 +575,9 @@ func seedBootstrapGroupPlugins(ctx context.Context, gps *store.GroupPluginStore,
 
 // usageRecorderAdapter adapts store.UsageStore to orchestrator.UsageRecorder.
 type usageRecorderAdapter struct {
-	store    *store.UsageStore
-	provider provider.Provider
+	store     *store.UsageStore
+	provider  provider.Provider
+	collector *metrics.Collector
 }
 
 func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int) {
@@ -564,19 +592,25 @@ func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupI
 			}
 		}
 	}
-	if err := a.store.Record(ctx, store.UsageRecord{
-		EntityID:     entityID,
-		GroupID:      groupID,
-		ChannelID:    channelID,
-		SessionID:    sessionID,
-		ModelID:      modelID,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-		ToolCalls:    toolCalls,
-		InputCost:    inputCostUSD,
-		OutputCost:   outputCostUSD,
-	}); err != nil {
-		slog.Warn("usage record failed", "entity", entityID, "error", err)
+	if a.store != nil {
+		if err := a.store.Record(ctx, store.UsageRecord{
+			EntityID:     entityID,
+			GroupID:      groupID,
+			ChannelID:    channelID,
+			SessionID:    sessionID,
+			ModelID:      modelID,
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+			ToolCalls:    toolCalls,
+			InputCost:    inputCostUSD,
+			OutputCost:   outputCostUSD,
+		}); err != nil {
+			slog.Warn("usage record failed", "entity", entityID, "error", err)
+		}
+	}
+	if a.collector != nil {
+		a.collector.RecordUsage(ctx, entityID, groupID, channelID, sessionID, modelID,
+			inputTokens, outputTokens, toolCalls, inputCostUSD, outputCostUSD)
 	}
 }
 

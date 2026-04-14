@@ -833,3 +833,77 @@ lua:
 		t.Errorf("plugin[1] = name %q github %q ref %q", cfg.Lua.Plugins[1].Name, cfg.Lua.Plugins[1].GitHub, cfg.Lua.Plugins[1].Ref)
 	}
 }
+
+func TestParseMetricsEnabled(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+metrics:
+  enabled: true
+  addr: ":9090"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Metrics.Enabled {
+		t.Error("Metrics.Enabled = false, want true")
+	}
+	if cfg.Metrics.Addr != ":9090" {
+		t.Errorf("Metrics.Addr = %q, want :9090", cfg.Metrics.Addr)
+	}
+}
+
+func TestParseMetricsDisabled(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+metrics:
+  enabled: false
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Metrics.Enabled {
+		t.Error("Metrics.Enabled = true, want false")
+	}
+	if cfg.Metrics.Addr != "" {
+		t.Errorf("Metrics.Addr = %q, want empty", cfg.Metrics.Addr)
+	}
+}
+
+func TestParseMetricsOmitted(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Metrics.Enabled {
+		t.Error("Metrics.Enabled = true, want false (zero value)")
+	}
+	if cfg.Metrics.Addr != "" {
+		t.Errorf("Metrics.Addr = %q, want empty (zero value)", cfg.Metrics.Addr)
+	}
+}
+
+func TestParseMetricsAddrEnvSubstitution(t *testing.T) {
+	t.Setenv("METRICS_ADDR", ":9091")
+	yaml := `
+models:
+  providers: {}
+metrics:
+  enabled: true
+  addr: "${METRICS_ADDR}"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Metrics.Addr != ":9091" {
+		t.Errorf("Metrics.Addr = %q, want :9091", cfg.Metrics.Addr)
+	}
+}
