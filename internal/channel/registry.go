@@ -166,6 +166,7 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 				sessionKey := pkg.SessionKey(ch.ID(), m.ConversationID, m.ThreadID)
 				traceID := logger.TraceIDFromSessionKey(sessionKey)
 				ctx := logger.WithTraceID(r.ctx, traceID)
+				ctx = pkg.WithCapabilities(ctx, ch.Capabilities())
 
 				// Deduplication: when running multiple pods each pod receives every
 				// inbound message. Only the pod that wins the Redis SET NX lock

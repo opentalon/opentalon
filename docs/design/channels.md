@@ -90,6 +90,8 @@ Advertised by the plugin at startup so the core knows what the platform supports
 | `reactions` | bool | Supports emoji reactions |
 | `edits` | bool | Supports message editing |
 | `max_message_length` | int64 | Platform's character limit (0 = unlimited) |
+| `response_format` | string | Output format hint for the LLM (`slack`, `markdown`, `html`, `telegram`, `text`) |
+| `response_format_prompt` | string | Custom formatting instruction appended to the system prompt (overrides built-in hint) |
 
 ## Multi-mode launcher
 
@@ -192,6 +194,56 @@ Session key = <channel_id>:<conversation_id>:<thread_id>
 - If `thread_id` is empty, the key is `<channel_id>:<conversation_id>`.
 - The registry auto-creates a new session when it encounters a key it hasn't seen before.
 - Sessions persist across messages, so the LLM maintains full conversation context within a thread.
+
+## Output format
+
+The core can instruct the LLM to format its replies for the specific channel it is responding to. This is controlled by two capability fields:
+
+| Field | Behaviour |
+|---|---|
+| `response_format` | Selects a built-in formatting hint. One of `slack`, `markdown`, `html`, `telegram`, `text`. |
+| `response_format_prompt` | A custom instruction string appended to the system prompt. **Takes precedence over `response_format`** when set. |
+
+When either field is non-empty, an `## OUTPUT FORMAT` section is appended to the LLM system prompt for every request on that channel.
+
+### Built-in format hints
+
+| Value | What the LLM is told |
+|---|---|
+| `slack` | Use Slack mrkdwn (`*bold*`, `_italic_`, `` `code` ``, ` ```blocks``` `, `>quote`). No Markdown `**` or `##`. |
+| `markdown` | Use CommonMark (`**bold**`, `_italic_`, `` `code` ``, fenced code blocks, `#` headings). |
+| `html` | Use HTML tags (`<b>`, `<i>`, `<code>`, `<pre>`). |
+| `telegram` | Use Telegram's HTML subset (`<b>`, `<i>`, `<code>`, `<pre>`). Keep replies concise. |
+| `text` | Plain prose only — no markup of any kind. |
+
+### YAML channel example (Slack)
+
+```yaml
+capabilities:
+  threads: true
+  files: true
+  reactions: true
+  max_message_length: 3000
+  response_format: slack
+```
+
+The LLM will then format all replies with Slack mrkdwn automatically.
+
+### Custom prompt override
+
+Set `response_format_prompt` to replace the built-in hint with your own instruction. This is useful when a platform has non-standard formatting rules or you want more specific guidance:
+
+```yaml
+capabilities:
+  response_format: slack          # kept for reference; ignored when prompt is set
+  response_format_prompt: |
+    You are responding in a Slack channel used by a DevOps team.
+    Use Slack mrkdwn for formatting. Lead with a one-line summary, then
+    use bullet points for details. Always include ticket/PR numbers as
+    plain text (not links). Keep replies under 400 words.
+```
+
+The prompt is set directly in the channel YAML by the operator, so only trusted admins can change it.
 
 ## Configuration
 

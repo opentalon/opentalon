@@ -3,6 +3,7 @@ package channel
 import (
 	"time"
 
+	pkg "github.com/opentalon/opentalon/pkg/channel"
 	"gopkg.in/yaml.v3"
 )
 
@@ -26,11 +27,13 @@ type YAMLChannelSpec struct {
 
 // CapabilitiesSpec declares what the channel supports.
 type CapabilitiesSpec struct {
-	Threads          bool `yaml:"threads"`
-	Files            bool `yaml:"files"`
-	Reactions        bool `yaml:"reactions"`
-	Edits            bool `yaml:"edits"`
-	MaxMessageLength int  `yaml:"max_message_length"`
+	Threads              bool               `yaml:"threads"`
+	Files                bool               `yaml:"files"`
+	Reactions            bool               `yaml:"reactions"`
+	Edits                bool               `yaml:"edits"`
+	MaxMessageLength     int                `yaml:"max_message_length"`
+	ResponseFormat       pkg.ResponseFormat `yaml:"response_format"`
+	ResponseFormatPrompt string             `yaml:"response_format_prompt"`
 }
 
 // InitStep is an HTTP call to run at startup. Results are stored in selfVars.

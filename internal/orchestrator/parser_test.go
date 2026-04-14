@@ -200,6 +200,58 @@ func TestParseFormatA_InlineNoClosingTag(t *testing.T) {
 	}
 }
 
+func TestStripInternalBlocks(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "strips tool_call block",
+			input: "[tool_call]\n{\"tool\": \"jira__jira_search\", \"args\": {}}\n[/tool_call]",
+			want:  "",
+		},
+		{
+			name:  "strips plugin_output block",
+			input: "Here are the results:\n[plugin_output]\n{\"issues\": []}\n[/plugin_output]\nDone.",
+			want:  "Here are the results:\n\nDone.",
+		},
+		{
+			name:  "strips both block types",
+			input: "[tool_call]{\"tool\":\"bad__name\"}[/tool_call]\n[plugin_output]raw output[/plugin_output]\nFinal answer.",
+			want:  "Final answer.",
+		},
+		{
+			name:  "preserves surrounding text around tool_call",
+			input: "Here is my answer.\n[tool_call]\n{\"tool\": \"bad__name\"}\n[/tool_call]\nDone.",
+			want:  "Here is my answer.\n\nDone.",
+		},
+		{
+			name:  "strips multiple blocks",
+			input: "[tool_call]block1[/tool_call] middle [tool_call]block2[/tool_call] end",
+			want:  "middle  end",
+		},
+		{
+			name:  "no blocks passthrough",
+			input: "normal response text",
+			want:  "normal response text",
+		},
+		{
+			name:  "no closing tag drops tail",
+			input: "before [tool_call]no closing",
+			want:  "before",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := StripInternalBlocks(tc.input)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseToolName(t *testing.T) {
 	tests := []struct {
 		input      string

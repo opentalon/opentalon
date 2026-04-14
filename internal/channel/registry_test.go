@@ -365,3 +365,49 @@ func TestRegistryDispatchHandlerError(t *testing.T) {
 		t.Errorf("expected no sent messages on handler error, got %d", len(sent))
 	}
 }
+
+func TestRegistryDispatchInjectsCapabilities(t *testing.T) {
+	var capturedCaps pkg.Capabilities
+	done := make(chan struct{})
+	capturingHandler := func(ctx context.Context, _ string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
+		capturedCaps = pkg.CapabilitiesFromContext(ctx)
+		close(done)
+		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "ok"}, nil
+	}
+
+	reg := NewRegistry(capturingHandler)
+	defer reg.StopAll()
+
+	ch := &mockChannel{
+		id: "slack",
+		caps: pkg.Capabilities{
+			ID:             "slack",
+			Name:           "Slack",
+			Threads:        true,
+			ResponseFormat: pkg.FormatSlack,
+		},
+	}
+	_ = reg.Register(ch)
+
+	ch.pushMessage(pkg.InboundMessage{
+		ChannelID:      "slack",
+		ConversationID: "c1",
+		Content:        "hello",
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for handler to be called")
+	}
+
+	if capturedCaps.ID != "slack" {
+		t.Errorf("capabilities.ID = %q, want %q", capturedCaps.ID, "slack")
+	}
+	if capturedCaps.ResponseFormat != pkg.FormatSlack {
+		t.Errorf("capabilities.ResponseFormat = %q, want %q", capturedCaps.ResponseFormat, pkg.FormatSlack)
+	}
+	if !capturedCaps.Threads {
+		t.Error("capabilities.Threads should be true")
+	}
+}
