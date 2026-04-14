@@ -216,18 +216,32 @@ func (p *AnthropicProvider) toAnthMessage(m Message) (anthMessage, error) {
 
 	var blocks []anthContentBlock
 	for _, f := range m.Files {
-		blockType := "document"
-		if strings.HasPrefix(f.MimeType, "image/") {
-			blockType = "image"
+		switch {
+		case strings.HasPrefix(f.MimeType, "image/"):
+			blocks = append(blocks, anthContentBlock{
+				Type: "image",
+				Source: &anthImageSource{
+					Type:      "base64",
+					MediaType: f.MimeType,
+					Data:      base64.StdEncoding.EncodeToString(f.Data),
+				},
+			})
+		case f.MimeType == "application/pdf":
+			blocks = append(blocks, anthContentBlock{
+				Type: "document",
+				Source: &anthImageSource{
+					Type:      "base64",
+					MediaType: f.MimeType,
+					Data:      base64.StdEncoding.EncodeToString(f.Data),
+				},
+			})
+		default:
+			// For text-based files (CSV, TXT, etc.), send as a plain text block.
+			blocks = append(blocks, anthContentBlock{
+				Type: "text",
+				Text: string(f.Data),
+			})
 		}
-		blocks = append(blocks, anthContentBlock{
-			Type: blockType,
-			Source: &anthImageSource{
-				Type:      "base64",
-				MediaType: f.MimeType,
-				Data:      base64.StdEncoding.EncodeToString(f.Data),
-			},
-		})
 	}
 	if m.Content != "" {
 		blocks = append(blocks, anthContentBlock{Type: "text", Text: m.Content})

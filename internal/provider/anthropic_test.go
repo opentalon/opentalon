@@ -208,3 +208,82 @@ func TestAnthropicDefaultBaseURL(t *testing.T) {
 		t.Errorf("baseURL = %q", p.baseURL)
 	}
 }
+
+func TestToAnthMessageFileBlocks(t *testing.T) {
+	p := NewAnthropicProvider("anthropic", "", "key", nil)
+
+	tests := []struct {
+		name       string
+		mimeType   string
+		data       []byte
+		wantType   string
+		wantText   string // non-empty only for text blocks
+		wantSource bool   // true when a source block is expected
+	}{
+		{
+			name:       "image becomes image block",
+			mimeType:   "image/png",
+			data:       []byte{0x89, 0x50, 0x4e, 0x47},
+			wantType:   "image",
+			wantSource: true,
+		},
+		{
+			name:       "pdf becomes document block",
+			mimeType:   "application/pdf",
+			data:       []byte("%PDF-1.4"),
+			wantType:   "document",
+			wantSource: true,
+		},
+		{
+			name:     "csv becomes text block",
+			mimeType: "text/csv",
+			data:     []byte("a,b,c\n1,2,3"),
+			wantType: "text",
+			wantText: "a,b,c\n1,2,3",
+		},
+		{
+			name:     "plain text becomes text block",
+			mimeType: "text/plain",
+			data:     []byte("hello"),
+			wantType: "text",
+			wantText: "hello",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, err := p.toAnthMessage(Message{
+				Role:    RoleUser,
+				Content: "see attached",
+				Files:   []MessageFile{{MimeType: tc.mimeType, Data: tc.data}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var blocks []anthContentBlock
+			if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+				t.Fatal(err)
+			}
+			// blocks[0] is the file, blocks[1] is the text message
+			if len(blocks) != 2 {
+				t.Fatalf("blocks = %d, want 2", len(blocks))
+			}
+			if blocks[0].Type != tc.wantType {
+				t.Errorf("block type = %q, want %q", blocks[0].Type, tc.wantType)
+			}
+			if tc.wantSource && blocks[0].Source == nil {
+				t.Error("expected source block, got nil")
+			}
+			if !tc.wantSource && blocks[0].Source != nil {
+				t.Error("expected no source block, got one")
+			}
+			if tc.wantText != "" && blocks[0].Text != tc.wantText {
+				t.Errorf("text = %q, want %q", blocks[0].Text, tc.wantText)
+			}
+			if tc.wantSource && blocks[0].Source != nil && blocks[0].Source.MediaType != tc.mimeType {
+				t.Errorf("media_type = %q, want %q", blocks[0].Source.MediaType, tc.mimeType)
+			}
+		})
+	}
+}
