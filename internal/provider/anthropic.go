@@ -97,9 +97,9 @@ type anthContentBlock struct {
 }
 
 type anthImageSource struct {
-	Type      string `json:"type"`       // "base64"
-	MediaType string `json:"media_type"` // e.g. "image/png"
-	Data      string `json:"data"`       // base64-encoded bytes
+	Type      string `json:"type"`                 // "base64" or "text"
+	MediaType string `json:"media_type,omitempty"` // e.g. "image/png"; omitted for text sources
+	Data      string `json:"data"`                 // base64-encoded bytes or plain text
 }
 
 type anthUsage struct {
@@ -204,7 +204,9 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 // toAnthMessage converts a provider.Message to an anthMessage.
 // When the message has file attachments, the content becomes a JSON array of
 // content blocks (files first, then the text block); otherwise it is a plain string.
-// Image mime types map to "image" blocks; all others map to "document" blocks.
+// Image mime types map to "image" blocks, application/pdf maps to "document" block with a
+// base64 source, text-like types (text/*, application/json, application/xml) map to
+// "document" blocks with a text source, and all other types return an error.
 func (p *AnthropicProvider) toAnthMessage(m Message) (anthMessage, error) {
 	if len(m.Files) == 0 {
 		raw, err := json.Marshal(m.Content)
@@ -235,12 +237,18 @@ func (p *AnthropicProvider) toAnthMessage(m Message) (anthMessage, error) {
 					Data:      base64.StdEncoding.EncodeToString(f.Data),
 				},
 			})
-		default:
-			// For text-based files (CSV, TXT, etc.), send as a plain text block.
+		case strings.HasPrefix(f.MimeType, "text/"),
+			f.MimeType == "application/json",
+			f.MimeType == "application/xml":
 			blocks = append(blocks, anthContentBlock{
-				Type: "text",
-				Text: string(f.Data),
+				Type: "document",
+				Source: &anthImageSource{
+					Type: "text",
+					Data: string(f.Data),
+				},
 			})
+		default:
+			return anthMessage{}, fmt.Errorf("unsupported file mime type %q", f.MimeType)
 		}
 	}
 	if m.Content != "" {
