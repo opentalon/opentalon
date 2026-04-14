@@ -208,3 +208,179 @@ func TestAnthropicDefaultBaseURL(t *testing.T) {
 		t.Errorf("baseURL = %q", p.baseURL)
 	}
 }
+
+func TestToAnthMessageFileBlocks(t *testing.T) {
+	p := NewAnthropicProvider("anthropic", "", "key", nil)
+
+	tests := []struct {
+		name           string
+		mimeType       string
+		data           []byte
+		wantBlockType  string
+		wantSourceType string // "base64", "text", or "" (no source)
+		wantMediaType  string // expected source.media_type; empty means omitted
+		wantData       string // expected source.data
+	}{
+		{
+			name:           "image becomes image block with base64 source",
+			mimeType:       "image/png",
+			data:           []byte{0x89, 0x50, 0x4e, 0x47},
+			wantBlockType:  "image",
+			wantSourceType: "base64",
+			wantMediaType:  "image/png",
+		},
+		{
+			name:           "pdf becomes document block with base64 source",
+			mimeType:       "application/pdf",
+			data:           []byte("%PDF-1.4"),
+			wantBlockType:  "document",
+			wantSourceType: "base64",
+			wantMediaType:  "application/pdf",
+		},
+		{
+			name:           "csv becomes document block with text source",
+			mimeType:       "text/csv",
+			data:           []byte("a,b,c\n1,2,3"),
+			wantBlockType:  "document",
+			wantSourceType: "text",
+			wantMediaType:  "text/plain",
+			wantData:       "a,b,c\n1,2,3",
+		},
+		{
+			name:           "plain text becomes document block with text source",
+			mimeType:       "text/plain",
+			data:           []byte("hello"),
+			wantBlockType:  "document",
+			wantSourceType: "text",
+			wantMediaType:  "text/plain",
+			wantData:       "hello",
+		},
+		{
+			name:           "application/json becomes document block with text source",
+			mimeType:       "application/json",
+			data:           []byte(`{"k":"v"}`),
+			wantBlockType:  "document",
+			wantSourceType: "text",
+			wantMediaType:  "text/plain",
+			wantData:       `{"k":"v"}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, err := p.toAnthMessage(Message{
+				Role:    RoleUser,
+				Content: "see attached",
+				Files:   []MessageFile{{MimeType: tc.mimeType, Data: tc.data}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var blocks []anthContentBlock
+			if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+				t.Fatal(err)
+			}
+			// blocks[0] is the file block, blocks[1] is the text message
+			if len(blocks) != 2 {
+				t.Fatalf("blocks = %d, want 2", len(blocks))
+			}
+			b := blocks[0]
+			if b.Type != tc.wantBlockType {
+				t.Errorf("block type = %q, want %q", b.Type, tc.wantBlockType)
+			}
+			if b.Source == nil {
+				t.Fatal("expected source, got nil")
+			}
+			if b.Source.Type != tc.wantSourceType {
+				t.Errorf("source type = %q, want %q", b.Source.Type, tc.wantSourceType)
+			}
+			if b.Source.MediaType != tc.wantMediaType {
+				t.Errorf("media_type = %q, want %q", b.Source.MediaType, tc.wantMediaType)
+			}
+			if tc.wantData != "" && b.Source.Data != tc.wantData {
+				t.Errorf("source data = %q, want %q", b.Source.Data, tc.wantData)
+			}
+		})
+	}
+}
+
+func TestToAnthMessageUnsupportedMimeType(t *testing.T) {
+	p := NewAnthropicProvider("anthropic", "", "key", nil)
+
+	unsupported := []string{"application/zip", "application/octet-stream", "audio/mpeg", "video/mp4"}
+	for _, mime := range unsupported {
+		t.Run(mime, func(t *testing.T) {
+			_, err := p.toAnthMessage(Message{
+				Role:  RoleUser,
+				Files: []MessageFile{{MimeType: mime, Data: []byte{0x00, 0x01}}},
+			})
+			if err == nil {
+				t.Errorf("expected error for mime type %q, got nil", mime)
+			}
+		})
+	}
+}
+
+func TestToAnthMessageMixedFiles(t *testing.T) {
+	p := NewAnthropicProvider("anthropic", "", "key", nil)
+
+	msg, err := p.toAnthMessage(Message{
+		Role:    RoleUser,
+		Content: "review these",
+		Files: []MessageFile{
+			{MimeType: "image/jpeg", Data: []byte{0xff, 0xd8}},
+			{MimeType: "application/pdf", Data: []byte("%PDF")},
+			{MimeType: "text/csv", Data: []byte("x,y\n1,2")},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var blocks []anthContentBlock
+	if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+		t.Fatal(err)
+	}
+	// 3 file blocks + 1 text block
+	if len(blocks) != 4 {
+		t.Fatalf("blocks = %d, want 4", len(blocks))
+	}
+	if blocks[0].Type != "image" {
+		t.Errorf("blocks[0] type = %q, want image", blocks[0].Type)
+	}
+	if blocks[1].Type != "document" || blocks[1].Source.Type != "base64" {
+		t.Errorf("blocks[1]: type=%q source.type=%q, want document/base64", blocks[1].Type, blocks[1].Source.Type)
+	}
+	if blocks[2].Type != "document" || blocks[2].Source.Type != "text" {
+		t.Errorf("blocks[2]: type=%q source.type=%q, want document/text", blocks[2].Type, blocks[2].Source.Type)
+	}
+	if blocks[3].Type != "text" || blocks[3].Text != "review these" {
+		t.Errorf("blocks[3]: type=%q text=%q, want text/review these", blocks[3].Type, blocks[3].Text)
+	}
+}
+
+func TestToAnthMessageEmptyContent(t *testing.T) {
+	p := NewAnthropicProvider("anthropic", "", "key", nil)
+
+	msg, err := p.toAnthMessage(Message{
+		Role:    RoleUser,
+		Content: "",
+		Files:   []MessageFile{{MimeType: "text/csv", Data: []byte("a,b")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var blocks []anthContentBlock
+	if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+		t.Fatal(err)
+	}
+	// empty Content must not produce a trailing text block
+	if len(blocks) != 1 {
+		t.Fatalf("blocks = %d, want 1 (no trailing text block for empty content)", len(blocks))
+	}
+	if blocks[0].Type != "document" {
+		t.Errorf("blocks[0] type = %q, want document", blocks[0].Type)
+	}
+}
