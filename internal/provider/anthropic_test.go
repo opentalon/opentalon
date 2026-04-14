@@ -243,6 +243,7 @@ func TestToAnthMessageFileBlocks(t *testing.T) {
 			data:           []byte("a,b,c\n1,2,3"),
 			wantBlockType:  "document",
 			wantSourceType: "text",
+			wantMediaType:  "text/plain",
 			wantData:       "a,b,c\n1,2,3",
 		},
 		{
@@ -251,6 +252,7 @@ func TestToAnthMessageFileBlocks(t *testing.T) {
 			data:           []byte("hello"),
 			wantBlockType:  "document",
 			wantSourceType: "text",
+			wantMediaType:  "text/plain",
 			wantData:       "hello",
 		},
 		{
@@ -259,6 +261,7 @@ func TestToAnthMessageFileBlocks(t *testing.T) {
 			data:           []byte(`{"k":"v"}`),
 			wantBlockType:  "document",
 			wantSourceType: "text",
+			wantMediaType:  "text/plain",
 			wantData:       `{"k":"v"}`,
 		},
 	}

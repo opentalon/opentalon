@@ -240,11 +240,14 @@ func (p *AnthropicProvider) toAnthMessage(m Message) (anthMessage, error) {
 		case strings.HasPrefix(f.MimeType, "text/"),
 			f.MimeType == "application/json",
 			f.MimeType == "application/xml":
+			// Anthropic's text source requires media_type "text/plain" regardless of
+			// the original MIME type — it is the only value the API accepts for this source kind.
 			blocks = append(blocks, anthContentBlock{
 				Type: "document",
 				Source: &anthImageSource{
-					Type: "text",
-					Data: string(f.Data),
+					Type:      "text",
+					MediaType: "text/plain",
+					Data:      string(f.Data),
 				},
 			})
 		default:
