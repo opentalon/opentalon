@@ -29,6 +29,20 @@ func LoadYAMLChannelSpec(path string) (*YAMLChannelSpec, error) {
 	if spec.ID == "" {
 		return nil, fmt.Errorf("channel spec %s: missing id", path)
 	}
+	if rf := spec.Capabilities.ResponseFormat; rf != "" {
+		switch rf {
+		case pkg.FormatText, pkg.FormatMarkdown, pkg.FormatSlack, pkg.FormatHTML,
+			pkg.FormatTelegram, pkg.FormatTeams, pkg.FormatWhatsApp, pkg.FormatDiscord:
+			// valid
+		default:
+			return nil, fmt.Errorf("channel spec %s: unknown response_format %q (valid: text, markdown, slack, html, telegram, teams, whatsapp, discord)", path, rf)
+		}
+	}
+	const maxFormatPromptLen = 500
+	if p := spec.Capabilities.ResponseFormatPrompt; len(p) > maxFormatPromptLen {
+		slog.Warn("channel spec response_format_prompt is unusually long and will bloat every LLM request; consider using a shorter hint",
+			"channel", spec.ID, "length", len(p), "max_suggested", maxFormatPromptLen)
+	}
 	return &spec, nil
 }
 

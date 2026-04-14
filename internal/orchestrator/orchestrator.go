@@ -543,10 +543,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// buildSystemPrompt and executeCall share the result without a second DB hit.
 	ctx = withAllowedPlugins(ctx, o.resolveAllowedPlugins(ctx))
 
+	var stripRetries int
+	var transientMessages []provider.Message
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		sess, _ := o.sessions.Get(sessionID)
 
 		messages := o.buildMessages(ctx, sess, content)
+		messages = append(messages, transientMessages...)
+		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
 		if err != nil {
 			return nil, err
@@ -582,18 +586,22 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		calls := o.parser.Parse(resp.Content)
 		if calls == nil {
 			stripped := StripInternalBlocks(resp.Content)
-			if stripped == "" && stripped != resp.Content {
+			if stripped == "" && resp.Content != "" {
 				// The LLM produced only unparseable tool call blocks — nothing to send
-				// to the user. Store the bad response and ask the LLM to try again in
-				// plain language so the user gets a meaningful reply.
-				_ = o.sessions.AddMessage(sessionID, provider.Message{
-					Role:    provider.RoleAssistant,
-					Content: resp.Content,
-				})
-				_ = o.sessions.AddMessage(sessionID, provider.Message{
-					Role:    provider.RoleUser,
-					Content: "[system] Your previous response contained tool call blocks that could not be executed. Please respond to the user in natural language without tool calls.",
-				})
+				// to the user. Ask it to retry in plain language, but cap at one such
+				// retry to avoid burning the whole agent-loop budget. The correction
+				// messages are kept transient (not persisted to the session) so they
+				// don't pollute future summaries or replays.
+				if stripRetries >= 1 {
+					log.Debug("LLM repeatedly produced only unparseable tool calls, giving up on strip-retry", "round", i+1)
+					result.Response = resp.Content
+					return result, nil
+				}
+				stripRetries++
+				transientMessages = []provider.Message{
+					{Role: provider.RoleAssistant, Content: resp.Content},
+					{Role: provider.RoleUser, Content: "[system] Your previous response contained tool call blocks that could not be executed. Please respond to the user in natural language without tool calls."},
+				}
 				log.Debug("LLM produced only unparseable tool calls, retrying for plain response", "round", i+1)
 				continue
 			}
@@ -905,13 +913,19 @@ func channelFormatHint(ctx context.Context) string {
 	}
 	switch caps.ResponseFormat {
 	case pkgchannel.FormatSlack:
-		return "You are responding in a Slack channel. Format your reply using Slack mrkdwn: *bold*, _italic_, `inline code`, ```code blocks```, >blockquote, and bullet lists with •. Do not use standard Markdown syntax (no ** or ##)."
+		return "You are responding in a Slack channel. Format your reply using Slack mrkdwn: *bold*, _italic_, `inline code`, ```code blocks```, >blockquote, and bullet lists with -. Do not use standard Markdown syntax (no ** or ##)."
 	case pkgchannel.FormatMarkdown:
 		return "You are responding in a Markdown-rendered interface. Format your reply using standard Markdown: **bold**, _italic_, `code`, ```code blocks```, and # headings where appropriate."
 	case pkgchannel.FormatHTML:
 		return "You are responding in an HTML-rendered interface. Format your reply using HTML tags: <b>bold</b>, <i>italic</i>, <code>inline code</code>, <pre>code blocks</pre>."
 	case pkgchannel.FormatTelegram:
 		return "You are responding in a Telegram chat. Format your reply using Telegram's supported HTML: <b>bold</b>, <i>italic</i>, <code>inline code</code>, <pre>code blocks</pre>. Keep responses concise."
+	case pkgchannel.FormatTeams:
+		return "You are responding in a Microsoft Teams channel. Format your reply using Teams markdown: **bold**, _italic_, `inline code`, ```code blocks```, and bullet lists with -. Do not use ## headings."
+	case pkgchannel.FormatWhatsApp:
+		return "You are responding in a WhatsApp chat. Format your reply using WhatsApp markup: *bold*, _italic_, ~strikethrough~, and ```code blocks```. Keep responses concise. Do not use standard Markdown syntax."
+	case pkgchannel.FormatDiscord:
+		return "You are responding in a Discord channel. Format your reply using Discord markdown: **bold**, *italic*, `inline code`, ```code blocks```, and bullet lists with -."
 	case pkgchannel.FormatText:
 		return "You are responding in a plain text channel. Do not use any markup or formatting characters. Write in plain prose only."
 	default:

@@ -3,6 +3,7 @@ package channel
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -254,5 +255,63 @@ capabilities:
 	}
 	if spec.Capabilities.ResponseFormatPrompt != "" {
 		t.Errorf("ResponseFormatPrompt should be empty when not set, got %q", spec.Capabilities.ResponseFormatPrompt)
+	}
+}
+
+func TestLoadYAMLChannelSpecUnknownResponseFormat(t *testing.T) {
+	specYAML := `
+kind: channel
+version: 1
+id: bad-format
+name: Bad Format
+capabilities:
+  response_format: slak
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "channel.yaml")
+	if err := os.WriteFile(path, []byte(specYAML), 0644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	_, err := LoadYAMLChannelSpec(path)
+	if err == nil {
+		t.Fatal("expected error for unknown response_format")
+	}
+	if !strings.Contains(err.Error(), "slak") {
+		t.Errorf("error should mention the bad value, got: %v", err)
+	}
+}
+
+func TestLoadYAMLChannelSpecKnownResponseFormats(t *testing.T) {
+	formats := []string{"text", "markdown", "slack", "html", "telegram", "teams", "whatsapp", "discord"}
+	for _, f := range formats {
+		t.Run(f, func(t *testing.T) {
+			specYAML := "kind: channel\nversion: 1\nid: test\nname: Test\ncapabilities:\n  response_format: " + f + "\n"
+			dir := t.TempDir()
+			path := filepath.Join(dir, "channel.yaml")
+			if err := os.WriteFile(path, []byte(specYAML), 0644); err != nil {
+				t.Fatalf("write spec: %v", err)
+			}
+			if _, err := LoadYAMLChannelSpec(path); err != nil {
+				t.Errorf("unexpected error for valid format %q: %v", f, err)
+			}
+		})
+	}
+}
+
+func TestLoadYAMLChannelSpecLongResponseFormatPrompt(t *testing.T) {
+	// A prompt over 500 chars should load successfully (warning only, not an error).
+	longPrompt := strings.Repeat("x", 501)
+	specYAML := "kind: channel\nversion: 1\nid: long-prompt\nname: Long\ncapabilities:\n  response_format_prompt: " + longPrompt + "\n"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "channel.yaml")
+	if err := os.WriteFile(path, []byte(specYAML), 0644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	spec, err := LoadYAMLChannelSpec(path)
+	if err != nil {
+		t.Fatalf("expected no error for long prompt, got: %v", err)
+	}
+	if len(spec.Capabilities.ResponseFormatPrompt) != 501 {
+		t.Errorf("prompt length = %d, want 501", len(spec.Capabilities.ResponseFormatPrompt))
 	}
 }

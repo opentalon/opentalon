@@ -213,6 +213,8 @@ func StripInternalBlocks(s string) string {
 	for _, tags := range internalBlockTags {
 		s = stripTaggedBlocks(s, tags[0], tags[1])
 	}
+	// TrimSpace normalises the result: block removal can leave leading/trailing
+	// newlines, and LLM replies with surrounding whitespace carry no meaning.
 	return strings.TrimSpace(s)
 }
 
@@ -237,10 +239,6 @@ func stripTaggedBlocks(s, open, close string) string {
 	}
 	return sb.String()
 }
-
-// StripToolCallBlocks is an alias kept for compatibility with existing callers.
-// Prefer StripInternalBlocks which also strips [plugin_output] blocks.
-func StripToolCallBlocks(s string) string { return StripInternalBlocks(s) }
 
 // parseToolName splits "plugin.action" into ("plugin", "action").
 func parseToolName(s string) (plugin, action string, err error) {

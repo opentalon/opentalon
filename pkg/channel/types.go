@@ -46,6 +46,9 @@ const (
 	FormatSlack    ResponseFormat = "slack"    // Slack mrkdwn (*bold*, _italic_, `code`, >quote)
 	FormatHTML     ResponseFormat = "html"     // HTML tags
 	FormatTelegram ResponseFormat = "telegram" // Telegram HTML subset
+	FormatTeams    ResponseFormat = "teams"    // Microsoft Teams markdown (*bold*, _italic_, `code`, >quote)
+	FormatWhatsApp ResponseFormat = "whatsapp" // WhatsApp markup (*bold*, _italic_, ~strikethrough~, ```code```)
+	FormatDiscord  ResponseFormat = "discord"  // Discord markdown (**bold**, *italic*, `code`, ```code blocks```)
 )
 
 // Capabilities declares what a channel supports.
@@ -61,19 +64,17 @@ type Capabilities struct {
 	ResponseFormatPrompt string         `yaml:"response_format_prompt" json:"response_format_prompt"`
 }
 
-type contextKey int
-
-const capabilitiesKey contextKey = iota
+type capabilitiesKey struct{}
 
 // WithCapabilities stores channel capabilities in the context.
 func WithCapabilities(ctx context.Context, caps Capabilities) context.Context {
-	return context.WithValue(ctx, capabilitiesKey, caps)
+	return context.WithValue(ctx, capabilitiesKey{}, caps)
 }
 
 // CapabilitiesFromContext returns the channel capabilities stored in ctx,
 // or zero-value Capabilities if none were set.
 func CapabilitiesFromContext(ctx context.Context) Capabilities {
-	caps, _ := ctx.Value(capabilitiesKey).(Capabilities)
+	caps, _ := ctx.Value(capabilitiesKey{}).(Capabilities)
 	return caps
 }
 

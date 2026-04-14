@@ -1467,6 +1467,21 @@ func TestChannelFormatHint(t *testing.T) {
 			wantContains: "plain text",
 		},
 		{
+			name:         "teams built-in",
+			format:       pkgchannel.FormatTeams,
+			wantContains: "Teams",
+		},
+		{
+			name:         "whatsapp built-in",
+			format:       pkgchannel.FormatWhatsApp,
+			wantContains: "WhatsApp",
+		},
+		{
+			name:         "discord built-in",
+			format:       pkgchannel.FormatDiscord,
+			wantContains: "Discord",
+		},
+		{
 			name:      "no format set returns empty",
 			wantEmpty: true,
 		},

@@ -35,7 +35,7 @@ func TestCapabilitiesFromContextEmpty(t *testing.T) {
 }
 
 func TestResponseFormatConstants(t *testing.T) {
-	formats := []ResponseFormat{FormatText, FormatMarkdown, FormatSlack, FormatHTML, FormatTelegram}
+	formats := []ResponseFormat{FormatText, FormatMarkdown, FormatSlack, FormatHTML, FormatTelegram, FormatTeams, FormatWhatsApp, FormatDiscord}
 	seen := make(map[ResponseFormat]bool)
 	for _, f := range formats {
 		if f == "" {
