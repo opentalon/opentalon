@@ -109,7 +109,10 @@ type oaiError struct {
 
 // Complete sends a non-streaming completion request.
 func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
-	oaiReq := p.toOAIRequest(req)
+	oaiReq, err := p.toOAIRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	oaiReq.Stream = false
 
 	body, err := json.Marshal(oaiReq)
@@ -168,9 +171,12 @@ func (p *OpenAIProvider) Stream(_ context.Context, _ *CompletionRequest) (Respon
 	return nil, fmt.Errorf("streaming not yet implemented for provider %s", p.id)
 }
 
-func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) oaiRequest {
+func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error) {
 	msgs := make([]oaiMessage, len(req.Messages))
 	for i, m := range req.Messages {
+		if len(m.Files) > 0 {
+			return oaiRequest{}, fmt.Errorf("provider %s does not support file attachments", p.id)
+		}
 		msgs[i] = oaiMessage{Role: string(m.Role), Content: m.Content}
 	}
 	return oaiRequest{
@@ -178,7 +184,7 @@ func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) oaiRequest {
 		Messages:    msgs,
 		MaxTokens:   req.MaxTokens,
 		Temperature: req.Temperature,
-	}
+	}, nil
 }
 
 func (p *OpenAIProvider) setHeaders(req *http.Request) {

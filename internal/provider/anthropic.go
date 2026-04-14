@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -218,8 +217,8 @@ func (p *AnthropicProvider) toAnthMessage(m Message) (anthMessage, error) {
 
 	var blocks []anthContentBlock
 	for _, f := range m.Files {
-		switch {
-		case strings.HasPrefix(f.MimeType, "image/"):
+		switch ClassifyFile(f.MimeType, f.Data) {
+		case FileClassImage:
 			blocks = append(blocks, anthContentBlock{
 				Type: "image",
 				Source: &anthImageSource{
@@ -228,7 +227,7 @@ func (p *AnthropicProvider) toAnthMessage(m Message) (anthMessage, error) {
 					Data:      base64.StdEncoding.EncodeToString(f.Data),
 				},
 			})
-		case f.MimeType == "application/pdf":
+		case FileClassPDF:
 			blocks = append(blocks, anthContentBlock{
 				Type: "document",
 				Source: &anthImageSource{
@@ -237,9 +236,7 @@ func (p *AnthropicProvider) toAnthMessage(m Message) (anthMessage, error) {
 					Data:      base64.StdEncoding.EncodeToString(f.Data),
 				},
 			})
-		case strings.HasPrefix(f.MimeType, "text/"),
-			f.MimeType == "application/json",
-			f.MimeType == "application/xml":
+		case FileClassText:
 			// Anthropic's text source requires media_type "text/plain" regardless of
 			// the original MIME type — it is the only value the API accepts for this source kind.
 			blocks = append(blocks, anthContentBlock{

@@ -177,3 +177,19 @@ func TestOpenAITrailingSlash(t *testing.T) {
 		t.Errorf("baseURL = %q, should strip trailing slash", p.baseURL)
 	}
 }
+
+func TestOpenAIRejectsFileAttachments(t *testing.T) {
+	p := NewOpenAIProvider("openai", "", "key", nil)
+
+	_, err := p.Complete(context.Background(), &CompletionRequest{
+		Model: "gpt-4o",
+		Messages: []Message{
+			{Role: RoleUser, Content: "see attached", Files: []MessageFile{
+				{MimeType: "text/csv", Data: []byte("a,b\n1,2")},
+			}},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for file attachment, got nil")
+	}
+}
