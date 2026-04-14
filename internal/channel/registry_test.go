@@ -368,8 +368,10 @@ func TestRegistryDispatchHandlerError(t *testing.T) {
 
 func TestRegistryDispatchInjectsCapabilities(t *testing.T) {
 	var capturedCaps pkg.Capabilities
+	done := make(chan struct{})
 	capturingHandler := func(ctx context.Context, _ string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		capturedCaps = pkg.CapabilitiesFromContext(ctx)
+		close(done)
 		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "ok"}, nil
 	}
 
@@ -393,7 +395,11 @@ func TestRegistryDispatchInjectsCapabilities(t *testing.T) {
 		Content:        "hello",
 	})
 
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for handler to be called")
+	}
 
 	if capturedCaps.ID != "slack" {
 		t.Errorf("capabilities.ID = %q, want %q", capturedCaps.ID, "slack")
