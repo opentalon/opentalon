@@ -594,7 +594,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				// don't pollute future summaries or replays.
 				if stripRetries >= 1 {
 					log.Debug("LLM repeatedly produced only unparseable tool calls, giving up on strip-retry", "round", i+1)
-					result.Response = resp.Content
+					result.Response = "(no response)"
+					_ = o.sessions.AddMessage(sessionID, provider.Message{
+						Role:    provider.RoleAssistant,
+						Content: result.Response,
+					})
+					o.maybeRecordWorkflow(ctx, result, userMessage)
 					return result, nil
 				}
 				stripRetries++
