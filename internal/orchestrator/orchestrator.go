@@ -73,6 +73,11 @@ type UsageRecorder interface {
 	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int)
 }
 
+// PluginCallObserver is notified after each plugin/tool call executed by the orchestrator.
+type PluginCallObserver interface {
+	ObservePluginCall(plugin, action string, failed bool)
+}
+
 // OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check, no summarization).
 type OrchestratorOpts struct {
 	CustomRules             []string
@@ -88,10 +93,11 @@ type OrchestratorOpts struct {
 	SummarizeUpdatePrompt   string                        // empty = default English
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PipelineConfig          pipeline.PipelineConfig
-	ContextWindow           int               // model context window in tokens; 0 = no trimming
-	MaxConcurrentSessions   int               // max sessions running in parallel; default 1 (sequential)
-	GroupPluginLookup       GroupPluginLookup // optional; when set, filters tool list by profile group
-	UsageRecorder           UsageRecorder     // optional; when set, records LLM usage after each run
+	ContextWindow           int                // model context window in tokens; 0 = no trimming
+	MaxConcurrentSessions   int                // max sessions running in parallel; default 1 (sequential)
+	GroupPluginLookup       GroupPluginLookup  // optional; when set, filters tool list by profile group
+	UsageRecorder           UsageRecorder      // optional; when set, records LLM usage after each run
+	PluginCallObserver      PluginCallObserver // optional; when set, notified after each plugin/tool call
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -142,9 +148,10 @@ type Orchestrator struct {
 	pendingMu               sync.Mutex                    // guards pendingPipelines map
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline (access via pendingMu)
 	pipelineConfig          pipeline.PipelineConfig
-	contextWindow           int               // model context window in tokens; 0 = no trimming
-	groupPluginLookup       GroupPluginLookup // optional; nil = no group-based filtering
-	usageRecorder           UsageRecorder     // optional; nil = no usage tracking
+	contextWindow           int                // model context window in tokens; 0 = no trimming
+	groupPluginLookup       GroupPluginLookup  // optional; nil = no group-based filtering
+	usageRecorder           UsageRecorder      // optional; nil = no usage tracking
+	pluginCallObserver      PluginCallObserver // optional; nil = no plugin call observation
 }
 
 const (
@@ -245,6 +252,7 @@ func NewWithRules(
 		contextWindow:           opts.ContextWindow,
 		groupPluginLookup:       opts.GroupPluginLookup,
 		usageRecorder:           opts.UsageRecorder,
+		pluginCallObserver:      opts.PluginCallObserver,
 	}
 }
 
@@ -647,6 +655,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 			if toolResult.Error != "" {
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
+			}
+			if o.pluginCallObserver != nil {
+				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "")
 			}
 
 			_ = o.sessions.AddMessage(sessionID, provider.Message{
