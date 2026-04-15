@@ -243,7 +243,9 @@ type SchedulerConfig struct {
 
 type JobConfig struct {
 	Name          string            `yaml:"name"`
-	Interval      string            `yaml:"interval"`
+	Interval      string            `yaml:"interval,omitempty"`
+	Cron          string            `yaml:"cron,omitempty"`
+	At            string            `yaml:"at,omitempty"`
 	Action        string            `yaml:"action"`
 	Args          map[string]string `yaml:"args,omitempty"`
 	NotifyChannel string            `yaml:"notify_channel,omitempty"`

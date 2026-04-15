@@ -205,6 +205,24 @@ state:
   #   summarize_prompt: "Summarize the following conversation in a short paragraph."  # any language
   #   summarize_update_prompt: "Update the given conversation summary with the following new exchange. Keep the result to a short paragraph."
 
+# Scheduler: periodic jobs and user-triggered reminders.
+# The built-in scheduler tool lets the LLM create/list/delete jobs and set
+# personal reminders ("remind me about X in 2h"). Jobs run plugin actions on
+# a schedule; results are optionally delivered back to a channel.
+# scheduler:
+#   # Only users in this list may create/modify recurring (interval/cron) jobs.
+#   # Personal one-shot reminders via remind_me bypass this gate.
+#   # Omit or leave empty to allow anyone.
+#   approvers: []
+#   # Cap on dynamic jobs per user (0 = unlimited). Reminders count toward this.
+#   max_jobs_per_user: 50
+#   # Static jobs loaded on startup. These are immutable at runtime.
+#   jobs:
+#     # - name: nightly-report
+#     #   cron: "0 0 * * *"
+#     #   action: reports.generate
+#     #   notify_channel: slack
+
 # Log level: debug, info, warn, error. Env var LOG_LEVEL overrides this.
 # All logs go to stderr (k8s-friendly). Debug includes LLM request/response details.
 # Each session gets a trace_id for correlation in kubectl logs / Grafana.

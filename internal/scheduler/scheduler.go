@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 )
 
@@ -24,15 +25,46 @@ type Notifier interface {
 }
 
 // Job represents a scheduled job at runtime.
+// Exactly one of Interval, Cron, or At must be set.
 type Job struct {
 	Name          string            `yaml:"name" json:"name"`
-	Interval      string            `yaml:"interval" json:"interval"`
+	Interval      string            `yaml:"interval,omitempty" json:"interval,omitempty"` // Go duration, e.g. "30m"
+	Cron          string            `yaml:"cron,omitempty" json:"cron,omitempty"`         // 5-field cron expression, e.g. "0 9 * * *"
+	At            string            `yaml:"at,omitempty" json:"at,omitempty"`             // RFC3339 UTC time for one-shot execution
 	Action        string            `yaml:"action" json:"action"`
 	Args          map[string]string `yaml:"args,omitempty" json:"args,omitempty"`
 	NotifyChannel string            `yaml:"notify_channel,omitempty" json:"notify_channel,omitempty"`
 	Paused        bool              `yaml:"paused,omitempty" json:"paused,omitempty"`
 	Source        string            `yaml:"source,omitempty" json:"source,omitempty"`         // "config" or "dynamic"
 	CreatedBy     string            `yaml:"created_by,omitempty" json:"created_by,omitempty"` // user who created the job
+}
+
+// schedule computes successive fire times for a job.
+type schedule interface {
+	next(time.Time) time.Time
+}
+
+type intervalSchedule struct{ d time.Duration }
+
+func (s intervalSchedule) next(t time.Time) time.Time { return t.Add(s.d) }
+
+type cronSchedule struct{ s cron.Schedule }
+
+func (c cronSchedule) next(t time.Time) time.Time { return c.s.Next(t) }
+
+// oneShotSchedule fires exactly once at the given time. After firing, next()
+// returns the zero Time to signal the runner to exit.
+type oneShotSchedule struct {
+	t     time.Time
+	fired bool
+}
+
+func (s *oneShotSchedule) next(now time.Time) time.Time {
+	if s.fired {
+		return time.Time{}
+	}
+	s.fired = true
+	return s.t
 }
 
 var (
@@ -42,6 +74,54 @@ var (
 
 func (j *Job) parseDuration() (time.Duration, error) {
 	return time.ParseDuration(j.Interval)
+}
+
+// schedule parses and validates the job's time spec. Exactly one of
+// Interval, Cron, or At must be set.
+func (j *Job) schedule() (schedule, error) {
+	hasInterval := j.Interval != ""
+	hasCron := j.Cron != ""
+	hasAt := j.At != ""
+	set := 0
+	if hasInterval {
+		set++
+	}
+	if hasCron {
+		set++
+	}
+	if hasAt {
+		set++
+	}
+	switch {
+	case set > 1:
+		return nil, fmt.Errorf("job %q: interval, cron, and at are mutually exclusive", j.Name)
+	case set == 0:
+		return nil, fmt.Errorf("job %q: one of interval, cron, or at must be set", j.Name)
+	case hasInterval:
+		d, err := time.ParseDuration(j.Interval)
+		if err != nil {
+			return nil, fmt.Errorf("job %q: invalid interval: %w", j.Name, err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("job %q: interval must be positive", j.Name)
+		}
+		return intervalSchedule{d: d}, nil
+	case hasCron:
+		s, err := cron.ParseStandard(j.Cron)
+		if err != nil {
+			return nil, fmt.Errorf("job %q: invalid cron: %w", j.Name, err)
+		}
+		return cronSchedule{s: s}, nil
+	default:
+		t, err := time.Parse(time.RFC3339, j.At)
+		if err != nil {
+			return nil, fmt.Errorf("job %q: invalid at: %w", j.Name, err)
+		}
+		if !t.After(time.Now()) {
+			return nil, fmt.Errorf("job %q: at %q is in the past", j.Name, j.At)
+		}
+		return &oneShotSchedule{t: t}, nil
+	}
 }
 
 func (j *Job) parseAction() (plugin, action string, err error) {
@@ -128,10 +208,18 @@ func (s *Scheduler) Start(staticJobs []Job) error {
 	if err != nil {
 		slog.Warn("loading dynamic jobs failed", "component", "scheduler", "error", err)
 	}
+	rejected := 0
 	for _, j := range dynamicJobs {
 		j.Source = "dynamic"
 		if err := s.addJobLocked(j); err != nil {
 			slog.Warn("skipping dynamic job", "component", "scheduler", "job", j.Name, "error", err)
+			rejected++
+		}
+	}
+	// Re-persist so rejected (e.g. past-due one-shots) are pruned from disk.
+	if rejected > 0 {
+		if err := s.persistDynamic(); err != nil {
+			slog.Warn("persist after load pruning failed", "component", "scheduler", "error", err)
 		}
 	}
 
@@ -148,6 +236,31 @@ func (s *Scheduler) Stop() {
 func (s *Scheduler) AddJob(job Job, userID string) error {
 	if !s.isApprover(userID) {
 		return ErrNotAuthorized
+	}
+	job.Source = "dynamic"
+	job.CreatedBy = userID
+
+	if s.maxJobsPerUser > 0 {
+		s.mu.RLock()
+		count := s.countUserJobs(userID)
+		s.mu.RUnlock()
+		if count >= s.maxJobsPerUser {
+			return fmt.Errorf("job limit reached: user %q already has %d jobs (max %d)", userID, count, s.maxJobsPerUser)
+		}
+	}
+
+	if err := s.addJobLocked(job); err != nil {
+		return err
+	}
+	return s.persistDynamic()
+}
+
+// AddPersonalJob creates a dynamic job on behalf of userID without the approver
+// gate. Intended for personal actions (e.g. reminders) that users set for
+// themselves. maxJobsPerUser is still enforced.
+func (s *Scheduler) AddPersonalJob(job Job, userID string) error {
+	if userID == "" {
+		return fmt.Errorf("user_id required for personal job")
 	}
 	job.Source = "dynamic"
 	job.CreatedBy = userID
@@ -223,9 +336,10 @@ func (s *Scheduler) ResumeJob(name string) error {
 	return s.persistDynamic()
 }
 
-// UpdateJob updates the interval and/or notify channel of an existing job.
+// UpdateJob updates the time spec (interval or cron) and/or notify channel
+// of an existing job. Setting interval clears cron and vice versa.
 // Config-defined jobs cannot be updated.
-func (s *Scheduler) UpdateJob(name, userID string, interval, notifyChannel *string) error {
+func (s *Scheduler) UpdateJob(name, userID string, interval, cronExpr, notifyChannel *string) error {
 	if !s.isApprover(userID) {
 		return ErrNotAuthorized
 	}
@@ -239,15 +353,29 @@ func (s *Scheduler) UpdateJob(name, userID string, interval, notifyChannel *stri
 		s.mu.Unlock()
 		return ErrConfigProtected
 	}
-	rj.cancel()
 
+	patched := rj.job
 	if interval != nil {
-		rj.job.Interval = *interval
+		patched.Interval = *interval
+		patched.Cron = ""
+	}
+	if cronExpr != nil {
+		patched.Cron = *cronExpr
+		patched.Interval = ""
 	}
 	if notifyChannel != nil {
-		rj.job.NotifyChannel = *notifyChannel
+		patched.NotifyChannel = *notifyChannel
 	}
-	rj.job.Paused = false
+	if interval != nil || cronExpr != nil {
+		if _, err := patched.schedule(); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	patched.Paused = false
+
+	rj.cancel()
+	rj.job = patched
 	s.mu.Unlock()
 
 	s.startTicker(rj)
@@ -282,8 +410,8 @@ func (s *Scheduler) addJobLocked(job Job) error {
 	if job.Name == "" {
 		return fmt.Errorf("job name is required")
 	}
-	if _, err := job.parseDuration(); err != nil {
-		return fmt.Errorf("invalid interval for job %q: %w", job.Name, err)
+	if _, err := job.schedule(); err != nil {
+		return err
 	}
 	if _, _, err := job.parseAction(); err != nil {
 		return err
@@ -335,21 +463,50 @@ func (s *Scheduler) runJob(ctx context.Context, rj *runningJob) {
 	defer s.wg.Done()
 
 	job := s.snapshotJob(rj)
-	dur, err := job.parseDuration()
+	sch, err := job.schedule()
 	if err != nil {
-		slog.Warn("job invalid interval", "component", "scheduler", "job", job.Name, "error", err)
+		slog.Warn("job invalid schedule", "component", "scheduler", "job", job.Name, "error", err)
 		return
 	}
 
-	ticker := time.NewTicker(dur)
-	defer ticker.Stop()
-
 	for {
+		now := time.Now()
+		fireAt := sch.next(now)
+		if fireAt.IsZero() {
+			// schedule has no more fires (one-shot already fired)
+			s.removeOneShot(job.Name)
+			return
+		}
+		wait := fireAt.Sub(now)
+		if wait < 0 {
+			wait = 0
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			s.executeJob(rj)
+		}
+	}
+}
+
+// removeOneShot removes a one-shot job from the registry after it has fired,
+// and re-persists the dynamic jobs file.
+func (s *Scheduler) removeOneShot(name string) {
+	s.mu.Lock()
+	rj, ok := s.jobs[name]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	isDynamic := rj.job.Source == "dynamic"
+	delete(s.jobs, name)
+	s.mu.Unlock()
+	if isDynamic {
+		if err := s.persistDynamic(); err != nil {
+			slog.Warn("persist after one-shot removal failed", "component", "scheduler", "job", name, "error", err)
 		}
 	}
 }
