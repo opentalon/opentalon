@@ -5,10 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"net/http"
 	"strings"
 	"time"
 

@@ -14,12 +14,12 @@ import (
 type Collector struct {
 	reg *prometheus.Registry
 
-	llmInputTokens    *prometheus.CounterVec
-	llmOutputTokens   *prometheus.CounterVec
-	llmInputCostUSD   *prometheus.CounterVec
-	llmOutputCostUSD  *prometheus.CounterVec
-	orchestratorRuns  *prometheus.CounterVec
-	pluginCalls       *prometheus.CounterVec
+	llmInputTokens   *prometheus.CounterVec
+	llmOutputTokens  *prometheus.CounterVec
+	llmInputCostUSD  *prometheus.CounterVec
+	llmOutputCostUSD *prometheus.CounterVec
+	orchestratorRuns *prometheus.CounterVec
+	pluginCalls      *prometheus.CounterVec
 }
 
 // New creates and registers all metrics.
