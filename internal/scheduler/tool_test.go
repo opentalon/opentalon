@@ -26,15 +26,15 @@ func TestToolCapability(t *testing.T) {
 	if cap.Name != ToolName {
 		t.Errorf("name = %q, want %q", cap.Name, ToolName)
 	}
-	if len(cap.Actions) != 6 {
-		t.Errorf("expected 6 actions, got %d", len(cap.Actions))
+	if len(cap.Actions) != 7 {
+		t.Errorf("expected 7 actions, got %d", len(cap.Actions))
 	}
 
 	names := make(map[string]bool)
 	for _, a := range cap.Actions {
 		names[a.Name] = true
 	}
-	expected := []string{"create_job", "list_jobs", "delete_job", "pause_job", "resume_job", "update_job"}
+	expected := []string{"create_job", "list_jobs", "delete_job", "pause_job", "resume_job", "update_job", "remind_me"}
 	for _, n := range expected {
 		if !names[n] {
 			t.Errorf("missing action %q", n)
@@ -66,6 +66,7 @@ func TestToolCreateAndListJobs(t *testing.T) {
 
 	listResult := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "list_jobs",
+		Args: map[string]string{"scope": "all"},
 	})
 	if listResult.Error != "" {
 		t.Fatalf("list_jobs error: %s", listResult.Error)

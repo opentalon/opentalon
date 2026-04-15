@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	"github.com/opentalon/opentalon/internal/profile"
 )
 
 type fakeRunner struct {
@@ -426,7 +428,7 @@ func TestSchedulerUpdateJob(t *testing.T) {
 	}
 
 	newInterval := "30m"
-	if err := s.UpdateJob("upd1", "user1", &newInterval, nil); err != nil {
+	if err := s.UpdateJob("upd1", "user1", &newInterval, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -442,7 +444,7 @@ func TestSchedulerUpdateJob(t *testing.T) {
 	}
 
 	newChan := "teams"
-	if err := s.UpdateJob("upd1", "user1", nil, &newChan); err != nil {
+	if err := s.UpdateJob("upd1", "user1", nil, nil, &newChan); err != nil {
 		t.Fatal(err)
 	}
 	j, _ = s.GetJob("upd1")
@@ -534,7 +536,7 @@ func TestSchedulerConfigJobCannotBeUpdated(t *testing.T) {
 	defer s.Stop()
 
 	newInterval := "30m"
-	err := s.UpdateJob("static1", "admin", &newInterval, nil)
+	err := s.UpdateJob("static1", "admin", &newInterval, nil, nil)
 	if err != ErrConfigProtected {
 		t.Errorf("expected ErrConfigProtected, got %v", err)
 	}
@@ -626,12 +628,12 @@ func TestSchedulerApproverUpdateRequired(t *testing.T) {
 	}
 
 	newInterval := "30m"
-	err := s.UpdateJob("j1", "random@co.com", &newInterval, nil)
+	err := s.UpdateJob("j1", "random@co.com", &newInterval, nil, nil)
 	if err != ErrNotAuthorized {
 		t.Errorf("non-approver should not update, got %v", err)
 	}
 
-	err = s.UpdateJob("j1", "admin@co.com", &newInterval, nil)
+	err = s.UpdateJob("j1", "admin@co.com", &newInterval, nil, nil)
 	if err != nil {
 		t.Fatalf("approver should update: %v", err)
 	}
@@ -738,6 +740,127 @@ func TestSchedulerMaxJobsConfigJobsNotCounted(t *testing.T) {
 	}
 }
 
+func TestJobScheduleValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		job     Job
+		wantErr string
+	}{
+		{"no spec", Job{Name: "j"}, "one of interval, cron, or at"},
+		{"both set", Job{Name: "j", Interval: "1h", Cron: "* * * * *"}, "mutually exclusive"},
+		{"bad interval", Job{Name: "j", Interval: "nope"}, "invalid interval"},
+		{"zero interval", Job{Name: "j", Interval: "0s"}, "must be positive"},
+		{"bad cron", Job{Name: "j", Cron: "not a cron"}, "invalid cron"},
+		{"good interval", Job{Name: "j", Interval: "30m"}, ""},
+		{"good cron", Job{Name: "j", Cron: "0 9 * * *"}, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.job.schedule()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestSchedulerCronExecution(t *testing.T) {
+	runner := &fakeRunner{}
+	s := New(runner, nil, "")
+
+	// robfig/cron v3 supports "@every Xs" shorthand via ParseStandard's descriptor
+	// fallback; but to avoid that edge case, use the plain 5-field form with
+	// seconds granularity is not possible. Validate via addJob only.
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	if err := s.AddJob(Job{Name: "daily", Cron: "0 9 * * *", Action: "a.b"}, "user1"); err != nil {
+		t.Fatalf("valid cron job rejected: %v", err)
+	}
+	j, ok := s.GetJob("daily")
+	if !ok || j.Cron != "0 9 * * *" {
+		t.Error("cron job not stored correctly")
+	}
+}
+
+func TestSchedulerAddJobRejectsBadCron(t *testing.T) {
+	s := New(&fakeRunner{}, nil, "")
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	err := s.AddJob(Job{Name: "bad", Cron: "garbage", Action: "a.b"}, "user1")
+	if err == nil {
+		t.Error("expected error for bad cron")
+	}
+}
+
+func TestSchedulerAddJobRejectsBothSpecs(t *testing.T) {
+	s := New(&fakeRunner{}, nil, "")
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	err := s.AddJob(Job{Name: "both", Interval: "1h", Cron: "0 * * * *", Action: "a.b"}, "user1")
+	if err == nil {
+		t.Error("expected error when both interval and cron are set")
+	}
+}
+
+func TestSchedulerUpdateSwitchIntervalToCron(t *testing.T) {
+	s := New(&fakeRunner{}, nil, t.TempDir())
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	if err := s.AddJob(Job{Name: "swap", Interval: "1h", Action: "a.b"}, "u"); err != nil {
+		t.Fatal(err)
+	}
+	newCron := "0 9 * * *"
+	if err := s.UpdateJob("swap", "u", nil, &newCron, nil); err != nil {
+		t.Fatal(err)
+	}
+	j, _ := s.GetJob("swap")
+	if j.Cron != "0 9 * * *" {
+		t.Errorf("cron = %q, want 0 9 * * *", j.Cron)
+	}
+	if j.Interval != "" {
+		t.Errorf("interval should be cleared, got %q", j.Interval)
+	}
+}
+
+func TestSchedulerUpdateRejectsBadCron(t *testing.T) {
+	s := New(&fakeRunner{}, nil, t.TempDir())
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	if err := s.AddJob(Job{Name: "j", Interval: "1h", Action: "a.b"}, "u"); err != nil {
+		t.Fatal(err)
+	}
+	bad := "not a cron"
+	if err := s.UpdateJob("j", "u", nil, &bad, nil); err == nil {
+		t.Error("expected error for bad cron in update")
+	}
+	// original job should be unchanged
+	j, _ := s.GetJob("j")
+	if j.Interval != "1h" {
+		t.Errorf("interval should be preserved on failed update, got %q", j.Interval)
+	}
+}
+
 func TestSchedulerCreatedByTracked(t *testing.T) {
 	runner := &fakeRunner{}
 	s := New(runner, nil, "")
@@ -756,6 +879,173 @@ func TestSchedulerCreatedByTracked(t *testing.T) {
 	}
 	if j.CreatedBy != "diana@co.com" {
 		t.Errorf("created_by = %q, want diana@co.com", j.CreatedBy)
+	}
+}
+
+// --- One-shot (at) tests ---
+
+func TestSchedulerOneShotFiresOnceAndRemoves(t *testing.T) {
+	runner := &fakeRunner{}
+	s := New(runner, nil, "")
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	at := time.Now().Add(80 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+	if err := s.AddPersonalJob(Job{Name: "once", At: at, Action: "a.b"}, "u"); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	if runner.callCount() != 1 {
+		t.Errorf("expected exactly 1 call, got %d", runner.callCount())
+	}
+	if _, ok := s.GetJob("once"); ok {
+		t.Error("one-shot should have been removed after firing")
+	}
+}
+
+func TestSchedulerOneShotPastDueRejected(t *testing.T) {
+	s := New(&fakeRunner{}, nil, "")
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	past := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	err := s.AddPersonalJob(Job{Name: "past", At: past, Action: "a.b"}, "u")
+	if err == nil || !strings.Contains(err.Error(), "in the past") {
+		t.Errorf("expected past-due rejection, got %v", err)
+	}
+}
+
+func TestSchedulerOneShotMutualExclusion(t *testing.T) {
+	tests := []Job{
+		{Name: "j", Interval: "1h", At: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
+		{Name: "j", Cron: "0 9 * * *", At: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
+		{Name: "j", Interval: "1h", Cron: "0 9 * * *", At: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
+	}
+	for i, tc := range tests {
+		if _, err := tc.schedule(); err == nil {
+			t.Errorf("case %d: expected mutual-exclusion error", i)
+		}
+	}
+}
+
+func TestSchedulerOneShotPersistedAndReloaded(t *testing.T) {
+	dir := t.TempDir()
+	at := time.Now().Add(200 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+
+	s1 := New(&fakeRunner{}, nil, dir)
+	if err := s1.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.AddPersonalJob(Job{Name: "later", At: at, Action: "a.b"}, "u"); err != nil {
+		t.Fatal(err)
+	}
+	s1.Stop()
+
+	// Reload — at is still in the future; should fire.
+	runner2 := &fakeRunner{}
+	s2 := New(runner2, nil, dir)
+	if err := s2.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Stop()
+
+	if _, ok := s2.GetJob("later"); !ok {
+		t.Fatal("reloaded job missing before fire time")
+	}
+
+	time.Sleep(400 * time.Millisecond)
+	if runner2.callCount() != 1 {
+		t.Errorf("reloaded one-shot should fire once, got %d calls", runner2.callCount())
+	}
+	if _, ok := s2.GetJob("later"); ok {
+		t.Error("reloaded one-shot should have been removed after firing")
+	}
+}
+
+func TestSchedulerOneShotExpiredOnReload(t *testing.T) {
+	dir := t.TempDir()
+
+	// Seed jobs.yaml directly with a past-due one-shot alongside a valid job.
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	past := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	contents := []byte(fmt.Sprintf(`- name: ghost
+  at: %q
+  action: a.b
+  source: dynamic
+  created_by: u
+- name: keep
+  at: %q
+  action: a.b
+  source: dynamic
+  created_by: u
+`, past, future))
+	if err := os.MkdirAll(filepath.Join(dir, "scheduler"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scheduler", "jobs.yaml"), contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(&fakeRunner{}, nil, dir)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	if _, ok := s.GetJob("ghost"); ok {
+		t.Error("expired one-shot should not be loaded")
+	}
+	if _, ok := s.GetJob("keep"); !ok {
+		t.Error("valid one-shot should still be loaded")
+	}
+
+	// And the on-disk file should have been pruned.
+	data, err := os.ReadFile(filepath.Join(dir, "scheduler", "jobs.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "ghost") {
+		t.Error("jobs.yaml should have been re-persisted without expired one-shot")
+	}
+}
+
+// --- AddPersonalJob tests ---
+
+func TestAddPersonalJobBypassesApprover(t *testing.T) {
+	s := NewWithPolicy(&fakeRunner{}, nil, "", []string{"admin@co.com"}, 0)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	err := s.AddPersonalJob(Job{Name: "p1", Interval: "1h", Action: "a.b"}, "random@co.com")
+	if err != nil {
+		t.Errorf("personal job should bypass approver: %v", err)
+	}
+}
+
+func TestAddPersonalJobEnforcesMaxPerUser(t *testing.T) {
+	s := NewWithPolicy(&fakeRunner{}, nil, "", nil, 2)
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	if err := s.AddPersonalJob(Job{Name: "p1", Interval: "1h", Action: "a.b"}, "diana"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddPersonalJob(Job{Name: "p2", Interval: "1h", Action: "a.b"}, "diana"); err != nil {
+		t.Fatal(err)
+	}
+	err := s.AddPersonalJob(Job{Name: "p3", Interval: "1h", Action: "a.b"}, "diana")
+	if err == nil || !strings.Contains(err.Error(), "job limit") {
+		t.Errorf("expected job limit error, got %v", err)
 	}
 }
 
@@ -844,6 +1134,239 @@ func TestToolApproverEnforced(t *testing.T) {
 	}
 }
 
+// --- remind_me tool tests ---
+
+func TestToolRemindMeMessageShortcut(t *testing.T) {
+	tool := newTestToolWithPolicy(t, nil, 0)
+
+	at := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	ctx := actor.WithActor(context.Background(), "slack:U123")
+	res := tool.Execute(ctx, orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "remind_me",
+		Args: map[string]string{"at": at, "message": "you promised poems"},
+	})
+	if res.Error != "" {
+		t.Fatalf("unexpected error: %s", res.Error)
+	}
+
+	jobs := tool.sched.ListJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	j := jobs[0]
+	if j.Action != "reminder.say" {
+		t.Errorf("action = %q, want reminder.say", j.Action)
+	}
+	if j.Args["message"] != "you promised poems" {
+		t.Errorf("message arg = %q", j.Args["message"])
+	}
+	if j.NotifyChannel != "slack" {
+		t.Errorf("notify_channel = %q, want slack", j.NotifyChannel)
+	}
+	if j.CreatedBy != "U123" {
+		t.Errorf("created_by = %q, want U123", j.CreatedBy)
+	}
+	if j.At == "" {
+		t.Error("at should be set")
+	}
+}
+
+func TestToolRemindMePluginAction(t *testing.T) {
+	tool := newTestToolWithPolicy(t, nil, 0)
+
+	at := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+	ctx := actor.WithActor(context.Background(), "slack:alice")
+	res := tool.Execute(ctx, orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "remind_me",
+		Args: map[string]string{
+			"at":     at,
+			"action": "jira.get_issue",
+			"args":   `{"issue_id":"XYZ"}`,
+		},
+	})
+	if res.Error != "" {
+		t.Fatalf("unexpected error: %s", res.Error)
+	}
+	j := tool.sched.ListJobs()[0]
+	if j.Action != "jira.get_issue" {
+		t.Errorf("action = %q", j.Action)
+	}
+	if j.Args["issue_id"] != "XYZ" {
+		t.Errorf("issue_id = %q", j.Args["issue_id"])
+	}
+}
+
+func TestToolRemindMeRequiresActor(t *testing.T) {
+	tool := newTestToolWithPolicy(t, nil, 0)
+	at := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	res := tool.Execute(context.Background(), orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "remind_me",
+		Args: map[string]string{"at": at, "message": "x"},
+	})
+	if res.Error == "" || !strings.Contains(res.Error, "user context") {
+		t.Errorf("expected user-context error, got %q", res.Error)
+	}
+}
+
+func TestToolRemindMeRejectsPast(t *testing.T) {
+	tool := newTestToolWithPolicy(t, nil, 0)
+	ctx := actor.WithActor(context.Background(), "slack:alice")
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	res := tool.Execute(ctx, orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "remind_me",
+		Args: map[string]string{"at": past, "message": "x"},
+	})
+	if res.Error == "" || !strings.Contains(res.Error, "past") {
+		t.Errorf("expected past-time error, got %q", res.Error)
+	}
+}
+
+func TestToolRemindMeBypassesApprover(t *testing.T) {
+	tool := newTestToolWithPolicy(t, []string{"admin@co.com"}, 0)
+
+	at := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	ctx := actor.WithActor(context.Background(), "slack:random@co.com")
+	res := tool.Execute(ctx, orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "remind_me",
+		Args: map[string]string{"at": at, "message": "x"},
+	})
+	if res.Error != "" {
+		t.Errorf("remind_me should bypass approver: %s", res.Error)
+	}
+}
+
+func TestToolRemindMePopulatesEntityAndGroup(t *testing.T) {
+	tool := newTestToolWithPolicy(t, nil, 0)
+
+	at := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	ctx := actor.WithActor(context.Background(), "ent-42")
+	ctx = profile.WithProfile(ctx, &profile.Profile{
+		EntityID:  "ent-42",
+		Group:     "team-a",
+		ChannelID: "slack",
+	})
+	res := tool.Execute(ctx, orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "remind_me",
+		Args: map[string]string{"at": at, "message": "hi"},
+	})
+	if res.Error != "" {
+		t.Fatalf("unexpected error: %s", res.Error)
+	}
+	jobs := tool.sched.ListJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	j := jobs[0]
+	if j.EntityID != "ent-42" {
+		t.Errorf("entity_id = %q, want ent-42", j.EntityID)
+	}
+	if j.Group != "team-a" {
+		t.Errorf("group = %q, want team-a", j.Group)
+	}
+	if j.NotifyChannel != "slack" {
+		t.Errorf("notify_channel = %q, want slack (from profile)", j.NotifyChannel)
+	}
+	if j.CreatedBy != "ent-42" {
+		t.Errorf("created_by = %q, want ent-42", j.CreatedBy)
+	}
+}
+
+func TestToolListJobsMineScope(t *testing.T) {
+	tool := newTestToolWithPolicy(t, nil, 0)
+
+	// Two reminders for two different tenants.
+	at := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	for _, entity := range []string{"ent-a", "ent-b"} {
+		ctx := actor.WithActor(context.Background(), entity)
+		ctx = profile.WithProfile(ctx, &profile.Profile{EntityID: entity, ChannelID: "slack"})
+		res := tool.Execute(ctx, orchestrator.ToolCall{
+			ID: "1", Plugin: ToolName, Action: "remind_me",
+			Args: map[string]string{"at": at, "message": "hi " + entity},
+		})
+		if res.Error != "" {
+			t.Fatalf("remind_me for %s: %s", entity, res.Error)
+		}
+	}
+
+	// Default scope: ent-a sees only its own reminder.
+	ctxA := profile.WithProfile(context.Background(), &profile.Profile{EntityID: "ent-a"})
+	res := tool.Execute(ctxA, orchestrator.ToolCall{ID: "1", Plugin: ToolName, Action: "list_jobs"})
+	if res.Error != "" {
+		t.Fatalf("list_jobs: %s", res.Error)
+	}
+	if !strings.Contains(res.Content, "hi ent-a") {
+		t.Errorf("ent-a should see own reminder: %s", res.Content)
+	}
+	if strings.Contains(res.Content, "hi ent-b") {
+		t.Errorf("ent-a should NOT see ent-b reminder: %s", res.Content)
+	}
+
+	// scope=all: both visible.
+	resAll := tool.Execute(ctxA, orchestrator.ToolCall{
+		ID: "2", Plugin: ToolName, Action: "list_jobs",
+		Args: map[string]string{"scope": "all"},
+	})
+	if !strings.Contains(resAll.Content, "hi ent-a") || !strings.Contains(resAll.Content, "hi ent-b") {
+		t.Errorf("scope=all should show both, got: %s", resAll.Content)
+	}
+}
+
+func TestToolListJobsMineFallbackToCreator(t *testing.T) {
+	tool := newTestToolWithPolicy(t, nil, 0)
+
+	// No profile, use channel:sender actor.
+	at := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	ctxA := actor.WithActor(context.Background(), "slack:alice")
+	ctxB := actor.WithActor(context.Background(), "slack:bob")
+	for _, pair := range []struct {
+		ctx context.Context
+		msg string
+	}{
+		{ctxA, "alice-msg"}, {ctxB, "bob-msg"},
+	} {
+		res := tool.Execute(pair.ctx, orchestrator.ToolCall{
+			ID: "1", Plugin: ToolName, Action: "remind_me",
+			Args: map[string]string{"at": at, "message": pair.msg},
+		})
+		if res.Error != "" {
+			t.Fatalf("%s: %s", pair.msg, res.Error)
+		}
+	}
+
+	res := tool.Execute(ctxA, orchestrator.ToolCall{ID: "1", Plugin: ToolName, Action: "list_jobs"})
+	if !strings.Contains(res.Content, "alice-msg") {
+		t.Errorf("alice should see own reminder: %s", res.Content)
+	}
+	if strings.Contains(res.Content, "bob-msg") {
+		t.Errorf("alice should NOT see bob reminder: %s", res.Content)
+	}
+}
+
+func TestSchedulerListJobsByEntity(t *testing.T) {
+	s := New(&fakeRunner{}, nil, "")
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	_ = s.AddPersonalJob(Job{Name: "a1", Interval: "1h", Action: "a.b", EntityID: "ent-a"}, "sender-a")
+	_ = s.AddPersonalJob(Job{Name: "a2", Interval: "1h", Action: "a.b", EntityID: "ent-a"}, "sender-a")
+	_ = s.AddPersonalJob(Job{Name: "b1", Interval: "1h", Action: "a.b", EntityID: "ent-b"}, "sender-b")
+
+	got := s.ListJobsByEntity("ent-a")
+	if len(got) != 2 {
+		t.Errorf("expected 2 jobs for ent-a, got %d", len(got))
+	}
+	gotB := s.ListJobsByEntity("ent-b")
+	if len(gotB) != 1 {
+		t.Errorf("expected 1 job for ent-b, got %d", len(gotB))
+	}
+	gotNone := s.ListJobsByEntity("ent-ghost")
+	if len(gotNone) != 0 {
+		t.Errorf("expected 0 for ghost, got %d", len(gotNone))
+	}
+}
+
 func TestToolListShowsSourceAndCreator(t *testing.T) {
 	tool := newTestToolWithConfigJob(t)
 
@@ -857,6 +1380,7 @@ func TestToolListShowsSourceAndCreator(t *testing.T) {
 
 	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "list_jobs",
+		Args: map[string]string{"scope": "all"},
 	})
 
 	if !strings.Contains(result.Content, "config") {

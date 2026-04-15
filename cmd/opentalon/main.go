@@ -28,7 +28,9 @@ import (
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/redisclient"
+	"github.com/opentalon/opentalon/internal/reminder"
 	"github.com/opentalon/opentalon/internal/requestpkg"
+	"github.com/opentalon/opentalon/internal/scheduler"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store"
 	"github.com/opentalon/opentalon/internal/version"
@@ -426,6 +428,37 @@ func main() {
 		PluginCallObserver:      pluginObserver,
 	})
 
+	// Scheduler: wired after orchestrator so it can route job actions through orch.
+	// Personal reminders bypass the approver policy via AddPersonalJob.
+	notifier := &channelNotifier{reg: nil} // reg populated below after it's built
+	sched := scheduler.NewWithPolicy(orch, notifier, dataDir, cfg.Scheduler.Approvers, cfg.Scheduler.MaxJobsPerUser)
+	staticJobs := make([]scheduler.Job, 0, len(cfg.Scheduler.Jobs))
+	for _, jc := range cfg.Scheduler.Jobs {
+		if jc.Enabled != nil && !*jc.Enabled {
+			continue
+		}
+		staticJobs = append(staticJobs, scheduler.Job{
+			Name:          jc.Name,
+			Interval:      jc.Interval,
+			Cron:          jc.Cron,
+			At:            jc.At,
+			Action:        jc.Action,
+			Args:          jc.Args,
+			NotifyChannel: jc.NotifyChannel,
+		})
+	}
+	if err := sched.Start(staticJobs); err != nil {
+		slog.Warn("scheduler start failed", "error", err)
+	}
+	defer sched.Stop()
+	schedTool := scheduler.NewSchedulerTool(sched)
+	if err := toolRegistry.Register(schedTool.Capability(), schedTool); err != nil {
+		slog.Warn("register scheduler tool failed", "error", err)
+	}
+	if err := toolRegistry.Register(reminder.Capability(), reminder.NewTool()); err != nil {
+		slog.Warn("register reminder tool failed", "error", err)
+	}
+
 	ensureSession := func(sessionKey string) {
 		if _, err := sessions.Get(sessionKey); err != nil {
 			sessions.Create(sessionKey)
@@ -435,6 +468,7 @@ func main() {
 	handler := channel.NewMessageHandler(ensureSession, runner, orch.RunAction, toolRegistry.HasAction, profileVerifier)
 
 	reg := channel.NewRegistry(handler)
+	notifier.reg = reg
 
 	// Build a single shared Redis client when cluster dedup, plugin exec, or both need it.
 	// Sharing one pool halves connection count compared to opening two clients to the same instance.
@@ -526,6 +560,10 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt)
 	<-sigCh
 
+	// Stop the scheduler before channels so in-flight reminders can still
+	// be delivered via the channel registry. (deferred sched.Stop() above
+	// runs late — we want explicit ordering here.)
+	sched.Stop()
 	if metricsSrv != nil {
 		_ = metricsSrv.Shutdown(context.Background())
 	}
@@ -622,6 +660,22 @@ func newInMemoryState() (orchestrator.MemoryStoreInterface, orchestrator.Session
 	mem := state.NewMemoryStore("")
 	_ = mem.Load()
 	return mem, state.NewSessionStore("")
+}
+
+// channelNotifier adapts channel.Registry to scheduler.Notifier so the
+// scheduler can deliver job results back to the channel where they were
+// scheduled. The registry pointer is set after construction because the
+// scheduler must be built before the orchestrator is, but the registry
+// depends on the orchestrator.
+type channelNotifier struct {
+	reg *channel.Registry
+}
+
+func (n *channelNotifier) Notify(ctx context.Context, channelID, content string) error {
+	if n.reg == nil {
+		return fmt.Errorf("channel registry not yet initialized")
+	}
+	return n.reg.Send(ctx, channelID, chanpkg.OutboundMessage{Content: content})
 }
 
 // channelRunner adapts the orchestrator to channel.Runner.
