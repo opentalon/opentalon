@@ -427,6 +427,32 @@ func (s *Scheduler) ListJobsByCreator(userID string) []Job {
 	return out
 }
 
+// ListJobsForCaller returns jobs owned by the given caller, matching EITHER
+// EntityID (when set) OR CreatedBy (as a fallback). The fallback exists for
+// two reasons:
+//   - jobs persisted before the EntityID field existed still need to be
+//     retrievable by their owner.
+//   - deployments without the profile system have empty EntityID by design;
+//     CreatedBy is their only identity.
+//
+// Either argument may be empty, in which case only the other is matched.
+func (s *Scheduler) ListJobsForCaller(entityID, userID string) []Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]Job, 0)
+	for _, rj := range s.jobs {
+		if entityID != "" && rj.job.EntityID == entityID {
+			out = append(out, rj.job)
+			continue
+		}
+		if userID != "" && rj.job.CreatedBy == userID {
+			out = append(out, rj.job)
+		}
+	}
+	return out
+}
+
 // GetJob returns a job by name.
 func (s *Scheduler) GetJob(name string) (Job, bool) {
 	s.mu.RLock()

@@ -1078,9 +1078,10 @@ func newTestToolWithConfigJob(t *testing.T) *SchedulerTool {
 func TestToolDeleteConfigJobRejected(t *testing.T) {
 	tool := newTestToolWithConfigJob(t)
 
-	result := tool.Execute(context.Background(), orchestrator.ToolCall{
+	ctx := actor.WithActor(context.Background(), "slack:admin")
+	result := tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "delete_job",
-		Args: map[string]string{"name": "config-job", "user_id": "admin"},
+		Args: map[string]string{"name": "config-job"},
 	})
 	if result.Error == "" {
 		t.Error("deleting config job should fail")
@@ -1093,9 +1094,10 @@ func TestToolDeleteConfigJobRejected(t *testing.T) {
 func TestToolUpdateConfigJobRejected(t *testing.T) {
 	tool := newTestToolWithConfigJob(t)
 
-	result := tool.Execute(context.Background(), orchestrator.ToolCall{
+	ctx := actor.WithActor(context.Background(), "slack:admin")
+	result := tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "update_job",
-		Args: map[string]string{"name": "config-job", "interval": "30m", "user_id": "admin"},
+		Args: map[string]string{"name": "config-job", "interval": "30m"},
 	})
 	if result.Error == "" {
 		t.Error("updating config job should fail")
@@ -1108,11 +1110,11 @@ func TestToolUpdateConfigJobRejected(t *testing.T) {
 func TestToolApproverEnforced(t *testing.T) {
 	tool := newTestToolWithPolicy(t, []string{"admin@co.com"}, 0)
 
-	result := tool.Execute(context.Background(), orchestrator.ToolCall{
+	ctxRandom := actor.WithActor(context.Background(), "slack:random@co.com")
+	result := tool.Execute(ctxRandom, orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{
 			"name": "j1", "interval": "1h", "action": "a.b",
-			"user_id": "random@co.com",
 		},
 	})
 	if result.Error == "" {
@@ -1122,11 +1124,11 @@ func TestToolApproverEnforced(t *testing.T) {
 		t.Errorf("error should mention authorization: %s", result.Error)
 	}
 
-	result = tool.Execute(context.Background(), orchestrator.ToolCall{
+	ctxAdmin := actor.WithActor(context.Background(), "slack:admin@co.com")
+	result = tool.Execute(ctxAdmin, orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{
 			"name": "j1", "interval": "1h", "action": "a.b",
-			"user_id": "admin@co.com",
 		},
 	})
 	if result.Error != "" {
@@ -1367,18 +1369,73 @@ func TestSchedulerListJobsByEntity(t *testing.T) {
 	}
 }
 
+// Regression: a job created via create_job must be visible to its creator
+// under the default "mine" scope (the bug where list_jobs said "no jobs"
+// right after a successful create_job).
+func TestToolCreateJobVisibleToCreator(t *testing.T) {
+	tool := newTestToolWithPolicy(t, nil, 0)
+	ctx := actor.WithActor(context.Background(), "slack:diana")
+
+	res := tool.Execute(ctx, orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "create_job",
+		Args: map[string]string{"name": "rubaiyat", "cron": "*/5 * * * *", "action": "poem.emit"},
+	})
+	if res.Error != "" {
+		t.Fatalf("create_job: %s", res.Error)
+	}
+
+	list := tool.Execute(ctx, orchestrator.ToolCall{ID: "2", Plugin: ToolName, Action: "list_jobs"})
+	if !strings.Contains(list.Content, "rubaiyat") {
+		t.Errorf("creator must see own job, got: %s", list.Content)
+	}
+}
+
+// Regression: jobs persisted before EntityID existed (empty EntityID,
+// non-empty CreatedBy) must still be retrievable by the caller who created
+// them, otherwise they appear to vanish after an upgrade.
+func TestListJobsForCallerLegacyFallback(t *testing.T) {
+	s := New(&fakeRunner{}, nil, "")
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	// Legacy job: no EntityID, CreatedBy only.
+	_ = s.AddPersonalJob(Job{Name: "legacy", Interval: "1h", Action: "a.b"}, "diana")
+	// Modern job: EntityID set.
+	_ = s.AddPersonalJob(Job{Name: "modern", Interval: "1h", Action: "a.b", EntityID: "ent-diana"}, "diana")
+
+	// Profile-era caller: ent-diana with userID diana sees both.
+	got := s.ListJobsForCaller("ent-diana", "diana")
+	if len(got) != 2 {
+		t.Errorf("expected 2 jobs (legacy + modern), got %d: %+v", len(got), got)
+	}
+
+	// Only userID known: still sees both (modern matches via CreatedBy fallback).
+	got = s.ListJobsForCaller("", "diana")
+	if len(got) != 2 {
+		t.Errorf("no-profile caller should see both, got %d", len(got))
+	}
+
+	// Different entity + different user: sees nothing.
+	got = s.ListJobsForCaller("ent-other", "bob")
+	if len(got) != 0 {
+		t.Errorf("unrelated caller should see nothing, got %d", len(got))
+	}
+}
+
 func TestToolListShowsSourceAndCreator(t *testing.T) {
 	tool := newTestToolWithConfigJob(t)
 
-	tool.Execute(context.Background(), orchestrator.ToolCall{
+	ctx := actor.WithActor(context.Background(), "slack:diana")
+	tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{
 			"name": "dyn1", "interval": "1h", "action": "a.b",
-			"user_id": "diana",
 		},
 	})
 
-	result := tool.Execute(context.Background(), orchestrator.ToolCall{
+	result := tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "list_jobs",
 		Args: map[string]string{"scope": "all"},
 	})

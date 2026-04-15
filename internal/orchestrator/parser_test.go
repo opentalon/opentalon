@@ -252,6 +252,31 @@ func TestStripInternalBlocks(t *testing.T) {
 	}
 }
 
+func TestToStringMapNestedObject(t *testing.T) {
+	// When the LLM emits a tool call whose args include a nested object
+	// (e.g. scheduler's remind_me with args={"issue_id":"XYZ"}), the nested
+	// map must be JSON-encoded so the downstream tool can json.Unmarshal it.
+	// Go's default %v formatter would produce "map[issue_id:XYZ]" which fails
+	// JSON parsing.
+	m := map[string]interface{}{
+		"args": map[string]interface{}{"issue_id": "XYZ"},
+	}
+	got := toStringMap(m)
+	if got["args"] != `{"issue_id":"XYZ"}` {
+		t.Errorf("nested object = %q, want valid JSON", got["args"])
+	}
+}
+
+func TestToStringMapNestedArray(t *testing.T) {
+	m := map[string]interface{}{
+		"tags": []interface{}{"a", "b"},
+	}
+	got := toStringMap(m)
+	if got["tags"] != `["a","b"]` {
+		t.Errorf("nested array = %q, want JSON array", got["tags"])
+	}
+}
+
 func TestParseToolName(t *testing.T) {
 	tests := []struct {
 		input      string

@@ -38,8 +38,7 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 					{Name: "cron", Description: "5-field cron expression, e.g. '0 9 * * *' (mutually exclusive with interval)", Required: false},
 					{Name: "action", Description: "Plugin action in format plugin.action", Required: true},
 					{Name: "args", Description: "JSON object with action arguments", Required: false},
-					{Name: "notify_channel", Description: "Channel ID to send results to", Required: false},
-					{Name: "user_id", Description: "User requesting the job creation", Required: true},
+					{Name: "notify_channel", Description: "Channel ID to send results to (defaults to the current channel)", Required: false},
 				},
 			},
 			{
@@ -56,7 +55,6 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 				Description: "Delete a dynamic scheduled job. Config-defined jobs cannot be deleted.",
 				Parameters: []orchestrator.Parameter{
 					{Name: "name", Description: "Job name to delete", Required: true},
-					{Name: "user_id", Description: "User requesting the deletion", Required: true},
 				},
 			},
 			{
@@ -96,7 +94,6 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 					{Name: "interval", Description: "New interval (optional, mutually exclusive with cron)", Required: false},
 					{Name: "cron", Description: "New cron expression (optional, mutually exclusive with interval)", Required: false},
 					{Name: "notify_channel", Description: "New notify channel (optional)", Required: false},
-					{Name: "user_id", Description: "User requesting the update", Required: true},
 				},
 			},
 		},
@@ -106,17 +103,17 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 func (t *SchedulerTool) Execute(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 	switch call.Action {
 	case "create_job":
-		return t.createJob(call)
+		return t.createJob(ctx, call)
 	case "list_jobs":
 		return t.listJobs(ctx, call)
 	case "delete_job":
-		return t.deleteJob(call)
+		return t.deleteJob(ctx, call)
 	case "pause_job":
 		return t.pauseJob(call)
 	case "resume_job":
 		return t.resumeJob(call)
 	case "update_job":
-		return t.updateJob(call)
+		return t.updateJob(ctx, call)
 	case "remind_me":
 		return t.remindMe(ctx, call)
 	default:
@@ -127,13 +124,47 @@ func (t *SchedulerTool) Execute(ctx context.Context, call orchestrator.ToolCall)
 	}
 }
 
-func (t *SchedulerTool) createJob(call orchestrator.ToolCall) orchestrator.ToolResult {
+// callerIdentity captures who is invoking a scheduler tool action. It is
+// derived from context (profile system → actor fallback) rather than trusted
+// from LLM-supplied args, because the LLM is free to invent user_id values
+// and will (in practice) invent ones that don't match the real caller —
+// making jobs disappear from list_jobs and from permission checks.
+type callerIdentity struct {
+	entityID  string // profile EntityID; empty when profile system is off
+	group     string // profile Group; empty when off
+	channelID string // where to deliver notifications
+	userID    string // stable ID for approver/limit checks and CreatedBy
+}
+
+func resolveCaller(ctx context.Context) (callerIdentity, error) {
+	if p := profile.FromContext(ctx); p != nil && p.EntityID != "" {
+		return callerIdentity{
+			entityID:  p.EntityID,
+			group:     p.Group,
+			channelID: p.ChannelID,
+			userID:    p.EntityID,
+		}, nil
+	}
+	actorID := actor.Actor(ctx)
+	if actorID == "" {
+		return callerIdentity{}, fmt.Errorf("missing user context")
+	}
+	parts := strings.SplitN(actorID, ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return callerIdentity{}, fmt.Errorf("malformed actor %q, expected channel_id:sender_id", actorID)
+	}
+	return callerIdentity{
+		channelID: parts[0],
+		userID:    parts[1],
+	}, nil
+}
+
+func (t *SchedulerTool) createJob(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 	name := call.Args["name"]
 	interval := call.Args["interval"]
 	cronExpr := call.Args["cron"]
 	action := call.Args["action"]
 	notifyChannel := call.Args["notify_channel"]
-	userID := call.Args["user_id"]
 
 	if name == "" || action == "" {
 		return orchestrator.ToolResult{
@@ -148,14 +179,17 @@ func (t *SchedulerTool) createJob(call orchestrator.ToolCall) orchestrator.ToolR
 		}
 	}
 
-	var args map[string]string
-	if raw, ok := call.Args["args"]; ok && raw != "" {
-		if err := json.Unmarshal([]byte(raw), &args); err != nil {
-			return orchestrator.ToolResult{
-				CallID: call.ID,
-				Error:  fmt.Sprintf("invalid args JSON: %v", err),
-			}
-		}
+	caller, err := resolveCaller(ctx)
+	if err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
+	}
+	if notifyChannel == "" {
+		notifyChannel = caller.channelID
+	}
+
+	args, err := parseArgsField(call.Args["args"])
+	if err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
 	}
 
 	job := Job{
@@ -165,9 +199,11 @@ func (t *SchedulerTool) createJob(call orchestrator.ToolCall) orchestrator.ToolR
 		Action:        action,
 		Args:          args,
 		NotifyChannel: notifyChannel,
+		EntityID:      caller.entityID,
+		Group:         caller.group,
 	}
 
-	if err := t.sched.AddJob(job, userID); err != nil {
+	if err := t.sched.AddJob(job, caller.userID); err != nil {
 		return orchestrator.ToolResult{
 			CallID: call.ID,
 			Error:  err.Error(),
@@ -189,18 +225,12 @@ func (t *SchedulerTool) listJobs(ctx context.Context, call orchestrator.ToolCall
 	var jobs []Job
 	switch scope {
 	case "", "mine":
-		if p := profile.FromContext(ctx); p != nil && p.EntityID != "" {
-			jobs = t.sched.ListJobsByEntity(p.EntityID)
-		} else if actorID := actor.Actor(ctx); actorID != "" {
-			// No profile system: fall back to channel:sender → CreatedBy match.
-			parts := strings.SplitN(actorID, ":", 2)
-			sender := actorID
-			if len(parts) == 2 {
-				sender = parts[1]
-			}
-			jobs = t.sched.ListJobsByCreator(sender)
-		} else {
+		caller, err := resolveCaller(ctx)
+		if err != nil {
+			// No caller context: nothing to filter by.
 			jobs = nil
+		} else {
+			jobs = t.sched.ListJobsForCaller(caller.entityID, caller.userID)
 		}
 	case "all":
 		jobs = t.sched.ListJobs()
@@ -228,13 +258,16 @@ func (t *SchedulerTool) listJobs(ctx context.Context, call orchestrator.ToolCall
 	}
 }
 
-func (t *SchedulerTool) deleteJob(call orchestrator.ToolCall) orchestrator.ToolResult {
+func (t *SchedulerTool) deleteJob(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 	name := call.Args["name"]
-	userID := call.Args["user_id"]
 	if name == "" {
 		return orchestrator.ToolResult{CallID: call.ID, Error: "name is required"}
 	}
-	if err := t.sched.RemoveJob(name, userID); err != nil {
+	caller, err := resolveCaller(ctx)
+	if err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
+	}
+	if err := t.sched.RemoveJob(name, caller.userID); err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
 	}
 	return orchestrator.ToolResult{
@@ -271,9 +304,8 @@ func (t *SchedulerTool) resumeJob(call orchestrator.ToolCall) orchestrator.ToolR
 	}
 }
 
-func (t *SchedulerTool) updateJob(call orchestrator.ToolCall) orchestrator.ToolResult {
+func (t *SchedulerTool) updateJob(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 	name := call.Args["name"]
-	userID := call.Args["user_id"]
 	if name == "" {
 		return orchestrator.ToolResult{CallID: call.ID, Error: "name is required"}
 	}
@@ -295,7 +327,11 @@ func (t *SchedulerTool) updateJob(call orchestrator.ToolCall) orchestrator.ToolR
 		return orchestrator.ToolResult{CallID: call.ID, Error: "at least one of interval, cron, or notify_channel must be provided"}
 	}
 
-	if err := t.sched.UpdateJob(name, userID, interval, cronExpr, notifyChannel); err != nil {
+	caller, err := resolveCaller(ctx)
+	if err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
+	}
+	if err := t.sched.UpdateJob(name, caller.userID, interval, cronExpr, notifyChannel); err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
 	}
 	return orchestrator.ToolResult{
@@ -305,27 +341,9 @@ func (t *SchedulerTool) updateJob(call orchestrator.ToolCall) orchestrator.ToolR
 }
 
 func (t *SchedulerTool) remindMe(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
-	actorID := actor.Actor(ctx)
-	if actorID == "" {
-		return orchestrator.ToolResult{CallID: call.ID, Error: "remind_me requires user context"}
-	}
-
-	// Resolve owner identity. Two modes:
-	//   - Profile system configured: actor is the profile EntityID; channel/
-	//     sender come from profile.FromContext which also gives us the group.
-	//   - No profile: actor is "channel_id:sender_id" and entity/group are empty.
-	var channelID, senderID, entityID, group string
-	if p := profile.FromContext(ctx); p != nil {
-		entityID = p.EntityID
-		group = p.Group
-		channelID = p.ChannelID
-		senderID = p.EntityID
-	} else {
-		parts := strings.SplitN(actorID, ":", 2)
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("remind_me: malformed actor %q, expected channel_id:sender_id", actorID)}
-		}
-		channelID, senderID = parts[0], parts[1]
+	caller, err := resolveCaller(ctx)
+	if err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: "remind_me: " + err.Error()}
 	}
 
 	at := strings.TrimSpace(call.Args["at"])
@@ -351,15 +369,15 @@ func (t *SchedulerTool) remindMe(ctx context.Context, call orchestrator.ToolCall
 	case action == "" && message == "":
 		return orchestrator.ToolResult{CallID: call.ID, Error: "remind_me: provide either 'message' or 'action'"}
 	case action != "":
-		if raw, ok := call.Args["args"]; ok && raw != "" {
-			if err := json.Unmarshal([]byte(raw), &args); err != nil {
-				return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("remind_me: invalid args JSON: %v", err)}
-			}
+		parsed, err := parseArgsField(call.Args["args"])
+		if err != nil {
+			return orchestrator.ToolResult{CallID: call.ID, Error: "remind_me: " + err.Error()}
 		}
+		args = parsed
 	}
 
-	// Sanitize senderID for job name (avoid ':' or spaces collisions).
-	nameSafeSender := strings.NewReplacer(":", "_", " ", "_", "/", "_").Replace(senderID)
+	// Sanitize caller.userID for job name (avoid ':' or spaces collisions).
+	nameSafeSender := strings.NewReplacer(":", "_", " ", "_", "/", "_").Replace(caller.userID)
 	// Nanosecond suffix guards against two reminders set in the same second.
 	name := fmt.Sprintf("remind-%s-%d", nameSafeSender, time.Now().UnixNano())
 
@@ -368,15 +386,34 @@ func (t *SchedulerTool) remindMe(ctx context.Context, call orchestrator.ToolCall
 		At:            fireTime.UTC().Format(time.RFC3339),
 		Action:        action,
 		Args:          args,
-		NotifyChannel: channelID,
-		EntityID:      entityID,
-		Group:         group,
+		NotifyChannel: caller.channelID,
+		EntityID:      caller.entityID,
+		Group:         caller.group,
 	}
-	if err := t.sched.AddPersonalJob(job, senderID); err != nil {
+	if err := t.sched.AddPersonalJob(job, caller.userID); err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
 	}
 	return orchestrator.ToolResult{
 		CallID:  call.ID,
 		Content: fmt.Sprintf("Reminder set for %s: will run %s.", job.At, action),
 	}
+}
+
+// parseArgsField decodes the `args` tool parameter, which is expected as a
+// JSON object serialized to a string (e.g. `{"issue_id":"XYZ"}`). It is
+// intentionally lenient about empty or whitespace-only values because LLMs
+// often pass those when they mean "no args". Any non-JSON value produces a
+// detailed error that echoes the offending input so the model can self-correct.
+func parseArgsField(raw string) (map[string]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var args map[string]string
+	if err := json.Unmarshal([]byte(trimmed), &args); err != nil {
+		// Truncated or wrong format (e.g. Go's `map[k:v]` default stringification).
+		// Surface the offending value so the model can recover on the next turn.
+		return nil, fmt.Errorf("invalid args JSON %q: %w (expected a JSON object like {\"key\":\"value\"})", trimmed, err)
+	}
+	return args, nil
 }

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 )
 
@@ -17,6 +18,12 @@ func newTestTool(t *testing.T) *SchedulerTool {
 	}
 	t.Cleanup(sched.Stop)
 	return NewSchedulerTool(sched)
+}
+
+// testCtx returns a context with an actor ID in the shape the handler
+// expects when no profile system is configured: "channel:sender".
+func testCtx(sender string) context.Context {
+	return actor.WithActor(context.Background(), "test-channel:"+sender)
 }
 
 func TestToolCapability(t *testing.T) {
@@ -44,8 +51,9 @@ func TestToolCapability(t *testing.T) {
 
 func TestToolCreateAndListJobs(t *testing.T) {
 	tool := newTestTool(t)
+	ctx := testCtx("diana")
 
-	result := tool.Execute(context.Background(), orchestrator.ToolCall{
+	result := tool.Execute(ctx, orchestrator.ToolCall{
 		ID:     "1",
 		Plugin: ToolName,
 		Action: "create_job",
@@ -54,7 +62,6 @@ func TestToolCreateAndListJobs(t *testing.T) {
 			"interval":       "1h",
 			"action":         "scan.run",
 			"notify_channel": "slack",
-			"user_id":        "diana",
 		},
 	})
 	if result.Error != "" {
@@ -64,7 +71,7 @@ func TestToolCreateAndListJobs(t *testing.T) {
 		t.Errorf("content = %q", result.Content)
 	}
 
-	listResult := tool.Execute(context.Background(), orchestrator.ToolCall{
+	listResult := tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "list_jobs",
 		Args: map[string]string{"scope": "all"},
 	})
@@ -108,14 +115,13 @@ func TestToolCreateMissingFields(t *testing.T) {
 func TestToolCreateWithArgs(t *testing.T) {
 	tool := newTestTool(t)
 
-	result := tool.Execute(context.Background(), orchestrator.ToolCall{
+	result := tool.Execute(testCtx("diana"), orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
 		Args: map[string]string{
 			"name":     "args-job",
 			"interval": "1h",
 			"action":   "a.b",
 			"args":     `{"key":"val"}`,
-			"user_id":  "diana",
 		},
 	})
 	if result.Error != "" {
@@ -148,23 +154,24 @@ func TestToolCreateBadArgsJSON(t *testing.T) {
 
 func TestToolDeleteJob(t *testing.T) {
 	tool := newTestTool(t)
+	ctx := testCtx("diana")
 
-	tool.Execute(context.Background(), orchestrator.ToolCall{
+	tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
-		Args: map[string]string{"name": "del", "interval": "1h", "action": "a.b", "user_id": "diana"},
+		Args: map[string]string{"name": "del", "interval": "1h", "action": "a.b"},
 	})
 
-	result := tool.Execute(context.Background(), orchestrator.ToolCall{
+	result := tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "delete_job",
-		Args: map[string]string{"name": "del", "user_id": "diana"},
+		Args: map[string]string{"name": "del"},
 	})
 	if result.Error != "" {
 		t.Errorf("delete error: %s", result.Error)
 	}
 
-	result = tool.Execute(context.Background(), orchestrator.ToolCall{
+	result = tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "3", Plugin: ToolName, Action: "delete_job",
-		Args: map[string]string{"name": "del", "user_id": "diana"},
+		Args: map[string]string{"name": "del"},
 	})
 	if result.Error == "" {
 		t.Error("expected error deleting nonexistent")
@@ -173,13 +180,14 @@ func TestToolDeleteJob(t *testing.T) {
 
 func TestToolPauseResumeJob(t *testing.T) {
 	tool := newTestTool(t)
+	ctx := testCtx("diana")
 
-	tool.Execute(context.Background(), orchestrator.ToolCall{
+	tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
-		Args: map[string]string{"name": "pr", "interval": "1h", "action": "a.b", "user_id": "diana"},
+		Args: map[string]string{"name": "pr", "interval": "1h", "action": "a.b"},
 	})
 
-	result := tool.Execute(context.Background(), orchestrator.ToolCall{
+	result := tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "pause_job",
 		Args: map[string]string{"name": "pr"},
 	})
@@ -187,7 +195,7 @@ func TestToolPauseResumeJob(t *testing.T) {
 		t.Errorf("pause error: %s", result.Error)
 	}
 
-	result = tool.Execute(context.Background(), orchestrator.ToolCall{
+	result = tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "3", Plugin: ToolName, Action: "resume_job",
 		Args: map[string]string{"name": "pr"},
 	})
@@ -198,15 +206,16 @@ func TestToolPauseResumeJob(t *testing.T) {
 
 func TestToolUpdateJob(t *testing.T) {
 	tool := newTestTool(t)
+	ctx := testCtx("diana")
 
-	tool.Execute(context.Background(), orchestrator.ToolCall{
+	tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "1", Plugin: ToolName, Action: "create_job",
-		Args: map[string]string{"name": "upd", "interval": "1h", "action": "a.b", "user_id": "diana"},
+		Args: map[string]string{"name": "upd", "interval": "1h", "action": "a.b"},
 	})
 
-	result := tool.Execute(context.Background(), orchestrator.ToolCall{
+	result := tool.Execute(ctx, orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "update_job",
-		Args: map[string]string{"name": "upd", "interval": "30m", "user_id": "diana"},
+		Args: map[string]string{"name": "upd", "interval": "30m"},
 	})
 	if result.Error != "" {
 		t.Errorf("update error: %s", result.Error)
@@ -269,5 +278,41 @@ func TestToolMissingName(t *testing.T) {
 		if result.Error == "" {
 			t.Errorf("%s should error with missing name", action)
 		}
+	}
+}
+
+func TestParseArgsField(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    map[string]string
+		wantErr bool
+	}{
+		{"empty", "", nil, false},
+		{"whitespace", "   \n\t  ", nil, false},
+		{"valid object", `{"issue_id":"XYZ"}`, map[string]string{"issue_id": "XYZ"}, false},
+		{"empty object", `{}`, map[string]string{}, false},
+		{"go map format", `map[issue_id:XYZ]`, nil, true},
+		{"truncated json", `{"issue_id":`, nil, true},
+		{"not an object", `"bare string"`, nil, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseArgsField(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Errorf("got[%q] = %q, want %q", k, got[k], v)
+				}
+			}
+		})
 	}
 }
