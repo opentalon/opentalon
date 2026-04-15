@@ -66,6 +66,7 @@ func TestToolCreateAndListJobs(t *testing.T) {
 
 	listResult := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "list_jobs",
+		Args: map[string]string{"scope": "all"},
 	})
 	if listResult.Error != "" {
 		t.Fatalf("list_jobs error: %s", listResult.Error)

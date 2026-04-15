@@ -36,7 +36,9 @@ type Job struct {
 	NotifyChannel string            `yaml:"notify_channel,omitempty" json:"notify_channel,omitempty"`
 	Paused        bool              `yaml:"paused,omitempty" json:"paused,omitempty"`
 	Source        string            `yaml:"source,omitempty" json:"source,omitempty"`         // "config" or "dynamic"
-	CreatedBy     string            `yaml:"created_by,omitempty" json:"created_by,omitempty"` // user who created the job
+	CreatedBy     string            `yaml:"created_by,omitempty" json:"created_by,omitempty"` // raw sender/actor ID used at creation
+	EntityID      string            `yaml:"entity_id,omitempty" json:"entity_id,omitempty"`   // tenant identity (profile.EntityID) — empty when no profile system is configured
+	Group         string            `yaml:"group,omitempty" json:"group,omitempty"`           // tenant group (profile.Group) — empty when no profile system is configured
 }
 
 // schedule computes successive fire times for a job.
@@ -390,6 +392,37 @@ func (s *Scheduler) ListJobs() []Job {
 	out := make([]Job, 0, len(s.jobs))
 	for _, rj := range s.jobs {
 		out = append(out, rj.job)
+	}
+	return out
+}
+
+// ListJobsByEntity returns dynamic jobs owned by the given entity (profile
+// identity). Useful for showing a caller just their own scheduled reminders.
+func (s *Scheduler) ListJobsByEntity(entityID string) []Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]Job, 0)
+	for _, rj := range s.jobs {
+		if rj.job.EntityID == entityID {
+			out = append(out, rj.job)
+		}
+	}
+	return out
+}
+
+// ListJobsByCreator returns dynamic jobs whose CreatedBy matches. Used when
+// profile verification is not configured and the only identity is the raw
+// sender ID.
+func (s *Scheduler) ListJobsByCreator(userID string) []Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]Job, 0)
+	for _, rj := range s.jobs {
+		if rj.job.CreatedBy == userID {
+			out = append(out, rj.job)
+		}
 	}
 	return out
 }

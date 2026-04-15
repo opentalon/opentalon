@@ -9,6 +9,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	"github.com/opentalon/opentalon/internal/profile"
 )
 
 const ToolName = "scheduler"
@@ -42,8 +43,13 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 				},
 			},
 			{
-				Name:        "list_jobs",
-				Description: "List all scheduled jobs with their status, source, and creator",
+				Name: "list_jobs",
+				Description: "List scheduled jobs. By default returns only jobs owned by the current caller " +
+					"(filtered by profile entity_id when the profile system is configured, otherwise by creator). " +
+					"Pass scope=\"all\" to see every job — this is intended for approvers/admins.",
+				Parameters: []orchestrator.Parameter{
+					{Name: "scope", Description: "\"mine\" (default) or \"all\"", Required: false},
+				},
 			},
 			{
 				Name:        "delete_job",
@@ -102,7 +108,7 @@ func (t *SchedulerTool) Execute(ctx context.Context, call orchestrator.ToolCall)
 	case "create_job":
 		return t.createJob(call)
 	case "list_jobs":
-		return t.listJobs(call)
+		return t.listJobs(ctx, call)
 	case "delete_job":
 		return t.deleteJob(call)
 	case "pause_job":
@@ -178,8 +184,29 @@ func (t *SchedulerTool) createJob(call orchestrator.ToolCall) orchestrator.ToolR
 	}
 }
 
-func (t *SchedulerTool) listJobs(call orchestrator.ToolCall) orchestrator.ToolResult {
-	jobs := t.sched.ListJobs()
+func (t *SchedulerTool) listJobs(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+	scope := strings.TrimSpace(call.Args["scope"])
+	var jobs []Job
+	switch scope {
+	case "", "mine":
+		if p := profile.FromContext(ctx); p != nil && p.EntityID != "" {
+			jobs = t.sched.ListJobsByEntity(p.EntityID)
+		} else if actorID := actor.Actor(ctx); actorID != "" {
+			// No profile system: fall back to channel:sender → CreatedBy match.
+			parts := strings.SplitN(actorID, ":", 2)
+			sender := actorID
+			if len(parts) == 2 {
+				sender = parts[1]
+			}
+			jobs = t.sched.ListJobsByCreator(sender)
+		} else {
+			jobs = nil
+		}
+	case "all":
+		jobs = t.sched.ListJobs()
+	default:
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("invalid scope %q, expected \"mine\" or \"all\"", scope)}
+	}
 	if len(jobs) == 0 {
 		return orchestrator.ToolResult{
 			CallID:  call.ID,
@@ -280,13 +307,26 @@ func (t *SchedulerTool) updateJob(call orchestrator.ToolCall) orchestrator.ToolR
 func (t *SchedulerTool) remindMe(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 	actorID := actor.Actor(ctx)
 	if actorID == "" {
-		return orchestrator.ToolResult{CallID: call.ID, Error: "remind_me requires user context (channel_id:sender_id)"}
+		return orchestrator.ToolResult{CallID: call.ID, Error: "remind_me requires user context"}
 	}
-	parts := strings.SplitN(actorID, ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("remind_me: malformed actor %q, expected channel_id:sender_id", actorID)}
+
+	// Resolve owner identity. Two modes:
+	//   - Profile system configured: actor is the profile EntityID; channel/
+	//     sender come from profile.FromContext which also gives us the group.
+	//   - No profile: actor is "channel_id:sender_id" and entity/group are empty.
+	var channelID, senderID, entityID, group string
+	if p := profile.FromContext(ctx); p != nil {
+		entityID = p.EntityID
+		group = p.Group
+		channelID = p.ChannelID
+		senderID = p.EntityID
+	} else {
+		parts := strings.SplitN(actorID, ":", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("remind_me: malformed actor %q, expected channel_id:sender_id", actorID)}
+		}
+		channelID, senderID = parts[0], parts[1]
 	}
-	channelID, senderID := parts[0], parts[1]
 
 	at := strings.TrimSpace(call.Args["at"])
 	if at == "" {
@@ -329,6 +369,8 @@ func (t *SchedulerTool) remindMe(ctx context.Context, call orchestrator.ToolCall
 		Action:        action,
 		Args:          args,
 		NotifyChannel: channelID,
+		EntityID:      entityID,
+		Group:         group,
 	}
 	if err := t.sched.AddPersonalJob(job, senderID); err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}

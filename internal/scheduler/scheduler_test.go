@@ -12,6 +12,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	"github.com/opentalon/opentalon/internal/profile"
 )
 
 type fakeRunner struct {
@@ -1234,6 +1235,138 @@ func TestToolRemindMeBypassesApprover(t *testing.T) {
 	}
 }
 
+func TestToolRemindMePopulatesEntityAndGroup(t *testing.T) {
+	tool := newTestToolWithPolicy(t, nil, 0)
+
+	at := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	ctx := actor.WithActor(context.Background(), "ent-42")
+	ctx = profile.WithProfile(ctx, &profile.Profile{
+		EntityID:  "ent-42",
+		Group:     "team-a",
+		ChannelID: "slack",
+	})
+	res := tool.Execute(ctx, orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "remind_me",
+		Args: map[string]string{"at": at, "message": "hi"},
+	})
+	if res.Error != "" {
+		t.Fatalf("unexpected error: %s", res.Error)
+	}
+	jobs := tool.sched.ListJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	j := jobs[0]
+	if j.EntityID != "ent-42" {
+		t.Errorf("entity_id = %q, want ent-42", j.EntityID)
+	}
+	if j.Group != "team-a" {
+		t.Errorf("group = %q, want team-a", j.Group)
+	}
+	if j.NotifyChannel != "slack" {
+		t.Errorf("notify_channel = %q, want slack (from profile)", j.NotifyChannel)
+	}
+	if j.CreatedBy != "ent-42" {
+		t.Errorf("created_by = %q, want ent-42", j.CreatedBy)
+	}
+}
+
+func TestToolListJobsMineScope(t *testing.T) {
+	tool := newTestToolWithPolicy(t, nil, 0)
+
+	// Two reminders for two different tenants.
+	at := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	for _, entity := range []string{"ent-a", "ent-b"} {
+		ctx := actor.WithActor(context.Background(), entity)
+		ctx = profile.WithProfile(ctx, &profile.Profile{EntityID: entity, ChannelID: "slack"})
+		res := tool.Execute(ctx, orchestrator.ToolCall{
+			ID: "1", Plugin: ToolName, Action: "remind_me",
+			Args: map[string]string{"at": at, "message": "hi " + entity},
+		})
+		if res.Error != "" {
+			t.Fatalf("remind_me for %s: %s", entity, res.Error)
+		}
+	}
+
+	// Default scope: ent-a sees only its own reminder.
+	ctxA := profile.WithProfile(context.Background(), &profile.Profile{EntityID: "ent-a"})
+	res := tool.Execute(ctxA, orchestrator.ToolCall{ID: "1", Plugin: ToolName, Action: "list_jobs"})
+	if res.Error != "" {
+		t.Fatalf("list_jobs: %s", res.Error)
+	}
+	if !strings.Contains(res.Content, "hi ent-a") {
+		t.Errorf("ent-a should see own reminder: %s", res.Content)
+	}
+	if strings.Contains(res.Content, "hi ent-b") {
+		t.Errorf("ent-a should NOT see ent-b reminder: %s", res.Content)
+	}
+
+	// scope=all: both visible.
+	resAll := tool.Execute(ctxA, orchestrator.ToolCall{
+		ID: "2", Plugin: ToolName, Action: "list_jobs",
+		Args: map[string]string{"scope": "all"},
+	})
+	if !strings.Contains(resAll.Content, "hi ent-a") || !strings.Contains(resAll.Content, "hi ent-b") {
+		t.Errorf("scope=all should show both, got: %s", resAll.Content)
+	}
+}
+
+func TestToolListJobsMineFallbackToCreator(t *testing.T) {
+	tool := newTestToolWithPolicy(t, nil, 0)
+
+	// No profile, use channel:sender actor.
+	at := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	ctxA := actor.WithActor(context.Background(), "slack:alice")
+	ctxB := actor.WithActor(context.Background(), "slack:bob")
+	for _, pair := range []struct {
+		ctx context.Context
+		msg string
+	}{
+		{ctxA, "alice-msg"}, {ctxB, "bob-msg"},
+	} {
+		res := tool.Execute(pair.ctx, orchestrator.ToolCall{
+			ID: "1", Plugin: ToolName, Action: "remind_me",
+			Args: map[string]string{"at": at, "message": pair.msg},
+		})
+		if res.Error != "" {
+			t.Fatalf("%s: %s", pair.msg, res.Error)
+		}
+	}
+
+	res := tool.Execute(ctxA, orchestrator.ToolCall{ID: "1", Plugin: ToolName, Action: "list_jobs"})
+	if !strings.Contains(res.Content, "alice-msg") {
+		t.Errorf("alice should see own reminder: %s", res.Content)
+	}
+	if strings.Contains(res.Content, "bob-msg") {
+		t.Errorf("alice should NOT see bob reminder: %s", res.Content)
+	}
+}
+
+func TestSchedulerListJobsByEntity(t *testing.T) {
+	s := New(&fakeRunner{}, nil, "")
+	if err := s.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	_ = s.AddPersonalJob(Job{Name: "a1", Interval: "1h", Action: "a.b", EntityID: "ent-a"}, "sender-a")
+	_ = s.AddPersonalJob(Job{Name: "a2", Interval: "1h", Action: "a.b", EntityID: "ent-a"}, "sender-a")
+	_ = s.AddPersonalJob(Job{Name: "b1", Interval: "1h", Action: "a.b", EntityID: "ent-b"}, "sender-b")
+
+	got := s.ListJobsByEntity("ent-a")
+	if len(got) != 2 {
+		t.Errorf("expected 2 jobs for ent-a, got %d", len(got))
+	}
+	gotB := s.ListJobsByEntity("ent-b")
+	if len(gotB) != 1 {
+		t.Errorf("expected 1 job for ent-b, got %d", len(gotB))
+	}
+	gotNone := s.ListJobsByEntity("ent-ghost")
+	if len(gotNone) != 0 {
+		t.Errorf("expected 0 for ghost, got %d", len(gotNone))
+	}
+}
+
 func TestToolListShowsSourceAndCreator(t *testing.T) {
 	tool := newTestToolWithConfigJob(t)
 
@@ -1247,6 +1380,7 @@ func TestToolListShowsSourceAndCreator(t *testing.T) {
 
 	result := tool.Execute(context.Background(), orchestrator.ToolCall{
 		ID: "2", Plugin: ToolName, Action: "list_jobs",
+		Args: map[string]string{"scope": "all"},
 	})
 
 	if !strings.Contains(result.Content, "config") {
