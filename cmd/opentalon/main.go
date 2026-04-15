@@ -8,13 +8,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"net/http"
 	"strings"
-
 	"time"
 
 	"github.com/redis/go-redis/v9"
-
-	"net/http"
 
 	"github.com/opentalon/opentalon/internal/bootstrap"
 	"github.com/opentalon/opentalon/internal/bundle"
@@ -81,17 +79,16 @@ func main() {
 
 	// Start Prometheus metrics server if enabled.
 	var metricsCollector *metrics.Collector
+	var metricsSrv *http.Server
 	if cfg.Metrics.Enabled {
 		metricsCollector = metrics.New()
 		addr := cfg.Metrics.Addr
-		if addr == "" {
-			addr = ":9090"
-		}
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metricsCollector.Handler())
+		metricsSrv = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() {
 			slog.Info("metrics server listening", "addr", addr)
-			if err := http.ListenAndServe(addr, mux); err != nil && err != http.ErrServerClosed {
+			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Error("metrics server error", "error", err)
 			}
 		}()
@@ -529,6 +526,9 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt)
 	<-sigCh
 
+	if metricsSrv != nil {
+		_ = metricsSrv.Shutdown(context.Background())
+	}
 	channelManager.StopAll()
 	pluginManager.StopAll()
 
@@ -581,6 +581,9 @@ type usageRecorderAdapter struct {
 }
 
 func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int) {
+	if a.store == nil && a.collector == nil {
+		return
+	}
 	var inputCostUSD, outputCostUSD float64
 	if modelID != "" && a.provider != nil {
 		for _, m := range a.provider.Models() {

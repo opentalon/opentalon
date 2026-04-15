@@ -1602,7 +1602,6 @@ func setupOrchestratorWithOpts(llm LLMClient, parser ToolCallParser, opts Orches
 	sessions := state.NewSessionStore("")
 	sessions.Create("test-session-obs")
 
-	opts.UsageRecorder = nil
 	orch := NewWithRules(llm, parser, registry, memory, sessions, opts)
 	return orch, "test-session-obs"
 }

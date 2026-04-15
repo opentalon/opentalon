@@ -854,6 +854,22 @@ metrics:
 	}
 }
 
+func TestParseMetricsEnabledDefaultAddr(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+metrics:
+  enabled: true
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Metrics.Addr != ":2112" {
+		t.Errorf("Metrics.Addr = %q, want :2112", cfg.Metrics.Addr)
+	}
+}
+
 func TestParseMetricsDisabled(t *testing.T) {
 	yaml := `
 models:

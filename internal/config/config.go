@@ -33,7 +33,7 @@ type Config struct {
 // MetricsConfig enables a Prometheus /metrics HTTP endpoint.
 type MetricsConfig struct {
 	Enabled bool   `yaml:"enabled"`
-	Addr    string `yaml:"addr"` // e.g. ":9090"; defaults to ":9090" when enabled
+	Addr    string `yaml:"addr"` // e.g. ":2112"; defaults to ":2112" when enabled
 }
 
 // RedisConfig holds the connection details for the shared Redis instance used by
@@ -417,6 +417,9 @@ func Parse(data []byte) (*Config, error) {
 	expandEnvInRedis(&cfg)
 	cfg.Cluster.DedupTTL = expandEnv(cfg.Cluster.DedupTTL)
 	cfg.Metrics.Addr = expandEnv(cfg.Metrics.Addr)
+	if cfg.Metrics.Enabled && cfg.Metrics.Addr == "" {
+		cfg.Metrics.Addr = ":2112"
+	}
 	if cfg.State.DataDir == "" {
 		home, _ := os.UserHomeDir()
 		cfg.State.DataDir = filepath.Join(home, ".opentalon")

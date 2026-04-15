@@ -14,11 +14,12 @@ import (
 type Collector struct {
 	reg *prometheus.Registry
 
-	llmInputTokens  *prometheus.CounterVec
-	llmOutputTokens *prometheus.CounterVec
-	llmCostUSD      *prometheus.CounterVec
-	llmRequests     *prometheus.CounterVec
-	pluginCalls     *prometheus.CounterVec
+	llmInputTokens    *prometheus.CounterVec
+	llmOutputTokens   *prometheus.CounterVec
+	llmInputCostUSD   *prometheus.CounterVec
+	llmOutputCostUSD  *prometheus.CounterVec
+	orchestratorRuns  *prometheus.CounterVec
+	pluginCalls       *prometheus.CounterVec
 }
 
 // New creates and registers all metrics.
@@ -40,14 +41,19 @@ func New() *Collector {
 			Help: "Total LLM output tokens produced.",
 		}, []string{"model", "channel", "group"}),
 
-		llmCostUSD: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "opentalon_llm_cost_usd_total",
-			Help: "Total LLM spend in USD.",
-		}, []string{"model", "channel", "group", "type"}),
+		llmInputCostUSD: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "opentalon_llm_input_cost_usd_total",
+			Help: "Total LLM input spend in USD.",
+		}, []string{"model", "channel", "group"}),
 
-		llmRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "opentalon_llm_requests_total",
-			Help: "Total completed LLM orchestrator runs.",
+		llmOutputCostUSD: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "opentalon_llm_output_cost_usd_total",
+			Help: "Total LLM output spend in USD.",
+		}, []string{"model", "channel", "group"}),
+
+		orchestratorRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "opentalon_orchestrator_runs_total",
+			Help: "Total completed orchestrator runs.",
 		}, []string{"model", "channel", "group"}),
 
 		pluginCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -59,8 +65,9 @@ func New() *Collector {
 	reg.MustRegister(
 		c.llmInputTokens,
 		c.llmOutputTokens,
-		c.llmCostUSD,
-		c.llmRequests,
+		c.llmInputCostUSD,
+		c.llmOutputCostUSD,
+		c.orchestratorRuns,
 		c.pluginCalls,
 	)
 
@@ -76,18 +83,10 @@ func (c *Collector) RecordUsage(_ context.Context, _, groupID, channelID, _, mod
 	}
 	c.llmInputTokens.With(labels).Add(float64(inputTokens))
 	c.llmOutputTokens.With(labels).Add(float64(outputTokens))
-	c.llmRequests.With(labels).Inc()
+	c.orchestratorRuns.With(labels).Inc()
 
-	if inputCostUSD > 0 {
-		c.llmCostUSD.With(prometheus.Labels{
-			"model": modelID, "channel": channelID, "group": groupID, "type": "input",
-		}).Add(inputCostUSD)
-	}
-	if outputCostUSD > 0 {
-		c.llmCostUSD.With(prometheus.Labels{
-			"model": modelID, "channel": channelID, "group": groupID, "type": "output",
-		}).Add(outputCostUSD)
-	}
+	c.llmInputCostUSD.With(labels).Add(inputCostUSD)
+	c.llmOutputCostUSD.With(labels).Add(outputCostUSD)
 }
 
 // ObservePluginCall implements orchestrator.PluginCallObserver.

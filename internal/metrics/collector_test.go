@@ -42,14 +42,14 @@ func TestRecordUsageSingleCall(t *testing.T) {
 	if got := testutil.ToFloat64(c.llmOutputTokens.With(labels)); got != 50 {
 		t.Errorf("outputTokens = %v, want 50", got)
 	}
-	if got := testutil.ToFloat64(c.llmRequests.With(labels)); got != 1 {
-		t.Errorf("requests = %v, want 1", got)
+	if got := testutil.ToFloat64(c.orchestratorRuns.With(labels)); got != 1 {
+		t.Errorf("orchestratorRuns = %v, want 1", got)
 	}
-	if got := testutil.ToFloat64(c.llmCostUSD.With(prometheus.Labels{"model": "m1", "channel": "ch1", "group": "g1", "type": "input"})); got != 0.01 {
-		t.Errorf("cost input = %v, want 0.01", got)
+	if got := testutil.ToFloat64(c.llmInputCostUSD.With(labels)); got != 0.01 {
+		t.Errorf("inputCost = %v, want 0.01", got)
 	}
-	if got := testutil.ToFloat64(c.llmCostUSD.With(prometheus.Labels{"model": "m1", "channel": "ch1", "group": "g1", "type": "output"})); got != 0.02 {
-		t.Errorf("cost output = %v, want 0.02", got)
+	if got := testutil.ToFloat64(c.llmOutputCostUSD.With(labels)); got != 0.02 {
+		t.Errorf("outputCost = %v, want 0.02", got)
 	}
 }
 
@@ -62,18 +62,21 @@ func TestRecordUsageAccumulates(t *testing.T) {
 	if got := testutil.ToFloat64(c.llmInputTokens.With(labels)); got != 300 {
 		t.Errorf("inputTokens = %v, want 300", got)
 	}
-	if got := testutil.ToFloat64(c.llmRequests.With(labels)); got != 2 {
-		t.Errorf("requests = %v, want 2", got)
+	if got := testutil.ToFloat64(c.orchestratorRuns.With(labels)); got != 2 {
+		t.Errorf("orchestratorRuns = %v, want 2", got)
 	}
 }
 
-func TestRecordUsageZeroCostNotRecorded(t *testing.T) {
+func TestRecordUsageZeroCostEmitsSeries(t *testing.T) {
 	c := New()
 	c.RecordUsage(context.Background(), "e", "g1", "ch1", "s", "m1", 10, 5, 0, 0.0, 0.0)
 
-	// With zero costs, no label combinations should be initialised for cost metric.
-	if n := gatherCount(t, c, "opentalon_llm_cost_usd_total"); n != 0 {
-		t.Errorf("expected 0 cost series, got %d", n)
+	// Zero-cost models still initialise the series so sum() queries include them.
+	if n := gatherCount(t, c, "opentalon_llm_input_cost_usd_total"); n != 1 {
+		t.Errorf("expected 1 input cost series, got %d", n)
+	}
+	if n := gatherCount(t, c, "opentalon_llm_output_cost_usd_total"); n != 1 {
+		t.Errorf("expected 1 output cost series, got %d", n)
 	}
 }
 
@@ -81,12 +84,12 @@ func TestRecordUsagePartialCost(t *testing.T) {
 	c := New()
 	c.RecordUsage(context.Background(), "e", "g1", "ch1", "s", "m1", 10, 5, 0, 0.05, 0.0)
 
-	// Only the "input" type should be initialised.
-	if n := gatherCount(t, c, "opentalon_llm_cost_usd_total"); n != 1 {
-		t.Errorf("expected 1 cost series (input only), got %d", n)
+	labels := prometheus.Labels{"model": "m1", "channel": "ch1", "group": "g1"}
+	if got := testutil.ToFloat64(c.llmInputCostUSD.With(labels)); got != 0.05 {
+		t.Errorf("inputCost = %v, want 0.05", got)
 	}
-	if got := testutil.ToFloat64(c.llmCostUSD.With(prometheus.Labels{"model": "m1", "channel": "ch1", "group": "g1", "type": "input"})); got != 0.05 {
-		t.Errorf("cost input = %v, want 0.05", got)
+	if got := testutil.ToFloat64(c.llmOutputCostUSD.With(labels)); got != 0 {
+		t.Errorf("outputCost = %v, want 0", got)
 	}
 }
 
@@ -142,8 +145,8 @@ func TestHandlerServesMetrics(t *testing.T) {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "opentalon_llm_requests_total") {
-		t.Errorf("body does not contain opentalon_llm_requests_total:\n%s", body)
+	if !strings.Contains(string(body), "opentalon_orchestrator_runs_total") {
+		t.Errorf("body does not contain opentalon_orchestrator_runs_total:\n%s", body)
 	}
 }
 
@@ -152,11 +155,11 @@ func TestCollectAndCompareAfterUsage(t *testing.T) {
 	c.RecordUsage(context.Background(), "entity1", "g1", "ch1", "sess1", "m1", 10, 5, 0, 0.0, 0.0)
 
 	expected := `
-		# HELP opentalon_llm_requests_total Total completed LLM orchestrator runs.
-		# TYPE opentalon_llm_requests_total counter
-		opentalon_llm_requests_total{channel="ch1",group="g1",model="m1"} 1
+		# HELP opentalon_orchestrator_runs_total Total completed orchestrator runs.
+		# TYPE opentalon_orchestrator_runs_total counter
+		opentalon_orchestrator_runs_total{channel="ch1",group="g1",model="m1"} 1
 	`
-	if err := testutil.GatherAndCompare(c.reg, strings.NewReader(expected), "opentalon_llm_requests_total"); err != nil {
+	if err := testutil.GatherAndCompare(c.reg, strings.NewReader(expected), "opentalon_orchestrator_runs_total"); err != nil {
 		t.Errorf("metric mismatch: %v", err)
 	}
 }

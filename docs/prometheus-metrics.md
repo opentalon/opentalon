@@ -9,10 +9,12 @@ Add a `metrics` section to your `config.yaml`:
 ```yaml
 metrics:
   enabled: true
-  addr: ":9090"   # optional; defaults to :9090
+  addr: ":2112"   # optional; defaults to :2112
 ```
 
-When enabled, OpenTalon starts an HTTP server on the configured address. Prometheus can then scrape it at `http://<host>:9090/metrics`.
+When enabled, OpenTalon starts an HTTP server on the configured address. Prometheus can then scrape it at `http://<host>:2112/metrics`.
+
+> **Security:** `/metrics` is unauthenticated. Bind to a loopback address (`127.0.0.1:2112`) or a private interface if the network is not trusted.
 
 ## Available metrics
 
@@ -20,13 +22,14 @@ When enabled, OpenTalon starts an HTTP server on the configured address. Prometh
 |--------|------|--------|-------------|
 | `opentalon_llm_input_tokens_total` | Counter | `model`, `channel`, `group` | Total input (prompt) tokens sent to the LLM |
 | `opentalon_llm_output_tokens_total` | Counter | `model`, `channel`, `group` | Total output (completion) tokens received from the LLM |
-| `opentalon_llm_cost_usd_total` | Counter | `model`, `channel`, `group`, `type` | Total spend in USD; `type` is `input` or `output` |
-| `opentalon_llm_requests_total` | Counter | `model`, `channel`, `group` | Total completed orchestrator runs |
+| `opentalon_llm_input_cost_usd_total` | Counter | `model`, `channel`, `group` | Total input spend in USD |
+| `opentalon_llm_output_cost_usd_total` | Counter | `model`, `channel`, `group` | Total output spend in USD |
+| `opentalon_orchestrator_runs_total` | Counter | `model`, `channel`, `group` | Total completed orchestrator runs |
 | `opentalon_plugin_calls_total` | Counter | `plugin`, `action`, `status` | Total plugin/tool calls; `status` is `success` or `error` |
 
 Standard Go runtime and process metrics (`go_*`, `process_*`) are also exposed.
 
-> **Note:** `opentalon_llm_cost_usd_total` is only non-zero when model `cost.input` / `cost.output` pricing is configured in `models.providers.<id>.models[*].cost`.
+> **Note:** Cost metrics are only non-zero when model `cost.input` / `cost.output` pricing is configured in `models.providers.<id>.models[*].cost`. Zero-cost (free-tier) models still emit the series with a value of `0`.
 
 ## Prometheus sidecar / Docker Compose example
 
@@ -45,14 +48,14 @@ services:
       - opentalon-data:/home/opentalon/.opentalon
     command: ["-config", "/config/config.yaml"]
     ports:
-      - "9090:9090"   # metrics port (only needed if you scrape from outside the compose network)
+      - "2112:2112"   # metrics port (only needed if you scrape from outside the compose network)
 
   prometheus:
     image: prom/prometheus:latest
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
-      - "9091:9090"
+      - "9090:9090"
     depends_on:
       - opentalon
 
@@ -69,7 +72,7 @@ global:
 scrape_configs:
   - job_name: opentalon
     static_configs:
-      - targets: ["opentalon:9090"]
+      - targets: ["opentalon:2112"]
 ```
 
 ## Kubernetes sidecar example
@@ -92,7 +95,7 @@ spec:
           args: ["-config", "/config/config.yaml"]
           ports:
             - name: metrics
-              containerPort: 9090
+              containerPort: 2112
 
         - name: prometheus
           image: prom/prometheus:latest
@@ -121,7 +124,7 @@ data:
     scrape_configs:
       - job_name: opentalon
         static_configs:
-          - targets: ["localhost:9090"]
+          - targets: ["localhost:2112"]
 ```
 
 ### Prometheus Operator (`ServiceMonitor`)
@@ -140,7 +143,7 @@ spec:
     app: opentalon
   ports:
     - name: metrics
-      port: 9090
+      port: 2112
       targetPort: metrics
 ---
 apiVersion: monitoring.coreos.com/v1
@@ -160,11 +163,13 @@ spec:
 ## Example PromQL queries
 
 ```promql
-# Total input tokens per model (rate over 5m)
-rate(opentalon_llm_input_tokens_total[5m])
+# Input token rate per model (summed across channels and groups)
+sum by (model) (rate(opentalon_llm_input_tokens_total[5m]))
 
 # Total USD spend per model
-sum by (model) (opentalon_llm_cost_usd_total)
+sum by (model) (
+  opentalon_llm_input_cost_usd_total + opentalon_llm_output_cost_usd_total
+)
 
 # Plugin call error rate
 rate(opentalon_plugin_calls_total{status="error"}[5m])
@@ -173,6 +178,6 @@ rate(opentalon_plugin_calls_total{status="error"}[5m])
 # Most used plugins
 topk(10, sum by (plugin) (opentalon_plugin_calls_total))
 
-# Requests per channel
-sum by (channel) (opentalon_llm_requests_total)
+# Orchestrator runs per channel
+sum by (channel) (opentalon_orchestrator_runs_total)
 ```
