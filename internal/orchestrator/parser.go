@@ -179,6 +179,17 @@ func toStringMap(m map[string]interface{}) map[string]string {
 				continue
 			}
 			result[k] = "true"
+		case map[string]interface{}, []interface{}:
+			// Nested object/array — JSON-encode so tools can json.Unmarshal it
+			// back (e.g. scheduler's create_job and remind_me accept an
+			// `args` JSON object). Go's default %v formatter would emit
+			// "map[key:val]" which no JSON parser accepts.
+			b, err := json.Marshal(val)
+			if err != nil {
+				result[k] = fmt.Sprintf("%v", val)
+			} else {
+				result[k] = string(b)
+			}
 		default:
 			result[k] = fmt.Sprintf("%v", val)
 		}
