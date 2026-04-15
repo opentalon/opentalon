@@ -148,14 +148,9 @@ func (t *SchedulerTool) createJob(call orchestrator.ToolCall) orchestrator.ToolR
 		}
 	}
 
-	var args map[string]string
-	if raw, ok := call.Args["args"]; ok && raw != "" {
-		if err := json.Unmarshal([]byte(raw), &args); err != nil {
-			return orchestrator.ToolResult{
-				CallID: call.ID,
-				Error:  fmt.Sprintf("invalid args JSON: %v", err),
-			}
-		}
+	args, err := parseArgsField(call.Args["args"])
+	if err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
 	}
 
 	job := Job{
@@ -351,11 +346,11 @@ func (t *SchedulerTool) remindMe(ctx context.Context, call orchestrator.ToolCall
 	case action == "" && message == "":
 		return orchestrator.ToolResult{CallID: call.ID, Error: "remind_me: provide either 'message' or 'action'"}
 	case action != "":
-		if raw, ok := call.Args["args"]; ok && raw != "" {
-			if err := json.Unmarshal([]byte(raw), &args); err != nil {
-				return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("remind_me: invalid args JSON: %v", err)}
-			}
+		parsed, err := parseArgsField(call.Args["args"])
+		if err != nil {
+			return orchestrator.ToolResult{CallID: call.ID, Error: "remind_me: " + err.Error()}
 		}
+		args = parsed
 	}
 
 	// Sanitize senderID for job name (avoid ':' or spaces collisions).
@@ -379,4 +374,23 @@ func (t *SchedulerTool) remindMe(ctx context.Context, call orchestrator.ToolCall
 		CallID:  call.ID,
 		Content: fmt.Sprintf("Reminder set for %s: will run %s.", job.At, action),
 	}
+}
+
+// parseArgsField decodes the `args` tool parameter, which is expected as a
+// JSON object serialized to a string (e.g. `{"issue_id":"XYZ"}`). It is
+// intentionally lenient about empty or whitespace-only values because LLMs
+// often pass those when they mean "no args". Any non-JSON value produces a
+// detailed error that echoes the offending input so the model can self-correct.
+func parseArgsField(raw string) (map[string]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var args map[string]string
+	if err := json.Unmarshal([]byte(trimmed), &args); err != nil {
+		// Truncated or wrong format (e.g. Go's `map[k:v]` default stringification).
+		// Surface the offending value so the model can recover on the next turn.
+		return nil, fmt.Errorf("invalid args JSON %q: %w (expected a JSON object like {\"key\":\"value\"})", trimmed, err)
+	}
+	return args, nil
 }

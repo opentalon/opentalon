@@ -271,3 +271,39 @@ func TestToolMissingName(t *testing.T) {
 		}
 	}
 }
+
+func TestParseArgsField(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    map[string]string
+		wantErr bool
+	}{
+		{"empty", "", nil, false},
+		{"whitespace", "   \n\t  ", nil, false},
+		{"valid object", `{"issue_id":"XYZ"}`, map[string]string{"issue_id": "XYZ"}, false},
+		{"empty object", `{}`, map[string]string{}, false},
+		{"go map format", `map[issue_id:XYZ]`, nil, true},
+		{"truncated json", `{"issue_id":`, nil, true},
+		{"not an object", `"bare string"`, nil, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseArgsField(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Errorf("got[%q] = %q, want %q", k, got[k], v)
+				}
+			}
+		})
+	}
+}
