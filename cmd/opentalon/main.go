@@ -5,11 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
-
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -21,6 +21,7 @@ import (
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/dedup"
 	"github.com/opentalon/opentalon/internal/logger"
+	"github.com/opentalon/opentalon/internal/metrics"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/plugin"
@@ -77,6 +78,23 @@ func main() {
 		logLevel = env
 	}
 	logger.Setup(logLevel)
+
+	// Start Prometheus metrics server if enabled.
+	var metricsCollector *metrics.Collector
+	var metricsSrv *http.Server
+	if cfg.Metrics.Enabled {
+		metricsCollector = metrics.New()
+		addr := cfg.Metrics.Addr
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metricsCollector.Handler())
+		metricsSrv = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			slog.Info("metrics server listening", "addr", addr)
+			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("metrics server error", "error", err)
+			}
+		}()
+	}
 
 	// Fetch remote bootstrap config (if configured) and merge into static config.
 	// Remote entries are additive — static config wins on key conflicts.
@@ -379,10 +397,15 @@ func main() {
 		slog.Info("profile verification enabled", "url", cfg.Profiles.WhoAmI.URL)
 	}
 
-	// Build orchestrator usage recorder adapter (nil when usageStore is nil).
+	// Build orchestrator usage recorder adapter (nil when usageStore is nil and metrics disabled).
 	var usageRecorder orchestrator.UsageRecorder
-	if usageStore != nil {
-		usageRecorder = &usageRecorderAdapter{store: usageStore, provider: prov}
+	if usageStore != nil || metricsCollector != nil {
+		usageRecorder = &usageRecorderAdapter{store: usageStore, provider: prov, collector: metricsCollector}
+	}
+	// Avoid non-nil interface wrapping a nil pointer.
+	var pluginObserver orchestrator.PluginCallObserver
+	if metricsCollector != nil {
+		pluginObserver = metricsCollector
 	}
 
 	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, orchestrator.OrchestratorOpts{
@@ -402,6 +425,7 @@ func main() {
 		MaxConcurrentSessions:   cfg.Orchestrator.MaxConcurrentSessions,
 		GroupPluginLookup:       groupPluginStore,
 		UsageRecorder:           usageRecorder,
+		PluginCallObserver:      pluginObserver,
 	})
 
 	// Scheduler: wired after orchestrator so it can route job actions through orch.
@@ -540,6 +564,9 @@ func main() {
 	// be delivered via the channel registry. (deferred sched.Stop() above
 	// runs late — we want explicit ordering here.)
 	sched.Stop()
+	if metricsSrv != nil {
+		_ = metricsSrv.Shutdown(context.Background())
+	}
 	channelManager.StopAll()
 	pluginManager.StopAll()
 
@@ -586,11 +613,15 @@ func seedBootstrapGroupPlugins(ctx context.Context, gps *store.GroupPluginStore,
 
 // usageRecorderAdapter adapts store.UsageStore to orchestrator.UsageRecorder.
 type usageRecorderAdapter struct {
-	store    *store.UsageStore
-	provider provider.Provider
+	store     *store.UsageStore
+	provider  provider.Provider
+	collector *metrics.Collector
 }
 
 func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int) {
+	if a.store == nil && a.collector == nil {
+		return
+	}
 	var inputCostUSD, outputCostUSD float64
 	if modelID != "" && a.provider != nil {
 		for _, m := range a.provider.Models() {
@@ -602,19 +633,25 @@ func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupI
 			}
 		}
 	}
-	if err := a.store.Record(ctx, store.UsageRecord{
-		EntityID:     entityID,
-		GroupID:      groupID,
-		ChannelID:    channelID,
-		SessionID:    sessionID,
-		ModelID:      modelID,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-		ToolCalls:    toolCalls,
-		InputCost:    inputCostUSD,
-		OutputCost:   outputCostUSD,
-	}); err != nil {
-		slog.Warn("usage record failed", "entity", entityID, "error", err)
+	if a.store != nil {
+		if err := a.store.Record(ctx, store.UsageRecord{
+			EntityID:     entityID,
+			GroupID:      groupID,
+			ChannelID:    channelID,
+			SessionID:    sessionID,
+			ModelID:      modelID,
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+			ToolCalls:    toolCalls,
+			InputCost:    inputCostUSD,
+			OutputCost:   outputCostUSD,
+		}); err != nil {
+			slog.Warn("usage record failed", "entity", entityID, "error", err)
+		}
+	}
+	if a.collector != nil {
+		a.collector.RecordUsage(ctx, entityID, groupID, channelID, sessionID, modelID,
+			inputTokens, outputTokens, toolCalls, inputCostUSD, outputCostUSD)
 	}
 }
 
