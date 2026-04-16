@@ -336,7 +336,15 @@ func (t *SchedulerTool) updateJob(ctx context.Context, call orchestrator.ToolCal
 	if err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
 	}
-	if err := t.sched.UpdateJob(name, caller.userID, interval, cronExpr, notifyChannel); err != nil {
+	// If the caller is switching notify channels, the stored conversation id
+	// belongs to the previous channel and is meaningless on the new one —
+	// refresh it from the caller's current context (same rule as create_job).
+	var notifyConversationID *string
+	if notifyChannel != nil {
+		cid := caller.conversationID
+		notifyConversationID = &cid
+	}
+	if err := t.sched.UpdateJob(name, caller.userID, interval, cronExpr, notifyChannel, notifyConversationID); err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
 	}
 	return orchestrator.ToolResult{
