@@ -226,6 +226,27 @@ func TestClientDialFailure(t *testing.T) {
 	}
 }
 
+func TestInjectContextArgsMappedFromProto(t *testing.T) {
+	pb := &pluginpb.PluginCapabilities{
+		Name:        "myplugin",
+		Description: "Test plugin",
+		Actions: []*pluginpb.Action{
+			{Name: "save_cred", Description: "Save", InjectContextArgs: []string{"actor_id"}},
+			{Name: "navigate", Description: "Nav"},
+		},
+	}
+	cap := toPluginCapability(pb)
+	if len(cap.Actions) != 2 {
+		t.Fatalf("expected 2 actions, got %d", len(cap.Actions))
+	}
+	if len(cap.Actions[0].InjectContextArgs) != 1 || cap.Actions[0].InjectContextArgs[0] != "actor_id" {
+		t.Errorf("InjectContextArgs = %v, want [actor_id]", cap.Actions[0].InjectContextArgs)
+	}
+	if len(cap.Actions[1].InjectContextArgs) != 0 {
+		t.Errorf("navigate should have no InjectContextArgs, got %v", cap.Actions[1].InjectContextArgs)
+	}
+}
+
 func TestUserOnlyMappedFromProto(t *testing.T) {
 	// Verify that user_only=true in the proto Action is carried through to orchestrator.Action.
 	pb := &pluginpb.PluginCapabilities{

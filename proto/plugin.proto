@@ -48,6 +48,7 @@ message Action {
   string description = 2;
   repeated Parameter parameters = 3;
   bool user_only = 4; // if true, hidden from LLM and blocked from LLM-sourced calls; only invocable directly by the user
+  repeated string inject_context_args = 5; // context arg names (e.g. "actor_id") the host injects from request context before calling Execute
 }
 
 message Parameter {

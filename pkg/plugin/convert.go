@@ -19,9 +19,11 @@ func capsToProto(c CapabilitiesMsg) *pluginpb.PluginCapabilities {
 			}
 		}
 		actions[i] = &pluginpb.Action{
-			Name:        a.Name,
-			Description: a.Description,
-			Parameters:  params,
+			Name:              a.Name,
+			Description:       a.Description,
+			Parameters:        params,
+			UserOnly:          a.UserOnly,
+			InjectContextArgs: a.InjectContextArgs,
 		}
 	}
 	return &pluginpb.PluginCapabilities{

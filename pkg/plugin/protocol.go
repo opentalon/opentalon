@@ -38,9 +38,11 @@ type CapabilitiesMsg struct {
 
 // ActionMsg describes one action a plugin supports.
 type ActionMsg struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Parameters  []ParameterMsg `json:"parameters,omitempty"`
+	Name              string         `json:"name"`
+	Description       string         `json:"description"`
+	Parameters        []ParameterMsg `json:"parameters,omitempty"`
+	InjectContextArgs []string       `json:"inject_context_args,omitempty"` // context arg names (e.g. "actor_id") the host injects before calling Execute
+	UserOnly          bool           `json:"user_only,omitempty"`           // if true, hidden from LLM and only invocable directly by the user
 }
 
 // ParameterMsg describes one parameter of an action.
