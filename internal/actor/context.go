@@ -4,6 +4,7 @@ import "context"
 
 type contextKey struct{}
 type sessionKey struct{}
+type conversationKey struct{}
 
 // WithActor returns a context that carries the given actor ID (e.g. channel_id:sender_id).
 // Use Actor(ctx) to retrieve it. When the request has no actor, do not call WithActor.
@@ -41,6 +42,30 @@ func SessionID(ctx context.Context) string {
 		return ""
 	}
 	v := ctx.Value(sessionKey{})
+	if v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// WithConversationID returns a context that carries the inbound message's
+// conversation ID (e.g. a Telegram chat_id or Slack channel ID). Scheduler jobs
+// use this to deliver results back to the specific conversation where they
+// were created. When empty, the original context is returned unchanged.
+func WithConversationID(ctx context.Context, conversationID string) context.Context {
+	if conversationID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, conversationKey{}, conversationID)
+}
+
+// ConversationID returns the conversation ID from the context, or empty string if not set.
+func ConversationID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v := ctx.Value(conversationKey{})
 	if v == nil {
 		return ""
 	}

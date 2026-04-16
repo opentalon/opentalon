@@ -49,6 +49,10 @@ func NewMessageHandler(
 			ctx = actor.WithActor(ctx, msg.ChannelID+":"+msg.SenderID)
 		}
 
+		// Carry the inbound conversation id so scheduler jobs (and anything
+		// else creating deferred work) can deliver results back to this chat.
+		ctx = actor.WithConversationID(ctx, msg.ConversationID)
+
 		ensureSession(sessionKey)
 		content := msg.Content
 		if prep := pkg.GetContentPreparer(msg.ChannelID); prep != nil {

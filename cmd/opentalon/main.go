@@ -671,11 +671,14 @@ type channelNotifier struct {
 	reg *channel.Registry
 }
 
-func (n *channelNotifier) Notify(ctx context.Context, channelID, content string) error {
+func (n *channelNotifier) Notify(ctx context.Context, channelID, conversationID, content string) error {
 	if n.reg == nil {
 		return fmt.Errorf("channel registry not yet initialized")
 	}
-	return n.reg.Send(ctx, channelID, chanpkg.OutboundMessage{Content: content})
+	return n.reg.Send(ctx, channelID, chanpkg.OutboundMessage{
+		ConversationID: conversationID,
+		Content:        content,
+	})
 }
 
 // channelRunner adapts the orchestrator to channel.Runner.

@@ -130,19 +130,22 @@ func (t *SchedulerTool) Execute(ctx context.Context, call orchestrator.ToolCall)
 // and will (in practice) invent ones that don't match the real caller —
 // making jobs disappear from list_jobs and from permission checks.
 type callerIdentity struct {
-	entityID  string // profile EntityID; empty when profile system is off
-	group     string // profile Group; empty when off
-	channelID string // where to deliver notifications
-	userID    string // stable ID for approver/limit checks and CreatedBy
+	entityID       string // profile EntityID; empty when profile system is off
+	group          string // profile Group; empty when off
+	channelID      string // channel plugin id (e.g. "telegram") — where to deliver notifications
+	conversationID string // specific chat/room on channelID — required for delivery
+	userID         string // stable ID for approver/limit checks and CreatedBy
 }
 
 func resolveCaller(ctx context.Context) (callerIdentity, error) {
+	convID := actor.ConversationID(ctx)
 	if p := profile.FromContext(ctx); p != nil && p.EntityID != "" {
 		return callerIdentity{
-			entityID:  p.EntityID,
-			group:     p.Group,
-			channelID: p.ChannelID,
-			userID:    p.EntityID,
+			entityID:       p.EntityID,
+			group:          p.Group,
+			channelID:      p.ChannelID,
+			conversationID: convID,
+			userID:         p.EntityID,
 		}, nil
 	}
 	actorID := actor.Actor(ctx)
@@ -154,8 +157,9 @@ func resolveCaller(ctx context.Context) (callerIdentity, error) {
 		return callerIdentity{}, fmt.Errorf("malformed actor %q, expected channel_id:sender_id", actorID)
 	}
 	return callerIdentity{
-		channelID: parts[0],
-		userID:    parts[1],
+		channelID:      parts[0],
+		conversationID: convID,
+		userID:         parts[1],
 	}, nil
 }
 
@@ -193,14 +197,15 @@ func (t *SchedulerTool) createJob(ctx context.Context, call orchestrator.ToolCal
 	}
 
 	job := Job{
-		Name:          name,
-		Interval:      interval,
-		Cron:          cronExpr,
-		Action:        action,
-		Args:          args,
-		NotifyChannel: notifyChannel,
-		EntityID:      caller.entityID,
-		Group:         caller.group,
+		Name:                 name,
+		Interval:             interval,
+		Cron:                 cronExpr,
+		Action:               action,
+		Args:                 args,
+		NotifyChannel:        notifyChannel,
+		NotifyConversationID: caller.conversationID,
+		EntityID:             caller.entityID,
+		Group:                caller.group,
 	}
 
 	if err := t.sched.AddJob(job, caller.userID); err != nil {
@@ -382,13 +387,14 @@ func (t *SchedulerTool) remindMe(ctx context.Context, call orchestrator.ToolCall
 	name := fmt.Sprintf("remind-%s-%d", nameSafeSender, time.Now().UnixNano())
 
 	job := Job{
-		Name:          name,
-		At:            fireTime.UTC().Format(time.RFC3339),
-		Action:        action,
-		Args:          args,
-		NotifyChannel: caller.channelID,
-		EntityID:      caller.entityID,
-		Group:         caller.group,
+		Name:                 name,
+		At:                   fireTime.UTC().Format(time.RFC3339),
+		Action:               action,
+		Args:                 args,
+		NotifyChannel:        caller.channelID,
+		NotifyConversationID: caller.conversationID,
+		EntityID:             caller.entityID,
+		Group:                caller.group,
 	}
 	if err := t.sched.AddPersonalJob(job, caller.userID); err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
