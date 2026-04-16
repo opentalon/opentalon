@@ -210,9 +210,16 @@ func stripSurroundingQuotes(s string) string {
 
 // internalBlockTags lists the open/close tag pairs for internal protocol
 // blocks that must never be forwarded to channel users.
+//
+// The <function_calls> and <function_calls> pairs are Claude's native
+// function-call XML. Our prompt tells models to use [tool_call], but trained
+// behaviour occasionally leaks through in the reply; strip it so end users
+// don't see raw protocol tags.
 var internalBlockTags = [][2]string{
 	{"[tool_call]", "[/tool_call]"},
 	{"[plugin_output]", "[/plugin_output]"},
+	{"<function_calls>", "</function_calls>"},
+	{"<" + "antml:function_calls>", "<" + "/antml:function_calls>"},
 }
 
 // StripInternalBlocks removes any internal protocol blocks from s

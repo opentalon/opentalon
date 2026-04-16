@@ -241,6 +241,21 @@ func TestStripInternalBlocks(t *testing.T) {
 			input: "before [tool_call]no closing",
 			want:  "before",
 		},
+		{
+			name:  "strips claude native function_calls xml",
+			input: "Sure thing.\n<function_calls>\n<invoke name=\"scheduler.update_job\">\n<parameter name=\"name\">foo</parameter>\n</invoke>\n</function_calls>\nDone.",
+			want:  "Sure thing.\n\nDone.",
+		},
+		{
+			name:  "strips antml namespaced function_calls xml",
+			input: "Let me check.\n<" + "antml:function_calls><" + "antml:invoke name=\"x.y\"/><" + "/antml:function_calls>\nok",
+			want:  "Let me check.\n\nok",
+		},
+		{
+			name:  "strips function_calls with no closing tag",
+			input: "You're absolutely right! Let me update.\n<function_calls>\n<invoke",
+			want:  "You're absolutely right! Let me update.",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

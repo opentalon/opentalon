@@ -623,8 +623,7 @@ func (s *Scheduler) executeJob(rj *runningJob) {
 					"component", "scheduler", "job", job.Name, "channel", job.NotifyChannel)
 			}
 		} else {
-			msg := fmt.Sprintf("[scheduled: %s] %s", job.Name, result)
-			if err := s.notifier.Notify(s.ctx, job.NotifyChannel, job.NotifyConversationID, msg); err != nil {
+			if err := s.notifier.Notify(s.ctx, job.NotifyChannel, job.NotifyConversationID, result); err != nil {
 				slog.Warn("job notify failed", "component", "scheduler", "job", job.Name, "error", err)
 			}
 		}
