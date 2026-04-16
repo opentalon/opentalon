@@ -167,6 +167,79 @@ func TestToolCreateCapturesConversationID(t *testing.T) {
 	}
 }
 
+// Regression: Haiku-class models routinely pass `message` as a top-level arg
+// to create_job instead of wrapping it in `args`. The shortcut must map that
+// to args={"message": ...} so reminder.say works on first fire.
+func TestToolCreateJobMessageShortcut(t *testing.T) {
+	tool := newTestTool(t)
+
+	result := tool.Execute(testCtx("diana"), orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "create_job",
+		Args: map[string]string{
+			"name":     "lenin_quote_spam",
+			"interval": "2m",
+			"action":   "reminder.say",
+			"message":  "There are decades where nothing happens; and there are weeks where decades happen. - Lenin",
+		},
+	})
+	if result.Error != "" {
+		t.Fatalf("create_job error: %s", result.Error)
+	}
+
+	j, ok := tool.sched.GetJob("lenin_quote_spam")
+	if !ok {
+		t.Fatal("job not found")
+	}
+	if got := j.Args["message"]; !strings.HasPrefix(got, "There are decades") {
+		t.Errorf("args[message] = %q, want the Lenin quote", got)
+	}
+}
+
+// Passing both 'message' and 'args' is ambiguous — error rather than guess.
+func TestToolCreateJobMessageAndArgsConflict(t *testing.T) {
+	tool := newTestTool(t)
+
+	result := tool.Execute(testCtx("diana"), orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "create_job",
+		Args: map[string]string{
+			"name":     "conflict",
+			"interval": "1h",
+			"action":   "reminder.say",
+			"message":  "hi",
+			"args":     `{"message":"also hi"}`,
+		},
+	})
+	if result.Error == "" {
+		t.Fatal("expected mutual-exclusion error")
+	}
+	if !strings.Contains(result.Error, "mutually exclusive") {
+		t.Errorf("error = %q, want mention of mutual exclusion", result.Error)
+	}
+}
+
+// An empty 'message' must not hide a bad 'args' — parseArgsField still runs.
+func TestToolCreateJobEmptyMessageFallsThroughToArgs(t *testing.T) {
+	tool := newTestTool(t)
+
+	result := tool.Execute(testCtx("diana"), orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "create_job",
+		Args: map[string]string{
+			"name":     "fall",
+			"interval": "1h",
+			"action":   "a.b",
+			"message":  "",
+			"args":     `{"key":"val"}`,
+		},
+	})
+	if result.Error != "" {
+		t.Fatalf("create_job error: %s", result.Error)
+	}
+	j, _ := tool.sched.GetJob("fall")
+	if j.Args["key"] != "val" {
+		t.Errorf("args = %v, want key=val", j.Args)
+	}
+}
+
 func TestToolCreateBadArgsJSON(t *testing.T) {
 	tool := newTestTool(t)
 

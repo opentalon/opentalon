@@ -37,7 +37,8 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 					{Name: "interval", Description: "Go duration string, e.g. 30m, 1h, 24h (mutually exclusive with cron)", Required: false},
 					{Name: "cron", Description: "5-field cron expression, e.g. '0 9 * * *' (mutually exclusive with interval)", Required: false},
 					{Name: "action", Description: "Plugin action in format plugin.action", Required: true},
-					{Name: "args", Description: "JSON object with action arguments", Required: false},
+					{Name: "args", Description: "JSON object with action arguments (mutually exclusive with 'message')", Required: false},
+					{Name: "message", Description: "Shortcut for args={\"message\":\"...\"} — use this for reminder.say and similar message-only actions instead of JSON-encoding args", Required: false},
 					{Name: "notify_channel", Description: "Channel ID to send results to (defaults to the current channel)", Required: false},
 				},
 			},
@@ -191,9 +192,25 @@ func (t *SchedulerTool) createJob(ctx context.Context, call orchestrator.ToolCal
 		notifyChannel = caller.channelID
 	}
 
-	args, err := parseArgsField(call.Args["args"])
-	if err != nil {
-		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
+	// 'message' is a shortcut for args={"message": ...}. Haiku-class models
+	// routinely emit `message=...` at top level when scheduling reminder.say
+	// (the schema of remind_me primes them for it). Without this shortcut the
+	// stray arg is silently dropped, the job is persisted with empty args, and
+	// it fails on first fire with "message is required".
+	message := call.Args["message"]
+	rawArgs := call.Args["args"]
+	var args map[string]string
+	switch {
+	case message != "" && strings.TrimSpace(rawArgs) != "":
+		return orchestrator.ToolResult{CallID: call.ID, Error: "'message' and 'args' are mutually exclusive — use one"}
+	case message != "":
+		args = map[string]string{"message": message}
+	default:
+		parsed, err := parseArgsField(rawArgs)
+		if err != nil {
+			return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
+		}
+		args = parsed
 	}
 
 	job := Job{
