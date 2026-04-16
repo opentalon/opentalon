@@ -37,7 +37,7 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 					{Name: "interval", Description: "Go duration string, e.g. 30m, 1h, 24h (mutually exclusive with cron)", Required: false},
 					{Name: "cron", Description: "5-field cron expression, e.g. '0 9 * * *' (mutually exclusive with interval)", Required: false},
 					{Name: "action", Description: "Plugin action in format plugin.action", Required: true},
-					{Name: "args", Description: "JSON object with action arguments (mutually exclusive with 'message')", Required: false},
+					{Name: "args", Description: "JSON-encoded object passed as a string, e.g. args={\"issue_id\":\"XYZ\"}. Action-specific keys MUST go inside this object, NOT at top level (top-level unknown keys are rejected). Mutually exclusive with 'message'.", Required: false},
 					{Name: "message", Description: "Shortcut for args={\"message\":\"...\"} — use this for reminder.say and similar message-only actions instead of JSON-encoding args", Required: false},
 					{Name: "notify_channel", Description: "Channel ID to send results to (defaults to the current channel)", Required: false},
 				},
@@ -84,7 +84,7 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 					{Name: "at", Description: "Absolute RFC3339 UTC timestamp when the reminder should fire (e.g. 2026-04-15T17:00:00Z)", Required: true},
 					{Name: "message", Description: "Literal text to deliver; shortcut for action=reminder.say", Required: false},
 					{Name: "action", Description: "Plugin action in the form plugin.action (omit if using message)", Required: false},
-					{Name: "args", Description: "JSON object with action arguments (omit if using message)", Required: false},
+					{Name: "args", Description: "JSON-encoded object passed as a string, e.g. args={\"issue_id\":\"XYZ\"}. Action-specific keys MUST go inside this object, NOT at top level (top-level unknown keys are rejected). Omit if using 'message'.", Required: false},
 				},
 			},
 			{
