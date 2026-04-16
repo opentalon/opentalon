@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -861,6 +862,18 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		}
 	}
 
+	// Expose the caller's channel and conversation id so the LLM knows what
+	// "the current channel" means when a tool parameter says it defaults to
+	// it. Without this, small models (e.g. Haiku) fail to invoke tools like
+	// scheduler.create_job on non-Slack channels because they pattern-match
+	// the Slack-shaped channel ids in other tool schemas and conclude they
+	// don't have a valid one on Telegram/Discord/etc.
+	if session := sessionDescriptor(ctx); session != "" {
+		sb.WriteString("## Current session\n")
+		sb.WriteString(session)
+		sb.WriteString("\nWhen a tool parameter's description says it defaults to the current channel or conversation, OMIT it — the host injects these values automatically. Do not try to invent or ask for an id.\n\n")
+	}
+
 	// Don't list content-preparer or guard actions as tools; they run automatically before LLM calls.
 	preparerAction := make(map[string]bool)
 	for _, prep := range o.preparers {
@@ -915,6 +928,39 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		sb.WriteString("\n")
 	}
 
+	return sb.String()
+}
+
+// sessionDescriptor returns a 1-2 line string describing the caller's current
+// channel and conversation for injection into the system prompt. Returns an
+// empty string when neither is known (e.g. in unit tests) so the block can
+// be safely omitted rather than rendering an empty "## Current session".
+func sessionDescriptor(ctx context.Context) string {
+	channelID := ""
+	if p := profile.FromContext(ctx); p != nil && p.ChannelID != "" {
+		channelID = p.ChannelID
+	} else if a := actor.Actor(ctx); a != "" {
+		// Classic mode: actor is "channel:sender". Take the channel prefix.
+		if i := strings.IndexByte(a, ':'); i > 0 {
+			channelID = a[:i]
+		}
+	}
+	conversationID := actor.ConversationID(ctx)
+	if channelID == "" && conversationID == "" {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("You are currently on")
+	if channelID != "" {
+		fmt.Fprintf(&sb, " channel `%s`", channelID)
+	}
+	if conversationID != "" {
+		if channelID != "" {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, " conversation `%s`", conversationID)
+	}
+	sb.WriteString(".\n")
 	return sb.String()
 }
 
@@ -1011,6 +1057,37 @@ func (o *Orchestrator) runInvokeSteps(ctx context.Context, steps []InvokeStep) (
 	}, nil
 }
 
+// rejectUnknownArgs returns a non-nil error listing args in call.Args that
+// are not declared as Parameters on the action. The error message also lists
+// the allowed parameter names so the LLM can self-correct on the next turn.
+func rejectUnknownArgs(call ToolCall, action *Action) error {
+	allowed := make(map[string]struct{}, len(action.Parameters))
+	for _, p := range action.Parameters {
+		allowed[p.Name] = struct{}{}
+	}
+	var unknown []string
+	for k := range call.Args {
+		if _, ok := allowed[k]; !ok {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	allowedList := make([]string, 0, len(allowed))
+	for k := range allowed {
+		allowedList = append(allowedList, k)
+	}
+	sort.Strings(allowedList)
+	allowedStr := "(none)"
+	if len(allowedList) > 0 {
+		allowedStr = strings.Join(allowedList, ", ")
+	}
+	return fmt.Errorf("unknown argument(s) for %s.%s: %s; allowed: %s",
+		call.Plugin, call.Action, strings.Join(unknown, ", "), allowedStr)
+}
+
 func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResult {
 	exec, ok := o.registry.GetExecutor(call.Plugin)
 	if !ok {
@@ -1076,6 +1153,20 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		return ToolResult{
 			CallID: call.ID,
 			Error:  fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
+		}
+	}
+	// Reject unknown args from LLM-originated calls. Without this, stray keys
+	// (e.g. Haiku emitting `message=` at top level instead of inside `args`)
+	// are silently dropped; the call reaches the plugin with empty args and
+	// fails later with an error the LLM can't trace back to its own mistake.
+	// Internal callers (pipelines, permission checks, context preparers) are
+	// exempt — they construct calls programmatically and may legitimately use
+	// names outside the declared Parameters set. InjectContextArgs are not
+	// accepted from the LLM; the host injects them below.
+	if call.FromLLM && action != nil && len(call.Args) > 0 {
+		if err := rejectUnknownArgs(call, action); err != nil {
+			slog.Warn("BLOCKED LLM call with unknown args", "plugin", call.Plugin, "action", call.Action, "error", err.Error())
+			return ToolResult{CallID: call.ID, Error: err.Error()}
 		}
 	}
 	if action != nil {

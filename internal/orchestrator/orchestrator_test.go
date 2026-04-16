@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 	pkgchannel "github.com/opentalon/opentalon/pkg/channel"
@@ -89,7 +91,7 @@ func setupOrchestrator(llm LLMClient, parser ToolCallParser) (*Orchestrator, str
 		Name:        "gitlab",
 		Description: "GitLab integration",
 		Actions: []Action{
-			{Name: "analyze_code", Description: "Analyze code"},
+			{Name: "analyze_code", Description: "Analyze code", Parameters: []Parameter{{Name: "repo", Description: "Repository"}}},
 			{Name: "create_pr", Description: "Create PR"},
 		},
 	}, &echoExecutor{})
@@ -1321,6 +1323,86 @@ func setupUserOnlyOrchestrator(parser ToolCallParser) *Orchestrator {
 	return New(&fakeLLM{responses: []string{"ok"}}, parser, registry, memory, sessions)
 }
 
+// Small models (Haiku in particular) can't invoke tools whose descriptions
+// say "defaults to the current channel" because they have no idea what
+// channel they are on. Expose channel + conversation in the prompt.
+func TestSystemPromptIncludesCurrentSessionClassic(t *testing.T) {
+	orch := setupUserOnlyOrchestrator(&fakeParser{parseFn: func(string) []ToolCall { return nil }})
+	ctx := actor.WithActor(context.Background(), "telegram:user42")
+	ctx = actor.WithConversationID(ctx, "chat-999")
+
+	prompt := orch.buildSystemPrompt(ctx, "test")
+
+	if !strings.Contains(prompt, "## Current session") {
+		t.Error("expected '## Current session' header in prompt")
+	}
+	if !strings.Contains(prompt, "telegram") {
+		t.Errorf("expected channel 'telegram' in prompt: %s", prompt)
+	}
+	if !strings.Contains(prompt, "chat-999") {
+		t.Errorf("expected conversation 'chat-999' in prompt: %s", prompt)
+	}
+	if !strings.Contains(prompt, "OMIT") {
+		t.Error("expected instruction to omit current-channel parameters")
+	}
+}
+
+func TestSystemPromptIncludesCurrentSessionProfileMode(t *testing.T) {
+	orch := setupUserOnlyOrchestrator(&fakeParser{parseFn: func(string) []ToolCall { return nil }})
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{
+		EntityID:  "ent-7",
+		ChannelID: "slack",
+	})
+	ctx = actor.WithConversationID(ctx, "C-abc")
+
+	prompt := orch.buildSystemPrompt(ctx, "test")
+
+	if !strings.Contains(prompt, "channel `slack`") {
+		t.Errorf("expected channel 'slack' (profile mode) in prompt: %s", prompt)
+	}
+	if !strings.Contains(prompt, "conversation `C-abc`") {
+		t.Errorf("expected conversation 'C-abc' in prompt: %s", prompt)
+	}
+}
+
+// When ctx carries no channel/conversation (e.g. tests or background jobs),
+// the section must be omitted — not rendered as an empty block.
+func TestSystemPromptOmitsCurrentSessionWhenMissing(t *testing.T) {
+	orch := setupUserOnlyOrchestrator(&fakeParser{parseFn: func(string) []ToolCall { return nil }})
+	prompt := orch.buildSystemPrompt(context.Background(), "test")
+
+	if strings.Contains(prompt, "## Current session") {
+		t.Error("session block should not appear when ctx has neither channel nor conversation")
+	}
+}
+
+func TestSessionDescriptorPartialContext(t *testing.T) {
+	// Only conversation known: should render conversation but no channel.
+	ctx := actor.WithConversationID(context.Background(), "c-1")
+	got := sessionDescriptor(ctx)
+	if !strings.Contains(got, "conversation `c-1`") {
+		t.Errorf("conversation-only: got %q", got)
+	}
+	if strings.Contains(got, "channel") {
+		t.Errorf("conversation-only: should not mention channel; got %q", got)
+	}
+
+	// Only channel known (no conversation): should render channel.
+	ctx = actor.WithActor(context.Background(), "slack:diana")
+	got = sessionDescriptor(ctx)
+	if !strings.Contains(got, "channel `slack`") {
+		t.Errorf("channel-only: got %q", got)
+	}
+	if strings.Contains(got, "conversation") {
+		t.Errorf("channel-only: should not mention conversation; got %q", got)
+	}
+
+	// Neither known: empty string.
+	if got := sessionDescriptor(context.Background()); got != "" {
+		t.Errorf("empty ctx: expected empty string, got %q", got)
+	}
+}
+
 func TestUserOnlyActionHiddenFromSystemPrompt(t *testing.T) {
 	orch := setupUserOnlyOrchestrator(&fakeParser{parseFn: func(string) []ToolCall { return nil }})
 	prompt := orch.buildSystemPrompt(context.Background(), "test")
@@ -1418,6 +1500,155 @@ func TestUserOnlyFromLLMFlagSetOnParsedCalls(t *testing.T) {
 	}
 	if !capturedCall.FromLLM {
 		t.Error("FromLLM should be true for calls parsed from LLM output")
+	}
+}
+
+// Regression: Haiku-class models emit action-specific keys at the top level
+// of a tool call instead of wrapping them in declared parameters like `args`.
+// Prior behavior silently dropped them; the call reached the plugin with
+// empty args and failed much later with a cryptic error. executeCall now
+// rejects unknown args on LLM-originated calls so the LLM can self-correct.
+func TestUnknownArgsRejectedForLLMCall(t *testing.T) {
+	captureExec := &capturingExecutor{fn: func(c ToolCall) ToolResult {
+		t.Fatalf("plugin must not be invoked for rejected call; got args=%v", c.Args)
+		return ToolResult{}
+	}}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "tools", Description: "Tools",
+		Actions: []Action{{Name: "run", Description: "Run it", Parameters: []Parameter{
+			{Name: "name", Description: "Name", Required: true},
+		}}},
+	}, captureExec)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	callNum := 0
+	parser := &fakeParser{parseFn: func(string) []ToolCall {
+		callNum++
+		if callNum == 1 {
+			return []ToolCall{{ID: "c1", Plugin: "tools", Action: "run",
+				Args: map[string]string{"name": "ok", "stray": "oops"}}}
+		}
+		return nil
+	}}
+	orch := New(&fakeLLM{responses: []string{"[tool]", "done"}}, parser, registry, memory, sessions)
+	result, err := orch.Run(context.Background(), "s1", "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) == 0 {
+		t.Fatal("expected a tool result")
+	}
+	errMsg := result.Results[0].Error
+	if errMsg == "" {
+		t.Fatal("expected an error for unknown args")
+	}
+	if !strings.Contains(errMsg, "stray") {
+		t.Errorf("error %q should name the unknown arg", errMsg)
+	}
+	if !strings.Contains(errMsg, "name") {
+		t.Errorf("error %q should list allowed args", errMsg)
+	}
+}
+
+// Declared args should pass through unmolested.
+func TestDeclaredArgsAcceptedForLLMCall(t *testing.T) {
+	var capturedArgs map[string]string
+	captureExec := &capturingExecutor{fn: func(c ToolCall) ToolResult {
+		capturedArgs = c.Args
+		return ToolResult{CallID: c.ID, Content: "ok"}
+	}}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "tools", Description: "Tools",
+		Actions: []Action{{Name: "run", Description: "Run it", Parameters: []Parameter{
+			{Name: "name", Description: "Name", Required: true},
+		}}},
+	}, captureExec)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	callNum := 0
+	parser := &fakeParser{parseFn: func(string) []ToolCall {
+		callNum++
+		if callNum == 1 {
+			return []ToolCall{{ID: "c1", Plugin: "tools", Action: "run",
+				Args: map[string]string{"name": "ok"}}}
+		}
+		return nil
+	}}
+	orch := New(&fakeLLM{responses: []string{"[tool]", "done"}}, parser, registry, memory, sessions)
+	if _, err := orch.Run(context.Background(), "s1", "go"); err != nil {
+		t.Fatal(err)
+	}
+	if capturedArgs["name"] != "ok" {
+		t.Errorf("name = %q, want ok", capturedArgs["name"])
+	}
+}
+
+// Internal callers (pipelines, content preparers, permission checks) don't
+// carry declared schemas through — they construct ToolCalls programmatically.
+// Unknown-args validation must not fire for FromLLM=false calls.
+func TestUnknownArgsNotRejectedForInternalCall(t *testing.T) {
+	var invoked bool
+	captureExec := &capturingExecutor{fn: func(c ToolCall) ToolResult {
+		invoked = true
+		return ToolResult{CallID: c.ID, Content: "ok"}
+	}}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "tools", Description: "Tools",
+		Actions: []Action{{Name: "run", Description: "Run it"}},
+	}, captureExec)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	orch := New(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions)
+
+	// FromLLM is false by default for constructed calls.
+	result := orch.executeCall(context.Background(), ToolCall{
+		ID: "c1", Plugin: "tools", Action: "run",
+		Args: map[string]string{"anything": "goes"},
+	})
+	if result.Error != "" {
+		t.Fatalf("internal call should not be rejected; got error %q", result.Error)
+	}
+	if !invoked {
+		t.Error("plugin should have been invoked")
+	}
+}
+
+func TestRejectUnknownArgsErrorFormat(t *testing.T) {
+	action := &Action{
+		Name: "do", Parameters: []Parameter{
+			{Name: "a"}, {Name: "b"},
+		},
+	}
+	call := ToolCall{Plugin: "p", Action: "do", Args: map[string]string{
+		"a": "1", "c": "3", "z": "9",
+	}}
+	err := rejectUnknownArgs(call, action)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	// Unknowns + allowed list must both be sorted so error messages are stable.
+	if !strings.Contains(msg, "c, z") {
+		t.Errorf("expected sorted unknowns 'c, z' in %q", msg)
+	}
+	if !strings.Contains(msg, "a, b") {
+		t.Errorf("expected sorted allowed 'a, b' in %q", msg)
+	}
+
+	// When all args are declared, no error.
+	if err := rejectUnknownArgs(ToolCall{Args: map[string]string{"a": "1"}}, action); err != nil {
+		t.Errorf("unexpected error for all-declared args: %v", err)
+	}
+
+	// When action has no params, any arg is unknown; allowed list renders as "(none)".
+	err = rejectUnknownArgs(ToolCall{Plugin: "p", Action: "do", Args: map[string]string{"x": "1"}}, &Action{Name: "do"})
+	if err == nil || !strings.Contains(err.Error(), "(none)") {
+		t.Errorf("expected '(none)' allowed list, got %v", err)
 	}
 }
 
@@ -1588,7 +1819,7 @@ func setupOrchestratorWithOpts(llm LLMClient, parser ToolCallParser, opts Orches
 		Name:        "gitlab",
 		Description: "GitLab integration",
 		Actions: []Action{
-			{Name: "analyze_code", Description: "Analyze code"},
+			{Name: "analyze_code", Description: "Analyze code", Parameters: []Parameter{{Name: "repo", Description: "Repository"}}},
 			{Name: "create_pr", Description: "Create PR"},
 		},
 	}, &echoExecutor{})

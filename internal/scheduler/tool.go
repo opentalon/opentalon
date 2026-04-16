@@ -31,14 +31,15 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 		Actions: []orchestrator.Action{
 			{
 				Name:        "create_job",
-				Description: "Create a new scheduled job. Provide exactly one of interval or cron. Requires user approval before calling.",
+				Description: "Create a new scheduled job. Provide exactly one of interval or cron. Requires user approval before calling. To schedule recurring delivery of a static message (e.g. 'send me a Ford quote every minute'), set action=\"reminder.say\" and pass the literal text via the 'message' parameter — the scheduler will deliver it to the current channel automatically. External plugins/APIs are only needed when the scheduled job must fetch fresh data each run.",
 				Parameters: []orchestrator.Parameter{
 					{Name: "name", Description: "Unique job name (slug)", Required: true},
 					{Name: "interval", Description: "Go duration string, e.g. 30m, 1h, 24h (mutually exclusive with cron)", Required: false},
 					{Name: "cron", Description: "5-field cron expression, e.g. '0 9 * * *' (mutually exclusive with interval)", Required: false},
 					{Name: "action", Description: "Plugin action in format plugin.action", Required: true},
-					{Name: "args", Description: "JSON object with action arguments", Required: false},
-					{Name: "notify_channel", Description: "Channel ID to send results to (defaults to the current channel)", Required: false},
+					{Name: "args", Description: "JSON-encoded object passed as a string, e.g. args={\"issue_id\":\"XYZ\"}. Action-specific keys MUST go inside this object, NOT at top level (top-level unknown keys are rejected). Mutually exclusive with 'message'.", Required: false},
+					{Name: "message", Description: "Shortcut for args={\"message\":\"...\"} — use this for reminder.say and similar message-only actions instead of JSON-encoding args", Required: false},
+					{Name: "notify_channel", Description: "OMIT this parameter in almost all cases. Defaults to the caller's current channel (works for Telegram, Slack, Discord, or any other channel identically — no channel-specific format is required). Only set this when the user explicitly asks to deliver results somewhere other than the current conversation.", Required: false},
 				},
 			},
 			{
@@ -83,7 +84,7 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 					{Name: "at", Description: "Absolute RFC3339 UTC timestamp when the reminder should fire (e.g. 2026-04-15T17:00:00Z)", Required: true},
 					{Name: "message", Description: "Literal text to deliver; shortcut for action=reminder.say", Required: false},
 					{Name: "action", Description: "Plugin action in the form plugin.action (omit if using message)", Required: false},
-					{Name: "args", Description: "JSON object with action arguments (omit if using message)", Required: false},
+					{Name: "args", Description: "JSON-encoded object passed as a string, e.g. args={\"issue_id\":\"XYZ\"}. Action-specific keys MUST go inside this object, NOT at top level (top-level unknown keys are rejected). Omit if using 'message'.", Required: false},
 				},
 			},
 			{
@@ -93,7 +94,7 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 					{Name: "name", Description: "Job name to update", Required: true},
 					{Name: "interval", Description: "New interval (optional, mutually exclusive with cron)", Required: false},
 					{Name: "cron", Description: "New cron expression (optional, mutually exclusive with interval)", Required: false},
-					{Name: "notify_channel", Description: "New notify channel (optional)", Required: false},
+					{Name: "notify_channel", Description: "New notify channel (optional). Setting this to the current channel name (e.g. 'telegram', 'slack') also refreshes the job's stored conversation id to the caller's current one.", Required: false},
 				},
 			},
 		},
@@ -191,9 +192,25 @@ func (t *SchedulerTool) createJob(ctx context.Context, call orchestrator.ToolCal
 		notifyChannel = caller.channelID
 	}
 
-	args, err := parseArgsField(call.Args["args"])
-	if err != nil {
-		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
+	// 'message' is a shortcut for args={"message": ...}. Haiku-class models
+	// routinely emit `message=...` at top level when scheduling reminder.say
+	// (the schema of remind_me primes them for it). Without this shortcut the
+	// stray arg is silently dropped, the job is persisted with empty args, and
+	// it fails on first fire with "message is required".
+	message := call.Args["message"]
+	rawArgs := call.Args["args"]
+	var args map[string]string
+	switch {
+	case message != "" && strings.TrimSpace(rawArgs) != "":
+		return orchestrator.ToolResult{CallID: call.ID, Error: "'message' and 'args' are mutually exclusive — use one"}
+	case message != "":
+		args = map[string]string{"message": message}
+	default:
+		parsed, err := parseArgsField(rawArgs)
+		if err != nil {
+			return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
+		}
+		args = parsed
 	}
 
 	job := Job{
