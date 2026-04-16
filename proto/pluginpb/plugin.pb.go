@@ -269,9 +269,10 @@ type Action struct {
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
 	Parameters    []*Parameter           `protobuf:"bytes,3,rep,name=parameters,proto3" json:"parameters,omitempty"`
-	UserOnly      bool                   `protobuf:"varint,4,opt,name=user_only,json=userOnly,proto3" json:"user_only,omitempty"` // if true, hidden from LLM and blocked from LLM-sourced calls; only invocable directly by the user
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	UserOnly         bool     `protobuf:"varint,4,opt,name=user_only,json=userOnly,proto3" json:"user_only,omitempty"`                                        // if true, hidden from LLM and blocked from LLM-sourced calls; only invocable directly by the user
+	InjectContextArgs []string `protobuf:"bytes,5,rep,name=inject_context_args,json=injectContextArgs,proto3" json:"inject_context_args,omitempty"` // context arg names the host injects from request context before calling Execute
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Action) Reset() {
@@ -330,6 +331,13 @@ func (x *Action) GetUserOnly() bool {
 		return x.UserOnly
 	}
 	return false
+}
+
+func (x *Action) GetInjectContextArgs() []string {
+	if x != nil {
+		return x.InjectContextArgs
+	}
+	return nil
 }
 
 type Parameter struct {

@@ -137,10 +137,11 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 			}
 		}
 		actions[i] = orchestrator.Action{
-			Name:        a.Name,
-			Description: a.Description,
-			Parameters:  params,
-			UserOnly:    a.UserOnly,
+			Name:              a.Name,
+			Description:       a.Description,
+			Parameters:        params,
+			UserOnly:          a.UserOnly,
+			InjectContextArgs: a.InjectContextArgs,
 		}
 	}
 	return orchestrator.PluginCapability{
