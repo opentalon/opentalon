@@ -19,9 +19,11 @@ type ActionRunner interface {
 	RunAction(ctx context.Context, plugin, action string, args map[string]string) (string, error)
 }
 
-// Notifier sends a message to a channel.
+// Notifier sends a message to a specific conversation on a channel.
+// conversationID identifies the chat/room (e.g. Telegram chat_id); channelID
+// identifies the plugin that delivers it (e.g. "telegram", "slack").
 type Notifier interface {
-	Notify(ctx context.Context, channelID, content string) error
+	Notify(ctx context.Context, channelID, conversationID, content string) error
 }
 
 // Job represents a scheduled job at runtime.
@@ -34,11 +36,16 @@ type Job struct {
 	Action        string            `yaml:"action" json:"action"`
 	Args          map[string]string `yaml:"args,omitempty" json:"args,omitempty"`
 	NotifyChannel string            `yaml:"notify_channel,omitempty" json:"notify_channel,omitempty"`
-	Paused        bool              `yaml:"paused,omitempty" json:"paused,omitempty"`
-	Source        string            `yaml:"source,omitempty" json:"source,omitempty"`         // "config" or "dynamic"
-	CreatedBy     string            `yaml:"created_by,omitempty" json:"created_by,omitempty"` // raw sender/actor ID used at creation
-	EntityID      string            `yaml:"entity_id,omitempty" json:"entity_id,omitempty"`   // tenant identity (profile.EntityID) — empty when no profile system is configured
-	Group         string            `yaml:"group,omitempty" json:"group,omitempty"`           // tenant group (profile.Group) — empty when no profile system is configured
+	// NotifyConversationID is the chat/room id on NotifyChannel to send the
+	// job result to. Without it, channels like Telegram reject the send
+	// because they don't know which chat to deliver into. Captured at
+	// job-creation time from the caller's current conversation.
+	NotifyConversationID string `yaml:"notify_conversation_id,omitempty" json:"notify_conversation_id,omitempty"`
+	Paused               bool   `yaml:"paused,omitempty" json:"paused,omitempty"`
+	Source               string `yaml:"source,omitempty" json:"source,omitempty"`         // "config" or "dynamic"
+	CreatedBy            string `yaml:"created_by,omitempty" json:"created_by,omitempty"` // raw sender/actor ID used at creation
+	EntityID             string `yaml:"entity_id,omitempty" json:"entity_id,omitempty"`   // tenant identity (profile.EntityID) — empty when no profile system is configured
+	Group                string `yaml:"group,omitempty" json:"group,omitempty"`           // tenant group (profile.Group) — empty when no profile system is configured
 }
 
 // schedule computes successive fire times for a job.
@@ -586,9 +593,17 @@ func (s *Scheduler) executeJob(rj *runningJob) {
 	}
 
 	if job.NotifyChannel != "" && s.notifier != nil {
-		msg := fmt.Sprintf("[scheduled: %s] %s", job.Name, result)
-		if err := s.notifier.Notify(s.ctx, job.NotifyChannel, msg); err != nil {
-			slog.Warn("job notify failed", "component", "scheduler", "job", job.Name, "error", err)
+		if job.NotifyConversationID == "" {
+			// Pre-fix jobs persisted without a conversation id would render an
+			// empty chat_id on the channel side and fail with a cryptic 400.
+			// Warn once per fire and skip the notify.
+			slog.Warn("job notify skipped: missing conversation id — recreate the job",
+				"component", "scheduler", "job", job.Name, "channel", job.NotifyChannel)
+		} else {
+			msg := fmt.Sprintf("[scheduled: %s] %s", job.Name, result)
+			if err := s.notifier.Notify(s.ctx, job.NotifyChannel, job.NotifyConversationID, msg); err != nil {
+				slog.Warn("job notify failed", "component", "scheduler", "job", job.Name, "error", err)
+			}
 		}
 	}
 }

@@ -21,9 +21,13 @@ func newTestTool(t *testing.T) *SchedulerTool {
 }
 
 // testCtx returns a context with an actor ID in the shape the handler
-// expects when no profile system is configured: "channel:sender".
+// expects when no profile system is configured: "channel:sender", plus a
+// synthetic conversation id so scheduler jobs created from this context
+// carry enough state to be notifiable.
 func testCtx(sender string) context.Context {
-	return actor.WithActor(context.Background(), "test-channel:"+sender)
+	ctx := actor.WithActor(context.Background(), "test-channel:"+sender)
+	ctx = actor.WithConversationID(ctx, "test-conversation")
+	return ctx
 }
 
 func TestToolCapability(t *testing.T) {
@@ -134,6 +138,31 @@ func TestToolCreateWithArgs(t *testing.T) {
 	}
 	if j.Args["key"] != "val" {
 		t.Errorf("args = %v", j.Args)
+	}
+}
+
+func TestToolCreateCapturesConversationID(t *testing.T) {
+	tool := newTestTool(t)
+	ctx := actor.WithActor(context.Background(), "telegram:sender-42")
+	ctx = actor.WithConversationID(ctx, "chat-999")
+
+	result := tool.Execute(ctx, orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "create_job",
+		Args: map[string]string{"name": "conv-capture", "interval": "1h", "action": "a.b"},
+	})
+	if result.Error != "" {
+		t.Fatalf("create_job error: %s", result.Error)
+	}
+
+	j, ok := tool.sched.GetJob("conv-capture")
+	if !ok {
+		t.Fatal("job not found")
+	}
+	if j.NotifyChannel != "telegram" {
+		t.Errorf("notify_channel = %q, want telegram", j.NotifyChannel)
+	}
+	if j.NotifyConversationID != "chat-999" {
+		t.Errorf("notify_conversation_id = %q, want chat-999", j.NotifyConversationID)
 	}
 }
 

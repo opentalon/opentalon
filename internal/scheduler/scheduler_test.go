@@ -54,14 +54,19 @@ type fakeNotifier struct {
 }
 
 type notifyCall struct {
-	ChannelID string
-	Content   string
+	ChannelID      string
+	ConversationID string
+	Content        string
 }
 
-func (n *fakeNotifier) Notify(_ context.Context, channelID, content string) error {
+func (n *fakeNotifier) Notify(_ context.Context, channelID, conversationID, content string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.messages = append(n.messages, notifyCall{ChannelID: channelID, Content: content})
+	n.messages = append(n.messages, notifyCall{
+		ChannelID:      channelID,
+		ConversationID: conversationID,
+		Content:        content,
+	})
 	return nil
 }
 
@@ -148,7 +153,7 @@ func TestSchedulerNotification(t *testing.T) {
 	s := New(runner, notifier, "")
 
 	err := s.Start([]Job{
-		{Name: "notify-test", Interval: "50ms", Action: "test.ping", NotifyChannel: "slack"},
+		{Name: "notify-test", Interval: "50ms", Action: "test.ping", NotifyChannel: "slack", NotifyConversationID: "C123"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -167,6 +172,33 @@ func TestSchedulerNotification(t *testing.T) {
 
 	if msg.ChannelID != "slack" {
 		t.Errorf("channel = %q, want slack", msg.ChannelID)
+	}
+	if msg.ConversationID != "C123" {
+		t.Errorf("conversation = %q, want C123", msg.ConversationID)
+	}
+}
+
+// TestSchedulerNotifySkipsWithoutConversationID guards the regression where
+// pre-fix jobs persisted without a NotifyConversationID caused the channel
+// plugin to render an empty chat_id and fail with a cryptic 400. Those jobs
+// should now be skipped (with a warning) rather than dispatched.
+func TestSchedulerNotifySkipsWithoutConversationID(t *testing.T) {
+	runner := &fakeRunner{results: map[string]string{"test.ping": "pong"}}
+	notifier := &fakeNotifier{}
+	s := New(runner, notifier, "")
+
+	err := s.Start([]Job{
+		{Name: "legacy", Interval: "50ms", Action: "test.ping", NotifyChannel: "telegram"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(120 * time.Millisecond)
+	s.Stop()
+
+	if n := notifier.messageCount(); n != 0 {
+		t.Errorf("expected no notifications for job without conversation id, got %d", n)
 	}
 }
 
