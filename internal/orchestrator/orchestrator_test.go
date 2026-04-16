@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 	pkgchannel "github.com/opentalon/opentalon/pkg/channel"
@@ -1319,6 +1321,86 @@ func setupUserOnlyOrchestrator(parser ToolCallParser) *Orchestrator {
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1")
 	return New(&fakeLLM{responses: []string{"ok"}}, parser, registry, memory, sessions)
+}
+
+// Small models (Haiku in particular) can't invoke tools whose descriptions
+// say "defaults to the current channel" because they have no idea what
+// channel they are on. Expose channel + conversation in the prompt.
+func TestSystemPromptIncludesCurrentSessionClassic(t *testing.T) {
+	orch := setupUserOnlyOrchestrator(&fakeParser{parseFn: func(string) []ToolCall { return nil }})
+	ctx := actor.WithActor(context.Background(), "telegram:user42")
+	ctx = actor.WithConversationID(ctx, "chat-999")
+
+	prompt := orch.buildSystemPrompt(ctx, "test")
+
+	if !strings.Contains(prompt, "## Current session") {
+		t.Error("expected '## Current session' header in prompt")
+	}
+	if !strings.Contains(prompt, "telegram") {
+		t.Errorf("expected channel 'telegram' in prompt: %s", prompt)
+	}
+	if !strings.Contains(prompt, "chat-999") {
+		t.Errorf("expected conversation 'chat-999' in prompt: %s", prompt)
+	}
+	if !strings.Contains(prompt, "OMIT") {
+		t.Error("expected instruction to omit current-channel parameters")
+	}
+}
+
+func TestSystemPromptIncludesCurrentSessionProfileMode(t *testing.T) {
+	orch := setupUserOnlyOrchestrator(&fakeParser{parseFn: func(string) []ToolCall { return nil }})
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{
+		EntityID:  "ent-7",
+		ChannelID: "slack",
+	})
+	ctx = actor.WithConversationID(ctx, "C-abc")
+
+	prompt := orch.buildSystemPrompt(ctx, "test")
+
+	if !strings.Contains(prompt, "channel `slack`") {
+		t.Errorf("expected channel 'slack' (profile mode) in prompt: %s", prompt)
+	}
+	if !strings.Contains(prompt, "conversation `C-abc`") {
+		t.Errorf("expected conversation 'C-abc' in prompt: %s", prompt)
+	}
+}
+
+// When ctx carries no channel/conversation (e.g. tests or background jobs),
+// the section must be omitted — not rendered as an empty block.
+func TestSystemPromptOmitsCurrentSessionWhenMissing(t *testing.T) {
+	orch := setupUserOnlyOrchestrator(&fakeParser{parseFn: func(string) []ToolCall { return nil }})
+	prompt := orch.buildSystemPrompt(context.Background(), "test")
+
+	if strings.Contains(prompt, "## Current session") {
+		t.Error("session block should not appear when ctx has neither channel nor conversation")
+	}
+}
+
+func TestSessionDescriptorPartialContext(t *testing.T) {
+	// Only conversation known: should render conversation but no channel.
+	ctx := actor.WithConversationID(context.Background(), "c-1")
+	got := sessionDescriptor(ctx)
+	if !strings.Contains(got, "conversation `c-1`") {
+		t.Errorf("conversation-only: got %q", got)
+	}
+	if strings.Contains(got, "channel") {
+		t.Errorf("conversation-only: should not mention channel; got %q", got)
+	}
+
+	// Only channel known (no conversation): should render channel.
+	ctx = actor.WithActor(context.Background(), "slack:diana")
+	got = sessionDescriptor(ctx)
+	if !strings.Contains(got, "channel `slack`") {
+		t.Errorf("channel-only: got %q", got)
+	}
+	if strings.Contains(got, "conversation") {
+		t.Errorf("channel-only: should not mention conversation; got %q", got)
+	}
+
+	// Neither known: empty string.
+	if got := sessionDescriptor(context.Background()); got != "" {
+		t.Errorf("empty ctx: expected empty string, got %q", got)
+	}
 }
 
 func TestUserOnlyActionHiddenFromSystemPrompt(t *testing.T) {

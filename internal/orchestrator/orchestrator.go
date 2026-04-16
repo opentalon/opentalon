@@ -862,6 +862,18 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		}
 	}
 
+	// Expose the caller's channel and conversation id so the LLM knows what
+	// "the current channel" means when a tool parameter says it defaults to
+	// it. Without this, small models (e.g. Haiku) fail to invoke tools like
+	// scheduler.create_job on non-Slack channels because they pattern-match
+	// the Slack-shaped channel ids in other tool schemas and conclude they
+	// don't have a valid one on Telegram/Discord/etc.
+	if session := sessionDescriptor(ctx); session != "" {
+		sb.WriteString("## Current session\n")
+		sb.WriteString(session)
+		sb.WriteString("\nWhen a tool parameter's description says it defaults to the current channel or conversation, OMIT it — the host injects these values automatically. Do not try to invent or ask for an id.\n\n")
+	}
+
 	// Don't list content-preparer or guard actions as tools; they run automatically before LLM calls.
 	preparerAction := make(map[string]bool)
 	for _, prep := range o.preparers {
@@ -916,6 +928,39 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		sb.WriteString("\n")
 	}
 
+	return sb.String()
+}
+
+// sessionDescriptor returns a 1-2 line string describing the caller's current
+// channel and conversation for injection into the system prompt. Returns an
+// empty string when neither is known (e.g. in unit tests) so the block can
+// be safely omitted rather than rendering an empty "## Current session".
+func sessionDescriptor(ctx context.Context) string {
+	channelID := ""
+	if p := profile.FromContext(ctx); p != nil && p.ChannelID != "" {
+		channelID = p.ChannelID
+	} else if a := actor.Actor(ctx); a != "" {
+		// Classic mode: actor is "channel:sender". Take the channel prefix.
+		if i := strings.IndexByte(a, ':'); i > 0 {
+			channelID = a[:i]
+		}
+	}
+	conversationID := actor.ConversationID(ctx)
+	if channelID == "" && conversationID == "" {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("You are currently on")
+	if channelID != "" {
+		fmt.Fprintf(&sb, " channel `%s`", channelID)
+	}
+	if conversationID != "" {
+		if channelID != "" {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, " conversation `%s`", conversationID)
+	}
+	sb.WriteString(".\n")
 	return sb.String()
 }
 
