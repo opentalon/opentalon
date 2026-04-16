@@ -144,6 +144,10 @@ func (j *Job) parseAction() (plugin, action string, err error) {
 type runningJob struct {
 	job    Job
 	cancel context.CancelFunc
+	// warnedMissingConv is set after the first "missing conversation id" warning
+	// for this job so recurring legacy jobs (e.g. "@every 5m") don't spam the
+	// log on every fire. Reset per process lifetime.
+	warnedMissingConv bool
 }
 
 // Scheduler manages periodic background jobs.
@@ -345,10 +349,15 @@ func (s *Scheduler) ResumeJob(name string) error {
 	return s.persistDynamic()
 }
 
-// UpdateJob updates the time spec (interval or cron) and/or notify channel
-// of an existing job. Setting interval clears cron and vice versa.
-// Config-defined jobs cannot be updated.
-func (s *Scheduler) UpdateJob(name, userID string, interval, cronExpr, notifyChannel *string) error {
+// UpdateJob updates the time spec (interval or cron), notify channel, and/or
+// notify conversation id of an existing job. Setting interval clears cron and
+// vice versa. Config-defined jobs cannot be updated.
+//
+// notifyConversationID is a separate parameter (rather than derived from
+// notifyChannel) so callers that switch the notify channel can also refresh
+// the conversation id from the caller's current context — the old chat id is
+// meaningless on a different channel.
+func (s *Scheduler) UpdateJob(name, userID string, interval, cronExpr, notifyChannel, notifyConversationID *string) error {
 	if !s.isApprover(userID) {
 		return ErrNotAuthorized
 	}
@@ -375,6 +384,9 @@ func (s *Scheduler) UpdateJob(name, userID string, interval, cronExpr, notifyCha
 	if notifyChannel != nil {
 		patched.NotifyChannel = *notifyChannel
 	}
+	if notifyConversationID != nil {
+		patched.NotifyConversationID = *notifyConversationID
+	}
 	if interval != nil || cronExpr != nil {
 		if _, err := patched.schedule(); err != nil {
 			s.mu.Unlock()
@@ -385,6 +397,9 @@ func (s *Scheduler) UpdateJob(name, userID string, interval, cronExpr, notifyCha
 
 	rj.cancel()
 	rj.job = patched
+	// Reset the legacy-warning flag so a post-update job that still lacks a
+	// conversation id (shouldn't happen in practice) can warn once again.
+	rj.warnedMissingConv = false
 	s.mu.Unlock()
 
 	s.startTicker(rj)
@@ -596,9 +611,17 @@ func (s *Scheduler) executeJob(rj *runningJob) {
 		if job.NotifyConversationID == "" {
 			// Pre-fix jobs persisted without a conversation id would render an
 			// empty chat_id on the channel side and fail with a cryptic 400.
-			// Warn once per fire and skip the notify.
-			slog.Warn("job notify skipped: missing conversation id — recreate the job",
-				"component", "scheduler", "job", job.Name, "channel", job.NotifyChannel)
+			// Warn once per job per process lifetime and skip the notify —
+			// a recurring "@every 5m" legacy job would otherwise spam ~288
+			// identical warnings/day until recreated.
+			s.mu.Lock()
+			alreadyWarned := rj.warnedMissingConv
+			rj.warnedMissingConv = true
+			s.mu.Unlock()
+			if !alreadyWarned {
+				slog.Warn("job notify skipped: missing conversation id — recreate the job",
+					"component", "scheduler", "job", job.Name, "channel", job.NotifyChannel)
+			}
 		} else {
 			msg := fmt.Sprintf("[scheduled: %s] %s", job.Name, result)
 			if err := s.notifier.Notify(s.ctx, job.NotifyChannel, job.NotifyConversationID, msg); err != nil {

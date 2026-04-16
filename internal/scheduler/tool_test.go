@@ -7,6 +7,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	"github.com/opentalon/opentalon/internal/profile"
 )
 
 func newTestTool(t *testing.T) *SchedulerTool {
@@ -253,6 +254,104 @@ func TestToolUpdateJob(t *testing.T) {
 	j, _ := tool.sched.GetJob("upd")
 	if j.Interval != "30m" {
 		t.Errorf("interval = %q, want 30m", j.Interval)
+	}
+}
+
+// Regression: when update_job changes notify_channel, the stored
+// conversation id belongs to the old channel and is meaningless on the new
+// one (e.g. a Slack channel id sent to Telegram). The tool layer must
+// refresh it from the caller's current context, matching create_job.
+func TestToolUpdateJobRefreshesConversationIDOnChannelChange(t *testing.T) {
+	tool := newTestTool(t)
+
+	// Create the job from Slack, conversation C-old.
+	createCtx := actor.WithActor(context.Background(), "slack:diana")
+	createCtx = actor.WithConversationID(createCtx, "C-old")
+	res := tool.Execute(createCtx, orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "create_job",
+		Args: map[string]string{"name": "cross", "interval": "1h", "action": "a.b"},
+	})
+	if res.Error != "" {
+		t.Fatalf("create_job: %s", res.Error)
+	}
+
+	// Update from Telegram, conversation T-new — switch notify_channel.
+	updateCtx := actor.WithActor(context.Background(), "telegram:diana")
+	updateCtx = actor.WithConversationID(updateCtx, "T-new")
+	res = tool.Execute(updateCtx, orchestrator.ToolCall{
+		ID: "2", Plugin: ToolName, Action: "update_job",
+		Args: map[string]string{"name": "cross", "notify_channel": "telegram"},
+	})
+	if res.Error != "" {
+		t.Fatalf("update_job: %s", res.Error)
+	}
+
+	j, _ := tool.sched.GetJob("cross")
+	if j.NotifyChannel != "telegram" {
+		t.Errorf("notify_channel = %q, want telegram", j.NotifyChannel)
+	}
+	if j.NotifyConversationID != "T-new" {
+		t.Errorf("notify_conversation_id = %q, want T-new (refreshed from new context)", j.NotifyConversationID)
+	}
+}
+
+// Counterpart to the above: an update that leaves notify_channel alone must
+// NOT touch the stored conversation id, even if the caller is in a different
+// conversation at update time.
+func TestToolUpdateJobPreservesConversationIDWhenChannelUnchanged(t *testing.T) {
+	tool := newTestTool(t)
+
+	createCtx := actor.WithActor(context.Background(), "slack:diana")
+	createCtx = actor.WithConversationID(createCtx, "C-original")
+	res := tool.Execute(createCtx, orchestrator.ToolCall{
+		ID: "1", Plugin: ToolName, Action: "create_job",
+		Args: map[string]string{"name": "keep", "interval": "1h", "action": "a.b"},
+	})
+	if res.Error != "" {
+		t.Fatalf("create_job: %s", res.Error)
+	}
+
+	updateCtx := actor.WithActor(context.Background(), "slack:diana")
+	updateCtx = actor.WithConversationID(updateCtx, "C-elsewhere")
+	res = tool.Execute(updateCtx, orchestrator.ToolCall{
+		ID: "2", Plugin: ToolName, Action: "update_job",
+		Args: map[string]string{"name": "keep", "interval": "30m"},
+	})
+	if res.Error != "" {
+		t.Fatalf("update_job: %s", res.Error)
+	}
+
+	j, _ := tool.sched.GetJob("keep")
+	if j.NotifyConversationID != "C-original" {
+		t.Errorf("notify_conversation_id = %q, want C-original (should not change)", j.NotifyConversationID)
+	}
+}
+
+// Covers the profile branch of resolveCaller — the actor-fallback branch is
+// covered by TestToolCreateCapturesConversationID.
+func TestResolveCallerProfileBranchReadsConversationID(t *testing.T) {
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{
+		EntityID:  "ent-7",
+		Group:     "team-a",
+		ChannelID: "slack",
+	})
+	ctx = actor.WithConversationID(ctx, "C-from-profile")
+
+	caller, err := resolveCaller(ctx)
+	if err != nil {
+		t.Fatalf("resolveCaller: %v", err)
+	}
+	if caller.entityID != "ent-7" {
+		t.Errorf("entityID = %q, want ent-7", caller.entityID)
+	}
+	if caller.channelID != "slack" {
+		t.Errorf("channelID = %q, want slack", caller.channelID)
+	}
+	if caller.conversationID != "C-from-profile" {
+		t.Errorf("conversationID = %q, want C-from-profile", caller.conversationID)
+	}
+	if caller.userID != "ent-7" {
+		t.Errorf("userID = %q, want ent-7 (profile uses EntityID)", caller.userID)
 	}
 }
 

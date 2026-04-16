@@ -390,6 +390,45 @@ func TestSchedulerPersistence(t *testing.T) {
 	}
 }
 
+// Guards against future struct-field drift: NotifyConversationID must survive
+// a write/read cycle on the YAML jobs file. The YAML tag being correct isn't
+// enough on its own — a rename or tag typo would silently drop the field.
+func TestSchedulerPersistenceRoundTripsConversationID(t *testing.T) {
+	dir := t.TempDir()
+
+	s1 := New(&fakeRunner{}, nil, dir)
+	if err := s1.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.AddJob(Job{
+		Name:                 "roundtrip",
+		Interval:             "1h",
+		Action:               "a.b",
+		NotifyChannel:        "telegram",
+		NotifyConversationID: "chat-12345",
+	}, "user1"); err != nil {
+		t.Fatal(err)
+	}
+	s1.Stop()
+
+	s2 := New(&fakeRunner{}, nil, dir)
+	if err := s2.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Stop()
+
+	j, ok := s2.GetJob("roundtrip")
+	if !ok {
+		t.Fatal("job not reloaded")
+	}
+	if j.NotifyConversationID != "chat-12345" {
+		t.Errorf("notify_conversation_id = %q, want chat-12345", j.NotifyConversationID)
+	}
+	if j.NotifyChannel != "telegram" {
+		t.Errorf("notify_channel = %q, want telegram", j.NotifyChannel)
+	}
+}
+
 func TestSchedulerStaticJobsNotPersisted(t *testing.T) {
 	dir := t.TempDir()
 	runner := &fakeRunner{}
@@ -460,7 +499,7 @@ func TestSchedulerUpdateJob(t *testing.T) {
 	}
 
 	newInterval := "30m"
-	if err := s.UpdateJob("upd1", "user1", &newInterval, nil, nil); err != nil {
+	if err := s.UpdateJob("upd1", "user1", &newInterval, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -476,7 +515,7 @@ func TestSchedulerUpdateJob(t *testing.T) {
 	}
 
 	newChan := "teams"
-	if err := s.UpdateJob("upd1", "user1", nil, nil, &newChan); err != nil {
+	if err := s.UpdateJob("upd1", "user1", nil, nil, &newChan, nil); err != nil {
 		t.Fatal(err)
 	}
 	j, _ = s.GetJob("upd1")
@@ -568,7 +607,7 @@ func TestSchedulerConfigJobCannotBeUpdated(t *testing.T) {
 	defer s.Stop()
 
 	newInterval := "30m"
-	err := s.UpdateJob("static1", "admin", &newInterval, nil, nil)
+	err := s.UpdateJob("static1", "admin", &newInterval, nil, nil, nil)
 	if err != ErrConfigProtected {
 		t.Errorf("expected ErrConfigProtected, got %v", err)
 	}
@@ -660,12 +699,12 @@ func TestSchedulerApproverUpdateRequired(t *testing.T) {
 	}
 
 	newInterval := "30m"
-	err := s.UpdateJob("j1", "random@co.com", &newInterval, nil, nil)
+	err := s.UpdateJob("j1", "random@co.com", &newInterval, nil, nil, nil)
 	if err != ErrNotAuthorized {
 		t.Errorf("non-approver should not update, got %v", err)
 	}
 
-	err = s.UpdateJob("j1", "admin@co.com", &newInterval, nil, nil)
+	err = s.UpdateJob("j1", "admin@co.com", &newInterval, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("approver should update: %v", err)
 	}
@@ -860,7 +899,7 @@ func TestSchedulerUpdateSwitchIntervalToCron(t *testing.T) {
 		t.Fatal(err)
 	}
 	newCron := "0 9 * * *"
-	if err := s.UpdateJob("swap", "u", nil, &newCron, nil); err != nil {
+	if err := s.UpdateJob("swap", "u", nil, &newCron, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	j, _ := s.GetJob("swap")
@@ -883,7 +922,7 @@ func TestSchedulerUpdateRejectsBadCron(t *testing.T) {
 		t.Fatal(err)
 	}
 	bad := "not a cron"
-	if err := s.UpdateJob("j", "u", nil, &bad, nil); err == nil {
+	if err := s.UpdateJob("j", "u", nil, &bad, nil, nil); err == nil {
 		t.Error("expected error for bad cron in update")
 	}
 	// original job should be unchanged
