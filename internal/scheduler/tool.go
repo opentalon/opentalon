@@ -31,7 +31,7 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 		Actions: []orchestrator.Action{
 			{
 				Name:        "create_job",
-				Description: "Create a new scheduled job. Provide exactly one of interval or cron. Requires user approval before calling.",
+				Description: "Create a new scheduled job. Provide exactly one of interval or cron. Requires user approval before calling. To schedule recurring delivery of a static message (e.g. 'send me a Ford quote every minute'), set action=\"reminder.say\" and pass the literal text via the 'message' parameter — the scheduler will deliver it to the current channel automatically. External plugins/APIs are only needed when the scheduled job must fetch fresh data each run.",
 				Parameters: []orchestrator.Parameter{
 					{Name: "name", Description: "Unique job name (slug)", Required: true},
 					{Name: "interval", Description: "Go duration string, e.g. 30m, 1h, 24h (mutually exclusive with cron)", Required: false},

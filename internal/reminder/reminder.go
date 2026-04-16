@@ -21,13 +21,13 @@ func NewTool() *Tool { return &Tool{} }
 func Capability() orchestrator.PluginCapability {
 	return orchestrator.PluginCapability{
 		Name:        ToolName,
-		Description: "Deliver a literal text reminder back to the user. Used internally by the scheduler's remind_me action.",
+		Description: "Deliver a literal text message to the user. Use this as the 'action' when scheduling a recurring or one-shot delivery of static text (e.g. a quote, a reminder, a status ping) via scheduler.create_job or scheduler.remind_me.",
 		Actions: []orchestrator.Action{
 			{
 				Name:        "say",
-				Description: "Return the provided message verbatim.",
+				Description: "Deliver the given text to the user verbatim. Pair with scheduler.create_job (interval or cron) for recurring messages, or with scheduler.remind_me for a single future message. The scheduler routes the result back to the caller's current channel and conversation automatically.",
 				Parameters: []orchestrator.Parameter{
-					{Name: "message", Description: "The message to deliver", Required: true},
+					{Name: "message", Description: "The text to deliver", Required: true},
 				},
 			},
 		},
