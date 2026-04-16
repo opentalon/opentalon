@@ -39,7 +39,7 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 					{Name: "action", Description: "Plugin action in format plugin.action", Required: true},
 					{Name: "args", Description: "JSON-encoded object passed as a string, e.g. args={\"issue_id\":\"XYZ\"}. Action-specific keys MUST go inside this object, NOT at top level (top-level unknown keys are rejected). Mutually exclusive with 'message'.", Required: false},
 					{Name: "message", Description: "Shortcut for args={\"message\":\"...\"} — use this for reminder.say and similar message-only actions instead of JSON-encoding args", Required: false},
-					{Name: "notify_channel", Description: "Channel ID to send results to (defaults to the current channel)", Required: false},
+					{Name: "notify_channel", Description: "OMIT this parameter in almost all cases. Defaults to the caller's current channel (works for Telegram, Slack, Discord, or any other channel identically — no channel-specific format is required). Only set this when the user explicitly asks to deliver results somewhere other than the current conversation.", Required: false},
 				},
 			},
 			{
@@ -94,7 +94,7 @@ func (t *SchedulerTool) Capability() orchestrator.PluginCapability {
 					{Name: "name", Description: "Job name to update", Required: true},
 					{Name: "interval", Description: "New interval (optional, mutually exclusive with cron)", Required: false},
 					{Name: "cron", Description: "New cron expression (optional, mutually exclusive with interval)", Required: false},
-					{Name: "notify_channel", Description: "New notify channel (optional)", Required: false},
+					{Name: "notify_channel", Description: "New notify channel (optional). Setting this to the current channel name (e.g. 'telegram', 'slack') also refreshes the job's stored conversation id to the caller's current one.", Required: false},
 				},
 			},
 		},
