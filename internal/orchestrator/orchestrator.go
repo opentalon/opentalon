@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -1011,6 +1012,37 @@ func (o *Orchestrator) runInvokeSteps(ctx context.Context, steps []InvokeStep) (
 	}, nil
 }
 
+// rejectUnknownArgs returns a non-nil error listing args in call.Args that
+// are not declared as Parameters on the action. The error message also lists
+// the allowed parameter names so the LLM can self-correct on the next turn.
+func rejectUnknownArgs(call ToolCall, action *Action) error {
+	allowed := make(map[string]struct{}, len(action.Parameters))
+	for _, p := range action.Parameters {
+		allowed[p.Name] = struct{}{}
+	}
+	var unknown []string
+	for k := range call.Args {
+		if _, ok := allowed[k]; !ok {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	allowedList := make([]string, 0, len(allowed))
+	for k := range allowed {
+		allowedList = append(allowedList, k)
+	}
+	sort.Strings(allowedList)
+	allowedStr := "(none)"
+	if len(allowedList) > 0 {
+		allowedStr = strings.Join(allowedList, ", ")
+	}
+	return fmt.Errorf("unknown argument(s) for %s.%s: %s; allowed: %s",
+		call.Plugin, call.Action, strings.Join(unknown, ", "), allowedStr)
+}
+
 func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResult {
 	exec, ok := o.registry.GetExecutor(call.Plugin)
 	if !ok {
@@ -1076,6 +1108,20 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		return ToolResult{
 			CallID: call.ID,
 			Error:  fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
+		}
+	}
+	// Reject unknown args from LLM-originated calls. Without this, stray keys
+	// (e.g. Haiku emitting `message=` at top level instead of inside `args`)
+	// are silently dropped; the call reaches the plugin with empty args and
+	// fails later with an error the LLM can't trace back to its own mistake.
+	// Internal callers (pipelines, permission checks, context preparers) are
+	// exempt — they construct calls programmatically and may legitimately use
+	// names outside the declared Parameters set. InjectContextArgs are not
+	// accepted from the LLM; the host injects them below.
+	if call.FromLLM && action != nil && len(call.Args) > 0 {
+		if err := rejectUnknownArgs(call, action); err != nil {
+			slog.Warn("BLOCKED LLM call with unknown args", "plugin", call.Plugin, "action", call.Action, "error", err.Error())
+			return ToolResult{CallID: call.ID, Error: err.Error()}
 		}
 	}
 	if action != nil {

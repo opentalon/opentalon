@@ -89,7 +89,7 @@ func setupOrchestrator(llm LLMClient, parser ToolCallParser) (*Orchestrator, str
 		Name:        "gitlab",
 		Description: "GitLab integration",
 		Actions: []Action{
-			{Name: "analyze_code", Description: "Analyze code"},
+			{Name: "analyze_code", Description: "Analyze code", Parameters: []Parameter{{Name: "repo", Description: "Repository"}}},
 			{Name: "create_pr", Description: "Create PR"},
 		},
 	}, &echoExecutor{})
@@ -1421,6 +1421,155 @@ func TestUserOnlyFromLLMFlagSetOnParsedCalls(t *testing.T) {
 	}
 }
 
+// Regression: Haiku-class models emit action-specific keys at the top level
+// of a tool call instead of wrapping them in declared parameters like `args`.
+// Prior behavior silently dropped them; the call reached the plugin with
+// empty args and failed much later with a cryptic error. executeCall now
+// rejects unknown args on LLM-originated calls so the LLM can self-correct.
+func TestUnknownArgsRejectedForLLMCall(t *testing.T) {
+	captureExec := &capturingExecutor{fn: func(c ToolCall) ToolResult {
+		t.Fatalf("plugin must not be invoked for rejected call; got args=%v", c.Args)
+		return ToolResult{}
+	}}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "tools", Description: "Tools",
+		Actions: []Action{{Name: "run", Description: "Run it", Parameters: []Parameter{
+			{Name: "name", Description: "Name", Required: true},
+		}}},
+	}, captureExec)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	callNum := 0
+	parser := &fakeParser{parseFn: func(string) []ToolCall {
+		callNum++
+		if callNum == 1 {
+			return []ToolCall{{ID: "c1", Plugin: "tools", Action: "run",
+				Args: map[string]string{"name": "ok", "stray": "oops"}}}
+		}
+		return nil
+	}}
+	orch := New(&fakeLLM{responses: []string{"[tool]", "done"}}, parser, registry, memory, sessions)
+	result, err := orch.Run(context.Background(), "s1", "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) == 0 {
+		t.Fatal("expected a tool result")
+	}
+	errMsg := result.Results[0].Error
+	if errMsg == "" {
+		t.Fatal("expected an error for unknown args")
+	}
+	if !strings.Contains(errMsg, "stray") {
+		t.Errorf("error %q should name the unknown arg", errMsg)
+	}
+	if !strings.Contains(errMsg, "name") {
+		t.Errorf("error %q should list allowed args", errMsg)
+	}
+}
+
+// Declared args should pass through unmolested.
+func TestDeclaredArgsAcceptedForLLMCall(t *testing.T) {
+	var capturedArgs map[string]string
+	captureExec := &capturingExecutor{fn: func(c ToolCall) ToolResult {
+		capturedArgs = c.Args
+		return ToolResult{CallID: c.ID, Content: "ok"}
+	}}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "tools", Description: "Tools",
+		Actions: []Action{{Name: "run", Description: "Run it", Parameters: []Parameter{
+			{Name: "name", Description: "Name", Required: true},
+		}}},
+	}, captureExec)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+	callNum := 0
+	parser := &fakeParser{parseFn: func(string) []ToolCall {
+		callNum++
+		if callNum == 1 {
+			return []ToolCall{{ID: "c1", Plugin: "tools", Action: "run",
+				Args: map[string]string{"name": "ok"}}}
+		}
+		return nil
+	}}
+	orch := New(&fakeLLM{responses: []string{"[tool]", "done"}}, parser, registry, memory, sessions)
+	if _, err := orch.Run(context.Background(), "s1", "go"); err != nil {
+		t.Fatal(err)
+	}
+	if capturedArgs["name"] != "ok" {
+		t.Errorf("name = %q, want ok", capturedArgs["name"])
+	}
+}
+
+// Internal callers (pipelines, content preparers, permission checks) don't
+// carry declared schemas through — they construct ToolCalls programmatically.
+// Unknown-args validation must not fire for FromLLM=false calls.
+func TestUnknownArgsNotRejectedForInternalCall(t *testing.T) {
+	var invoked bool
+	captureExec := &capturingExecutor{fn: func(c ToolCall) ToolResult {
+		invoked = true
+		return ToolResult{CallID: c.ID, Content: "ok"}
+	}}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "tools", Description: "Tools",
+		Actions: []Action{{Name: "run", Description: "Run it"}},
+	}, captureExec)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	orch := New(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions)
+
+	// FromLLM is false by default for constructed calls.
+	result := orch.executeCall(context.Background(), ToolCall{
+		ID: "c1", Plugin: "tools", Action: "run",
+		Args: map[string]string{"anything": "goes"},
+	})
+	if result.Error != "" {
+		t.Fatalf("internal call should not be rejected; got error %q", result.Error)
+	}
+	if !invoked {
+		t.Error("plugin should have been invoked")
+	}
+}
+
+func TestRejectUnknownArgsErrorFormat(t *testing.T) {
+	action := &Action{
+		Name: "do", Parameters: []Parameter{
+			{Name: "a"}, {Name: "b"},
+		},
+	}
+	call := ToolCall{Plugin: "p", Action: "do", Args: map[string]string{
+		"a": "1", "c": "3", "z": "9",
+	}}
+	err := rejectUnknownArgs(call, action)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	// Unknowns + allowed list must both be sorted so error messages are stable.
+	if !strings.Contains(msg, "c, z") {
+		t.Errorf("expected sorted unknowns 'c, z' in %q", msg)
+	}
+	if !strings.Contains(msg, "a, b") {
+		t.Errorf("expected sorted allowed 'a, b' in %q", msg)
+	}
+
+	// When all args are declared, no error.
+	if err := rejectUnknownArgs(ToolCall{Args: map[string]string{"a": "1"}}, action); err != nil {
+		t.Errorf("unexpected error for all-declared args: %v", err)
+	}
+
+	// When action has no params, any arg is unknown; allowed list renders as "(none)".
+	err = rejectUnknownArgs(ToolCall{Plugin: "p", Action: "do", Args: map[string]string{"x": "1"}}, &Action{Name: "do"})
+	if err == nil || !strings.Contains(err.Error(), "(none)") {
+		t.Errorf("expected '(none)' allowed list, got %v", err)
+	}
+}
+
 func TestCapabilitiesToPlannerInfoSkipsUserOnly(t *testing.T) {
 	caps := []PluginCapability{
 		{
@@ -1588,7 +1737,7 @@ func setupOrchestratorWithOpts(llm LLMClient, parser ToolCallParser, opts Orches
 		Name:        "gitlab",
 		Description: "GitLab integration",
 		Actions: []Action{
-			{Name: "analyze_code", Description: "Analyze code"},
+			{Name: "analyze_code", Description: "Analyze code", Parameters: []Parameter{{Name: "repo", Description: "Repository"}}},
 			{Name: "create_pr", Description: "Create PR"},
 		},
 	}, &echoExecutor{})
