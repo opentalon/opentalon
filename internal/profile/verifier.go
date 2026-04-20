@@ -45,6 +45,7 @@ type VerifierConfig struct {
 	ChannelTypeHeader string            // optional header name to send channel type to WhoAmI server (e.g. "X-Channel-Type")
 	LimitField        string            // optional JSON field for token spend limit; default "limit"
 	LimitTimeField    string            // optional JSON field for limit window duration (e.g. "1h"); default "limit_time"
+	CredentialsField  string            // optional JSON field for per-MCP-server tokens map; default "credentials"
 	ExtraHeaders      map[string]string // static headers sent on every WhoAmI call; ${ENV_VAR} expanded once at construction
 }
 
@@ -89,6 +90,9 @@ func (c *VerifierConfig) setDefaults() {
 	}
 	if c.LimitTimeField == "" {
 		c.LimitTimeField = "limit_time"
+	}
+	if c.CredentialsField == "" {
+		c.CredentialsField = "credentials"
 	}
 	// Expand env vars in ExtraHeaders once at construction time so values are
 	// immutable for the verifier's lifetime and can't drift mid-run. Also guard
@@ -333,6 +337,11 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 		}
 	}
 
+	var credentials map[string]string
+	if craw, ok := raw[v.cfg.CredentialsField]; ok {
+		_ = json.Unmarshal(craw, &credentials)
+	}
+
 	return &Profile{
 		EntityID:    entityID,
 		Group:       group,
@@ -342,6 +351,7 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 		ChannelType: channelTypeResp,
 		Limit:       limit,
 		LimitWindow: limitWindow,
+		Credentials: credentials,
 	}, nil
 }
 

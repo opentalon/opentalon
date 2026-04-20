@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	"github.com/opentalon/opentalon/internal/profile"
 	pkg "github.com/opentalon/opentalon/pkg/plugin"
 	"github.com/opentalon/opentalon/proto/pluginpb"
 	"google.golang.org/grpc"
@@ -104,11 +105,16 @@ func (c *Client) Execute(ctx context.Context, call orchestrator.ToolCall) orches
 
 // ExecuteContext is like Execute but respects context cancellation.
 func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+	var credentials map[string]string
+	if p := profile.FromContext(ctx); p != nil && len(p.Credentials) > 0 {
+		credentials = p.Credentials
+	}
 	resp, err := c.client.Execute(ctx, &pluginpb.ToolCallRequest{
-		Id:     call.ID,
-		Plugin: call.Plugin,
-		Action: call.Action,
-		Args:   call.Args,
+		Id:          call.ID,
+		Plugin:      call.Plugin,
+		Action:      call.Action,
+		Args:        call.Args,
+		Credentials: credentials,
 	})
 	if err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc: %v", err)}

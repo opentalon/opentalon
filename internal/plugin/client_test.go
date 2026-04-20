@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/proto/pluginpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -266,6 +267,105 @@ func TestUserOnlyMappedFromProto(t *testing.T) {
 	}
 	if !cap.Actions[1].UserOnly {
 		t.Error("admin_action should have UserOnly=true")
+	}
+}
+
+// credCapturingPluginService records the credentials map from each Execute call.
+type credCapturingPluginService struct {
+	pluginpb.UnimplementedPluginServiceServer
+	received chan map[string]string
+}
+
+func (s *credCapturingPluginService) Init(_ context.Context, _ *pluginpb.PluginInitRequest) (*emptypb.Empty, error) {
+	return &emptypb.Empty{}, nil
+}
+
+func (s *credCapturingPluginService) Capabilities(_ context.Context, _ *emptypb.Empty) (*pluginpb.PluginCapabilities, error) {
+	return &pluginpb.PluginCapabilities{
+		Name: "cred-echo",
+		Actions: []*pluginpb.Action{
+			{Name: "noop", Description: "No-op"},
+		},
+	}, nil
+}
+
+func (s *credCapturingPluginService) Execute(_ context.Context, req *pluginpb.ToolCallRequest) (*pluginpb.ToolResultResponse, error) {
+	s.received <- req.Credentials
+	return &pluginpb.ToolResultResponse{CallId: req.Id, Content: "ok"}, nil
+}
+
+func startCredCapturingServer(t *testing.T) (*grpc.ClientConn, chan map[string]string) {
+	t.Helper()
+	received := make(chan map[string]string, 1)
+	lis := bufconn.Listen(bufSize)
+	srv := grpc.NewServer()
+	pluginpb.RegisterPluginServiceServer(srv, &credCapturingPluginService{received: received})
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(func() { srv.Stop() })
+
+	cc, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) { return lis.Dial() }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cc.Close() })
+	return cc, received
+}
+
+// TestExecuteForwardsCredentialsFromProfile verifies that credentials stored
+// on the profile in context are forwarded to the plugin via ToolCallRequest.
+func TestExecuteForwardsCredentialsFromProfile(t *testing.T) {
+	cc, received := startCredCapturingServer(t)
+	c := &Client{conn: cc, client: pluginpb.NewPluginServiceClient(cc)}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.fetchCapabilities(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &profile.Profile{
+		EntityID: "u1",
+		Credentials: map[string]string{
+			"timly": "user-api-token-abc",
+			"jira":  "user-jira-token-xyz",
+		},
+	}
+	ctx = profile.WithProfile(context.Background(), p)
+
+	result := c.Execute(ctx, orchestrator.ToolCall{ID: "c1", Plugin: "cred-echo", Action: "noop"})
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	creds := <-received
+	if creds["timly"] != "user-api-token-abc" {
+		t.Errorf("credentials[timly] = %q, want user-api-token-abc", creds["timly"])
+	}
+	if creds["jira"] != "user-jira-token-xyz" {
+		t.Errorf("credentials[jira] = %q, want user-jira-token-xyz", creds["jira"])
+	}
+}
+
+// TestExecuteNoCredentialsWithoutProfile verifies that nil credentials are sent
+// when no profile is in the context.
+func TestExecuteNoCredentialsWithoutProfile(t *testing.T) {
+	cc, received := startCredCapturingServer(t)
+	c := &Client{conn: cc, client: pluginpb.NewPluginServiceClient(cc)}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.fetchCapabilities(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	result := c.Execute(context.Background(), orchestrator.ToolCall{ID: "c2", Plugin: "cred-echo", Action: "noop"})
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	if creds := <-received; len(creds) != 0 {
+		t.Errorf("credentials = %v, want empty when no profile in context", creds)
 	}
 }
 
