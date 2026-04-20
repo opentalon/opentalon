@@ -267,6 +267,19 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 		req.Header.Set(k, val)
 	}
 
+	// Log the outgoing request for debugging (token value is redacted).
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		logHeaders := make(map[string]string, len(req.Header))
+		for k := range req.Header {
+			if textproto.CanonicalMIMEHeaderKey(k) == textproto.CanonicalMIMEHeaderKey(v.cfg.TokenHeader) {
+				logHeaders[k] = "[REDACTED]"
+			} else {
+				logHeaders[k] = req.Header.Get(k)
+			}
+		}
+		slog.DebugContext(ctx, "whoami request", "method", req.Method, "url", req.URL.String(), "headers", logHeaders)
+	}
+
 	resp, err := v.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrAuthFailed, err)
@@ -274,6 +287,8 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
+		slog.Warn("whoami server rejected token", "method", req.Method, "url", req.URL.String(), "status", resp.StatusCode, "channel", channelType, "response_body", string(respBody))
 		return nil, rejectedError{fmt.Errorf("%w: status %d", ErrAuthFailed, resp.StatusCode)}
 	}
 
