@@ -44,7 +44,14 @@ func newTestHandler(verifier ProfileVerifier, checker LimitChecker) pkg.MessageH
 		return "", errors.New("no actions")
 	}
 	hasAction := func(_, _ string) bool { return false }
-	return NewMessageHandler(ensureSession, &echoRunner{}, noAction, hasAction, verifier, checker)
+	return NewMessageHandler(HandlerConfig{
+		EnsureSession: ensureSession,
+		Runner:        &echoRunner{},
+		RunAction:     noAction,
+		HasAction:     hasAction,
+		Verifier:      verifier,
+		LimitChecker:  checker,
+	})
 }
 
 func callHandler(h pkg.MessageHandler, meta map[string]string) pkg.OutboundMessage {
@@ -96,7 +103,7 @@ func TestHandler_LimitExceeded(t *testing.T) {
 	checker := &stubLimitChecker{total: 1000} // at the limit
 	h := newTestHandler(&stubVerifier{p: p}, checker)
 	out := callHandler(h, map[string]string{"profile_token": "tok"})
-	if !strings.Contains(out.Content, "Token limit reached") {
+	if !strings.Contains(out.Content, "token limit reached") {
 		t.Errorf("Content = %q, want limit-exceeded message", out.Content)
 	}
 }

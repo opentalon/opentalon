@@ -22,25 +22,28 @@ type LimitChecker interface {
 	TotalTokensSince(ctx context.Context, entityID string, since time.Time) (int, error)
 }
 
+// HandlerConfig holds the dependencies for NewMessageHandler.
+type HandlerConfig struct {
+	EnsureSession pkg.EnsureSessionFunc
+	Runner        pkg.Runner
+	RunAction     pkg.RunActionFunc
+	HasAction     pkg.HasActionFunc
+	Verifier      ProfileVerifier // nil disables profile verification
+	LimitChecker  LimitChecker   // nil disables token spend enforcement
+}
+
 // NewMessageHandler returns a MessageHandler that: ensures session, verifies profile token (if
-// verifier is non-nil), runs channel-specific content preparer (if registered), then runs the
+// Verifier is non-nil), runs channel-specific content preparer (if registered), then runs the
 // message through the Runner and returns the response.
-func NewMessageHandler(
-	ensureSession pkg.EnsureSessionFunc,
-	runner pkg.Runner,
-	runAction pkg.RunActionFunc,
-	hasAction pkg.HasActionFunc,
-	verifier ProfileVerifier,
-	limitChecker LimitChecker,
-) pkg.MessageHandler {
+func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	return func(ctx context.Context, sessionKey string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		// Profile verification: required when verifier is configured.
-		if verifier != nil {
+		if cfg.Verifier != nil {
 			token := msg.Metadata["profile_token"]
 			if token == "" {
 				return errorResponse(msg, "profile token required"), nil
 			}
-			p, err := verifier.Verify(ctx, token, msg.ChannelID)
+			p, err := cfg.Verifier.Verify(ctx, token, msg.ChannelID)
 			if err != nil {
 				slog.Warn("profile verification failed", "error", err, "channel", msg.ChannelID)
 				return errorResponse(msg, "authentication failed"), nil
@@ -49,14 +52,14 @@ func NewMessageHandler(
 			ctx = profile.WithProfile(ctx, p)
 
 			// Enforce per-profile token spend limit when configured.
-			if limitChecker != nil && p.Limit > 0 && p.LimitWindow > 0 {
+			if cfg.LimitChecker != nil && p.Limit > 0 && p.LimitWindow > 0 {
 				since := time.Now().Add(-p.LimitWindow)
-				used, lerr := limitChecker.TotalTokensSince(ctx, p.EntityID, since)
+				used, lerr := cfg.LimitChecker.TotalTokensSince(ctx, p.EntityID, since)
 				if lerr != nil {
 					slog.Warn("limit check failed", "error", lerr, "entity", p.EntityID)
 				} else if used >= p.Limit {
 					slog.Info("token limit exceeded", "entity", p.EntityID, "used", used, "limit", p.Limit, "window", p.LimitWindow)
-					return errorResponse(msg, "Token limit reached. Please try again later."), nil
+					return errorResponse(msg, "token limit reached, please try again later"), nil
 				}
 			}
 
@@ -73,12 +76,12 @@ func NewMessageHandler(
 		// else creating deferred work) can deliver results back to this chat.
 		ctx = actor.WithConversationID(ctx, msg.ConversationID)
 
-		ensureSession(sessionKey)
+		cfg.EnsureSession(sessionKey)
 		content := msg.Content
 		if prep := pkg.GetContentPreparer(msg.ChannelID); prep != nil {
-			content = prep(ctx, content, runAction, hasAction)
+			content = prep(ctx, content, cfg.RunAction, cfg.HasAction)
 		}
-		response, inputForDisplay, err := runner.Run(ctx, sessionKey, content, msg.Files...)
+		response, inputForDisplay, err := cfg.Runner.Run(ctx, sessionKey, content, msg.Files...)
 		if err != nil {
 			logger.FromContext(ctx).Error("handler run failed", "error", err)
 			return pkg.OutboundMessage{

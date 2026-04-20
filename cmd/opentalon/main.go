@@ -469,7 +469,14 @@ func main() {
 		}
 	}
 	runner := &channelRunner{orch: orch}
-	handler := channel.NewMessageHandler(ensureSession, runner, orch.RunAction, toolRegistry.HasAction, profileVerifier, usageStore)
+	handler := channel.NewMessageHandler(channel.HandlerConfig{
+		EnsureSession: ensureSession,
+		Runner:        runner,
+		RunAction:     orch.RunAction,
+		HasAction:     toolRegistry.HasAction,
+		Verifier:      profileVerifier,
+		LimitChecker:  usageStore,
+	})
 
 	reg := channel.NewRegistry(handler)
 	notifier.reg = reg

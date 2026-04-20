@@ -190,7 +190,7 @@ func (v *Verifier) cleanupLoop() {
 // forwarded to the WhoAmI server if ChannelTypeHeader is configured.
 // Returns ErrAuthFailed if the server rejects the token or returns incomplete data.
 func (v *Verifier) Verify(ctx context.Context, token, channelType string) (*Profile, error) {
-	key := sha256.Sum256([]byte(token))
+	key := sha256.Sum256([]byte(token + "\x00" + channelType))
 
 	v.mu.Lock()
 	if e, ok := v.cache[key]; ok && time.Now().Before(e.expiresAt) {
@@ -303,12 +303,18 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 
 	var limit int
 	if lraw, ok := raw[v.cfg.LimitField]; ok {
-		_ = json.Unmarshal(lraw, &limit)
+		if err := json.Unmarshal(lraw, &limit); err != nil {
+			return nil, fmt.Errorf("%w: malformed %q field: %v", ErrAuthFailed, v.cfg.LimitField, err)
+		}
 	}
 	var limitWindow time.Duration
 	if ltraw, ok := raw[v.cfg.LimitTimeField]; ok {
 		if s := jsonString(ltraw); s != "" {
-			limitWindow, _ = time.ParseDuration(s)
+			var err error
+			limitWindow, err = time.ParseDuration(s)
+			if err != nil {
+				return nil, fmt.Errorf("%w: malformed %q field %q: %v", ErrAuthFailed, v.cfg.LimitTimeField, s, err)
+			}
 		}
 	}
 
