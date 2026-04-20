@@ -41,11 +41,12 @@ func requestFromProto(pb *pluginpb.ToolCallRequest) Request {
 		return Request{}
 	}
 	return Request{
-		Method: "execute",
-		ID:     pb.Id,
-		Plugin: pb.Plugin,
-		Action: pb.Action,
-		Args:   pb.Args,
+		Method:      "execute",
+		ID:          pb.Id,
+		Plugin:      pb.Plugin,
+		Action:      pb.Action,
+		Args:        pb.Args,
+		Credentials: pb.Credentials,
 	}
 }
 
