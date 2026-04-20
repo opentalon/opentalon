@@ -328,7 +328,7 @@ func TestExecuteForwardsCredentialsFromProfile(t *testing.T) {
 	p := &profile.Profile{
 		EntityID: "u1",
 		Credentials: map[string]string{
-			"timly": "user-api-token-abc",
+			"mymcp": "user-api-token-abc",
 			"jira":  "user-jira-token-xyz",
 		},
 	}
@@ -340,8 +340,8 @@ func TestExecuteForwardsCredentialsFromProfile(t *testing.T) {
 	}
 
 	creds := <-received
-	if creds["timly"] != "user-api-token-abc" {
-		t.Errorf("credentials[timly] = %q, want user-api-token-abc", creds["timly"])
+	if creds["mymcp"] != "user-api-token-abc" {
+		t.Errorf("credentials[mymcp] = %q, want user-api-token-abc", creds["mymcp"])
 	}
 	if creds["jira"] != "user-jira-token-xyz" {
 		t.Errorf("credentials[jira] = %q, want user-jira-token-xyz", creds["jira"])

@@ -72,7 +72,7 @@ type ToolCallRequest struct {
 	Plugin string                 `protobuf:"bytes,2,opt,name=plugin,proto3" json:"plugin,omitempty"`
 	Action string                 `protobuf:"bytes,3,opt,name=action,proto3" json:"action,omitempty"`
 	Args   map[string]string      `protobuf:"bytes,4,rep,name=args,proto3" json:"args,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// Per-request credentials from the verified profile (e.g. {"timly": "user-api-token"}).
+	// Per-request credentials from the verified profile (e.g. {"mymcp": "user-api-token"}).
 	// Keyed by MCP server name; the plugin merges these with its static configured headers.
 	Credentials   map[string]string `protobuf:"bytes,5,rep,name=credentials,proto3" json:"credentials,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields

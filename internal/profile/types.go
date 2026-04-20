@@ -17,5 +17,5 @@ type Profile struct {
 	ChannelType string            // optional channel type returned by WhoAmI (e.g. "slack", "web", "api")
 	Limit       int               // token spend limit per LimitWindow (0 = unlimited)
 	LimitWindow time.Duration     // rolling window for Limit (0 = unlimited)
-	Credentials map[string]string // per-MCP-server tokens from WhoAmI (e.g. {"timly": "user-api-token"})
+	Credentials map[string]string // per-MCP-server tokens from WhoAmI (e.g. {"mymcp": "user-api-token"})
 }

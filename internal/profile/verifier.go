@@ -314,7 +314,9 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 
 	var plugins []string
 	if praw, ok := raw[v.cfg.PluginsField]; ok {
-		_ = json.Unmarshal(praw, &plugins)
+		if err := json.Unmarshal(praw, &plugins); err != nil {
+			slog.WarnContext(ctx, "whoami: malformed plugins field, ignoring", "field", v.cfg.PluginsField, "error", err)
+		}
 	}
 
 	model := jsonString(raw[v.cfg.ModelField])
@@ -339,7 +341,10 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 
 	var credentials map[string]string
 	if craw, ok := raw[v.cfg.CredentialsField]; ok {
-		_ = json.Unmarshal(craw, &credentials)
+		if err := json.Unmarshal(craw, &credentials); err != nil {
+			credentials = nil
+			slog.WarnContext(ctx, "whoami: malformed credentials field, ignoring", "field", v.cfg.CredentialsField, "error", err)
+		}
 	}
 
 	return &Profile{

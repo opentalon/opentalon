@@ -386,7 +386,7 @@ func TestVerifier_Credentials(t *testing.T) {
 			"entity_id": "u1",
 			"group":     "g1",
 			"credentials": map[string]string{
-				"timly": "user-api-token-abc",
+				"mymcp": "user-api-token-abc",
 				"jira":  "user-jira-token-xyz",
 			},
 		})
@@ -403,8 +403,8 @@ func TestVerifier_Credentials(t *testing.T) {
 	if len(p.Credentials) != 2 {
 		t.Fatalf("Credentials len = %d, want 2", len(p.Credentials))
 	}
-	if p.Credentials["timly"] != "user-api-token-abc" {
-		t.Errorf("Credentials[timly] = %q, want user-api-token-abc", p.Credentials["timly"])
+	if p.Credentials["mymcp"] != "user-api-token-abc" {
+		t.Errorf("Credentials[mymcp] = %q, want user-api-token-abc", p.Credentials["mymcp"])
 	}
 	if p.Credentials["jira"] != "user-jira-token-xyz" {
 		t.Errorf("Credentials[jira] = %q, want user-jira-token-xyz", p.Credentials["jira"])
@@ -442,7 +442,7 @@ func TestVerifier_Credentials_CustomField(t *testing.T) {
 			"entity_id": "u1",
 			"group":     "g1",
 			"tokens": map[string]string{
-				"timly": "custom-field-token",
+				"mymcp": "custom-field-token",
 			},
 		})
 	}))
@@ -455,8 +455,45 @@ func TestVerifier_Credentials_CustomField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if p.Credentials["timly"] != "custom-field-token" {
-		t.Errorf("Credentials[timly] = %q, want custom-field-token", p.Credentials["timly"])
+	if p.Credentials["mymcp"] != "custom-field-token" {
+		t.Errorf("Credentials[mymcp] = %q, want custom-field-token", p.Credentials["mymcp"])
+	}
+}
+
+// TestVerifier_Credentials_Malformed verifies that an unparseable credentials
+// field (array instead of object, non-string values) yields nil credentials
+// with no error — the call succeeds and the bad field is silently ignored.
+func TestVerifier_Credentials_Malformed(t *testing.T) {
+	cases := []struct {
+		name        string
+		credentials interface{}
+	}{
+		{"array", []string{"mymcp", "jira"}},
+		{"non-string values", map[string]interface{}{"mymcp": 123}},
+		{"nested object", map[string]interface{}{"mymcp": map[string]string{"token": "abc"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"entity_id":   "u1",
+					"group":       "g1",
+					"credentials": tc.credentials,
+				})
+			}))
+			defer srv.Close()
+
+			v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
+			defer v.Close()
+
+			p, err := v.Verify(context.Background(), "tok", "")
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if len(p.Credentials) != 0 {
+				t.Errorf("Credentials = %v, want nil/empty for malformed input", p.Credentials)
+			}
+		})
 	}
 }
 

@@ -106,7 +106,7 @@ func (c *Client) Execute(ctx context.Context, call orchestrator.ToolCall) orches
 // ExecuteContext is like Execute but respects context cancellation.
 func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 	var credentials map[string]string
-	if p := profile.FromContext(ctx); p != nil && len(p.Credentials) > 0 {
+	if p := profile.FromContext(ctx); p != nil {
 		credentials = p.Credentials
 	}
 	resp, err := c.client.Execute(ctx, &pluginpb.ToolCallRequest{
