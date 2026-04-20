@@ -22,6 +22,9 @@ message ToolCallRequest {
   string plugin = 2;
   string action = 3;
   map<string, string> args = 4;
+  // Per-request credentials from the verified profile (e.g. {"mymcp": "user-api-token"}).
+  // Keyed by MCP server name; the plugin merges these with its static configured headers.
+  map<string, string> credentials = 5;
 }
 
 message ToolResultResponse {
