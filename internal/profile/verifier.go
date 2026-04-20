@@ -30,18 +30,22 @@ type EntityUpserter interface {
 
 // VerifierConfig holds configuration parsed from config.WhoAmIConfig.
 type VerifierConfig struct {
-	URL              string
-	Method           string            // "GET" or "POST"; default "POST"
-	TokenHeader      string            // default "Authorization"
-	TokenPrefix      string            // default "Bearer "
-	Timeout          time.Duration     // default 5s
-	CacheTTL         time.Duration     // default 60s
-	NegativeCacheTTL time.Duration     // default 15s; caches explicit server rejections (4xx)
-	EntityIDField    string            // default "entity_id"
-	GroupField       string            // default "group"
-	PluginsField     string            // default "plugins"
-	ModelField       string            // optional JSON field for model override; default "model"
-	ExtraHeaders     map[string]string // static headers sent on every WhoAmI call; ${ENV_VAR} expanded once at construction
+	URL               string
+	Method            string            // "GET" or "POST"; default "POST"
+	TokenHeader       string            // default "Authorization"
+	TokenPrefix       string            // default "Bearer "
+	Timeout           time.Duration     // default 5s
+	CacheTTL          time.Duration     // default 60s
+	NegativeCacheTTL  time.Duration     // default 15s; caches explicit server rejections (4xx)
+	EntityIDField     string            // default "entity_id"
+	GroupField        string            // default "group"
+	PluginsField      string            // default "plugins"
+	ModelField        string            // optional JSON field for model override; default "model"
+	ChannelTypeField  string            // optional JSON field for channel type in response; default "channel_type"
+	ChannelTypeHeader string            // optional header name to send channel type to WhoAmI server (e.g. "X-Channel-Type")
+	LimitField        string            // optional JSON field for token spend limit; default "limit"
+	LimitTimeField    string            // optional JSON field for limit window duration (e.g. "1h"); default "limit_time"
+	ExtraHeaders      map[string]string // static headers sent on every WhoAmI call; ${ENV_VAR} expanded once at construction
 }
 
 func (c *VerifierConfig) setDefaults() {
@@ -76,6 +80,15 @@ func (c *VerifierConfig) setDefaults() {
 	}
 	if c.ModelField == "" {
 		c.ModelField = "model"
+	}
+	if c.ChannelTypeField == "" {
+		c.ChannelTypeField = "channel_type"
+	}
+	if c.LimitField == "" {
+		c.LimitField = "limit"
+	}
+	if c.LimitTimeField == "" {
+		c.LimitTimeField = "limit_time"
 	}
 	// Expand env vars in ExtraHeaders once at construction time so values are
 	// immutable for the verifier's lifetime and can't drift mid-run. Also guard
@@ -173,9 +186,11 @@ func (v *Verifier) cleanupLoop() {
 }
 
 // Verify returns the Profile for token, using the cache when valid.
+// channelType is the originating channel ID (e.g. "slack", "telegram") and is
+// forwarded to the WhoAmI server if ChannelTypeHeader is configured.
 // Returns ErrAuthFailed if the server rejects the token or returns incomplete data.
-func (v *Verifier) Verify(ctx context.Context, token string) (*Profile, error) {
-	key := sha256.Sum256([]byte(token))
+func (v *Verifier) Verify(ctx context.Context, token, channelType string) (*Profile, error) {
+	key := sha256.Sum256([]byte(token + "\x00" + channelType))
 
 	v.mu.Lock()
 	if e, ok := v.cache[key]; ok && time.Now().Before(e.expiresAt) {
@@ -184,7 +199,7 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*Profile, error) {
 	}
 	v.mu.Unlock()
 
-	p, err := v.callServer(ctx, token)
+	p, err := v.callServer(ctx, token, channelType)
 	if err != nil {
 		var rejected rejectedError
 		if errors.As(err, &rejected) {
@@ -239,12 +254,15 @@ func (v *Verifier) evictLocked() {
 	}
 }
 
-func (v *Verifier) callServer(ctx context.Context, token string) (*Profile, error) {
+func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*Profile, error) {
 	req, err := http.NewRequestWithContext(ctx, v.cfg.Method, v.cfg.URL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: build request: %v", ErrAuthFailed, err)
 	}
 	req.Header.Set(v.cfg.TokenHeader, v.cfg.TokenPrefix+token)
+	if v.cfg.ChannelTypeHeader != "" && channelType != "" {
+		req.Header.Set(v.cfg.ChannelTypeHeader, channelType)
+	}
 	for k, val := range v.cfg.ExtraHeaders {
 		req.Header.Set(k, val)
 	}
@@ -281,13 +299,34 @@ func (v *Verifier) callServer(ctx context.Context, token string) (*Profile, erro
 	}
 
 	model := jsonString(raw[v.cfg.ModelField])
+	channelTypeResp := jsonString(raw[v.cfg.ChannelTypeField])
+
+	var limit int
+	if lraw, ok := raw[v.cfg.LimitField]; ok {
+		if err := json.Unmarshal(lraw, &limit); err != nil {
+			return nil, fmt.Errorf("%w: malformed %q field: %v", ErrAuthFailed, v.cfg.LimitField, err)
+		}
+	}
+	var limitWindow time.Duration
+	if ltraw, ok := raw[v.cfg.LimitTimeField]; ok {
+		if s := jsonString(ltraw); s != "" {
+			var err error
+			limitWindow, err = time.ParseDuration(s)
+			if err != nil {
+				return nil, fmt.Errorf("%w: malformed %q field %q: %v", ErrAuthFailed, v.cfg.LimitTimeField, s, err)
+			}
+		}
+	}
 
 	return &Profile{
-		EntityID: entityID,
-		Group:    group,
-		Token:    token,
-		Plugins:  plugins,
-		Model:    model,
+		EntityID:    entityID,
+		Group:       group,
+		Token:       token,
+		Plugins:     plugins,
+		Model:       model,
+		ChannelType: channelTypeResp,
+		Limit:       limit,
+		LimitWindow: limitWindow,
 	}, nil
 }
 

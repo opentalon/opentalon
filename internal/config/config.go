@@ -92,17 +92,21 @@ type ProfilesConfig struct {
 
 // WhoAmIConfig configures the external identity-verification server.
 type WhoAmIConfig struct {
-	URL           string            `yaml:"url"`                     // required to enable profile verification
-	Method        string            `yaml:"method"`                  // GET or POST; default POST
-	TokenHeader   string            `yaml:"token_header"`            // header sent to server; default "Authorization"
-	TokenPrefix   string            `yaml:"token_prefix"`            // value prefix; default "Bearer "
-	Timeout       string            `yaml:"timeout"`                 // Go duration; default "5s"
-	CacheTTL      string            `yaml:"cache_ttl"`               // Go duration; default "60s"
-	EntityIDField string            `yaml:"entity_id_field"`         // JSON field in response; default "entity_id"
-	GroupField    string            `yaml:"group_field"`             // JSON field in response; default "group"
-	PluginsField  string            `yaml:"plugins_field"`           // optional JSON field for plugin list; default "plugins"
-	ModelField    string            `yaml:"model_field"`             // optional JSON field for model override; default "model"
-	ExtraHeaders  map[string]string `yaml:"extra_headers,omitempty"` // static headers added to every WhoAmI call; values support ${ENV_VAR}
+	URL               string            `yaml:"url"`                     // required to enable profile verification
+	Method            string            `yaml:"method"`                  // GET or POST; default POST
+	TokenHeader       string            `yaml:"token_header"`            // header sent to server; default "Authorization"
+	TokenPrefix       string            `yaml:"token_prefix"`            // value prefix; default "Bearer "
+	Timeout           string            `yaml:"timeout"`                 // Go duration; default "5s"
+	CacheTTL          string            `yaml:"cache_ttl"`               // Go duration; default "60s"
+	EntityIDField     string            `yaml:"entity_id_field"`         // JSON field in response; default "entity_id"
+	GroupField        string            `yaml:"group_field"`             // JSON field in response; default "group"
+	PluginsField      string            `yaml:"plugins_field"`           // optional JSON field for plugin list; default "plugins"
+	ModelField        string            `yaml:"model_field"`             // optional JSON field for model override; default "model"
+	ChannelTypeField  string            `yaml:"channel_type_field"`      // optional JSON field for channel type in response; default "channel_type"
+	ChannelTypeHeader string            `yaml:"channel_type_header"`     // optional header name to send channel type to WhoAmI server (e.g. "X-Channel-Type")
+	LimitField        string            `yaml:"limit_field"`             // optional JSON field for token spend limit; default "limit"
+	LimitTimeField    string            `yaml:"limit_time_field"`        // optional JSON field for limit window duration (e.g. "1h"); default "limit_time"
+	ExtraHeaders      map[string]string `yaml:"extra_headers,omitempty"` // static headers added to every WhoAmI call; values support ${ENV_VAR}
 }
 
 // GroupConfig is a static baseline of plugin IDs for a group.

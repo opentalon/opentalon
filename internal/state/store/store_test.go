@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/config"
@@ -24,8 +25,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 2 {
-		t.Errorf("schema_version = %d, want 2", v)
+	if v != 3 {
+		t.Errorf("schema_version = %d, want 3", v)
 	}
 
 	// Re-open: idempotent, no error
@@ -38,8 +39,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version (second open): %v", err)
 	}
-	if v != 2 {
-		t.Errorf("schema_version after re-open = %d, want 2", v)
+	if v != 3 {
+		t.Errorf("schema_version after re-open = %d, want 3", v)
 	}
 }
 
@@ -242,5 +243,96 @@ func TestRunPluginMigrations_WithMigrations(t *testing.T) {
 	dbPath := filepath.Join(dataDir, "plugin_data", "testplugin.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Errorf("plugin db not created: %v", err)
+	}
+}
+
+func TestUsageStore_TotalTokensSince(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DBConfig{}, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	usage := NewUsageStore(db)
+	ctx := context.Background()
+	now := time.Now()
+
+	// Record two entries for entity-1 within the window.
+	if err := usage.Record(ctx, UsageRecord{
+		EntityID: "entity-1", GroupID: "g1", ChannelID: "slack",
+		SessionID: "s1", ModelID: "m1", InputTokens: 500, OutputTokens: 300,
+	}); err != nil {
+		t.Fatalf("Record 1: %v", err)
+	}
+	if err := usage.Record(ctx, UsageRecord{
+		EntityID: "entity-1", GroupID: "g1", ChannelID: "slack",
+		SessionID: "s1", ModelID: "m1", InputTokens: 200, OutputTokens: 100,
+	}); err != nil {
+		t.Fatalf("Record 2: %v", err)
+	}
+	// Record an entry for a different entity — must not be counted.
+	if err := usage.Record(ctx, UsageRecord{
+		EntityID: "entity-2", GroupID: "g1", ChannelID: "slack",
+		SessionID: "s2", ModelID: "m1", InputTokens: 999, OutputTokens: 999,
+	}); err != nil {
+		t.Fatalf("Record entity-2: %v", err)
+	}
+
+	total, err := usage.TotalTokensSince(ctx, "entity-1", now.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("TotalTokensSince: %v", err)
+	}
+	// 500+300 + 200+100 = 1100
+	if total != 1100 {
+		t.Errorf("TotalTokensSince = %d, want 1100", total)
+	}
+}
+
+func TestUsageStore_TotalTokensSince_WindowExcludes(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DBConfig{}, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	usage := NewUsageStore(db)
+	ctx := context.Background()
+
+	if err := usage.Record(ctx, UsageRecord{
+		EntityID: "entity-1", GroupID: "g1", ChannelID: "slack",
+		SessionID: "s1", ModelID: "m1", InputTokens: 400, OutputTokens: 200,
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// Query with a since time in the future — nothing should be counted.
+	total, err := usage.TotalTokensSince(ctx, "entity-1", time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("TotalTokensSince: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("TotalTokensSince (future window) = %d, want 0", total)
+	}
+}
+
+func TestUsageStore_TotalTokensSince_Empty(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DBConfig{}, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	usage := NewUsageStore(db)
+	ctx := context.Background()
+
+	total, err := usage.TotalTokensSince(ctx, "nobody", time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("TotalTokensSince: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("TotalTokensSince for unknown entity = %d, want 0", total)
 	}
 }
