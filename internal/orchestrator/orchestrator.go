@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,7 @@ const PermissionAction = "check"
 
 // ContentPreparerEntry configures a plugin action to run before the first LLM call.
 // If Guard is true, the plugin also runs before every LLM call in the agent loop to sanitize messages and prevent prompt injection.
+// If STT is true, the preparer handles audio transcription: audio/* files are passed as base64 args (file_data, file_mime) and the response is used as transcript text.
 type ContentPreparerEntry struct {
 	Plugin   string
 	Action   string
@@ -34,6 +36,7 @@ type ContentPreparerEntry struct {
 	Insecure bool   // if true (default), this preparer cannot run invoke steps; if false (trusted), can invoke
 	Guard    bool   // if true, also runs before every LLM call to sanitize messages
 	FailOpen bool   // if true, guard/preparer failures are logged and skipped; default false (fail-closed)
+	STT      bool   // if true, receives audio/* files as base64 args and returns transcript text
 }
 
 type LLMClient interface {
@@ -307,6 +310,79 @@ func (o *Orchestrator) handlePreparerFailure(prep ContentPreparerEntry, details 
 	return &RunResult{Response: fmt.Sprintf("Request blocked: guard %s failed.", name)}
 }
 
+// runSTTPreparers transcribes audio/* files using STT-flagged preparers.
+// Each audio file is passed to every STT preparer as base64 args; the returned transcript
+// is prepended to content and the audio file is removed from the slice.
+// Non-audio files and non-STT preparers are unaffected.
+// On error with FailOpen=true the audio file is passed through; with FailOpen=false the
+// original content and files are returned unchanged.
+func (o *Orchestrator) runSTTPreparers(ctx context.Context, content string, files []provider.MessageFile) (string, []provider.MessageFile) {
+	hasSTT := false
+	for _, p := range o.preparers {
+		if p.STT {
+			hasSTT = true
+			break
+		}
+	}
+
+	var audioFiles, remaining []provider.MessageFile
+	for _, f := range files {
+		if strings.HasPrefix(f.MimeType, "audio/") {
+			audioFiles = append(audioFiles, f)
+		} else {
+			remaining = append(remaining, f)
+		}
+	}
+	if !hasSTT || len(audioFiles) == 0 {
+		return content, files
+	}
+
+	for _, prep := range o.preparers {
+		if !prep.STT {
+			continue
+		}
+		for _, af := range audioFiles {
+			transcript, err := o.runSTTPreparer(ctx, prep, af)
+			if err != nil {
+				slog.WarnContext(ctx, "stt transcription failed", "plugin", prep.Plugin, "action", prep.Action, "error", err)
+				if !prep.FailOpen {
+					return content, files // fail-closed: abort and return original
+				}
+				remaining = append(remaining, af) // fail_open: pass audio through unchanged
+				continue
+			}
+			if content == "" {
+				content = transcript
+			} else {
+				content = transcript + "\n\n" + content
+			}
+		}
+	}
+	return content, remaining
+}
+
+// runSTTPreparer calls a single STT preparer plugin with a base64-encoded audio file.
+// It always returns an error on plugin failure so that runSTTPreparers can apply FailOpen logic.
+func (o *Orchestrator) runSTTPreparer(ctx context.Context, prep ContentPreparerEntry, f provider.MessageFile) (string, error) {
+	if !o.registry.HasAction(prep.Plugin, prep.Action) {
+		return "", fmt.Errorf("stt plugin %q action %q not found", prep.Plugin, prep.Action)
+	}
+	call := ToolCall{
+		ID:     fmt.Sprintf("stt-%s-%s", prep.Plugin, prep.Action),
+		Plugin: prep.Plugin,
+		Action: prep.Action,
+		Args: map[string]string{
+			"file_data": base64.StdEncoding.EncodeToString(f.Data),
+			"file_mime": f.MimeType,
+		},
+	}
+	result := o.executeCall(ctx, call)
+	if result.Error != "" {
+		return "", fmt.Errorf("stt plugin %q: %s", prep.Plugin, result.Error)
+	}
+	return result.Content, nil
+}
+
 func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPreparerEntry, content, callPrefix string, allowInvoke bool) (string, *RunResult, error) {
 	if strings.HasPrefix(prep.Plugin, "lua:") {
 		scriptName := strings.TrimPrefix(prep.Plugin, "lua:")
@@ -466,8 +542,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	}
 
 	content := userMessage
+	// Transcribe any audio files using STT-flagged preparers before the main preparer loop.
+	content, files = o.runSTTPreparers(ctx, content, files)
+
 	// Run content preparers before the first LLM call (config-driven).
+	// STT preparers are skipped here — they already ran in runSTTPreparers above.
 	for _, prep := range o.preparers {
+		if prep.STT {
+			continue
+		}
 		guardedContent, blocked, err := o.runSinglePreparer(ctx, prep, content, "preparer", true)
 		if err != nil {
 			return nil, err
