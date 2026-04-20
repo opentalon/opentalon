@@ -377,15 +377,19 @@ func main() {
 	var profileVerifier channel.ProfileVerifier
 	if cfg.Profiles.WhoAmI.URL != "" {
 		vcfg := profile.VerifierConfig{
-			URL:           cfg.Profiles.WhoAmI.URL,
-			Method:        cfg.Profiles.WhoAmI.Method,
-			TokenHeader:   cfg.Profiles.WhoAmI.TokenHeader,
-			TokenPrefix:   cfg.Profiles.WhoAmI.TokenPrefix,
-			EntityIDField: cfg.Profiles.WhoAmI.EntityIDField,
-			GroupField:    cfg.Profiles.WhoAmI.GroupField,
-			PluginsField:  cfg.Profiles.WhoAmI.PluginsField,
-			ModelField:    cfg.Profiles.WhoAmI.ModelField,
-			ExtraHeaders:  cfg.Profiles.WhoAmI.ExtraHeaders,
+			URL:               cfg.Profiles.WhoAmI.URL,
+			Method:            cfg.Profiles.WhoAmI.Method,
+			TokenHeader:       cfg.Profiles.WhoAmI.TokenHeader,
+			TokenPrefix:       cfg.Profiles.WhoAmI.TokenPrefix,
+			EntityIDField:     cfg.Profiles.WhoAmI.EntityIDField,
+			GroupField:        cfg.Profiles.WhoAmI.GroupField,
+			PluginsField:      cfg.Profiles.WhoAmI.PluginsField,
+			ModelField:        cfg.Profiles.WhoAmI.ModelField,
+			ChannelTypeField:  cfg.Profiles.WhoAmI.ChannelTypeField,
+			ChannelTypeHeader: cfg.Profiles.WhoAmI.ChannelTypeHeader,
+			LimitField:        cfg.Profiles.WhoAmI.LimitField,
+			LimitTimeField:    cfg.Profiles.WhoAmI.LimitTimeField,
+			ExtraHeaders:      cfg.Profiles.WhoAmI.ExtraHeaders,
 		}
 		if d, err := time.ParseDuration(cfg.Profiles.WhoAmI.Timeout); err == nil {
 			vcfg.Timeout = d
@@ -465,7 +469,7 @@ func main() {
 		}
 	}
 	runner := &channelRunner{orch: orch}
-	handler := channel.NewMessageHandler(ensureSession, runner, orch.RunAction, toolRegistry.HasAction, profileVerifier)
+	handler := channel.NewMessageHandler(ensureSession, runner, orch.RunAction, toolRegistry.HasAction, profileVerifier, usageStore)
 
 	reg := channel.NewRegistry(handler)
 	notifier.reg = reg

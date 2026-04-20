@@ -32,6 +32,22 @@ func NewUsageStore(db *DB) *UsageStore {
 	return &UsageStore{db: db}
 }
 
+// TotalTokensSince returns the sum of input + output tokens for entityID
+// recorded on or after since. Used to enforce per-profile token limits.
+func (s *UsageStore) TotalTokensSince(ctx context.Context, entityID string, since time.Time) (int, error) {
+	sinceStr := since.UTC().Format(time.RFC3339)
+	row := s.db.SQLDB().QueryRowContext(ctx, s.db.Dialect().Rebind(`
+		SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
+		FROM profile_usage
+		WHERE entity_id = ? AND created_at >= ?`),
+		entityID, sinceStr)
+	var total int
+	if err := row.Scan(&total); err != nil {
+		return 0, fmt.Errorf("usage store: total tokens since: %w", err)
+	}
+	return total, nil
+}
+
 // Record inserts a usage record.
 func (s *UsageStore) Record(ctx context.Context, r UsageRecord) error {
 	id := "usg_" + uuid.New().String()

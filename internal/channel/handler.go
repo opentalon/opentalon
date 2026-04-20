@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/logger"
@@ -13,7 +14,12 @@ import (
 
 // ProfileVerifier is the subset of profile.Verifier used by the handler.
 type ProfileVerifier interface {
-	Verify(ctx context.Context, token string) (*profile.Profile, error)
+	Verify(ctx context.Context, token, channelType string) (*profile.Profile, error)
+}
+
+// LimitChecker checks how many tokens an entity has consumed within a rolling window.
+type LimitChecker interface {
+	TotalTokensSince(ctx context.Context, entityID string, since time.Time) (int, error)
 }
 
 // NewMessageHandler returns a MessageHandler that: ensures session, verifies profile token (if
@@ -25,6 +31,7 @@ func NewMessageHandler(
 	runAction pkg.RunActionFunc,
 	hasAction pkg.HasActionFunc,
 	verifier ProfileVerifier,
+	limitChecker LimitChecker,
 ) pkg.MessageHandler {
 	return func(ctx context.Context, sessionKey string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		// Profile verification: required when verifier is configured.
@@ -33,13 +40,26 @@ func NewMessageHandler(
 			if token == "" {
 				return errorResponse(msg, "profile token required"), nil
 			}
-			p, err := verifier.Verify(ctx, token)
+			p, err := verifier.Verify(ctx, token, msg.ChannelID)
 			if err != nil {
 				slog.Warn("profile verification failed", "error", err, "channel", msg.ChannelID)
 				return errorResponse(msg, "authentication failed"), nil
 			}
 			p.ChannelID = msg.ChannelID
 			ctx = profile.WithProfile(ctx, p)
+
+			// Enforce per-profile token spend limit when configured.
+			if limitChecker != nil && p.Limit > 0 && p.LimitWindow > 0 {
+				since := time.Now().Add(-p.LimitWindow)
+				used, lerr := limitChecker.TotalTokensSince(ctx, p.EntityID, since)
+				if lerr != nil {
+					slog.Warn("limit check failed", "error", lerr, "entity", p.EntityID)
+				} else if used >= p.Limit {
+					slog.Info("token limit exceeded", "entity", p.EntityID, "used", used, "limit", p.Limit, "window", p.LimitWindow)
+					return errorResponse(msg, "Token limit reached. Please try again later."), nil
+				}
+			}
+
 			// Scope session to entity so profiles cannot access each other's history.
 			sessionKey = p.EntityID + ":" + sessionKey
 			// Use entity ID as actor for memory scoping and permission checks.
