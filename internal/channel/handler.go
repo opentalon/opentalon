@@ -29,7 +29,7 @@ type HandlerConfig struct {
 	RunAction     pkg.RunActionFunc
 	HasAction     pkg.HasActionFunc
 	Verifier      ProfileVerifier // nil disables profile verification
-	LimitChecker  LimitChecker   // nil disables token spend enforcement
+	LimitChecker  LimitChecker    // nil disables token spend enforcement
 }
 
 // NewMessageHandler returns a MessageHandler that: ensures session, verifies profile token (if
