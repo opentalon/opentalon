@@ -1782,34 +1782,38 @@ func TestBuildSystemPromptIncludesFormatSection(t *testing.T) {
 		t.Fatalf("get session: %v", err)
 	}
 
-	// Without format hint — system prompt must not contain OUTPUT FORMAT.
-	msgs := o.buildMessages(context.Background(), sess, "hi")
-	systemContent := ""
-	for _, m := range msgs {
-		if m.Role == provider.RoleSystem {
-			systemContent = m.Content
+	// collectSystem concatenates all system messages so assertions work
+	// regardless of whether the hint lives in the main system prompt or in
+	// the trailing format-reminder message.
+	collectSystem := func(msgs []provider.Message) string {
+		var sb strings.Builder
+		for _, m := range msgs {
+			if m.Role == provider.RoleSystem {
+				sb.WriteString(m.Content)
+				sb.WriteString("\n")
+			}
 		}
+		return sb.String()
 	}
-	if strings.Contains(systemContent, "OUTPUT FORMAT") {
+
+	// Without format hint — system messages must not contain OUTPUT FORMAT.
+	msgs := o.buildMessages(context.Background(), sess, "hi")
+	allSystem := collectSystem(msgs)
+	if strings.Contains(allSystem, "OUTPUT FORMAT") {
 		t.Error("system prompt should not contain OUTPUT FORMAT when no format is set")
 	}
 
-	// With Slack format — system prompt must contain the section.
+	// With Slack format — system messages must contain the section.
 	ctx := pkgchannel.WithCapabilities(context.Background(), pkgchannel.Capabilities{
 		ResponseFormat: pkgchannel.FormatSlack,
 	})
 	msgs = o.buildMessages(ctx, sess, "hi")
-	systemContent = ""
-	for _, m := range msgs {
-		if m.Role == provider.RoleSystem {
-			systemContent = m.Content
-		}
+	allSystem = collectSystem(msgs)
+	if !strings.Contains(allSystem, "OUTPUT FORMAT") {
+		t.Error("system messages should contain OUTPUT FORMAT for Slack channel")
 	}
-	if !strings.Contains(systemContent, "OUTPUT FORMAT") {
-		t.Error("system prompt should contain OUTPUT FORMAT for Slack channel")
-	}
-	if !strings.Contains(systemContent, "Slack") {
-		t.Error("system prompt should mention Slack formatting")
+	if !strings.Contains(allSystem, "Slack") {
+		t.Error("system messages should mention Slack formatting")
 	}
 }
 

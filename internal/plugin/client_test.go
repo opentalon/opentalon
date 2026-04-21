@@ -270,17 +270,17 @@ func TestUserOnlyMappedFromProto(t *testing.T) {
 	}
 }
 
-// credCapturingPluginService records the credentials map from each Execute call.
-type credCapturingPluginService struct {
+// credHeaderCapturingPluginService records the credential headers from each Execute call.
+type credHeaderCapturingPluginService struct {
 	pluginpb.UnimplementedPluginServiceServer
-	received chan map[string]string
+	received chan map[string]*pluginpb.CredentialHeader
 }
 
-func (s *credCapturingPluginService) Init(_ context.Context, _ *pluginpb.PluginInitRequest) (*emptypb.Empty, error) {
+func (s *credHeaderCapturingPluginService) Init(_ context.Context, _ *pluginpb.PluginInitRequest) (*emptypb.Empty, error) {
 	return &emptypb.Empty{}, nil
 }
 
-func (s *credCapturingPluginService) Capabilities(_ context.Context, _ *emptypb.Empty) (*pluginpb.PluginCapabilities, error) {
+func (s *credHeaderCapturingPluginService) Capabilities(_ context.Context, _ *emptypb.Empty) (*pluginpb.PluginCapabilities, error) {
 	return &pluginpb.PluginCapabilities{
 		Name: "cred-echo",
 		Actions: []*pluginpb.Action{
@@ -289,17 +289,17 @@ func (s *credCapturingPluginService) Capabilities(_ context.Context, _ *emptypb.
 	}, nil
 }
 
-func (s *credCapturingPluginService) Execute(_ context.Context, req *pluginpb.ToolCallRequest) (*pluginpb.ToolResultResponse, error) {
-	s.received <- req.Credentials
+func (s *credHeaderCapturingPluginService) Execute(_ context.Context, req *pluginpb.ToolCallRequest) (*pluginpb.ToolResultResponse, error) {
+	s.received <- req.CredentialHeaders
 	return &pluginpb.ToolResultResponse{CallId: req.Id, Content: "ok"}, nil
 }
 
-func startCredCapturingServer(t *testing.T) (*grpc.ClientConn, chan map[string]string) {
+func startCredCapturingServer(t *testing.T) (*grpc.ClientConn, chan map[string]*pluginpb.CredentialHeader) {
 	t.Helper()
-	received := make(chan map[string]string, 1)
+	received := make(chan map[string]*pluginpb.CredentialHeader, 1)
 	lis := bufconn.Listen(bufSize)
 	srv := grpc.NewServer()
-	pluginpb.RegisterPluginServiceServer(srv, &credCapturingPluginService{received: received})
+	pluginpb.RegisterPluginServiceServer(srv, &credHeaderCapturingPluginService{received: received})
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(func() { srv.Stop() })
 
@@ -314,9 +314,9 @@ func startCredCapturingServer(t *testing.T) (*grpc.ClientConn, chan map[string]s
 	return cc, received
 }
 
-// TestExecuteForwardsCredentialsFromProfile verifies that credentials stored
+// TestExecuteForwardsCredentialHeadersFromProfile verifies that credential headers stored
 // on the profile in context are forwarded to the plugin via ToolCallRequest.
-func TestExecuteForwardsCredentialsFromProfile(t *testing.T) {
+func TestExecuteForwardsCredentialHeadersFromProfile(t *testing.T) {
 	cc, received := startCredCapturingServer(t)
 	c := &Client{conn: cc, client: pluginpb.NewPluginServiceClient(cc)}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -327,9 +327,9 @@ func TestExecuteForwardsCredentialsFromProfile(t *testing.T) {
 
 	p := &profile.Profile{
 		EntityID: "u1",
-		Credentials: map[string]string{
-			"mymcp": "user-api-token-abc",
-			"jira":  "user-jira-token-xyz",
+		Credentials: map[string]profile.CredentialHeader{
+			"myapp": {Header: "X-App-User", Value: "user-123"},
+			"jira":  {Header: "Authorization", Value: "Bearer jira-xyz"},
 		},
 	}
 	ctx = profile.WithProfile(context.Background(), p)
@@ -340,17 +340,17 @@ func TestExecuteForwardsCredentialsFromProfile(t *testing.T) {
 	}
 
 	creds := <-received
-	if creds["mymcp"] != "user-api-token-abc" {
-		t.Errorf("credentials[mymcp] = %q, want user-api-token-abc", creds["mymcp"])
+	if c := creds["myapp"]; c == nil || c.Header != "X-App-User" || c.Value != "user-123" {
+		t.Errorf("credential_headers[myapp] = %+v, want {X-App-User user-123}", c)
 	}
-	if creds["jira"] != "user-jira-token-xyz" {
-		t.Errorf("credentials[jira] = %q, want user-jira-token-xyz", creds["jira"])
+	if c := creds["jira"]; c == nil || c.Header != "Authorization" || c.Value != "Bearer jira-xyz" {
+		t.Errorf("credential_headers[jira] = %+v, want {Authorization Bearer jira-xyz}", c)
 	}
 }
 
-// TestExecuteNoCredentialsWithoutProfile verifies that nil credentials are sent
+// TestExecuteNoCredentialHeadersWithoutProfile verifies that nil credential headers are sent
 // when no profile is in the context.
-func TestExecuteNoCredentialsWithoutProfile(t *testing.T) {
+func TestExecuteNoCredentialHeadersWithoutProfile(t *testing.T) {
 	cc, received := startCredCapturingServer(t)
 	c := &Client{conn: cc, client: pluginpb.NewPluginServiceClient(cc)}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -365,7 +365,7 @@ func TestExecuteNoCredentialsWithoutProfile(t *testing.T) {
 	}
 
 	if creds := <-received; len(creds) != 0 {
-		t.Errorf("credentials = %v, want empty when no profile in context", creds)
+		t.Errorf("credential_headers = %v, want empty when no profile in context", creds)
 	}
 }
 

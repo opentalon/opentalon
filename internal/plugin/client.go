@@ -105,16 +105,19 @@ func (c *Client) Execute(ctx context.Context, call orchestrator.ToolCall) orches
 
 // ExecuteContext is like Execute but respects context cancellation.
 func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
-	var credentials map[string]string
-	if p := profile.FromContext(ctx); p != nil {
-		credentials = p.Credentials
+	var credHeaders map[string]*pluginpb.CredentialHeader
+	if p := profile.FromContext(ctx); p != nil && len(p.Credentials) > 0 {
+		credHeaders = make(map[string]*pluginpb.CredentialHeader, len(p.Credentials))
+		for k, v := range p.Credentials {
+			credHeaders[k] = &pluginpb.CredentialHeader{Header: v.Header, Value: v.Value}
+		}
 	}
 	resp, err := c.client.Execute(ctx, &pluginpb.ToolCallRequest{
-		Id:          call.ID,
-		Plugin:      call.Plugin,
-		Action:      call.Action,
-		Args:        call.Args,
-		Credentials: credentials,
+		Id:                call.ID,
+		Plugin:            call.Plugin,
+		Action:            call.Action,
+		Args:              call.Args,
+		CredentialHeaders: credHeaders,
 	})
 	if err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc: %v", err)}

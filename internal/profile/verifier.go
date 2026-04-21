@@ -45,7 +45,7 @@ type VerifierConfig struct {
 	ChannelTypeHeader string            // optional header name to send channel type to WhoAmI server (e.g. "X-Channel-Type")
 	LimitField        string            // optional JSON field for token spend limit; default "limit"
 	LimitTimeField    string            // optional JSON field for limit window duration (e.g. "1h"); default "limit_time"
-	CredentialsField  string            // optional JSON field for per-MCP-server tokens map; default "credentials"
+	CredentialsField  string            // optional JSON field for per-MCP-server credential headers; default "credentials"
 	ExtraHeaders      map[string]string // static headers sent on every WhoAmI call; ${ENV_VAR} expanded once at construction
 }
 
@@ -339,7 +339,7 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 		}
 	}
 
-	var credentials map[string]string
+	var credentials map[string]CredentialHeader
 	if craw, ok := raw[v.cfg.CredentialsField]; ok {
 		if err := json.Unmarshal(craw, &credentials); err != nil {
 			credentials = nil
