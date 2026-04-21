@@ -347,7 +347,7 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 		}
 	}
 
-	return &Profile{
+	p := &Profile{
 		EntityID:    entityID,
 		Group:       group,
 		Token:       token,
@@ -357,7 +357,15 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 		Limit:       limit,
 		LimitWindow: limitWindow,
 		Credentials: credentials,
-	}, nil
+	}
+	slog.DebugContext(ctx, "whoami profile resolved",
+		"entity_id", p.EntityID,
+		"group", p.Group,
+		"plugins", p.Plugins,
+		"model", p.Model,
+		"channel_type", p.ChannelType,
+	)
+	return p, nil
 }
 
 func jsonString(raw json.RawMessage) string {
