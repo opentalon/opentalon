@@ -110,12 +110,13 @@ func buildPlannerPrompt(capabilities []CapabilityInfo) string {
 2. If this requires multiple steps, return: {"type": "pipeline", "steps": [...]}
 
 Each step must have: {"id": "<unique>", "name": "<human description>", "plugin": "<plugin>", "action": "<action>", "args": {}, "depends_on": []}
+The "plugin" field must be the exact plugin name shown below (the part before the "|"). The "action" field must be the exact action name shown below (the part after "action=").
 
 Available tools:
 `)
 	for _, cap := range capabilities {
 		for _, action := range cap.Actions {
-			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
+			fmt.Fprintf(&sb, "- plugin=%s | action=%s: %s\n", cap.Name, action.Name, action.Description)
 			for _, param := range action.Parameters {
 				req := ""
 				if param.Required {
