@@ -220,6 +220,24 @@ func TestParseFormatA_InlineNoClosingTag(t *testing.T) {
 	}
 }
 
+func TestParseFormatA_HyphenatedMCPAction(t *testing.T) {
+	// MCP tools commonly use hyphens in action names (e.g. list-org-units).
+	response := `[tool_call]
+{"tool": "myapp.myapp__list-org-units", "args": {}}
+[/tool_call]`
+
+	calls := DefaultParser.Parse(response)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Plugin != "myapp" {
+		t.Errorf("plugin = %q, want %q", calls[0].Plugin, "myapp")
+	}
+	if calls[0].Action != "myapp__list-org-units" {
+		t.Errorf("action = %q, want %q", calls[0].Action, "myapp__list-org-units")
+	}
+}
+
 func TestParseFormatA_DoubleUnderscore(t *testing.T) {
 	// LLMs trained on OpenAI function calling often emit "plugin__action"
 	// instead of "plugin.action".
@@ -368,6 +386,9 @@ func TestParseToolName(t *testing.T) {
 		{"jira__search_issues", "jira", "search_issues", false},
 		{"appsignal__get_applications", "appsignal", "get_applications", false},
 		{"brave_search__search", "brave_search", "search", false},
+		// hyphenated MCP action names
+		{"myapp.myapp__list-org-units", "myapp", "myapp__list-org-units", false},
+		{"jira__get-issue-details", "jira", "get-issue-details", false},
 		// dot is preferred over double-underscore when both could apply
 		{"mcp.jira__search", "mcp", "jira__search", false},
 		// natural-language fragments must be rejected
