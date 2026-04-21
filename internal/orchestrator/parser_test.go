@@ -305,6 +305,10 @@ func TestParseToolName(t *testing.T) {
 		{"noaction", "", "", true},
 		{".nodot", "", "", true},
 		{"nodot.", "", "", true},
+		// natural-language fragments must be rejected
+		{"` syntax). Let me know which action you'd like to perform!", "", "", true},
+		{"plugin.action with spaces", "", "", true},
+		{"plugin.action!", "", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
