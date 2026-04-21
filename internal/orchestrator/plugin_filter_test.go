@@ -223,6 +223,39 @@ func TestPluginAllowed_NonStrictMode_PublicAlwaysVisible(t *testing.T) {
 	}
 }
 
+// --- pluginAllowed with aliases ---
+
+func TestPluginAllowed_StrictMode_AliasInAllowlist(t *testing.T) {
+	reg := buildFilterRegistry()
+	// Register "mcp" with an alias "mymcp-alias"
+	_ = reg.Register(PluginCapability{
+		Name:    "mcpbridge",
+		Actions: []Action{{Name: "call", Description: "call it"}},
+	}, &echoExecutor{})
+	_ = reg.RegisterAlias("my-jira", "mcpbridge")
+
+	o := newFilterOrch(reg, nil)
+
+	// Strict mode: allowlist has "my-jira" (alias), not "mcpbridge" (parent).
+	allowed := cachedAllowedPlugins{m: map[string]bool{"my-jira": true}, strict: true}
+
+	// The parent capability should be allowed because its alias is in the allowlist.
+	// capByName won't find it via ListCapabilities (replaced by alias), construct directly.
+	parentCap := PluginCapability{Name: "mcpbridge"}
+	if !o.pluginAllowed(parentCap, allowed) {
+		t.Error("mcpbridge should be allowed via its alias my-jira being in the allowlist")
+	}
+
+	// The alias capability itself should also be allowed.
+	aliasCap, ok := reg.GetCapability("my-jira")
+	if !ok {
+		t.Fatal("expected to find alias capability")
+	}
+	if !o.pluginAllowed(aliasCap, allowed) {
+		t.Error("my-jira alias capability should be allowed directly")
+	}
+}
+
 // --- end-to-end: system prompt ---
 
 func TestSystemPrompt_StrictMode_OnlyListedPluginsVisible(t *testing.T) {
@@ -299,6 +332,94 @@ func TestExecute_StrictMode_GuardNotInWhoAmI_StillRuns(t *testing.T) {
 	}
 	if !guardCalled {
 		t.Error("guard plugin should have been called even though it is not in the WhoAmI Plugins list")
+	}
+}
+
+func TestSystemPrompt_StrictMode_MCPAliasVisible(t *testing.T) {
+	reg := NewToolRegistry()
+	_ = reg.Register(PluginCapability{
+		Name:        "mcp",
+		Description: "MCP bridge",
+		Actions:     []Action{{Name: "search_issues", Description: "Search Jira issues"}},
+	}, &echoExecutor{})
+	_ = reg.RegisterAlias("jira", "mcp")
+
+	mem := state.NewMemoryStore("")
+	sess := state.NewSessionStore("")
+	sess.Create("s-alias")
+
+	llm := &capturingLLM{responses: []string{"done"}}
+	o := NewWithRules(llm, &fakeParser{parseFn: func(_ string) []ToolCall { return nil }},
+		reg, mem, sess, OrchestratorOpts{})
+
+	// WhoAmI says plugins=["jira"] — which is an alias for "mcp".
+	p := &profile.Profile{EntityID: "u1", Plugins: []string{"jira"}}
+	ctx := profile.WithProfile(context.Background(), p)
+
+	if _, err := o.Run(ctx, "s-alias", "hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(llm.requests) == 0 {
+		t.Fatal("LLM was never called")
+	}
+	system := llm.requests[0].Messages[0].Content
+
+	if !strings.Contains(system, "jira") {
+		t.Error("system prompt should mention 'jira' (alias name)")
+	}
+	if strings.Contains(system, "## mcp") {
+		t.Error("system prompt should NOT mention 'mcp' (parent is replaced by alias)")
+	}
+	if !strings.Contains(system, "search_issues") {
+		t.Error("system prompt should include actions from the MCP plugin under the jira alias")
+	}
+}
+
+func TestExecute_StrictMode_MCPAlias_ToolCallAllowed(t *testing.T) {
+	reg := NewToolRegistry()
+	mcpExec := &callbackExecutor{fn: func(call ToolCall) ToolResult {
+		return ToolResult{CallID: call.ID, Content: "jira result"}
+	}}
+	_ = reg.Register(PluginCapability{
+		Name:    "mcp",
+		Actions: []Action{{Name: "search_issues", Description: "Search"}},
+	}, mcpExec)
+	_ = reg.RegisterAlias("jira", "mcp")
+
+	mem := state.NewMemoryStore("")
+	sess := state.NewSessionStore("")
+	sess.Create("s-alias-exec")
+
+	callNum := 0
+	llm := &capturingLLM{responses: []string{"[tool] jira.search_issues", "done"}}
+	parser := &fakeParser{parseFn: func(_ string) []ToolCall {
+		callNum++
+		if callNum == 1 {
+			return []ToolCall{{ID: "c1", Plugin: "jira", Action: "search_issues", FromLLM: true}}
+		}
+		return nil
+	}}
+	o := NewWithRules(llm, parser, reg, mem, sess, OrchestratorOpts{})
+
+	// WhoAmI: plugins=["jira"]
+	p := &profile.Profile{EntityID: "u1", Plugins: []string{"jira"}}
+	ctx := profile.WithProfile(context.Background(), p)
+
+	result, err := o.Run(ctx, "s-alias-exec", "search jira")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the tool call was executed, not blocked.
+	if len(result.Results) == 0 {
+		t.Fatal("expected at least one tool result")
+	}
+	if result.Results[0].Error != "" {
+		t.Errorf("tool call should not have been blocked, got error: %s", result.Results[0].Error)
+	}
+	if result.Results[0].Content != "jira result" {
+		t.Errorf("Content = %q, want 'jira result'", result.Results[0].Content)
 	}
 }
 

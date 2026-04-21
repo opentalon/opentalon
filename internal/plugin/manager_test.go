@@ -195,6 +195,63 @@ func TestWatchProcessIgnoresStaleProcess(t *testing.T) {
 	}
 }
 
+func TestMCPServerNames(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry PluginEntry
+		want  []string
+	}{
+		{
+			name:  "no config",
+			entry: PluginEntry{Name: "mcp"},
+			want:  nil,
+		},
+		{
+			name:  "no servers key",
+			entry: PluginEntry{Name: "mcp", Config: map[string]interface{}{"foo": "bar"}},
+			want:  nil,
+		},
+		{
+			name: "inline servers with server key",
+			entry: PluginEntry{
+				Name: "mcp",
+				Config: map[string]interface{}{
+					"servers": []interface{}{
+						map[string]interface{}{"server": "jira", "url": "http://localhost:8001"},
+						map[string]interface{}{"server": "appsignal", "url": "http://localhost:8002"},
+					},
+				},
+			},
+			want: []string{"jira", "appsignal"},
+		},
+		{
+			name: "static servers with name key",
+			entry: PluginEntry{
+				Name: "mcp",
+				Config: map[string]interface{}{
+					"servers": []interface{}{
+						map[string]interface{}{"name": "gitlab", "url": "http://localhost:9000"},
+					},
+				},
+			},
+			want: []string{"gitlab"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mcpServerNames(tt.entry)
+			if len(got) != len(tt.want) {
+				t.Fatalf("mcpServerNames() = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("mcpServerNames()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestConfigJSON(t *testing.T) {
 	tests := []struct {
 		name  string

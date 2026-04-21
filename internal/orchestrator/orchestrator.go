@@ -1446,7 +1446,19 @@ func (o *Orchestrator) pluginAllowed(cap PluginCapability, allowed cachedAllowed
 		// Non-strict mode: capability has no group restriction — always visible.
 		return true
 	}
-	return allowed.m[cap.Name]
+	if allowed.m[cap.Name] {
+		return true
+	}
+	// Check aliases: if the capability is an alias target (e.g. "mcp") and any
+	// of its aliases (e.g. "jira", "appsignal") are in the allowlist, allow it.
+	// This shouldn't normally fire because ListCapabilities already replaces
+	// alias targets with per-alias entries, but it's defense-in-depth.
+	for _, alias := range o.registry.AliasesFor(cap.Name) {
+		if allowed.m[alias] {
+			return true
+		}
+	}
+	return false
 }
 
 // mapKeys returns the keys of a map as a sorted slice (for debug logging).

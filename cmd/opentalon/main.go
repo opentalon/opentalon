@@ -319,7 +319,7 @@ func main() {
 	if err := pluginManager.LoadAll(ctx, pluginEntries); err != nil {
 		slog.Warn("some plugins failed to load", "error", err)
 	}
-	pluginManager.StartRetryLoop(retryCtx, 30*time.Second)
+	pluginManager.StartRetryLoop(retryCtx, 10*time.Second)
 
 	if err := requestpkg.Register(toolRegistry, requestSets); err != nil {
 		slog.Warn("request_packages registration failed", "error", err)
