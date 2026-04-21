@@ -889,8 +889,15 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	caps := o.registry.ListCapabilities()
 	for _, cap := range caps {
 		if !o.pluginAllowed(cap, allowedPlugins) {
+			slog.Debug("plugin excluded from system prompt",
+				"plugin", cap.Name,
+				"strict", allowedPlugins.strict,
+				"allowed_groups", cap.AllowedGroups,
+				"in_allowlist", allowedPlugins.m[cap.Name],
+			)
 			continue
 		}
+		slog.Debug("plugin included in system prompt", "plugin", cap.Name)
 		fmt.Fprintf(&sb, "## %s\n%s\n", cap.Name, cap.Description)
 		for _, action := range cap.Actions {
 			if preparerAction[cap.Name+"."+action.Name] || action.UserOnly {
@@ -1144,11 +1151,25 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	// the exemptions already in place for UserOnly and rejectUnknownArgs below.
 	if call.FromLLM {
 		if allowed := o.resolveAllowedPlugins(ctx); !o.pluginAllowed(capForCheck, allowed) {
-			slog.Warn("BLOCKED tool call for restricted plugin", "plugin", call.Plugin, "action", call.Action)
+			slog.Warn("BLOCKED tool call for restricted plugin",
+				"plugin", call.Plugin,
+				"action", call.Action,
+				"strict", allowed.strict,
+				"allowed_groups", capForCheck.AllowedGroups,
+				"in_allowlist", allowed.m[capForCheck.Name],
+				"allowlist_keys", mapKeys(allowed.m),
+			)
 			return ToolResult{
 				CallID: call.ID,
 				Error:  fmt.Sprintf("plugin %q is not available for this profile", call.Plugin),
 			}
+		} else {
+			slog.Debug("tool call allowed",
+				"plugin", call.Plugin,
+				"action", call.Action,
+				"strict", allowed.strict,
+				"in_allowlist", allowed.m[capForCheck.Name],
+			)
 		}
 	}
 
@@ -1426,6 +1447,18 @@ func (o *Orchestrator) pluginAllowed(cap PluginCapability, allowed cachedAllowed
 		return true
 	}
 	return allowed.m[cap.Name]
+}
+
+// mapKeys returns the keys of a map as a sorted slice (for debug logging).
+func mapKeys(m map[string]bool) []string {
+	if m == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // plannerLLMAdapter adapts orchestrator.LLMClient to pipeline.LLMClient.
