@@ -320,63 +320,29 @@ func (m *Manager) Unload(name string) error {
 	return nil
 }
 
-// StartRetryLoop starts a background goroutine that periodically:
-//  1. Retries loading any plugin in the known map that failed to load.
-//  2. Reloads MCP plugins whose sidecars may not have been ready at startup.
-//     MCP plugins often load successfully using cached specs even when servers
-//     are down; reloading forces a fresh connection attempt. Uses exponential
-//     backoff: 10s, 30s, 1m, 2m, 5m (then stops).
+// StartRetryLoop starts a background goroutine that periodically retries
+// loading any plugin in the known map that failed to load.
 //
-// The loop ticks every 10s (the base interval) and each MCP plugin tracks its
-// own next-retry time independently.
+// MCP plugins handle their own sidecar reconnection internally (background
+// retry for offline servers, on-demand reconnect at Execute time), so the
+// host no longer kills and restarts the MCP plugin process to retry sidecars.
 //
 // The loop stops when ctx is cancelled.
 func (m *Manager) StartRetryLoop(ctx context.Context, interval time.Duration) {
-	// mcpBackoffSchedule defines the delay before each successive MCP reload attempt.
-	// After the last entry the plugin is no longer retried.
-	mcpBackoffSchedule := []time.Duration{
-		10 * time.Second,
-		30 * time.Second,
-		1 * time.Minute,
-		2 * time.Minute,
-		5 * time.Minute,
-	}
-
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-
-		type mcpState struct {
-			attempt int
-			nextAt  time.Time
-		}
-		mcpRetries := make(map[string]*mcpState) // plugin name → state
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				now := time.Now()
-
 				m.mu.Lock()
 				var pending []PluginEntry
-				var mcpReload []PluginEntry
 				for name, entry := range m.known {
 					if _, loaded := m.plugins[name]; !loaded {
 						pending = append(pending, entry)
-						continue
-					}
-					// MCP plugins with servers: reload to retry sidecar connections.
-					if servers := mcpServerNames(entry); len(servers) > 0 {
-						st, exists := mcpRetries[name]
-						if !exists {
-							st = &mcpState{nextAt: now}
-							mcpRetries[name] = st
-						}
-						if st.attempt < len(mcpBackoffSchedule) && !now.Before(st.nextAt) {
-							mcpReload = append(mcpReload, entry)
-						}
 					}
 				}
 				m.mu.Unlock()
@@ -385,26 +351,6 @@ func (m *Manager) StartRetryLoop(ctx context.Context, interval time.Duration) {
 					slog.Info("retrying failed plugin load", "component", "plugin-manager", "plugin", entry.Name)
 					if err := m.Load(ctx, entry); err != nil {
 						slog.Warn("plugin retry failed", "component", "plugin-manager", "plugin", entry.Name, "error", err)
-					}
-				}
-
-				for _, entry := range mcpReload {
-					st := mcpRetries[entry.Name]
-					st.attempt++
-					nextDelay := mcpBackoffSchedule[st.attempt-1]
-					if st.attempt < len(mcpBackoffSchedule) {
-						st.nextAt = now.Add(mcpBackoffSchedule[st.attempt])
-					}
-					slog.Info("reloading MCP plugin for sidecar retry",
-						"component", "plugin-manager", "plugin", entry.Name,
-						"attempt", st.attempt, "max", len(mcpBackoffSchedule),
-						"next_retry_in", nextDelay)
-					if err := m.Reload(ctx, entry.Name); err != nil {
-						slog.Warn("MCP plugin reload failed", "component", "plugin-manager",
-							"plugin", entry.Name, "error", err)
-					} else {
-						slog.Info("MCP plugin reloaded successfully",
-							"component", "plugin-manager", "plugin", entry.Name)
 					}
 				}
 			}
