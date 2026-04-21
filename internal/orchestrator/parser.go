@@ -259,10 +259,35 @@ func stripTaggedBlocks(s, open, close string) string {
 }
 
 // parseToolName splits "plugin.action" into ("plugin", "action").
+// Both parts must be valid identifiers: plugin allows [a-zA-Z0-9_.-],
+// action allows [a-zA-Z0-9_]. This rejects natural-language fragments
+// that an LLM might accidentally emit inside [tool_call] blocks.
 func parseToolName(s string) (plugin, action string, err error) {
 	dot := strings.LastIndex(s, ".")
 	if dot <= 0 || dot == len(s)-1 {
 		return "", "", fmt.Errorf("invalid tool name %q", s)
 	}
-	return s[:dot], s[dot+1:], nil
+	plugin, action = s[:dot], s[dot+1:]
+	if !isValidPluginName(plugin) || !isValidActionName(action) {
+		return "", "", fmt.Errorf("invalid tool name %q", s)
+	}
+	return plugin, action, nil
+}
+
+func isValidPluginName(s string) bool {
+	for _, c := range s {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '-' && c != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+func isValidActionName(s string) bool {
+	for _, c := range s {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
+			return false
+		}
+	}
+	return true
 }
