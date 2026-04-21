@@ -158,11 +158,42 @@ func TestBuildPlannerPrompt(t *testing.T) {
 	if prompt == "" {
 		t.Error("expected non-empty prompt")
 	}
-	if !containsStr(prompt, "jira.create_issue") {
-		t.Error("prompt should list jira.create_issue")
+	if !containsStr(prompt, "plugin=jira | action=create_issue") {
+		t.Error("prompt should list plugin=jira | action=create_issue")
 	}
 	if !containsStr(prompt, "(required)") {
 		t.Error("prompt should mark required params")
+	}
+}
+
+// TestBuildPlannerPromptMCPDotActions verifies that when a plugin (e.g. "mcp") has
+// action names containing dots (e.g. "appsignal.get_applications"), the prompt uses
+// an explicit plugin= | action= format so the LLM cannot misparse the boundary.
+// Regression test for: planner generating plugin=mcp.appsignal action=get_applications
+// instead of plugin=mcp action=appsignal.get_applications.
+func TestBuildPlannerPromptMCPDotActions(t *testing.T) {
+	caps := []CapabilityInfo{
+		{
+			Name:        "mcp",
+			Description: "MCP gateway",
+			Actions: []ActionInfo{
+				{Name: "appsignal.get_applications", Description: "List AppSignal apps"},
+				{Name: "jira.search_issues", Description: "Search Jira issues"},
+			},
+		},
+	}
+	prompt := buildPlannerPrompt(caps)
+
+	// The explicit format must appear so the LLM knows plugin="mcp", not "mcp.appsignal".
+	if !containsStr(prompt, "plugin=mcp | action=appsignal.get_applications") {
+		t.Error("prompt should contain 'plugin=mcp | action=appsignal.get_applications'")
+	}
+	if !containsStr(prompt, "plugin=mcp | action=jira.search_issues") {
+		t.Error("prompt should contain 'plugin=mcp | action=jira.search_issues'")
+	}
+	// The old ambiguous dot-joined form must not appear.
+	if containsStr(prompt, "mcp.appsignal.get_applications") {
+		t.Error("prompt must not contain ambiguous 'mcp.appsignal.get_applications'")
 	}
 }
 
