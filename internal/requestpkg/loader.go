@@ -4,10 +4,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"gopkg.in/yaml.v3"
 )
+
+var envVarPattern = regexp.MustCompile(`\$\{([^}]+)}`)
+
+func expandEnv(s string) string {
+	return envVarPattern.ReplaceAllStringFunc(s, func(match string) string {
+		varName := envVarPattern.FindStringSubmatch(match)[1]
+		if val, ok := os.LookupEnv(varName); ok {
+			return val
+		}
+		return match
+	})
+}
+
+func expandEnvInSet(s *Set) {
+	if s.MCP != nil {
+		s.MCP.URL = expandEnv(s.MCP.URL)
+		for k, v := range s.MCP.Headers {
+			s.MCP.Headers[k] = expandEnv(v)
+		}
+	}
+	for i, p := range s.Packages {
+		p.URL = expandEnv(p.URL)
+		for k, v := range p.Headers {
+			p.Headers[k] = expandEnv(v)
+		}
+		s.Packages[i] = p
+	}
+}
 
 // LoadDir loads all request package sets from a directory. Each .yaml file is one Set.
 func LoadDir(dir string) ([]Set, error) {
@@ -38,6 +67,7 @@ func LoadDir(dir string) ([]Set, error) {
 		if s.MCP != nil && s.MCP.URL == "" {
 			return nil, fmt.Errorf("%s: mcp section requires a non-empty url", path)
 		}
+		expandEnvInSet(&s)
 		sets = append(sets, s)
 	}
 	return sets, nil
