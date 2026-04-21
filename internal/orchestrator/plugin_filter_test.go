@@ -146,6 +146,15 @@ func TestResolveAllowedPlugins_CachedResult(t *testing.T) {
 	}
 }
 
+// callbackExecutor is a PluginExecutor that delegates to an arbitrary function.
+type callbackExecutor struct {
+	fn func(ToolCall) ToolResult
+}
+
+func (c *callbackExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
+	return c.fn(call)
+}
+
 type countingGroupLookup struct {
 	inner GroupPluginLookup
 	calls *int
@@ -246,6 +255,50 @@ func TestSystemPrompt_StrictMode_OnlyListedPluginsVisible(t *testing.T) {
 	}
 	if strings.Contains(system, "## restricted") {
 		t.Error("system prompt should NOT mention restricted (strict mode, not in WhoAmI list)")
+	}
+}
+
+// --- end-to-end: internal calls exempt from strict allowlist ---
+
+// TestExecute_StrictMode_GuardNotInWhoAmI_StillRuns verifies that a guard
+// plugin configured by the host is not blocked by the strict-mode allowlist
+// even when it is absent from the WhoAmI Plugins list. Internal calls
+// (FromLLM == false) must be exempt so that guards, preparers, and pipelines
+// work correctly regardless of what the profile exposes to the LLM.
+func TestExecute_StrictMode_GuardNotInWhoAmI_StillRuns(t *testing.T) {
+	reg := buildFilterRegistry()
+	// Register an additional "xss-guard" plugin that is NOT in the WhoAmI list.
+	guardCalled := false
+	_ = reg.Register(PluginCapability{
+		Name:        "xss-guard",
+		Description: "Content guard",
+		Actions:     []Action{{Name: "check", Description: "check content"}},
+	}, &callbackExecutor{fn: func(_ ToolCall) ToolResult {
+		guardCalled = true
+		return ToolResult{Content: `{"send_to_llm": true}`}
+	}})
+
+	mem := state.NewMemoryStore("")
+	sess := state.NewSessionStore("")
+	sess.Create("s-guard")
+
+	llm := &capturingLLM{responses: []string{"done"}}
+	parser := &fakeParser{parseFn: func(_ string) []ToolCall { return nil }}
+	o := NewWithRules(llm, parser, reg, mem, sess, OrchestratorOpts{
+		ContentPreparers: []ContentPreparerEntry{
+			{Plugin: "xss-guard", Action: "check", Guard: true},
+		},
+	})
+
+	// Strict mode: only "mymcp" is in the WhoAmI list; "xss-guard" is not.
+	p := &profile.Profile{EntityID: "u1", Plugins: []string{"mymcp"}}
+	ctx := profile.WithProfile(context.Background(), p)
+
+	if _, err := o.Run(ctx, "s-guard", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if !guardCalled {
+		t.Error("guard plugin should have been called even though it is not in the WhoAmI Plugins list")
 	}
 }
 

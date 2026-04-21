@@ -1139,11 +1139,16 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	// In strict mode (WhoAmI plugins list) every plugin is checked; in non-strict
 	// mode only capabilities with AllowedGroups set are gated (pluginAllowed handles both).
 	// This mirrors buildSystemPrompt and protects against crafted tool calls.
-	if allowed := o.resolveAllowedPlugins(ctx); !o.pluginAllowed(capForCheck, allowed) {
-		slog.Warn("BLOCKED tool call for restricted plugin", "plugin", call.Plugin, "action", call.Action)
-		return ToolResult{
-			CallID: call.ID,
-			Error:  fmt.Sprintf("plugin %q is not available for this profile", call.Plugin),
+	// Internal calls (guards, preparers, pipelines) are exempt: they are constructed
+	// programmatically by the host, not by the LLM, so they are trusted. This matches
+	// the exemptions already in place for UserOnly and rejectUnknownArgs below.
+	if call.FromLLM {
+		if allowed := o.resolveAllowedPlugins(ctx); !o.pluginAllowed(capForCheck, allowed) {
+			slog.Warn("BLOCKED tool call for restricted plugin", "plugin", call.Plugin, "action", call.Action)
+			return ToolResult{
+				CallID: call.ID,
+				Error:  fmt.Sprintf("plugin %q is not available for this profile", call.Plugin),
+			}
 		}
 	}
 
@@ -1335,11 +1340,16 @@ func formatToolResultMessage(result ToolResult) string {
 // allowedPluginsKey is the context key for the per-Run allowed-plugin cache.
 type allowedPluginsKey struct{}
 
-// cachedAllowedPlugins wraps the map so a nil map (no restrictions) is
-// distinguishable from an absent cache entry.
-// strict is true when the list came directly from Profile.Plugins (WhoAmI
-// per-request allowlist). In strict mode every plugin is gated against the map,
-// not just those that have AllowedGroups configured on their capability.
+// cachedAllowedPlugins wraps the plugin allowlist for a single Run call.
+// m == nil means "unrestricted" (no profile, no lookup configured, or a DB
+// failure that fails open). strict is true when the list came directly from
+// Profile.Plugins (WhoAmI per-request allowlist); in that mode every plugin
+// is gated, not just those with AllowedGroups on their capability.
+//
+// The zero value (m == nil, strict == false) deliberately doubles as both
+// "cache miss" and "no restrictions" — the ctx type-assertion in
+// resolveAllowedPlugins uses the ok bool to distinguish a real cache hit from
+// the zero value, so the two meanings never collide in practice.
 type cachedAllowedPlugins struct {
 	m      map[string]bool
 	strict bool
@@ -1384,6 +1394,12 @@ func (o *Orchestrator) resolveAllowedPlugins(ctx context.Context) cachedAllowedP
 	ids, err := o.groupPluginLookup.PluginsForGroup(ctx, p.Group)
 	if err != nil {
 		slog.Warn("group plugin lookup failed", "group", p.Group, "error", err)
+		// Fail open: return unrestricted (m == nil) so the bot stays usable during
+		// DB outages. This means a lookup failure silently grants access to all
+		// AllowedGroups-gated plugins for this request. Strict mode (WhoAmI) never
+		// reaches here, so that path is unaffected. Chosen deliberately over
+		// fail-closed because bricking the bot during incidents is worse than a
+		// temporary permission widening on group-gated plugins.
 		return cachedAllowedPlugins{}
 	}
 	m := make(map[string]bool, len(ids))
