@@ -197,22 +197,26 @@ func (ch *YAMLChannel) processInboundFrame(frame map[string]interface{}) {
 	// Navigate to the event object
 	event := navigatePath(frame, ch.spec.Inbound.EventPath)
 	if event == nil {
+		slog.Debug("yaml-channel frame dropped: event_path not found", "channel", ch.spec.ID, "event_path", ch.spec.Inbound.EventPath)
 		return
 	}
 
 	// Check event type
 	eventType, _ := event["type"].(string)
 	if !ch.shouldProcess(event, eventType) {
+		slog.Debug("yaml-channel frame dropped: event type not in event_types", "channel", ch.spec.ID, "event_type", eventType)
 		return
 	}
 
 	// Apply process_when allowlist (if configured, at least one must match)
 	if !ch.matchesProcessWhen(event) {
+		slog.Debug("yaml-channel frame dropped: no process_when rule matched", "channel", ch.spec.ID, "event_type", eventType)
 		return
 	}
 
 	// Apply skip rules
 	if ch.shouldSkip(event) {
+		slog.Debug("yaml-channel frame dropped: matched skip rule", "channel", ch.spec.ID, "event_type", eventType)
 		return
 	}
 
