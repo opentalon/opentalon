@@ -121,6 +121,26 @@ func TestParseInvalidToolName(t *testing.T) {
 	}
 }
 
+func TestParseBareJSONArgs_ReturnsMissingToolCall(t *testing.T) {
+	// When the LLM emits [tool_call]{...}[/tool_call] with just args (no "tool" key),
+	// the parser should return a ToolCall with empty Plugin/Action so executeCall
+	// can return a specific "missing tool name" error instead of dropping it silently.
+	response := `[tool_call]
+{
+  "app_name": "MyApp",
+  "app_environment": "production"
+}
+[/tool_call]`
+
+	calls := DefaultParser.Parse(response)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call for bare JSON args, got %d", len(calls))
+	}
+	if calls[0].Plugin != "" || calls[0].Action != "" {
+		t.Errorf("expected empty Plugin/Action, got %q/%q", calls[0].Plugin, calls[0].Action)
+	}
+}
+
 func TestParseEmptyBody(t *testing.T) {
 	response := `[tool_call][/tool_call]`
 	calls := DefaultParser.Parse(response)

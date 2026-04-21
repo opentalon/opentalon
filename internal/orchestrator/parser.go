@@ -81,8 +81,18 @@ func (defaultParser) Parse(response string) []ToolCall {
 
 		// Format B: plugin.action\n{json_args}
 		// Format C: plugin.action(key=value, key=value)
-		// Skip if body starts with '{' — that's malformed Format A, not an inline call.
-		if !strings.HasPrefix(body, "{") {
+		if strings.HasPrefix(body, "{") {
+			// Body is a bare JSON object without a "tool" key — the LLM emitted
+			// just the args and dropped the tool name. Return a ToolCall with an
+			// empty Plugin so executeCall can give a specific format-hint error
+			// instead of the generic "could not be executed" strip-retry message.
+			calls = append(calls, ToolCall{
+				ID:     fmt.Sprintf("call-%d", len(calls)+1),
+				Plugin: "",
+				Action: "",
+				Args:   make(map[string]string),
+			})
+		} else {
 			if call, ok := parseInlineToolCall(body, len(calls)+1); ok {
 				calls = append(calls, call)
 			}
