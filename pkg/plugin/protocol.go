@@ -11,14 +11,22 @@ const (
 	HandshakeVersion = 1
 )
 
+// CredentialHeader is a per-MCP-server credential specifying an HTTP header
+// name and value to inject into requests to that server. The plugin merges
+// these with its static configured headers; credential headers take priority.
+type CredentialHeader struct {
+	Header string `json:"header"` // HTTP header name (e.g. "X-App-User", "Authorization")
+	Value  string `json:"value"`  // header value (e.g. "user-123", "Bearer tok")
+}
+
 // Request is the logical request from the host to the plugin.
 type Request struct {
-	Method      string            `json:"method"`
-	ID          string            `json:"id,omitempty"`
-	Plugin      string            `json:"plugin,omitempty"`
-	Action      string            `json:"action,omitempty"`
-	Args        map[string]string `json:"args,omitempty"`
-	Credentials map[string]string `json:"credentials,omitempty"` // per-MCP-server tokens from WhoAmI, keyed by server name
+	Method            string                      `json:"method"`
+	ID                string                      `json:"id,omitempty"`
+	Plugin            string                      `json:"plugin,omitempty"`
+	Action            string                      `json:"action,omitempty"`
+	Args              map[string]string           `json:"args,omitempty"`
+	CredentialHeaders map[string]CredentialHeader `json:"credential_headers,omitempty"` // per-MCP-server credential headers from WhoAmI, keyed by server name
 }
 
 // Response is the logical response from the plugin back to the host.

@@ -6,49 +6,49 @@ import (
 	"github.com/opentalon/opentalon/proto/pluginpb"
 )
 
-func TestRequestFromProto_Credentials(t *testing.T) {
+func TestRequestFromProto_CredentialHeaders(t *testing.T) {
 	pb := &pluginpb.ToolCallRequest{
 		Id:     "r1",
 		Plugin: "mcp",
 		Action: "call",
-		Credentials: map[string]string{
-			"mymcp": "user-token-abc",
-			"jira":  "user-jira-xyz",
+		CredentialHeaders: map[string]*pluginpb.CredentialHeader{
+			"myapp": {Header: "X-App-User", Value: "user-123"},
+			"jira":  {Header: "Authorization", Value: "Bearer jira-xyz"},
 		},
 	}
 	req := requestFromProto(pb)
 
-	if req.Credentials["mymcp"] != "user-token-abc" {
-		t.Errorf("Credentials[mymcp] = %q, want user-token-abc", req.Credentials["mymcp"])
+	if c := req.CredentialHeaders["myapp"]; c.Header != "X-App-User" || c.Value != "user-123" {
+		t.Errorf("CredentialHeaders[myapp] = %+v, want {X-App-User user-123}", c)
 	}
-	if req.Credentials["jira"] != "user-jira-xyz" {
-		t.Errorf("Credentials[jira] = %q, want user-jira-xyz", req.Credentials["jira"])
+	if c := req.CredentialHeaders["jira"]; c.Header != "Authorization" || c.Value != "Bearer jira-xyz" {
+		t.Errorf("CredentialHeaders[jira] = %+v, want {Authorization Bearer jira-xyz}", c)
 	}
 }
 
-func TestRequestFromProto_NoCredentials(t *testing.T) {
+func TestRequestFromProto_NoCredentialHeaders(t *testing.T) {
 	pb := &pluginpb.ToolCallRequest{Id: "r2", Plugin: "mcp", Action: "call"}
 	req := requestFromProto(pb)
-	if len(req.Credentials) != 0 {
-		t.Errorf("Credentials = %v, want empty", req.Credentials)
+	if len(req.CredentialHeaders) != 0 {
+		t.Errorf("CredentialHeaders = %v, want empty", req.CredentialHeaders)
 	}
 }
 
 func TestRequestFromProto_NilProto(t *testing.T) {
 	req := requestFromProto(nil)
-	if req.Method != "" || req.ID != "" || req.Credentials != nil {
+	if req.Method != "" || req.ID != "" || req.CredentialHeaders != nil {
 		t.Errorf("nil proto should return zero Request, got %+v", req)
 	}
 }
 
-func TestRequestFromProto_CredentialsWithArgs(t *testing.T) {
+func TestRequestFromProto_CredentialHeadersWithArgs(t *testing.T) {
 	pb := &pluginpb.ToolCallRequest{
 		Id:     "r3",
 		Plugin: "mcp",
 		Action: "search",
 		Args:   map[string]string{"query": "hello"},
-		Credentials: map[string]string{
-			"mymcp": "tok",
+		CredentialHeaders: map[string]*pluginpb.CredentialHeader{
+			"myapp": {Header: "X-App-User", Value: "u1"},
 		},
 	}
 	req := requestFromProto(pb)
@@ -56,8 +56,8 @@ func TestRequestFromProto_CredentialsWithArgs(t *testing.T) {
 	if req.Args["query"] != "hello" {
 		t.Errorf("Args[query] = %q, want hello", req.Args["query"])
 	}
-	if req.Credentials["mymcp"] != "tok" {
-		t.Errorf("Credentials[mymcp] = %q, want tok", req.Credentials["mymcp"])
+	if c := req.CredentialHeaders["myapp"]; c.Header != "X-App-User" || c.Value != "u1" {
+		t.Errorf("CredentialHeaders[myapp] = %+v, want {X-App-User u1}", c)
 	}
 }
 

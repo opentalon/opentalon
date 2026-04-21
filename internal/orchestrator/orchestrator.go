@@ -784,6 +784,17 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 	}
 	messages = append(messages, sess.Messages...)
 
+	// For weaker / OSS models that tend to ignore system-prompt formatting
+	// instructions, repeat the channel format hint as a trailing system
+	// reminder right before the context-window trim so it sits close to the
+	// most recent user message.
+	if hint := channelFormatHint(ctx); hint != "" {
+		messages = append(messages, provider.Message{
+			Role:    provider.RoleSystem,
+			Content: "[IMPORTANT — output format reminder] " + hint,
+		})
+	}
+
 	if o.contextWindow > 0 {
 		messages = trimToContextWindow(ctx, messages, o.contextWindow)
 	}

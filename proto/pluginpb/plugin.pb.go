@@ -72,11 +72,13 @@ type ToolCallRequest struct {
 	Plugin string                 `protobuf:"bytes,2,opt,name=plugin,proto3" json:"plugin,omitempty"`
 	Action string                 `protobuf:"bytes,3,opt,name=action,proto3" json:"action,omitempty"`
 	Args   map[string]string      `protobuf:"bytes,4,rep,name=args,proto3" json:"args,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// Per-request credentials from the verified profile (e.g. {"mymcp": "user-api-token"}).
-	// Keyed by MCP server name; the plugin merges these with its static configured headers.
-	Credentials   map[string]string `protobuf:"bytes,5,rep,name=credentials,proto3" json:"credentials,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Per-request credential headers from the verified profile, keyed by MCP server name.
+	// Each entry specifies an HTTP header name and value to inject when calling that server.
+	// Example: {"myapp": {header: "X-App-User", value: "123"}}.
+	// The plugin merges these with its static configured headers; credential headers take priority.
+	CredentialHeaders map[string]*CredentialHeader `protobuf:"bytes,6,rep,name=credential_headers,json=credentialHeaders,proto3" json:"credential_headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ToolCallRequest) Reset() {
@@ -137,11 +139,65 @@ func (x *ToolCallRequest) GetArgs() map[string]string {
 	return nil
 }
 
-func (x *ToolCallRequest) GetCredentials() map[string]string {
+func (x *ToolCallRequest) GetCredentialHeaders() map[string]*CredentialHeader {
 	if x != nil {
-		return x.Credentials
+		return x.CredentialHeaders
 	}
 	return nil
+}
+
+// CredentialHeader is a per-MCP-server credential specifying an HTTP header
+// name and value to inject into requests to that server.
+type CredentialHeader struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Header        string                 `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"` // HTTP header name (e.g. "X-App-User", "Authorization")
+	Value         string                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`   // header value (e.g. "user-123", "Bearer tok")
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CredentialHeader) Reset() {
+	*x = CredentialHeader{}
+	mi := &file_plugin_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CredentialHeader) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CredentialHeader) ProtoMessage() {}
+
+func (x *CredentialHeader) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CredentialHeader.ProtoReflect.Descriptor instead.
+func (*CredentialHeader) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *CredentialHeader) GetHeader() string {
+	if x != nil {
+		return x.Header
+	}
+	return ""
+}
+
+func (x *CredentialHeader) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
 }
 
 type ToolResultResponse struct {
@@ -155,7 +211,7 @@ type ToolResultResponse struct {
 
 func (x *ToolResultResponse) Reset() {
 	*x = ToolResultResponse{}
-	mi := &file_plugin_proto_msgTypes[2]
+	mi := &file_plugin_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -167,7 +223,7 @@ func (x *ToolResultResponse) String() string {
 func (*ToolResultResponse) ProtoMessage() {}
 
 func (x *ToolResultResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_proto_msgTypes[2]
+	mi := &file_plugin_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -180,7 +236,7 @@ func (x *ToolResultResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolResultResponse.ProtoReflect.Descriptor instead.
 func (*ToolResultResponse) Descriptor() ([]byte, []int) {
-	return file_plugin_proto_rawDescGZIP(), []int{2}
+	return file_plugin_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ToolResultResponse) GetCallId() string {
@@ -222,7 +278,7 @@ type PluginCapabilities struct {
 
 func (x *PluginCapabilities) Reset() {
 	*x = PluginCapabilities{}
-	mi := &file_plugin_proto_msgTypes[3]
+	mi := &file_plugin_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -234,7 +290,7 @@ func (x *PluginCapabilities) String() string {
 func (*PluginCapabilities) ProtoMessage() {}
 
 func (x *PluginCapabilities) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_proto_msgTypes[3]
+	mi := &file_plugin_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -247,7 +303,7 @@ func (x *PluginCapabilities) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PluginCapabilities.ProtoReflect.Descriptor instead.
 func (*PluginCapabilities) Descriptor() ([]byte, []int) {
-	return file_plugin_proto_rawDescGZIP(), []int{3}
+	return file_plugin_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *PluginCapabilities) GetName() string {
@@ -291,7 +347,7 @@ type Action struct {
 
 func (x *Action) Reset() {
 	*x = Action{}
-	mi := &file_plugin_proto_msgTypes[4]
+	mi := &file_plugin_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -303,7 +359,7 @@ func (x *Action) String() string {
 func (*Action) ProtoMessage() {}
 
 func (x *Action) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_proto_msgTypes[4]
+	mi := &file_plugin_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -316,7 +372,7 @@ func (x *Action) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Action.ProtoReflect.Descriptor instead.
 func (*Action) Descriptor() ([]byte, []int) {
-	return file_plugin_proto_rawDescGZIP(), []int{4}
+	return file_plugin_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Action) GetName() string {
@@ -366,7 +422,7 @@ type Parameter struct {
 
 func (x *Parameter) Reset() {
 	*x = Parameter{}
-	mi := &file_plugin_proto_msgTypes[5]
+	mi := &file_plugin_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -378,7 +434,7 @@ func (x *Parameter) String() string {
 func (*Parameter) ProtoMessage() {}
 
 func (x *Parameter) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_proto_msgTypes[5]
+	mi := &file_plugin_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -391,7 +447,7 @@ func (x *Parameter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Parameter.ProtoReflect.Descriptor instead.
 func (*Parameter) Descriptor() ([]byte, []int) {
-	return file_plugin_proto_rawDescGZIP(), []int{5}
+	return file_plugin_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Parameter) GetName() string {
@@ -429,19 +485,22 @@ const file_plugin_proto_rawDesc = "" +
 	"\fplugin.proto\x12\x13opentalon.plugin.v1\x1a\x1bgoogle/protobuf/empty.proto\"4\n" +
 	"\x11PluginInitRequest\x12\x1f\n" +
 	"\vconfig_json\x18\x01 \x01(\tR\n" +
-	"configJson\"\xe7\x02\n" +
+	"configJson\"\xad\x03\n" +
 	"\x0fToolCallRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06plugin\x18\x02 \x01(\tR\x06plugin\x12\x16\n" +
 	"\x06action\x18\x03 \x01(\tR\x06action\x12B\n" +
-	"\x04args\x18\x04 \x03(\v2..opentalon.plugin.v1.ToolCallRequest.ArgsEntryR\x04args\x12W\n" +
-	"\vcredentials\x18\x05 \x03(\v25.opentalon.plugin.v1.ToolCallRequest.CredentialsEntryR\vcredentials\x1a7\n" +
+	"\x04args\x18\x04 \x03(\v2..opentalon.plugin.v1.ToolCallRequest.ArgsEntryR\x04args\x12j\n" +
+	"\x12credential_headers\x18\x06 \x03(\v2;.opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntryR\x11credentialHeaders\x1a7\n" +
 	"\tArgsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a>\n" +
-	"\x10CredentialsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"]\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1ak\n" +
+	"\x16CredentialHeadersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12;\n" +
+	"\x05value\x18\x02 \x01(\v2%.opentalon.plugin.v1.CredentialHeaderR\x05value:\x028\x01J\x04\b\x05\x10\x06\"@\n" +
+	"\x10CredentialHeader\x12\x16\n" +
+	"\x06header\x18\x01 \x01(\tR\x06header\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"]\n" +
 	"\x12ToolResultResponse\x12\x17\n" +
 	"\acall_id\x18\x01 \x01(\tR\x06callId\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x14\n" +
@@ -481,34 +540,36 @@ func file_plugin_proto_rawDescGZIP() []byte {
 	return file_plugin_proto_rawDescData
 }
 
-var file_plugin_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_plugin_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_plugin_proto_goTypes = []any{
 	(*PluginInitRequest)(nil),  // 0: opentalon.plugin.v1.PluginInitRequest
 	(*ToolCallRequest)(nil),    // 1: opentalon.plugin.v1.ToolCallRequest
-	(*ToolResultResponse)(nil), // 2: opentalon.plugin.v1.ToolResultResponse
-	(*PluginCapabilities)(nil), // 3: opentalon.plugin.v1.PluginCapabilities
-	(*Action)(nil),             // 4: opentalon.plugin.v1.Action
-	(*Parameter)(nil),          // 5: opentalon.plugin.v1.Parameter
-	nil,                        // 6: opentalon.plugin.v1.ToolCallRequest.ArgsEntry
-	nil,                        // 7: opentalon.plugin.v1.ToolCallRequest.CredentialsEntry
-	(*emptypb.Empty)(nil),      // 8: google.protobuf.Empty
+	(*CredentialHeader)(nil),   // 2: opentalon.plugin.v1.CredentialHeader
+	(*ToolResultResponse)(nil), // 3: opentalon.plugin.v1.ToolResultResponse
+	(*PluginCapabilities)(nil), // 4: opentalon.plugin.v1.PluginCapabilities
+	(*Action)(nil),             // 5: opentalon.plugin.v1.Action
+	(*Parameter)(nil),          // 6: opentalon.plugin.v1.Parameter
+	nil,                        // 7: opentalon.plugin.v1.ToolCallRequest.ArgsEntry
+	nil,                        // 8: opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry
+	(*emptypb.Empty)(nil),      // 9: google.protobuf.Empty
 }
 var file_plugin_proto_depIdxs = []int32{
-	6, // 0: opentalon.plugin.v1.ToolCallRequest.args:type_name -> opentalon.plugin.v1.ToolCallRequest.ArgsEntry
-	7, // 1: opentalon.plugin.v1.ToolCallRequest.credentials:type_name -> opentalon.plugin.v1.ToolCallRequest.CredentialsEntry
-	4, // 2: opentalon.plugin.v1.PluginCapabilities.actions:type_name -> opentalon.plugin.v1.Action
-	5, // 3: opentalon.plugin.v1.Action.parameters:type_name -> opentalon.plugin.v1.Parameter
-	0, // 4: opentalon.plugin.v1.PluginService.Init:input_type -> opentalon.plugin.v1.PluginInitRequest
-	1, // 5: opentalon.plugin.v1.PluginService.Execute:input_type -> opentalon.plugin.v1.ToolCallRequest
-	8, // 6: opentalon.plugin.v1.PluginService.Capabilities:input_type -> google.protobuf.Empty
-	8, // 7: opentalon.plugin.v1.PluginService.Init:output_type -> google.protobuf.Empty
-	2, // 8: opentalon.plugin.v1.PluginService.Execute:output_type -> opentalon.plugin.v1.ToolResultResponse
-	3, // 9: opentalon.plugin.v1.PluginService.Capabilities:output_type -> opentalon.plugin.v1.PluginCapabilities
-	7, // [7:10] is the sub-list for method output_type
-	4, // [4:7] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	7, // 0: opentalon.plugin.v1.ToolCallRequest.args:type_name -> opentalon.plugin.v1.ToolCallRequest.ArgsEntry
+	8, // 1: opentalon.plugin.v1.ToolCallRequest.credential_headers:type_name -> opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry
+	5, // 2: opentalon.plugin.v1.PluginCapabilities.actions:type_name -> opentalon.plugin.v1.Action
+	6, // 3: opentalon.plugin.v1.Action.parameters:type_name -> opentalon.plugin.v1.Parameter
+	2, // 4: opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry.value:type_name -> opentalon.plugin.v1.CredentialHeader
+	0, // 5: opentalon.plugin.v1.PluginService.Init:input_type -> opentalon.plugin.v1.PluginInitRequest
+	1, // 6: opentalon.plugin.v1.PluginService.Execute:input_type -> opentalon.plugin.v1.ToolCallRequest
+	9, // 7: opentalon.plugin.v1.PluginService.Capabilities:input_type -> google.protobuf.Empty
+	9, // 8: opentalon.plugin.v1.PluginService.Init:output_type -> google.protobuf.Empty
+	3, // 9: opentalon.plugin.v1.PluginService.Execute:output_type -> opentalon.plugin.v1.ToolResultResponse
+	4, // 10: opentalon.plugin.v1.PluginService.Capabilities:output_type -> opentalon.plugin.v1.PluginCapabilities
+	8, // [8:11] is the sub-list for method output_type
+	5, // [5:8] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_plugin_proto_init() }
@@ -522,7 +583,7 @@ func file_plugin_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_plugin_proto_rawDesc), len(file_plugin_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

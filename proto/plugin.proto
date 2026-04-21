@@ -22,9 +22,19 @@ message ToolCallRequest {
   string plugin = 2;
   string action = 3;
   map<string, string> args = 4;
-  // Per-request credentials from the verified profile (e.g. {"mymcp": "user-api-token"}).
-  // Keyed by MCP server name; the plugin merges these with its static configured headers.
-  map<string, string> credentials = 5;
+  reserved 5; // was: map<string, string> credentials (replaced by credential_headers)
+  // Per-request credential headers from the verified profile, keyed by MCP server name.
+  // Each entry specifies an HTTP header name and value to inject when calling that server.
+  // Example: {"myapp": {header: "X-App-User", value: "123"}}.
+  // The plugin merges these with its static configured headers; credential headers take priority.
+  map<string, CredentialHeader> credential_headers = 6;
+}
+
+// CredentialHeader is a per-MCP-server credential specifying an HTTP header
+// name and value to inject into requests to that server.
+message CredentialHeader {
+  string header = 1; // HTTP header name (e.g. "X-App-User", "Authorization")
+  string value = 2;  // header value (e.g. "user-123", "Bearer tok")
 }
 
 message ToolResultResponse {

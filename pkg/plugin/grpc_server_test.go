@@ -10,17 +10,17 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// credCapturingHandler records the Credentials map from each Execute call.
-type credCapturingHandler struct {
-	received chan map[string]string
+// credHeaderCapturingHandler records the CredentialHeaders from each Execute call.
+type credHeaderCapturingHandler struct {
+	received chan map[string]CredentialHeader
 }
 
-func (h *credCapturingHandler) Capabilities() CapabilitiesMsg {
+func (h *credHeaderCapturingHandler) Capabilities() CapabilitiesMsg {
 	return CapabilitiesMsg{Name: "test"}
 }
 
-func (h *credCapturingHandler) Execute(req Request) Response {
-	h.received <- req.Credentials
+func (h *credHeaderCapturingHandler) Execute(req Request) Response {
+	h.received <- req.CredentialHeaders
 	return Response{CallID: req.ID, Content: "ok"}
 }
 
@@ -43,19 +43,19 @@ func startGRPCServer(t *testing.T, handler Handler) pluginpb.PluginServiceClient
 	return pluginpb.NewPluginServiceClient(cc)
 }
 
-// TestGRPCServer_CredentialsReachHandler verifies that credentials sent in
-// ToolCallRequest are forwarded to Handler.Execute via Request.Credentials.
-func TestGRPCServer_CredentialsReachHandler(t *testing.T) {
-	received := make(chan map[string]string, 1)
-	client := startGRPCServer(t, &credCapturingHandler{received: received})
+// TestGRPCServer_CredentialHeadersReachHandler verifies that credential headers sent in
+// ToolCallRequest are forwarded to Handler.Execute via Request.CredentialHeaders.
+func TestGRPCServer_CredentialHeadersReachHandler(t *testing.T) {
+	received := make(chan map[string]CredentialHeader, 1)
+	client := startGRPCServer(t, &credHeaderCapturingHandler{received: received})
 
 	_, err := client.Execute(context.Background(), &pluginpb.ToolCallRequest{
 		Id:     "c1",
 		Plugin: "mcp",
 		Action: "call",
-		Credentials: map[string]string{
-			"mymcp": "user-token-abc",
-			"jira":  "user-jira-xyz",
+		CredentialHeaders: map[string]*pluginpb.CredentialHeader{
+			"myapp": {Header: "X-App-User", Value: "user-123"},
+			"jira":  {Header: "Authorization", Value: "Bearer jira-xyz"},
 		},
 	})
 	if err != nil {
@@ -63,19 +63,19 @@ func TestGRPCServer_CredentialsReachHandler(t *testing.T) {
 	}
 
 	creds := <-received
-	if creds["mymcp"] != "user-token-abc" {
-		t.Errorf("Credentials[mymcp] = %q, want user-token-abc", creds["mymcp"])
+	if c := creds["myapp"]; c.Header != "X-App-User" || c.Value != "user-123" {
+		t.Errorf("CredentialHeaders[myapp] = %+v, want {X-App-User user-123}", c)
 	}
-	if creds["jira"] != "user-jira-xyz" {
-		t.Errorf("Credentials[jira] = %q, want user-jira-xyz", creds["jira"])
+	if c := creds["jira"]; c.Header != "Authorization" || c.Value != "Bearer jira-xyz" {
+		t.Errorf("CredentialHeaders[jira] = %+v, want {Authorization Bearer jira-xyz}", c)
 	}
 }
 
-// TestGRPCServer_NoCredentials verifies that nil credentials are forwarded as
-// nil (not an empty map) when the request carries no credentials.
-func TestGRPCServer_NoCredentials(t *testing.T) {
-	received := make(chan map[string]string, 1)
-	client := startGRPCServer(t, &credCapturingHandler{received: received})
+// TestGRPCServer_NoCredentialHeaders verifies that nil credential headers are forwarded as
+// nil (not an empty map) when the request carries none.
+func TestGRPCServer_NoCredentialHeaders(t *testing.T) {
+	received := make(chan map[string]CredentialHeader, 1)
+	client := startGRPCServer(t, &credHeaderCapturingHandler{received: received})
 
 	_, err := client.Execute(context.Background(), &pluginpb.ToolCallRequest{
 		Id:     "c2",
@@ -87,6 +87,6 @@ func TestGRPCServer_NoCredentials(t *testing.T) {
 	}
 
 	if creds := <-received; len(creds) != 0 {
-		t.Errorf("Credentials = %v, want empty when none sent", creds)
+		t.Errorf("CredentialHeaders = %v, want empty when none sent", creds)
 	}
 }

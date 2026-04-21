@@ -378,16 +378,16 @@ func TestVerifier_ChannelTypeResponse(t *testing.T) {
 	}
 }
 
-// TestVerifier_Credentials verifies that a credentials map returned by WhoAmI
-// is parsed and stored on the profile.
-func TestVerifier_Credentials(t *testing.T) {
+// TestVerifier_CredentialHeaders verifies that credential headers returned by WhoAmI
+// are parsed and stored on the profile.
+func TestVerifier_CredentialHeaders(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"entity_id": "u1",
 			"group":     "g1",
-			"credentials": map[string]string{
-				"mymcp": "user-api-token-abc",
-				"jira":  "user-jira-token-xyz",
+			"credentials": map[string]interface{}{
+				"myapp": map[string]string{"header": "X-App-User", "value": "user-123"},
+				"jira":  map[string]string{"header": "Authorization", "value": "Bearer jira-xyz"},
 			},
 		})
 	}))
@@ -403,17 +403,17 @@ func TestVerifier_Credentials(t *testing.T) {
 	if len(p.Credentials) != 2 {
 		t.Fatalf("Credentials len = %d, want 2", len(p.Credentials))
 	}
-	if p.Credentials["mymcp"] != "user-api-token-abc" {
-		t.Errorf("Credentials[mymcp] = %q, want user-api-token-abc", p.Credentials["mymcp"])
+	if c := p.Credentials["myapp"]; c.Header != "X-App-User" || c.Value != "user-123" {
+		t.Errorf("Credentials[myapp] = %+v, want {X-App-User user-123}", c)
 	}
-	if p.Credentials["jira"] != "user-jira-token-xyz" {
-		t.Errorf("Credentials[jira] = %q, want user-jira-token-xyz", p.Credentials["jira"])
+	if c := p.Credentials["jira"]; c.Header != "Authorization" || c.Value != "Bearer jira-xyz" {
+		t.Errorf("Credentials[jira] = %+v, want {Authorization Bearer jira-xyz}", c)
 	}
 }
 
-// TestVerifier_Credentials_Missing verifies that an absent credentials field
+// TestVerifier_CredentialHeaders_Missing verifies that an absent credentials field
 // results in a nil map (no credentials, no error).
-func TestVerifier_Credentials_Missing(t *testing.T) {
+func TestVerifier_CredentialHeaders_Missing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"entity_id": "u1",
@@ -434,15 +434,15 @@ func TestVerifier_Credentials_Missing(t *testing.T) {
 	}
 }
 
-// TestVerifier_Credentials_CustomField verifies that credentials_field can be
+// TestVerifier_CredentialHeaders_CustomField verifies that credentials_field can be
 // overridden to read from a different JSON key.
-func TestVerifier_Credentials_CustomField(t *testing.T) {
+func TestVerifier_CredentialHeaders_CustomField(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"entity_id": "u1",
 			"group":     "g1",
-			"tokens": map[string]string{
-				"mymcp": "custom-field-token",
+			"tokens": map[string]interface{}{
+				"myapp": map[string]string{"header": "X-App-Token", "value": "custom-tok"},
 			},
 		})
 	}))
@@ -455,22 +455,22 @@ func TestVerifier_Credentials_CustomField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if p.Credentials["mymcp"] != "custom-field-token" {
-		t.Errorf("Credentials[mymcp] = %q, want custom-field-token", p.Credentials["mymcp"])
+	if c := p.Credentials["myapp"]; c.Header != "X-App-Token" || c.Value != "custom-tok" {
+		t.Errorf("Credentials[myapp] = %+v, want {X-App-Token custom-tok}", c)
 	}
 }
 
-// TestVerifier_Credentials_Malformed verifies that an unparseable credentials
-// field (array instead of object, non-string values) yields nil credentials
-// with no error — the call succeeds and the bad field is silently ignored.
-func TestVerifier_Credentials_Malformed(t *testing.T) {
+// TestVerifier_CredentialHeaders_Malformed verifies that an unparseable credentials
+// field yields nil credentials with no error — the call succeeds and the bad field
+// is silently ignored.
+func TestVerifier_CredentialHeaders_Malformed(t *testing.T) {
 	cases := []struct {
 		name        string
 		credentials interface{}
 	}{
-		{"array", []string{"mymcp", "jira"}},
-		{"non-string values", map[string]interface{}{"mymcp": 123}},
-		{"nested object", map[string]interface{}{"mymcp": map[string]string{"token": "abc"}}},
+		{"array", []string{"myapp", "jira"}},
+		{"plain strings", map[string]string{"myapp": "token-only"}},
+		{"number values", map[string]interface{}{"myapp": 123}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
