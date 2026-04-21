@@ -396,6 +396,25 @@ func expandTilde(s string) string {
 	return s
 }
 
+func expandEnvInRequestPackages(cfg *Config) {
+	for i, inl := range cfg.RequestPackages.Inline {
+		if inl.MCP != nil {
+			inl.MCP.URL = expandEnv(inl.MCP.URL)
+			for k, v := range inl.MCP.Headers {
+				inl.MCP.Headers[k] = expandEnv(v)
+			}
+			cfg.RequestPackages.Inline[i] = inl
+		}
+		for j, p := range inl.Packages {
+			p.URL = expandEnv(p.URL)
+			for k, v := range p.Headers {
+				p.Headers[k] = expandEnv(v)
+			}
+			cfg.RequestPackages.Inline[i].Packages[j] = p
+		}
+	}
+}
+
 func expandEnvInProviders(cfg *Config) {
 	for name, p := range cfg.Models.Providers {
 		p.BaseURL = expandEnv(p.BaseURL)
@@ -422,6 +441,7 @@ func Parse(data []byte) (*Config, error) {
 	expandEnvInChannels(&cfg)
 	expandEnvInBootstrap(&cfg)
 	expandEnvInRedis(&cfg)
+	expandEnvInRequestPackages(&cfg)
 	cfg.Cluster.DedupTTL = expandEnv(cfg.Cluster.DedupTTL)
 	cfg.Metrics.Addr = expandEnv(cfg.Metrics.Addr)
 	if cfg.Metrics.Enabled && cfg.Metrics.Addr == "" {
