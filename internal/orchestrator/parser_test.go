@@ -200,6 +200,45 @@ func TestParseFormatA_InlineNoClosingTag(t *testing.T) {
 	}
 }
 
+func TestParseFormatA_DoubleUnderscore(t *testing.T) {
+	// LLMs trained on OpenAI function calling often emit "plugin__action"
+	// instead of "plugin.action".
+	response := `[tool_call]
+{"tool": "jira__search_issues", "args": {"jql": "assignee = alice@example.com"}}
+[/tool_call]`
+
+	calls := DefaultParser.Parse(response)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Plugin != "jira" {
+		t.Errorf("plugin = %q, want %q", calls[0].Plugin, "jira")
+	}
+	if calls[0].Action != "search_issues" {
+		t.Errorf("action = %q, want %q", calls[0].Action, "search_issues")
+	}
+	if calls[0].Args["jql"] != "assignee = alice@example.com" {
+		t.Errorf("jql = %q", calls[0].Args["jql"])
+	}
+}
+
+func TestParseFormatB_DoubleUnderscore(t *testing.T) {
+	response := `[tool_call] jira__search_issues
+{"jql": "assignee = alice@example.com"}
+[/tool_call]`
+
+	calls := DefaultParser.Parse(response)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Plugin != "jira" {
+		t.Errorf("plugin = %q, want %q", calls[0].Plugin, "jira")
+	}
+	if calls[0].Action != "search_issues" {
+		t.Errorf("action = %q, want %q", calls[0].Action, "search_issues")
+	}
+}
+
 func TestStripInternalBlocks(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -305,6 +344,12 @@ func TestParseToolName(t *testing.T) {
 		{"noaction", "", "", true},
 		{".nodot", "", "", true},
 		{"nodot.", "", "", true},
+		// double-underscore format (OpenAI-style function names)
+		{"jira__search_issues", "jira", "search_issues", false},
+		{"appsignal__get_applications", "appsignal", "get_applications", false},
+		{"brave_search__search", "brave_search", "search", false},
+		// dot is preferred over double-underscore when both could apply
+		{"mcp.jira__search", "mcp", "jira__search", false},
 		// natural-language fragments must be rejected
 		{"` syntax). Let me know which action you'd like to perform!", "", "", true},
 		{"plugin.action with spaces", "", "", true},

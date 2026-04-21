@@ -258,20 +258,32 @@ func stripTaggedBlocks(s, open, close string) string {
 	return sb.String()
 }
 
-// parseToolName splits "plugin.action" into ("plugin", "action").
+// parseToolName splits "plugin.action" or "plugin__action" into ("plugin", "action").
 // Both parts must be valid identifiers: plugin allows [a-zA-Z0-9_.-],
 // action allows [a-zA-Z0-9_]. This rejects natural-language fragments
 // that an LLM might accidentally emit inside [tool_call] blocks.
+//
+// The dot separator is preferred; double-underscore is a fallback because
+// LLMs trained on OpenAI-style function calling frequently emit names like
+// "jira__search_issues" instead of "jira.search_issues".
 func parseToolName(s string) (plugin, action string, err error) {
-	dot := strings.LastIndex(s, ".")
-	if dot <= 0 || dot == len(s)-1 {
-		return "", "", fmt.Errorf("invalid tool name %q", s)
+	// Preferred: split on last dot.
+	if dot := strings.LastIndex(s, "."); dot > 0 && dot < len(s)-1 {
+		plugin, action = s[:dot], s[dot+1:]
+		if isValidPluginName(plugin) && isValidActionName(action) {
+			return plugin, action, nil
+		}
 	}
-	plugin, action = s[:dot], s[dot+1:]
-	if !isValidPluginName(plugin) || !isValidActionName(action) {
-		return "", "", fmt.Errorf("invalid tool name %q", s)
+
+	// Fallback: split on first "__" (double underscore).
+	if dunder := strings.Index(s, "__"); dunder > 0 && dunder < len(s)-2 {
+		plugin, action = s[:dunder], s[dunder+2:]
+		if isValidPluginName(plugin) && isValidActionName(action) {
+			return plugin, action, nil
+		}
 	}
-	return plugin, action, nil
+
+	return "", "", fmt.Errorf("invalid tool name %q", s)
 }
 
 func isValidPluginName(s string) bool {
