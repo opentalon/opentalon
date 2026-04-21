@@ -1135,11 +1135,15 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		}
 	}
 
-	// Defense-in-depth: block restricted plugins when a profile is active but the plugin is not allowed.
-	// This mirrors the filtering done in buildSystemPrompt; protects against crafted tool calls.
-	if len(capForCheck.AllowedGroups) > 0 {
-		allowedPlugins := o.resolveAllowedPlugins(ctx)
-		if !o.pluginAllowed(capForCheck, allowedPlugins) {
+	// Defense-in-depth: block plugins that are not allowed for this profile.
+	// In strict mode (WhoAmI plugins list) every plugin is checked; in non-strict
+	// mode only capabilities with AllowedGroups set are gated (pluginAllowed handles both).
+	// This mirrors buildSystemPrompt and protects against crafted tool calls.
+	// Internal calls (guards, preparers, pipelines) are exempt: they are constructed
+	// programmatically by the host, not by the LLM, so they are trusted. This matches
+	// the exemptions already in place for UserOnly and rejectUnknownArgs below.
+	if call.FromLLM {
+		if allowed := o.resolveAllowedPlugins(ctx); !o.pluginAllowed(capForCheck, allowed) {
 			slog.Warn("BLOCKED tool call for restricted plugin", "plugin", call.Plugin, "action", call.Action)
 			return ToolResult{
 				CallID: call.ID,
@@ -1336,64 +1340,92 @@ func formatToolResultMessage(result ToolResult) string {
 // allowedPluginsKey is the context key for the per-Run allowed-plugin cache.
 type allowedPluginsKey struct{}
 
-// cachedAllowedPlugins wraps the map so a nil map (no restrictions) is
-// distinguishable from an absent cache entry.
-type cachedAllowedPlugins struct{ m map[string]bool }
-
-func withAllowedPlugins(ctx context.Context, m map[string]bool) context.Context {
-	return context.WithValue(ctx, allowedPluginsKey{}, cachedAllowedPlugins{m})
+// cachedAllowedPlugins wraps the plugin allowlist for a single Run call.
+// m == nil means "unrestricted" (no profile, no lookup configured, or a DB
+// failure that fails open). strict is true when the list came directly from
+// Profile.Plugins (WhoAmI per-request allowlist); in that mode every plugin
+// is gated, not just those with AllowedGroups on their capability.
+//
+// The zero value (m == nil, strict == false) deliberately doubles as both
+// "cache miss" and "no restrictions" — the ctx type-assertion in
+// resolveAllowedPlugins uses the ok bool to distinguish a real cache hit from
+// the zero value, so the two meanings never collide in practice.
+type cachedAllowedPlugins struct {
+	m      map[string]bool
+	strict bool
 }
 
-// resolveAllowedPlugins returns the set of plugin IDs allowed for the current profile's group.
-// Returns nil when no profile is set or no group plugin lookup is configured (= no restrictions).
-// Returns an empty map when a profile is present but has no group (= all restricted plugins blocked).
+func withAllowedPlugins(ctx context.Context, c cachedAllowedPlugins) context.Context {
+	return context.WithValue(ctx, allowedPluginsKey{}, c)
+}
+
+// resolveAllowedPlugins returns the set of plugin IDs allowed for the current profile.
+// Returns a zero cachedAllowedPlugins (m == nil, strict == false) when no profile is set
+// or no group plugin lookup is configured (= no restrictions).
 // The result is cached in ctx by Run; within a single Run call this never hits the DB twice.
-func (o *Orchestrator) resolveAllowedPlugins(ctx context.Context) map[string]bool {
+//
+// Priority:
+//  1. Profile.Plugins non-nil → strict allowlist from WhoAmI (per-request, every plugin gated)
+//  2. Group DB lookup → non-strict (only capabilities with AllowedGroups are gated)
+func (o *Orchestrator) resolveAllowedPlugins(ctx context.Context) cachedAllowedPlugins {
 	if cached, ok := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins); ok {
-		return cached.m
-	}
-	if o.groupPluginLookup == nil {
-		return nil
+		return cached
 	}
 	p := profile.FromContext(ctx)
 	if p == nil {
-		return nil
+		return cachedAllowedPlugins{}
+	}
+	// WhoAmI returned an explicit plugin list — use it as a strict per-request allowlist.
+	if p.Plugins != nil {
+		m := make(map[string]bool, len(p.Plugins))
+		for _, id := range p.Plugins {
+			m[id] = true
+		}
+		return cachedAllowedPlugins{m: m, strict: true}
+	}
+	// Fall back to group-based DB lookup (non-strict: only AllowedGroups-gated capabilities are affected).
+	if o.groupPluginLookup == nil {
+		return cachedAllowedPlugins{}
 	}
 	if p.Group == "" {
-		// Profile is present but has no group: deny all restricted plugins.
-		return map[string]bool{}
+		// Profile is present but has no group: deny all group-restricted plugins.
+		return cachedAllowedPlugins{m: map[string]bool{}}
 	}
 	ids, err := o.groupPluginLookup.PluginsForGroup(ctx, p.Group)
 	if err != nil {
 		slog.Warn("group plugin lookup failed", "group", p.Group, "error", err)
-		return nil
-	}
-	if len(ids) == 0 {
-		return map[string]bool{} // group exists but has no plugins — return empty (all restricted plugins blocked)
+		// Fail open: return unrestricted (m == nil) so the bot stays usable during
+		// DB outages. This means a lookup failure silently grants access to all
+		// AllowedGroups-gated plugins for this request. Strict mode (WhoAmI) never
+		// reaches here, so that path is unaffected. Chosen deliberately over
+		// fail-closed because bricking the bot during incidents is worse than a
+		// temporary permission widening on group-gated plugins.
+		return cachedAllowedPlugins{}
 	}
 	m := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		m[id] = true
 	}
-	return m
+	return cachedAllowedPlugins{m: m}
 }
 
-// pluginAllowed reports whether a capability may be shown to the current profile.
-// allowedPlugins is the result of resolveAllowedPlugins: nil = no restrictions.
-// A capability is blocked when:
-//   - allowedPlugins is non-nil (profile-mode active) AND
-//   - the capability has AllowedGroups set (meaning it is restricted) AND
-//   - the plugin name is not in allowedPlugins.
-func (o *Orchestrator) pluginAllowed(cap PluginCapability, allowedPlugins map[string]bool) bool {
-	if allowedPlugins == nil {
+// pluginAllowed reports whether a capability is accessible for the current profile.
+//
+// Strict mode (Profile.Plugins from WhoAmI): every plugin is checked against the
+// allowlist — a plugin absent from the list is blocked regardless of AllowedGroups.
+//
+// Non-strict mode (group DB lookup): only capabilities that have AllowedGroups set
+// are gated; capabilities without AllowedGroups remain publicly visible.
+func (o *Orchestrator) pluginAllowed(cap PluginCapability, allowed cachedAllowedPlugins) bool {
+	if allowed.m == nil {
 		// No profile / no lookup configured — unrestricted.
 		return true
 	}
-	if len(cap.AllowedGroups) == 0 {
-		// Capability has no group restriction — always visible.
+	if !allowed.strict && len(cap.AllowedGroups) == 0 {
+		// Non-strict mode: capability has no group restriction — always visible.
 		return true
 	}
-	return allowedPlugins[cap.Name]
+	return allowed.m[cap.Name]
 }
 
 // plannerLLMAdapter adapts orchestrator.LLMClient to pipeline.LLMClient.

@@ -13,11 +13,12 @@ const (
 
 // Request is the logical request from the host to the plugin.
 type Request struct {
-	Method string            `json:"method"`
-	ID     string            `json:"id,omitempty"`
-	Plugin string            `json:"plugin,omitempty"`
-	Action string            `json:"action,omitempty"`
-	Args   map[string]string `json:"args,omitempty"`
+	Method      string            `json:"method"`
+	ID          string            `json:"id,omitempty"`
+	Plugin      string            `json:"plugin,omitempty"`
+	Action      string            `json:"action,omitempty"`
+	Args        map[string]string `json:"args,omitempty"`
+	Credentials map[string]string `json:"credentials,omitempty"` // per-MCP-server tokens from WhoAmI, keyed by server name
 }
 
 // Response is the logical response from the plugin back to the host.

@@ -2,7 +2,64 @@ package plugin
 
 import (
 	"testing"
+
+	"github.com/opentalon/opentalon/proto/pluginpb"
 )
+
+func TestRequestFromProto_Credentials(t *testing.T) {
+	pb := &pluginpb.ToolCallRequest{
+		Id:     "r1",
+		Plugin: "mcp",
+		Action: "call",
+		Credentials: map[string]string{
+			"mymcp": "user-token-abc",
+			"jira":  "user-jira-xyz",
+		},
+	}
+	req := requestFromProto(pb)
+
+	if req.Credentials["mymcp"] != "user-token-abc" {
+		t.Errorf("Credentials[mymcp] = %q, want user-token-abc", req.Credentials["mymcp"])
+	}
+	if req.Credentials["jira"] != "user-jira-xyz" {
+		t.Errorf("Credentials[jira] = %q, want user-jira-xyz", req.Credentials["jira"])
+	}
+}
+
+func TestRequestFromProto_NoCredentials(t *testing.T) {
+	pb := &pluginpb.ToolCallRequest{Id: "r2", Plugin: "mcp", Action: "call"}
+	req := requestFromProto(pb)
+	if len(req.Credentials) != 0 {
+		t.Errorf("Credentials = %v, want empty", req.Credentials)
+	}
+}
+
+func TestRequestFromProto_NilProto(t *testing.T) {
+	req := requestFromProto(nil)
+	if req.Method != "" || req.ID != "" || req.Credentials != nil {
+		t.Errorf("nil proto should return zero Request, got %+v", req)
+	}
+}
+
+func TestRequestFromProto_CredentialsWithArgs(t *testing.T) {
+	pb := &pluginpb.ToolCallRequest{
+		Id:     "r3",
+		Plugin: "mcp",
+		Action: "search",
+		Args:   map[string]string{"query": "hello"},
+		Credentials: map[string]string{
+			"mymcp": "tok",
+		},
+	}
+	req := requestFromProto(pb)
+
+	if req.Args["query"] != "hello" {
+		t.Errorf("Args[query] = %q, want hello", req.Args["query"])
+	}
+	if req.Credentials["mymcp"] != "tok" {
+		t.Errorf("Credentials[mymcp] = %q, want tok", req.Credentials["mymcp"])
+	}
+}
 
 func TestCapsToProto_InjectContextArgs(t *testing.T) {
 	msg := CapabilitiesMsg{
