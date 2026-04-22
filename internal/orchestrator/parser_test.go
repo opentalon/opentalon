@@ -171,6 +171,22 @@ func TestParseFormatA_MixedArgTypes(t *testing.T) {
 	}
 }
 
+func TestParseFormatA_LargeNumericID(t *testing.T) {
+	// Large numeric IDs must not be converted to scientific notation (e.g. 2.004555e+06).
+	response := `[tool_call] {"tool": "timly.timly__assign-item", "args": {"item_id": 2004555, "container_id": 170909}}
+`
+	calls := DefaultParser.Parse(response)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Args["item_id"] != "2004555" {
+		t.Errorf("item_id = %q, want %q", calls[0].Args["item_id"], "2004555")
+	}
+	if calls[0].Args["container_id"] != "170909" {
+		t.Errorf("container_id = %q, want %q", calls[0].Args["container_id"], "170909")
+	}
+}
+
 func TestParseFormatC_ParenArgs(t *testing.T) {
 	response := `[tool_call] brave-search.search(query=SpaceX launch today, freshness=pd)
 `
