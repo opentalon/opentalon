@@ -26,6 +26,8 @@ When enabled, OpenTalon starts an HTTP server on the configured address. Prometh
 | `opentalon_llm_output_cost_usd_total` | Counter | `model`, `channel`, `group` | Total output spend in USD |
 | `opentalon_orchestrator_runs_total` | Counter | `model`, `channel`, `group` | Total completed orchestrator runs |
 | `opentalon_plugin_calls_total` | Counter | `plugin`, `action`, `status` | Total plugin/tool calls; `status` is `success` or `error` |
+| `opentalon_plugin_input_tokens_total` | Counter | `plugin`, `action` | LLM input tokens attributed to each plugin/tool call |
+| `opentalon_plugin_output_tokens_total` | Counter | `plugin`, `action` | LLM output tokens attributed to each plugin/tool call |
 
 Standard Go runtime and process metrics (`go_*`, `process_*`) are also exposed.
 
@@ -177,6 +179,12 @@ rate(opentalon_plugin_calls_total{status="error"}[5m])
 
 # Most used plugins
 topk(10, sum by (plugin) (opentalon_plugin_calls_total))
+
+# Token usage per MCP server / plugin
+sum by (plugin) (opentalon_plugin_input_tokens_total + opentalon_plugin_output_tokens_total)
+
+# Top 10 plugins by token consumption
+topk(10, sum by (plugin) (opentalon_plugin_input_tokens_total + opentalon_plugin_output_tokens_total))
 
 # Orchestrator runs per channel
 sum by (channel) (opentalon_orchestrator_runs_total)

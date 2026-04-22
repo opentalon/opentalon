@@ -49,20 +49,24 @@ func (e *echoExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 type fakeObserver struct {
 	mu    sync.Mutex
 	calls []struct {
-		plugin string
-		action string
-		failed bool
+		plugin       string
+		action       string
+		failed       bool
+		inputTokens  int
+		outputTokens int
 	}
 }
 
-func (f *fakeObserver) ObservePluginCall(plugin, action string, failed bool) {
+func (f *fakeObserver) ObservePluginCall(plugin, action string, failed bool, inputTokens, outputTokens int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, struct {
-		plugin string
-		action string
-		failed bool
-	}{plugin, action, failed})
+		plugin       string
+		action       string
+		failed       bool
+		inputTokens  int
+		outputTokens int
+	}{plugin, action, failed, inputTokens, outputTokens})
 }
 
 // fixedResultExecutor returns fixed content (for preparers that return JSON).

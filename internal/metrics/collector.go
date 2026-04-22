@@ -20,6 +20,9 @@ type Collector struct {
 	llmOutputCostUSD *prometheus.CounterVec
 	orchestratorRuns *prometheus.CounterVec
 	pluginCalls      *prometheus.CounterVec
+
+	pluginInputTokens  *prometheus.CounterVec
+	pluginOutputTokens *prometheus.CounterVec
 }
 
 // New creates and registers all metrics.
@@ -60,6 +63,16 @@ func New() *Collector {
 			Name: "opentalon_plugin_calls_total",
 			Help: "Total plugin/tool calls executed by the orchestrator.",
 		}, []string{"plugin", "action", "status"}),
+
+		pluginInputTokens: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "opentalon_plugin_input_tokens_total",
+			Help: "Total LLM input tokens attributed to plugin/tool calls.",
+		}, []string{"plugin", "action"}),
+
+		pluginOutputTokens: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "opentalon_plugin_output_tokens_total",
+			Help: "Total LLM output tokens attributed to plugin/tool calls.",
+		}, []string{"plugin", "action"}),
 	}
 
 	reg.MustRegister(
@@ -69,6 +82,8 @@ func New() *Collector {
 		c.llmOutputCostUSD,
 		c.orchestratorRuns,
 		c.pluginCalls,
+		c.pluginInputTokens,
+		c.pluginOutputTokens,
 	)
 
 	return c
@@ -90,7 +105,7 @@ func (c *Collector) RecordUsage(_ context.Context, _, groupID, channelID, _, mod
 }
 
 // ObservePluginCall implements orchestrator.PluginCallObserver.
-func (c *Collector) ObservePluginCall(plugin, action string, failed bool) {
+func (c *Collector) ObservePluginCall(plugin, action string, failed bool, inputTokens, outputTokens int) {
 	status := "success"
 	if failed {
 		status = "error"
@@ -100,6 +115,13 @@ func (c *Collector) ObservePluginCall(plugin, action string, failed bool) {
 		"action": action,
 		"status": status,
 	}).Inc()
+
+	tokenLabels := prometheus.Labels{
+		"plugin": plugin,
+		"action": action,
+	}
+	c.pluginInputTokens.With(tokenLabels).Add(float64(inputTokens))
+	c.pluginOutputTokens.With(tokenLabels).Add(float64(outputTokens))
 }
 
 // Handler returns an http.Handler that serves the /metrics endpoint.

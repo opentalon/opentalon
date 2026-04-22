@@ -95,16 +95,23 @@ func TestRecordUsagePartialCost(t *testing.T) {
 
 func TestObservePluginCallSuccess(t *testing.T) {
 	c := New()
-	c.ObservePluginCall("gitlab", "analyze_code", false)
+	c.ObservePluginCall("gitlab", "analyze_code", false, 100, 50)
 
 	if got := testutil.ToFloat64(c.pluginCalls.With(prometheus.Labels{"plugin": "gitlab", "action": "analyze_code", "status": "success"})); got != 1 {
 		t.Errorf("plugin calls success = %v, want 1", got)
+	}
+	tokenLabels := prometheus.Labels{"plugin": "gitlab", "action": "analyze_code"}
+	if got := testutil.ToFloat64(c.pluginInputTokens.With(tokenLabels)); got != 100 {
+		t.Errorf("plugin input tokens = %v, want 100", got)
+	}
+	if got := testutil.ToFloat64(c.pluginOutputTokens.With(tokenLabels)); got != 50 {
+		t.Errorf("plugin output tokens = %v, want 50", got)
 	}
 }
 
 func TestObservePluginCallFailed(t *testing.T) {
 	c := New()
-	c.ObservePluginCall("jira", "create_issue", true)
+	c.ObservePluginCall("jira", "create_issue", true, 200, 80)
 
 	if got := testutil.ToFloat64(c.pluginCalls.With(prometheus.Labels{"plugin": "jira", "action": "create_issue", "status": "error"})); got != 1 {
 		t.Errorf("plugin calls error = %v, want 1", got)
@@ -113,13 +120,18 @@ func TestObservePluginCallFailed(t *testing.T) {
 	if n := gatherCount(t, c, "opentalon_plugin_calls_total"); n != 1 {
 		t.Errorf("expected 1 series (error only), got %d", n)
 	}
+	// Token counters are always recorded regardless of status.
+	tokenLabels := prometheus.Labels{"plugin": "jira", "action": "create_issue"}
+	if got := testutil.ToFloat64(c.pluginInputTokens.With(tokenLabels)); got != 200 {
+		t.Errorf("plugin input tokens = %v, want 200", got)
+	}
 }
 
 func TestObservePluginCallAccumulates(t *testing.T) {
 	c := New()
-	c.ObservePluginCall("gitlab", "analyze_code", false)
-	c.ObservePluginCall("gitlab", "analyze_code", false)
-	c.ObservePluginCall("gitlab", "analyze_code", true)
+	c.ObservePluginCall("gitlab", "analyze_code", false, 100, 50)
+	c.ObservePluginCall("gitlab", "analyze_code", false, 150, 60)
+	c.ObservePluginCall("gitlab", "analyze_code", true, 80, 30)
 
 	success := testutil.ToFloat64(c.pluginCalls.With(prometheus.Labels{"plugin": "gitlab", "action": "analyze_code", "status": "success"}))
 	if success != 2 {
@@ -128,6 +140,13 @@ func TestObservePluginCallAccumulates(t *testing.T) {
 	errs := testutil.ToFloat64(c.pluginCalls.With(prometheus.Labels{"plugin": "gitlab", "action": "analyze_code", "status": "error"}))
 	if errs != 1 {
 		t.Errorf("errors = %v, want 1", errs)
+	}
+	tokenLabels := prometheus.Labels{"plugin": "gitlab", "action": "analyze_code"}
+	if got := testutil.ToFloat64(c.pluginInputTokens.With(tokenLabels)); got != 330 {
+		t.Errorf("plugin input tokens = %v, want 330", got)
+	}
+	if got := testutil.ToFloat64(c.pluginOutputTokens.With(tokenLabels)); got != 140 {
+		t.Errorf("plugin output tokens = %v, want 140", got)
 	}
 }
 
