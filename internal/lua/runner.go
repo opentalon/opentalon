@@ -136,6 +136,47 @@ func getTableString(tbl *lua.LTable, key string) string {
 	return ""
 }
 
+// RunFormat runs the Lua script at scriptPath, calling the global format(text, response_format)
+// function. The script must return a string (the formatted text). This is the post-LLM counterpart
+// of RunPrepare — simpler because formatters are text-in/text-out with no blocking or invoke.
+func RunFormat(scriptPath, text, responseFormat string) (string, error) {
+	lState := lua.NewState()
+	defer lState.Close()
+
+	lState.PreloadModule("os", osModuleLoader)
+
+	absPath, err := filepath.Abs(scriptPath)
+	if err != nil {
+		return "", fmt.Errorf("script path: %w", err)
+	}
+	if err := lState.DoFile(absPath); err != nil {
+		return "", fmt.Errorf("load script: %w", err)
+	}
+
+	fn := lState.GetGlobal("format")
+	if fn.Type() == lua.LTNil {
+		return "", fmt.Errorf("script must define global function format(text, response_format)")
+	}
+	if fn.Type() != lua.LTFunction {
+		return "", fmt.Errorf("format must be a function, got %s", fn.Type().String())
+	}
+
+	lState.Push(fn)
+	lState.Push(lua.LString(text))
+	lState.Push(lua.LString(responseFormat))
+	if err := lState.PCall(2, 1, nil); err != nil {
+		return "", fmt.Errorf("format(): %w", err)
+	}
+
+	ret := lState.Get(-1)
+	lState.Pop(1)
+
+	if ret.Type() != lua.LTString {
+		return "", fmt.Errorf("format() must return a string, got %s", ret.Type().String())
+	}
+	return ret.String(), nil
+}
+
 // osModuleLoader provides a minimal os module: getenv and time (for math.randomseed).
 func osModuleLoader(lState *lua.LState) int {
 	mod := lState.NewTable()

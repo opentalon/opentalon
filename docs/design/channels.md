@@ -173,7 +173,54 @@ This is where company rules, vocabulary enforcement, and compliance checks can r
 
 **Insecure preparers:** Preparers are **insecure by default** (they cannot run invoke). This is only about invoking other plugins: an insecure preparer can change the message and block with a message, but **cannot** run invoke steps. To allow a plugin to run invoke when used as a preparer, set `insecure: false` (trusted) in that plugin's config.
 
-**How this fits with orchestration:** The only place the core does a **pre-check call** to a plugin (or Lua) before the LLM is this content-preparer pipeline. All other plugin invocations are **orchestration-driven**: the LLM decides which tools to call during the turn, and the core runs those actions in the agent loop. There is no separate “after” hook—the response to the user is the LLM’s final output (and any tool results). So “before” in config is the only special pipeline that runs plugins/Lua ahead of the LLM; everything else is normal tool use decided by the LLM.
+**How this fits with orchestration:** Content preparers run **before** the LLM; response formatters (see below) run **after** the LLM. All other plugin invocations are **orchestration-driven**: the LLM decides which tools to call during the turn, and the core runs those actions in the agent loop.
+
+## Post-LLM processing (response formatters)
+
+After the LLM response is generated, it can be **transformed** before reaching the channel. This is the counterpart to content preparers — symmetric in config, but runs after the LLM instead of before.
+
+**Why:** Cheap/small LLMs often ignore system prompt formatting hints (e.g. `## OUTPUT FORMAT`) and output standard Markdown (`**bold**`, `## Heading`) regardless of the channel. Response formatters fix this deterministically — no extra LLM call needed.
+
+**Configuration:**
+
+```yaml
+orchestrator:
+  response_formatters:
+    - plugin: "lua:format-response"    # Lua script (ships with OpenTalon)
+      fail_open: true                  # default true; never block responses on formatter failure
+    # Or a gRPC plugin:
+    - plugin: my-formatter
+      action: format
+      fail_open: true
+```
+
+**How it works:**
+
+1. Each formatter receives the LLM response text and the channel's `response_format` (e.g. `"slack"`, `"teams"`, `"text"`).
+2. For **Lua scripts** (`plugin: "lua:my-script"`): the core calls the script's `format(text, response_format)` function and expects a string return.
+3. For **gRPC plugins** (`plugin: my-plugin`, `action: format`): the core calls the plugin action with args `{"text": "...", "response_format": "..."}`.
+4. Order is significant: the first entry receives the LLM response; each formatter's output is passed to the next.
+5. Only LLM-generated and pipeline-execution responses are formatted. System messages (pipeline confirmation, cancelled, blocked by guard, errors) are **not** formatted.
+
+**Error handling:** `fail_open` defaults to `true` — if a formatter fails, the error is logged and the response is passed through unchanged. Set `fail_open: false` to make formatter failures block the response (returns an error to the user).
+
+**Built-in Lua formatter:** OpenTalon ships `scripts/format-response.lua`, a deterministic Markdown-to-channel converter that handles:
+
+| Channel format | Transformations |
+|---|---|
+| `slack` | `**text**` → `*text*`, `## Heading` → `*Heading*` (mrkdwn) |
+| `teams` | `## Heading` → `**Heading**` |
+| `whatsapp` | `**text**` → `*text*`, `## Heading` → `*Heading*` |
+| `text` | Strip all formatting |
+| `html` / `telegram` | `**text**` → `<b>text</b>`, `*text*` → `<i>text</i>` |
+| `markdown` / `discord` | No-op (already correct) |
+
+Code blocks (fenced ` ``` ` and inline `` ` ``) are protected from transformation.
+
+**Custom formatters:** To customize, either:
+- Fork `scripts/format-response.lua` and adjust the patterns.
+- Write a gRPC plugin that implements a `format` action returning transformed text.
+- Chain multiple formatters (e.g. format-response first, then a compliance check).
 
 ## Actor and permission plugin
 

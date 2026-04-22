@@ -36,6 +36,14 @@ type ContentPreparerEntry struct {
 	FailOpen bool   // if true, guard/preparer failures are logged and skipped; default false (fail-closed)
 }
 
+// ResponseFormatterEntry configures a plugin or Lua script that transforms the
+// LLM response text after the agent loop, before returning to the channel handler.
+type ResponseFormatterEntry struct {
+	Plugin   string // "my-plugin" for gRPC or "lua:my-script" for Lua
+	Action   string // gRPC action name; ignored for Lua scripts
+	FailOpen bool   // default true: log and skip on failure (don't block responses)
+}
+
 type LLMClient interface {
 	Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error)
 }
@@ -83,6 +91,7 @@ type PluginCallObserver interface {
 type OrchestratorOpts struct {
 	CustomRules             []string
 	ContentPreparers        []ContentPreparerEntry
+	ResponseFormatters      []ResponseFormatterEntry
 	LuaScriptPaths          map[string]string
 	PermissionChecker       PermissionChecker
 	PermissionPluginName    string
@@ -135,6 +144,7 @@ type Orchestrator struct {
 	guard                   *Guard
 	rules                   *RulesConfig
 	preparers               []ContentPreparerEntry
+	formatters              []ResponseFormatterEntry      // run after final response; text-in/text-out
 	guards                  []ContentPreparerEntry        // subset of preparers with Guard:true; run before every LLM call
 	luaScriptPaths          map[string]string             // optional; plugin name -> path to .lua script (for "lua:name" preparers)
 	permissionChecker       PermissionChecker             // optional; when set, executeCall checks permission before running
@@ -237,6 +247,7 @@ func NewWithRules(
 		guard:                   NewGuard(),
 		rules:                   NewRulesConfig(opts.CustomRules),
 		preparers:               preparers,
+		formatters:              opts.ResponseFormatters,
 		guards:                  guards,
 		luaScriptPaths:          opts.LuaScriptPaths,
 		permissionChecker:       opts.PermissionChecker,
@@ -390,6 +401,71 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 	return toolResult.Content, nil, nil
 }
 
+// formatResponse runs all configured response formatters on result.Response.
+// Each formatter receives the response text and the channel's response_format.
+// Formatters are text-in/text-out (no invoke, no blocking). On error the
+// formatter is skipped (FailOpen true) or the error is returned (FailOpen false).
+func (o *Orchestrator) formatResponse(ctx context.Context, result *RunResult) error {
+	if len(o.formatters) == 0 || result == nil || result.Response == "" {
+		return nil
+	}
+	responseFormat := string(pkgchannel.CapabilitiesFromContext(ctx).ResponseFormat)
+
+	for _, f := range o.formatters {
+		var formatted string
+		var err error
+
+		if strings.HasPrefix(f.Plugin, "lua:") {
+			scriptName := strings.TrimPrefix(f.Plugin, "lua:")
+			scriptPath := o.luaScriptPaths[scriptName]
+			if scriptPath == "" {
+				err = fmt.Errorf("lua script path not found for %q", scriptName)
+			} else {
+				formatted, err = lua.RunFormat(scriptPath, result.Response, responseFormat)
+			}
+		} else {
+			if !o.registry.HasAction(f.Plugin, f.Action) {
+				err = fmt.Errorf("action %s.%s not found", f.Plugin, f.Action)
+			} else {
+				call := ToolCall{
+					ID:     fmt.Sprintf("formatter-%s-%s", f.Plugin, f.Action),
+					Plugin: f.Plugin,
+					Action: f.Action,
+					Args: map[string]string{
+						"text":            result.Response,
+						"response_format": responseFormat,
+					},
+				}
+				toolResult := o.executeCall(ctx, call)
+				if toolResult.Error != "" {
+					err = fmt.Errorf("%s", toolResult.Error)
+				} else {
+					formatted = toolResult.Content
+				}
+			}
+		}
+
+		if err != nil {
+			name := f.Plugin
+			if f.Action != "" {
+				name += "." + f.Action
+			}
+			if f.FailOpen {
+				slog.Warn("response formatter failed, skipping", "formatter", name, "error", err)
+				continue
+			}
+			return fmt.Errorf("response formatter %s: %w", name, err)
+		}
+		// Guard: ignore empty results so a broken formatter can't blank the
+		// response. A formatter that intentionally returns "" is treated as a
+		// no-op, preserving the previous response text.
+		if formatted != "" {
+			result.Response = formatted
+		}
+	}
+	return nil
+}
+
 // acquireSessionLock returns the per-session mutex for sessionID, locked.
 func (o *Orchestrator) acquireSessionLock(sessionID string) *sessionMutex {
 	o.sessionMuxMu.Lock()
@@ -457,7 +533,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 		if decision == pipeline.Approved {
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
-			return o.executePipeline(ctx, sessionID, p)
+			res, err := o.executePipeline(ctx, sessionID, p)
+			if err == nil && res != nil {
+				if fmtErr := o.formatResponse(ctx, res); fmtErr != nil {
+					return nil, fmtErr
+				}
+			}
+			return res, err
 		}
 		resp := "Pipeline cancelled (expected y/yes to confirm)."
 		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
@@ -643,6 +725,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				Content: resp.Content,
 			})
 			o.maybeRecordWorkflow(ctx, result, userMessage)
+			if fmtErr := o.formatResponse(ctx, result); fmtErr != nil {
+				return nil, fmtErr
+			}
 			return result, nil
 		}
 
@@ -1128,8 +1213,11 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	}
 
 	actorID := actor.Actor(ctx)
-	// permission_plugin gates all plugin actions (including e.g. install_skill); configure it for team deployments.
-	if actorID != "" && o.permissionChecker != nil && call.Plugin != o.permissionPluginName {
+	// permission_plugin gates LLM-originated plugin actions (including e.g.
+	// install_skill); configure it for team deployments.  Internal calls
+	// (guards, preparers, formatters, pipelines) are exempt — they are
+	// constructed programmatically by the host, not by the LLM.
+	if call.FromLLM && actorID != "" && o.permissionChecker != nil && call.Plugin != o.permissionPluginName {
 		allowed, err := o.permissionChecker.Allowed(ctx, actorID, call.Plugin)
 		if err != nil {
 			slog.Warn("permission check failed", "actor", actorID, "plugin", call.Plugin, "error", err)

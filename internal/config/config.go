@@ -282,9 +282,18 @@ type ContentPreparerEntry struct {
 	FailOpen bool   `yaml:"fail_open,omitempty"` // default false (fail-closed): block request if guard/preparer fails
 }
 
+// ResponseFormatterEntry configures a plugin or Lua script that transforms the LLM
+// response text before it reaches the channel (post-processing, symmetric with content preparers).
+type ResponseFormatterEntry struct {
+	Plugin   string `yaml:"plugin"`              // "my-plugin" for gRPC or "lua:my-script" for Lua
+	Action   string `yaml:"action"`              // gRPC action name; ignored for Lua scripts
+	FailOpen *bool  `yaml:"fail_open,omitempty"` // pointer; defaults to true when nil (don't block responses on formatter failure)
+}
+
 type OrchestratorConfig struct {
 	Rules                 []string                   `yaml:"rules"`
 	ContentPreparers      []ContentPreparerEntry     `yaml:"content_preparers,omitempty"`
+	ResponseFormatters    []ResponseFormatterEntry   `yaml:"response_formatters,omitempty"`
 	PermissionPlugin      string                     `yaml:"permission_plugin,omitempty"`       // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
 	MaxConcurrentSessions int                        `yaml:"max_concurrent_sessions,omitempty"` // max sessions running in parallel (default 1 = sequential)
 	Pipeline              PipelineOrchestratorConfig `yaml:"pipeline,omitempty"`
