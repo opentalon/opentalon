@@ -1975,3 +1975,190 @@ func TestPluginCallObserverCalledForEachCallInMultiStep(t *testing.T) {
 		}
 	}
 }
+
+// --- Response formatter tests ---
+
+// formatterExecutor transforms text by wrapping it with the response_format.
+type formatterExecutor struct{}
+
+func (e *formatterExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
+	text := call.Args["text"]
+	rf := call.Args["response_format"]
+	return ToolResult{CallID: call.ID, Content: fmt.Sprintf("[%s]%s[/%s]", rf, text, rf)}
+}
+
+// errorFormatterExecutor always returns an error.
+type errorFormatterExecutor struct{}
+
+func (e *errorFormatterExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
+	return ToolResult{CallID: call.ID, Error: "formatter broke"}
+}
+
+func setupOrchestratorWithFormatters(llm LLMClient, parser ToolCallParser, formatters []ResponseFormatterEntry) (*Orchestrator, string) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:        "gitlab",
+		Description: "GitLab integration",
+		Actions: []Action{
+			{Name: "analyze_code", Description: "Analyze code", Parameters: []Parameter{{Name: "repo", Description: "Repository"}}},
+			{Name: "create_pr", Description: "Create PR"},
+		},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name:        "jira",
+		Description: "Jira integration",
+		Actions:     []Action{{Name: "create_issue", Description: "Create issue"}},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name:        "my-formatter",
+		Description: "Test formatter",
+		Actions:     []Action{{Name: "format", Description: "Format response", Parameters: []Parameter{{Name: "text"}, {Name: "response_format"}}}},
+	}, &formatterExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name:        "bad-formatter",
+		Description: "Broken formatter",
+		Actions:     []Action{{Name: "format", Description: "Format response", Parameters: []Parameter{{Name: "text"}, {Name: "response_format"}}}},
+	}, &errorFormatterExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("test-session")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		ResponseFormatters: formatters,
+	})
+	return orch, "test-session"
+}
+
+func TestResponseFormatterGRPCPlugin(t *testing.T) {
+	llm := &fakeLLM{responses: []string{"**Hello world**"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	formatters := []ResponseFormatterEntry{
+		{Plugin: "my-formatter", Action: "format", FailOpen: true},
+	}
+
+	orch, sessID := setupOrchestratorWithFormatters(llm, parser, formatters)
+	ctx := pkgchannel.WithCapabilities(context.Background(), pkgchannel.Capabilities{
+		ResponseFormat: pkgchannel.FormatSlack,
+	})
+	result, err := orch.Run(ctx, sessID, "Hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "[slack]**Hello world**[/slack]"
+	if result.Response != expected {
+		t.Errorf("Response = %q, want %q", result.Response, expected)
+	}
+}
+
+func TestResponseFormatterChaining(t *testing.T) {
+	llm := &fakeLLM{responses: []string{"original"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	formatters := []ResponseFormatterEntry{
+		{Plugin: "my-formatter", Action: "format", FailOpen: true},
+		{Plugin: "my-formatter", Action: "format", FailOpen: true},
+	}
+
+	orch, sessID := setupOrchestratorWithFormatters(llm, parser, formatters)
+	ctx := pkgchannel.WithCapabilities(context.Background(), pkgchannel.Capabilities{
+		ResponseFormat: pkgchannel.FormatTeams,
+	})
+	result, err := orch.Run(ctx, sessID, "Hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First formatter: [teams]original[/teams]
+	// Second formatter: [teams][teams]original[/teams][/teams]
+	expected := "[teams][teams]original[/teams][/teams]"
+	if result.Response != expected {
+		t.Errorf("Response = %q, want %q", result.Response, expected)
+	}
+}
+
+func TestResponseFormatterFailOpenTrue(t *testing.T) {
+	llm := &fakeLLM{responses: []string{"keep me"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	formatters := []ResponseFormatterEntry{
+		{Plugin: "bad-formatter", Action: "format", FailOpen: true},
+	}
+
+	orch, sessID := setupOrchestratorWithFormatters(llm, parser, formatters)
+	result, err := orch.Run(context.Background(), sessID, "Hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// FailOpen=true: error is logged, response unchanged
+	if result.Response != "keep me" {
+		t.Errorf("Response = %q, want %q", result.Response, "keep me")
+	}
+}
+
+func TestResponseFormatterFailOpenFalse(t *testing.T) {
+	llm := &fakeLLM{responses: []string{"will fail"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	formatters := []ResponseFormatterEntry{
+		{Plugin: "bad-formatter", Action: "format", FailOpen: false},
+	}
+
+	orch, sessID := setupOrchestratorWithFormatters(llm, parser, formatters)
+	_, err := orch.Run(context.Background(), sessID, "Hi")
+	if err == nil {
+		t.Fatal("expected error when FailOpen is false")
+	}
+	if !strings.Contains(err.Error(), "response formatter") {
+		t.Errorf("error = %q, want to contain 'response formatter'", err.Error())
+	}
+}
+
+func TestResponseFormatterMissingAction(t *testing.T) {
+	llm := &fakeLLM{responses: []string{"keep me"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	formatters := []ResponseFormatterEntry{
+		{Plugin: "nonexistent", Action: "format", FailOpen: true},
+	}
+
+	orch, sessID := setupOrchestratorWithFormatters(llm, parser, formatters)
+	result, err := orch.Run(context.Background(), sessID, "Hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// FailOpen=true: missing plugin is logged and skipped
+	if result.Response != "keep me" {
+		t.Errorf("Response = %q, want %q", result.Response, "keep me")
+	}
+}
+
+func TestResponseFormatterNoFormatters(t *testing.T) {
+	llm := &fakeLLM{responses: []string{"untouched"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	orch, sessID := setupOrchestratorWithFormatters(llm, parser, nil)
+	result, err := orch.Run(context.Background(), sessID, "Hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "untouched" {
+		t.Errorf("Response = %q, want %q", result.Response, "untouched")
+	}
+}
+
+func TestResponseFormatterLuaScript(t *testing.T) {
+	// Test Lua formatter via the orchestrator (requires a temp script file)
+	import_os := false
+	_ = import_os // Lua test is covered in runner_test.go; here we test the wiring for missing script
+	llm := &fakeLLM{responses: []string{"keep me"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	formatters := []ResponseFormatterEntry{
+		{Plugin: "lua:nonexistent-script", Action: "", FailOpen: true},
+	}
+
+	orch, sessID := setupOrchestratorWithFormatters(llm, parser, formatters)
+	result, err := orch.Run(context.Background(), sessID, "Hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// FailOpen=true: missing Lua script is logged and skipped
+	if result.Response != "keep me" {
+		t.Errorf("Response = %q, want %q", result.Response, "keep me")
+	}
+}

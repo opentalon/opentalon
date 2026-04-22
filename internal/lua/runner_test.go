@@ -134,3 +134,102 @@ end
 		t.Errorf("expected no invoke steps, got %d", len(result.InvokeSteps))
 	}
 }
+
+func TestRunFormatReturnsString(t *testing.T) {
+	script := `
+function format(text, response_format)
+  return "formatted(" .. response_format .. "): " .. text
+end
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fmt.lua")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := RunFormat(path, "hello **world**", "slack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "formatted(slack): hello **world**" {
+		t.Errorf("result = %q", result)
+	}
+}
+
+func TestRunFormatReceivesResponseFormat(t *testing.T) {
+	script := `
+function format(text, response_format)
+  return response_format
+end
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fmt.lua")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := RunFormat(path, "anything", "teams")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "teams" {
+		t.Errorf("expected response_format 'teams', got %q", result)
+	}
+}
+
+func TestRunFormatMissingFunction(t *testing.T) {
+	script := `function prepare(text) return text end`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fmt.lua")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := RunFormat(path, "hello", "slack")
+	if err == nil {
+		t.Fatal("expected error for missing format function")
+	}
+}
+
+func TestRunFormatNonStringReturn(t *testing.T) {
+	script := `
+function format(text, response_format)
+  return { message = "oops" }
+end
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fmt.lua")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := RunFormat(path, "hello", "slack")
+	if err == nil {
+		t.Fatal("expected error for non-string return")
+	}
+}
+
+func TestRunFormatEmptyFormat(t *testing.T) {
+	// Verify empty response_format is passed correctly
+	script := `
+function format(text, response_format)
+  if response_format == "" then
+    return text
+  end
+  return "changed"
+end
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fmt.lua")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := RunFormat(path, "keep me", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "keep me" {
+		t.Errorf("expected no-op for empty format, got %q", result)
+	}
+}

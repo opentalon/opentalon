@@ -51,6 +51,18 @@ orchestrator:
     - plugin: hello-world
       action: prepare
       arg_key: text
+  # Run these plugin actions after the LLM response to transform the output before
+  # it reaches the channel. Useful for fixing formatting when cheap models ignore
+  # system prompt hints (e.g. outputting Markdown ** bold ** in a Slack channel).
+  # List order = execution order; each formatter's output is the next one's input.
+  # Formatters receive two args: "text" (the response) and "response_format" (e.g. "slack").
+  # response_formatters:
+  #   - plugin: "lua:format-response"    # built-in Lua formatter (see scripts/format-response.lua)
+  #     fail_open: true                  # default true; log and skip on failure (never blocks responses)
+  #   # Or use a gRPC plugin:
+  #   # - plugin: my-formatter
+  #   #   action: format
+  #   #   fail_open: true
   # Pipeline execution: LLM-planned multi-step workflows with confirmation and retry.
   # When enabled, the planner decomposes multi-step requests into a DAG of plugin actions,
   # asks the user for confirmation, and executes with per-step retry and timeout.

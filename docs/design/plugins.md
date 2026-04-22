@@ -240,11 +240,10 @@ User message
     │
     ▼
 ┌──────────────────────────────────────┐
-│  Lua pre-hooks                       │
-│  - Expert rules (pattern matching,   │
-│    decision trees, scoring)          │
-│  - Small LLM calls (classify,       │
-│    translate, normalize)             │
+│  Content preparers (pre-hooks)       │
+│  - gRPC plugin actions or Lua        │
+│  - Expert rules, classify, translate │
+│  - Config: content_preparers         │
 └──────────┬───────────────────────────┘
            │  refined message
            ▼
@@ -256,11 +255,12 @@ User message
            │  raw response
            ▼
 ┌──────────────────────────────────────┐
-│  Lua post-hooks                      │
-│  - Expert rules (compliance check,   │
-│    vocabulary enforcement)           │
-│  - Small LLM calls (summarize,      │
-│    validate, rewrite)                │
+│  Response formatters (post-hooks)    │
+│  - gRPC plugin actions or Lua        │
+│  - Format conversion (Markdown →     │
+│    Slack mrkdwn, Teams, HTML, etc.)  │
+│  - Compliance, vocabulary, rewrite   │
+│  - Config: response_formatters       │
 └──────────┬───────────────────────────┘
            │  final response
            ▼
@@ -426,7 +426,7 @@ Both plugin tiers share the same set of extension points. Each point defines whe
 |---|---|---|---|
 | **Tool actions** | Primary | -- | LLM-callable capabilities (code analysis, issue creation, search) |
 | **Request hooks** | Supported | Primary | Pre-process user messages before the orchestrator |
-| **Response hooks** | Supported | Primary | Post-process LLM responses before delivery |
+| **Response formatters** | Supported | Primary | Post-process LLM responses before delivery (config: `orchestrator.response_formatters`) |
 | **Auth providers** | Primary | -- | Custom authentication backends |
 | **Storage backends** | Primary | -- | Custom persistence (S3, database, etc.) |
 | **Notification sinks** | Supported | Supported | Send alerts/notifications to external systems |

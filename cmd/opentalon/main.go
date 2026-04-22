@@ -358,6 +358,18 @@ func main() {
 		}
 		contentPreparers = append(contentPreparers, entry)
 	}
+	responseFormatters := make([]orchestrator.ResponseFormatterEntry, 0, len(cfg.Orchestrator.ResponseFormatters))
+	for _, f := range cfg.Orchestrator.ResponseFormatters {
+		failOpen := true
+		if f.FailOpen != nil {
+			failOpen = *f.FailOpen
+		}
+		responseFormatters = append(responseFormatters, orchestrator.ResponseFormatterEntry{
+			Plugin:   f.Plugin,
+			Action:   f.Action,
+			FailOpen: failOpen,
+		})
+	}
 	luaScriptPaths := buildLuaScriptPaths(ctx, dataDir, cfg)
 	var permChecker orchestrator.PermissionChecker
 	permPluginName := cfg.Orchestrator.PermissionPlugin
@@ -415,6 +427,7 @@ func main() {
 	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, orchestrator.OrchestratorOpts{
 		CustomRules:             cfg.Orchestrator.Rules,
 		ContentPreparers:        contentPreparers,
+		ResponseFormatters:      responseFormatters,
 		LuaScriptPaths:          luaScriptPaths,
 		PermissionChecker:       permChecker,
 		PermissionPluginName:    permPluginName,
