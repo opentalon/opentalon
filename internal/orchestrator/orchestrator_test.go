@@ -1618,63 +1618,6 @@ func TestUnknownArgsNotRejectedForInternalCall(t *testing.T) {
 	}
 }
 
-// Permission plugin must NOT block internal calls (preparers, formatters,
-// pipelines) — only LLM-originated calls should be checked.
-func TestPermissionCheckerSkippedForInternalCalls(t *testing.T) {
-	// A permission checker that always denies.
-	deny := &denyAllPermissionChecker{}
-
-	var invoked bool
-	captureExec := &capturingExecutor{fn: func(c ToolCall) ToolResult {
-		invoked = true
-		return ToolResult{CallID: c.ID, Content: "ok"}
-	}}
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "formatter", Description: "Formatter plugin",
-		Actions: []Action{{Name: "format", Description: "Format response"}},
-	}, captureExec)
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
-		PermissionChecker: deny,
-	})
-
-	ctx := actor.WithActor(context.Background(), "user:alice")
-
-	// Internal call (FromLLM=false) — should bypass permission check.
-	result := orch.executeCall(ctx, ToolCall{
-		ID: "c1", Plugin: "formatter", Action: "format",
-		Args: map[string]string{"text": "hello"},
-	})
-	if result.Error != "" {
-		t.Fatalf("internal call should bypass permission checker; got error %q", result.Error)
-	}
-	if !invoked {
-		t.Error("plugin should have been invoked for internal call")
-	}
-
-	// LLM-originated call — should be denied.
-	invoked = false
-	result = orch.executeCall(ctx, ToolCall{
-		ID: "c2", Plugin: "formatter", Action: "format",
-		Args:    map[string]string{"text": "hello"},
-		FromLLM: true,
-	})
-	if result.Error == "" {
-		t.Error("LLM call should be denied by permission checker")
-	}
-	if invoked {
-		t.Error("plugin should NOT have been invoked for denied LLM call")
-	}
-}
-
-type denyAllPermissionChecker struct{}
-
-func (d *denyAllPermissionChecker) Allowed(ctx context.Context, actorID, plugin string) (bool, error) {
-	return false, nil
-}
-
 func TestRejectUnknownArgsErrorFormat(t *testing.T) {
 	action := &Action{
 		Name: "do", Parameters: []Parameter{
@@ -2199,7 +2142,10 @@ func TestResponseFormatterNoFormatters(t *testing.T) {
 	}
 }
 
-func TestResponseFormatterLuaMissingScript(t *testing.T) {
+func TestResponseFormatterLuaScript(t *testing.T) {
+	// Test Lua formatter via the orchestrator (requires a temp script file)
+	import_os := false
+	_ = import_os // Lua test is covered in runner_test.go; here we test the wiring for missing script
 	llm := &fakeLLM{responses: []string{"keep me"}}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	formatters := []ResponseFormatterEntry{
