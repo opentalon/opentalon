@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 )
 
@@ -183,7 +185,13 @@ func toStringMap(m map[string]interface{}) map[string]string {
 			if val == 0 {
 				continue
 			}
-			result[k] = fmt.Sprintf("%v", val)
+			// Use decimal notation to avoid scientific notation (e.g. 2.004555e+06)
+			// that breaks downstream consumers expecting plain integers.
+			if val == math.Trunc(val) && !math.IsInf(val, 0) && !math.IsNaN(val) {
+				result[k] = strconv.FormatInt(int64(val), 10)
+			} else {
+				result[k] = strconv.FormatFloat(val, 'f', -1, 64)
+			}
 		case bool:
 			if !val {
 				continue
