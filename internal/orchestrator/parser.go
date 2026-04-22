@@ -100,7 +100,22 @@ func (defaultParser) Parse(response string) []ToolCall {
 			}
 		}
 	}
+	// Fallback: the entire response is a bare JSON tool call without [tool_call] tags.
+	// LLMs sometimes emit {"tool": "plugin.action", "args": {...}} as plain text.
 	if len(calls) == 0 {
+		trimmed := strings.TrimSpace(response)
+		var block toolCallJSON
+		if json.Unmarshal([]byte(trimmed), &block) == nil && block.Tool != "" {
+			plugin, action, err := parseToolName(block.Tool)
+			if err == nil {
+				return []ToolCall{{
+					ID:     "call-1",
+					Plugin: plugin,
+					Action: action,
+					Args:   toStringMap(block.Args),
+				}}
+			}
+		}
 		return nil
 	}
 	return calls

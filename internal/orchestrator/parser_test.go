@@ -424,3 +424,40 @@ func TestParseToolName(t *testing.T) {
 		})
 	}
 }
+
+func TestParseBareJSONToolCall(t *testing.T) {
+	// LLM emits a bare JSON tool call without [tool_call] tags.
+	response := `{"tool": "myapp.myapp__list-org-units", "args": {}}`
+
+	calls := DefaultParser.Parse(response)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Plugin != "myapp" {
+		t.Errorf("plugin = %q, want %q", calls[0].Plugin, "myapp")
+	}
+	if calls[0].Action != "myapp__list-org-units" {
+		t.Errorf("action = %q, want %q", calls[0].Action, "myapp__list-org-units")
+	}
+}
+
+func TestParseBareJSONToolCall_WithSurroundingText(t *testing.T) {
+	// Bare JSON mixed with text should NOT be parsed (avoid false positives).
+	response := `Let me look that up.
+{"tool": "myapp.search", "args": {"q": "test"}}`
+
+	calls := DefaultParser.Parse(response)
+	if calls != nil {
+		t.Errorf("expected nil for bare JSON with surrounding text, got %v", calls)
+	}
+}
+
+func TestParseBareJSONToolCall_NoToolKey(t *testing.T) {
+	// Bare JSON without a "tool" key should NOT be parsed.
+	response := `{"name": "myapp.search", "args": {"q": "test"}}`
+
+	calls := DefaultParser.Parse(response)
+	if calls != nil {
+		t.Errorf("expected nil for JSON without tool key, got %v", calls)
+	}
+}
