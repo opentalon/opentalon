@@ -35,7 +35,7 @@ func TestRecordUsageSingleCall(t *testing.T) {
 	c := New()
 	c.RecordUsage(context.Background(), "entity1", "g1", "ch1", "sess1", "m1", 100, 50, 3, 0.01, 0.02)
 
-	labels := prometheus.Labels{"model": "m1", "channel": "ch1", "group": "g1"}
+	labels := prometheus.Labels{"model": "m1", "channel": "ch1", "group": "g1", "entity_id": "entity1"}
 	if got := testutil.ToFloat64(c.llmInputTokens.With(labels)); got != 100 {
 		t.Errorf("inputTokens = %v, want 100", got)
 	}
@@ -58,7 +58,7 @@ func TestRecordUsageAccumulates(t *testing.T) {
 	c.RecordUsage(context.Background(), "e", "g1", "ch1", "s", "m1", 100, 50, 1, 0.0, 0.0)
 	c.RecordUsage(context.Background(), "e", "g1", "ch1", "s", "m1", 200, 80, 2, 0.0, 0.0)
 
-	labels := prometheus.Labels{"model": "m1", "channel": "ch1", "group": "g1"}
+	labels := prometheus.Labels{"model": "m1", "channel": "ch1", "group": "g1", "entity_id": "e"}
 	if got := testutil.ToFloat64(c.llmInputTokens.With(labels)); got != 300 {
 		t.Errorf("inputTokens = %v, want 300", got)
 	}
@@ -84,7 +84,7 @@ func TestRecordUsagePartialCost(t *testing.T) {
 	c := New()
 	c.RecordUsage(context.Background(), "e", "g1", "ch1", "s", "m1", 10, 5, 0, 0.05, 0.0)
 
-	labels := prometheus.Labels{"model": "m1", "channel": "ch1", "group": "g1"}
+	labels := prometheus.Labels{"model": "m1", "channel": "ch1", "group": "g1", "entity_id": "e"}
 	if got := testutil.ToFloat64(c.llmInputCostUSD.With(labels)); got != 0.05 {
 		t.Errorf("inputCost = %v, want 0.05", got)
 	}
@@ -176,7 +176,7 @@ func TestCollectAndCompareAfterUsage(t *testing.T) {
 	expected := `
 		# HELP opentalon_orchestrator_runs_total Total completed orchestrator runs.
 		# TYPE opentalon_orchestrator_runs_total counter
-		opentalon_orchestrator_runs_total{channel="ch1",group="g1",model="m1"} 1
+		opentalon_orchestrator_runs_total{channel="ch1",entity_id="entity1",group="g1",model="m1"} 1
 	`
 	if err := testutil.GatherAndCompare(c.reg, strings.NewReader(expected), "opentalon_orchestrator_runs_total"); err != nil {
 		t.Errorf("metric mismatch: %v", err)

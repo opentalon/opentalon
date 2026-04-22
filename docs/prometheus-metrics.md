@@ -20,11 +20,11 @@ When enabled, OpenTalon starts an HTTP server on the configured address. Prometh
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `opentalon_llm_input_tokens_total` | Counter | `model`, `channel`, `group` | Total input (prompt) tokens sent to the LLM |
-| `opentalon_llm_output_tokens_total` | Counter | `model`, `channel`, `group` | Total output (completion) tokens received from the LLM |
-| `opentalon_llm_input_cost_usd_total` | Counter | `model`, `channel`, `group` | Total input spend in USD |
-| `opentalon_llm_output_cost_usd_total` | Counter | `model`, `channel`, `group` | Total output spend in USD |
-| `opentalon_orchestrator_runs_total` | Counter | `model`, `channel`, `group` | Total completed orchestrator runs |
+| `opentalon_llm_input_tokens_total` | Counter | `model`, `channel`, `group`, `entity_id` | Total input (prompt) tokens sent to the LLM |
+| `opentalon_llm_output_tokens_total` | Counter | `model`, `channel`, `group`, `entity_id` | Total output (completion) tokens received from the LLM |
+| `opentalon_llm_input_cost_usd_total` | Counter | `model`, `channel`, `group`, `entity_id` | Total input spend in USD |
+| `opentalon_llm_output_cost_usd_total` | Counter | `model`, `channel`, `group`, `entity_id` | Total output spend in USD |
+| `opentalon_orchestrator_runs_total` | Counter | `model`, `channel`, `group`, `entity_id` | Total completed orchestrator runs |
 | `opentalon_plugin_calls_total` | Counter | `plugin`, `action`, `status` | Total plugin/tool calls; `status` is `success` or `error` |
 | `opentalon_plugin_input_tokens_total` | Counter | `plugin`, `action` | LLM input tokens attributed to each plugin/tool call |
 | `opentalon_plugin_output_tokens_total` | Counter | `plugin`, `action` | LLM output tokens attributed to each plugin/tool call |
@@ -32,6 +32,15 @@ When enabled, OpenTalon starts an HTTP server on the configured address. Prometh
 Standard Go runtime and process metrics (`go_*`, `process_*`) are also exposed.
 
 > **Note:** Cost metrics are only non-zero when model `cost.input` / `cost.output` pricing is configured in `models.providers.<id>.models[*].cost`. Zero-cost (free-tier) models still emit the series with a value of `0`.
+
+### Label semantics
+
+- `model` — the LLM model that served the run (e.g. `gpt-oss-120b`).
+- `channel` — the channel plugin that initiated the run (e.g. `slack`, `msteams`, `console`, `websocket`).
+- `group` — the channel-scoped group identifier (e.g. Slack team/workspace ID). Stable per tenant.
+- `entity_id` — the channel-scoped actor identifier (e.g. the Slack user ID that sent the message). Use this to attribute spend to individual users. Empty for runs without a resolved actor.
+
+> **Cardinality:** `entity_id` adds one series per unique user. For deployments with a bounded user base this is fine; for public-facing deployments with unbounded users, consider dropping the label via `metric_relabel_configs` in your Prometheus scrape config.
 
 ## Prometheus sidecar / Docker Compose example
 

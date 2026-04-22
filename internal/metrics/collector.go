@@ -37,27 +37,27 @@ func New() *Collector {
 		llmInputTokens: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "opentalon_llm_input_tokens_total",
 			Help: "Total LLM input tokens consumed.",
-		}, []string{"model", "channel", "group"}),
+		}, []string{"model", "channel", "group", "entity_id"}),
 
 		llmOutputTokens: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "opentalon_llm_output_tokens_total",
 			Help: "Total LLM output tokens produced.",
-		}, []string{"model", "channel", "group"}),
+		}, []string{"model", "channel", "group", "entity_id"}),
 
 		llmInputCostUSD: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "opentalon_llm_input_cost_usd_total",
 			Help: "Total LLM input spend in USD.",
-		}, []string{"model", "channel", "group"}),
+		}, []string{"model", "channel", "group", "entity_id"}),
 
 		llmOutputCostUSD: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "opentalon_llm_output_cost_usd_total",
 			Help: "Total LLM output spend in USD.",
-		}, []string{"model", "channel", "group"}),
+		}, []string{"model", "channel", "group", "entity_id"}),
 
 		orchestratorRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "opentalon_orchestrator_runs_total",
 			Help: "Total completed orchestrator runs.",
-		}, []string{"model", "channel", "group"}),
+		}, []string{"model", "channel", "group", "entity_id"}),
 
 		pluginCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "opentalon_plugin_calls_total",
@@ -90,11 +90,12 @@ func New() *Collector {
 }
 
 // RecordUsage implements orchestrator.UsageRecorder.
-func (c *Collector) RecordUsage(_ context.Context, _, groupID, channelID, _, modelID string, inputTokens, outputTokens, _ int, inputCostUSD, outputCostUSD float64) {
+func (c *Collector) RecordUsage(_ context.Context, entityID, groupID, channelID, _, modelID string, inputTokens, outputTokens, _ int, inputCostUSD, outputCostUSD float64) {
 	labels := prometheus.Labels{
-		"model":   modelID,
-		"channel": channelID,
-		"group":   groupID,
+		"model":     modelID,
+		"channel":   channelID,
+		"group":     groupID,
+		"entity_id": entityID,
 	}
 	c.llmInputTokens.With(labels).Add(float64(inputTokens))
 	c.llmOutputTokens.With(labels).Add(float64(outputTokens))
