@@ -84,7 +84,7 @@ type UsageRecorder interface {
 
 // PluginCallObserver is notified after each plugin/tool call executed by the orchestrator.
 type PluginCallObserver interface {
-	ObservePluginCall(plugin, action string, failed bool)
+	ObservePluginCall(plugin, action string, failed bool, inputTokens, outputTokens int)
 }
 
 // OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check, no summarization).
@@ -731,6 +731,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			return result, nil
 		}
 
+		// Attribute this LLM round's tokens evenly across the tool calls it produced.
+		perCallInput := resp.Usage.InputTokens / max(len(calls), 1)
+		perCallOutput := resp.Usage.OutputTokens / max(len(calls), 1)
+
 		for i := range calls {
 			calls[i].FromLLM = true
 			toolResult := o.executeCall(ctx, calls[i])
@@ -743,7 +747,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
 			}
 			if o.pluginCallObserver != nil {
-				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "")
+				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", perCallInput, perCallOutput)
 			}
 
 			_ = o.sessions.AddMessage(sessionID, provider.Message{
