@@ -96,21 +96,23 @@ end
 
 -- Slack mrkdwn: **bold** -> *bold*, ## Heading -> *Heading*
 local function format_slack(s)
-  -- Headings: # ... or ## ... -> *...*
-  s = s:gsub("(\n?)#+%s+([^\n]+)", function(nl, heading)
-    -- Strip any bold markers from heading text
+  -- Headings: # ... or ## ... -> *...* (placeholder to protect from italic pass)
+  s = s:gsub("(\n)#+%s+([^\n]+)", function(nl, heading)
     heading = heading:gsub("%*%*(.-)%*%*", "%1")
-    return nl .. "*" .. heading .. "*"
+    return nl .. "\0HEAD\0" .. heading .. "\0HEAD\0"
   end)
-  -- Handle heading at start of string (no preceding newline)
   if s:sub(1, 1) == "#" then
     s = s:gsub("^#+%s+([^\n]+)", function(heading)
       heading = heading:gsub("%*%*(.-)%*%*", "%1")
-      return "*" .. heading .. "*"
+      return "\0HEAD\0" .. heading .. "\0HEAD\0"
     end)
   end
-  -- Bold: **text** -> *text* (non-greedy)
-  s = s:gsub("%*%*(.-)%*%*", "*%1*")
+  -- Italic: *text* -> _text_ (Slack italic is _text_, not *text*)
+  -- Protect **bold** first, convert *italic*, then restore bold and headings.
+  s = s:gsub("%*%*(.-)%*%*", "\0BOLD\0%1\0BOLD\0")
+  s = s:gsub("%*(.-)%*", "_%1_")
+  s = s:gsub("\0BOLD\0(.-)\0BOLD\0", "*%1*")
+  s = s:gsub("\0HEAD\0(.-)\0HEAD\0", "*%1*")
   -- Bold underscore: __text__ -> _text_
   s = s:gsub("__(.-)__", "_%1_")
   return s
@@ -118,7 +120,7 @@ end
 
 -- Teams: ## Heading -> **Heading** (Teams renders bold but not # headings well)
 local function format_teams(s)
-  s = s:gsub("(\n?)#+%s+([^\n]+)", function(nl, heading)
+  s = s:gsub("(\n)#+%s+([^\n]+)", function(nl, heading)
     heading = heading:gsub("%*%*(.-)%*%*", "%1")
     return nl .. "**" .. heading .. "**"
   end)
@@ -134,7 +136,7 @@ end
 -- WhatsApp: **text** -> *text*, ## Heading -> *Heading*
 local function format_whatsapp(s)
   -- Headings
-  s = s:gsub("(\n?)#+%s+([^\n]+)", function(nl, heading)
+  s = s:gsub("(\n)#+%s+([^\n]+)", function(nl, heading)
     heading = heading:gsub("%*%*(.-)%*%*", "%1")
     return nl .. "*" .. heading .. "*"
   end)
@@ -152,7 +154,7 @@ end
 -- Plain text: strip all formatting
 local function format_text(s)
   -- Headings
-  s = s:gsub("(\n?)#+%s+([^\n]+)", "%1%2")
+  s = s:gsub("(\n)#+%s+([^\n]+)", "%1%2")
   if s:sub(1, 1) == "#" then
     s = s:gsub("^#+%s+([^\n]+)", "%1")
   end
@@ -173,7 +175,7 @@ end
 -- HTML: **text** -> <b>text</b>, *text* -> <i>text</i>, etc.
 local function format_html(s)
   -- Headings: # Heading -> <b>Heading</b>
-  s = s:gsub("(\n?)#+%s+([^\n]+)", function(nl, heading)
+  s = s:gsub("(\n)#+%s+([^\n]+)", function(nl, heading)
     heading = heading:gsub("%*%*(.-)%*%*", "%1")
     return nl .. "<b>" .. heading .. "</b>"
   end)
