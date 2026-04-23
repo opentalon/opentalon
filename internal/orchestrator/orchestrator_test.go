@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -2218,5 +2219,302 @@ func TestResponseFormatterLuaMissingScript(t *testing.T) {
 	// FailOpen=true: missing Lua script is logged and skipped
 	if result.Response != "keep me" {
 		t.Errorf("Response = %q, want %q", result.Response, "keep me")
+	}
+}
+
+// --- Knowledge-Augmented RAG tests (issue #97) ---
+
+func TestPreparerRelevantToolsFilterSystemPrompt(t *testing.T) {
+	// A preparer returns relevant_tools -> buildSystemPrompt only shows those tools.
+	ragJSON := `{"send_to_llm": true, "message": "enriched query", "relevant_tools": ["gitlab.analyze_code"]}`
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-preparer", Description: "RAG",
+		Actions: []Action{{Name: "prepare", Description: "RAG prepare", Parameters: []Parameter{{Name: "text", Description: "User message"}}}},
+	}, &fixedResultExecutor{content: ragJSON})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab integration",
+		Actions: []Action{
+			{Name: "analyze_code", Description: "Analyze code"},
+			{Name: "create_pr", Description: "Create PR"},
+		},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name: "jira", Description: "Jira integration",
+		Actions: []Action{{Name: "create_issue", Description: "Create issue"}},
+	}, &echoExecutor{})
+
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+
+	interceptLLM := &capturingLLM{responses: []string{"done"}}
+	preparers := []ContentPreparerEntry{{Plugin: "rag-preparer", Action: "prepare"}}
+	orch := NewWithRules(interceptLLM, parser, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
+
+	result, err := orch.Run(context.Background(), "s1", "analyze my repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "done" {
+		t.Errorf("Response = %q", result.Response)
+	}
+
+	if len(interceptLLM.requests) == 0 {
+		t.Fatal("no requests captured")
+	}
+
+	systemPrompt := interceptLLM.requests[0].Messages[0].Content
+	// Should include gitlab.analyze_code (relevant)
+	if !strings.Contains(systemPrompt, "gitlab.analyze_code") {
+		t.Error("system prompt should contain gitlab.analyze_code (relevant tool)")
+	}
+	// Should NOT include gitlab.create_pr or jira.create_issue (not in relevant_tools)
+	if strings.Contains(systemPrompt, "gitlab.create_pr") {
+		t.Error("system prompt should NOT contain gitlab.create_pr (not in relevant_tools)")
+	}
+	if strings.Contains(systemPrompt, "jira.create_issue") {
+		t.Error("system prompt should NOT contain jira.create_issue (not in relevant_tools)")
+	}
+}
+
+func TestPreparerNoRelevantToolsShowsAll(t *testing.T) {
+	// When preparer returns empty relevant_tools, all tools remain visible.
+	ragJSON := `{"send_to_llm": true, "message": "unchanged", "relevant_tools": []}`
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-preparer", Description: "RAG",
+		Actions: []Action{{Name: "prepare", Description: "RAG prepare", Parameters: []Parameter{{Name: "text", Description: "text"}}}},
+	}, &fixedResultExecutor{content: ragJSON})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze code"}},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name: "jira", Description: "Jira",
+		Actions: []Action{{Name: "create_issue", Description: "Create issue"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+
+	interceptLLM := &capturingLLM{responses: []string{"all tools"}}
+	preparers := []ContentPreparerEntry{{Plugin: "rag-preparer", Action: "prepare"}}
+	orch := NewWithRules(interceptLLM, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
+
+	result, err := orch.Run(context.Background(), "s1", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "all tools" {
+		t.Errorf("Response = %q", result.Response)
+	}
+	systemPrompt := interceptLLM.requests[0].Messages[0].Content
+	if !strings.Contains(systemPrompt, "gitlab.analyze_code") {
+		t.Error("system prompt should contain all tools when relevant_tools is empty")
+	}
+	if !strings.Contains(systemPrompt, "jira.create_issue") {
+		t.Error("system prompt should contain all tools when relevant_tools is empty")
+	}
+}
+
+func TestPreparerInjectsAllowedPlugins(t *testing.T) {
+	// When a profile with strict plugins is present, the preparer should receive
+	// allowed_plugins in its args.
+	var capturedArgs map[string]string
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-preparer", Description: "RAG",
+		Actions: []Action{{Name: "prepare", Description: "RAG prepare", Parameters: []Parameter{
+			{Name: "text", Description: "text"},
+			{Name: "allowed_plugins", Description: "allowed plugins"},
+		}}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		capturedArgs = call.Args
+		return ToolResult{CallID: call.ID, Content: `{"send_to_llm": true, "message": "ok"}`}
+	}})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze code"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+
+	preparers := []ContentPreparerEntry{{Plugin: "rag-preparer", Action: "prepare"}}
+	orch := NewWithRules(&fakeLLM{responses: []string{"reply"}}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
+
+	// Set up a strict profile with allowed plugins.
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{
+		EntityID: "user1",
+		Group:    "team1",
+		Plugins:  []string{"gitlab", "rag-preparer"},
+	})
+
+	_, err := orch.Run(ctx, "s1", "test message")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capturedArgs == nil {
+		t.Fatal("preparer was not called")
+	}
+	ap, ok := capturedArgs["allowed_plugins"]
+	if !ok || ap == "" {
+		t.Fatal("allowed_plugins not injected into preparer args")
+	}
+	// Should be a JSON array containing the allowed plugins.
+	var plugins []string
+	if err := json.Unmarshal([]byte(ap), &plugins); err != nil {
+		t.Fatalf("allowed_plugins is not valid JSON: %v", err)
+	}
+	if len(plugins) != 2 {
+		t.Errorf("expected 2 allowed plugins, got %d: %v", len(plugins), plugins)
+	}
+}
+
+func TestSyncActions(t *testing.T) {
+	var syncCalls []string
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "weaviate", Description: "Vector DB",
+		Actions: []Action{{Name: "sync_actions", Description: "Sync actions", Parameters: []Parameter{{Name: "payload", Description: "JSON"}}}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		syncCalls = append(syncCalls, call.Args["payload"])
+		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
+	}})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{
+			{Name: "analyze_code", Description: "Analyze code"},
+			{Name: "create_pr", Description: "Create PR"},
+		},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name: "jira", Description: "Jira",
+		Actions: []Action{{Name: "create_issue", Description: "Create issue"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		SyncActionsPlugin: "weaviate",
+		SyncActionsAction: "sync_actions",
+	})
+
+	orch.SyncActions(context.Background())
+
+	// Should have synced gitlab and jira (not weaviate itself).
+	if len(syncCalls) != 2 {
+		t.Fatalf("expected 2 sync calls, got %d", len(syncCalls))
+	}
+
+	// Verify payload contains expected plugin names.
+	allPayloads := strings.Join(syncCalls, " ")
+	if !strings.Contains(allPayloads, `"plugin_name":"gitlab"`) && !strings.Contains(allPayloads, `"plugin_name":"jira"`) {
+		t.Errorf("sync payloads missing expected plugin names: %s", allPayloads)
+	}
+	if strings.Contains(allPayloads, `"plugin_name":"weaviate"`) {
+		t.Error("sync should not include the sync plugin itself")
+	}
+}
+
+func TestSyncActionsNoopWhenUnconfigured(t *testing.T) {
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{})
+
+	// Should not panic or error when sync is not configured.
+	orch.SyncActions(context.Background())
+}
+
+func TestIngestKnowledgeDirNoopWhenUnconfigured(t *testing.T) {
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{})
+
+	// Should not panic or error when knowledge is not configured.
+	orch.IngestKnowledgeDir(context.Background())
+}
+
+func TestIngestKnowledgeDir(t *testing.T) {
+	dir := t.TempDir()
+	// Write two markdown files and one non-markdown file.
+	if err := os.WriteFile(dir+"/getting-started.md", []byte("# Getting Started\nWelcome!"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/faq.md", []byte("# FAQ\nQ: What?\nA: This."), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/ignore.txt", []byte("not a markdown file"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var ingestCalls []map[string]string
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "weaviate", Description: "Vector DB",
+		Actions: []Action{{Name: "ingest", Description: "Ingest article", Parameters: []Parameter{
+			{Name: "title", Description: "Title"},
+			{Name: "content", Description: "Content"},
+			{Name: "source", Description: "Source"},
+		}}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		ingestCalls = append(ingestCalls, call.Args)
+		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
+	}})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		Knowledge: KnowledgeConfig{
+			Plugin: "weaviate",
+			Action: "ingest",
+			Dir:    dir,
+		},
+	})
+
+	orch.IngestKnowledgeDir(context.Background())
+
+	if len(ingestCalls) != 2 {
+		t.Fatalf("expected 2 ingest calls (only .md files), got %d", len(ingestCalls))
+	}
+
+	// Verify titles and sources.
+	for _, args := range ingestCalls {
+		if args["source"] != "knowledge_dir" {
+			t.Errorf("expected source 'knowledge_dir', got %q", args["source"])
+		}
+		if args["title"] != "getting-started" && args["title"] != "faq" {
+			t.Errorf("unexpected title: %q", args["title"])
+		}
+		if args["content"] == "" {
+			t.Error("content should not be empty")
+		}
+	}
+}
+
+func TestRelevantToolsContextRoundTrip(t *testing.T) {
+	tools := []string{"gitlab.analyze_code", "jira.create_issue"}
+	ctx := withRelevantTools(context.Background(), tools)
+	got := relevantToolsFromContext(ctx)
+	if len(got) != 2 || got[0] != tools[0] || got[1] != tools[1] {
+		t.Errorf("round-trip failed: got %v, want %v", got, tools)
+	}
+}
+
+func TestRelevantToolsContextEmpty(t *testing.T) {
+	got := relevantToolsFromContext(context.Background())
+	if got != nil {
+		t.Errorf("expected nil from empty context, got %v", got)
 	}
 }

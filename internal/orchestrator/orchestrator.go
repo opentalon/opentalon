@@ -87,6 +87,13 @@ type PluginCallObserver interface {
 	ObservePluginCall(plugin, action string, failed bool, inputTokens, outputTokens int)
 }
 
+// KnowledgeConfig configures the knowledge directory scanning feature.
+type KnowledgeConfig struct {
+	Plugin string // plugin name to call for ingestion (e.g. "weaviate")
+	Action string // action name for single-article ingestion (e.g. "ingest")
+	Dir    string // directory to scan for .md files
+}
+
 // OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check, no summarization).
 type OrchestratorOpts struct {
 	CustomRules             []string
@@ -108,6 +115,9 @@ type OrchestratorOpts struct {
 	GroupPluginLookup       GroupPluginLookup  // optional; when set, filters tool list by profile group
 	UsageRecorder           UsageRecorder      // optional; when set, records LLM usage after each run
 	PluginCallObserver      PluginCallObserver // optional; when set, notified after each plugin/tool call
+	SyncActionsPlugin       string             // optional; plugin name for action sync (e.g. "weaviate")
+	SyncActionsAction       string             // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
+	Knowledge               KnowledgeConfig    // optional; knowledge directory ingestion
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -163,6 +173,9 @@ type Orchestrator struct {
 	groupPluginLookup       GroupPluginLookup  // optional; nil = no group-based filtering
 	usageRecorder           UsageRecorder      // optional; nil = no usage tracking
 	pluginCallObserver      PluginCallObserver // optional; nil = no plugin call observation
+	syncActionsPlugin       string             // optional; plugin name for action sync
+	syncActionsAction       string             // optional; action name for action sync
+	knowledge               KnowledgeConfig    // optional; knowledge directory ingestion
 }
 
 const (
@@ -170,11 +183,28 @@ const (
 	defaultSummarizeUpdatePrompt = "Update the given conversation summary with the following new exchange. Keep the result to a short paragraph."
 )
 
+// resolveAllowedPluginNames returns a JSON array of allowed plugin names for the
+// current profile, or "" when unrestricted. Used to inject allowed_plugins into
+// preparer and LLM-called actions so RAG plugins can filter by profile.
+func resolveAllowedPluginNames(ctx context.Context, o *Orchestrator) string {
+	allowed := o.resolveAllowedPlugins(ctx)
+	if allowed.m == nil {
+		return ""
+	}
+	names := mapKeys(allowed.m)
+	sort.Strings(names)
+	b, _ := json.Marshal(names)
+	return string(b)
+}
+
 // defaultContextArgProviders returns built-in providers only for opaque identifiers (e.g. session_id).
 // No session messages, conversation text, or other sensitive content is exposed to plugins via this mechanism.
-func defaultContextArgProviders(custom map[string]ContextArgProvider) map[string]ContextArgProvider {
+func defaultContextArgProviders(o *Orchestrator, custom map[string]ContextArgProvider) map[string]ContextArgProvider {
 	builtin := map[string]ContextArgProvider{
 		"session_id": func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
+		"allowed_plugins": func(ctx context.Context, _ string) string {
+			return resolveAllowedPluginNames(ctx, o)
+		},
 	}
 	if len(custom) == 0 {
 		return builtin
@@ -236,7 +266,7 @@ func NewWithRules(
 	// Always create a semaphore. cap=1 = sequential (default); cap=N = N parallel sessions.
 	semaphore := make(chan struct{}, maxConcurrent)
 
-	return &Orchestrator{
+	o := &Orchestrator{
 		sessionMuxes:            make(map[string]*sessionMutex),
 		semaphore:               semaphore,
 		llm:                     llm,
@@ -253,7 +283,6 @@ func NewWithRules(
 		permissionChecker:       opts.PermissionChecker,
 		permissionPluginName:    opts.PermissionPluginName,
 		runtimePromptPath:       opts.RuntimePromptPath,
-		contextArgProviders:     defaultContextArgProviders(opts.ContextArgProviders),
 		summarizeAfterMessages:  opts.SummarizeAfterMessages,
 		maxMessagesAfterSummary: opts.MaxMessagesAfterSummary,
 		summarizePrompt:         opts.SummarizePrompt,
@@ -265,7 +294,13 @@ func NewWithRules(
 		groupPluginLookup:       opts.GroupPluginLookup,
 		usageRecorder:           opts.UsageRecorder,
 		pluginCallObserver:      opts.PluginCallObserver,
+		syncActionsPlugin:       opts.SyncActionsPlugin,
+		syncActionsAction:       opts.SyncActionsAction,
+		knowledge:               opts.Knowledge,
 	}
+	// Context arg providers need access to 'o' for allowed_plugins resolution.
+	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
+	return o
 }
 
 type RunResult struct {
@@ -301,9 +336,10 @@ func (s *invokeStepsUnmarshal) UnmarshalJSON(data []byte) error {
 
 // preparerResponse is the optional JSON shape from a content preparer (guard or invoke).
 type preparerResponse struct {
-	SendToLLM *bool                `json:"send_to_llm"`
-	Message   string               `json:"message"`
-	Invoke    invokeStepsUnmarshal `json:"invoke"`
+	SendToLLM     *bool                `json:"send_to_llm"`
+	Message       string               `json:"message"`
+	Invoke        invokeStepsUnmarshal `json:"invoke"`
+	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional: filter system prompt to these tools (format: "plugin.action")
 }
 
 func (o *Orchestrator) handlePreparerFailure(prep ContentPreparerEntry, details string) *RunResult {
@@ -318,22 +354,24 @@ func (o *Orchestrator) handlePreparerFailure(prep ContentPreparerEntry, details 
 	return &RunResult{Response: fmt.Sprintf("Request blocked: guard %s failed.", name)}
 }
 
-func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPreparerEntry, content, callPrefix string, allowInvoke bool) (string, *RunResult, error) {
+// runSinglePreparer executes one content preparer. Returns (new content, blocked result, relevant tools, error).
+// relevantTools is non-nil only when the preparer explicitly returns a relevant_tools list.
+func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPreparerEntry, content, callPrefix string, allowInvoke bool) (string, *RunResult, []string, error) {
 	if strings.HasPrefix(prep.Plugin, "lua:") {
 		scriptName := strings.TrimPrefix(prep.Plugin, "lua:")
 		scriptPath := o.luaScriptPaths[scriptName]
 		if scriptPath == "" {
 			if blocked := o.handlePreparerFailure(prep, "Lua script path not found"); blocked != nil {
-				return content, blocked, nil
+				return content, blocked, nil, nil
 			}
-			return content, nil, nil
+			return content, nil, nil, nil
 		}
 		result, err := lua.RunPrepare(scriptPath, content)
 		if err != nil {
 			if blocked := o.handlePreparerFailure(prep, err.Error()); blocked != nil {
-				return content, blocked, nil
+				return content, blocked, nil, nil
 			}
-			return content, nil, nil
+			return content, nil, nil, nil
 		}
 		if !result.SendToLLM {
 			if allowInvoke && len(result.InvokeSteps) > 0 {
@@ -342,15 +380,15 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 					steps[i] = InvokeStep{Plugin: s.Plugin, Action: s.Action, Args: s.Args}
 				}
 				invokeResult, err := o.runInvokeSteps(ctx, steps)
-				return "", invokeResult, err
+				return "", invokeResult, nil, err
 			}
 			msg := result.Content
 			if msg == "" {
 				msg = "Request blocked by guard."
 			}
-			return "", &RunResult{Response: msg}, nil
+			return "", &RunResult{Response: msg}, nil, nil
 		}
-		return result.Content, nil, nil
+		return result.Content, nil, nil, nil
 	}
 
 	argKey := prep.ArgKey
@@ -359,9 +397,9 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 	}
 	if !o.registry.HasAction(prep.Plugin, prep.Action) {
 		if blocked := o.handlePreparerFailure(prep, "action not found"); blocked != nil {
-			return content, blocked, nil
+			return content, blocked, nil, nil
 		}
-		return content, nil, nil
+		return content, nil, nil, nil
 	}
 	call := ToolCall{
 		ID:     fmt.Sprintf("%s-%s-%s", callPrefix, prep.Plugin, prep.Action),
@@ -369,22 +407,26 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 		Action: prep.Action,
 		Args:   map[string]string{argKey: content},
 	}
+	// Inject allowed_plugins for preparers so RAG plugins can filter by profile.
+	if allowed := resolveAllowedPluginNames(ctx, o); allowed != "" {
+		call.Args["allowed_plugins"] = allowed
+	}
 	toolResult := o.executeCall(ctx, call)
 	if toolResult.Error != "" {
 		if blocked := o.handlePreparerFailure(prep, toolResult.Error); blocked != nil {
-			return content, blocked, nil
+			return content, blocked, nil, nil
 		}
-		return content, nil, nil
+		return content, nil, nil, nil
 	}
 	var pr preparerResponse
 	if err := json.Unmarshal([]byte(toolResult.Content), &pr); err == nil && pr.SendToLLM != nil && !*pr.SendToLLM {
 		if allowInvoke && len(pr.Invoke) > 0 {
 			if prep.Insecure {
 				slog.Warn("insecure preparer cannot run invoke, ignoring", "plugin", prep.Plugin, "action", prep.Action)
-				return content, nil, nil
+				return content, nil, nil, nil
 			}
 			invokeResult, err := o.runInvokeSteps(ctx, pr.Invoke)
-			return "", invokeResult, err
+			return "", invokeResult, nil, err
 		}
 		msg := pr.Message
 		if msg == "" {
@@ -393,12 +435,12 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 		if msg == "" {
 			msg = "Request blocked by guard."
 		}
-		return "", &RunResult{Response: msg}, nil
+		return "", &RunResult{Response: msg}, nil, nil
 	}
 	if pr.Message != "" {
-		return pr.Message, nil, nil
+		return pr.Message, nil, pr.RelevantTools, nil
 	}
-	return toolResult.Content, nil, nil
+	return toolResult.Content, nil, pr.RelevantTools, nil
 }
 
 // formatResponse runs all configured response formatters on result.Response.
@@ -549,8 +591,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 	content := userMessage
 	// Run content preparers before the first LLM call (config-driven).
+	var relevantTools []string
 	for _, prep := range o.preparers {
-		guardedContent, blocked, err := o.runSinglePreparer(ctx, prep, content, "preparer", true)
+		guardedContent, blocked, tools, err := o.runSinglePreparer(ctx, prep, content, "preparer", true)
 		if err != nil {
 			return nil, err
 		}
@@ -558,6 +601,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			return blocked, nil
 		}
 		content = guardedContent
+		// Last preparer that returns relevant_tools wins.
+		if len(tools) > 0 {
+			relevantTools = tools
+		}
+	}
+	// Store relevant tools in context so buildSystemPrompt can filter.
+	if len(relevantTools) > 0 {
+		ctx = withRelevantTools(ctx, relevantTools)
 	}
 
 	// Block B: Run planner to check if this requires a multi-step pipeline.
@@ -784,7 +835,7 @@ func (o *Orchestrator) runGuardPlugins(ctx context.Context, messages []provider.
 	original := messages[lastIdx].Content
 	content := original
 	for _, g := range o.guards {
-		nextContent, blocked, err := o.runSinglePreparer(ctx, g, content, "guard", false)
+		nextContent, blocked, _, err := o.runSinglePreparer(ctx, g, content, "guard", false)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -986,6 +1037,15 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	// Resolve the set of plugins allowed for the current profile group (if any).
 	allowedPlugins := o.resolveAllowedPlugins(ctx)
 
+	// Build a set of relevant tools from the preparer (RAG) for filtering.
+	// When non-empty, only tools in this set (format "plugin.action") are shown.
+	relevantToolSet := make(map[string]bool)
+	if rt := relevantToolsFromContext(ctx); len(rt) > 0 {
+		for _, t := range rt {
+			relevantToolSet[t] = true
+		}
+	}
+
 	caps := o.registry.ListCapabilities()
 	for _, cap := range caps {
 		if !o.pluginAllowed(cap, allowedPlugins) {
@@ -998,11 +1058,25 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 			continue
 		}
 		slog.Debug("plugin included in system prompt", "plugin", cap.Name)
-		fmt.Fprintf(&sb, "## %s\n%s\n", cap.Name, cap.Description)
+
+		// When relevantToolSet is populated, filter actions to only include relevant ones.
+		var visibleActions []Action
 		for _, action := range cap.Actions {
 			if preparerAction[cap.Name+"."+action.Name] || action.UserOnly {
 				continue
 			}
+			if len(relevantToolSet) > 0 && !relevantToolSet[cap.Name+"."+action.Name] {
+				continue
+			}
+			visibleActions = append(visibleActions, action)
+		}
+		// Skip plugin header entirely if no actions are visible after filtering.
+		if len(visibleActions) == 0 && cap.SystemPromptAddition == "" {
+			continue
+		}
+
+		fmt.Fprintf(&sb, "## %s\n%s\n", cap.Name, cap.Description)
+		for _, action := range visibleActions {
 			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
 			for _, p := range action.Parameters {
 				req := ""
@@ -1467,6 +1541,21 @@ func formatToolResultMessage(result ToolResult) string {
 	return fmt.Sprintf("[tool_result] %s", result.Content)
 }
 
+// relevantToolsKey is the context key for tool filtering from preparer responses.
+type relevantToolsKey struct{}
+
+// withRelevantTools stores the relevant tool list from a preparer response in ctx.
+// An empty or nil slice means "no filtering" (show all tools).
+func withRelevantTools(ctx context.Context, tools []string) context.Context {
+	return context.WithValue(ctx, relevantToolsKey{}, tools)
+}
+
+// relevantToolsFromContext returns the relevant tool list, or nil if not set.
+func relevantToolsFromContext(ctx context.Context) []string {
+	tools, _ := ctx.Value(relevantToolsKey{}).([]string)
+	return tools
+}
+
 // allowedPluginsKey is the context key for the per-Run allowed-plugin cache.
 type allowedPluginsKey struct{}
 
@@ -1656,6 +1745,146 @@ func (p *permissionCheckerImpl) Allowed(ctx context.Context, actorID, plugin str
 		return false, nil // deny on error
 	}
 	return parsePermissionResult(result.Content), nil
+}
+
+// syncActionEntry mirrors the weaviate-plugin's expected JSON shape for one action.
+type syncActionEntry struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	Parameters  []Parameter `json:"parameters"`
+}
+
+// syncActionsPayload is the JSON shape expected by the sync_actions action.
+type syncActionsPayload struct {
+	PluginName string            `json:"plugin_name"`
+	Actions    []syncActionEntry `json:"actions"`
+}
+
+// SyncActions iterates all registered plugin capabilities and calls the configured
+// sync_actions plugin to upsert them into the vector store. This enables retrieval-based
+// tool filtering by the RAG preparer. Safe to call at startup; errors are logged, not returned.
+func (o *Orchestrator) SyncActions(ctx context.Context) {
+	if o.syncActionsPlugin == "" || o.syncActionsAction == "" {
+		return
+	}
+	if !o.registry.HasAction(o.syncActionsPlugin, o.syncActionsAction) {
+		slog.Warn("sync_actions target not found", "plugin", o.syncActionsPlugin, "action", o.syncActionsAction)
+		return
+	}
+
+	caps := o.registry.ListCapabilities()
+	for _, cap := range caps {
+		// Don't sync the sync plugin itself.
+		if cap.Name == o.syncActionsPlugin {
+			continue
+		}
+		entries := make([]syncActionEntry, 0, len(cap.Actions))
+		for _, a := range cap.Actions {
+			if a.UserOnly {
+				continue
+			}
+			entries = append(entries, syncActionEntry{
+				Name:        a.Name,
+				Description: a.Description,
+				Parameters:  a.Parameters,
+			})
+		}
+		if len(entries) == 0 {
+			continue
+		}
+		payload := syncActionsPayload{PluginName: cap.Name, Actions: entries}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			slog.Warn("sync_actions marshal failed", "plugin", cap.Name, "error", err)
+			continue
+		}
+		call := ToolCall{
+			ID:     fmt.Sprintf("sync-%s", cap.Name),
+			Plugin: o.syncActionsPlugin,
+			Action: o.syncActionsAction,
+			Args:   map[string]string{"payload": string(b)},
+		}
+		result := o.guard.ExecuteWithTimeout(ctx, mustGetExec(o.registry, o.syncActionsPlugin), call)
+		if result.Error != "" {
+			slog.Warn("sync_actions failed", "plugin", cap.Name, "error", result.Error)
+		} else {
+			slog.Info("sync_actions done", "plugin", cap.Name, "actions", len(entries))
+		}
+	}
+}
+
+// IngestKnowledgeDir scans the configured knowledge directory for .md files and
+// ingests each one via the configured plugin action. The directory is optional —
+// knowledge articles can also be submitted via the plugin's HTTP API. Idempotent;
+// errors are logged, not returned.
+func (o *Orchestrator) IngestKnowledgeDir(ctx context.Context) {
+	k := o.knowledge
+	if k.Plugin == "" || k.Action == "" {
+		return
+	}
+	// Dir is optional — articles may arrive exclusively via HTTP API.
+	if k.Dir == "" {
+		return
+	}
+	if !o.registry.HasAction(k.Plugin, k.Action) {
+		slog.Warn("knowledge ingest target not found", "plugin", k.Plugin, "action", k.Action)
+		return
+	}
+
+	entries, err := os.ReadDir(k.Dir)
+	if err != nil {
+		slog.Warn("knowledge dir scan failed", "dir", k.Dir, "error", err)
+		return
+	}
+
+	exec, ok := o.registry.GetExecutor(k.Plugin)
+	if !ok {
+		slog.Warn("knowledge ingest executor not found", "plugin", k.Plugin)
+		return
+	}
+
+	var count int
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		path := k.Dir + "/" + e.Name()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Warn("knowledge file read failed", "path", path, "error", err)
+			continue
+		}
+		title := strings.TrimSuffix(e.Name(), ".md")
+		call := ToolCall{
+			ID:     fmt.Sprintf("knowledge-ingest-%s", title),
+			Plugin: k.Plugin,
+			Action: k.Action,
+			Args: map[string]string{
+				"title":   title,
+				"content": string(data),
+				"source":  "knowledge_dir",
+			},
+		}
+		result := o.guard.ExecuteWithTimeout(ctx, exec, call)
+		if result.Error != "" {
+			slog.Warn("knowledge ingest failed", "file", e.Name(), "error", result.Error)
+		} else {
+			count++
+		}
+	}
+	if count > 0 {
+		slog.Info("knowledge dir ingested", "dir", k.Dir, "files", count)
+	}
+}
+
+// mustGetExec returns the executor for a plugin or panics. Only used for
+// plugins whose existence was verified before the call.
+func mustGetExec(reg *ToolRegistry, name string) PluginExecutor {
+	exec, ok := reg.GetExecutor(name)
+	if !ok {
+		panic("executor not found for verified plugin: " + name)
+	}
+	return exec
 }
 
 // parsePermissionResult interprets permission plugin output: "true" or JSON {"allowed": true} -> true.

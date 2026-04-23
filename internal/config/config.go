@@ -290,6 +290,16 @@ type ResponseFormatterEntry struct {
 	FailOpen *bool  `yaml:"fail_open,omitempty"` // pointer; defaults to true when nil (don't block responses on formatter failure)
 }
 
+// KnowledgeConfig configures knowledge-augmented RAG: startup action sync and
+// optional knowledge directory scanning.
+type KnowledgeConfig struct {
+	SyncPlugin string `yaml:"sync_plugin"` // plugin name for action sync (e.g. "weaviate")
+	SyncAction string `yaml:"sync_action"` // action name for sync (e.g. "sync_actions")
+	Plugin     string `yaml:"plugin"`      // plugin name for knowledge ingestion (e.g. "weaviate")
+	Action     string `yaml:"action"`      // action name for single-article ingestion (e.g. "ingest")
+	Dir        string `yaml:"dir"`         // optional directory of .md files to ingest at startup
+}
+
 type OrchestratorConfig struct {
 	Rules                 []string                   `yaml:"rules"`
 	ContentPreparers      []ContentPreparerEntry     `yaml:"content_preparers,omitempty"`
@@ -297,6 +307,7 @@ type OrchestratorConfig struct {
 	PermissionPlugin      string                     `yaml:"permission_plugin,omitempty"`       // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
 	MaxConcurrentSessions int                        `yaml:"max_concurrent_sessions,omitempty"` // max sessions running in parallel (default 1 = sequential)
 	Pipeline              PipelineOrchestratorConfig `yaml:"pipeline,omitempty"`
+	Knowledge             KnowledgeConfig            `yaml:"knowledge,omitempty"` // knowledge-augmented RAG configuration
 }
 
 // PipelineOrchestratorConfig enables structured multi-step pipeline execution.
@@ -464,6 +475,9 @@ func Parse(data []byte) (*Config, error) {
 	}
 	if cfg.Log.Level != "" {
 		cfg.Log.Level = expandEnv(cfg.Log.Level)
+	}
+	if cfg.Orchestrator.Knowledge.Dir != "" {
+		cfg.Orchestrator.Knowledge.Dir = expandTilde(expandEnv(cfg.Orchestrator.Knowledge.Dir))
 	}
 	if cfg.Lua != nil {
 		if cfg.Lua.ScriptsDir != "" {

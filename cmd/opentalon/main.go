@@ -443,7 +443,21 @@ func main() {
 		GroupPluginLookup:       groupPluginStore,
 		UsageRecorder:           usageRecorder,
 		PluginCallObserver:      pluginObserver,
+		SyncActionsPlugin:       cfg.Orchestrator.Knowledge.SyncPlugin,
+		SyncActionsAction:       cfg.Orchestrator.Knowledge.SyncAction,
+		Knowledge: orchestrator.KnowledgeConfig{
+			Plugin: cfg.Orchestrator.Knowledge.Plugin,
+			Action: cfg.Orchestrator.Knowledge.Action,
+			Dir:    cfg.Orchestrator.Knowledge.Dir,
+		},
 	})
+
+	// Sync plugin capabilities to the vector store and ingest knowledge articles
+	// from the configured directory. Both are fire-and-forget at startup.
+	go func() {
+		orch.SyncActions(ctx)
+		orch.IngestKnowledgeDir(ctx)
+	}()
 
 	// Scheduler: wired after orchestrator so it can route job actions through orch.
 	// Personal reminders bypass the approver policy via AddPersonalJob.

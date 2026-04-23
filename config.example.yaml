@@ -70,6 +70,17 @@ orchestrator:
   #   enabled: true
   #   max_step_retries: 3    # retries per step before giving up (default 3)
   #   step_timeout: "60s"    # per-step timeout as Go duration (default "60s")
+  # Knowledge-augmented RAG: sync plugin actions to vector store on startup and
+  # optionally ingest markdown files from a directory. Articles can also arrive
+  # via the weaviate plugin's HTTP API (POST /api/v1/articles).
+  # The prepare action (configured as a content_preparer above) returns relevant_tools
+  # to filter the system prompt to only the tools the query needs.
+  # knowledge:
+  #   sync_plugin: weaviate        # plugin that has sync_actions action
+  #   sync_action: sync_actions    # action name for capability sync
+  #   plugin: weaviate             # plugin for knowledge article ingestion
+  #   action: ingest               # action name for single-article ingestion
+  #   dir: ./knowledge             # optional: scan .md files at startup
 
 channels:
   console:
