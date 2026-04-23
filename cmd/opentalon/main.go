@@ -454,6 +454,12 @@ func main() {
 
 	// Sync plugin capabilities to the vector store and ingest knowledge articles
 	// from the configured directory. Both are fire-and-forget at startup.
+	//
+	// These calls use guard.ExecuteWithTimeout directly (not executeCall) because
+	// there is no actor/session at startup. This intentionally skips permission
+	// checks, audit logging, arg validation, and plugin-allowed filtering.
+	// If the sync or ingest plugin ever declares AuditLog=true, those calls
+	// will not be logged — acceptable for host-initiated startup work.
 	go func() {
 		orch.SyncActions(ctx)
 		orch.IngestKnowledgeDir(ctx)

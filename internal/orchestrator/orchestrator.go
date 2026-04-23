@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -1774,7 +1775,8 @@ func (o *Orchestrator) SyncActions(ctx context.Context) {
 
 	caps := o.registry.ListCapabilities()
 	for _, cap := range caps {
-		// Don't sync the sync plugin itself.
+		// Skip all actions from the sync plugin so it doesn't index its own
+		// internal actions (sync_actions, ingest, etc.) into the vector store.
 		if cap.Name == o.syncActionsPlugin {
 			continue
 		}
@@ -1804,7 +1806,12 @@ func (o *Orchestrator) SyncActions(ctx context.Context) {
 			Action: o.syncActionsAction,
 			Args:   map[string]string{"payload": string(b)},
 		}
-		result := o.guard.ExecuteWithTimeout(ctx, mustGetExec(o.registry, o.syncActionsPlugin), call)
+		exec, ok := o.registry.GetExecutor(o.syncActionsPlugin)
+		if !ok {
+			slog.Warn("sync_actions executor disappeared", "plugin", o.syncActionsPlugin)
+			return
+		}
+		result := o.guard.ExecuteWithTimeout(ctx, exec, call)
 		if result.Error != "" {
 			slog.Warn("sync_actions failed", "plugin", cap.Name, "error", result.Error)
 		} else {
@@ -1813,10 +1820,11 @@ func (o *Orchestrator) SyncActions(ctx context.Context) {
 	}
 }
 
-// IngestKnowledgeDir scans the configured knowledge directory for .md files and
-// ingests each one via the configured plugin action. The directory is optional —
-// knowledge articles can also be submitted via the plugin's HTTP API. Idempotent;
-// errors are logged, not returned.
+// IngestKnowledgeDir recursively scans the configured knowledge directory for .md
+// files and ingests each one via the configured plugin action. The directory is
+// optional — knowledge articles can also be submitted via the plugin's HTTP API.
+// Whether re-runs produce duplicates depends on the ingest action (weaviate upserts
+// by title, so re-runs are safe). Errors are logged, not returned.
 func (o *Orchestrator) IngestKnowledgeDir(ctx context.Context) {
 	k := o.knowledge
 	if k.Plugin == "" || k.Action == "" {
@@ -1831,30 +1839,37 @@ func (o *Orchestrator) IngestKnowledgeDir(ctx context.Context) {
 		return
 	}
 
-	entries, err := os.ReadDir(k.Dir)
-	if err != nil {
-		slog.Warn("knowledge dir scan failed", "dir", k.Dir, "error", err)
-		return
-	}
-
 	exec, ok := o.registry.GetExecutor(k.Plugin)
 	if !ok {
 		slog.Warn("knowledge ingest executor not found", "plugin", k.Plugin)
 		return
 	}
 
+	const maxFileSize int64 = 10 << 20 // 10 MB
+
 	var count int
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
-			continue
+	err := filepath.WalkDir(k.Dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		path := k.Dir + "/" + e.Name()
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			slog.Warn("knowledge file stat failed", "path", path, "error", err)
+			return nil
+		}
+		if info.Size() > maxFileSize {
+			slog.Warn("knowledge file too large, skipping", "path", path, "size_bytes", info.Size(), "max_bytes", maxFileSize)
+			return nil
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			slog.Warn("knowledge file read failed", "path", path, "error", err)
-			continue
+			return nil
 		}
-		title := strings.TrimSuffix(e.Name(), ".md")
+		title := strings.TrimSuffix(d.Name(), ".md")
 		call := ToolCall{
 			ID:     fmt.Sprintf("knowledge-ingest-%s", title),
 			Plugin: k.Plugin,
@@ -1867,24 +1882,18 @@ func (o *Orchestrator) IngestKnowledgeDir(ctx context.Context) {
 		}
 		result := o.guard.ExecuteWithTimeout(ctx, exec, call)
 		if result.Error != "" {
-			slog.Warn("knowledge ingest failed", "file", e.Name(), "error", result.Error)
+			slog.Warn("knowledge ingest failed", "file", d.Name(), "error", result.Error)
 		} else {
 			count++
 		}
+		return nil
+	})
+	if err != nil {
+		slog.Warn("knowledge dir walk failed", "dir", k.Dir, "error", err)
 	}
 	if count > 0 {
 		slog.Info("knowledge dir ingested", "dir", k.Dir, "files", count)
 	}
-}
-
-// mustGetExec returns the executor for a plugin or panics. Only used for
-// plugins whose existence was verified before the call.
-func mustGetExec(reg *ToolRegistry, name string) PluginExecutor {
-	exec, ok := reg.GetExecutor(name)
-	if !ok {
-		panic("executor not found for verified plugin: " + name)
-	}
-	return exec
 }
 
 // parsePermissionResult interprets permission plugin output: "true" or JSON {"allowed": true} -> true.

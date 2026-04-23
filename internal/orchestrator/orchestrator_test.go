@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -2500,6 +2501,94 @@ func TestIngestKnowledgeDir(t *testing.T) {
 		if args["content"] == "" {
 			t.Error("content should not be empty")
 		}
+	}
+}
+
+func TestPreparerRelevantToolsNoMatchSkipsAllHeaders(t *testing.T) {
+	// When relevant_tools contains names that don't match any registered action,
+	// all plugin headers are skipped from the system prompt.
+	ragJSON := `{"send_to_llm": true, "message": "query", "relevant_tools": ["nonexistent.action"]}`
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-preparer", Description: "RAG",
+		Actions: []Action{{Name: "prepare", Description: "RAG prepare", Parameters: []Parameter{{Name: "text", Description: "text"}}}},
+	}, &fixedResultExecutor{content: ragJSON})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab integration",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze code"}},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name: "jira", Description: "Jira integration",
+		Actions: []Action{{Name: "create_issue", Description: "Create issue"}},
+	}, &echoExecutor{})
+
+	interceptLLM := &capturingLLM{responses: []string{"ok"}}
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+
+	preparers := []ContentPreparerEntry{{Plugin: "rag-preparer", Action: "prepare"}}
+	orch := NewWithRules(interceptLLM, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
+
+	_, err := orch.Run(context.Background(), "s1", "something irrelevant")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	systemPrompt := interceptLLM.requests[0].Messages[0].Content
+	// No plugin actions should appear (nonexistent.action matches nothing).
+	if strings.Contains(systemPrompt, "gitlab.analyze_code") {
+		t.Error("system prompt should NOT contain gitlab.analyze_code when relevant_tools match nothing")
+	}
+	if strings.Contains(systemPrompt, "jira.create_issue") {
+		t.Error("system prompt should NOT contain jira.create_issue when relevant_tools match nothing")
+	}
+	// Plugin headers (## gitlab, ## jira) should also be absent.
+	if strings.Contains(systemPrompt, "## gitlab") {
+		t.Error("system prompt should NOT contain ## gitlab header when no actions match")
+	}
+	if strings.Contains(systemPrompt, "## jira") {
+		t.Error("system prompt should NOT contain ## jira header when no actions match")
+	}
+}
+
+func TestIngestKnowledgeDirRecursive(t *testing.T) {
+	// Verify that subdirectories are scanned recursively.
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "faq")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "top.md"), []byte("top level"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subdir, "nested.md"), []byte("nested file"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var ingestCount int
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "weaviate", Description: "Vector DB",
+		Actions: []Action{{Name: "ingest", Description: "Ingest", Parameters: []Parameter{
+			{Name: "title"}, {Name: "content"}, {Name: "source"},
+		}}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		ingestCount++
+		return ToolResult{CallID: call.ID, Content: `{"ok":true}`}
+	}})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		Knowledge: KnowledgeConfig{Plugin: "weaviate", Action: "ingest", Dir: dir},
+	})
+
+	orch.IngestKnowledgeDir(context.Background())
+
+	if ingestCount != 2 {
+		t.Errorf("expected 2 ingest calls (top + nested), got %d", ingestCount)
 	}
 }
 
