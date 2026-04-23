@@ -1773,51 +1773,83 @@ func (o *Orchestrator) SyncActions(ctx context.Context) {
 		return
 	}
 
+	slog.Info("sync_actions starting", "component", "orchestrator",
+		"sync_plugin", o.syncActionsPlugin, "sync_action", o.syncActionsAction)
+
 	caps := o.registry.ListCapabilities()
+	var synced, failed int
 	for _, cap := range caps {
-		// Skip all actions from the sync plugin so it doesn't index its own
-		// internal actions (sync_actions, ingest, etc.) into the vector store.
-		if cap.Name == o.syncActionsPlugin {
-			continue
-		}
-		entries := make([]syncActionEntry, 0, len(cap.Actions))
-		for _, a := range cap.Actions {
-			if a.UserOnly {
-				continue
-			}
-			entries = append(entries, syncActionEntry{
-				Name:        a.Name,
-				Description: a.Description,
-				Parameters:  a.Parameters,
-			})
-		}
-		if len(entries) == 0 {
-			continue
-		}
-		payload := syncActionsPayload{PluginName: cap.Name, Actions: entries}
-		b, err := json.Marshal(payload)
-		if err != nil {
-			slog.Warn("sync_actions marshal failed", "plugin", cap.Name, "error", err)
-			continue
-		}
-		call := ToolCall{
-			ID:     fmt.Sprintf("sync-%s", cap.Name),
-			Plugin: o.syncActionsPlugin,
-			Action: o.syncActionsAction,
-			Args:   map[string]string{"payload": string(b)},
-		}
-		exec, ok := o.registry.GetExecutor(o.syncActionsPlugin)
-		if !ok {
-			slog.Warn("sync_actions executor disappeared", "plugin", o.syncActionsPlugin)
-			return
-		}
-		result := o.guard.ExecuteWithTimeout(ctx, exec, call)
-		if result.Error != "" {
-			slog.Warn("sync_actions failed", "plugin", cap.Name, "error", result.Error)
+		if err := o.syncPluginCapability(ctx, cap); err != nil {
+			slog.Warn("sync_actions failed", "component", "orchestrator", "plugin", cap.Name, "error", err)
+			failed++
 		} else {
-			slog.Info("sync_actions done", "plugin", cap.Name, "actions", len(entries))
+			synced++
 		}
 	}
+
+	slog.Info("sync_actions completed", "component", "orchestrator",
+		"plugins_synced", synced, "plugins_failed", failed)
+}
+
+// SyncPluginActions syncs a single plugin's capabilities to the vector store.
+// Intended for use when a plugin comes online after initial startup (e.g. via retry).
+func (o *Orchestrator) SyncPluginActions(ctx context.Context, pluginName string) {
+	if o.syncActionsPlugin == "" || o.syncActionsAction == "" {
+		return
+	}
+	cap, ok := o.registry.GetCapability(pluginName)
+	if !ok {
+		slog.Warn("sync_actions: plugin not found in registry", "component", "orchestrator", "plugin", pluginName)
+		return
+	}
+	slog.Info("sync_actions: syncing late-loaded plugin", "component", "orchestrator", "plugin", pluginName)
+	if err := o.syncPluginCapability(ctx, cap); err != nil {
+		slog.Warn("sync_actions failed for late-loaded plugin", "component", "orchestrator", "plugin", pluginName, "error", err)
+	}
+}
+
+// syncPluginCapability syncs a single plugin's actions to the vector store.
+func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapability) error {
+	// Skip all actions from the sync plugin so it doesn't index its own
+	// internal actions (sync_actions, ingest, etc.) into the vector store.
+	if cap.Name == o.syncActionsPlugin {
+		return nil
+	}
+	entries := make([]syncActionEntry, 0, len(cap.Actions))
+	for _, a := range cap.Actions {
+		if a.UserOnly {
+			continue
+		}
+		entries = append(entries, syncActionEntry{
+			Name:        a.Name,
+			Description: a.Description,
+			Parameters:  a.Parameters,
+		})
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	payload := syncActionsPayload{PluginName: cap.Name, Actions: entries}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	call := ToolCall{
+		ID:     fmt.Sprintf("sync-%s", cap.Name),
+		Plugin: o.syncActionsPlugin,
+		Action: o.syncActionsAction,
+		Args:   map[string]string{"payload": string(b)},
+	}
+	exec, ok := o.registry.GetExecutor(o.syncActionsPlugin)
+	if !ok {
+		return fmt.Errorf("executor disappeared")
+	}
+	result := o.guard.ExecuteWithTimeout(ctx, exec, call)
+	if result.Error != "" {
+		return fmt.Errorf("%s", result.Error)
+	}
+	slog.Info("sync_actions done", "component", "orchestrator", "plugin", cap.Name, "actions", len(entries))
+	return nil
 }
 
 // IngestKnowledgeDir recursively scans the configured knowledge directory for .md

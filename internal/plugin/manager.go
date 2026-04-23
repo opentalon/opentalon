@@ -56,13 +56,18 @@ type managed struct {
 	client  *Client
 }
 
+// PluginLoadedFunc is called after a plugin is successfully loaded and registered.
+// It receives the plugin name so the caller can react (e.g. sync actions).
+type PluginLoadedFunc func(name string)
+
 // Manager discovers, launches, and registers tool plugins with the
 // orchestrator's ToolRegistry.
 type Manager struct {
-	mu       sync.Mutex
-	plugins  map[string]*managed
-	known    map[string]PluginEntry // all configured entries, including those that failed to load
-	registry *orchestrator.ToolRegistry
+	mu             sync.Mutex
+	plugins        map[string]*managed
+	known          map[string]PluginEntry // all configured entries, including those that failed to load
+	registry       *orchestrator.ToolRegistry
+	onPluginLoaded PluginLoadedFunc
 }
 
 // NewManager creates a manager that registers plugins into the given
@@ -73,6 +78,15 @@ func NewManager(registry *orchestrator.ToolRegistry) *Manager {
 		known:    make(map[string]PluginEntry),
 		registry: registry,
 	}
+}
+
+// OnPluginLoaded sets a callback invoked after each plugin is successfully
+// loaded and registered. Intended for triggering action sync when late-loaded
+// plugins come online via the retry loop.
+func (m *Manager) OnPluginLoaded(fn PluginLoadedFunc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onPluginLoaded = fn
 }
 
 // LoadAll launches all enabled plugins and registers them. Plugins that fail
@@ -105,11 +119,29 @@ func (m *Manager) LoadAll(ctx context.Context, entries []PluginEntry) error {
 
 // Load launches a single plugin and registers it.
 func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
+	name, err := m.loadLocked(ctx, entry)
+	if err != nil {
+		return err
+	}
+
+	// Fire callback outside the lock to avoid deadlocks if the callback
+	// calls back into the manager.
+	m.mu.Lock()
+	fn := m.onPluginLoaded
+	m.mu.Unlock()
+	if fn != nil {
+		fn(name)
+	}
+
+	return nil
+}
+
+func (m *Manager) loadLocked(ctx context.Context, entry PluginEntry) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if _, exists := m.plugins[entry.Name]; exists {
-		return fmt.Errorf("plugin %q already loaded", entry.Name)
+		return "", fmt.Errorf("plugin %q already loaded", entry.Name)
 	}
 
 	mode := detectPluginMode(entry.Plugin)
@@ -124,10 +156,10 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 	case modeRemoteGRPC:
 		client, err = m.connectRemote(entry)
 	default:
-		return fmt.Errorf("unsupported plugin mode %q for %s", mode, entry.Name)
+		return "", fmt.Errorf("unsupported plugin mode %q for %s", mode, entry.Name)
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	cap := client.Capability()
@@ -140,7 +172,7 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 		if proc != nil {
 			_ = proc.Stop(defaultStopGrace)
 		}
-		return fmt.Errorf("register %s: %w", entry.Name, err)
+		return "", fmt.Errorf("register %s: %w", entry.Name, err)
 	}
 
 	// Register per-server aliases for MCP plugins so that each MCP server
@@ -194,7 +226,8 @@ func (m *Manager) Load(ctx context.Context, entry PluginEntry) error {
 	}
 
 	slog.Info("loaded plugin", "component", "plugin-manager", "plugin", entry.Name, "mode", mode, "actions", len(cap.Actions))
-	return nil
+
+	return entry.Name, nil
 }
 
 // watchProcess monitors a plugin process and cleans up if it exits unexpectedly.
