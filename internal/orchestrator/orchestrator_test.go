@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/profile"
@@ -113,6 +114,54 @@ func setupOrchestrator(llm LLMClient, parser ToolCallParser) (*Orchestrator, str
 
 	orch := New(llm, parser, registry, memory, sessions)
 	return orch, "test-session"
+}
+
+// unparseableToolBlock is a response that consists solely of a [tool_call] block
+// that the parser cannot parse — StripInternalBlocks returns "" for it.
+const unparseableToolBlock = "[tool_call]not-valid-json[/tool_call]"
+
+func TestStripRetryBackoffDelay(t *testing.T) {
+	// First response: unparseable tool block → triggers strip-retry with 1s backoff.
+	// Second response: plain text → returned as result.
+	llm := &fakeLLM{responses: []string{unparseableToolBlock, "Here is my answer."}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	orch, sessID := setupOrchestrator(llm, parser)
+
+	start := time.Now()
+	result, err := orch.Run(context.Background(), sessID, "Hi")
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "Here is my answer." {
+		t.Errorf("Response = %q, want %q", result.Response, "Here is my answer.")
+	}
+	if elapsed < time.Second {
+		t.Errorf("expected >=1s backoff before retry, got %s", elapsed)
+	}
+	if llm.callCount != 2 {
+		t.Errorf("expected 2 LLM calls, got %d", llm.callCount)
+	}
+}
+
+func TestStripRetryCapAtOne(t *testing.T) {
+	// Both responses are unparseable — second retry must not happen; result is "(no response)".
+	llm := &fakeLLM{responses: []string{unparseableToolBlock, unparseableToolBlock}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	orch, sessID := setupOrchestrator(llm, parser)
+	result, err := orch.Run(context.Background(), sessID, "Hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "(no response)" {
+		t.Errorf("Response = %q, want %q", result.Response, "(no response)")
+	}
+	if llm.callCount != 2 {
+		t.Errorf("expected 2 LLM calls, got %d", llm.callCount)
+	}
 }
 
 func TestOrchestratorDirectAnswer(t *testing.T) {

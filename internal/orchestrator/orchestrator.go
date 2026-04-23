@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/logger"
@@ -751,6 +752,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					{Role: provider.RoleUser, Content: "[system] Your previous response contained tool call blocks that could not be executed. Please respond to the user in natural language without tool calls."},
 				}
 				log.Debug("LLM produced only unparseable tool calls, retrying for plain response", "round", i+1)
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(time.Duration(stripRetries) * time.Second):
+				}
 				continue
 			}
 			result.Response = stripped
