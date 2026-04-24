@@ -1064,6 +1064,12 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	}
 
 	caps := o.registry.ListCapabilities()
+
+	// When relevantToolsActive, collect plugin names that have actions but none
+	// matched — these go into a compact "discoverable plugins" section so the
+	// LLM knows they exist and can use ask_knowledge to find their actions.
+	var discoverablePlugins []string
+
 	for _, cap := range caps {
 		if !o.pluginAllowed(cap, allowedPlugins) {
 			slog.Debug("plugin excluded from system prompt",
@@ -1076,17 +1082,28 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		}
 		slog.Debug("plugin included in system prompt", "plugin", cap.Name)
 
-		// When relevantToolSet is populated, filter actions to only include relevant ones.
+		// Filter actions: exclude preparer/guard actions, user-only, and
+		// (when RAG is active) actions not in the relevant set.
 		var visibleActions []Action
+		hasNonInternalActions := false
 		for _, action := range cap.Actions {
 			if preparerAction[cap.Name+"."+action.Name] || action.UserOnly {
 				continue
 			}
+			hasNonInternalActions = true
 			if relevantToolsActive && !relevantToolSet[cap.Name+"."+action.Name] {
 				continue
 			}
 			visibleActions = append(visibleActions, action)
 		}
+
+		// When RAG is active and no actions matched, add to discoverable list
+		// so the LLM knows the plugin exists and can query ask_knowledge.
+		if relevantToolsActive && len(visibleActions) == 0 && hasNonInternalActions {
+			discoverablePlugins = append(discoverablePlugins, cap.Name)
+			continue
+		}
+
 		// Skip plugin header entirely if no actions are visible after filtering.
 		if len(visibleActions) == 0 && cap.SystemPromptAddition == "" {
 			continue
@@ -1106,6 +1123,18 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		if cap.SystemPromptAddition != "" {
 			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---", cap.Name, cap.SystemPromptAddition, cap.Name)
 			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	// When RAG filtering is active, list plugins that have actions but none
+	// matched the current query. The LLM can use ask_knowledge to discover
+	// their actions on demand.
+	if len(discoverablePlugins) > 0 {
+		sb.WriteString("## Other available plugins\n")
+		sb.WriteString("These plugins have tools but none matched your current request. Use weaviate.ask_knowledge to discover their actions.\n")
+		for _, name := range discoverablePlugins {
+			fmt.Fprintf(&sb, "- %s\n", name)
 		}
 		sb.WriteString("\n")
 	}
