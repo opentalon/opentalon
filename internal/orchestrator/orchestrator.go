@@ -1129,12 +1129,19 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 
 	// When RAG filtering is active, list plugins that have actions but none
 	// matched the current query. The LLM can use ask_knowledge to discover
-	// their actions on demand.
+	// their actions on demand. Use alias names (e.g. "jira", "timly") when
+	// available, since those are the names the LLM should use.
 	if len(discoverablePlugins) > 0 {
 		sb.WriteString("## Other available plugins\n")
 		sb.WriteString("These plugins have tools but none matched your current request. Use weaviate.ask_knowledge to discover their actions.\n")
 		for _, name := range discoverablePlugins {
-			fmt.Fprintf(&sb, "- %s\n", name)
+			if aliases := o.registry.AliasesFor(name); len(aliases) > 0 {
+				for _, alias := range aliases {
+					fmt.Fprintf(&sb, "- %s\n", alias)
+				}
+			} else {
+				fmt.Fprintf(&sb, "- %s\n", name)
+			}
 		}
 		sb.WriteString("\n")
 	}
