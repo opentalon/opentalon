@@ -316,9 +316,11 @@ func main() {
 	pluginManager := plugin.NewManager(toolRegistry)
 	retryCtx, retryCancel := context.WithCancel(ctx)
 	defer retryCancel()
+	slog.Info("loading plugins", "component", "startup", "count", len(pluginEntries))
 	if err := pluginManager.LoadAll(ctx, pluginEntries); err != nil {
 		slog.Warn("some plugins failed to load", "error", err)
 	}
+	slog.Info("plugin loading complete", "component", "startup", "loaded", len(pluginManager.List()))
 	pluginManager.StartRetryLoop(retryCtx, 10*time.Second)
 
 	if err := requestpkg.Register(toolRegistry, requestSets); err != nil {
@@ -453,17 +455,24 @@ func main() {
 	})
 
 	// Sync plugin capabilities to the vector store and ingest knowledge articles
-	// from the configured directory. Both are fire-and-forget at startup.
+	// from the configured directory. Runs synchronously so the orchestrator is
+	// fully ready before accepting traffic.
 	//
 	// These calls use guard.ExecuteWithTimeout directly (not executeCall) because
 	// there is no actor/session at startup. This intentionally skips permission
 	// checks, audit logging, arg validation, and plugin-allowed filtering.
 	// If the sync or ingest plugin ever declares AuditLog=true, those calls
 	// will not be logged — acceptable for host-initiated startup work.
-	go func() {
-		orch.SyncActions(ctx)
-		orch.IngestKnowledgeDir(ctx)
-	}()
+	slog.Info("startup: syncing plugin actions to vector store", "component", "startup")
+	orch.SyncActions(ctx)
+	orch.IngestKnowledgeDir(ctx)
+	slog.Info("startup: sync complete, orchestrator ready", "component", "startup")
+
+	// When a plugin comes online later (e.g. via the retry loop), sync its
+	// actions to the vector store automatically.
+	pluginManager.OnPluginLoaded(func(name string) {
+		go orch.SyncPluginActions(ctx, name)
+	})
 
 	// Scheduler: wired after orchestrator so it can route job actions through orch.
 	// Personal reminders bypass the approver policy via AddPersonalJob.
