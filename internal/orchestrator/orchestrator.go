@@ -616,7 +616,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// Block B: Run planner to check if this requires a multi-step pipeline.
 	if o.planner != nil {
 		log.Debug("planner running", "session", sessionID, "message", content)
-		planResult, err := o.planner.Plan(ctx, content, capabilitiesToPlannerInfo(o.registry.ListCapabilities()))
+		plannerCaps := filterCapabilitiesByRelevantTools(o.registry.ListCapabilities(), relevantToolsFromContext(ctx))
+		planResult, err := o.planner.Plan(ctx, content, capabilitiesToPlannerInfo(plannerCaps))
 		if err != nil {
 			log.Warn("planner error, falling through to agent loop", "error", err)
 		} else {
@@ -1561,6 +1562,34 @@ func withRelevantTools(ctx context.Context, tools []string) context.Context {
 func relevantToolsFromContext(ctx context.Context) []string {
 	tools, _ := ctx.Value(relevantToolsKey{}).([]string)
 	return tools
+}
+
+// filterCapabilitiesByRelevantTools returns only the capabilities and actions
+// that match the relevant tools list (format "plugin.action"). When the list
+// is empty or nil, all capabilities are returned unchanged.
+func filterCapabilitiesByRelevantTools(caps []PluginCapability, relevantTools []string) []PluginCapability {
+	if len(relevantTools) == 0 {
+		return caps
+	}
+	set := make(map[string]bool, len(relevantTools))
+	for _, t := range relevantTools {
+		set[t] = true
+	}
+	var filtered []PluginCapability
+	for _, cap := range caps {
+		var actions []Action
+		for _, a := range cap.Actions {
+			if set[cap.Name+"."+a.Name] {
+				actions = append(actions, a)
+			}
+		}
+		if len(actions) > 0 || cap.SystemPromptAddition != "" {
+			fc := cap
+			fc.Actions = actions
+			filtered = append(filtered, fc)
+		}
+	}
+	return filtered
 }
 
 // allowedPluginsKey is the context key for the per-Run allowed-plugin cache.
