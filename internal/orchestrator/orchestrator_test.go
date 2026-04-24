@@ -2331,8 +2331,9 @@ func TestPreparerRelevantToolsFilterSystemPrompt(t *testing.T) {
 	}
 }
 
-func TestPreparerNoRelevantToolsShowsAll(t *testing.T) {
-	// When preparer returns empty relevant_tools, all tools remain visible.
+func TestPreparerEmptyRelevantToolsShowsNone(t *testing.T) {
+	// When preparer returns empty relevant_tools [], no tools are shown.
+	// This means "preparer found nothing relevant" — LLM sees no tools.
 	ragJSON := `{"send_to_llm": true, "message": "unchanged", "relevant_tools": []}`
 
 	registry := NewToolRegistry()
@@ -2353,7 +2354,7 @@ func TestPreparerNoRelevantToolsShowsAll(t *testing.T) {
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1")
 
-	interceptLLM := &capturingLLM{responses: []string{"all tools"}}
+	interceptLLM := &capturingLLM{responses: []string{"no tools"}}
 	preparers := []ContentPreparerEntry{{Plugin: "rag-preparer", Action: "prepare"}}
 	orch := NewWithRules(interceptLLM, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
 
@@ -2361,15 +2362,15 @@ func TestPreparerNoRelevantToolsShowsAll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Response != "all tools" {
+	if result.Response != "no tools" {
 		t.Errorf("Response = %q", result.Response)
 	}
 	systemPrompt := interceptLLM.requests[0].Messages[0].Content
-	if !strings.Contains(systemPrompt, "gitlab.analyze_code") {
-		t.Error("system prompt should contain all tools when relevant_tools is empty")
+	if strings.Contains(systemPrompt, "gitlab.analyze_code") {
+		t.Error("system prompt should NOT contain gitlab.analyze_code when relevant_tools is empty []")
 	}
-	if !strings.Contains(systemPrompt, "jira.create_issue") {
-		t.Error("system prompt should contain all tools when relevant_tools is empty")
+	if strings.Contains(systemPrompt, "jira.create_issue") {
+		t.Error("system prompt should NOT contain jira.create_issue when relevant_tools is empty []")
 	}
 }
 
@@ -2644,15 +2645,33 @@ func TestIngestKnowledgeDirRecursive(t *testing.T) {
 func TestRelevantToolsContextRoundTrip(t *testing.T) {
 	tools := []string{"gitlab.analyze_code", "jira.create_issue"}
 	ctx := withRelevantTools(context.Background(), tools)
-	got := relevantToolsFromContext(ctx)
+	got, ok := relevantToolsFromContext(ctx)
+	if !ok {
+		t.Fatal("expected relevantToolsFromContext to return ok=true")
+	}
 	if len(got) != 2 || got[0] != tools[0] || got[1] != tools[1] {
 		t.Errorf("round-trip failed: got %v, want %v", got, tools)
 	}
 }
 
 func TestRelevantToolsContextEmpty(t *testing.T) {
-	got := relevantToolsFromContext(context.Background())
+	got, ok := relevantToolsFromContext(context.Background())
+	if ok {
+		t.Errorf("expected ok=false from empty context, got ok=true tools=%v", got)
+	}
 	if got != nil {
 		t.Errorf("expected nil from empty context, got %v", got)
+	}
+}
+
+func TestRelevantToolsContextExplicitEmpty(t *testing.T) {
+	// Preparer returned [] explicitly — should filter to empty, not show all.
+	ctx := withRelevantTools(context.Background(), []string{})
+	got, ok := relevantToolsFromContext(ctx)
+	if !ok {
+		t.Fatal("expected ok=true for explicitly set empty tools")
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty slice, got %v", got)
 	}
 }

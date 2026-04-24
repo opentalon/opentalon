@@ -593,7 +593,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 	content := userMessage
 	// Run content preparers before the first LLM call (config-driven).
+	// relevantTools stays nil when no preparer returns a tools list.
+	// An explicit empty slice means "preparer found nothing relevant" →
+	// filter to empty (LLM sees no tools except those the plugin always
+	// includes, such as ask_knowledge).
 	var relevantTools []string
+	relevantToolsSet := false
 	for _, prep := range o.preparers {
 		guardedContent, blocked, tools, err := o.runSinglePreparer(ctx, prep, content, "preparer", true)
 		if err != nil {
@@ -604,19 +609,22 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		content = guardedContent
 		// Last preparer that returns relevant_tools wins.
-		if len(tools) > 0 {
+		// Distinguish nil (no tools field) from [] (explicitly empty).
+		if tools != nil {
 			relevantTools = tools
+			relevantToolsSet = true
 		}
 	}
-	// Store relevant tools in context so buildSystemPrompt can filter.
-	if len(relevantTools) > 0 {
+	// Store relevant tools in context so buildSystemPrompt and planner can filter.
+	if relevantToolsSet {
 		ctx = withRelevantTools(ctx, relevantTools)
 	}
 
 	// Block B: Run planner to check if this requires a multi-step pipeline.
 	if o.planner != nil {
 		log.Debug("planner running", "session", sessionID, "message", content)
-		plannerCaps := filterCapabilitiesByRelevantTools(o.registry.ListCapabilities(), relevantToolsFromContext(ctx))
+		rtTools, rtSet := relevantToolsFromContext(ctx)
+		plannerCaps := filterCapabilitiesByRelevantTools(o.registry.ListCapabilities(), rtTools, rtSet)
 		planResult, err := o.planner.Plan(ctx, content, capabilitiesToPlannerInfo(plannerCaps))
 		if err != nil {
 			log.Warn("planner error, falling through to agent loop", "error", err)
@@ -1046,15 +1054,22 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	allowedPlugins := o.resolveAllowedPlugins(ctx)
 
 	// Build a set of relevant tools from the preparer (RAG) for filtering.
-	// When non-empty, only tools in this set (format "plugin.action") are shown.
+	// When a preparer ran (relevantToolsActive=true), only tools in the set
+	// are shown — an empty set means "preparer found nothing relevant".
+	// When no preparer ran (relevantToolsActive=false), all tools are shown.
 	relevantToolSet := make(map[string]bool)
-	if rt := relevantToolsFromContext(ctx); len(rt) > 0 {
-		for _, t := range rt {
-			relevantToolSet[t] = true
-		}
+	rtTools, relevantToolsActive := relevantToolsFromContext(ctx)
+	for _, t := range rtTools {
+		relevantToolSet[t] = true
 	}
 
 	caps := o.registry.ListCapabilities()
+
+	// When relevantToolsActive, collect plugin names that have actions but none
+	// matched — these go into a compact "discoverable plugins" section so the
+	// LLM knows they exist and can use ask_knowledge to find their actions.
+	var discoverablePlugins []string
+
 	for _, cap := range caps {
 		if !o.pluginAllowed(cap, allowedPlugins) {
 			slog.Debug("plugin excluded from system prompt",
@@ -1067,17 +1082,28 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		}
 		slog.Debug("plugin included in system prompt", "plugin", cap.Name)
 
-		// When relevantToolSet is populated, filter actions to only include relevant ones.
+		// Filter actions: exclude preparer/guard actions, user-only, and
+		// (when RAG is active) actions not in the relevant set.
 		var visibleActions []Action
+		hasNonInternalActions := false
 		for _, action := range cap.Actions {
 			if preparerAction[cap.Name+"."+action.Name] || action.UserOnly {
 				continue
 			}
-			if len(relevantToolSet) > 0 && !relevantToolSet[cap.Name+"."+action.Name] {
+			hasNonInternalActions = true
+			if relevantToolsActive && !relevantToolSet[cap.Name+"."+action.Name] {
 				continue
 			}
 			visibleActions = append(visibleActions, action)
 		}
+
+		// When RAG is active and no actions matched, add to discoverable list
+		// so the LLM knows the plugin exists and can query ask_knowledge.
+		if relevantToolsActive && len(visibleActions) == 0 && hasNonInternalActions {
+			discoverablePlugins = append(discoverablePlugins, cap.Name)
+			continue
+		}
+
 		// Skip plugin header entirely if no actions are visible after filtering.
 		if len(visibleActions) == 0 && cap.SystemPromptAddition == "" {
 			continue
@@ -1097,6 +1123,25 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		if cap.SystemPromptAddition != "" {
 			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---", cap.Name, cap.SystemPromptAddition, cap.Name)
 			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	// When RAG filtering is active, list plugins that have actions but none
+	// matched the current query. The LLM can use ask_knowledge to discover
+	// their actions on demand. Use alias names (e.g. "jira", "timly") when
+	// available, since those are the names the LLM should use.
+	if len(discoverablePlugins) > 0 {
+		sb.WriteString("## Other available plugins\n")
+		sb.WriteString("These plugins have tools but none matched your current request. Use weaviate.ask_knowledge to discover their actions.\n")
+		for _, name := range discoverablePlugins {
+			if aliases := o.registry.AliasesFor(name); len(aliases) > 0 {
+				for _, alias := range aliases {
+					fmt.Fprintf(&sb, "- %s\n", alias)
+				}
+			} else {
+				fmt.Fprintf(&sb, "- %s\n", name)
+			}
 		}
 		sb.WriteString("\n")
 	}
@@ -1552,23 +1597,35 @@ func formatToolResultMessage(result ToolResult) string {
 // relevantToolsKey is the context key for tool filtering from preparer responses.
 type relevantToolsKey struct{}
 
-// withRelevantTools stores the relevant tool list from a preparer response in ctx.
-// An empty or nil slice means "no filtering" (show all tools).
-func withRelevantTools(ctx context.Context, tools []string) context.Context {
-	return context.WithValue(ctx, relevantToolsKey{}, tools)
+// relevantToolsResult wraps the tool list so we can distinguish
+// "preparer not called" (nil wrapper) from "preparer returned empty" (non-nil, empty list).
+type relevantToolsResult struct {
+	tools []string
 }
 
-// relevantToolsFromContext returns the relevant tool list, or nil if not set.
-func relevantToolsFromContext(ctx context.Context) []string {
-	tools, _ := ctx.Value(relevantToolsKey{}).([]string)
-	return tools
+// withRelevantTools stores the relevant tool list from a preparer response in ctx.
+// An empty slice means "preparer found nothing relevant" — the filter will exclude
+// all tools. Pass nil to indicate no preparer ran (show all tools).
+func withRelevantTools(ctx context.Context, tools []string) context.Context {
+	return context.WithValue(ctx, relevantToolsKey{}, &relevantToolsResult{tools: tools})
+}
+
+// relevantToolsFromContext returns (tools, true) when a preparer set the list
+// (even if empty), or (nil, false) when no preparer ran.
+func relevantToolsFromContext(ctx context.Context) ([]string, bool) {
+	r, ok := ctx.Value(relevantToolsKey{}).(*relevantToolsResult)
+	if !ok || r == nil {
+		return nil, false
+	}
+	return r.tools, true
 }
 
 // filterCapabilitiesByRelevantTools returns only the capabilities and actions
-// that match the relevant tools list (format "plugin.action"). When the list
-// is empty or nil, all capabilities are returned unchanged.
-func filterCapabilitiesByRelevantTools(caps []PluginCapability, relevantTools []string) []PluginCapability {
-	if len(relevantTools) == 0 {
+// that match the relevant tools list (format "plugin.action"). When set is
+// false (no preparer ran), all capabilities are returned unchanged. When set
+// is true but the list is empty, no actions pass the filter.
+func filterCapabilitiesByRelevantTools(caps []PluginCapability, relevantTools []string, isSet bool) []PluginCapability {
+	if !isSet {
 		return caps
 	}
 	set := make(map[string]bool, len(relevantTools))
