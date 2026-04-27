@@ -770,15 +770,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// collecting the full response for tool-call parsing.
 		// A per-request callback (from context) takes priority over the global one.
 		var resp *provider.CompletionResponse
+		llmStart := time.Now()
 		streamCB := o.resolveStreamCallback(ctx)
 		if streamCB != nil {
 			resp, err = o.streamComplete(ctx, req)
 		} else {
 			resp, err = o.llm.Complete(ctx, req)
 		}
+		llmDuration := time.Since(llmStart)
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
+		log.Info("LLM response", "round", i+1, "duration", llmDuration, "input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens)
 
 		if modelUsed == "" {
 			modelUsed = resp.Model
@@ -854,12 +857,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 		for i := range calls {
 			calls[i].FromLLM = true
+			pluginStart := time.Now()
 			toolResult := o.executeCall(ctx, calls[i])
+			pluginDuration := time.Since(pluginStart)
 			call := calls[i]
 			result.ToolCalls = append(result.ToolCalls, call)
 			result.Results = append(result.Results, toolResult)
 			totalToolCalls++
 
+			log.Info("plugin call", "plugin", call.Plugin, "action", call.Action, "duration", pluginDuration, "error", toolResult.Error != "")
 			if toolResult.Error != "" {
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
 			}
