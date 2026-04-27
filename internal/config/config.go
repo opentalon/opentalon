@@ -301,13 +301,14 @@ type KnowledgeConfig struct {
 }
 
 type OrchestratorConfig struct {
-	Rules                 []string                   `yaml:"rules"`
-	ContentPreparers      []ContentPreparerEntry     `yaml:"content_preparers,omitempty"`
-	ResponseFormatters    []ResponseFormatterEntry   `yaml:"response_formatters,omitempty"`
-	PermissionPlugin      string                     `yaml:"permission_plugin,omitempty"`       // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
-	MaxConcurrentSessions int                        `yaml:"max_concurrent_sessions,omitempty"` // max sessions running in parallel (default 1 = sequential)
-	Pipeline              PipelineOrchestratorConfig `yaml:"pipeline,omitempty"`
-	Knowledge             KnowledgeConfig            `yaml:"knowledge,omitempty"` // knowledge-augmented RAG configuration
+	Rules                 []string                     `yaml:"rules"`
+	ContentPreparers      []ContentPreparerEntry       `yaml:"content_preparers,omitempty"`
+	ResponseFormatters    []ResponseFormatterEntry     `yaml:"response_formatters,omitempty"`
+	PermissionPlugin      string                       `yaml:"permission_plugin,omitempty"`       // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
+	MaxConcurrentSessions int                          `yaml:"max_concurrent_sessions,omitempty"` // max sessions running in parallel (default 1 = sequential)
+	Pipeline              PipelineOrchestratorConfig   `yaml:"pipeline,omitempty"`
+	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`  // knowledge-augmented RAG configuration
+	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"` // subprocess (sub-agent) support
 }
 
 // PipelineOrchestratorConfig enables structured multi-step pipeline execution.
@@ -315,6 +316,14 @@ type PipelineOrchestratorConfig struct {
 	Enabled        bool   `yaml:"enabled"`          // default false
 	MaxStepRetries int    `yaml:"max_step_retries"` // default 3
 	StepTimeout    string `yaml:"step_timeout"`     // Go duration, default "60s"
+}
+
+// SubprocessOrchestratorConfig enables subprocess (sub-agent) forking from the main agent loop.
+type SubprocessOrchestratorConfig struct {
+	Enabled        bool   `yaml:"enabled"`                   // default false
+	MaxDepth       int    `yaml:"max_depth,omitempty"`       // max nesting depth; default 2, hard cap 3
+	MaxIterations  int    `yaml:"max_iterations,omitempty"`  // default iterations per child; default 5, hard cap 10
+	DefaultTimeout string `yaml:"default_timeout,omitempty"` // Go duration; default "60s"
 }
 
 type StateConfig struct {

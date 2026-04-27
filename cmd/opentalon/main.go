@@ -452,6 +452,19 @@ func main() {
 			Action: cfg.Orchestrator.Knowledge.Action,
 			Dir:    cfg.Orchestrator.Knowledge.Dir,
 		},
+		Subprocess: orchestrator.SubprocessConfig{
+			Enabled:       cfg.Orchestrator.Subprocess.Enabled,
+			MaxDepth:      cfg.Orchestrator.Subprocess.MaxDepth,
+			MaxIterations: cfg.Orchestrator.Subprocess.MaxIterations,
+			DefaultTimeout: func() time.Duration {
+				if cfg.Orchestrator.Subprocess.DefaultTimeout != "" {
+					if d, err := time.ParseDuration(cfg.Orchestrator.Subprocess.DefaultTimeout); err == nil {
+						return d
+					}
+				}
+				return 60 * time.Second
+			}(),
+		},
 	})
 
 	// Sync plugin capabilities to the vector store and ingest knowledge articles

@@ -120,6 +120,7 @@ type OrchestratorOpts struct {
 	SyncActionsPlugin       string             // optional; plugin name for action sync (e.g. "weaviate")
 	SyncActionsAction       string             // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
 	Knowledge               KnowledgeConfig    // optional; knowledge directory ingestion
+	Subprocess              SubprocessConfig   // optional; subprocess (sub-agent) support
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -178,6 +179,7 @@ type Orchestrator struct {
 	syncActionsPlugin       string             // optional; plugin name for action sync
 	syncActionsAction       string             // optional; action name for action sync
 	knowledge               KnowledgeConfig    // optional; knowledge directory ingestion
+	subprocessConfig        SubprocessConfig   // optional; subprocess (sub-agent) support
 }
 
 const (
@@ -302,6 +304,26 @@ func NewWithRules(
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
+
+	// Register the built-in _subprocess plugin when enabled.
+	o.subprocessConfig = opts.Subprocess
+	if opts.Subprocess.Enabled {
+		subCap := PluginCapability{
+			Name:        "_subprocess",
+			Description: "Fork a focused sub-agent process to handle a sub-task",
+			Actions: []Action{{
+				Name:        "run",
+				Description: "Fork a subprocess that runs its own agent loop. Use for sub-tasks like research, multi-step tool usage, or focused questions that benefit from independent reasoning.",
+				Parameters: []Parameter{
+					{Name: "task", Description: "Clear description of what the subprocess should accomplish", Required: true},
+					{Name: "tools", Description: "Comma-separated plugin.action allowlist (empty = all available tools)", Required: false},
+					{Name: "max_iterations", Description: "Max agent loop iterations 1-10 (default 5)", Required: false},
+				},
+			}},
+		}
+		_ = o.registry.Register(subCap, &subprocessExecutor{orch: o})
+	}
+
 	return o
 }
 
@@ -1144,6 +1166,19 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 			}
 		}
 		sb.WriteString("\n")
+	}
+
+	if o.subprocessConfig.Enabled {
+		sb.WriteString("## Subprocess (sub-agent)\n")
+		sb.WriteString("You can fork a focused sub-process using `_subprocess.run` to handle sub-tasks independently.\n")
+		sb.WriteString("The subprocess runs its own agent loop with its own context — it can call tools, reason through multiple steps, and return a final answer to you.\n\n")
+		sb.WriteString("USE subprocess when:\n")
+		sb.WriteString("- A sub-task requires multiple tool calls that don't need your main conversation context\n")
+		sb.WriteString("- You need to search or research something before continuing your main reasoning\n")
+		sb.WriteString("- The task is self-contained with a clear question and answer\n\n")
+		sb.WriteString("DO NOT use subprocess for:\n")
+		sb.WriteString("- Simple single tool calls — just call the tool directly\n")
+		sb.WriteString("- Tasks that need the full conversation history\n\n")
 	}
 
 	workflowMemories, _ := o.memory.MemoriesForContext(ctx, "workflow")
