@@ -107,17 +107,9 @@ func TestSubprocessDepthLimit(t *testing.T) {
 	// Subprocess executor checks depth. At depth >= MaxDepth, it returns an error.
 	orch := setupSubprocessOrchestrator(&fakeLLM{})
 
-	req := subprocessRequest{Task: "test task"}
-	ctx := withSubprocessDepth(context.Background(), 2) // already at max depth
-
-	result, err := orch.runSubprocess(ctx, req, 3) // depth 3 > MaxDepth 2
-	// The depth check is in the executor, not runSubprocess. Let's test via executor.
-	_ = result
-	_ = err
-
 	exec := &subprocessExecutor{orch: orch}
-	ctx2 := withSubprocessDepth(context.Background(), 2)
-	tr := exec.Execute(ctx2, ToolCall{ID: "1", Args: map[string]string{"task": "nested task"}})
+	ctx := withSubprocessDepth(context.Background(), 2)
+	tr := exec.Execute(ctx, ToolCall{ID: "1", Args: map[string]string{"task": "nested task"}})
 	if tr.Error == "" {
 		t.Fatal("expected depth limit error")
 	}
@@ -128,7 +120,6 @@ func TestSubprocessDepthLimit(t *testing.T) {
 
 func TestSubprocessIterationLimit(t *testing.T) {
 	// Subprocess LLM always returns tool calls, never a final answer.
-	callCount := 0
 	llm := &fakeLLM{responses: make([]string, 20)}
 	for i := range llm.responses {
 		llm.responses[i] = fmt.Sprintf(`[tool_call]
@@ -150,7 +141,6 @@ func TestSubprocessIterationLimit(t *testing.T) {
 	if result.Iterations != 3 {
 		t.Errorf("expected 3 iterations, got: %d", result.Iterations)
 	}
-	_ = callCount
 }
 
 func TestSubprocessToolAllowlist(t *testing.T) {
@@ -198,7 +188,10 @@ func TestSubprocessBlocksRecursion(t *testing.T) {
 	// The subprocess should have gotten an error for the _subprocess call
 	// and then returned a final answer.
 	if result.Response == "" {
-		t.Error("expected a response")
+		t.Fatal("expected a non-empty response")
+	}
+	if result.Iterations < 1 {
+		t.Errorf("expected at least 1 iteration, got %d", result.Iterations)
 	}
 }
 

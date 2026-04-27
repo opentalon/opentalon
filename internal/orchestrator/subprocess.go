@@ -60,7 +60,7 @@ func (s *subprocessExecutor) Execute(ctx context.Context, call ToolCall) ToolRes
 	if currentDepth >= maxDepth {
 		return ToolResult{
 			CallID: call.ID,
-			Error:  fmt.Sprintf("subprocess depth limit reached (%d)", maxDepth),
+			Error:  fmt.Sprintf("subprocess depth limit reached (depth %d of %d)", currentDepth+1, maxDepth),
 		}
 	}
 
@@ -141,6 +141,12 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 			return result, nil
 		}
 
+		perCallInput, perCallOutput := 0, 0
+		if len(calls) > 0 {
+			perCallInput = resp.Usage.InputTokens / len(calls)
+			perCallOutput = resp.Usage.OutputTokens / len(calls)
+		}
+
 		for _, call := range calls {
 			call.FromLLM = true
 
@@ -159,7 +165,7 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 			toolResult := o.executeCall(ctx, call)
 
 			if o.pluginCallObserver != nil {
-				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", 0, 0)
+				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", perCallInput, perCallOutput)
 			}
 
 			messages = append(messages,
@@ -192,12 +198,12 @@ func (o *Orchestrator) buildSubprocessSystemPrompt(ctx context.Context, req subp
 	hasAllowlist := len(allowSet) > 0
 
 	// Don't list preparer/guard actions.
-	preparerAction := make(map[string]bool)
+	internalActions := make(map[string]bool)
 	for _, prep := range o.preparers {
-		preparerAction[prep.Plugin+"."+prep.Action] = true
+		internalActions[prep.Plugin+"."+prep.Action] = true
 	}
 	for _, g := range o.guards {
-		preparerAction[g.Plugin+"."+g.Action] = true
+		internalActions[g.Plugin+"."+g.Action] = true
 	}
 
 	allowedPlugins := o.resolveAllowedPlugins(ctx)
@@ -215,7 +221,7 @@ func (o *Orchestrator) buildSubprocessSystemPrompt(ctx context.Context, req subp
 
 		var visibleActions []Action
 		for _, action := range cap.Actions {
-			if preparerAction[cap.Name+"."+action.Name] || action.UserOnly {
+			if internalActions[cap.Name+"."+action.Name] || action.UserOnly {
 				continue
 			}
 			if hasAllowlist && !allowSet[cap.Name+"."+action.Name] {
@@ -232,11 +238,11 @@ func (o *Orchestrator) buildSubprocessSystemPrompt(ctx context.Context, req subp
 		for _, action := range visibleActions {
 			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
 			for _, p := range action.Parameters {
-				req := ""
+				reqMark := ""
 				if p.Required {
-					req = " (required)"
+					reqMark = " (required)"
 				}
-				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
+				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, reqMark)
 			}
 		}
 		sb.WriteString("\n")
