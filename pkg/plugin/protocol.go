@@ -30,11 +30,19 @@ type Request struct {
 }
 
 // Response is the logical response from the plugin back to the host.
+//
+// StructuredContent mirrors the MCP `structuredContent` field (revision
+// 2025-06+): when a tool emits both human-readable text and a
+// schema-validated JSON record, the JSON is carried here as raw JSON text
+// so the host can surface it as a distinct channel. Empty for plugins
+// that don't produce structured payloads, which keeps existing plugins
+// untouched.
 type Response struct {
-	CallID  string           `json:"call_id,omitempty"`
-	Content string           `json:"content,omitempty"`
-	Error   string           `json:"error,omitempty"`
-	Caps    *CapabilitiesMsg `json:"caps,omitempty"`
+	CallID            string           `json:"call_id,omitempty"`
+	Content           string           `json:"content,omitempty"`
+	StructuredContent string           `json:"structured_content,omitempty"`
+	Error             string           `json:"error,omitempty"`
+	Caps              *CapabilitiesMsg `json:"caps,omitempty"`
 }
 
 // CapabilitiesMsg carries the plugin's self-description.

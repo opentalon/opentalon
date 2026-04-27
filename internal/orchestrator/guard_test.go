@@ -130,6 +130,65 @@ func TestWrapContentError(t *testing.T) {
 	}
 }
 
+// TestWrapContentStructured verifies that a structured payload is nested
+// inside the same [plugin_output] envelope under [structured] tags, so the
+// LLM sees both channels for the same call as one unit.
+func TestWrapContentStructured(t *testing.T) {
+	g := NewGuard()
+	result := ToolResult{
+		CallID:            "1",
+		Content:           "Items: 1 total",
+		StructuredContent: `{"items":[{"id":42}]}`,
+	}
+	wrapped := g.WrapContent(result)
+
+	if !strings.HasPrefix(wrapped, "[plugin_output]") || !strings.HasSuffix(wrapped, "[/plugin_output]") {
+		t.Errorf("expected single [plugin_output] envelope, got %q", wrapped)
+	}
+	if strings.Count(wrapped, "[plugin_output]") != 1 || strings.Count(wrapped, "[/plugin_output]") != 1 {
+		t.Errorf("expected exactly one [plugin_output] block, got %q", wrapped)
+	}
+	if !strings.Contains(wrapped, "Items: 1 total") {
+		t.Error("expected text content inside the envelope")
+	}
+	if !strings.Contains(wrapped, "[structured]\n"+`{"items":[{"id":42}]}`+"\n[/structured]") {
+		t.Errorf("expected nested [structured] block carrying the JSON, got %q", wrapped)
+	}
+}
+
+// TestWrapContentNoStructured guards the no-op path: when StructuredContent
+// is empty (legacy plugins, tools without a structured channel), the
+// rendering must match the pre-existing single-block format exactly.
+func TestWrapContentNoStructured(t *testing.T) {
+	g := NewGuard()
+	result := ToolResult{CallID: "1", Content: "plain"}
+	wrapped := g.WrapContent(result)
+
+	if wrapped != "[plugin_output]\nplain\n[/plugin_output]" {
+		t.Errorf("legacy shape changed; got %q", wrapped)
+	}
+}
+
+// TestSanitizeStructuredContentNotPatternStripped verifies that JSON in
+// StructuredContent is preserved byte-for-byte under sanitization (only
+// truncated by size). Pattern-replacing inside JSON would corrupt it for
+// the LLM, defeating the structured-channel.
+func TestSanitizeStructuredContentNotPatternStripped(t *testing.T) {
+	g := NewGuard()
+	// Contains a token that the forbidden-pattern list would otherwise
+	// asterisk out — when it appears as a JSON string value, it must
+	// survive sanitisation untouched.
+	in := ToolResult{
+		CallID:            "1",
+		Content:           "ok",
+		StructuredContent: `{"sample":"[tool_call]","other":42}`,
+	}
+	out := g.Sanitize(in)
+	if out.StructuredContent != in.StructuredContent {
+		t.Errorf("StructuredContent must pass through unchanged; got %q", out.StructuredContent)
+	}
+}
+
 type slowExecutor struct {
 	delay time.Duration
 }

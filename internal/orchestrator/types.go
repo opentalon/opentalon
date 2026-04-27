@@ -39,7 +39,12 @@ type ToolCall struct {
 type ToolResult struct {
 	CallID  string `yaml:"call_id"`
 	Content string `yaml:"content"`
-	Error   string `yaml:"error,omitempty"`
+	// StructuredContent carries the schema-validated JSON payload from tools
+	// that emit one alongside their text content (MCP `structuredContent`,
+	// spec revision 2025-06+). Stored as raw JSON text; empty when the
+	// underlying plugin doesn't produce one.
+	StructuredContent string `yaml:"structured_content,omitempty"`
+	Error             string `yaml:"error,omitempty"`
 }
 
 type WorkflowStep struct {

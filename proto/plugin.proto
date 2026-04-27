@@ -41,6 +41,13 @@ message ToolResultResponse {
   string call_id = 1;
   string content = 2;
   string error = 3;
+  // Optional structured payload from the underlying tool. Mirrors the
+  // `structuredContent` field defined by the MCP spec (revision 2025-06+):
+  // when a tool emits both a human-readable text block (`content`) and a
+  // schema-validated JSON record, the latter goes here so the host can
+  // render or forward it as a separate channel without relying on string
+  // delimiters embedded in `content`. JSON-encoded; empty when omitted.
+  string structured_content = 4;
 }
 
 message PluginCapabilities {
