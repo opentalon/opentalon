@@ -336,12 +336,12 @@ func main() {
 	if dataDir != "" {
 		mcpCacheDir = filepath.Join(dataDir, "mcp-cache")
 	}
-	// Wire on-clear actions from knowledge config.
+	// When a knowledge plugin is configured, automatically refresh it on /clear.
 	var onClearActions []commands.OnClearAction
-	if cfg.Orchestrator.Knowledge.OnClearPlugin != "" && cfg.Orchestrator.Knowledge.OnClearAction != "" {
+	if cfg.Orchestrator.Knowledge.Plugin != "" {
 		onClearActions = append(onClearActions, commands.OnClearAction{
-			Plugin: cfg.Orchestrator.Knowledge.OnClearPlugin,
-			Action: cfg.Orchestrator.Knowledge.OnClearAction,
+			Plugin: cfg.Orchestrator.Knowledge.Plugin,
+			Action: "refresh",
 		})
 	}
 	cmdExecutor := commands.NewExecutor(toolRegistry, sessions, dataDir, cfg, runtimePromptPath).
