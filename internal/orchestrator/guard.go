@@ -78,7 +78,12 @@ func (g *Guard) WrapContent(result ToolResult) string {
 }
 
 func (g *Guard) ExecuteWithTimeout(ctx context.Context, exec PluginExecutor, call ToolCall) ToolResult {
-	callCtx, cancel := context.WithTimeout(ctx, g.Timeout)
+	return g.ExecuteWithDeadline(ctx, exec, call, g.Timeout)
+}
+
+// ExecuteWithDeadline runs a plugin call with a caller-specified timeout.
+func (g *Guard) ExecuteWithDeadline(ctx context.Context, exec PluginExecutor, call ToolCall, timeout time.Duration) ToolResult {
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	done := make(chan ToolResult, 1)
@@ -92,7 +97,7 @@ func (g *Guard) ExecuteWithTimeout(ctx context.Context, exec PluginExecutor, cal
 	case <-callCtx.Done():
 		return ToolResult{
 			CallID: call.ID,
-			Error:  fmt.Sprintf("plugin %q timed out after %s", call.Plugin, g.Timeout),
+			Error:  fmt.Sprintf("plugin %q timed out after %s", call.Plugin, timeout),
 		}
 	}
 }

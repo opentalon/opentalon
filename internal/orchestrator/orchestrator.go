@@ -2091,7 +2091,9 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 	if !ok {
 		return fmt.Errorf("executor disappeared")
 	}
-	result := o.guard.ExecuteWithTimeout(ctx, exec, call)
+	// Use a longer timeout for sync_actions: the payload can be large when a
+	// plugin has many actions and the vector store needs time to upsert them.
+	result := o.guard.ExecuteWithDeadline(ctx, exec, call, 2*time.Minute)
 	if result.Error != "" {
 		return fmt.Errorf("%s", result.Error)
 	}
