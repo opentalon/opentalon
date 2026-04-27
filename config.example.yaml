@@ -77,6 +77,13 @@ orchestrator:
   # to filter the system prompt to only the tools the query needs.
   # NOTE: If multiple content_preparers return relevant_tools, the last one wins.
   # Place the RAG preparer last in the content_preparers list to control precedence.
+  # The sync_actions payload also carries each plugin's SystemPromptAddition
+  # (e.g. an MCP server's `initialize.instructions` text bridged through by
+  # mcp-plugin) as `server_instructions`, so the vector store can index it for
+  # semantic retrieval alongside per-action descriptions. Each call also ships
+  # `keep_plugins` (the authoritative live-plugin list) so the sync plugin can
+  # delete records for plugins removed since last startup. Older sync-plugin
+  # versions ignore both fields — upserts continue to work.
   # knowledge:
   #   sync_plugin: weaviate        # plugin that has sync_actions action
   #   sync_action: sync_actions    # action name for capability sync
