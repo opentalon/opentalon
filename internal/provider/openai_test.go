@@ -263,7 +263,7 @@ func TestOpenAIStreamHTTPError(t *testing.T) {
 func TestOpenAIStreamError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "data: %s\n\n", `{"error":{"type":"server_error","message":"internal error"}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"error":{"type":"server_error","message":"internal error"}}`)
 	}))
 	defer server.Close()
 

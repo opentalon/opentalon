@@ -13,10 +13,10 @@ type fakeChannel struct {
 	messages []OutboundMessage
 }
 
-func (f *fakeChannel) ID() string                  { return f.caps.ID }
-func (f *fakeChannel) Capabilities() Capabilities   { return f.caps }
+func (f *fakeChannel) ID() string                                         { return f.caps.ID }
+func (f *fakeChannel) Capabilities() Capabilities                         { return f.caps }
 func (f *fakeChannel) Start(context.Context, chan<- InboundMessage) error { return nil }
-func (f *fakeChannel) Stop() error                  { return nil }
+func (f *fakeChannel) Stop() error                                        { return nil }
 
 func (f *fakeChannel) Send(_ context.Context, msg OutboundMessage) error {
 	f.mu.Lock()
