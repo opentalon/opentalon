@@ -140,6 +140,34 @@ func TestCapsToProto_Parameters(t *testing.T) {
 	}
 }
 
+// TestResponseToProto_StructuredContent verifies that the structured
+// payload travels alongside the textual content over the gRPC boundary.
+func TestResponseToProto_StructuredContent(t *testing.T) {
+	r := Response{
+		CallID:            "call-1",
+		Content:           "Items: 1 total",
+		StructuredContent: `{"items":[{"id":42}]}`,
+	}
+	pb := responseToProto(r)
+	if pb.Content != r.Content {
+		t.Errorf("Content = %q, want %q", pb.Content, r.Content)
+	}
+	if pb.StructuredContent != r.StructuredContent {
+		t.Errorf("StructuredContent = %q, want %q", pb.StructuredContent, r.StructuredContent)
+	}
+}
+
+// TestResponseToProto_OmittedStructuredContent guards backwards compat:
+// a plugin that doesn't set StructuredContent must produce a proto with
+// the field empty so old hosts decode it as a no-op.
+func TestResponseToProto_OmittedStructuredContent(t *testing.T) {
+	r := Response{CallID: "call-1", Content: "ok"}
+	pb := responseToProto(r)
+	if pb.StructuredContent != "" {
+		t.Errorf("StructuredContent should be empty when unset, got %q", pb.StructuredContent)
+	}
+}
+
 func TestCapsToProto_Roundtrip_Name(t *testing.T) {
 	msg := CapabilitiesMsg{
 		Name:                 "myplugin",

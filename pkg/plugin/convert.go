@@ -59,8 +59,9 @@ func requestFromProto(pb *pluginpb.ToolCallRequest) Request {
 
 func responseToProto(r Response) *pluginpb.ToolResultResponse {
 	return &pluginpb.ToolResultResponse{
-		CallId:  r.CallID,
-		Content: r.Content,
-		Error:   r.Error,
+		CallId:            r.CallID,
+		Content:           r.Content,
+		StructuredContent: r.StructuredContent,
+		Error:             r.Error,
 	}
 }

@@ -123,9 +123,10 @@ func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall)
 		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc: %v", err)}
 	}
 	return orchestrator.ToolResult{
-		CallID:  resp.CallId,
-		Content: resp.Content,
-		Error:   resp.Error,
+		CallID:            resp.CallId,
+		Content:           resp.Content,
+		StructuredContent: resp.StructuredContent,
+		Error:             resp.Error,
 	}
 }
 
