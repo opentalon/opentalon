@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,12 @@ type PluginReloader interface {
 	Reload(ctx context.Context, name string) error
 }
 
+// OnClearAction is a plugin action to call when the session is cleared.
+type OnClearAction struct {
+	Plugin string
+	Action string
+}
+
 // GroupPluginManager manages group→plugin assignments (admin commands).
 type GroupPluginManager interface {
 	PluginsForGroup(ctx context.Context, groupID string) ([]string, error)
@@ -51,6 +58,8 @@ type Executor struct {
 	pluginReloader     PluginReloader     // optional; enables reload_mcp
 	mcpCacheDir        string             // optional; mcp-cache dir for cache invalidation on reload
 	groupPluginManager GroupPluginManager // optional; enables profile_assign/revoke/list_group
+	onClearActions     []OnClearAction
+	runAction          func(ctx context.Context, plugin, action string, args map[string]string) (string, error)
 }
 
 // Capability returns the plugin capability for the opentalon built-in plugin.
@@ -98,6 +107,14 @@ func (e *Executor) WithMCPReload(reloader PluginReloader, cacheDir string) *Exec
 	return e
 }
 
+// WithOnClear configures plugin actions to run when a session is cleared.
+// runAction is the function used to execute plugin actions (typically wired from the orchestrator).
+func (e *Executor) WithOnClear(actions []OnClearAction, runAction func(ctx context.Context, plugin, action string, args map[string]string) (string, error)) *Executor {
+	e.onClearActions = actions
+	e.runAction = runAction
+	return e
+}
+
 // WithProfileStore enables profile admin commands (profile_assign, profile_revoke, profile_list_group).
 func (e *Executor) WithProfileStore(m GroupPluginManager) *Executor {
 	e.groupPluginManager = m
@@ -116,7 +133,7 @@ func (e *Executor) Execute(ctx context.Context, call orchestrator.ToolCall) orch
 	case ActionSetPrompt:
 		return e.setPrompt(call)
 	case ActionClearSession:
-		return e.clearSession(call)
+		return e.clearSession(ctx, call)
 	case ActionReloadMCP:
 		return e.reloadMCP(ctx, call)
 	case ActionProfileAssign:
@@ -345,7 +362,7 @@ func (e *Executor) setPrompt(call orchestrator.ToolCall) orchestrator.ToolResult
 	}
 }
 
-func (e *Executor) clearSession(call orchestrator.ToolCall) orchestrator.ToolResult {
+func (e *Executor) clearSession(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 	sessionID := call.Args["session_id"]
 	if sessionID == "" {
 		return orchestrator.ToolResult{CallID: call.ID, Error: "session_id not set (internal error)"}
@@ -355,6 +372,16 @@ func (e *Executor) clearSession(call orchestrator.ToolCall) orchestrator.ToolRes
 		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("delete session: %v", err)}
 	}
 	e.sessions.Create(sessionID)
+
+	// Run configured on-clear plugin actions (e.g. weaviate refresh).
+	if e.runAction != nil {
+		for _, a := range e.onClearActions {
+			if _, err := e.runAction(ctx, a.Plugin, a.Action, nil); err != nil {
+				slog.Warn("on-clear action failed", "plugin", a.Plugin, "action", a.Action, "error", err)
+			}
+		}
+	}
+
 	return orchestrator.ToolResult{
 		CallID:  call.ID,
 		Content: "Session cleared.",

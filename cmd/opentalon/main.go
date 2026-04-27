@@ -336,6 +336,14 @@ func main() {
 	if dataDir != "" {
 		mcpCacheDir = filepath.Join(dataDir, "mcp-cache")
 	}
+	// When a knowledge plugin is configured, automatically refresh it on /clear.
+	var onClearActions []commands.OnClearAction
+	if cfg.Orchestrator.Knowledge.Plugin != "" {
+		onClearActions = append(onClearActions, commands.OnClearAction{
+			Plugin: cfg.Orchestrator.Knowledge.Plugin,
+			Action: "refresh",
+		})
+	}
 	cmdExecutor := commands.NewExecutor(toolRegistry, sessions, dataDir, cfg, runtimePromptPath).
 		WithMCPReload(pluginManager, mcpCacheDir).
 		WithProfileStore(groupPluginStore)
@@ -466,6 +474,9 @@ func main() {
 			}(),
 		},
 	})
+
+	// Wire on-clear actions now that the orchestrator is available.
+	cmdExecutor.WithOnClear(onClearActions, orch.RunAction)
 
 	// Sync plugin capabilities to the vector store and ingest knowledge articles
 	// from the configured directory. Runs synchronously so the orchestrator is
