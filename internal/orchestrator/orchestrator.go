@@ -50,6 +50,20 @@ type LLMClient interface {
 	Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error)
 }
 
+// StreamingLLMClient is an optional extension of LLMClient that supports
+// streaming responses. When the orchestrator's LLM implements this interface
+// and an OnStreamChunk callback is provided, the final-answer LLM round
+// streams tokens to the caller in real-time.
+type StreamingLLMClient interface {
+	LLMClient
+	Stream(ctx context.Context, req *provider.CompletionRequest) (provider.ResponseStream, error)
+}
+
+// StreamChunkCallback is called for each text chunk during a streaming LLM
+// response. The ctx carries the same trace/actor information as the Run call.
+// done is true on the last invocation (content may be empty).
+type StreamChunkCallback func(ctx context.Context, content string, done bool)
+
 // ToolCallParser extracts tool calls from LLM response text.
 // Returns nil if the response is a final answer (no tool calls).
 type ToolCallParser interface {
@@ -121,6 +135,7 @@ type OrchestratorOpts struct {
 	SyncActionsAction       string             // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
 	Knowledge               KnowledgeConfig    // optional; knowledge directory ingestion
 	Subprocess              SubprocessConfig   // optional; subprocess (sub-agent) support
+	OnStreamChunk           StreamChunkCallback // optional; when set and LLM supports streaming, final answers are streamed
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -180,6 +195,7 @@ type Orchestrator struct {
 	syncActionsAction       string             // optional; action name for action sync
 	knowledge               KnowledgeConfig    // optional; knowledge directory ingestion
 	subprocessConfig        SubprocessConfig   // optional; subprocess (sub-agent) support
+	onStreamChunk           StreamChunkCallback // optional; when set, final answers stream to caller
 }
 
 const (
@@ -301,6 +317,7 @@ func NewWithRules(
 		syncActionsPlugin:       opts.SyncActionsPlugin,
 		syncActionsAction:       opts.SyncActionsAction,
 		knowledge:               opts.Knowledge,
+		onStreamChunk:           opts.OnStreamChunk,
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
@@ -747,7 +764,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if profileModel != "" {
 			req.Model = profileModel
 		}
-		resp, err := o.llm.Complete(ctx, req)
+
+		// Use streaming when a callback is registered and the LLM supports it.
+		// Streaming delivers tokens to the channel in real-time while still
+		// collecting the full response for tool-call parsing.
+		// A per-request callback (from context) takes priority over the global one.
+		var resp *provider.CompletionResponse
+		streamCB := o.resolveStreamCallback(ctx)
+		if streamCB != nil {
+			resp, err = o.streamComplete(ctx, req)
+		} else {
+			resp, err = o.llm.Complete(ctx, req)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
@@ -851,6 +879,61 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	}
 
 	return nil, fmt.Errorf("agent loop exceeded %d iterations", maxAgentLoopIterations)
+}
+
+// resolveStreamCallback returns the streaming callback for the current request.
+// A per-request callback (from context, set by the channel handler) takes
+// priority over the global one configured in OrchestratorOpts.
+func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCallback {
+	if sw := pkgchannel.StreamWriterFromContext(ctx); sw != nil {
+		return sw.OnChunk
+	}
+	return o.onStreamChunk
+}
+
+// streamComplete attempts a streaming LLM call, forwarding chunks via the
+// resolved callback and returning the fully assembled response. If the LLM
+// does not support streaming it falls back to a regular Complete call.
+func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	sllm, ok := o.llm.(StreamingLLMClient)
+	if !ok {
+		return o.llm.Complete(ctx, req)
+	}
+
+	cb := o.resolveStreamCallback(ctx)
+
+	stream, err := sllm.Stream(ctx, req)
+	if err != nil {
+		// If streaming fails, fall back to non-streaming.
+		logger.FromContext(ctx).Debug("streaming unavailable, falling back to complete", "error", err)
+		return o.llm.Complete(ctx, req)
+	}
+	defer stream.Close()
+
+	var buf strings.Builder
+	for {
+		chunk, err := stream.Recv()
+		if err != nil {
+			return nil, fmt.Errorf("stream recv: %w", err)
+		}
+		if chunk.Content != "" {
+			buf.WriteString(chunk.Content)
+			if cb != nil {
+				cb(ctx, chunk.Content, false)
+			}
+		}
+		if chunk.Done {
+			if cb != nil {
+				cb(ctx, "", true)
+			}
+			break
+		}
+	}
+
+	return &provider.CompletionResponse{
+		Content: buf.String(),
+		// Usage is not available in streaming mode for most providers.
+	}, nil
 }
 
 // runGuardPlugins runs all guard plugins on the last non-system message before an LLM call.

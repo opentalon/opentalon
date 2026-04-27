@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -107,6 +108,33 @@ type oaiError struct {
 	Code    string `json:"code"`
 }
 
+// -- OpenAI streaming wire types --
+
+type oaiStreamChunk struct {
+	ID      string             `json:"id"`
+	Model   string             `json:"model"`
+	Choices []oaiStreamChoice  `json:"choices"`
+	Usage   *oaiUsage          `json:"usage,omitempty"`
+	Error   *oaiError          `json:"error,omitempty"`
+}
+
+type oaiStreamChoice struct {
+	Index        int            `json:"index"`
+	Delta        oaiStreamDelta `json:"delta"`
+	FinishReason *string        `json:"finish_reason"`
+}
+
+type oaiStreamDelta struct {
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+// oaiResponseStream implements ResponseStream over an SSE connection.
+type oaiResponseStream struct {
+	body    io.ReadCloser
+	scanner *bufio.Scanner
+}
+
 // Complete sends a non-streaming completion request.
 func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
 	oaiReq, err := p.toOAIRequest(req)
@@ -166,9 +194,84 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	}, nil
 }
 
-// Stream is not yet implemented; returns an error.
-func (p *OpenAIProvider) Stream(_ context.Context, _ *CompletionRequest) (ResponseStream, error) {
-	return nil, fmt.Errorf("streaming not yet implemented for provider %s", p.id)
+// Stream sends a streaming completion request and returns a ResponseStream
+// that yields chunks as they arrive via SSE.
+func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (ResponseStream, error) {
+	oaiReq, err := p.toOAIRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	oaiReq.Stream = true
+
+	body, err := json.Marshal(oaiReq)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		p.baseURL+openAICompletionsPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	p.setHeaders(httpReq)
+
+	// Use a client without timeout for streaming; context handles cancellation.
+	streamClient := &http.Client{}
+	httpResp, err := streamClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("http request: %w", err)
+	}
+
+	if httpResp.StatusCode != http.StatusOK {
+		defer func() { _ = httpResp.Body.Close() }()
+		respBody, _ := io.ReadAll(httpResp.Body)
+		return nil, fmt.Errorf("openai api error (status %d): %s", httpResp.StatusCode, string(respBody))
+	}
+
+	return &oaiResponseStream{
+		body:    httpResp.Body,
+		scanner: bufio.NewScanner(httpResp.Body),
+	}, nil
+}
+
+func (s *oaiResponseStream) Recv() (StreamChunk, error) {
+	for s.scanner.Scan() {
+		line := s.scanner.Text()
+
+		// SSE format: lines prefixed with "data: "
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+
+		// OpenAI signals end-of-stream with "data: [DONE]"
+		if data == "[DONE]" {
+			return StreamChunk{Done: true}, nil
+		}
+
+		var chunk oaiStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue // skip malformed chunks
+		}
+		if chunk.Error != nil {
+			return StreamChunk{}, fmt.Errorf("openai stream error [%s]: %s", chunk.Error.Type, chunk.Error.Message)
+		}
+
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			return StreamChunk{Content: chunk.Choices[0].Delta.Content}, nil
+		}
+		// Empty delta (e.g. role-only chunk) — skip and read next line.
+	}
+
+	if err := s.scanner.Err(); err != nil {
+		return StreamChunk{}, fmt.Errorf("read stream: %w", err)
+	}
+	// Scanner exhausted without [DONE] — treat as done.
+	return StreamChunk{Done: true}, nil
+}
+
+func (s *oaiResponseStream) Close() error {
+	return s.body.Close()
 }
 
 func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error) {

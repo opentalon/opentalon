@@ -186,11 +186,28 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 					}
 				}
 
+				// When the channel supports edits, attach a StreamWriter so the
+				// orchestrator can progressively deliver LLM output in real-time.
+				var sw *pkg.StreamWriter
+				caps := ch.Capabilities()
+				if caps.Edits {
+					sw = pkg.NewStreamWriter(ch, m.ConversationID, m.ThreadID, safeMetadata(m.Metadata))
+					ctx = pkg.WithStreamWriter(ctx, sw)
+				}
+
 				resp, err := r.handler(ctx, sessionKey, m)
 				if err != nil {
 					logger.FromContext(ctx).Error("handling message failed", "channel", ch.ID(), "session", sessionKey, "error", err)
 					return
 				}
+
+				// If streaming already delivered the content, skip the final
+				// Send to avoid duplicating the message. The StreamWriter's
+				// last flush (done=true) already sent the complete text.
+				if sw != nil && sw.Flushed() {
+					return
+				}
+
 				if err := ch.Send(ctx, resp); err != nil {
 					logger.FromContext(ctx).Error("sending response failed", "channel", ch.ID(), "error", err)
 				}

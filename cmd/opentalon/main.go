@@ -783,6 +783,21 @@ func (c *defaultModelClient) Complete(ctx context.Context, req *provider.Complet
 	return c.provider.Complete(ctx, req)
 }
 
+// Stream implements orchestrator.StreamingLLMClient by delegating to the
+// underlying provider's Stream method, filling in the default model if needed.
+func (c *defaultModelClient) Stream(ctx context.Context, req *provider.CompletionRequest) (provider.ResponseStream, error) {
+	if req.Model == "" {
+		req = &provider.CompletionRequest{
+			Model:       c.model,
+			Messages:    req.Messages,
+			MaxTokens:   req.MaxTokens,
+			Temperature: req.Temperature,
+			Stream:      true,
+		}
+	}
+	return c.provider.Stream(ctx, req)
+}
+
 // buildLuaScriptPaths returns a map of Lua plugin name -> path to .lua script,
 // from local scripts_dir and from plugins downloaded from GitHub.
 func buildLuaScriptPaths(ctx context.Context, dataDir string, cfg *config.Config) map[string]string {

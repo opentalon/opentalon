@@ -217,8 +217,10 @@ type DedupSpec struct {
 
 // OutboundSpec describes how to send messages.
 type OutboundSpec struct {
-	Chunking ChunkingSpec `yaml:"chunking"`
-	Send     HTTPCallSpec `yaml:"send"`
+	Chunking      ChunkingSpec      `yaml:"chunking"`
+	Send          HTTPCallSpec      `yaml:"send"`
+	Update        HTTPCallSpec      `yaml:"update"`         // optional: edit an existing message (for streaming); template has {{msg.message_id}}
+	SendStoreID   string            `yaml:"send_store_id"`  // optional: JSON field in send response to capture as message ID (e.g. "ts" for Slack)
 }
 
 // ChunkingSpec configures message chunking.
