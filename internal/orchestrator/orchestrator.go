@@ -126,15 +126,15 @@ type OrchestratorOpts struct {
 	SummarizeUpdatePrompt   string                        // empty = default English
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PipelineConfig          pipeline.PipelineConfig
-	ContextWindow           int                // model context window in tokens; 0 = no trimming
-	MaxConcurrentSessions   int                // max sessions running in parallel; default 1 (sequential)
-	GroupPluginLookup       GroupPluginLookup  // optional; when set, filters tool list by profile group
-	UsageRecorder           UsageRecorder      // optional; when set, records LLM usage after each run
-	PluginCallObserver      PluginCallObserver // optional; when set, notified after each plugin/tool call
-	SyncActionsPlugin       string             // optional; plugin name for action sync (e.g. "weaviate")
-	SyncActionsAction       string             // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
-	Knowledge               KnowledgeConfig    // optional; knowledge directory ingestion
-	Subprocess              SubprocessConfig   // optional; subprocess (sub-agent) support
+	ContextWindow           int                 // model context window in tokens; 0 = no trimming
+	MaxConcurrentSessions   int                 // max sessions running in parallel; default 1 (sequential)
+	GroupPluginLookup       GroupPluginLookup   // optional; when set, filters tool list by profile group
+	UsageRecorder           UsageRecorder       // optional; when set, records LLM usage after each run
+	PluginCallObserver      PluginCallObserver  // optional; when set, notified after each plugin/tool call
+	SyncActionsPlugin       string              // optional; plugin name for action sync (e.g. "weaviate")
+	SyncActionsAction       string              // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
+	Knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
+	Subprocess              SubprocessConfig    // optional; subprocess (sub-agent) support
 	OnStreamChunk           StreamChunkCallback // optional; when set and LLM supports streaming, final answers are streamed
 }
 
@@ -187,14 +187,14 @@ type Orchestrator struct {
 	pendingMu               sync.Mutex                    // guards pendingPipelines map
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline (access via pendingMu)
 	pipelineConfig          pipeline.PipelineConfig
-	contextWindow           int                // model context window in tokens; 0 = no trimming
-	groupPluginLookup       GroupPluginLookup  // optional; nil = no group-based filtering
-	usageRecorder           UsageRecorder      // optional; nil = no usage tracking
-	pluginCallObserver      PluginCallObserver // optional; nil = no plugin call observation
-	syncActionsPlugin       string             // optional; plugin name for action sync
-	syncActionsAction       string             // optional; action name for action sync
-	knowledge               KnowledgeConfig    // optional; knowledge directory ingestion
-	subprocessConfig        SubprocessConfig   // optional; subprocess (sub-agent) support
+	contextWindow           int                 // model context window in tokens; 0 = no trimming
+	groupPluginLookup       GroupPluginLookup   // optional; nil = no group-based filtering
+	usageRecorder           UsageRecorder       // optional; nil = no usage tracking
+	pluginCallObserver      PluginCallObserver  // optional; nil = no plugin call observation
+	syncActionsPlugin       string              // optional; plugin name for action sync
+	syncActionsAction       string              // optional; action name for action sync
+	knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
+	subprocessConfig        SubprocessConfig    // optional; subprocess (sub-agent) support
 	onStreamChunk           StreamChunkCallback // optional; when set, final answers stream to caller
 }
 
@@ -908,7 +908,7 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 		logger.FromContext(ctx).Debug("streaming unavailable, falling back to complete", "error", err)
 		return o.llm.Complete(ctx, req)
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	var buf strings.Builder
 	for {

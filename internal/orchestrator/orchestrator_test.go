@@ -2825,8 +2825,8 @@ func TestRelevantToolsContextExplicitEmpty(t *testing.T) {
 
 // fakeStreamingLLM implements StreamingLLMClient for tests.
 type fakeStreamingLLM struct {
-	chunks    []string // each string becomes one StreamChunk
-	completeResp string // fallback for Complete
+	chunks       []string // each string becomes one StreamChunk
+	completeResp string   // fallback for Complete
 }
 
 func (f *fakeStreamingLLM) Complete(_ context.Context, _ *provider.CompletionRequest) (*provider.CompletionResponse, error) {

@@ -42,17 +42,17 @@ type UpdatableChannel interface {
 // Usage: the handler creates a StreamWriter before calling Run(), stores it
 // in the context, and the orchestrator's streaming callback invokes OnChunk.
 type StreamWriter struct {
-	ch         Channel
-	convID     string
-	threadID   string
-	metadata   map[string]string
+	ch       Channel
+	convID   string
+	threadID string
+	metadata map[string]string
 
-	mu         sync.Mutex
-	buf        strings.Builder
-	lastSent   string
-	messageID  string // populated after first send, used for updates
-	done       bool
-	flushed    bool   // true if at least one flush happened
+	mu        sync.Mutex
+	buf       strings.Builder
+	lastSent  string
+	messageID string // populated after first send, used for updates
+	done      bool
+	flushed   bool // true if at least one flush happened
 
 	// flushInterval controls how often partial updates are sent.
 	flushInterval time.Duration

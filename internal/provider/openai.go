@@ -111,11 +111,11 @@ type oaiError struct {
 // -- OpenAI streaming wire types --
 
 type oaiStreamChunk struct {
-	ID      string             `json:"id"`
-	Model   string             `json:"model"`
-	Choices []oaiStreamChoice  `json:"choices"`
-	Usage   *oaiUsage          `json:"usage,omitempty"`
-	Error   *oaiError          `json:"error,omitempty"`
+	ID      string            `json:"id"`
+	Model   string            `json:"model"`
+	Choices []oaiStreamChoice `json:"choices"`
+	Usage   *oaiUsage         `json:"usage,omitempty"`
+	Error   *oaiError         `json:"error,omitempty"`
 }
 
 type oaiStreamChoice struct {
