@@ -3,8 +3,10 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -175,6 +177,110 @@ func TestOpenAITrailingSlash(t *testing.T) {
 	p := NewOpenAIProvider("openai", "https://api.example.com/v1/", "key", nil)
 	if p.baseURL != "https://api.example.com/v1" {
 		t.Errorf("baseURL = %q, should strip trailing slash", p.baseURL)
+	}
+}
+
+func TestOpenAIStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req oaiRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if !req.Stream {
+			t.Error("expected stream=true")
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("server does not support flushing")
+		}
+
+		chunks := []string{
+			`{"id":"c1","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`,
+			`{"id":"c1","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}`,
+			`{"id":"c1","model":"gpt-4o","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}`,
+			`{"id":"c1","model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		}
+		for _, c := range chunks {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", c)
+			flusher.Flush()
+		}
+		_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	p := NewOpenAIProvider("openai", server.URL, "test-key", nil)
+
+	stream, err := p.Stream(context.Background(), &CompletionRequest{
+		Model: "gpt-4o",
+		Messages: []Message{
+			{Role: RoleUser, Content: "Hi"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	var got strings.Builder
+	for {
+		chunk, err := stream.Recv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if chunk.Done {
+			break
+		}
+		got.WriteString(chunk.Content)
+	}
+
+	if got.String() != "Hello world" {
+		t.Errorf("streamed content = %q, want %q", got.String(), "Hello world")
+	}
+}
+
+func TestOpenAIStreamHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+	}))
+	defer server.Close()
+
+	p := NewOpenAIProvider("openai", server.URL, "key", nil)
+
+	_, err := p.Stream(context.Background(), &CompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []Message{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestOpenAIStreamError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"error":{"type":"server_error","message":"internal error"}}`)
+	}))
+	defer server.Close()
+
+	p := NewOpenAIProvider("openai", server.URL, "key", nil)
+
+	stream, err := p.Stream(context.Background(), &CompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []Message{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	_, err = stream.Recv()
+	if err == nil {
+		t.Fatal("expected error from stream chunk")
 	}
 }
 

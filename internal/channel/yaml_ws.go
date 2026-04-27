@@ -557,6 +557,65 @@ func (ch *YAMLChannel) doHTTPCall(ctx context.Context, call HTTPCallSpec, contex
 	return nil
 }
 
+// doHTTPCallCaptureField executes a templated HTTP call and extracts a single
+// top-level string field from the JSON response. Returns "" if the field is
+// absent or the response isn't JSON. Used to capture message IDs (e.g. Slack's
+// "ts") from send responses for streaming updates.
+func (ch *YAMLChannel) doHTTPCallCaptureField(ctx context.Context, call HTTPCallSpec, contexts map[string]map[string]string, field string) (string, error) {
+	url := substituteTemplate(call.URL, contexts)
+	if url == "" {
+		return "", fmt.Errorf("empty URL after template substitution")
+	}
+
+	var bodyReader io.Reader
+	if call.Body != "" {
+		isJSON := false
+		for _, v := range call.Headers {
+			if strings.EqualFold(v, "application/json") {
+				isJSON = true
+				break
+			}
+		}
+		var resolved string
+		if isJSON {
+			resolved = substituteTemplateJSON(call.Body, contexts)
+			resolved = stripEmptyJSONValues(resolved)
+		} else {
+			resolved = substituteTemplate(call.Body, contexts)
+		}
+		bodyReader = strings.NewReader(resolved)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(call.Method), url, bodyReader)
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	for k, v := range call.Headers {
+		req.Header.Set(k, substituteTemplate(v, contexts))
+	}
+
+	resp, err := ch.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request: %w", err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(respBody))
+	}
+
+	if field == "" {
+		return "", nil
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", nil // not JSON, silently ignore
+	}
+	return getStringField(parsed, field), nil
+}
+
 // navigatePath walks a dot-separated path into a nested map.
 // Returns nil if the path doesn't lead to a map.
 func navigatePath(obj map[string]interface{}, path string) map[string]interface{} {

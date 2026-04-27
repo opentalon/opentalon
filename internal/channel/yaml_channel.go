@@ -206,6 +206,58 @@ func (ch *YAMLChannel) Send(ctx context.Context, msg pkg.OutboundMessage) error 
 	return nil
 }
 
+// SendAndCapture implements pkg.UpdatableChannel. It sends a message using the
+// outbound.send spec and captures the message ID from the response (using the
+// field name configured in outbound.send_store_id, e.g. "ts" for Slack).
+func (ch *YAMLChannel) SendAndCapture(ctx context.Context, msg pkg.OutboundMessage) (string, error) {
+	storeField := ch.spec.Outbound.SendStoreID
+	if storeField == "" {
+		// No capture configured — fall back to plain Send.
+		return "", ch.Send(ctx, msg)
+	}
+
+	msgCtx := map[string]string{
+		"conversation_id": msg.ConversationID,
+		"thread_id":       msg.ThreadID,
+		"content":         msg.Content,
+	}
+	for k, v := range msg.Metadata {
+		msgCtx["metadata."+k] = v
+	}
+
+	contexts := ch.buildContexts()
+	contexts["msg"] = msgCtx
+
+	messageID, err := ch.doHTTPCallCaptureField(ctx, ch.spec.Outbound.Send, contexts, storeField)
+	if err != nil {
+		return "", fmt.Errorf("channel %s send-and-capture: %w", ch.spec.ID, err)
+	}
+	return messageID, nil
+}
+
+// SendUpdate implements pkg.UpdatableChannel. It uses the optional outbound.update
+// HTTP call spec to edit an existing message (e.g. Slack chat.update).
+func (ch *YAMLChannel) SendUpdate(ctx context.Context, messageID string, msg pkg.OutboundMessage) error {
+	if ch.spec.Outbound.Update.URL == "" {
+		return fmt.Errorf("channel %s: no update spec configured", ch.spec.ID)
+	}
+
+	msgCtx := map[string]string{
+		"conversation_id": msg.ConversationID,
+		"thread_id":       msg.ThreadID,
+		"content":         msg.Content,
+		"message_id":      messageID,
+	}
+	for k, v := range msg.Metadata {
+		msgCtx["metadata."+k] = v
+	}
+
+	contexts := ch.buildContexts()
+	contexts["msg"] = msgCtx
+
+	return ch.doHTTPCall(ctx, ch.spec.Outbound.Update, contexts)
+}
+
 // encodeFilesJSON serialises a slice of FileAttachments as a JSON array with
 // base64-encoded data fields, suitable for embedding in outbound templates.
 func encodeFilesJSON(files []pkg.FileAttachment) string {

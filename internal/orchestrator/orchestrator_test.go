@@ -2822,3 +2822,111 @@ func TestRelevantToolsContextExplicitEmpty(t *testing.T) {
 		t.Errorf("expected empty slice, got %v", got)
 	}
 }
+
+// fakeStreamingLLM implements StreamingLLMClient for tests.
+type fakeStreamingLLM struct {
+	chunks       []string // each string becomes one StreamChunk
+	completeResp string   // fallback for Complete
+}
+
+func (f *fakeStreamingLLM) Complete(_ context.Context, _ *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	return &provider.CompletionResponse{Content: f.completeResp}, nil
+}
+
+func (f *fakeStreamingLLM) Stream(_ context.Context, _ *provider.CompletionRequest) (provider.ResponseStream, error) {
+	return &fakeResponseStream{chunks: f.chunks}, nil
+}
+
+type fakeResponseStream struct {
+	chunks []string
+	index  int
+}
+
+func (s *fakeResponseStream) Recv() (provider.StreamChunk, error) {
+	if s.index >= len(s.chunks) {
+		return provider.StreamChunk{Done: true}, nil
+	}
+	c := s.chunks[s.index]
+	s.index++
+	return provider.StreamChunk{Content: c}, nil
+}
+
+func (s *fakeResponseStream) Close() error { return nil }
+
+func TestStreamingFinalAnswer(t *testing.T) {
+	sllm := &fakeStreamingLLM{
+		chunks: []string{"Hello", " ", "world", "!"},
+	}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+
+	var mu sync.Mutex
+	var receivedChunks []string
+	var doneSeen bool
+
+	orch := NewWithRules(sllm, parser, registry, memory, sessions, OrchestratorOpts{
+		OnStreamChunk: func(_ context.Context, content string, done bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			if done {
+				doneSeen = true
+			} else {
+				receivedChunks = append(receivedChunks, content)
+			}
+		},
+	})
+
+	result, err := orch.Run(context.Background(), "s1", "Hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.Response != "Hello world!" {
+		t.Errorf("response = %q, want %q", result.Response, "Hello world!")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !doneSeen {
+		t.Error("expected done=true callback")
+	}
+	joined := strings.Join(receivedChunks, "")
+	if joined != "Hello world!" {
+		t.Errorf("streamed chunks = %q, want %q", joined, "Hello world!")
+	}
+}
+
+func TestStreamingFallbackToComplete(t *testing.T) {
+	// When LLM does not implement StreamingLLMClient, should fall back to Complete.
+	llm := &fakeLLM{responses: []string{"plain response"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1")
+
+	callbackCalled := false
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		OnStreamChunk: func(_ context.Context, _ string, _ bool) {
+			callbackCalled = true
+		},
+	})
+
+	result, err := orch.Run(context.Background(), "s1", "Hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.Response != "plain response" {
+		t.Errorf("response = %q, want %q", result.Response, "plain response")
+	}
+	// Callback should NOT be called when falling back to Complete.
+	if callbackCalled {
+		t.Error("callback should not be called when LLM doesn't support streaming")
+	}
+}

@@ -411,3 +411,99 @@ func TestRegistryDispatchInjectsCapabilities(t *testing.T) {
 		t.Error("capabilities.Threads should be true")
 	}
 }
+
+func TestRegistryDispatchStreamWriterInjected(t *testing.T) {
+	// When a channel declares edits:true, the dispatch should inject a
+	// StreamWriter into the context. The handler can verify this.
+	var gotSW bool
+	done := make(chan struct{})
+
+	handler := func(ctx context.Context, _ string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
+		sw := pkg.StreamWriterFromContext(ctx)
+		gotSW = sw != nil
+		// Simulate streaming: call OnChunk so the StreamWriter flushes,
+		// which means the final Send should be skipped.
+		if sw != nil {
+			sw.OnChunk(ctx, "streamed!", true)
+		}
+		close(done)
+		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "streamed!"}, nil
+	}
+
+	reg := NewRegistry(handler)
+	defer reg.StopAll()
+
+	ch := &mockChannel{
+		id:   "slack-stream",
+		caps: pkg.Capabilities{ID: "slack-stream", Name: "Slack", Edits: true},
+	}
+	_ = reg.Register(ch)
+
+	ch.pushMessage(pkg.InboundMessage{
+		ChannelID:      "slack-stream",
+		ConversationID: "c1",
+		Content:        "hello",
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	if !gotSW {
+		t.Error("expected StreamWriter to be injected for edits:true channel")
+	}
+
+	// Give dispatch goroutine time to finish.
+	time.Sleep(50 * time.Millisecond)
+	sent := ch.sentMessages()
+
+	// The StreamWriter flushed (streaming delivered the content), so the
+	// registry dispatch should have skipped the final ch.Send. However,
+	// the StreamWriter itself called Send once for the streaming flush.
+	// So we expect exactly 1 Send (from StreamWriter), not 2.
+	if len(sent) != 1 {
+		t.Errorf("expected 1 Send call (from StreamWriter), got %d", len(sent))
+	}
+}
+
+func TestRegistryDispatchNoStreamWriterWithoutEdits(t *testing.T) {
+	// Channels without edits:true should not get a StreamWriter.
+	var gotSW bool
+	done := make(chan struct{})
+
+	handler := func(ctx context.Context, _ string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
+		gotSW = pkg.StreamWriterFromContext(ctx) != nil
+		close(done)
+		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "reply"}, nil
+	}
+
+	reg := NewRegistry(handler)
+	defer reg.StopAll()
+
+	ch := newMockChannel("noedit")
+	_ = reg.Register(ch)
+
+	ch.pushMessage(pkg.InboundMessage{
+		ChannelID:      "noedit",
+		ConversationID: "c1",
+		Content:        "hello",
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	if gotSW {
+		t.Error("StreamWriter should NOT be injected when edits is false")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	sent := ch.sentMessages()
+	if len(sent) != 1 {
+		t.Errorf("expected 1 Send call, got %d", len(sent))
+	}
+}
