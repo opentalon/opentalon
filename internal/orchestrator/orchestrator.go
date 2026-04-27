@@ -1883,9 +1883,24 @@ type syncActionEntry struct {
 }
 
 // syncActionsPayload is the JSON shape expected by the sync_actions action.
+//
+// ServerInstructions carries the plugin's SystemPromptAddition (e.g. an MCP
+// server's `initialize.instructions` text bridged through by mcp-plugin) so the
+// vector store can index it for semantic retrieval alongside actions.
+//
+// KeepPlugins, when populated, is the authoritative list of plugin names that
+// should remain in the vector store. Sync-plugin implementations are expected
+// to delete any indexed records whose plugin is NOT in this list (orphan prune).
+// It's set during full startup syncs (SyncActions) and omitted during late-load
+// single-plugin syncs (SyncPluginActions). The prune is idempotent across the
+// per-plugin calls of one full sync, so plugins can apply it on every call.
+// Older sync-plugin versions that don't recognize the field MUST ignore it —
+// the upsert path is unaffected.
 type syncActionsPayload struct {
-	PluginName string            `json:"plugin_name"`
-	Actions    []syncActionEntry `json:"actions"`
+	PluginName         string            `json:"plugin_name"`
+	Actions            []syncActionEntry `json:"actions"`
+	ServerInstructions string            `json:"server_instructions,omitempty"`
+	KeepPlugins        []string          `json:"keep_plugins,omitempty"`
 }
 
 // SyncActions iterates all registered plugin capabilities and calls the configured
@@ -1904,9 +1919,22 @@ func (o *Orchestrator) SyncActions(ctx context.Context) {
 		"sync_plugin", o.syncActionsPlugin, "sync_action", o.syncActionsAction)
 
 	caps := o.registry.ListCapabilities()
+	// Build the authoritative live-plugin list once, excluding the sync plugin
+	// itself. Each per-plugin sync_actions call ships this list as keep_plugins
+	// so the sync plugin can prune records for plugins that have been removed
+	// since the last startup. Older sync-plugin versions ignore the field —
+	// upserts still work, orphans just linger (the previous behavior).
+	keep := make([]string, 0, len(caps))
+	for _, cap := range caps {
+		if cap.Name == o.syncActionsPlugin {
+			continue
+		}
+		keep = append(keep, cap.Name)
+	}
+
 	var synced, failed int
 	for _, cap := range caps {
-		if err := o.syncPluginCapability(ctx, cap); err != nil {
+		if err := o.syncPluginCapability(ctx, cap, keep); err != nil {
 			slog.Warn("sync_actions failed", "component", "orchestrator", "plugin", cap.Name, "error", err)
 			failed++
 		} else {
@@ -1930,13 +1958,17 @@ func (o *Orchestrator) SyncPluginActions(ctx context.Context, pluginName string)
 		return
 	}
 	slog.Info("sync_actions: syncing late-loaded plugin", "component", "orchestrator", "plugin", pluginName)
-	if err := o.syncPluginCapability(ctx, cap); err != nil {
+	// Late-load: omit keep_plugins so the sync plugin only upserts this one
+	// capability and does not interpret the call as a full-snapshot prune.
+	if err := o.syncPluginCapability(ctx, cap, nil); err != nil {
 		slog.Warn("sync_actions failed for late-loaded plugin", "component", "orchestrator", "plugin", pluginName, "error", err)
 	}
 }
 
 // syncPluginCapability syncs a single plugin's actions to the vector store.
-func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapability) error {
+// keepPlugins is the authoritative live-plugin set during a full startup sync,
+// or nil during late-load single-plugin re-sync.
+func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapability, keepPlugins []string) error {
 	// Skip all actions from the sync plugin so it doesn't index its own
 	// internal actions (sync_actions, ingest, etc.) into the vector store.
 	if cap.Name == o.syncActionsPlugin {
@@ -1953,10 +1985,15 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 			Parameters:  a.Parameters,
 		})
 	}
-	if len(entries) == 0 {
+	if len(entries) == 0 && cap.SystemPromptAddition == "" {
 		return nil
 	}
-	payload := syncActionsPayload{PluginName: cap.Name, Actions: entries}
+	payload := syncActionsPayload{
+		PluginName:         cap.Name,
+		Actions:            entries,
+		ServerInstructions: cap.SystemPromptAddition,
+		KeepPlugins:        keepPlugins,
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)

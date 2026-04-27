@@ -2476,6 +2476,153 @@ func TestSyncActions(t *testing.T) {
 	}
 }
 
+func TestSyncActionsCarriesServerInstructions(t *testing.T) {
+	var syncCalls []string
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "weaviate", Description: "Vector DB",
+		Actions: []Action{{Name: "sync_actions", Description: "Sync actions", Parameters: []Parameter{{Name: "payload", Description: "JSON"}}}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		syncCalls = append(syncCalls, call.Args["payload"])
+		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
+	}})
+	_ = registry.Register(PluginCapability{
+		Name: "timly", Description: "Timly",
+		SystemPromptAddition: "Timly MCP server.\n\n## Org-units vs Containers\nA Place is a storage unit; an Org-unit is a structural unit.",
+		Actions:              []Action{{Name: "list-items", Description: "List items"}},
+	}, &echoExecutor{})
+	// Plugin with no actions and no SystemPromptAddition: should be skipped entirely.
+	_ = registry.Register(PluginCapability{
+		Name: "empty", Description: "Empty plugin",
+	}, &echoExecutor{})
+	// Plugin with no actions but with SystemPromptAddition: should still be synced
+	// so the vector store has the prose.
+	_ = registry.Register(PluginCapability{
+		Name:                 "prose-only",
+		Description:          "Prose only",
+		SystemPromptAddition: "Some orientation prose without any callable actions.",
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		SyncActionsPlugin: "weaviate",
+		SyncActionsAction: "sync_actions",
+	})
+
+	orch.SyncActions(context.Background())
+
+	if len(syncCalls) != 2 {
+		t.Fatalf("expected 2 sync calls (timly + prose-only), got %d: %v", len(syncCalls), syncCalls)
+	}
+
+	all := strings.Join(syncCalls, " ")
+	if !strings.Contains(all, `"server_instructions":"Timly MCP server.`) {
+		t.Errorf("timly server_instructions missing from payload: %s", all)
+	}
+	if !strings.Contains(all, `"server_instructions":"Some orientation prose without any callable actions."`) {
+		t.Errorf("prose-only server_instructions missing from payload: %s", all)
+	}
+	if strings.Contains(all, `"plugin_name":"empty"`) {
+		t.Error("empty plugin (no actions, no prose) should not be synced")
+	}
+}
+
+func TestSyncActionsOmitsServerInstructionsWhenAbsent(t *testing.T) {
+	// Pre-existing weaviate-plugin versions parse the payload without
+	// `server_instructions` — verify the JSON shape is unchanged for plugins
+	// that don't set SystemPromptAddition.
+	var syncCalls []string
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "weaviate", Description: "Vector DB",
+		Actions: []Action{{Name: "sync_actions", Description: "Sync actions", Parameters: []Parameter{{Name: "payload", Description: "JSON"}}}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		syncCalls = append(syncCalls, call.Args["payload"])
+		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
+	}})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze code"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		SyncActionsPlugin: "weaviate",
+		SyncActionsAction: "sync_actions",
+	})
+
+	orch.SyncActions(context.Background())
+
+	if len(syncCalls) != 1 {
+		t.Fatalf("expected 1 sync call, got %d", len(syncCalls))
+	}
+	if strings.Contains(syncCalls[0], "server_instructions") {
+		t.Errorf("server_instructions key should be omitted when SystemPromptAddition is empty: %s", syncCalls[0])
+	}
+}
+
+func TestSyncActionsCarriesKeepPlugins(t *testing.T) {
+	// During a full startup sync, every sync_actions call should ship the live
+	// plugin list as keep_plugins so the sync plugin can prune orphans. The
+	// late-load path (SyncPluginActions) must NOT include keep_plugins, since
+	// it represents only one capability re-syncing, not a full snapshot.
+	var fullSyncCalls []string
+	var lateLoadCalls []string
+	mode := "full"
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "weaviate", Description: "Vector DB",
+		Actions: []Action{{Name: "sync_actions", Description: "Sync actions", Parameters: []Parameter{{Name: "payload", Description: "JSON"}}}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		if mode == "full" {
+			fullSyncCalls = append(fullSyncCalls, call.Args["payload"])
+		} else {
+			lateLoadCalls = append(lateLoadCalls, call.Args["payload"])
+		}
+		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
+	}})
+	_ = registry.Register(PluginCapability{
+		Name: "timly", Description: "Timly",
+		Actions: []Action{{Name: "list-items", Description: "List items"}},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze code"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		SyncActionsPlugin: "weaviate",
+		SyncActionsAction: "sync_actions",
+	})
+
+	orch.SyncActions(context.Background())
+	if len(fullSyncCalls) != 2 {
+		t.Fatalf("expected 2 full-sync calls, got %d", len(fullSyncCalls))
+	}
+	for _, p := range fullSyncCalls {
+		if !strings.Contains(p, `"keep_plugins":["timly","gitlab"]`) &&
+			!strings.Contains(p, `"keep_plugins":["gitlab","timly"]`) {
+			t.Errorf("full-sync payload missing expected keep_plugins: %s", p)
+		}
+		if strings.Contains(p, `"weaviate"`) {
+			t.Errorf("keep_plugins must not include the sync plugin itself: %s", p)
+		}
+	}
+
+	mode = "late"
+	orch.SyncPluginActions(context.Background(), "timly")
+	if len(lateLoadCalls) != 1 {
+		t.Fatalf("expected 1 late-load call, got %d", len(lateLoadCalls))
+	}
+	if strings.Contains(lateLoadCalls[0], "keep_plugins") {
+		t.Errorf("late-load payload must not include keep_plugins: %s", lateLoadCalls[0])
+	}
+}
+
 func TestSyncActionsNoopWhenUnconfigured(t *testing.T) {
 	registry := NewToolRegistry()
 	memory := state.NewMemoryStore("")
