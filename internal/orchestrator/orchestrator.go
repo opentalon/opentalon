@@ -1568,6 +1568,12 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		}
 
 		fmt.Fprintf(&sb, "## %s\n%s\n", cap.Name, cap.Description)
+		// Server instructions first — domain context the LLM needs before
+		// reading tool definitions (e.g. entity relationships, counting
+		// patterns, field semantics).
+		if includeServerInstructions && cap.SystemPromptAddition != "" {
+			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n", cap.Name, cap.SystemPromptAddition, cap.Name)
+		}
 		for _, action := range visibleActions {
 			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
 			for _, p := range action.Parameters {
@@ -1577,10 +1583,6 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 				}
 				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 			}
-		}
-		if includeServerInstructions && cap.SystemPromptAddition != "" {
-			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---", cap.Name, cap.SystemPromptAddition, cap.Name)
-			sb.WriteString("\n")
 		}
 		sb.WriteString("\n")
 	}
