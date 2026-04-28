@@ -2553,6 +2553,66 @@ func TestSyncActions(t *testing.T) {
 	}
 }
 
+// TestSyncActionsMarksContinuationBatches verifies that for plugins whose
+// action count exceeds the batch size, the orchestrator only sends
+// is_continuation_batch=false on the FIRST batch (so the sync plugin runs the
+// per-plugin pre-delete) and is_continuation_batch=true on every subsequent
+// batch (so the sync plugin only inserts and does not wipe earlier batches).
+//
+// Without this flag, weaviate-plugin's unconditional pre-delete on every
+// sync_actions call wipes the previous batch's inserts — leaving only the
+// LAST batch persisted. See the companion fix in
+// opentalon/weaviate-plugin#23.
+func TestSyncActionsMarksContinuationBatches(t *testing.T) {
+	var syncCalls []string
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "weaviate", Description: "Vector DB",
+		Actions: []Action{{Name: "sync_actions", Description: "Sync actions", Parameters: []Parameter{{Name: "payload", Description: "JSON"}}}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		syncCalls = append(syncCalls, call.Args["payload"])
+		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
+	}})
+
+	// Build a plugin with 25 actions so it spans 3 batches at the default
+	// batchSize=10 (10 + 10 + 5).
+	actions := make([]Action, 25)
+	for i := range actions {
+		actions[i] = Action{Name: fmt.Sprintf("action_%02d", i), Description: "test"}
+	}
+	_ = registry.Register(PluginCapability{
+		Name: "bigplugin", Description: "Many actions", Actions: actions,
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		SyncActionsPlugin: "weaviate",
+		SyncActionsAction: "sync_actions",
+	})
+
+	orch.SyncActions(context.Background())
+
+	if len(syncCalls) != 3 {
+		t.Fatalf("expected 3 sync_actions calls (25 actions / batchSize 10), got %d", len(syncCalls))
+	}
+
+	// Batch 0: must NOT carry is_continuation_batch=true (omitted is fine —
+	// `omitempty` drops the false default — but it must not be true).
+	if strings.Contains(syncCalls[0], `"is_continuation_batch":true`) {
+		t.Errorf("batch 0 must not be marked as continuation batch: %s", syncCalls[0])
+	}
+
+	// Batches 1 and 2: MUST carry is_continuation_batch=true so the sync
+	// plugin skips the per-plugin pre-delete that would wipe batch 0's inserts.
+	for i := 1; i < len(syncCalls); i++ {
+		if !strings.Contains(syncCalls[i], `"is_continuation_batch":true`) {
+			t.Errorf("batch %d must be marked as continuation batch: %s", i, syncCalls[i])
+		}
+	}
+}
+
 func TestSyncActionsCarriesServerInstructions(t *testing.T) {
 	var syncCalls []string
 	registry := NewToolRegistry()
