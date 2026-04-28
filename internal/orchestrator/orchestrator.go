@@ -2385,6 +2385,14 @@ type syncActionsPayload struct {
 	Actions            []syncActionEntry `json:"actions"`
 	ServerInstructions string            `json:"server_instructions,omitempty"`
 	KeepPlugins        []string          `json:"keep_plugins,omitempty"`
+	// IsContinuationBatch tells the sync plugin to skip the per-plugin
+	// pre-delete on this call. Set on batches 1..N of a chunked plugin sync
+	// so each subsequent batch only inserts and does not wipe what batch 0
+	// (and earlier continuation batches) already persisted. Older sync-plugin
+	// versions that don't recognize the field MUST ignore it — they will
+	// continue to pre-delete on every batch and exhibit the legacy
+	// last-batch-wins truncation behaviour.
+	IsContinuationBatch bool `json:"is_continuation_batch,omitempty"`
 }
 
 // SyncActions iterates all registered plugin capabilities and calls the configured
@@ -2490,8 +2498,9 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 
 	for i, batch := range batches {
 		payload := syncActionsPayload{
-			PluginName: cap.Name,
-			Actions:    batch,
+			PluginName:          cap.Name,
+			Actions:             batch,
+			IsContinuationBatch: i > 0,
 		}
 		if i == 0 {
 			// Persist server instructions (e.g. MCP initialize.instructions) to
