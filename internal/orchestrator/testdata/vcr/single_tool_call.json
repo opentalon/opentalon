@@ -1,0 +1,23 @@
+{
+  "prompt_hash": "2bfe2d07a91dbd2bd88e52beff8abdd7acd318d25d78c53e77ea808c1e6d897c",
+  "recorded_at": "2026-04-28T00:00:00Z",
+  "model": "claude-haiku-4-5-20251001",
+  "interactions": [
+    {
+      "response": {
+        "id": "msg_vcr_tool_01",
+        "model": "claude-haiku-4-5-20251001",
+        "content": "[tool_call]\n{\"tool\": \"gitlab.analyze_code\", \"args\": {\"repo\": \"myrepo\"}}\n[/tool_call]",
+        "usage": {"input_tokens": 150, "output_tokens": 20}
+      }
+    },
+    {
+      "response": {
+        "id": "msg_vcr_tool_02",
+        "model": "claude-haiku-4-5-20251001",
+        "content": "The code in myrepo has been analyzed. No critical issues found.",
+        "usage": {"input_tokens": 220, "output_tokens": 14}
+      }
+    }
+  ]
+}
