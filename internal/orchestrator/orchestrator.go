@@ -1793,7 +1793,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	if call.Plugin == "" {
 		return ToolResult{
 			CallID: call.ID,
-			Error:  `tool call missing tool name. Use format: [tool_call] plugin.action(key=value, key=value) [/tool_call] or [tool_call] {"tool": "plugin.action", "args": {"key": "value"}} [/tool_call]`,
+			Error:  `tool call format not recognized. You MUST use this exact format: [tool_call] {"tool": "plugin.action", "args": {"key": "value"}} [/tool_call]. Do NOT use XML or any other format. Retry the same action now using the correct format.`,
 		}
 	}
 	exec, ok := o.registry.GetExecutor(call.Plugin)
