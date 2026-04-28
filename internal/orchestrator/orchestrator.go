@@ -623,7 +623,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	}
 	o.pendingMu.Unlock()
 	if p := pendingPipeline; p != nil {
-		decision := pipeline.ParseConfirmation(userMessage)
+		var decision pipeline.ConfirmationDecision
+		if o.planner != nil {
+			d, classErr := o.planner.ClassifyConfirmation(ctx, userMessage)
+			if classErr != nil {
+				log.Warn("confirmation classification failed, falling back to keyword match", "error", classErr)
+				decision = pipeline.ParseConfirmation(userMessage)
+			} else {
+				decision = d
+			}
+		} else {
+			decision = pipeline.ParseConfirmation(userMessage)
+		}
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
 		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 		if decision == pipeline.Approved {
@@ -637,7 +648,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			return res, err
 		}
-		resp := "Pipeline cancelled (expected y/yes to confirm)."
+		resp := "Pipeline cancelled."
 		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
 		log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
 		return &RunResult{Response: resp}, nil
@@ -688,7 +699,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			o.pendingMu.Lock()
 			o.pendingPipelines[sessionID] = p
 			o.pendingMu.Unlock()
-			planText := p.FormatForConfirmation()
+			var planText string
+			if narrated, narrateErr := o.planner.NarratePlan(ctx, planResult.Steps); narrateErr != nil {
+				log.Warn("plan narration failed, using fallback", "error", narrateErr)
+				planText = p.FormatForConfirmation()
+			} else {
+				planText = narrated
+			}
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))

@@ -200,3 +200,63 @@ func extractJSON(s string) string {
 
 	return s
 }
+
+// NarratePlan asks the LLM to describe the pipeline steps in natural language
+// and invite the user to confirm or cancel.
+func (p *Planner) NarratePlan(ctx context.Context, steps []*Step) (string, error) {
+	lang := ""
+	if prof := profile.FromContext(ctx); prof != nil {
+		lang = prof.Language
+	}
+	var sb strings.Builder
+	sb.WriteString("Plan steps:\n")
+	for i, s := range steps {
+		fmt.Fprintf(&sb, "%d. %s", i+1, s.Name)
+		if s.Command != nil {
+			fmt.Fprintf(&sb, " (%s.%s)", s.Command.Plugin, s.Command.Action)
+		}
+		sb.WriteString("\n")
+	}
+	systemContent := "You are a helpful assistant. Describe the following multi-step plan to the user in 2-3 natural sentences. Name each step clearly without exposing technical details like plugin or action names. End with a short question asking if they want to proceed."
+	if lang != "" {
+		systemContent += fmt.Sprintf(" Respond in %s.", lang)
+	}
+	resp, err := p.llm.Complete(ctx, &CompletionRequest{
+		Messages: []Message{
+			{Role: "system", Content: systemContent},
+			{Role: "user", Content: sb.String()},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
+}
+
+// ClassifyConfirmation asks the LLM whether the user approved or rejected the plan.
+// Returns Rejected on parse failure.
+func (p *Planner) ClassifyConfirmation(ctx context.Context, userReply string) (ConfirmationDecision, error) {
+	prompt := fmt.Sprintf(
+		"The user was shown a multi-step task plan and asked to confirm. They replied: %q\nDid they approve? Respond ONLY with valid JSON: {\"approved\": true} or {\"approved\": false}",
+		userReply,
+	)
+	resp, err := p.llm.Complete(ctx, &CompletionRequest{
+		Messages: []Message{
+			{Role: "user", Content: prompt},
+		},
+	})
+	if err != nil {
+		return Rejected, err
+	}
+	jsonStr := extractJSON(resp.Content)
+	var result struct {
+		Approved bool `json:"approved"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+		return Rejected, fmt.Errorf("classify confirmation parse: %w", err)
+	}
+	if result.Approved {
+		return Approved, nil
+	}
+	return Rejected, nil
+}
