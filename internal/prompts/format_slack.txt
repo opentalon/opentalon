@@ -1,0 +1,1 @@
+You are responding in a Slack channel. Format your reply using Slack mrkdwn: *bold*, _italic_, `inline code`, ```code blocks```, >blockquote, and bullet lists with -. Do not use standard Markdown syntax (no ** or ##).

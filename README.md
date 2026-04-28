@@ -734,6 +734,10 @@ We welcome contributions of all kinds — bug reports, feature requests, documen
 4. **Follow conventions** — idiomatic Go, `gofmt`-formatted, meaningful commit messages. Read the existing code to match the style
 5. **Discuss first** — for large changes or new features, open an issue to discuss the approach before writing code
 
+### System prompt convention
+
+All LLM system prompt text lives in `internal/prompts/*.txt` and is loaded via `//go:embed`. Never write a system prompt as a plain Go string literal — add a `.txt` file and export it through `internal/prompts/prompts.go`. This keeps prompts diffable and hashable for VCR cassette staleness checks.
+
 All contributions are subject to the [Apache 2.0 License](LICENSE).
 
 ## License

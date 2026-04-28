@@ -18,6 +18,7 @@ import (
 	"github.com/opentalon/opentalon/internal/lua"
 	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 	pkgchannel "github.com/opentalon/opentalon/pkg/channel"
@@ -203,11 +204,6 @@ type Orchestrator struct {
 	showToolCalls           bool                // when true, prepend tool call details to response
 }
 
-const (
-	defaultSummarizePrompt       = "Summarize the following conversation in a short paragraph."
-	defaultSummarizeUpdatePrompt = "Update the given conversation summary with the following new exchange. Keep the result to a short paragraph."
-)
-
 // resolveAllowedPluginNames returns a JSON array of allowed plugin names for the
 // current profile, or "" when unrestricted. Used to inject allowed_plugins into
 // preparer and LLM-called actions so RAG plugins can filter by profile.
@@ -263,10 +259,10 @@ func NewWithRules(
 	opts OrchestratorOpts,
 ) *Orchestrator {
 	if opts.SummarizePrompt == "" {
-		opts.SummarizePrompt = defaultSummarizePrompt
+		opts.SummarizePrompt = prompts.SummarizeDefault
 	}
 	if opts.SummarizeUpdatePrompt == "" {
-		opts.SummarizeUpdatePrompt = defaultSummarizeUpdatePrompt
+		opts.SummarizeUpdatePrompt = prompts.SummarizeUpdate
 	}
 	var planner *pipeline.Planner
 	if opts.PipelineEnabled {
@@ -1263,12 +1259,7 @@ func trimToContextWindow(ctx context.Context, messages []provider.Message, conte
 
 func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string) string {
 	var sb strings.Builder
-	sb.WriteString("You are an AI assistant with access to the following tools.\n\n")
-	sb.WriteString("To call a tool, use EXACTLY this format (no other format will be recognized):\n\n")
-	sb.WriteString("[tool_call]\n{\"tool\": \"plugin.action\", \"args\": {\"key\": \"value\"}}\n[/tool_call]\n\n")
-	sb.WriteString("Example:\n[tool_call]\n{\"tool\": \"brave-search.search\", \"args\": {\"query\": \"latest news\"}}\n[/tool_call]\n\n")
-	sb.WriteString("You may include multiple [tool_call]...[/tool_call] blocks in a single response. Any text outside these blocks is ignored when tool calls are present.\n\n")
-	sb.WriteString("When you receive plugin or tool results, reply to the user in a brief natural language answer. Do not simply repeat or echo the tool output; use it to answer the user's question or confirm what was done.\n\n")
+	sb.WriteString(prompts.OrchestratorPreamble)
 
 	sb.WriteString(o.rules.BuildPromptSection())
 
@@ -1401,16 +1392,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	}
 
 	if o.subprocessConfig.Enabled {
-		sb.WriteString("## Subprocess (sub-agent)\n")
-		sb.WriteString("You can fork a focused sub-process using `_subprocess.run` to handle sub-tasks independently.\n")
-		sb.WriteString("The subprocess runs its own agent loop with its own context — it can call tools, reason through multiple steps, and return a final answer to you.\n\n")
-		sb.WriteString("USE subprocess when:\n")
-		sb.WriteString("- A sub-task requires multiple tool calls that don't need your main conversation context\n")
-		sb.WriteString("- You need to search or research something before continuing your main reasoning\n")
-		sb.WriteString("- The task is self-contained with a clear question and answer\n\n")
-		sb.WriteString("DO NOT use subprocess for:\n")
-		sb.WriteString("- Simple single tool calls — just call the tool directly\n")
-		sb.WriteString("- Tasks that need the full conversation history\n\n")
+		sb.WriteString(prompts.OrchestratorSubprocess)
 	}
 
 	workflowMemories, _ := o.memory.MemoriesForContext(ctx, "workflow")
@@ -1481,21 +1463,21 @@ func channelFormatHint(ctx context.Context) string {
 	}
 	switch caps.ResponseFormat {
 	case pkgchannel.FormatSlack:
-		return "You are responding in a Slack channel. Format your reply using Slack mrkdwn: *bold*, _italic_, `inline code`, ```code blocks```, >blockquote, and bullet lists with -. Do not use standard Markdown syntax (no ** or ##)."
+		return prompts.FormatSlack
 	case pkgchannel.FormatMarkdown:
-		return "You are responding in a Markdown-rendered interface. Format your reply using standard Markdown: **bold**, _italic_, `code`, ```code blocks```, and # headings where appropriate."
+		return prompts.FormatMarkdown
 	case pkgchannel.FormatHTML:
-		return "You are responding in an HTML-rendered interface. Format your reply using HTML tags: <b>bold</b>, <i>italic</i>, <code>inline code</code>, <pre>code blocks</pre>."
+		return prompts.FormatHTML
 	case pkgchannel.FormatTelegram:
-		return "You are responding in a Telegram chat. Format your reply using Telegram's supported HTML: <b>bold</b>, <i>italic</i>, <code>inline code</code>, <pre>code blocks</pre>. Keep responses concise."
+		return prompts.FormatTelegram
 	case pkgchannel.FormatTeams:
-		return "You are responding in a Microsoft Teams channel. Format your reply using Teams markdown: **bold**, _italic_, `inline code`, ```code blocks```, and bullet lists with -. Do not use ## headings."
+		return prompts.FormatTeams
 	case pkgchannel.FormatWhatsApp:
-		return "You are responding in a WhatsApp chat. Format your reply using WhatsApp markup: *bold*, _italic_, ~strikethrough~, and ```code blocks```. Keep responses concise. Do not use standard Markdown syntax."
+		return prompts.FormatWhatsApp
 	case pkgchannel.FormatDiscord:
-		return "You are responding in a Discord channel. Format your reply using Discord markdown: **bold**, *italic*, `inline code`, ```code blocks```, and bullet lists with -."
+		return prompts.FormatDiscord
 	case pkgchannel.FormatText:
-		return "You are responding in a plain text channel. Do not use any markup or formatting characters. Write in plain prose only."
+		return prompts.FormatText
 	default:
 		return ""
 	}
@@ -1773,7 +1755,7 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 	if sess.Summary != "" {
 		sysPrompt = o.summarizeUpdatePrompt
 		if sysPrompt == "" {
-			sysPrompt = defaultSummarizeUpdatePrompt
+			sysPrompt = prompts.SummarizeUpdate
 		}
 		var b strings.Builder
 		b.WriteString("Previous summary: ")
@@ -1786,7 +1768,7 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 	} else {
 		sysPrompt = o.summarizePrompt
 		if sysPrompt == "" {
-			sysPrompt = defaultSummarizePrompt
+			sysPrompt = prompts.SummarizeDefault
 		}
 		var b strings.Builder
 		for _, m := range toSummarize {

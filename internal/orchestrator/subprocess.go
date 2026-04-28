@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 )
 
@@ -185,10 +186,7 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 // with only the allowed tools listed. It excludes _subprocess itself to prevent fork bombs.
 func (o *Orchestrator) buildSubprocessSystemPrompt(ctx context.Context, req subprocessRequest) string {
 	var sb strings.Builder
-	sb.WriteString("You are a focused sub-agent. Complete the following task using the available tools.\n")
-	sb.WriteString("When you have the answer, respond in plain text without any tool calls.\n\n")
-	sb.WriteString("To call a tool, use EXACTLY this format:\n\n")
-	sb.WriteString("[tool_call]\n{\"tool\": \"plugin.action\", \"args\": {\"key\": \"value\"}}\n[/tool_call]\n\n")
+	sb.WriteString(prompts.SubprocessPreamble)
 
 	// Build allowlist set for fast lookup.
 	allowSet := make(map[string]bool, len(req.AllowedTools))
