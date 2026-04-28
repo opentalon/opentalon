@@ -128,6 +128,22 @@ jobs:
           REDIS_URL: redis://localhost:6379/0
         run: go test -tags redis -race -v -run TestExecDispatcher ./internal/plugin/
 
+  test-vcr:
+    name: Test (VCR replay)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Replay VCR cassettes
+        # No API keys needed — cassettes are committed to the repo.
+        # Fails if prompt_hash in any cassette doesn't match the current
+        # prompts.Hash(), meaning prompts changed without re-recording.
+        run: go test -race -v -run TestVCR ./internal/orchestrator/...
+
   docker:
     name: Docker
     runs-on: ubuntu-latest
