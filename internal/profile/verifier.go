@@ -46,6 +46,7 @@ type VerifierConfig struct {
 	LimitField        string            // optional JSON field for token spend limit; default "limit"
 	LimitTimeField    string            // optional JSON field for limit window duration (e.g. "1h"); default "limit_time"
 	CredentialsField  string            // optional JSON field for per-MCP-server credential headers; default "credentials"
+	LanguageField     string            // optional JSON field for user language; default "language"
 	ExtraHeaders      map[string]string // static headers sent on every WhoAmI call; ${ENV_VAR} expanded once at construction
 }
 
@@ -93,6 +94,9 @@ func (c *VerifierConfig) setDefaults() {
 	}
 	if c.CredentialsField == "" {
 		c.CredentialsField = "credentials"
+	}
+	if c.LanguageField == "" {
+		c.LanguageField = "language"
 	}
 	// Expand env vars in ExtraHeaders once at construction time so values are
 	// immutable for the verifier's lifetime and can't drift mid-run. Also guard
@@ -321,6 +325,7 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 
 	model := jsonString(raw[v.cfg.ModelField])
 	channelTypeResp := jsonString(raw[v.cfg.ChannelTypeField])
+	language := jsonString(raw[v.cfg.LanguageField])
 
 	var limit int
 	if lraw, ok := raw[v.cfg.LimitField]; ok {
@@ -354,6 +359,7 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 		Plugins:     plugins,
 		Model:       model,
 		ChannelType: channelTypeResp,
+		Language:    language,
 		Limit:       limit,
 		LimitWindow: limitWindow,
 		Credentials: credentials,
@@ -364,6 +370,7 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 		"plugins", p.Plugins,
 		"model", p.Model,
 		"channel_type", p.ChannelType,
+		"language", p.Language,
 	)
 	return p, nil
 }
