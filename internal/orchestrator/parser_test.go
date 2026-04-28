@@ -487,3 +487,40 @@ func TestParseBareJSONToolCall_NoToolKey(t *testing.T) {
 		t.Errorf("expected nil for JSON without tool key, got %v", calls)
 	}
 }
+
+func TestParseXMLFunctionCalls(t *testing.T) {
+	response := `<function_calls>
+<invoke name="timly.timly__list-person-types">
+<parameter name="per_page">1</parameter>
+</invoke>
+</function_calls>`
+	calls := DefaultParser.Parse(response)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Plugin != "timly" {
+		t.Errorf("plugin = %q, want timly", calls[0].Plugin)
+	}
+	if calls[0].Action != "timly__list-person-types" {
+		t.Errorf("action = %q, want timly__list-person-types", calls[0].Action)
+	}
+	if calls[0].Args["per_page"] != "1" {
+		t.Errorf("per_page = %q, want 1", calls[0].Args["per_page"])
+	}
+}
+
+func TestParseXMLFunctionCalls_NoArgs(t *testing.T) {
+	response := `<function_calls>
+<invoke name="timly.timly__list-items"/>
+</function_calls>`
+	calls := DefaultParser.Parse(response)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Plugin != "timly" {
+		t.Errorf("plugin = %q", calls[0].Plugin)
+	}
+	if calls[0].Action != "timly__list-items" {
+		t.Errorf("action = %q", calls[0].Action)
+	}
+}

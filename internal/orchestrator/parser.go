@@ -118,6 +118,12 @@ func (defaultParser) Parse(response string) []ToolCall {
 				}}
 			}
 		}
+		// Fallback: parse Claude's native <function_calls> XML format.
+		// The LLM sometimes emits <invoke name="plugin.action"><parameter name="key">value</parameter></invoke>
+		// instead of [tool_call]. Parse it rather than rejecting it.
+		if xmlCalls := parseXMLFunctionCalls(response); len(xmlCalls) > 0 {
+			return xmlCalls
+		}
 		// We found [tool_call] blocks (or Claude's native XML variants) but
 		// none parsed — return a placeholder so executeCall sends the
 		// format-hint error back to the LLM instead of the silent
@@ -255,11 +261,149 @@ func stripSurroundingQuotes(s string) string {
 	return s
 }
 
+// parseXMLFunctionCalls extracts tool calls from Claude's native XML format:
+//
+//	<function_calls>
+//	<invoke name="plugin.action">
+//	<parameter name="key">value</parameter>
+//	</invoke>
+//	</function_calls>
+//
+// Also handles the antml: namespaced variant. Returns nil if no valid calls found.
+func parseXMLFunctionCalls(response string) []ToolCall {
+	var calls []ToolCall
+
+	// Find all invoke blocks. Supports both <invoke> and namespaced variants.
+	rest := response
+	for {
+		// Find next invoke tag (with or without namespace prefix).
+		invokeTag := findNextInvoke(rest)
+		if invokeTag.start < 0 {
+			break
+		}
+		rest = rest[invokeTag.start:]
+
+		// Extract name="..." attribute.
+		nameAttr := extractAttr(rest, "name")
+		if nameAttr == "" {
+			rest = rest[1:]
+			continue
+		}
+
+		// Find the body between > and the closing </invoke> (or self-closing />).
+		body, advance := extractInvokeBody(rest)
+		if advance <= 0 {
+			break
+		}
+		rest = rest[advance:]
+
+		plugin, action, err := parseToolName(nameAttr)
+		if err != nil {
+			continue
+		}
+
+		args := parseXMLParameters(body)
+		calls = append(calls, ToolCall{
+			ID:     fmt.Sprintf("call-%d", len(calls)+1),
+			Plugin: plugin,
+			Action: action,
+			Args:   args,
+		})
+	}
+	return calls
+}
+
+type invokePos struct{ start int }
+
+func findNextInvoke(s string) invokePos {
+	// Check both plain and any namespace-prefixed invoke tags.
+	idx := strings.Index(s, "<invoke ")
+	idx2 := strings.Index(s, "<invoke>")
+	if idx < 0 || (idx2 >= 0 && idx2 < idx) {
+		idx = idx2
+	}
+	return invokePos{start: idx}
+}
+
+// extractAttr extracts the value of attr="value" from an XML tag at the start of s.
+func extractAttr(s string, attr string) string {
+	needle := attr + `="`
+	i := strings.Index(s, needle)
+	if i < 0 {
+		return ""
+	}
+	i += len(needle)
+	j := strings.Index(s[i:], `"`)
+	if j < 0 {
+		return ""
+	}
+	return s[i : i+j]
+}
+
+// extractInvokeBody returns the body inside an <invoke>...</invoke> block
+// and the number of bytes to advance past the block.
+func extractInvokeBody(s string) (body string, advance int) {
+	// Find the closing > of the opening tag.
+	gt := strings.Index(s, ">")
+	if gt < 0 {
+		return "", 0
+	}
+	// Self-closing tag: <invoke name="x"/>
+	if gt > 0 && s[gt-1] == '/' {
+		return "", gt + 1
+	}
+
+	bodyStart := gt + 1
+	// Find closing </invoke> (any namespace).
+	for _, close := range []string{"</invoke>", "</invoke>"} {
+		if end := strings.Index(s[bodyStart:], close); end >= 0 {
+			return s[bodyStart : bodyStart+end], bodyStart + end + len(close)
+		}
+	}
+	// No closing tag — take everything after >.
+	return s[bodyStart:], len(s)
+}
+
+// parseXMLParameters extracts parameter name/value pairs from XML like:
+// <parameter name="key">value</parameter>
+func parseXMLParameters(body string) map[string]string {
+	args := make(map[string]string)
+	rest := body
+	for {
+		// Find next <parameter (with or without namespace).
+		idx := strings.Index(rest, "<parameter ")
+		if idx < 0 {
+			break
+		}
+		rest = rest[idx:]
+
+		name := extractAttr(rest, "name")
+		if name == "" {
+			rest = rest[1:]
+			continue
+		}
+
+		// Find > closing the opening tag.
+		gt := strings.Index(rest, ">")
+		if gt < 0 {
+			break
+		}
+		rest = rest[gt+1:]
+
+		// Find closing parameter tag.
+		closeTag := "<" + "/parameter>"
+		closeIdx := strings.Index(rest, closeTag)
+		if closeIdx < 0 {
+			break
+		}
+		args[name] = strings.TrimSpace(rest[:closeIdx])
+		rest = rest[closeIdx+len(closeTag):]
+	}
+	return args
+}
+
 // containsInternalBlock returns true if s contains any internal protocol
-// block opening tag (e.g. <function_calls>, <function_calls>).
-// Used by the parser to detect when the LLM emitted a tool call in a format
-// the parser doesn't understand (Claude's native XML) so it can return a
-// format-hint placeholder instead of silently dropping the response.
+// block opening tag.
 func containsInternalBlock(s string) bool {
 	for _, tags := range internalBlockTags {
 		if strings.Contains(s, tags[0]) {
