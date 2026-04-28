@@ -118,10 +118,11 @@ func (defaultParser) Parse(response string) []ToolCall {
 				}}
 			}
 		}
-		// We found [tool_call] blocks but none parsed — return a placeholder
-		// so executeCall sends the format-hint error back to the LLM instead
-		// of the silent strip-retry → "(no response)" path.
-		if sawBlock {
+		// We found [tool_call] blocks (or Claude's native XML variants) but
+		// none parsed — return a placeholder so executeCall sends the
+		// format-hint error back to the LLM instead of the silent
+		// strip-retry → "(no response)" path.
+		if sawBlock || containsInternalBlock(response) {
 			return []ToolCall{{
 				ID:     "call-1",
 				Plugin: "",
@@ -252,6 +253,20 @@ func stripSurroundingQuotes(s string) string {
 		}
 	}
 	return s
+}
+
+// containsInternalBlock returns true if s contains any internal protocol
+// block opening tag (e.g. <function_calls>, <function_calls>).
+// Used by the parser to detect when the LLM emitted a tool call in a format
+// the parser doesn't understand (Claude's native XML) so it can return a
+// format-hint placeholder instead of silently dropping the response.
+func containsInternalBlock(s string) bool {
+	for _, tags := range internalBlockTags {
+		if strings.Contains(s, tags[0]) {
+			return true
+		}
+	}
+	return false
 }
 
 // internalBlockTags lists the open/close tag pairs for internal protocol
