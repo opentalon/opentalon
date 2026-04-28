@@ -71,12 +71,17 @@ func (p *OpenAIProvider) SupportsFeature(f Feature) bool {
 
 // -- OpenAI wire types --
 
+type oaiStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 type oaiRequest struct {
-	Model       string       `json:"model"`
-	Messages    []oaiMessage `json:"messages"`
-	MaxTokens   int          `json:"max_tokens,omitempty"`
-	Temperature *float64     `json:"temperature,omitempty"`
-	Stream      bool         `json:"stream,omitempty"`
+	Model         string            `json:"model"`
+	Messages      []oaiMessage      `json:"messages"`
+	MaxTokens     int               `json:"max_tokens,omitempty"`
+	Temperature   *float64          `json:"temperature,omitempty"`
+	Stream        bool              `json:"stream,omitempty"`
+	StreamOptions *oaiStreamOptions `json:"stream_options,omitempty"`
 }
 
 type oaiMessage struct {
@@ -202,6 +207,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 		return nil, err
 	}
 	oaiReq.Stream = true
+	oaiReq.StreamOptions = &oaiStreamOptions{IncludeUsage: true}
 
 	body, err := json.Marshal(oaiReq)
 	if err != nil {
@@ -257,8 +263,27 @@ func (s *oaiResponseStream) Recv() (StreamChunk, error) {
 			return StreamChunk{}, fmt.Errorf("openai stream error [%s]: %s", chunk.Error.Type, chunk.Error.Message)
 		}
 
+		// Usage-only chunk (sent as the final chunk when stream_options.include_usage is true).
+		// It has no choices but carries the complete usage for the request.
+		if chunk.Usage != nil && len(chunk.Choices) == 0 {
+			return StreamChunk{
+				Model: chunk.Model,
+				Usage: Usage{
+					InputTokens:  chunk.Usage.PromptTokens,
+					OutputTokens: chunk.Usage.CompletionTokens,
+				},
+			}, nil
+		}
+
 		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-			return StreamChunk{Content: chunk.Choices[0].Delta.Content}, nil
+			sc := StreamChunk{Content: chunk.Choices[0].Delta.Content, Model: chunk.Model}
+			if chunk.Usage != nil {
+				sc.Usage = Usage{
+					InputTokens:  chunk.Usage.PromptTokens,
+					OutputTokens: chunk.Usage.CompletionTokens,
+				}
+			}
+			return sc, nil
 		}
 		// Empty delta (e.g. role-only chunk) — skip and read next line.
 	}

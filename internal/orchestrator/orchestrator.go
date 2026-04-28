@@ -1043,6 +1043,8 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 	defer func() { _ = stream.Close() }()
 
 	var buf strings.Builder
+	var usage provider.Usage
+	var model string
 	for {
 		chunk, err := stream.Recv()
 		if err != nil {
@@ -1054,6 +1056,12 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 				cb(ctx, chunk.Content, false)
 			}
 		}
+		if chunk.Model != "" {
+			model = chunk.Model
+		}
+		if chunk.Usage.InputTokens > 0 || chunk.Usage.OutputTokens > 0 {
+			usage = chunk.Usage
+		}
 		if chunk.Done {
 			if cb != nil {
 				cb(ctx, "", true)
@@ -1064,7 +1072,8 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 
 	return &provider.CompletionResponse{
 		Content: buf.String(),
-		// Usage is not available in streaming mode for most providers.
+		Model:   model,
+		Usage:   usage,
 	}, nil
 }
 
