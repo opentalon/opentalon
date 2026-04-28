@@ -878,6 +878,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 	var stripRetries int
 	var transientMessages []provider.Message
+	var lastCallSig string // "plugin.action\x00arg1=val1\x00..." for loop detection
+	var repeatCount int
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		sess, _ := o.sessions.Get(sessionID)
 
@@ -991,6 +993,23 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				return nil, fmtErr
 			}
 			return result, nil
+		}
+
+		// Detect repeated identical tool calls — the LLM is stuck in a loop.
+		callSig := toolCallSignature(calls)
+		if callSig == lastCallSig {
+			repeatCount++
+		} else {
+			lastCallSig = callSig
+			repeatCount = 1
+		}
+		if repeatCount >= 2 {
+			log.Warn("repeated identical tool call detected, breaking loop", "round", i+1, "repeat", repeatCount)
+			transientMessages = []provider.Message{
+				{Role: provider.RoleAssistant, Content: resp.Content},
+				{Role: provider.RoleUser, Content: "[system] You are repeating the same tool call. Stop calling tools and answer the user based on the information you already have."},
+			}
+			continue
 		}
 
 		// Attribute this LLM round's tokens evenly across the tool calls it produced.
@@ -2023,6 +2042,26 @@ func formatToolCallMessage(call ToolCall) string {
 			first = false
 		}
 		sb.WriteString(")")
+	}
+	return sb.String()
+}
+
+// toolCallSignature builds a deterministic string from a set of tool calls
+// for loop detection. Two rounds with the same signature are considered repeats.
+func toolCallSignature(calls []ToolCall) string {
+	var sb strings.Builder
+	for _, c := range calls {
+		fmt.Fprintf(&sb, "%s.%s", c.Plugin, c.Action)
+		// Sort keys for deterministic comparison (map iteration is random).
+		keys := make([]string, 0, len(c.Args))
+		for k := range c.Args {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(&sb, "\x00%s=%s", k, c.Args[k])
+		}
+		sb.WriteByte('\n')
 	}
 	return sb.String()
 }
