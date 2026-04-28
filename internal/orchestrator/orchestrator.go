@@ -1184,12 +1184,11 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 			Content: "Previous conversation summary: " + sess.Summary,
 		})
 	}
-	// Strip [knowledge_context] from historical messages to avoid duplicating
-	// MCP instructions across every turn. The current turn (last user message)
-	// keeps its knowledge_context since it contains per-query knowledge articles.
-	// The MCP server instructions in older turns are already in the system prompt
-	// via SystemPromptAddition.
-	messages = appendStrippingHistoricalKC(messages, sess.Messages)
+	// Strip [knowledge_context] from ALL user messages including the current turn.
+	// Server instructions are already in the system prompt via SystemPromptAddition,
+	// and the preparer's knowledge_context duplicates them. Stripping all turns
+	// prevents both per-turn duplication and redundancy with the system prompt.
+	messages = appendStrippingAllKC(messages, sess.Messages)
 
 	// For weaker / OSS models that tend to ignore system-prompt formatting
 	// instructions, repeat the channel format hint as a trailing system
@@ -1371,10 +1370,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 			}
 		}
-		// When a RAG preparer ran (relevantToolsActive), server instructions are
-		// already injected in the user message via [knowledge_context]. Skip them
-		// here to avoid sending the same ~14KB block twice per request.
-		if cap.SystemPromptAddition != "" && !relevantToolsActive {
+		if cap.SystemPromptAddition != "" {
 			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---", cap.Name, cap.SystemPromptAddition, cap.Name)
 			sb.WriteString("\n")
 		}
@@ -2054,21 +2050,14 @@ func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.Completi
 }
 
 // capabilitiesToPlannerInfo converts orchestrator PluginCapability to pipeline CapabilityInfo.
-// appendStrippingHistoricalKC appends session messages to dst, stripping
-// [knowledge_context] blocks from all user messages except the last one
-// (the current turn). This prevents N copies of MCP instructions from
-// accumulating in the LLM request as the conversation grows.
-func appendStrippingHistoricalKC(dst []provider.Message, msgs []provider.Message) []provider.Message {
-	// Find the last user message index.
-	lastUserIdx := -1
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == provider.RoleUser {
-			lastUserIdx = i
-			break
-		}
-	}
-	for i, m := range msgs {
-		if m.Role == provider.RoleUser && i != lastUserIdx {
+// appendStrippingAllKC appends session messages to dst, stripping
+// [knowledge_context] blocks from every user message. Server instructions
+// are already in the system prompt via SystemPromptAddition, so the
+// preparer-injected knowledge_context is redundant. Stripping all turns
+// prevents both historical accumulation and current-turn duplication.
+func appendStrippingAllKC(dst []provider.Message, msgs []provider.Message) []provider.Message {
+	for _, m := range msgs {
+		if m.Role == provider.RoleUser {
 			stripped := stripKnowledgeContext(m.Content)
 			if stripped != m.Content {
 				m = provider.Message{Role: m.Role, Content: stripped, Files: m.Files}
@@ -2287,7 +2276,11 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 			Actions:    batch,
 		}
 		if i == 0 {
-			payload.ServerInstructions = cap.SystemPromptAddition
+			// ServerInstructions intentionally omitted — they are already in the
+			// system prompt via SystemPromptAddition. Sending them here causes
+			// the weaviate plugin to store them as a KnowledgeArticle, which the
+			// prepare action then re-injects as [knowledge_context], duplicating
+			// the instructions in every LLM request.
 			payload.KeepPlugins = keepPlugins
 		}
 		b, err := json.Marshal(payload)

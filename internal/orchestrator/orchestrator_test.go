@@ -2589,16 +2589,18 @@ func TestSyncActionsCarriesServerInstructions(t *testing.T) {
 
 	orch.SyncActions(context.Background())
 
+	// timly (has actions) + prose-only (has SystemPromptAddition but no actions)
+	// are synced; empty (neither) is skipped.
 	if len(syncCalls) != 2 {
 		t.Fatalf("expected 2 sync calls (timly + prose-only), got %d: %v", len(syncCalls), syncCalls)
 	}
 
 	all := strings.Join(syncCalls, " ")
-	if !strings.Contains(all, `"server_instructions":"Timly MCP server.`) {
-		t.Errorf("timly server_instructions missing from payload: %s", all)
-	}
-	if !strings.Contains(all, `"server_instructions":"Some orientation prose without any callable actions."`) {
-		t.Errorf("prose-only server_instructions missing from payload: %s", all)
+	// ServerInstructions should NOT be sent — they are already in the system
+	// prompt via SystemPromptAddition and would cause duplication if stored
+	// in the vector store.
+	if strings.Contains(all, `"server_instructions"`) {
+		t.Error("server_instructions should not be sent in sync payload")
 	}
 	if strings.Contains(all, `"plugin_name":"empty"`) {
 		t.Error("empty plugin (no actions, no prose) should not be synced")
