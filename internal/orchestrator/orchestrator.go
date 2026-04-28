@@ -2276,7 +2276,11 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 			Actions:    batch,
 		}
 		if i == 0 {
-			payload.ServerInstructions = cap.SystemPromptAddition
+			// ServerInstructions intentionally omitted — they are already in the
+			// system prompt via SystemPromptAddition. Sending them here causes
+			// the weaviate plugin to store them as a KnowledgeArticle, which the
+			// prepare action then re-injects as [knowledge_context], duplicating
+			// the instructions in every LLM request.
 			payload.KeepPlugins = keepPlugins
 		}
 		b, err := json.Marshal(payload)
