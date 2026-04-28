@@ -1549,8 +1549,15 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 
 		// When RAG is active and no actions matched, add to discoverable list
 		// so the LLM knows the plugin exists and can query ask_knowledge.
+		// Preserve server instructions even when actions are filtered out —
+		// they are plugin-level guidance the LLM needs regardless of which
+		// specific actions are visible.
 		if relevantToolsActive && len(visibleActions) == 0 && hasNonInternalActions {
 			discoverablePlugins = append(discoverablePlugins, cap.Name)
+			if cap.SystemPromptAddition != "" {
+				fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n\n",
+					cap.Name, cap.SystemPromptAddition, cap.Name)
+			}
 			continue
 		}
 
@@ -2487,11 +2494,12 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 			Actions:    batch,
 		}
 		if i == 0 {
-			// ServerInstructions intentionally omitted — they are already in the
-			// system prompt via SystemPromptAddition. Sending them here causes
-			// the weaviate plugin to store them as a KnowledgeArticle, which the
-			// prepare action then re-injects as [knowledge_context], duplicating
-			// the instructions in every LLM request.
+			// Persist server instructions (e.g. MCP initialize.instructions) to
+			// the vector store so they survive plugin restarts and are searchable
+			// via search_instructions. The prepare action excludes mcp:-sourced
+			// articles from [knowledge_context] to avoid duplication with the
+			// system prompt's SystemPromptAddition.
+			payload.ServerInstructions = cap.SystemPromptAddition
 			payload.KeepPlugins = keepPlugins
 		}
 		b, err := json.Marshal(payload)
