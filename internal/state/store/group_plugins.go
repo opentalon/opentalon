@@ -55,7 +55,7 @@ ON CONFLICT (group_id, plugin_id) DO UPDATE SET
     source     = excluded.source,
     updated_at = excluded.updated_at
 WHERE CASE excluded.source WHEN 'bootstrap' THEN 0 WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END
-   >= CASE source           WHEN 'bootstrap' THEN 0 WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END`)
+   >= CASE group_plugins.source WHEN 'bootstrap' THEN 0 WHEN 'config' THEN 1 WHEN 'whoami' THEN 2 WHEN 'admin' THEN 3 ELSE 0 END`)
 
 	tx, err := s.db.SQLDB().BeginTx(ctx, nil)
 	if err != nil {
