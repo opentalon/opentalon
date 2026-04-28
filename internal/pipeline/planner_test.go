@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -11,6 +12,16 @@ type fakePlannerLLM struct {
 
 func (f *fakePlannerLLM) Complete(_ context.Context, _ *CompletionRequest) (*CompletionResponse, error) {
 	return &CompletionResponse{Content: f.response}, nil
+}
+
+type capturingPlannerLLM struct {
+	response string
+	captured *CompletionRequest
+}
+
+func (c *capturingPlannerLLM) Complete(_ context.Context, req *CompletionRequest) (*CompletionResponse, error) {
+	c.captured = req
+	return &CompletionResponse{Content: c.response}, nil
 }
 
 func TestPlannerReturnsDirect(t *testing.T) {
@@ -212,6 +223,92 @@ func TestBuildPlannerPromptWithLanguage(t *testing.T) {
 	promptNoLang := buildPlannerPrompt(caps, "")
 	if containsStr(promptNoLang, "must be written in") {
 		t.Error("prompt without language should not contain language instruction")
+	}
+}
+
+func TestNarratePlanReturnsLLMResponse(t *testing.T) {
+	want := "I'll fetch error details from AppSignal, then create a Jira ticket. Want me to proceed?"
+	llm := &fakePlannerLLM{response: want}
+	planner := NewPlanner(llm)
+	steps := []*Step{
+		{ID: "1", Name: "Get error details", Command: &PluginCommand{Plugin: "appsignal", Action: "get_error"}},
+		{ID: "2", Name: "Create Jira issue", Command: &PluginCommand{Plugin: "jira", Action: "create_issue"}},
+	}
+	got, err := planner.NarratePlan(context.Background(), steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("NarratePlan = %q, want %q", got, want)
+	}
+}
+
+func TestNarratePlanIncludesStepNamesInPrompt(t *testing.T) {
+	c := &capturingPlannerLLM{response: "ok"}
+	planner := NewPlanner(c)
+	steps := []*Step{
+		{ID: "1", Name: "Fetch metrics", Command: &PluginCommand{Plugin: "p", Action: "a"}},
+	}
+	if _, err := planner.NarratePlan(context.Background(), steps); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, msg := range c.captured.Messages {
+		if strings.Contains(msg.Content, "Fetch metrics") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("NarratePlan prompt should include step names")
+	}
+}
+
+func TestClassifyConfirmationApproved(t *testing.T) {
+	llm := &fakePlannerLLM{response: `{"approved": true}`}
+	planner := NewPlanner(llm)
+	d, err := planner.ClassifyConfirmation(context.Background(), "yes please go ahead")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d != Approved {
+		t.Errorf("ClassifyConfirmation = %d, want Approved", d)
+	}
+}
+
+func TestClassifyConfirmationRejected(t *testing.T) {
+	llm := &fakePlannerLLM{response: `{"approved": false}`}
+	planner := NewPlanner(llm)
+	d, err := planner.ClassifyConfirmation(context.Background(), "no thanks cancel it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d != Rejected {
+		t.Errorf("ClassifyConfirmation = %d, want Rejected", d)
+	}
+}
+
+func TestClassifyConfirmationMarkdownWrapped(t *testing.T) {
+	llm := &fakePlannerLLM{response: "```json\n{\"approved\": true}\n```"}
+	planner := NewPlanner(llm)
+	d, err := planner.ClassifyConfirmation(context.Background(), "sure go for it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d != Approved {
+		t.Errorf("ClassifyConfirmation = %d, want Approved", d)
+	}
+}
+
+func TestClassifyConfirmationMalformedJSON(t *testing.T) {
+	llm := &fakePlannerLLM{response: "I cannot determine that"}
+	planner := NewPlanner(llm)
+	d, err := planner.ClassifyConfirmation(context.Background(), "sure")
+	if err == nil {
+		t.Error("expected error on malformed JSON")
+	}
+	if d != Rejected {
+		t.Errorf("ClassifyConfirmation = %d, want Rejected on error", d)
 	}
 }
 
