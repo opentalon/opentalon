@@ -140,7 +140,7 @@ type OrchestratorOpts struct {
 	Knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
 	Subprocess              SubprocessConfig    // optional; subprocess (sub-agent) support
 	OnStreamChunk           StreamChunkCallback // optional; when set and LLM supports streaming, final answers are streamed
-	ShowToolCalls           bool                // when true, prepend tool call details to response (debug mode)
+	ShowToolCalls           string              // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -201,7 +201,7 @@ type Orchestrator struct {
 	knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
 	subprocessConfig        SubprocessConfig    // optional; subprocess (sub-agent) support
 	onStreamChunk           StreamChunkCallback // optional; when set, final answers stream to caller
-	showToolCalls           bool                // when true, prepend tool call details to response
+	showToolCalls           string              // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 }
 
 // resolveAllowedPluginNames returns a JSON array of allowed plugin names for the
@@ -571,13 +571,33 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 	return toolResult.Content, nil, pr.RelevantTools, nil
 }
 
-// applyShowToolCalls prepends tool call details to result.Response when show_tool_calls is enabled.
+// applyShowToolCalls prepends tool call details to result.Response based on show_tool_calls mode.
 // Called before formatResponse so Lua formatters can restyle the combined output.
+//
+//   - "raw":      full debug blocks ([tool_call] …, [tool_result] …) + separator
+//   - "friendly": short "_plugin → action…_" labels per tool call
+//   - "" / other: nothing prepended
 func (o *Orchestrator) applyShowToolCalls(result *RunResult) {
-	if !o.showToolCalls || result == nil || result.InputForDisplay == "" {
+	if result == nil || len(result.ToolCalls) == 0 {
 		return
 	}
-	result.Response = result.InputForDisplay + "\n\n---\n\n" + result.Response
+	switch o.showToolCalls {
+	case "raw", "true": // "true" for backward compat with bool config
+		if result.InputForDisplay == "" {
+			return
+		}
+		result.Response = result.InputForDisplay + "\n\n---\n\n" + result.Response
+	case "friendly":
+		var labels []string
+		for _, call := range result.ToolCalls {
+			if call.Plugin != "" {
+				labels = append(labels, fmt.Sprintf("_%s → %s…_", call.Plugin, call.Action))
+			}
+		}
+		if len(labels) > 0 {
+			result.Response = strings.Join(labels, "\n") + "\n\n" + result.Response
+		}
+	}
 }
 
 // formatResponse runs all configured response formatters on result.Response.
@@ -1041,6 +1061,8 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 	var buf strings.Builder
 	var usage provider.Usage
 	var model string
+	showLabels := o.showToolCalls == "friendly" || o.showToolCalls == "raw" || o.showToolCalls == "true"
+	filter := newStreamTagFilter(showLabels)
 	for {
 		chunk, err := stream.Recv()
 		if err != nil {
@@ -1049,7 +1071,11 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 		if chunk.Content != "" {
 			buf.WriteString(chunk.Content)
 			if cb != nil {
-				cb(ctx, chunk.Content, false)
+				// Filter out [tool_call]...[/tool_call] blocks so users
+				// never see raw protocol tags in streaming updates.
+				if visible := filter.Feed(chunk.Content); visible != "" {
+					cb(ctx, visible, false)
+				}
 			}
 		}
 		if chunk.Model != "" {
@@ -1060,6 +1086,10 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 		}
 		if chunk.Done {
 			if cb != nil {
+				// Flush any buffered text that wasn't part of a tag.
+				if trailing := filter.Flush(); trailing != "" {
+					cb(ctx, trailing, false)
+				}
 				cb(ctx, "", true)
 			}
 			break
@@ -1071,6 +1101,166 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 		Model:   model,
 		Usage:   usage,
 	}, nil
+}
+
+// streamTagFilter suppresses [tool_call]...[/tool_call] blocks from streamed
+// output so channel users never see raw protocol tags. When a complete block
+// is detected, the filter emits a short human-friendly placeholder like
+// "⏳ Calling plugin.action…\n" instead of the raw protocol content.
+//
+// Because tags may arrive split across multiple chunks (e.g. "[tool_" then
+// "call]"), the filter buffers partial matches against the opening/closing tag
+// and only emits or drops once the match is confirmed or refuted.
+type streamTagFilter struct {
+	inside     bool   // true while between [tool_call] and [/tool_call]
+	pending    string // buffered text that might be the start of a tag
+	blockBody  string // accumulated body inside a [tool_call] block
+	showLabels bool   // when true, emit friendly "_plugin → action…_" labels
+}
+
+func newStreamTagFilter(showLabels bool) *streamTagFilter {
+	return &streamTagFilter{showLabels: showLabels}
+}
+
+const (
+	streamOpenTag  = "[tool_call]"
+	streamCloseTag = "[/tool_call]"
+)
+
+// Feed processes new text and returns the portion that should be forwarded to
+// the channel callback. It may return "" if all text is inside a tool_call
+// block or is being buffered for a partial tag match.
+func (f *streamTagFilter) Feed(text string) string {
+	f.pending += text
+	var out strings.Builder
+	for f.pending != "" {
+		if f.inside {
+			// Look for closing tag.
+			idx := strings.Index(f.pending, streamCloseTag)
+			if idx >= 0 {
+				// Accumulate the body and optionally emit a friendly placeholder.
+				f.blockBody += f.pending[:idx]
+				f.pending = f.pending[idx+len(streamCloseTag):]
+				f.inside = false
+				if f.showLabels {
+					if friendly := toolCallFriendlyLabel(f.blockBody); friendly != "" {
+						out.WriteString(friendly)
+					}
+				}
+				f.blockBody = ""
+				continue
+			}
+			// Check if pending ends with a prefix of the closing tag.
+			if partialTagSuffix(f.pending, streamCloseTag) > 0 {
+				break // keep buffering
+			}
+			// No match — accumulate all buffered content as block body.
+			f.blockBody += f.pending
+			f.pending = ""
+		} else {
+			// Look for opening tag.
+			idx := strings.Index(f.pending, streamOpenTag)
+			if idx >= 0 {
+				// Emit everything before the tag.
+				out.WriteString(f.pending[:idx])
+				f.pending = f.pending[idx+len(streamOpenTag):]
+				f.inside = true
+				f.blockBody = ""
+				continue
+			}
+			// Check if pending ends with a prefix of the opening tag.
+			if n := partialTagSuffix(f.pending, streamOpenTag); n > 0 {
+				// Emit everything except the partial match at the end.
+				out.WriteString(f.pending[:len(f.pending)-n])
+				f.pending = f.pending[len(f.pending)-n:]
+				break
+			}
+			// No tag at all — emit everything.
+			out.WriteString(f.pending)
+			f.pending = ""
+		}
+	}
+	return out.String()
+}
+
+// Flush returns any buffered text that was held back for partial tag matching.
+// Called when the stream ends.
+func (f *streamTagFilter) Flush() string {
+	s := f.pending
+	f.pending = ""
+	f.blockBody = ""
+	if f.inside {
+		// Unclosed block — drop the buffered content.
+		f.inside = false
+		return ""
+	}
+	return s
+}
+
+// toolCallFriendlyLabel extracts the tool name from a [tool_call] block body
+// and returns a short human-readable string. Returns "" if no name is found.
+func toolCallFriendlyLabel(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+
+	var toolName string
+
+	// Format A: {"tool": "plugin.action", ...}
+	var block toolCallJSON
+	if json.Unmarshal([]byte(body), &block) == nil && block.Tool != "" {
+		toolName = block.Tool
+	} else {
+		// Format B/C: first line is "plugin.action" or "plugin.action(...)"
+		firstLine := body
+		if nl := strings.IndexByte(body, '\n'); nl >= 0 {
+			firstLine = body[:nl]
+		}
+		firstLine = strings.TrimSpace(firstLine)
+		if paren := strings.IndexByte(firstLine, '('); paren > 0 {
+			firstLine = firstLine[:paren]
+		}
+		// Validate it looks like a tool name (has a dot or double underscore).
+		if strings.Contains(firstLine, ".") || strings.Contains(firstLine, "__") {
+			toolName = firstLine
+		}
+	}
+
+	if toolName == "" {
+		return ""
+	}
+
+	// Normalise double-underscore to dot for display.
+	if !strings.Contains(toolName, ".") {
+		if dunder := strings.Index(toolName, "__"); dunder > 0 {
+			toolName = toolName[:dunder] + "." + toolName[dunder+2:]
+		}
+	}
+
+	// Split into plugin and action for a friendlier display.
+	if dot := strings.LastIndex(toolName, "."); dot > 0 && dot < len(toolName)-1 {
+		plugin := toolName[:dot]
+		action := toolName[dot+1:]
+		return fmt.Sprintf("_%s → %s…_\n", plugin, action)
+	}
+	return fmt.Sprintf("_Calling %s…_\n", toolName)
+}
+
+// partialTagSuffix returns the length of the longest suffix of s that is a
+// prefix of tag. For example, partialTagSuffix("abc[tool", "[tool_call]")
+// returns 5 ("[tool").
+func partialTagSuffix(s, tag string) int {
+	maxLen := len(tag) - 1
+	if maxLen > len(s) {
+		maxLen = len(s)
+	}
+	for n := maxLen; n > 0; n-- {
+		if strings.HasSuffix(s, tag[:n]) {
+			return n
+		}
+	}
+	return 0
 }
 
 // runGuardPlugins runs all guard plugins on the last non-system message before an LLM call.

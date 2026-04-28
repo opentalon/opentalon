@@ -312,7 +312,7 @@ type OrchestratorConfig struct {
 	Pipeline              PipelineOrchestratorConfig   `yaml:"pipeline,omitempty"`
 	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`       // knowledge-augmented RAG configuration
 	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`      // subprocess (sub-agent) support
-	ShowToolCalls         bool                         `yaml:"show_tool_calls,omitempty"` // when true, include tool call details in the response (useful for debugging)
+	ShowToolCalls         string                       `yaml:"show_tool_calls,omitempty"` // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 }
 
 // PipelineOrchestratorConfig enables structured multi-step pipeline execution.

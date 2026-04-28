@@ -36,12 +36,14 @@ type defaultParser struct{}
 
 func (defaultParser) Parse(response string) []ToolCall {
 	var calls []ToolCall
+	var sawBlock bool // true if we found at least one [tool_call] tag
 	rest := response
 	for {
 		start := strings.Index(rest, "[tool_call]")
 		if start < 0 {
 			break
 		}
+		sawBlock = true
 		rest = rest[start+len("[tool_call]"):]
 
 		// Extract body: prefer [/tool_call] closing tag, fall back to end of string or next [tool_call].
@@ -115,6 +117,17 @@ func (defaultParser) Parse(response string) []ToolCall {
 					Args:   toStringMap(block.Args),
 				}}
 			}
+		}
+		// We found [tool_call] blocks but none parsed — return a placeholder
+		// so executeCall sends the format-hint error back to the LLM instead
+		// of the silent strip-retry → "(no response)" path.
+		if sawBlock {
+			return []ToolCall{{
+				ID:     "call-1",
+				Plugin: "",
+				Action: "",
+				Args:   make(map[string]string),
+			}}
 		}
 		return nil
 	}
