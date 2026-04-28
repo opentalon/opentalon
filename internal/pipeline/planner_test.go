@@ -208,7 +208,7 @@ func TestBuildPlannerPromptMCPDotActions(t *testing.T) {
 	}
 }
 
-func TestBuildPlannerPrompt_ServerInstructionsBeforeTools(t *testing.T) {
+func TestBuildPlannerPrompt_ExcludesServerInstructions(t *testing.T) {
 	caps := []CapabilityInfo{
 		{
 			Name:                 "timly",
@@ -222,15 +222,14 @@ func TestBuildPlannerPrompt_ServerInstructionsBeforeTools(t *testing.T) {
 	}
 	prompt := buildPlannerPrompt(caps, "")
 
-	// Server instructions must be present.
-	if !containsStr(prompt, "Counting records") {
-		t.Error("prompt must include server instructions")
+	// Server instructions must NOT be in the planner prompt — it only decides
+	// direct vs pipeline. The main LLM system prompt has them.
+	if containsStr(prompt, "Counting records") {
+		t.Error("planner prompt must not include server instructions")
 	}
-	// Server instructions must appear BEFORE tool definitions.
-	instrIdx := strings.Index(prompt, "Counting records")
-	toolIdx := strings.Index(prompt, "plugin=timly | action=list-items")
-	if instrIdx >= toolIdx {
-		t.Errorf("server instructions (at %d) must appear before tools (at %d)", instrIdx, toolIdx)
+	// Tool definitions must still be present.
+	if !containsStr(prompt, "plugin=timly | action=list-items") {
+		t.Error("planner prompt must include tool definitions")
 	}
 }
 
