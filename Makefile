@@ -64,10 +64,18 @@ lint:
 # Requires: ANTHROPIC_API_KEY to be set.
 # Run this after changing anything in internal/prompts/.
 vcr-record-all:
-	@if [ -z "$$ANTHROPIC_API_KEY" ]; then \
-		echo "error: ANTHROPIC_API_KEY is not set"; exit 1; \
+	@if [ -n "$$ANTHROPIC_API_KEY" ]; then \
+		echo "==> Recording Anthropic (Haiku) cassettes..."; \
+		VCR_RECORD=1 go test -v -run "TestVCRDirect|TestVCRSingle|TestVCRMulti" ./internal/orchestrator/...; \
+	else \
+		echo "Skipping Anthropic: ANTHROPIC_API_KEY not set"; \
 	fi
-	VCR_RECORD=1 go test -v -run TestVCR ./internal/orchestrator/...
+	@if [ -n "$$OPENROUTER_API_KEY" ]; then \
+		echo "==> Recording OpenRouter (Ministral 8B) cassettes..."; \
+		VCR_RECORD=1 go test -v -run "TestVCROpenRouter" ./internal/orchestrator/...; \
+	else \
+		echo "Skipping OpenRouter: OPENROUTER_API_KEY not set"; \
+	fi
 
 # ── Convenience ─────────────────────────────────────────────────────────────
 
