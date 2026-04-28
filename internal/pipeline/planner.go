@@ -122,13 +122,14 @@ Available tools:
 `)
 	for _, cap := range capabilities {
 		for _, action := range cap.Actions {
-			fmt.Fprintf(&sb, "- plugin=%s | action=%s: %s\n", cap.Name, action.Name, action.Description)
+			desc := truncatePlannerDescription(action.Description, 200)
+			fmt.Fprintf(&sb, "- plugin=%s | action=%s: %s\n", cap.Name, action.Name, desc)
 			for _, param := range action.Parameters {
 				req := ""
 				if param.Required {
 					req = " (required)"
 				}
-				fmt.Fprintf(&sb, "  - %s: %s%s\n", param.Name, param.Description, req)
+				fmt.Fprintf(&sb, "  - %s: %s%s\n", param.Name, truncatePlannerDescription(param.Description, 80), req)
 			}
 		}
 	}
@@ -178,6 +179,26 @@ func parsePlanResponse(content string) (*PlanResult, error) {
 	}
 
 	return &PlanResult{Type: "pipeline", Steps: steps}, nil
+}
+
+// truncatePlannerDescription shortens a description to maxLen characters for the planner prompt.
+// The planner only needs a brief summary to decide direct vs pipeline — full descriptions
+// (which can include output schemas and usage examples) waste tokens.
+func truncatePlannerDescription(s string, maxLen int) string {
+	// Strip output schema blocks that inflate descriptions.
+	if idx := strings.Index(s, "\n\nOutput schema"); idx >= 0 {
+		s = s[:idx]
+	}
+	s = strings.TrimSpace(s)
+	if len(s) <= maxLen {
+		return s
+	}
+	// Cut at last space before maxLen to avoid mid-word truncation.
+	cut := strings.LastIndex(s[:maxLen], " ")
+	if cut < maxLen/2 {
+		cut = maxLen
+	}
+	return s[:cut] + "..."
 }
 
 // extractJSON tries to pull JSON from a response that may be wrapped in markdown code fences.
