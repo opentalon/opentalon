@@ -266,6 +266,26 @@ state:
 	}
 }
 
+func TestStateDBDSNEnvSubstitution(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://user:pass@host:5432/db")
+	yaml := `
+models:
+  providers: {}
+state:
+  data_dir: ""
+  db:
+    driver: postgres
+    dsn: "${DATABASE_URL}"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.State.DB.DSN != "postgres://user:pass@host:5432/db" {
+		t.Errorf("db.dsn = %q, want expanded DSN", cfg.State.DB.DSN)
+	}
+}
+
 func TestResolveStateDataDirAbsoluteUnchanged(t *testing.T) {
 	cfg, err := Parse([]byte(testYAML))
 	if err != nil {

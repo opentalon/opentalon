@@ -480,6 +480,9 @@ func Parse(data []byte) (*Config, error) {
 	if cfg.Metrics.Enabled && cfg.Metrics.Addr == "" {
 		cfg.Metrics.Addr = ":2112"
 	}
+	if cfg.State.DB.DSN != "" {
+		cfg.State.DB.DSN = expandEnv(cfg.State.DB.DSN)
+	}
 	if cfg.State.DataDir == "" {
 		home, _ := os.UserHomeDir()
 		cfg.State.DataDir = filepath.Join(home, ".opentalon")
