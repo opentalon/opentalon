@@ -2596,11 +2596,15 @@ func TestSyncActionsCarriesServerInstructions(t *testing.T) {
 	}
 
 	all := strings.Join(syncCalls, " ")
-	// ServerInstructions should NOT be sent — they are already in the system
-	// prompt via SystemPromptAddition and would cause duplication if stored
-	// in the vector store.
-	if strings.Contains(all, `"server_instructions"`) {
-		t.Error("server_instructions should not be sent in sync payload")
+	// ServerInstructions should be sent for plugins that have SystemPromptAddition
+	// so the vector store persists them for search_instructions and resilience.
+	// The prepare action excludes mcp:-sourced articles from [knowledge_context]
+	// to avoid duplication with the system prompt.
+	if !strings.Contains(all, `"server_instructions"`) {
+		t.Error("server_instructions should be present in sync payload for plugins with SystemPromptAddition")
+	}
+	if !strings.Contains(all, "Org-units vs Containers") {
+		t.Error("expected timly's SystemPromptAddition content in sync payload")
 	}
 	if strings.Contains(all, `"plugin_name":"empty"`) {
 		t.Error("empty plugin (no actions, no prose) should not be synced")
