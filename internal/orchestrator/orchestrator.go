@@ -1371,7 +1371,10 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 			}
 		}
-		if cap.SystemPromptAddition != "" {
+		// When a RAG preparer ran (relevantToolsActive), server instructions are
+		// already injected in the user message via [knowledge_context]. Skip them
+		// here to avoid sending the same ~14KB block twice per request.
+		if cap.SystemPromptAddition != "" && !relevantToolsActive {
 			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---", cap.Name, cap.SystemPromptAddition, cap.Name)
 			sb.WriteString("\n")
 		}
