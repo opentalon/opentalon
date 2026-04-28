@@ -923,7 +923,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
-		log.Info("LLM response", "round", i+1, "duration", llmDuration, "input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens)
+		log.Info("LLM response", "round", i+1, "duration", llmDuration, "input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens, "content", resp.Content)
 
 		if modelUsed == "" {
 			modelUsed = resp.Model
@@ -2321,7 +2321,7 @@ func capabilitiesToPlannerInfo(caps []PluginCapability) []pipeline.CapabilityInf
 			}
 			actions[j] = pipeline.ActionInfo{Name: a.Name, Description: a.Description, Parameters: params}
 		}
-		result[i] = pipeline.CapabilityInfo{Name: cap.Name, Description: cap.Description, Actions: actions}
+		result[i] = pipeline.CapabilityInfo{Name: cap.Name, Description: cap.Description, Actions: actions, SystemPromptAddition: cap.SystemPromptAddition}
 	}
 	return result
 }

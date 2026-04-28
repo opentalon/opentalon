@@ -208,6 +208,32 @@ func TestBuildPlannerPromptMCPDotActions(t *testing.T) {
 	}
 }
 
+func TestBuildPlannerPrompt_ServerInstructionsBeforeTools(t *testing.T) {
+	caps := []CapabilityInfo{
+		{
+			Name:                 "timly",
+			Description:          "Timly MCP",
+			SystemPromptAddition: "## Counting records\nUse list-items with per_page:1 and read pagination.total.",
+			Actions: []ActionInfo{
+				{Name: "list-items", Description: "List items"},
+				{Name: "add-to-stock", Description: "Add stock"},
+			},
+		},
+	}
+	prompt := buildPlannerPrompt(caps, "")
+
+	// Server instructions must be present.
+	if !containsStr(prompt, "Counting records") {
+		t.Error("prompt must include server instructions")
+	}
+	// Server instructions must appear BEFORE tool definitions.
+	instrIdx := strings.Index(prompt, "Counting records")
+	toolIdx := strings.Index(prompt, "plugin=timly | action=list-items")
+	if instrIdx >= toolIdx {
+		t.Errorf("server instructions (at %d) must appear before tools (at %d)", instrIdx, toolIdx)
+	}
+}
+
 func TestBuildPlannerPromptWithLanguage(t *testing.T) {
 	caps := []CapabilityInfo{
 		{Name: "jira", Description: "Jira", Actions: []ActionInfo{
