@@ -136,6 +136,7 @@ type OrchestratorOpts struct {
 	Knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
 	Subprocess              SubprocessConfig    // optional; subprocess (sub-agent) support
 	OnStreamChunk           StreamChunkCallback // optional; when set and LLM supports streaming, final answers are streamed
+	ShowToolCalls           bool                // when true, prepend tool call details to response (debug mode)
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -196,6 +197,7 @@ type Orchestrator struct {
 	knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
 	subprocessConfig        SubprocessConfig    // optional; subprocess (sub-agent) support
 	onStreamChunk           StreamChunkCallback // optional; when set, final answers stream to caller
+	showToolCalls           bool                // when true, prepend tool call details to response
 }
 
 const (
@@ -318,6 +320,7 @@ func NewWithRules(
 		syncActionsAction:       opts.SyncActionsAction,
 		knowledge:               opts.Knowledge,
 		onStreamChunk:           opts.OnStreamChunk,
+		showToolCalls:           opts.ShowToolCalls,
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
@@ -484,6 +487,15 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 	return toolResult.Content, nil, pr.RelevantTools, nil
 }
 
+// applyShowToolCalls prepends tool call details to result.Response when show_tool_calls is enabled.
+// Called before formatResponse so Lua formatters can restyle the combined output.
+func (o *Orchestrator) applyShowToolCalls(result *RunResult) {
+	if !o.showToolCalls || result == nil || result.InputForDisplay == "" {
+		return
+	}
+	result.Response = result.InputForDisplay + "\n\n---\n\n" + result.Response
+}
+
 // formatResponse runs all configured response formatters on result.Response.
 // Each formatter receives the response text and the channel's response_format.
 // Formatters are text-in/text-out (no invoke, no blocking). On error the
@@ -618,6 +630,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
 			res, err := o.executePipeline(ctx, sessionID, p)
 			if err == nil && res != nil {
+				o.applyShowToolCalls(res)
 				if fmtErr := o.formatResponse(ctx, res); fmtErr != nil {
 					return nil, fmtErr
 				}
@@ -845,6 +858,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				Content: resp.Content,
 			})
 			o.maybeRecordWorkflow(ctx, result, userMessage)
+			o.applyShowToolCalls(result)
 			if fmtErr := o.formatResponse(ctx, result); fmtErr != nil {
 				return nil, fmtErr
 			}

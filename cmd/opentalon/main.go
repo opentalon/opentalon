@@ -461,6 +461,7 @@ func main() {
 			Action: cfg.Orchestrator.Knowledge.Action,
 			Dir:    cfg.Orchestrator.Knowledge.Dir,
 		},
+		ShowToolCalls: cfg.Orchestrator.ShowToolCalls,
 		Subprocess: orchestrator.SubprocessConfig{
 			Enabled:       cfg.Orchestrator.Subprocess.Enabled,
 			MaxDepth:      cfg.Orchestrator.Subprocess.MaxDepth,

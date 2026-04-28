@@ -2272,6 +2272,83 @@ func TestResponseFormatterLuaMissingScript(t *testing.T) {
 	}
 }
 
+func TestShowToolCallsPrependsInputForDisplay(t *testing.T) {
+	// LLM responds with a tool call first, then a final answer.
+	llm := &fakeLLM{responses: []string{
+		`[tool_call]{"tool": "gitlab.analyze_code", "args": {"file": "main.go"}}[/tool_call]`,
+		"Analysis complete: looks good!",
+	}}
+	parser := &fakeParser{parseFn: func(s string) []ToolCall {
+		if strings.Contains(s, "tool_call") {
+			return []ToolCall{{ID: "1", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{"file": "main.go"}}}
+		}
+		return nil
+	}}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:        "gitlab",
+		Description: "GitLab",
+		Actions:     []Action{{Name: "analyze_code", Description: "Analyze code"}},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("test-session")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		ShowToolCalls: true,
+	})
+	result, err := orch.Run(context.Background(), "test-session", "analyze main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// With ShowToolCalls enabled, the response should contain tool call info.
+	if !strings.Contains(result.Response, "[tool_call]") {
+		t.Errorf("expected response to contain tool call info, got %q", result.Response)
+	}
+	if !strings.Contains(result.Response, "Analysis complete") {
+		t.Errorf("expected response to contain LLM answer, got %q", result.Response)
+	}
+}
+
+func TestShowToolCallsDisabledDoesNotPrepend(t *testing.T) {
+	llm := &fakeLLM{responses: []string{
+		`[tool_call]{"tool": "gitlab.analyze_code", "args": {"file": "main.go"}}[/tool_call]`,
+		"Analysis complete: looks good!",
+	}}
+	parser := &fakeParser{parseFn: func(s string) []ToolCall {
+		if strings.Contains(s, "tool_call") {
+			return []ToolCall{{ID: "1", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{"file": "main.go"}}}
+		}
+		return nil
+	}}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:        "gitlab",
+		Description: "GitLab",
+		Actions:     []Action{{Name: "analyze_code", Description: "Analyze code"}},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("test-session")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		ShowToolCalls: false,
+	})
+	result, err := orch.Run(context.Background(), "test-session", "analyze main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// With ShowToolCalls disabled, the response should NOT contain tool call info.
+	if strings.Contains(result.Response, "[tool_call]") {
+		t.Errorf("expected response without tool call info, got %q", result.Response)
+	}
+	if result.Response != "Analysis complete: looks good!" {
+		t.Errorf("Response = %q, want %q", result.Response, "Analysis complete: looks good!")
+	}
+}
+
 // --- Knowledge-Augmented RAG tests (issue #97) ---
 
 func TestPreparerRelevantToolsFilterSystemPrompt(t *testing.T) {

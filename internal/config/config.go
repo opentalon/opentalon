@@ -308,8 +308,9 @@ type OrchestratorConfig struct {
 	PermissionPlugin      string                       `yaml:"permission_plugin,omitempty"`       // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
 	MaxConcurrentSessions int                          `yaml:"max_concurrent_sessions,omitempty"` // max sessions running in parallel (default 1 = sequential)
 	Pipeline              PipelineOrchestratorConfig   `yaml:"pipeline,omitempty"`
-	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`  // knowledge-augmented RAG configuration
-	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"` // subprocess (sub-agent) support
+	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`       // knowledge-augmented RAG configuration
+	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`      // subprocess (sub-agent) support
+	ShowToolCalls         bool                         `yaml:"show_tool_calls,omitempty"` // when true, include tool call details in the response (useful for debugging)
 }
 
 // PipelineOrchestratorConfig enables structured multi-step pipeline execution.
