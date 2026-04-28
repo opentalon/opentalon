@@ -428,33 +428,45 @@ func (o *Orchestrator) runSTTPreparers(ctx context.Context, content string, file
 		return content, files
 	}
 
-	for _, prep := range o.preparers {
-		if !prep.STT {
-			continue
-		}
-		for _, af := range audioFiles {
+	for _, af := range audioFiles {
+		transcribed := false
+		for _, prep := range o.preparers {
+			if !prep.STT {
+				continue
+			}
 			transcript, err := o.runSTTPreparer(ctx, prep, af)
 			if err != nil {
 				slog.WarnContext(ctx, "stt transcription failed", "plugin", prep.Plugin, "action", prep.Action, "error", err)
 				if !prep.FailOpen {
 					return content, files // fail-closed: abort and return original
 				}
-				remaining = append(remaining, af) // fail_open: pass audio through unchanged
-				continue
+				continue // try next STT preparer
 			}
 			if content == "" {
 				content = transcript
 			} else {
 				content = transcript + "\n\n" + content
 			}
+			transcribed = true
+			break // file handled, don't try more preparers
+		}
+		if !transcribed {
+			remaining = append(remaining, af) // no preparer succeeded, pass through
 		}
 	}
 	return content, remaining
 }
 
+// maxSTTFileSize is the maximum audio file size accepted for STT transcription.
+// Larger files are rejected to avoid doubling peak memory during base64 encoding.
+const maxSTTFileSize = 25 << 20 // 25 MB
+
 // runSTTPreparer calls a single STT preparer plugin with a base64-encoded audio file.
 // It always returns an error on plugin failure so that runSTTPreparers can apply FailOpen logic.
 func (o *Orchestrator) runSTTPreparer(ctx context.Context, prep ContentPreparerEntry, f provider.MessageFile) (string, error) {
+	if len(f.Data) > maxSTTFileSize {
+		return "", fmt.Errorf("audio file too large for STT (%d bytes, max %d)", len(f.Data), maxSTTFileSize)
+	}
 	if !o.registry.HasAction(prep.Plugin, prep.Action) {
 		return "", fmt.Errorf("stt plugin %q action %q not found", prep.Plugin, prep.Action)
 	}

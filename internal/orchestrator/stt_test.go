@@ -207,6 +207,167 @@ func TestRunSTTPreparer_PassesBase64ArgsToPlugin(t *testing.T) {
 	}
 }
 
+func TestRunSTTPreparers_MultiplePreparers_FirstSucceeds(t *testing.T) {
+	// Two STT preparers, first succeeds — file should be transcribed once, not twice.
+	reg := NewToolRegistry()
+	exec1 := &sttExecutor{transcript: "hello from prep1"}
+	exec2 := &sttExecutor{transcript: "hello from prep2"}
+	_ = reg.Register(PluginCapability{
+		Name:    "stt1",
+		Actions: []Action{{Name: "transcribe", Description: "transcribe"}},
+	}, exec1)
+	_ = reg.Register(PluginCapability{
+		Name:    "stt2",
+		Actions: []Action{{Name: "transcribe", Description: "transcribe"}},
+	}, exec2)
+
+	mem := state.NewMemoryStore("")
+	sess := state.NewSessionStore("")
+	o := NewWithRules(
+		&fakeLLM{responses: []string{"done"}},
+		&fakeParser{parseFn: func(_ string) []ToolCall { return nil }},
+		reg, mem, sess,
+		OrchestratorOpts{ContentPreparers: []ContentPreparerEntry{
+			{Plugin: "stt1", Action: "transcribe", STT: true},
+			{Plugin: "stt2", Action: "transcribe", STT: true},
+		}},
+	)
+
+	af := audioFile("audio/webm", []byte("audio"))
+	content, files := o.runSTTPreparers(context.Background(), "", []provider.MessageFile{af})
+
+	if content != "hello from prep1" {
+		t.Errorf("content = %q, want single transcript from first preparer", content)
+	}
+	if len(files) != 0 {
+		t.Errorf("audio file should be consumed, got %d remaining", len(files))
+	}
+}
+
+func TestRunSTTPreparers_MultiplePreparers_FirstFailsOpen(t *testing.T) {
+	// First preparer fails (fail_open), second succeeds — file transcribed by second.
+	reg := NewToolRegistry()
+	exec1 := &sttExecutor{err: "fail"}
+	exec2 := &sttExecutor{transcript: "hello from prep2"}
+	_ = reg.Register(PluginCapability{
+		Name:    "stt1",
+		Actions: []Action{{Name: "transcribe", Description: "transcribe"}},
+	}, exec1)
+	_ = reg.Register(PluginCapability{
+		Name:    "stt2",
+		Actions: []Action{{Name: "transcribe", Description: "transcribe"}},
+	}, exec2)
+
+	mem := state.NewMemoryStore("")
+	sess := state.NewSessionStore("")
+	o := NewWithRules(
+		&fakeLLM{responses: []string{"done"}},
+		&fakeParser{parseFn: func(_ string) []ToolCall { return nil }},
+		reg, mem, sess,
+		OrchestratorOpts{ContentPreparers: []ContentPreparerEntry{
+			{Plugin: "stt1", Action: "transcribe", STT: true, FailOpen: true},
+			{Plugin: "stt2", Action: "transcribe", STT: true},
+		}},
+	)
+
+	af := audioFile("audio/webm", []byte("audio"))
+	content, files := o.runSTTPreparers(context.Background(), "", []provider.MessageFile{af})
+
+	if content != "hello from prep2" {
+		t.Errorf("content = %q, want transcript from second preparer", content)
+	}
+	if len(files) != 0 {
+		t.Errorf("audio file should be consumed, got %d remaining", len(files))
+	}
+}
+
+func TestRunSTTPreparers_AllPreparersFail_FilePassedThrough(t *testing.T) {
+	// Both preparers fail with fail_open — audio file should appear in remaining exactly once.
+	reg := NewToolRegistry()
+	exec1 := &sttExecutor{err: "fail1"}
+	exec2 := &sttExecutor{err: "fail2"}
+	_ = reg.Register(PluginCapability{
+		Name:    "stt1",
+		Actions: []Action{{Name: "transcribe", Description: "transcribe"}},
+	}, exec1)
+	_ = reg.Register(PluginCapability{
+		Name:    "stt2",
+		Actions: []Action{{Name: "transcribe", Description: "transcribe"}},
+	}, exec2)
+
+	mem := state.NewMemoryStore("")
+	sess := state.NewSessionStore("")
+	o := NewWithRules(
+		&fakeLLM{responses: []string{"done"}},
+		&fakeParser{parseFn: func(_ string) []ToolCall { return nil }},
+		reg, mem, sess,
+		OrchestratorOpts{ContentPreparers: []ContentPreparerEntry{
+			{Plugin: "stt1", Action: "transcribe", STT: true, FailOpen: true},
+			{Plugin: "stt2", Action: "transcribe", STT: true, FailOpen: true},
+		}},
+	)
+
+	af := audioFile("audio/webm", []byte("audio"))
+	content, files := o.runSTTPreparers(context.Background(), "original", []provider.MessageFile{af})
+
+	if content != "original" {
+		t.Errorf("content = %q, want original (all failed)", content)
+	}
+	if len(files) != 1 {
+		t.Errorf("audio file should appear exactly once in remaining, got %d", len(files))
+	}
+}
+
+func TestRunSTTPreparers_MultipleAudioFiles(t *testing.T) {
+	prep := ContentPreparerEntry{Plugin: "stt", Action: "transcribe", STT: true}
+	o := newSTTOrchestrator(&sttExecutor{transcript: "transcribed"}, prep)
+
+	af1 := audioFile("audio/webm", []byte("audio1"))
+	af2 := audioFile("audio/mp4", []byte("audio2"))
+	img := provider.MessageFile{MimeType: "image/png", Data: []byte{1}}
+	content, files := o.runSTTPreparers(context.Background(), "", []provider.MessageFile{af1, af2, img})
+
+	// Both audio files transcribed, each prepending "transcribed".
+	if !strings.Contains(content, "transcribed") {
+		t.Errorf("content should contain transcript, got %q", content)
+	}
+	// Only the image should remain.
+	if len(files) != 1 || files[0].MimeType != "image/png" {
+		t.Errorf("only non-audio files should remain, got %v", files)
+	}
+}
+
+func TestRunSTTPreparer_UnknownPlugin(t *testing.T) {
+	reg := NewToolRegistry()
+	mem := state.NewMemoryStore("")
+	sess := state.NewSessionStore("")
+	o := NewWithRules(
+		&fakeLLM{responses: []string{"done"}},
+		&fakeParser{parseFn: func(_ string) []ToolCall { return nil }},
+		reg, mem, sess, OrchestratorOpts{},
+	)
+
+	prep := ContentPreparerEntry{Plugin: "nonexistent", Action: "transcribe", STT: true}
+	_, err := o.runSTTPreparer(context.Background(), prep, audioFile("audio/webm", []byte("x")))
+	if err == nil {
+		t.Error("expected error for unknown plugin/action")
+	}
+}
+
+func TestRunSTTPreparer_FileTooLarge(t *testing.T) {
+	prep := ContentPreparerEntry{Plugin: "stt", Action: "transcribe", STT: true}
+	o := newSTTOrchestrator(&sttExecutor{transcript: "hello"}, prep)
+
+	largeData := make([]byte, maxSTTFileSize+1)
+	_, err := o.runSTTPreparer(context.Background(), prep, audioFile("audio/webm", largeData))
+	if err == nil {
+		t.Error("expected error for oversized audio file")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("error = %q, want 'too large' message", err)
+	}
+}
+
 type capturingArgsExecutor struct {
 	fn func(ToolCall) ToolResult
 }
