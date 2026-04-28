@@ -152,6 +152,59 @@ func TestStreamWriterWithUpdatableChannel(t *testing.T) {
 	}
 }
 
+func TestStreamWriterFinalUpdate(t *testing.T) {
+	ch := &fakeUpdatableChannel{
+		fakeChannel: fakeChannel{caps: Capabilities{ID: "test", Edits: true}},
+		captureID:   "msg-ts-456",
+	}
+	sw := NewStreamWriter(ch, "conv1", "", nil)
+	sw.SetFlushParams(0, 1)
+
+	ctx := context.Background()
+
+	// Simulate streaming with tool call blocks in the raw output.
+	sw.OnChunk(ctx, "[tool_call]{\"tool\":\"x.y\"}[/tool_call]", false)
+	sw.OnChunk(ctx, "The answer is 42.", true)
+
+	updatesBefore := ch.updateCount()
+
+	// FinalUpdate replaces the streamed content with the clean response.
+	err := sw.FinalUpdate(ctx, "The answer is 42.")
+	if err != nil {
+		t.Fatalf("FinalUpdate returned error: %v", err)
+	}
+	if ch.updateCount() != updatesBefore+1 {
+		t.Error("expected FinalUpdate to trigger a SendUpdate")
+	}
+	last := ch.updates[len(ch.updates)-1]
+	if last.Content != "The answer is 42." {
+		t.Errorf("FinalUpdate content = %q, want %q", last.Content, "The answer is 42.")
+	}
+}
+
+func TestStreamWriterFinalUpdateNoopWhenSame(t *testing.T) {
+	ch := &fakeUpdatableChannel{
+		fakeChannel: fakeChannel{caps: Capabilities{ID: "test", Edits: true}},
+		captureID:   "msg-ts-789",
+	}
+	sw := NewStreamWriter(ch, "conv1", "", nil)
+	sw.SetFlushParams(0, 1)
+
+	ctx := context.Background()
+
+	sw.OnChunk(ctx, "Hello", true)
+	updatesBefore := ch.updateCount()
+
+	// Content matches lastSent — should be a no-op.
+	err := sw.FinalUpdate(ctx, "Hello")
+	if err != nil {
+		t.Fatalf("FinalUpdate returned error: %v", err)
+	}
+	if ch.updateCount() != updatesBefore {
+		t.Error("expected FinalUpdate to be a no-op when content matches")
+	}
+}
+
 func TestStreamWriterCapturesMessageID(t *testing.T) {
 	ch := &fakeUpdatableChannel{
 		fakeChannel: fakeChannel{caps: Capabilities{ID: "test", Edits: true}},

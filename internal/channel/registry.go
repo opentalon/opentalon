@@ -201,10 +201,16 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 					return
 				}
 
-				// If streaming already delivered the content, skip the final
-				// Send to avoid duplicating the message. The StreamWriter's
-				// last flush (done=true) already sent the complete text.
+				// Streaming delivered content progressively, but the final
+				// handler response may differ (tool-call blocks stripped,
+				// Lua formatting applied). Update the streamed message
+				// with the clean response so users see the processed text.
 				if sw != nil && sw.Flushed() {
+					if resp.Content != sw.FullContent() {
+						if err := sw.FinalUpdate(ctx, resp.Content); err != nil {
+							logger.FromContext(ctx).Debug("stream final update failed", "channel", ch.ID(), "error", err)
+						}
+					}
 					return
 				}
 
