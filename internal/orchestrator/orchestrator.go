@@ -783,7 +783,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		log.Debug("planner running", "session", sessionID, "message", content)
 		rtTools, rtSet := relevantToolsFromContext(ctx)
 		plannerCaps := filterCapabilitiesByRelevantTools(o.registry.ListCapabilities(), rtTools, rtSet)
-		planResult, err := o.planner.Plan(ctx, content, capabilitiesToPlannerInfo(plannerCaps))
+		planResult, err := o.planner.Plan(ctx, stripKnowledgeContext(content), capabilitiesToPlannerInfo(plannerCaps))
 		if err != nil {
 			log.Warn("planner error, falling through to agent loop", "error", err)
 		} else {
@@ -2037,6 +2037,22 @@ func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.Completi
 }
 
 // capabilitiesToPlannerInfo converts orchestrator PluginCapability to pipeline CapabilityInfo.
+// stripKnowledgeContext removes [knowledge_context]...[/knowledge_context] blocks
+// from the message before passing it to the planner. The planner only needs the
+// user's request to decide direct vs pipeline — domain instructions waste tokens.
+func stripKnowledgeContext(s string) string {
+	const open, close = "[knowledge_context]", "[/knowledge_context]"
+	start := strings.Index(s, open)
+	if start < 0 {
+		return s
+	}
+	end := strings.Index(s, close)
+	if end < 0 {
+		return s
+	}
+	return strings.TrimSpace(s[:start] + s[end+len(close):])
+}
+
 func capabilitiesToPlannerInfo(caps []PluginCapability) []pipeline.CapabilityInfo {
 	result := make([]pipeline.CapabilityInfo, len(caps))
 	for i, cap := range caps {
