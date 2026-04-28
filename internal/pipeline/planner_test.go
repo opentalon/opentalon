@@ -154,7 +154,7 @@ func TestBuildPlannerPrompt(t *testing.T) {
 			},
 		},
 	}
-	prompt := buildPlannerPrompt(caps)
+	prompt := buildPlannerPrompt(caps, "")
 	if prompt == "" {
 		t.Error("expected non-empty prompt")
 	}
@@ -182,7 +182,7 @@ func TestBuildPlannerPromptMCPDotActions(t *testing.T) {
 			},
 		},
 	}
-	prompt := buildPlannerPrompt(caps)
+	prompt := buildPlannerPrompt(caps, "")
 
 	// The explicit format must appear so the LLM knows plugin="mcp", not "mcp.appsignal".
 	if !containsStr(prompt, "plugin=mcp | action=appsignal.get_applications") {
@@ -194,6 +194,24 @@ func TestBuildPlannerPromptMCPDotActions(t *testing.T) {
 	// The old ambiguous dot-joined form must not appear.
 	if containsStr(prompt, "mcp.appsignal.get_applications") {
 		t.Error("prompt must not contain ambiguous 'mcp.appsignal.get_applications'")
+	}
+}
+
+func TestBuildPlannerPromptWithLanguage(t *testing.T) {
+	caps := []CapabilityInfo{
+		{Name: "jira", Description: "Jira", Actions: []ActionInfo{
+			{Name: "create_issue", Description: "Create issue"},
+		}},
+	}
+	prompt := buildPlannerPrompt(caps, "English")
+	if !containsStr(prompt, "English") {
+		t.Error("prompt should contain language instruction for English")
+	}
+
+	// Without language, no language instruction should appear.
+	promptNoLang := buildPlannerPrompt(caps, "")
+	if containsStr(promptNoLang, "must be written in") {
+		t.Error("prompt without language should not contain language instruction")
 	}
 }
 

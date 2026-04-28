@@ -24,6 +24,7 @@ type Profile struct {
 	ChannelID   string                      // set by the handler; used for usage statistics
 	Model       string                      // optional model override returned by WhoAmI (e.g. "anthropic/claude-3-5-sonnet-20241022")
 	ChannelType string                      // optional channel type returned by WhoAmI (e.g. "slack", "web", "api")
+	Language    string                      // optional response language from WhoAmI (e.g. "German", "English")
 	Limit       int                         // token spend limit per LimitWindow (0 = unlimited)
 	LimitWindow time.Duration               // rolling window for Limit (0 = unlimited)
 	Credentials map[string]CredentialHeader // per-MCP-server credentials from WhoAmI, keyed by server name

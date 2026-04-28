@@ -411,6 +411,7 @@ func main() {
 			ChannelTypeHeader: cfg.Profiles.WhoAmI.ChannelTypeHeader,
 			LimitField:        cfg.Profiles.WhoAmI.LimitField,
 			LimitTimeField:    cfg.Profiles.WhoAmI.LimitTimeField,
+			LanguageField:     cfg.Profiles.WhoAmI.LanguageField,
 			ExtraHeaders:      cfg.Profiles.WhoAmI.ExtraHeaders,
 		}
 		if d, err := time.ParseDuration(cfg.Profiles.WhoAmI.Timeout); err == nil {

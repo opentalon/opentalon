@@ -497,6 +497,77 @@ func TestVerifier_CredentialHeaders_Malformed(t *testing.T) {
 	}
 }
 
+// TestVerifier_Language verifies that the language field from the WhoAmI
+// response is stored on the profile.
+func TestVerifier_Language(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"entity_id": "u1",
+			"group":     "g1",
+			"language":  "English",
+		})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
+	defer v.Close()
+
+	p, err := v.Verify(context.Background(), "tok", "")
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if p.Language != "English" {
+		t.Errorf("Language = %q, want English", p.Language)
+	}
+}
+
+// TestVerifier_Language_Missing verifies that an absent language field
+// results in an empty string (no language override).
+func TestVerifier_Language_Missing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"entity_id": "u1",
+			"group":     "g1",
+		})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
+	defer v.Close()
+
+	p, err := v.Verify(context.Background(), "tok", "")
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if p.Language != "" {
+		t.Errorf("Language = %q, want empty when not provided", p.Language)
+	}
+}
+
+// TestVerifier_Language_CustomField verifies that language_field can be
+// overridden to read from a different JSON key.
+func TestVerifier_Language_CustomField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"entity_id": "u1",
+			"group":     "g1",
+			"locale":    "English",
+		})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{URL: srv.URL, LanguageField: "locale"}, nil, nil)
+	defer v.Close()
+
+	p, err := v.Verify(context.Background(), "tok", "")
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if p.Language != "English" {
+		t.Errorf("Language = %q, want English", p.Language)
+	}
+}
+
 // stubGroupSaver records calls to UpsertGroupPlugins for test assertions.
 type stubGroupSaver struct {
 	saved map[string][]string

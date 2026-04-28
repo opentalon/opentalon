@@ -1286,6 +1286,11 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		sb.WriteString("\n")
 	}
 
+	if p := profile.FromContext(ctx); p != nil && p.Language != "" {
+		sb.WriteString("## Language\n")
+		fmt.Fprintf(&sb, "IMPORTANT: You MUST respond in %s. All your replies, explanations, and summaries must be written in %s.\n\n", p.Language, p.Language)
+	}
+
 	return sb.String()
 }
 

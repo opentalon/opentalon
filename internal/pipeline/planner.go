@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"github.com/opentalon/opentalon/internal/profile"
 )
 
 // LLMClient is the interface the planner uses for LLM calls, matching orchestrator.LLMClient.
@@ -84,7 +86,11 @@ type planStepJSON struct {
 
 // Plan asks the LLM whether the user's message requires a multi-step pipeline or a direct action.
 func (p *Planner) Plan(ctx context.Context, message string, capabilities []CapabilityInfo) (*PlanResult, error) {
-	systemPrompt := buildPlannerPrompt(capabilities)
+	lang := ""
+	if prof := profile.FromContext(ctx); prof != nil {
+		lang = prof.Language
+	}
+	systemPrompt := buildPlannerPrompt(capabilities, lang)
 	slog.Debug("planner system prompt", "prompt", systemPrompt)
 	slog.Debug("planner user message", "message", message)
 
@@ -103,7 +109,7 @@ func (p *Planner) Plan(ctx context.Context, message string, capabilities []Capab
 	return parsePlanResponse(resp.Content)
 }
 
-func buildPlannerPrompt(capabilities []CapabilityInfo) string {
+func buildPlannerPrompt(capabilities []CapabilityInfo, language string) string {
 	var sb strings.Builder
 	sb.WriteString(`You are a task planner. Given the user's request and available tools, decide:
 1. If this is a simple single-action request, return: {"type": "direct"}
@@ -125,6 +131,9 @@ Available tools:
 				fmt.Fprintf(&sb, "  - %s: %s%s\n", param.Name, param.Description, req)
 			}
 		}
+	}
+	if language != "" {
+		fmt.Fprintf(&sb, "\nThe step names and descriptions must be written in %s.\n", language)
 	}
 	sb.WriteString("\nRespond ONLY with valid JSON, no other text.")
 	return sb.String()
