@@ -185,6 +185,30 @@ func (sw *StreamWriter) flush(ctx context.Context) {
 	}
 }
 
+// FinalUpdate replaces the streamed message content with the final processed
+// response. Called by the registry after the handler returns, so the user sees
+// the clean formatted text (tool-call blocks stripped, Lua formatting applied)
+// instead of the raw accumulated stream.
+func (sw *StreamWriter) FinalUpdate(ctx context.Context, content string) error {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	if !sw.flushed || content == sw.lastSent {
+		return nil
+	}
+	msg := OutboundMessage{
+		ConversationID: sw.convID,
+		ThreadID:       sw.threadID,
+		Content:        content,
+		Metadata:       sw.cloneMetadata(),
+	}
+	if sw.messageID != "" {
+		if uch, ok := sw.ch.(UpdatableChannel); ok {
+			return uch.SendUpdate(ctx, sw.messageID, msg)
+		}
+	}
+	return sw.ch.Send(ctx, msg)
+}
+
 func (sw *StreamWriter) cloneMetadata() map[string]string {
 	if len(sw.metadata) == 0 {
 		return nil
