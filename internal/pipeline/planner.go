@@ -35,9 +35,10 @@ type Message struct {
 
 // CapabilityInfo describes a plugin's capabilities for the planner prompt.
 type CapabilityInfo struct {
-	Name        string
-	Description string
-	Actions     []ActionInfo
+	Name                 string
+	Description          string
+	Actions              []ActionInfo
+	SystemPromptAddition string
 }
 
 // ActionInfo describes a single action.
@@ -123,6 +124,12 @@ func buildPlannerPrompt(capabilities []CapabilityInfo, language string) string {
 	var sb strings.Builder
 	sb.WriteString(prompts.PlannerPreamble)
 	for _, cap := range capabilities {
+		// Server instructions first — domain context the planner needs
+		// before reading tool definitions.
+		if cap.SystemPromptAddition != "" {
+			sb.WriteString(cap.SystemPromptAddition)
+			sb.WriteString("\n")
+		}
 		for _, action := range cap.Actions {
 			desc := truncatePlannerDescription(action.Description, 200)
 			fmt.Fprintf(&sb, "- plugin=%s | action=%s: %s\n", cap.Name, action.Name, desc)
