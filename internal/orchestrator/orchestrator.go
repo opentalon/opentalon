@@ -897,6 +897,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		log.Debug("LLM request", "round", i+1, "messages", len(guardedMessages))
 		for j, m := range guardedMessages {
 			preview := m.Content
+			if m.Role == provider.RoleSystem {
+				if i == 0 {
+					// First round: log full system prompt so we can verify contents.
+					log.Debug("LLM request message", "index", j+1, "role", m.Role, "content", preview)
+				} else {
+					// Subsequent rounds: system prompt is the same, just log length.
+					log.Debug("LLM request message", "index", j+1, "role", m.Role, "len", len(preview))
+				}
+				continue
+			}
 			if len(preview) > 2000 {
 				preview = preview[:2000] + "... [truncated]"
 			}
