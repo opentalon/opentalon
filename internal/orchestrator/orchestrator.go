@@ -724,7 +724,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			decision = pipeline.ParseConfirmation(userMessage)
 		}
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
-		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: stripKnowledgeContext(userMessage)})
+		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 		if decision == pipeline.Approved {
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
 			res, err := o.executePipeline(ctx, sessionID, p)
@@ -801,7 +801,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			} else {
 				planText = narrated
 			}
-			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: stripKnowledgeContext(content)})
+			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
 			return &RunResult{Response: planText}, nil
@@ -822,13 +822,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		content = "[The user sent a file attachment.]"
 	}
 
-	// Strip [knowledge_context] before persisting to session. The preparer
-	// re-injects it fresh each turn, so storing it would duplicate it across
-	// all historical messages — wasting tokens on every subsequent request.
-	sessionContent := stripKnowledgeContext(content)
 	if err := o.sessions.AddMessage(sessionID, provider.Message{
 		Role:    provider.RoleUser,
-		Content: sessionContent,
+		Content: content,
 		Files:   files,
 	}); err != nil {
 		return nil, fmt.Errorf("adding user message: %w", err)
@@ -1188,7 +1184,12 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 			Content: "Previous conversation summary: " + sess.Summary,
 		})
 	}
-	messages = append(messages, sess.Messages...)
+	// Strip [knowledge_context] from historical messages to avoid duplicating
+	// MCP instructions across every turn. The current turn (last user message)
+	// keeps its knowledge_context since it contains per-query knowledge articles.
+	// The MCP server instructions in older turns are already in the system prompt
+	// via SystemPromptAddition.
+	messages = appendStrippingHistoricalKC(messages, sess.Messages)
 
 	// For weaker / OSS models that tend to ignore system-prompt formatting
 	// instructions, repeat the channel format hint as a trailing system
@@ -2050,9 +2051,33 @@ func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.Completi
 }
 
 // capabilitiesToPlannerInfo converts orchestrator PluginCapability to pipeline CapabilityInfo.
+// appendStrippingHistoricalKC appends session messages to dst, stripping
+// [knowledge_context] blocks from all user messages except the last one
+// (the current turn). This prevents N copies of MCP instructions from
+// accumulating in the LLM request as the conversation grows.
+func appendStrippingHistoricalKC(dst []provider.Message, msgs []provider.Message) []provider.Message {
+	// Find the last user message index.
+	lastUserIdx := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == provider.RoleUser {
+			lastUserIdx = i
+			break
+		}
+	}
+	for i, m := range msgs {
+		if m.Role == provider.RoleUser && i != lastUserIdx {
+			stripped := stripKnowledgeContext(m.Content)
+			if stripped != m.Content {
+				m = provider.Message{Role: m.Role, Content: stripped, Files: m.Files}
+			}
+		}
+		dst = append(dst, m)
+	}
+	return dst
+}
+
 // stripKnowledgeContext removes [knowledge_context]...[/knowledge_context] blocks
-// from a message. Used before persisting user messages to session history (the
-// preparer re-injects context each turn) and before passing to the planner.
+// from a message. Used to strip historical knowledge context and planner input.
 func stripKnowledgeContext(s string) string {
 	const open, close = "[knowledge_context]", "[/knowledge_context]"
 	start := strings.Index(s, open)
