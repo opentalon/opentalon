@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/profile"
 )
@@ -84,6 +85,11 @@ type planStepJSON struct {
 	DependsOn []string          `json:"depends_on"`
 }
 
+// PlanTimeout is the maximum time the planner waits for an LLM response.
+// The planner is a lightweight classifier (direct vs pipeline); if it takes
+// longer than this the agent loop handles the request instead.
+const PlanTimeout = 15 * time.Second
+
 // Plan asks the LLM whether the user's message requires a multi-step pipeline or a direct action.
 func (p *Planner) Plan(ctx context.Context, message string, capabilities []CapabilityInfo) (*PlanResult, error) {
 	lang := ""
@@ -94,7 +100,10 @@ func (p *Planner) Plan(ctx context.Context, message string, capabilities []Capab
 	slog.Debug("planner system prompt", "prompt", systemPrompt)
 	slog.Debug("planner user message", "message", message)
 
-	resp, err := p.llm.Complete(ctx, &CompletionRequest{
+	planCtx, cancel := context.WithTimeout(ctx, PlanTimeout)
+	defer cancel()
+
+	resp, err := p.llm.Complete(planCtx, &CompletionRequest{
 		Messages: []Message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: message},
