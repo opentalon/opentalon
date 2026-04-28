@@ -3,6 +3,7 @@ package lua
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -231,5 +232,106 @@ end
 	}
 	if result != "keep me" {
 		t.Errorf("expected no-op for empty format, got %q", result)
+	}
+}
+
+// formatResponseScriptPath returns the path to the bundled format-response.lua script.
+func formatResponseScriptPath(t *testing.T) string {
+	t.Helper()
+	// Resolve relative to this test file's package: internal/lua -> ../../scripts
+	path := filepath.Join("..", "..", "scripts", "format-response.lua")
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("resolve format-response.lua path: %v", err)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		t.Skipf("format-response.lua not found at %s, skipping", abs)
+	}
+	return abs
+}
+
+func TestFormatResponseSlackToolDebug(t *testing.T) {
+	path := formatResponseScriptPath(t)
+
+	input := "[tool_call] timly.list-containers(page=1, per_page=1)\n[tool_result] {\"total\": 7}\n\n---\n\nYou have **7** containers."
+	result, err := RunFormat(path, input, "slack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Debug section should use Slack blockquote format
+	if !strings.Contains(result, "> :wrench:") {
+		t.Errorf("expected Slack wrench emoji in blockquote, got:\n%s", result)
+	}
+	if !strings.Contains(result, "`timly.list-containers(page=1, per_page=1)`") {
+		t.Errorf("expected tool call in code block, got:\n%s", result)
+	}
+	// Response should be Slack-formatted (bold: *text* not **text**)
+	if !strings.Contains(result, "*7*") {
+		t.Errorf("expected Slack bold formatting, got:\n%s", result)
+	}
+	// Should not contain raw [tool_call] tags
+	if strings.Contains(result, "[tool_call]") {
+		t.Errorf("raw [tool_call] tag should be removed, got:\n%s", result)
+	}
+}
+
+func TestFormatResponseSlackToolDebugError(t *testing.T) {
+	path := formatResponseScriptPath(t)
+
+	input := "[tool_call] jira.get-issue(id=123)\n[tool_result] error: not found\n\n---\n\nI could not find that issue."
+	result, err := RunFormat(path, input, "slack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "> :x:") {
+		t.Errorf("expected error indicator in debug, got:\n%s", result)
+	}
+}
+
+func TestFormatResponseMarkdownToolDebug(t *testing.T) {
+	path := formatResponseScriptPath(t)
+
+	input := "[tool_call] timly.list-containers(page=1)\n[tool_result] {\"total\": 7}\n\n---\n\nYou have **7** containers."
+	result, err := RunFormat(path, input, "markdown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "> **Tool:**") {
+		t.Errorf("expected markdown blockquote with bold, got:\n%s", result)
+	}
+	// Response body should pass through unchanged for markdown
+	if !strings.Contains(result, "**7**") {
+		t.Errorf("expected markdown bold preserved, got:\n%s", result)
+	}
+}
+
+func TestFormatResponseHTMLToolDebug(t *testing.T) {
+	path := formatResponseScriptPath(t)
+
+	input := "[tool_call] timly.list-containers(page=1)\n[tool_result] ok\n\n---\n\nDone."
+	result, err := RunFormat(path, input, "html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "<blockquote>") {
+		t.Errorf("expected HTML blockquote, got:\n%s", result)
+	}
+	if !strings.Contains(result, "<code>timly.list-containers(page=1)</code>") {
+		t.Errorf("expected HTML code tag, got:\n%s", result)
+	}
+}
+
+func TestFormatResponseNoDebugUnchanged(t *testing.T) {
+	path := formatResponseScriptPath(t)
+
+	// Normal response without tool debug blocks
+	input := "You have **7** containers."
+	result, err := RunFormat(path, input, "slack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should just do normal Slack formatting
+	if !strings.Contains(result, "*7*") {
+		t.Errorf("expected normal Slack formatting, got:\n%s", result)
 	}
 }

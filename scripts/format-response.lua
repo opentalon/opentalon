@@ -197,6 +197,133 @@ local function format_telegram(s)
   return format_html(s)
 end
 
+-- Format [tool_call] and [tool_result] debug blocks that appear when
+-- orchestrator.show_tool_calls is enabled. Returns (formatted_debug, rest)
+-- where rest is the response body after the "---" separator.
+-- If no debug blocks are found, returns (nil, text).
+local function split_tool_debug(text)
+  -- The orchestrator prepends: tool_call/result lines + "\n\n---\n\n" + response
+  local sep = text:find("\n\n%-%-%-%s*\n\n")
+  if not sep then return nil, text end
+
+  local debug_part = text:sub(1, sep - 1)
+  local rest = text:sub(text:find("\n", sep + 3) or sep + 5)
+  rest = rest:gsub("^%s+", "")
+
+  -- Only treat as debug if it actually contains [tool_call] lines
+  if not debug_part:find("%[tool_call%]") then
+    return nil, text
+  end
+  return debug_part, rest
+end
+
+local function format_tool_debug_slack(debug_part)
+  local lines = {}
+  for line in debug_part:gmatch("[^\n]+") do
+    -- [tool_call] plugin.action(args) -> blockquote with code
+    local tool = line:match("^%[tool_call%]%s*(.+)$")
+    if tool then
+      table.insert(lines, "> :wrench:  `" .. tool .. "`")
+    else
+      -- [tool_result] content or [tool_result] error: msg
+      local err = line:match("^%[tool_result%] error:%s*(.+)$")
+      if err then
+        table.insert(lines, "> :x:  " .. err)
+      else
+        local result = line:match("^%[tool_result%]%s*(.+)$")
+        if result then
+          -- Truncate long results for readability
+          if #result > 200 then
+            result = result:sub(1, 200) .. "..."
+          end
+          table.insert(lines, "> :white_check_mark:  `" .. result .. "`")
+        else
+          table.insert(lines, "> " .. line)
+        end
+      end
+    end
+  end
+  return table.concat(lines, "\n")
+end
+
+local function format_tool_debug_html(debug_part)
+  local lines = {}
+  for line in debug_part:gmatch("[^\n]+") do
+    local tool = line:match("^%[tool_call%]%s*(.+)$")
+    if tool then
+      table.insert(lines, "<b>Tool:</b> <code>" .. tool .. "</code>")
+    else
+      local err = line:match("^%[tool_result%] error:%s*(.+)$")
+      if err then
+        table.insert(lines, "<b>Error:</b> " .. err)
+      else
+        local result = line:match("^%[tool_result%]%s*(.+)$")
+        if result then
+          if #result > 200 then
+            result = result:sub(1, 200) .. "..."
+          end
+          table.insert(lines, "<b>Result:</b> <code>" .. result .. "</code>")
+        else
+          table.insert(lines, line)
+        end
+      end
+    end
+  end
+  return "<blockquote>" .. table.concat(lines, "\n") .. "</blockquote>"
+end
+
+local function format_tool_debug_text(debug_part)
+  local lines = {}
+  for line in debug_part:gmatch("[^\n]+") do
+    local tool = line:match("^%[tool_call%]%s*(.+)$")
+    if tool then
+      table.insert(lines, "  Tool: " .. tool)
+    else
+      local err = line:match("^%[tool_result%] error:%s*(.+)$")
+      if err then
+        table.insert(lines, "  Error: " .. err)
+      else
+        local result = line:match("^%[tool_result%]%s*(.+)$")
+        if result then
+          if #result > 200 then
+            result = result:sub(1, 200) .. "..."
+          end
+          table.insert(lines, "  Result: " .. result)
+        else
+          table.insert(lines, "  " .. line)
+        end
+      end
+    end
+  end
+  return table.concat(lines, "\n")
+end
+
+local function format_tool_debug_markdown(debug_part)
+  local lines = {}
+  for line in debug_part:gmatch("[^\n]+") do
+    local tool = line:match("^%[tool_call%]%s*(.+)$")
+    if tool then
+      table.insert(lines, "> **Tool:** `" .. tool .. "`")
+    else
+      local err = line:match("^%[tool_result%] error:%s*(.+)$")
+      if err then
+        table.insert(lines, "> **Error:** " .. err)
+      else
+        local result = line:match("^%[tool_result%]%s*(.+)$")
+        if result then
+          if #result > 200 then
+            result = result:sub(1, 200) .. "..."
+          end
+          table.insert(lines, "> **Result:** `" .. result .. "`")
+        else
+          table.insert(lines, "> " .. line)
+        end
+      end
+    end
+  end
+  return table.concat(lines, "\n")
+end
+
 -- Main entry point called by OpenTalon's response formatter pipeline.
 -- text: the LLM response
 -- response_format: channel format string ("slack", "teams", "text", etc.)
@@ -205,19 +332,22 @@ function format(text, response_format)
     return text
   end
 
+  -- Split off debug tool_call blocks (from show_tool_calls) before formatting.
+  local debug_part, rest = split_tool_debug(text)
+
+  local formatted
   if response_format == "slack" then
-    return apply_transform(text, format_slack)
+    formatted = apply_transform(rest, format_slack)
   elseif response_format == "teams" then
-    return apply_transform(text, format_teams)
+    formatted = apply_transform(rest, format_teams)
   elseif response_format == "whatsapp" then
-    return apply_transform(text, format_whatsapp)
+    formatted = apply_transform(rest, format_whatsapp)
   elseif response_format == "text" then
     -- For plain text, also strip code delimiters from protected segments
-    local segments = split_segments(text)
+    local segments = split_segments(rest)
     local parts = {}
     for _, seg in ipairs(segments) do
       if seg.protected then
-        -- Strip fences and backticks but keep content
         local inner = seg.text
         inner = inner:gsub("^```[^\n]*\n?", "")
         inner = inner:gsub("\n?```$", "")
@@ -228,13 +358,33 @@ function format(text, response_format)
         table.insert(parts, format_text(seg.text))
       end
     end
-    return table.concat(parts)
+    formatted = table.concat(parts)
   elseif response_format == "html" then
-    return apply_transform(text, format_html)
+    formatted = apply_transform(rest, format_html)
   elseif response_format == "telegram" then
-    return apply_transform(text, format_telegram)
+    formatted = apply_transform(rest, format_telegram)
   else
-    -- markdown, discord, empty: no-op
-    return text
+    -- markdown, discord, empty: no-op on response body
+    formatted = rest
   end
+
+  -- If no debug blocks, return the formatted response as-is.
+  if not debug_part then
+    return formatted
+  end
+
+  -- Format the debug blocks for the target channel.
+  local debug_formatted
+  if response_format == "slack" then
+    debug_formatted = format_tool_debug_slack(debug_part)
+  elseif response_format == "html" or response_format == "telegram" then
+    debug_formatted = format_tool_debug_html(debug_part)
+  elseif response_format == "text" then
+    debug_formatted = format_tool_debug_text(debug_part)
+  else
+    -- markdown, discord, teams, whatsapp: use markdown blockquotes
+    debug_formatted = format_tool_debug_markdown(debug_part)
+  end
+
+  return debug_formatted .. "\n\n" .. formatted
 end
