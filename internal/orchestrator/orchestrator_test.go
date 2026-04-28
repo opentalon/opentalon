@@ -146,9 +146,13 @@ func TestStripRetryBackoffDelay(t *testing.T) {
 	}
 }
 
-func TestStripRetryCapAtOne(t *testing.T) {
-	// Both responses are unparseable — second retry must not happen; result is "(no response)".
-	llm := &fakeLLM{responses: []string{unparseableToolBlock, unparseableToolBlock}}
+func TestStripRetryCapAtFive(t *testing.T) {
+	// All 6 responses are unparseable — after 5 retries give up with "(no response)".
+	responses := make([]string, 6)
+	for i := range responses {
+		responses[i] = unparseableToolBlock
+	}
+	llm := &fakeLLM{responses: responses}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 
 	orch, sessID := setupOrchestrator(llm, parser)
@@ -159,8 +163,8 @@ func TestStripRetryCapAtOne(t *testing.T) {
 	if result.Response != "(no response)" {
 		t.Errorf("Response = %q, want %q", result.Response, "(no response)")
 	}
-	if llm.callCount != 2 {
-		t.Errorf("expected 2 LLM calls, got %d", llm.callCount)
+	if llm.callCount != 6 {
+		t.Errorf("expected 6 LLM calls (1 + 5 retries), got %d", llm.callCount)
 	}
 }
 

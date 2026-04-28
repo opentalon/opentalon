@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -123,6 +124,12 @@ func (defaultParser) Parse(response string) []ToolCall {
 		// instead of [tool_call]. Parse it rather than rejecting it.
 		if xmlCalls := parseXMLFunctionCalls(response); len(xmlCalls) > 0 {
 			return xmlCalls
+		}
+		// Fallback: detect narrated tool calls in plain text.
+		// Weak LLMs sometimes say "We need to call timly__list-items" instead
+		// of using [tool_call] format. Flag this so the orchestrator can retry.
+		if hasNarratedToolCall(response) {
+			return narratedToolCallPlaceholder
 		}
 		// We found [tool_call] blocks (or Claude's native XML variants) but
 		// none parsed — return a placeholder so executeCall sends the
@@ -400,6 +407,27 @@ func parseXMLParameters(body string) map[string]string {
 		rest = rest[closeIdx+len(closeTag):]
 	}
 	return args
+}
+
+// narratedToolRe matches tool names in plain text narration from weak LLMs.
+// Captures patterns like "call timly.timly__list-items" or "use timly__list-container-types".
+var narratedToolRe = regexp.MustCompile(`(?i)(?:call|use|invoke|execute|run)\s+` + "`?" + `([a-zA-Z0-9_.-]+(?:\.[a-zA-Z0-9_.-]+|__[a-zA-Z0-9_-]+))` + "`?")
+
+// narratedToolCallPlaceholder is returned when the LLM narrated a tool call
+// instead of using [tool_call] format. The orchestrator detects this via
+// IsNarratedPlaceholder and retries with "?" to nudge the LLM into acting.
+var narratedToolCallPlaceholder = []ToolCall{{
+	ID: "narrated", Plugin: "", Action: "", Args: map[string]string{"__narrated": "true"},
+}}
+
+// IsNarratedPlaceholder returns true if calls came from a narrated tool call detection.
+func IsNarratedPlaceholder(calls []ToolCall) bool {
+	return len(calls) == 1 && calls[0].ID == "narrated" && calls[0].Args["__narrated"] == "true"
+}
+
+// hasNarratedToolCall returns true if the response contains narrated tool calls.
+func hasNarratedToolCall(response string) bool {
+	return narratedToolRe.MatchString(response)
 }
 
 // containsInternalBlock returns true if s contains any internal protocol

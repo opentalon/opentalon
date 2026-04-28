@@ -934,14 +934,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		calls := o.parser.Parse(resp.Content)
 		if calls == nil {
 			stripped := StripInternalBlocks(resp.Content)
-			if stripped == "" && resp.Content != "" {
-				// The LLM produced only unparseable tool call blocks — nothing to send
-				// to the user. Ask it to retry in plain language, but cap at one such
-				// retry to avoid burning the whole agent-loop budget. The correction
-				// messages are kept transient (not persisted to the session) so they
-				// don't pollute future summaries or replays.
-				if stripRetries >= 1 {
-					log.Debug("LLM repeatedly produced only unparseable tool calls, giving up on strip-retry", "round", i+1)
+			if stripped == "" {
+				// Empty response — either the LLM returned nothing, or its output
+				// was entirely unparseable tool call blocks that got stripped.
+				// Retry once asking for a plain-language answer.
+				if stripRetries >= 5 {
+					log.Debug("LLM repeatedly produced empty/unparseable response, giving up", "round", i+1)
 					result.Response = "(no response)"
 					_ = o.sessions.AddMessage(sessionID, provider.Message{
 						Role:    provider.RoleAssistant,
@@ -951,11 +949,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					return result, nil
 				}
 				stripRetries++
-				transientMessages = []provider.Message{
-					{Role: provider.RoleAssistant, Content: resp.Content},
-					{Role: provider.RoleUser, Content: "[system] Your previous response contained tool call blocks that could not be executed. Please respond to the user in natural language without tool calls."},
+				retryHint := "[system] Your previous response was empty or contained only unparseable tool call blocks. Please respond to the user in natural language. If you need to call a tool, use the [tool_call] format shown in your instructions."
+				if resp.Content != "" {
+					transientMessages = []provider.Message{
+						{Role: provider.RoleAssistant, Content: resp.Content},
+						{Role: provider.RoleUser, Content: retryHint},
+					}
+				} else {
+					transientMessages = []provider.Message{
+						{Role: provider.RoleUser, Content: retryHint},
+					}
 				}
-				log.Debug("LLM produced only unparseable tool calls, retrying for plain response", "round", i+1)
+				log.Debug("LLM produced empty/unparseable response, retrying", "round", i+1, "had_content", resp.Content != "")
 				select {
 				case <-ctx.Done():
 					return nil, ctx.Err()
@@ -992,6 +997,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				return nil, fmtErr
 			}
 			return result, nil
+		}
+
+		// The LLM narrated a tool call ("We need to call timly__list-items")
+		// instead of using [tool_call] format. Retry with "?" to nudge it.
+		if IsNarratedPlaceholder(calls) {
+			log.Debug("narrated tool call detected, retrying with nudge", "round", i+1)
+			transientMessages = []provider.Message{
+				{Role: provider.RoleAssistant, Content: resp.Content},
+				{Role: provider.RoleUser, Content: "?"},
+			}
+			continue
 		}
 
 		// Detect repeated identical tool calls — the LLM is stuck in a loop.
@@ -1806,9 +1822,17 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		}
 	}
 	if !o.registry.HasAction(call.Plugin, call.Action) {
-		return ToolResult{
-			CallID: call.ID,
-			Error:  fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin),
+		// LLMs often drop the plugin prefix from double-underscore action names,
+		// emitting "timly__list-items" which parseToolName splits into
+		// plugin="timly" action="list-items". Try plugin__action as fallback.
+		prefixed := call.Plugin + "__" + call.Action
+		if o.registry.HasAction(call.Plugin, prefixed) {
+			call.Action = prefixed
+		} else {
+			return ToolResult{
+				CallID: call.ID,
+				Error:  fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin),
+			}
 		}
 	}
 

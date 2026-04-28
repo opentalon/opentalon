@@ -524,3 +524,25 @@ func TestParseXMLFunctionCalls_NoArgs(t *testing.T) {
 		t.Errorf("action = %q", calls[0].Action)
 	}
 }
+
+func TestParseNarratedToolCall(t *testing.T) {
+	// Narrated tool calls return a placeholder — the orchestrator retries with "?".
+	matches := []string{
+		"We need to call timly.timly__list-container-types.",
+		"I'll call timly__list-items to check.",
+		"Let me use timly.timly__show-person to look that up.",
+		"We should call `timly.timly__list-items`.",
+		"Call timly.timly__list-items and also call timly.timly__list-persons.",
+	}
+	for _, input := range matches {
+		calls := DefaultParser.Parse(input)
+		if !IsNarratedPlaceholder(calls) {
+			t.Errorf("expected narrated placeholder for %q, got %v", input, calls)
+		}
+	}
+	// No match — should return nil.
+	calls := DefaultParser.Parse("Here are your results.")
+	if calls != nil {
+		t.Errorf("expected nil for non-narrated text, got %v", calls)
+	}
+}
