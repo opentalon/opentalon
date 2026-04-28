@@ -2208,34 +2208,64 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 	if len(entries) == 0 && cap.SystemPromptAddition == "" {
 		return nil
 	}
-	payload := syncActionsPayload{
-		PluginName:         cap.Name,
-		Actions:            entries,
-		ServerInstructions: cap.SystemPromptAddition,
-		KeepPlugins:        keepPlugins,
-	}
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
-	call := ToolCall{
-		ID:     fmt.Sprintf("sync-%s", cap.Name),
-		Plugin: o.syncActionsPlugin,
-		Action: o.syncActionsAction,
-		Args:   map[string]string{"payload": string(b)},
-	}
+
 	exec, ok := o.registry.GetExecutor(o.syncActionsPlugin)
 	if !ok {
 		return fmt.Errorf("executor disappeared")
 	}
-	// Use a longer timeout for sync_actions: the payload can be large when a
-	// plugin has many actions and the vector store needs time to upsert them.
-	result := o.guard.ExecuteWithDeadline(ctx, exec, call, 2*time.Minute)
-	if result.Error != "" {
-		return fmt.Errorf("%s", result.Error)
+
+	// Batch actions into chunks to avoid oversized payloads that time out
+	// on the vector store side. Instructions and keep_plugins go on the
+	// first batch only; subsequent batches are pure action upserts.
+	const batchSize = 10
+	batches := chunkActions(entries, batchSize)
+	if len(batches) == 0 {
+		// No actions but we have server instructions — send a single empty batch.
+		batches = [][]syncActionEntry{{}}
 	}
-	slog.Info("sync_actions done", "component", "orchestrator", "plugin", cap.Name, "actions", len(entries))
+
+	for i, batch := range batches {
+		payload := syncActionsPayload{
+			PluginName: cap.Name,
+			Actions:    batch,
+		}
+		if i == 0 {
+			payload.ServerInstructions = cap.SystemPromptAddition
+			payload.KeepPlugins = keepPlugins
+		}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal batch %d: %w", i, err)
+		}
+		call := ToolCall{
+			ID:     fmt.Sprintf("sync-%s-%d", cap.Name, i),
+			Plugin: o.syncActionsPlugin,
+			Action: o.syncActionsAction,
+			Args:   map[string]string{"payload": string(b)},
+		}
+		result := o.guard.ExecuteWithDeadline(ctx, exec, call, 2*time.Minute)
+		if result.Error != "" {
+			return fmt.Errorf("batch %d/%d: %s", i+1, len(batches), result.Error)
+		}
+	}
+	slog.Info("sync_actions done", "component", "orchestrator", "plugin", cap.Name, "actions", len(entries), "batches", len(batches))
 	return nil
+}
+
+// chunkActions splits a slice of syncActionEntry into batches of at most size n.
+func chunkActions(entries []syncActionEntry, n int) [][]syncActionEntry {
+	if n <= 0 {
+		return [][]syncActionEntry{entries}
+	}
+	var batches [][]syncActionEntry
+	for i := 0; i < len(entries); i += n {
+		end := i + n
+		if end > len(entries) {
+			end = len(entries)
+		}
+		batches = append(batches, entries[i:end])
+	}
+	return batches
 }
 
 // IngestKnowledgeDir recursively scans the configured knowledge directory for .md
