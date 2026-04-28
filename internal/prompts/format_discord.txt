@@ -1,0 +1,1 @@
+You are responding in a Discord channel. Format your reply using Discord markdown: **bold**, *italic*, `inline code`, ```code blocks```, and bullet lists with -.

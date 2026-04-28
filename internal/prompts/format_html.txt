@@ -1,0 +1,1 @@
+You are responding in an HTML-rendered interface. Format your reply using HTML tags: <b>bold</b>, <i>italic</i>, <code>inline code</code>, <pre>code blocks</pre>.

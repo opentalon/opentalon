@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/prompts"
 )
 
 // LLMClient is the interface the planner uses for LLM calls, matching orchestrator.LLMClient.
@@ -120,15 +121,7 @@ func (p *Planner) Plan(ctx context.Context, message string, capabilities []Capab
 
 func buildPlannerPrompt(capabilities []CapabilityInfo, language string) string {
 	var sb strings.Builder
-	sb.WriteString(`You are a task planner. Given the user's request and available tools, decide:
-1. If this is a simple single-action request, return: {"type": "direct"}
-2. If this requires multiple steps, return: {"type": "pipeline", "steps": [...]}
-
-Each step must have: {"id": "<unique>", "name": "<human description>", "plugin": "<plugin>", "action": "<action>", "args": {}, "depends_on": []}
-The "plugin" field must be the exact plugin name shown below (the part before the "|"). The "action" field must be the exact action name shown below (the part after "action=").
-
-Available tools:
-`)
+	sb.WriteString(prompts.PlannerPreamble)
 	for _, cap := range capabilities {
 		for _, action := range cap.Actions {
 			desc := truncatePlannerDescription(action.Description, 200)
@@ -145,7 +138,8 @@ Available tools:
 	if language != "" {
 		fmt.Fprintf(&sb, "\nThe step names and descriptions must be written in %s.\n", language)
 	}
-	sb.WriteString("\nRespond ONLY with valid JSON, no other text.")
+	sb.WriteString("\n")
+	sb.WriteString(prompts.PlannerSuffix)
 	return sb.String()
 }
 
@@ -247,7 +241,7 @@ func (p *Planner) NarratePlan(ctx context.Context, steps []*Step) (string, error
 		}
 		sb.WriteString("\n")
 	}
-	systemContent := "You are a helpful assistant. Describe the following multi-step plan to the user in 2-3 natural sentences. Name each step clearly without exposing technical details like plugin or action names. End with a short question asking if they want to proceed."
+	systemContent := prompts.PlannerNarrate
 	if lang != "" {
 		systemContent += fmt.Sprintf(" Respond in %s.", lang)
 	}

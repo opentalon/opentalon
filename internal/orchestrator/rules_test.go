@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
@@ -100,7 +101,7 @@ func TestBuildPromptSectionFormat(t *testing.T) {
 	if !strings.Contains(prompt, "You MUST follow ALL") {
 		t.Error("prompt should contain enforcement language")
 	}
-	for _, r := range defaultRules {
+	for _, r := range prompts.DefaultRules {
 		if !strings.Contains(prompt, r) {
 			t.Errorf("prompt missing rule: %s", r[:40])
 		}

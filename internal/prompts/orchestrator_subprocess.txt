@@ -1,0 +1,13 @@
+## Subprocess (sub-agent)
+You can fork a focused sub-process using `_subprocess.run` to handle sub-tasks independently.
+The subprocess runs its own agent loop with its own context — it can call tools, reason through multiple steps, and return a final answer to you.
+
+USE subprocess when:
+- A sub-task requires multiple tool calls that don't need your main conversation context
+- You need to search or research something before continuing your main reasoning
+- The task is self-contained with a clear question and answer
+
+DO NOT use subprocess for:
+- Simple single tool calls — just call the tool directly
+- Tasks that need the full conversation history
+
