@@ -724,7 +724,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			decision = pipeline.ParseConfirmation(userMessage)
 		}
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
-		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
+		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: stripKnowledgeContext(userMessage)})
 		if decision == pipeline.Approved {
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
 			res, err := o.executePipeline(ctx, sessionID, p)
@@ -801,7 +801,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			} else {
 				planText = narrated
 			}
-			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: stripKnowledgeContext(content)})
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
 			return &RunResult{Response: planText}, nil
@@ -822,9 +822,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		content = "[The user sent a file attachment.]"
 	}
 
+	// Strip [knowledge_context] before persisting to session. The preparer
+	// re-injects it fresh each turn, so storing it would duplicate it across
+	// all historical messages — wasting tokens on every subsequent request.
+	sessionContent := stripKnowledgeContext(content)
 	if err := o.sessions.AddMessage(sessionID, provider.Message{
 		Role:    provider.RoleUser,
-		Content: content,
+		Content: sessionContent,
 		Files:   files,
 	}); err != nil {
 		return nil, fmt.Errorf("adding user message: %w", err)
@@ -2047,8 +2051,8 @@ func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.Completi
 
 // capabilitiesToPlannerInfo converts orchestrator PluginCapability to pipeline CapabilityInfo.
 // stripKnowledgeContext removes [knowledge_context]...[/knowledge_context] blocks
-// from the message before passing it to the planner. The planner only needs the
-// user's request to decide direct vs pipeline — domain instructions waste tokens.
+// from a message. Used before persisting user messages to session history (the
+// preparer re-injects context each turn) and before passing to the planner.
 func stripKnowledgeContext(s string) string {
 	const open, close = "[knowledge_context]", "[/knowledge_context]"
 	start := strings.Index(s, open)
