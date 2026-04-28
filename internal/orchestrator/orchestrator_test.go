@@ -2296,13 +2296,13 @@ func TestShowToolCallsPrependsInputForDisplay(t *testing.T) {
 	sessions.Create("test-session")
 
 	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		ShowToolCalls: true,
+		ShowToolCalls: "raw",
 	})
 	result, err := orch.Run(context.Background(), "test-session", "analyze main.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// With ShowToolCalls enabled, the response should contain tool call info.
+	// With ShowToolCalls "raw", the response should contain tool call info.
 	if !strings.Contains(result.Response, "[tool_call]") {
 		t.Errorf("expected response to contain tool call info, got %q", result.Response)
 	}
@@ -2334,13 +2334,13 @@ func TestShowToolCallsDisabledDoesNotPrepend(t *testing.T) {
 	sessions.Create("test-session")
 
 	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		ShowToolCalls: false,
+		ShowToolCalls: "",
 	})
 	result, err := orch.Run(context.Background(), "test-session", "analyze main.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// With ShowToolCalls disabled, the response should NOT contain tool call info.
+	// With ShowToolCalls empty/hidden, the response should NOT contain tool call info.
 	if strings.Contains(result.Response, "[tool_call]") {
 		t.Errorf("expected response without tool call info, got %q", result.Response)
 	}

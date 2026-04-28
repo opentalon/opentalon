@@ -116,8 +116,13 @@ func TestParseInvalidToolName(t *testing.T) {
 [/tool_call]`
 
 	calls := DefaultParser.Parse(response)
-	if calls != nil {
-		t.Errorf("expected nil for invalid tool name, got %v", calls)
+	// Invalid tool name still produces a placeholder so the LLM gets a
+	// format-hint error instead of the strip-retry → "(no response)" path.
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 placeholder call, got %d", len(calls))
+	}
+	if calls[0].Plugin != "" || calls[0].Action != "" {
+		t.Errorf("expected empty Plugin/Action, got %q/%q", calls[0].Plugin, calls[0].Action)
 	}
 }
 
@@ -144,8 +149,29 @@ func TestParseBareJSONArgs_ReturnsMissingToolCall(t *testing.T) {
 func TestParseEmptyBody(t *testing.T) {
 	response := `[tool_call][/tool_call]`
 	calls := DefaultParser.Parse(response)
-	if calls != nil {
-		t.Errorf("expected nil for empty body, got %v", calls)
+	// Empty body still triggers a placeholder so executeCall returns a format-hint
+	// error instead of the silent strip-retry → "(no response)" path.
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 placeholder call for empty body, got %d", len(calls))
+	}
+	if calls[0].Plugin != "" || calls[0].Action != "" {
+		t.Errorf("expected empty Plugin/Action, got %q/%q", calls[0].Plugin, calls[0].Action)
+	}
+}
+
+func TestParseUnparseableBodyReturnsPlaceholder(t *testing.T) {
+	// LLM wrapped natural language inside [tool_call] tags — not a valid tool call.
+	// Parser should return a placeholder so the LLM gets a format-hint error
+	// instead of the response being silently stripped to "(no response)".
+	response := `[tool_call]
+fetch all person types
+[/tool_call]`
+	calls := DefaultParser.Parse(response)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 placeholder call, got %d", len(calls))
+	}
+	if calls[0].Plugin != "" || calls[0].Action != "" {
+		t.Errorf("expected empty Plugin/Action, got %q/%q", calls[0].Plugin, calls[0].Action)
 	}
 }
 
