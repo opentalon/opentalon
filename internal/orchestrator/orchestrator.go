@@ -1531,7 +1531,8 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 			continue
 		}
 		slog.Debug("plugin included in system prompt", "plugin", cap.Name,
-			"system_prompt_addition_len", len(cap.SystemPromptAddition))
+			"system_prompt_addition_len", len(cap.SystemPromptAddition),
+			"server_instructions_included", includeServerInstructions && cap.SystemPromptAddition != "")
 
 		// Filter actions: exclude preparer/guard actions, user-only, and
 		// (when RAG is active) actions not in the relevant set.
