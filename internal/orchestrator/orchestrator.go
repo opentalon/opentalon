@@ -883,7 +883,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		sess, _ := o.sessions.Get(sessionID)
 
-		messages := o.buildMessages(ctx, sess, content)
+		// Include server instructions only on the first round — they are large
+		// (can be 10KB+) and the LLM doesn't need them again just to process
+		// tool results and format the final response.
+		messages := o.buildMessages(ctx, sess, content, i == 0)
 		messages = append(messages, transientMessages...)
 		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
@@ -896,11 +899,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 		log.Debug("LLM request", "round", i+1, "messages", len(guardedMessages))
 		for j, m := range guardedMessages {
-			preview := m.Content
-			if len(preview) > 2000 {
-				preview = preview[:2000] + "... [truncated]"
-			}
-			log.Debug("LLM request message", "index", j+1, "role", m.Role, "content", preview)
+			log.Debug("LLM request message", "index", j+1, "role", m.Role, "content", m.Content)
 		}
 
 		req := &provider.CompletionRequest{Messages: guardedMessages}
@@ -1375,10 +1374,11 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 	}, nil
 }
 
-func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string) []provider.Message {
+func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 
-	systemPrompt := o.buildSystemPrompt(ctx, userMessage)
+	inclSI := len(includeServerInstructions) == 0 || includeServerInstructions[0]
+	systemPrompt := o.buildSystemPrompt(ctx, userMessage, inclSI)
 	messages = append(messages, provider.Message{
 		Role:    provider.RoleSystem,
 		Content: systemPrompt,
@@ -1465,7 +1465,7 @@ func trimToContextWindow(ctx context.Context, messages []provider.Message, conte
 	return trimmed
 }
 
-func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string) string {
+func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string, includeServerInstructions bool) string {
 	var sb strings.Builder
 	sb.WriteString(prompts.OrchestratorPreamble)
 
@@ -1555,7 +1555,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		// specific actions are visible.
 		if relevantToolsActive && len(visibleActions) == 0 && hasNonInternalActions {
 			discoverablePlugins = append(discoverablePlugins, cap.Name)
-			if cap.SystemPromptAddition != "" {
+			if includeServerInstructions && cap.SystemPromptAddition != "" {
 				fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n\n",
 					cap.Name, cap.SystemPromptAddition, cap.Name)
 			}
@@ -1563,7 +1563,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		}
 
 		// Skip plugin header entirely if no actions are visible after filtering.
-		if len(visibleActions) == 0 && cap.SystemPromptAddition == "" {
+		if len(visibleActions) == 0 && (!includeServerInstructions || cap.SystemPromptAddition == "") {
 			continue
 		}
 
@@ -1578,7 +1578,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 			}
 		}
-		if cap.SystemPromptAddition != "" {
+		if includeServerInstructions && cap.SystemPromptAddition != "" {
 			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---", cap.Name, cap.SystemPromptAddition, cap.Name)
 			sb.WriteString("\n")
 		}
