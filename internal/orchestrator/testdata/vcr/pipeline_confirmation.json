@@ -1,0 +1,55 @@
+{
+  "prompt_hash": "2bfe2d07a91dbd2bd88e52beff8abdd7acd318d25d78c53e77ea808c1e6d897c",
+  "recorded_at": "2026-04-28T15:21:15.820038Z",
+  "model": "claude-haiku-4-5-20251001",
+  "interactions": [
+    {
+      "request": {
+        "model": "claude-haiku-4-5-20251001",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a task planner. Given the user's request and available tools, decide:\n1. If this is a simple single-action request, return: {\"type\": \"direct\"}\n2. If this requires multiple steps, return: {\"type\": \"pipeline\", \"steps\": [...]}\n\nEach step must have: {\"id\": \"\u003cunique\u003e\", \"name\": \"\u003chuman description\u003e\", \"plugin\": \"\u003cplugin\u003e\", \"action\": \"\u003caction\u003e\", \"args\": {}, \"depends_on\": []}\nThe \"plugin\" field must be the exact plugin name shown below (the part before the \"|\"). The \"action\" field must be the exact action name shown below (the part after \"action=\").\n\nAvailable tools:\n- plugin=jira | action=create_issue: Create issue\n- plugin=gitlab | action=analyze_code: Analyze code\n  - repo: Repository\n- plugin=gitlab | action=create_pr: Create PR\n\nRespond ONLY with valid JSON, no other text."
+          },
+          {
+            "role": "user",
+            "content": "analyze code in myrepo and then create a jira issue for the findings"
+          }
+        ]
+      },
+      "response": {
+        "id": "msg_01LdfNjeWDZtnUVR3tRVeZDh",
+        "model": "claude-haiku-4-5-20251001",
+        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue for findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {},\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
+        "usage": {
+          "input_tokens": 241,
+          "output_tokens": 167
+        }
+      }
+    },
+    {
+      "request": {
+        "model": "claude-haiku-4-5-20251001",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a helpful assistant. Describe the following multi-step plan to the user in 2-3 natural sentences. Name each step clearly without exposing technical details like plugin or action names. End with a short question asking if they want to proceed."
+          },
+          {
+            "role": "user",
+            "content": "Plan steps:\n1. Analyze code in myrepo (gitlab.analyze_code)\n2. Create Jira issue for findings (jira.create_issue)\n"
+          }
+        ]
+      },
+      "response": {
+        "id": "msg_01MtX3oD2C38Bqz2DEqedU6t",
+        "model": "claude-haiku-4-5-20251001",
+        "content": "I'll help you set up an automated workflow that analyzes your code in myrepo and creates a Jira issue to track any findings that come up. First, we'll examine your code for potential issues, and then automatically generate a Jira ticket documenting what we found. Would you like me to proceed with setting this up?",
+        "usage": {
+          "input_tokens": 98,
+          "output_tokens": 73
+        }
+      }
+    }
+  ]
+}

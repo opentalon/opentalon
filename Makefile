@@ -1,4 +1,4 @@
-.PHONY: all build test lint deps setup plugin channel run clean clean-cache clean-plugins clean-channels clean-skills clean-lua-plugins proto
+.PHONY: all build test lint deps setup plugin channel run clean clean-cache clean-plugins clean-channels clean-skills clean-lua-plugins proto vcr-record-all
 
 BINARY      := opentalon
 CMD_PKG     := ./cmd/opentalon
@@ -58,6 +58,24 @@ test:
 
 lint:
 	golangci-lint run
+
+# ── VCR cassettes ────────────────────────────────────────────────────────────
+# Re-record all VCR cassettes against the real Anthropic API.
+# Requires: ANTHROPIC_API_KEY to be set.
+# Run this after changing anything in internal/prompts/.
+vcr-record-all:
+	@if [ -n "$$ANTHROPIC_API_KEY" ]; then \
+		echo "==> Recording Anthropic (Haiku) cassettes..."; \
+		VCR_RECORD=1 go test -v -run "TestVCRDirect|TestVCRSingle|TestVCRMulti" ./internal/orchestrator/...; \
+	else \
+		echo "Skipping Anthropic: ANTHROPIC_API_KEY not set"; \
+	fi
+	@if [ -n "$$OPENROUTER_API_KEY" ]; then \
+		echo "==> Recording OpenRouter (Ministral 8B) cassettes..."; \
+		VCR_RECORD=1 go test -v -run "TestVCROpenRouter" ./internal/orchestrator/...; \
+	else \
+		echo "Skipping OpenRouter: OPENROUTER_API_KEY not set"; \
+	fi
 
 # ── Convenience ─────────────────────────────────────────────────────────────
 

@@ -1,9 +1,38 @@
 package prompts
 
 import (
-	_ "embed"
+	"crypto/sha256"
+	"embed"
+	"encoding/hex"
+	"fmt"
 	"strings"
 )
+
+// promptFS holds all .txt files for hashing. Individual vars use //go:embed for
+// typed access; this FS is the authoritative source for Hash().
+//
+//go:embed *.txt
+var promptFS embed.FS
+
+// Hash returns the sha256 digest of all prompt files, sorted by filename.
+// Cassette metadata stores this value; a mismatch means prompts changed since
+// recording and the cassette must be re-recorded.
+func Hash() string {
+	entries, err := promptFS.ReadDir(".")
+	if err != nil {
+		panic(fmt.Sprintf("prompts: failed to read embedded FS: %v", err))
+	}
+	h := sha256.New()
+	for _, e := range entries {
+		data, err := promptFS.ReadFile(e.Name())
+		if err != nil {
+			panic(fmt.Sprintf("prompts: failed to read %s: %v", e.Name(), err))
+		}
+		_, _ = fmt.Fprintf(h, "%s\n", e.Name())
+		h.Write(data)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 //go:embed planner_preamble.txt
 var PlannerPreamble string
