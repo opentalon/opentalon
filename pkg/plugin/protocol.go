@@ -50,8 +50,8 @@ type CapabilitiesMsg struct {
 	Name                 string             `json:"name"`
 	Description          string             `json:"description"`
 	Actions              []ActionMsg        `json:"actions"`
-	SystemPromptAddition string             `json:"system_prompt_addition,omitempty"` // optional text appended to the LLM system prompt
-	Glossary             []GlossaryEntryMsg `json:"glossary,omitempty"`              // optional glossary term/definition pairs
+	SystemPromptAddition string             `json:"system_prompt_addition,omitempty"`
+	Glossary             []GlossaryEntryMsg `json:"glossary,omitempty"`
 }
 
 // GlossaryEntryMsg is a single term/definition pair provided by a plugin.

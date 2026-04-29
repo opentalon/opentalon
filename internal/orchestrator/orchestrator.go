@@ -2580,14 +2580,14 @@ func capabilityHash(entries []syncActionEntry, serverInstructions string) string
 	h := sha256.New()
 	// Deterministic: entries are built in stable order from cap.Actions.
 	for _, e := range entries {
-		fmt.Fprintf(h, "%s\n%s\n", e.Name, e.Description)
+		_, _ = fmt.Fprintf(h, "%s\n%s\n", e.Name, e.Description)
 		if len(e.Parameters) > 0 {
 			b, _ := json.Marshal(e.Parameters)
 			h.Write(b)
 		}
 		h.Write([]byte{'\n'})
 	}
-	fmt.Fprintf(h, "instructions:%s", serverInstructions)
+	_, _ = fmt.Fprintf(h, "instructions:%s", serverInstructions)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -2630,12 +2630,12 @@ type syncGlossaryEntry struct {
 func glossaryHash(entries []syncGlossaryEntry) string {
 	h := sha256.New()
 	for _, e := range entries {
-		fmt.Fprintf(h, "%s\n%s\n%s\n", e.Term, e.Definition, e.Category)
+		_, _ = fmt.Fprintf(h, "%s\n%s\n%s\n", e.Term, e.Definition, e.Category)
 		for _, t := range e.Tags {
-			fmt.Fprintf(h, "tag:%s\n", t)
+			_, _ = fmt.Fprintf(h, "tag:%s\n", t)
 		}
 		for _, s := range e.Synonyms {
-			fmt.Fprintf(h, "syn:%s\n", s)
+			_, _ = fmt.Fprintf(h, "syn:%s\n", s)
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil))
@@ -2662,13 +2662,7 @@ func (o *Orchestrator) SyncGlossary(ctx context.Context) {
 			if g.Term == "" || g.Definition == "" {
 				continue
 			}
-			allEntries = append(allEntries, syncGlossaryEntry{
-				Term:       g.Term,
-				Definition: g.Definition,
-				Category:   g.Category,
-				Tags:       g.Tags,
-				Synonyms:   g.Synonyms,
-			})
+			allEntries = append(allEntries, syncGlossaryEntry(g))
 		}
 	}
 
