@@ -33,6 +33,7 @@ import (
 	"github.com/opentalon/opentalon/internal/scheduler"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store"
+	"github.com/opentalon/opentalon/internal/synclock"
 	"github.com/opentalon/opentalon/internal/version"
 	chanpkg "github.com/opentalon/opentalon/pkg/channel"
 )
@@ -482,6 +483,40 @@ func main() {
 	// Wire on-clear actions now that the orchestrator is available.
 	cmdExecutor.WithOnClear(onClearActions, orch.RunAction)
 
+	// Build a single shared Redis client when cluster dedup, plugin exec, or both need it.
+	// Sharing one pool halves connection count compared to opening two clients to the same instance.
+	// Hoisted before sync so the sync lock can use it.
+	needsRedis := cfg.Cluster.Enabled || cfg.PluginExec.Enabled
+	var sharedRedis redis.UniversalClient
+	if needsRedis && (cfg.Redis.RedisURL != "" || len(cfg.Redis.Sentinels) > 0) {
+		var err error
+		sharedRedis, err = redisclient.New(
+			cfg.Redis.RedisURL,
+			cfg.Redis.MasterName,
+			cfg.Redis.Sentinels,
+			cfg.Redis.Password,
+			cfg.Redis.SentinelPassword,
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error connecting to Redis: %v\n", err)
+			os.Exit(1) //nolint:gocritic
+		}
+		defer func() { _ = sharedRedis.Close() }()
+	}
+	if cfg.Cluster.Enabled && sharedRedis == nil {
+		fmt.Fprintf(os.Stderr, "cluster.enabled requires redis.redis_url or redis.sentinels to be configured\n")
+		os.Exit(1) //nolint:gocritic
+	}
+
+	// Build sync locker: cluster mode uses Redis so only one pod runs
+	// SyncActions/SyncGlossary/IngestKnowledgeDir; single-instance uses noop.
+	var slocker synclock.Locker
+	if cfg.Cluster.Enabled && sharedRedis != nil {
+		slocker = synclock.NewRedis(sharedRedis)
+	} else {
+		slocker = synclock.Noop()
+	}
+
 	// Sync plugin capabilities to the vector store and ingest knowledge articles
 	// from the configured directory. Runs synchronously so the orchestrator is
 	// fully ready before accepting traffic.
@@ -492,15 +527,38 @@ func main() {
 	// If the sync or ingest plugin ever declares AuditLog=true, those calls
 	// will not be logged — acceptable for host-initiated startup work.
 	slog.Info("startup: syncing plugin actions and glossary to vector store", "component", "startup")
-	orch.SyncActions(ctx)
-	orch.SyncGlossary(ctx)
-	orch.IngestKnowledgeDir(ctx)
-	slog.Info("startup: sync complete, orchestrator ready", "component", "startup")
+	acquired, err := slocker.AcquireOrWait(ctx)
+	if err != nil {
+		slog.Error("startup: sync lock failed, proceeding with local sync", "component", "startup", "error", err)
+		acquired = true
+	}
+	if acquired {
+		orch.SyncActions(ctx)
+		orch.SyncGlossary(ctx)
+		orch.IngestKnowledgeDir(ctx)
+		slocker.ReleaseDone(ctx)
+		slog.Info("startup: sync complete (leader), orchestrator ready", "component", "startup")
+	} else {
+		slog.Info("startup: sync skipped (follower), orchestrator ready", "component", "startup")
+	}
 
 	// When a plugin comes online later (e.g. via the retry loop), sync its
-	// actions to the vector store automatically.
+	// actions to the vector store automatically. In cluster mode, the lock
+	// ensures only one pod performs the sync for a given plugin.
 	pluginManager.OnPluginLoaded(func(name string) {
-		go orch.SyncPluginActions(ctx, name)
+		go func() {
+			ok, lockErr := slocker.TryAcquirePlugin(ctx, name)
+			if lockErr != nil {
+				slog.Warn("plugin sync lock failed, proceeding", "plugin", name, "error", lockErr)
+				ok = true
+			}
+			if ok {
+				defer slocker.ReleasePlugin(ctx, name)
+				orch.SyncPluginActions(ctx, name)
+			} else {
+				slog.Debug("plugin sync skipped (another pod is syncing)", "plugin", name)
+			}
+		}()
 	})
 
 	// Scheduler: wired after orchestrator so it can route job actions through orch.
@@ -552,31 +610,7 @@ func main() {
 	reg := channel.NewRegistry(handler)
 	notifier.reg = reg
 
-	// Build a single shared Redis client when cluster dedup, plugin exec, or both need it.
-	// Sharing one pool halves connection count compared to opening two clients to the same instance.
-	needsRedis := cfg.Cluster.Enabled || cfg.PluginExec.Enabled
-	var sharedRedis redis.UniversalClient
-	if needsRedis && (cfg.Redis.RedisURL != "" || len(cfg.Redis.Sentinels) > 0) {
-		var err error
-		sharedRedis, err = redisclient.New(
-			cfg.Redis.RedisURL,
-			cfg.Redis.MasterName,
-			cfg.Redis.Sentinels,
-			cfg.Redis.Password,
-			cfg.Redis.SentinelPassword,
-		)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error connecting to Redis: %v\n", err)
-			os.Exit(1) //nolint:gocritic
-		}
-		defer func() { _ = sharedRedis.Close() }()
-	}
-
 	if cfg.Cluster.Enabled {
-		if sharedRedis == nil {
-			fmt.Fprintf(os.Stderr, "cluster.enabled requires redis.redis_url or redis.sentinels to be configured\n")
-			os.Exit(1) //nolint:gocritic
-		}
 		dedupTTL := 5 * time.Minute
 		if cfg.Cluster.DedupTTL != "" {
 			if d, err := time.ParseDuration(cfg.Cluster.DedupTTL); err == nil {
