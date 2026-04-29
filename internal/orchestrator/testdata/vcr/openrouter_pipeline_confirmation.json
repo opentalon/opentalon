@@ -1,5 +1,6 @@
 {
   "prompt_hash": "2bfe2d07a91dbd2bd88e52beff8abdd7acd318d25d78c53e77ea808c1e6d897c",
+  "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
   "recorded_at": "2026-04-28T15:22:33.56883Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
@@ -9,7 +10,7 @@
         "messages": [
           {
             "role": "system",
-            "content": "You are a task planner. Given the user's request and available tools, decide:\n1. If this is a simple single-action request, return: {\"type\": \"direct\"}\n2. If this requires multiple steps, return: {\"type\": \"pipeline\", \"steps\": [...]}\n\nEach step must have: {\"id\": \"\u003cunique\u003e\", \"name\": \"\u003chuman description\u003e\", \"plugin\": \"\u003cplugin\u003e\", \"action\": \"\u003caction\u003e\", \"args\": {}, \"depends_on\": []}\nThe \"plugin\" field must be the exact plugin name shown below (the part before the \"|\"). The \"action\" field must be the exact action name shown below (the part after \"action=\").\n\nAvailable tools:\n- plugin=gitlab | action=analyze_code: Analyze code\n  - repo: Repository\n- plugin=gitlab | action=create_pr: Create PR\n- plugin=jira | action=create_issue: Create issue\n\nRespond ONLY with valid JSON, no other text."
+            "content": "You are a task planner. Given the user's request and available tools, decide:\n1. If this is a simple single-action request, return: {\"type\": \"direct\"}\n2. If this requires multiple steps, return: {\"type\": \"pipeline\", \"steps\": [...]}\n\nEach step must have: {\"id\": \"<unique>\", \"name\": \"<human description>\", \"plugin\": \"<plugin>\", \"action\": \"<action>\", \"args\": {}, \"depends_on\": []}\nThe \"plugin\" field must be the exact plugin name shown below (the part before the \"|\"). The \"action\" field must be the exact action name shown below (the part after \"action=\").\n\nAvailable tools:\n- plugin=gitlab | action=analyze_code: Analyze code\n  - repo: Repository\n- plugin=gitlab | action=create_pr: Create PR\n- plugin=jira | action=create_issue: Create issue\n\nRespond ONLY with valid JSON, no other text."
           },
           {
             "role": "user",
@@ -44,7 +45,7 @@
       "response": {
         "id": "gen-1777389755-kTp62pMnH98FqMIYlfp8",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Here’s a simple breakdown of the plan:\n\nFirst, I’ll scan your code in **myrepo** to check for any potential vulnerabilities or problems. Then, I’ll automatically create a **Jira ticket** summarizing the findings so your team can address them.\n\nWould you like me to get started?",
+        "content": "Here\u2019s a simple breakdown of the plan:\n\nFirst, I\u2019ll scan your code in **myrepo** to check for any potential vulnerabilities or problems. Then, I\u2019ll automatically create a **Jira ticket** summarizing the findings so your team can address them.\n\nWould you like me to get started?",
         "usage": {
           "input_tokens": 96,
           "output_tokens": 62

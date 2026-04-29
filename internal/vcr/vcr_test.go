@@ -10,6 +10,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
+	"github.com/opentalon/opentalon/internal/scenarios"
 )
 
 func writeCassette(t *testing.T, c Cassette) string {
@@ -28,9 +29,10 @@ func writeCassette(t *testing.T, c Cassette) string {
 
 func TestPlayerReplaySequence(t *testing.T) {
 	c := Cassette{
-		PromptHash: prompts.Hash(),
-		RecordedAt: time.Now(),
-		Model:      "test-model",
+		PromptHash:    prompts.Hash(),
+		ScenariosHash: scenarios.Hash(),
+		RecordedAt:    time.Now(),
+		Model:         "test-model",
 		Interactions: []Interaction{
 			{Response: &provider.CompletionResponse{Content: "first"}},
 			{Response: &provider.CompletionResponse{Content: "second"}},
@@ -61,9 +63,10 @@ func TestPlayerReplaySequence(t *testing.T) {
 
 func TestPlayerExhaustedError(t *testing.T) {
 	c := Cassette{
-		PromptHash:   prompts.Hash(),
-		RecordedAt:   time.Now(),
-		Interactions: []Interaction{{Response: &provider.CompletionResponse{Content: "only"}}},
+		PromptHash:    prompts.Hash(),
+		ScenariosHash: scenarios.Hash(),
+		RecordedAt:    time.Now(),
+		Interactions:  []Interaction{{Response: &provider.CompletionResponse{Content: "only"}}},
 	}
 	path := writeCassette(t, c)
 	p, _ := NewPlayer(path)
@@ -74,16 +77,31 @@ func TestPlayerExhaustedError(t *testing.T) {
 	}
 }
 
-func TestPlayerStaleCassetteError(t *testing.T) {
+func TestPlayerStalePromptHashError(t *testing.T) {
 	c := Cassette{
-		PromptHash:   "0000000000000000000000000000000000000000000000000000000000000000",
-		RecordedAt:   time.Now(),
-		Interactions: []Interaction{{Response: &provider.CompletionResponse{Content: "x"}}},
+		PromptHash:    "0000000000000000000000000000000000000000000000000000000000000000",
+		ScenariosHash: scenarios.Hash(),
+		RecordedAt:    time.Now(),
+		Interactions:  []Interaction{{Response: &provider.CompletionResponse{Content: "x"}}},
 	}
 	path := writeCassette(t, c)
 	_, err := NewPlayer(path)
 	if err == nil {
-		t.Fatal("expected stale cassette error")
+		t.Fatal("expected stale cassette error for prompt_hash mismatch")
+	}
+}
+
+func TestPlayerStaleScenariosHashError(t *testing.T) {
+	c := Cassette{
+		PromptHash:    prompts.Hash(),
+		ScenariosHash: "0000000000000000000000000000000000000000000000000000000000000000",
+		RecordedAt:    time.Now(),
+		Interactions:  []Interaction{{Response: &provider.CompletionResponse{Content: "x"}}},
+	}
+	path := writeCassette(t, c)
+	_, err := NewPlayer(path)
+	if err == nil {
+		t.Fatal("expected stale cassette error for scenarios_hash mismatch")
 	}
 }
 
