@@ -674,6 +674,9 @@ Other useful Make targets:
 | `make lint` | Run golangci-lint |
 | `make all` | deps + build + test + lint |
 | `make clean` | Remove built binaries |
+| `make test-structural` | Structural integration tests (requires `ANTHROPIC_API_KEY`) |
+| `make eval` | YAML-driven eval with baseline tracking (requires `ANTHROPIC_API_KEY`) |
+| `make vcr-record-all` | Re-record VCR cassettes (requires API keys) |
 
 ### Alternative: GitHub auto-fetch (bundler)
 
@@ -760,6 +763,27 @@ git commit -m "chore: re-record VCR cassettes"
 ```
 
 `ANTHROPIC_API_KEY` records the Anthropic/Haiku scenarios; `OPENROUTER_API_KEY` records the OpenRouter/Ministral scenarios. Each is optional — omitting one skips that provider's cassettes.
+
+### Structural integration tests
+
+`internal/orchestrator/integration_test.go` (build tag `integration`) hits the real Anthropic API at temperature=0 and asserts structural properties: correct tool selection, no hallucinated plugins, no max-iteration breach, no parser errors. Run before a release:
+
+```bash
+ANTHROPIC_API_KEY=<key> make test-structural
+# OpenRouter tests also run if OPENROUTER_API_KEY is set
+```
+
+These are gated in CI by `.github/workflows/release-gate.yml` on every release and push to `release/*` branches.
+
+### Eval framework
+
+`internal/eval/` contains a YAML-driven scenario runner with baseline tracking. Scenarios live in `internal/eval/scenarios/*.yaml`. Add new scenarios there without touching Go code.
+
+```bash
+ANTHROPIC_API_KEY=<key> make eval
+```
+
+Pass rate is checked against a baseline stored in `.eval-baselines/<git-tag>.json`. On the first run for a given tag the baseline is saved; subsequent runs fail if pass rate regresses. The eval runs on minor/major releases only (patch releases skip it).
 
 All contributions are subject to the [Apache 2.0 License](LICENSE).
 
