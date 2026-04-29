@@ -1,0 +1,64 @@
+name: Release gate
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # manual pre-release validation
+
+permissions:
+  contents: read
+
+jobs:
+  structural:
+    name: Structural assertions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Run structural tests
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: make test-structural
+
+  eval:
+    name: Eval (minor/major releases; always on manual trigger)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Check if eval should run
+        id: version-check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Always run eval on manual trigger (pre-release validation).
+            echo "run_eval=true" >> "$GITHUB_OUTPUT"
+          else
+            # On release events: run eval only for minor/major (patch = 0).
+            # e.g. v1.2.0 → runs; v1.2.1 → skips.
+            TAG="${{ github.ref_name }}"
+            PATCH="${TAG##*.}"
+            if [ "$PATCH" = "0" ]; then
+              echo "run_eval=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "run_eval=false" >> "$GITHUB_OUTPUT"
+              echo "Skipping eval: patch release ($TAG)"
+            fi
+          fi
+
+      - name: Run eval
+        if: steps.version-check.outputs.run_eval == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: make eval

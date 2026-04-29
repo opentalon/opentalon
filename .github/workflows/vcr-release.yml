@@ -1,0 +1,43 @@
+name: VCR Re-record (release)
+# Fires when a GitHub release is published (Actions → Releases → "Publish release").
+# Re-records VCR cassettes so they reflect current model behavior at the release point,
+# then commits the updated cassettes back to master.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  vcr-rerecord:
+    name: Re-record VCR cassettes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: master
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Re-record cassettes
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: make vcr-record-all
+
+      - name: Commit refreshed cassettes to master
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add internal/orchestrator/testdata/vcr/
+          if git diff --cached --quiet; then
+            echo "No cassette changes to commit"
+          else
+            git commit -m "chore: re-record VCR cassettes for ${{ github.event.release.tag_name }}"
+            git push origin master
+          fi
