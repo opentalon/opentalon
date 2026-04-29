@@ -136,7 +136,7 @@ func (w *withModelLLM) Complete(ctx context.Context, req *provider.CompletionReq
 // Adding a new scenario to testdata/*.yaml automatically queues it for VCR recording;
 // the test skips gracefully until the cassette is recorded with make vcr-record-all.
 func TestVCRScenarios(t *testing.T) {
-	all, err := scenarios.LoadScenarios("../scenarios/testdata")
+	all, err := scenarios.EmbeddedScenarios()
 	if err != nil {
 		t.Fatalf("load scenarios: %v", err)
 	}

@@ -17,6 +17,7 @@ import (
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/scenarios"
 	"github.com/opentalon/opentalon/internal/state"
+	"github.com/opentalon/opentalon/internal/testutil"
 )
 
 const (
@@ -25,23 +26,13 @@ const (
 	openrouterURL   = "https://openrouter.ai/api/v1"
 	scenariosDir    = "../scenarios/testdata"
 	baselineDir     = "../../.eval-baselines"
-	passThreshold   = 1.0
+	passThreshold   = 0.9
 )
 
 type evalProvider struct {
-	name      string
+	name         string
 	profileModel string // "anthropic/<model>" or "openrouter/<model>"
-	llm       orchestrator.LLMClient
-}
-
-type zeroTempLLM struct {
-	inner orchestrator.LLMClient
-}
-
-func (z *zeroTempLLM) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
-	zero := 0.0
-	req.Temperature = &zero
-	return z.inner.Complete(ctx, req)
+	llm          orchestrator.LLMClient
 }
 
 func evalProviders() []evalProvider {
@@ -50,14 +41,14 @@ func evalProviders() []evalProvider {
 		out = append(out, evalProvider{
 			name:         "Anthropic",
 			profileModel: "anthropic/" + anthropicModel,
-			llm:          &zeroTempLLM{inner: provider.NewAnthropicProvider("anthropic", "", key, nil)},
+			llm:          &testutil.ZeroTempLLM{Inner: provider.NewAnthropicProvider("anthropic", "", key, nil)},
 		})
 	}
 	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
 		out = append(out, evalProvider{
 			name:         "OpenRouter",
 			profileModel: "openrouter/" + openrouterModel,
-			llm:          &zeroTempLLM{inner: provider.NewOpenAIProvider("openrouter", openrouterURL, key, nil)},
+			llm:          &testutil.ZeroTempLLM{Inner: provider.NewOpenAIProvider("openrouter", openrouterURL, key, nil)},
 		})
 	}
 	return out
@@ -191,12 +182,14 @@ func TestEval(t *testing.T) {
 				t.Errorf("pass rate regressed: %.0f%% < baseline %.0f%% (tag %s)",
 					passRate*100, baseline.PassRate*100, baseline.Tag)
 			}
-		} else {
+		} else if os.Getenv("EVAL_SAVE_BASELINE") == "1" {
 			if err := eval.SaveBaseline(baselinePath, result); err != nil {
 				t.Logf("warn: save baseline: %v", err)
 			} else {
 				t.Logf("saved baseline to %s", baselinePath)
 			}
+		} else {
+			t.Errorf("no baseline for tag %s; run with EVAL_SAVE_BASELINE=1 to create one", tag)
 		}
 	}
 

@@ -11,20 +11,10 @@ import (
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/scenarios"
+	"github.com/opentalon/opentalon/internal/testutil"
 )
 
 const integrationModel = "claude-haiku-4-5-20251001"
-
-// zeroTempLLM wraps any LLMClient and pins temperature=0 for deterministic output.
-type zeroTempLLM struct {
-	inner LLMClient
-}
-
-func (z *zeroTempLLM) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
-	zero := 0.0
-	req.Temperature = &zero
-	return z.inner.Complete(ctx, req)
-}
 
 // integrationFixtures returns provider fixtures backed by real API clients.
 // Skips if no API keys are set.
@@ -33,7 +23,7 @@ func integrationFixtures(t *testing.T) []providerFixture {
 	var fixtures []providerFixture
 
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		real := &zeroTempLLM{inner: provider.NewAnthropicProvider("anthropic", "", key, nil)}
+		real := &testutil.ZeroTempLLM{Inner: provider.NewAnthropicProvider("anthropic", "", key, nil)}
 		fixtures = append(fixtures, providerFixture{
 			name:  "Anthropic",
 			model: integrationModel,
@@ -50,7 +40,7 @@ func integrationFixtures(t *testing.T) []providerFixture {
 	}
 
 	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
-		real := &zeroTempLLM{inner: provider.NewOpenAIProvider("openrouter", openrouterBaseURL, key, nil)}
+		real := &testutil.ZeroTempLLM{Inner: provider.NewOpenAIProvider("openrouter", openrouterBaseURL, key, nil)}
 		fixtures = append(fixtures, providerFixture{
 			name:  "OpenRouter",
 			model: recordModelOpenRouter,
@@ -70,19 +60,6 @@ func integrationFixtures(t *testing.T) []providerFixture {
 		t.Skip("set ANTHROPIC_API_KEY or OPENROUTER_API_KEY to run integration tests")
 	}
 	return fixtures
-}
-
-// orchRunResult converts a RunResult to scenarios.RunResult for assertion checking.
-func orchRunResult(r *RunResult) scenarios.RunResult {
-	out := scenarios.RunResult{Response: r.Response}
-	for _, tc := range r.ToolCalls {
-		out.ToolCalls = append(out.ToolCalls, scenarios.ToolCallResult{
-			Plugin: tc.Plugin,
-			Action: tc.Action,
-			Args:   tc.Args,
-		})
-	}
-	return out
 }
 
 // assertStructural applies cross-cutting structural checks to any run:
@@ -107,7 +84,7 @@ func assertStructural(t *testing.T, result *RunResult, err error) {
 // TestIntegrationScenarios runs all shared scenarios against the real API and
 // verifies structural correctness. Mirrors the same inputs used in VCR and eval.
 func TestIntegrationScenarios(t *testing.T) {
-	all, err := scenarios.LoadScenarios("../scenarios/testdata")
+	all, err := scenarios.EmbeddedScenarios()
 	if err != nil {
 		t.Fatalf("load scenarios: %v", err)
 	}
@@ -115,15 +92,17 @@ func TestIntegrationScenarios(t *testing.T) {
 	for _, s := range all {
 		s := s
 		t.Run(s.Name, func(t *testing.T) {
+			t.Parallel()
 			for _, prov := range integrationFixtures(t) {
 				prov := prov
 				t.Run(prov.name, func(t *testing.T) {
+					t.Parallel()
 					llm, cleanup := prov.llmFn(t, "")
 					defer cleanup()
 					orch, sessID := setupOrchestrator(withModel(llm, prov.model), DefaultParser)
 					result, err := orch.Run(prov.ctxFn(), sessID, s.Input)
 					assertStructural(t, result, err)
-					if reason := scenarios.CheckAssertions(s, orchRunResult(result)); reason != "" {
+					if reason := scenarios.CheckAssertions(s, vcrRunResult(result)); reason != "" {
 						t.Error(reason)
 					}
 				})

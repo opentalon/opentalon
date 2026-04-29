@@ -73,6 +73,33 @@ func CassetteName(scenarioName string) string {
 	return strings.ReplaceAll(strings.ToLower(scenarioName), " ", "_") + ".json"
 }
 
+// EmbeddedScenarios returns all scenarios from the embedded YAML files.
+// Uses the same content as Hash(), so it stays consistent with VCR cassette
+// staleness checks. Tests that compare against Hash() should call this rather
+// than LoadScenarios.
+func EmbeddedScenarios() ([]Scenario, error) {
+	var all []Scenario
+	err := fs.WalkDir(scenarioFS, "testdata", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".yaml") {
+			return err
+		}
+		data, readErr := scenarioFS.ReadFile(path)
+		if readErr != nil {
+			return fmt.Errorf("read %s: %w", path, readErr)
+		}
+		var sf ScenarioFile
+		if parseErr := yaml.Unmarshal(data, &sf); parseErr != nil {
+			return fmt.Errorf("parse %s: %w", path, parseErr)
+		}
+		all = append(all, sf.Scenarios...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return checkCassetteCollisions(all)
+}
+
 // LoadScenarios reads all *.yaml files in dir and returns all scenarios.
 func LoadScenarios(dir string) ([]Scenario, error) {
 	entries, err := os.ReadDir(dir)
@@ -94,7 +121,20 @@ func LoadScenarios(dir string) ([]Scenario, error) {
 		}
 		all = append(all, sf.Scenarios...)
 	}
-	return all, nil
+	return checkCassetteCollisions(all)
+}
+
+// checkCassetteCollisions returns an error if any two scenarios map to the same cassette filename.
+func checkCassetteCollisions(scenarios []Scenario) ([]Scenario, error) {
+	seen := make(map[string]string, len(scenarios))
+	for _, s := range scenarios {
+		cn := CassetteName(s.Name)
+		if prev, ok := seen[cn]; ok {
+			return nil, fmt.Errorf("scenario name collision: %q and %q both map to cassette %s", prev, s.Name, cn)
+		}
+		seen[cn] = s.Name
+	}
+	return scenarios, nil
 }
 
 // CheckAssertions returns "" if all assertions pass, or a failure reason.
