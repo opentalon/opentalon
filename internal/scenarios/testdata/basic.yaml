@@ -1,0 +1,7 @@
+scenarios:
+  # VCR cassette: direct_response.json
+  - name: "direct response"
+    input: "hello"
+    assert:
+      no_tool_calls: true
+      response_not_empty: true

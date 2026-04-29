@@ -1,0 +1,15 @@
+scenarios:
+  # VCR cassette: single_tool_call.json
+  - name: "single tool call"
+    input: "analyze code in myrepo"
+    assert:
+      tool_called: "gitlab.analyze_code"
+      arg_equals:
+        repo: "myrepo"
+      response_not_empty: true
+
+  # VCR cassette: multi_tool_call.json
+  - name: "multi tool call"
+    input: "analyze code in myrepo and create a jira issue titled 'Code review'"
+    assert:
+      response_not_empty: true
