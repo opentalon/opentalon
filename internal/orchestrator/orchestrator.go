@@ -2,7 +2,9 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -137,6 +139,7 @@ type OrchestratorOpts struct {
 	PluginCallObserver      PluginCallObserver  // optional; when set, notified after each plugin/tool call
 	SyncActionsPlugin       string              // optional; plugin name for action sync (e.g. "weaviate")
 	SyncActionsAction       string              // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
+	SyncGlossaryAction      string              // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
 	Knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
 	Subprocess              SubprocessConfig    // optional; subprocess (sub-agent) support
 	OnStreamChunk           StreamChunkCallback // optional; when set and LLM supports streaming, final answers are streamed
@@ -198,6 +201,7 @@ type Orchestrator struct {
 	pluginCallObserver      PluginCallObserver  // optional; nil = no plugin call observation
 	syncActionsPlugin       string              // optional; plugin name for action sync
 	syncActionsAction       string              // optional; action name for action sync
+	syncGlossaryAction      string              // optional; action name for glossary sync (uses syncActionsPlugin)
 	knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
 	subprocessConfig        SubprocessConfig    // optional; subprocess (sub-agent) support
 	onStreamChunk           StreamChunkCallback // optional; when set, final answers stream to caller
@@ -317,6 +321,7 @@ func NewWithRules(
 		pluginCallObserver:      opts.PluginCallObserver,
 		syncActionsPlugin:       opts.SyncActionsPlugin,
 		syncActionsAction:       opts.SyncActionsAction,
+		syncGlossaryAction:      opts.SyncGlossaryAction,
 		knowledge:               opts.Knowledge,
 		onStreamChunk:           opts.OnStreamChunk,
 		showToolCalls:           opts.ShowToolCalls,
@@ -2412,6 +2417,11 @@ type syncActionsPayload struct {
 	Actions            []syncActionEntry `json:"actions"`
 	ServerInstructions string            `json:"server_instructions,omitempty"`
 	KeepPlugins        []string          `json:"keep_plugins,omitempty"`
+	// Hash is a SHA-256 digest of the plugin's actions + server_instructions.
+	// When the sync plugin receives the same hash on consecutive calls for a
+	// given plugin_name, it can skip the upsert (the data hasn't changed).
+	// Computed by the orchestrator; older sync plugins ignore unknown fields.
+	Hash string `json:"hash,omitempty"`
 	// IsContinuationBatch tells the sync plugin to skip the per-plugin
 	// pre-delete on this call. Set on batches 1..N of a chunked plugin sync
 	// so each subsequent batch only inserts and does not wipe what batch 0
@@ -2513,6 +2523,11 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 		return fmt.Errorf("executor disappeared")
 	}
 
+	// Compute a deterministic hash over the full set of actions + server
+	// instructions. The sync plugin stores this per plugin and skips the
+	// upsert when unchanged — avoids redundant Weaviate writes on restart.
+	hash := capabilityHash(entries, cap.SystemPromptAddition)
+
 	// Batch actions into chunks to avoid oversized payloads that time out
 	// on the vector store side. Instructions and keep_plugins go on the
 	// first batch only; subsequent batches are pure action upserts.
@@ -2527,6 +2542,7 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 		payload := syncActionsPayload{
 			PluginName:          cap.Name,
 			Actions:             batch,
+			Hash:                hash,
 			IsContinuationBatch: i > 0,
 		}
 		if i == 0 {
@@ -2557,6 +2573,24 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 	return nil
 }
 
+// capabilityHash computes a SHA-256 digest over a plugin's actions and server
+// instructions. The sync plugin stores this hash and skips re-syncing when it
+// matches — avoiding redundant Weaviate writes on restart.
+func capabilityHash(entries []syncActionEntry, serverInstructions string) string {
+	h := sha256.New()
+	// Deterministic: entries are built in stable order from cap.Actions.
+	for _, e := range entries {
+		fmt.Fprintf(h, "%s\n%s\n", e.Name, e.Description)
+		if len(e.Parameters) > 0 {
+			b, _ := json.Marshal(e.Parameters)
+			h.Write(b)
+		}
+		h.Write([]byte{'\n'})
+	}
+	fmt.Fprintf(h, "instructions:%s", serverInstructions)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // chunkActions splits a slice of syncActionEntry into batches of at most size n.
 func chunkActions(entries []syncActionEntry, n int) [][]syncActionEntry {
 	if n <= 0 {
@@ -2571,6 +2605,120 @@ func chunkActions(entries []syncActionEntry, n int) [][]syncActionEntry {
 		batches = append(batches, entries[i:end])
 	}
 	return batches
+}
+
+// ---------------------------------------------------------------------------
+// Glossary sync
+// ---------------------------------------------------------------------------
+
+// syncGlossaryPayload is the JSON shape expected by the sync_glossary action.
+type syncGlossaryPayload struct {
+	GlossaryHash        string              `json:"glossary_hash"`
+	Entries             []syncGlossaryEntry `json:"entries"`
+	IsContinuationBatch bool                `json:"is_continuation_batch,omitempty"`
+}
+
+type syncGlossaryEntry struct {
+	Term       string   `json:"term"`
+	Definition string   `json:"definition"`
+	Category   string   `json:"category,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	Synonyms   []string `json:"synonyms,omitempty"`
+}
+
+// glossaryHash computes a SHA-256 digest over the full set of glossary entries.
+func glossaryHash(entries []syncGlossaryEntry) string {
+	h := sha256.New()
+	for _, e := range entries {
+		fmt.Fprintf(h, "%s\n%s\n%s\n", e.Term, e.Definition, e.Category)
+		for _, t := range e.Tags {
+			fmt.Fprintf(h, "tag:%s\n", t)
+		}
+		for _, s := range e.Synonyms {
+			fmt.Fprintf(h, "syn:%s\n", s)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// SyncGlossary collects glossary entries from all registered plugins and syncs
+// them to the vector store via the sync_glossary action. Entries arrive from MCP
+// servers through the plugin capability proto. Safe to call at startup; errors
+// are logged, not returned.
+func (o *Orchestrator) SyncGlossary(ctx context.Context) {
+	if o.syncActionsPlugin == "" || o.syncGlossaryAction == "" {
+		return
+	}
+	if !o.registry.HasAction(o.syncActionsPlugin, o.syncGlossaryAction) {
+		slog.Warn("sync_glossary target not found", "plugin", o.syncActionsPlugin, "action", o.syncGlossaryAction)
+		return
+	}
+
+	// Collect glossary entries from all plugins.
+	caps := o.registry.ListCapabilities()
+	var allEntries []syncGlossaryEntry
+	for _, cap := range caps {
+		for _, g := range cap.Glossary {
+			if g.Term == "" || g.Definition == "" {
+				continue
+			}
+			allEntries = append(allEntries, syncGlossaryEntry{
+				Term:       g.Term,
+				Definition: g.Definition,
+				Category:   g.Category,
+				Tags:       g.Tags,
+				Synonyms:   g.Synonyms,
+			})
+		}
+	}
+
+	if len(allEntries) == 0 {
+		slog.Info("sync_glossary: no entries from any plugin, skipping", "component", "orchestrator")
+		return
+	}
+
+	slog.Info("sync_glossary starting", "component", "orchestrator",
+		"entries", len(allEntries), "sync_plugin", o.syncActionsPlugin, "sync_action", o.syncGlossaryAction)
+
+	exec, ok := o.registry.GetExecutor(o.syncActionsPlugin)
+	if !ok {
+		slog.Warn("sync_glossary: executor not found", "plugin", o.syncActionsPlugin)
+		return
+	}
+
+	hash := glossaryHash(allEntries)
+
+	// Batch glossary entries like actions to avoid oversized payloads.
+	const batchSize = 50
+	for i := 0; i < len(allEntries); i += batchSize {
+		end := i + batchSize
+		if end > len(allEntries) {
+			end = len(allEntries)
+		}
+		payload := syncGlossaryPayload{
+			GlossaryHash:        hash,
+			Entries:             allEntries[i:end],
+			IsContinuationBatch: i > 0,
+		}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			slog.Warn("sync_glossary: marshal failed", "error", err)
+			return
+		}
+		call := ToolCall{
+			ID:     fmt.Sprintf("sync-glossary-%d", i/batchSize),
+			Plugin: o.syncActionsPlugin,
+			Action: o.syncGlossaryAction,
+			Args:   map[string]string{"payload": string(b)},
+		}
+		result := o.guard.ExecuteWithDeadline(ctx, exec, call, 2*time.Minute)
+		if result.Error != "" {
+			slog.Warn("sync_glossary: batch failed", "batch", i/batchSize, "error", result.Error)
+			return
+		}
+	}
+
+	slog.Info("sync_glossary completed", "component", "orchestrator", "entries", len(allEntries))
 }
 
 // IngestKnowledgeDir recursively scans the configured knowledge directory for .md

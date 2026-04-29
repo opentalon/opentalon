@@ -457,6 +457,7 @@ func main() {
 		PluginCallObserver:      pluginObserver,
 		SyncActionsPlugin:       cfg.Orchestrator.Knowledge.SyncPlugin,
 		SyncActionsAction:       cfg.Orchestrator.Knowledge.SyncAction,
+		SyncGlossaryAction:      cfg.Orchestrator.Knowledge.SyncGlossaryAction,
 		Knowledge: orchestrator.KnowledgeConfig{
 			Plugin: cfg.Orchestrator.Knowledge.Plugin,
 			Action: cfg.Orchestrator.Knowledge.Action,
@@ -490,8 +491,9 @@ func main() {
 	// checks, audit logging, arg validation, and plugin-allowed filtering.
 	// If the sync or ingest plugin ever declares AuditLog=true, those calls
 	// will not be logged — acceptable for host-initiated startup work.
-	slog.Info("startup: syncing plugin actions to vector store", "component", "startup")
+	slog.Info("startup: syncing plugin actions and glossary to vector store", "component", "startup")
 	orch.SyncActions(ctx)
+	orch.SyncGlossary(ctx)
 	orch.IngestKnowledgeDir(ctx)
 	slog.Info("startup: sync complete, orchestrator ready", "component", "startup")
 

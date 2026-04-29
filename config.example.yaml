@@ -85,11 +85,12 @@ orchestrator:
   # delete records for plugins removed since last startup. Older sync-plugin
   # versions ignore both fields — upserts continue to work.
   # knowledge:
-  #   sync_plugin: weaviate        # plugin that has sync_actions action
-  #   sync_action: sync_actions    # action name for capability sync
-  #   plugin: weaviate             # plugin for knowledge article ingestion
-  #   action: ingest               # action name for single-article ingestion
-  #   dir: ./knowledge             # optional: scan .md files at startup
+  #   sync_plugin: weaviate              # plugin that has sync_actions action
+  #   sync_action: sync_actions          # action name for capability sync
+  #   sync_glossary_action: sync_glossary # action name for glossary sync (uses sync_plugin)
+  #   plugin: weaviate                   # plugin for knowledge article ingestion
+  #   action: ingest                     # action name for single-article ingestion
+  #   dir: ./knowledge                   # optional: scan .md files at startup
 
 channels:
   console:

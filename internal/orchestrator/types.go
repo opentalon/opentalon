@@ -21,11 +21,23 @@ type Action struct {
 }
 
 type PluginCapability struct {
-	Name                 string   `yaml:"name"`
-	Description          string   `yaml:"description"`
-	Actions              []Action `yaml:"actions"`
-	AllowedGroups        []string `yaml:"allowed_groups,omitempty"`         // empty = unrestricted; when set, only listed groups can use this plugin
-	SystemPromptAddition string   `yaml:"system_prompt_addition,omitempty"` // optional text appended to LLM system prompt when this plugin is loaded
+	Name                 string          `yaml:"name"`
+	Description          string          `yaml:"description"`
+	Actions              []Action        `yaml:"actions"`
+	AllowedGroups        []string        `yaml:"allowed_groups,omitempty"`         // empty = unrestricted; when set, only listed groups can use this plugin
+	SystemPromptAddition string          `yaml:"system_prompt_addition,omitempty"` // optional text appended to LLM system prompt when this plugin is loaded
+	Glossary             []GlossaryEntry `yaml:"glossary,omitempty"`               // optional glossary term/definition pairs from the plugin
+}
+
+// GlossaryEntry is a domain term with its definition, provided by a plugin
+// (e.g. from an MCP server). Collected by the orchestrator and synced to the
+// vector store for automatic context injection in the prepare pipeline.
+type GlossaryEntry struct {
+	Term       string   `yaml:"term"`
+	Definition string   `yaml:"definition"`
+	Category   string   `yaml:"category,omitempty"`
+	Tags       []string `yaml:"tags,omitempty"`
+	Synonyms   []string `yaml:"synonyms,omitempty"`
 }
 
 type ToolCall struct {

@@ -26,11 +26,22 @@ func capsToProto(c CapabilitiesMsg) *pluginpb.PluginCapabilities {
 			InjectContextArgs: a.InjectContextArgs,
 		}
 	}
+	glossary := make([]*pluginpb.GlossaryEntry, len(c.Glossary))
+	for i, g := range c.Glossary {
+		glossary[i] = &pluginpb.GlossaryEntry{
+			Term:       g.Term,
+			Definition: g.Definition,
+			Category:   g.Category,
+			Tags:       g.Tags,
+			Synonyms:   g.Synonyms,
+		}
+	}
 	return &pluginpb.PluginCapabilities{
 		Name:                 c.Name,
 		Description:          c.Description,
 		Actions:              actions,
 		SystemPromptAddition: c.SystemPromptAddition,
+		Glossary:             glossary,
 	}
 }
 
