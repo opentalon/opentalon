@@ -371,7 +371,7 @@ func (e *Executor) clearSession(ctx context.Context, call orchestrator.ToolCall)
 	if err := e.sessions.Delete(sessionID); err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("delete session: %v", err)}
 	}
-	e.sessions.Create(sessionID)
+	e.sessions.Create(sessionID, "", "")
 
 	// Run configured on-clear plugin actions (e.g. weaviate refresh).
 	if e.runAction != nil {

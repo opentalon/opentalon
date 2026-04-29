@@ -124,7 +124,7 @@ func TestRulesInjectedIntoSystemPrompt(t *testing.T) {
 	registry := NewToolRegistry()
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("s1")
+	sessions.Create("s1", "", "")
 
 	var capturedMessages []provider.Message
 	capturingLLM := &captureLLM{

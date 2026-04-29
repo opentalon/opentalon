@@ -155,7 +155,7 @@ type MemoryStoreInterface interface {
 // SessionStoreInterface is the session store (in-memory or SQLite).
 type SessionStoreInterface interface {
 	Get(id string) (*state.Session, error)
-	Create(id string) *state.Session
+	Create(id, entityID, groupID string) *state.Session
 	AddMessage(id string, msg provider.Message) error
 	SetModel(id string, model provider.ModelRef) error
 	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op

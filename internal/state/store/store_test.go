@@ -25,8 +25,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 3 {
-		t.Errorf("schema_version = %d, want 3", v)
+	if v != 4 {
+		t.Errorf("schema_version = %d, want 4", v)
 	}
 
 	// Re-open: idempotent, no error
@@ -39,8 +39,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version (second open): %v", err)
 	}
-	if v != 3 {
-		t.Errorf("schema_version after re-open = %d, want 3", v)
+	if v != 4 {
+		t.Errorf("schema_version after re-open = %d, want 4", v)
 	}
 }
 
@@ -98,7 +98,7 @@ func TestSessionStore_PersistAndGet(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	sessStore := NewSessionStore(db, 0, 0)
-	sessStore.Create("s1")
+	sessStore.Create("s1", "", "")
 	err = sessStore.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "hello"})
 	if err != nil {
 		t.Fatalf("AddMessage: %v", err)
@@ -139,7 +139,7 @@ func TestSessionStore_MaxMessagesTrim(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	sessStore := NewSessionStore(db, 3, 0) // keep last 3
-	sessStore.Create("s1")
+	sessStore.Create("s1", "", "")
 	for i := 0; i < 5; i++ {
 		_ = sessStore.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "msg"})
 	}
@@ -159,7 +159,7 @@ func TestSessionStore_SetSummaryRoundTrip(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	sessStore := NewSessionStore(db, 0, 0)
-	sessStore.Create("s1")
+	sessStore.Create("s1", "", "")
 	_ = sessStore.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "a"})
 	err = sessStore.SetSummary("s1", "Summary of past conversation.", []provider.Message{
 		{Role: provider.RoleUser, Content: "last user"},

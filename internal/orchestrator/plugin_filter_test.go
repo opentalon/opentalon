@@ -262,7 +262,7 @@ func TestSystemPrompt_StrictMode_OnlyListedPluginsVisible(t *testing.T) {
 	reg := buildFilterRegistry()
 	mem := state.NewMemoryStore("")
 	sess := state.NewSessionStore("")
-	sess.Create("s-prompt")
+	sess.Create("s-prompt", "", "")
 
 	llm := &capturingLLM{responses: []string{"done"}}
 	o := NewWithRules(llm, &fakeParser{parseFn: func(_ string) []ToolCall { return nil }},
@@ -313,7 +313,7 @@ func TestExecute_StrictMode_GuardNotInWhoAmI_StillRuns(t *testing.T) {
 
 	mem := state.NewMemoryStore("")
 	sess := state.NewSessionStore("")
-	sess.Create("s-guard")
+	sess.Create("s-guard", "", "")
 
 	llm := &capturingLLM{responses: []string{"done"}}
 	parser := &fakeParser{parseFn: func(_ string) []ToolCall { return nil }}
@@ -346,7 +346,7 @@ func TestSystemPrompt_StrictMode_MCPAliasVisible(t *testing.T) {
 
 	mem := state.NewMemoryStore("")
 	sess := state.NewSessionStore("")
-	sess.Create("s-alias")
+	sess.Create("s-alias", "", "")
 
 	llm := &capturingLLM{responses: []string{"done"}}
 	o := NewWithRules(llm, &fakeParser{parseFn: func(_ string) []ToolCall { return nil }},
@@ -389,7 +389,7 @@ func TestExecute_StrictMode_MCPAlias_ToolCallAllowed(t *testing.T) {
 
 	mem := state.NewMemoryStore("")
 	sess := state.NewSessionStore("")
-	sess.Create("s-alias-exec")
+	sess.Create("s-alias-exec", "", "")
 
 	callNum := 0
 	llm := &capturingLLM{responses: []string{"[tool] jira.search_issues", "done"}}
@@ -429,7 +429,7 @@ func TestExecute_StrictMode_BlocksUnlistedPlugin(t *testing.T) {
 	reg := buildFilterRegistry()
 	mem := state.NewMemoryStore("")
 	sess := state.NewSessionStore("")
-	sess.Create("s-block")
+	sess.Create("s-block", "", "")
 
 	callNum := 0
 	llm := &capturingLLM{responses: []string{"[tool] public.go", "done"}}

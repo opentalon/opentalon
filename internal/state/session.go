@@ -34,7 +34,7 @@ func NewSessionStore(dir string) *SessionStore {
 	}
 }
 
-func (s *SessionStore) Create(id string) *Session {
+func (s *SessionStore) Create(id, _, _ string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

@@ -193,8 +193,25 @@ func main() {
 			slog.Warn("plugin has no plugin ref and no github/ref", "plugin", name)
 			continue
 		}
+		pluginCfg := p.Config
+		if pluginCfg == nil {
+			pluginCfg = make(map[string]interface{})
+		}
+		// Auto-inject DB connection info so plugins can query the state store.
+		if _, ok := pluginCfg["__db_driver"]; !ok {
+			driver := cfg.State.DB.Driver
+			if driver == "" {
+				driver = "sqlite"
+			}
+			pluginCfg["__db_driver"] = driver
+			if driver == "postgres" {
+				pluginCfg["__db_dsn"] = cfg.State.DB.DSN
+			} else if dataDir != "" {
+				pluginCfg["__db_dsn"] = filepath.Join(dataDir, "state.db")
+			}
+		}
 		entry := plugin.PluginEntry{
-			Name: name, Plugin: path, Enabled: p.Enabled, Config: p.Config, ExposeHTTP: p.ExposeHTTP,
+			Name: name, Plugin: path, Enabled: p.Enabled, Config: pluginCfg, ExposeHTTP: p.ExposeHTTP,
 		}
 		if p.DialTimeout != "" {
 			if d, err := time.ParseDuration(p.DialTimeout); err == nil {
@@ -592,9 +609,9 @@ func main() {
 		slog.Warn("register reminder tool failed", "error", err)
 	}
 
-	ensureSession := func(sessionKey string) {
+	ensureSession := func(sessionKey, entityID, groupID string) {
 		if _, err := sessions.Get(sessionKey); err != nil {
-			sessions.Create(sessionKey)
+			sessions.Create(sessionKey, entityID, groupID)
 		}
 	}
 	runner := &channelRunner{orch: orch}

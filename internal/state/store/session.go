@@ -55,11 +55,11 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 }
 
 // Create inserts a new session. If id already exists (e.g. race), returns existing session from DB.
-func (s *SessionStore) Create(id string) *state.Session {
+func (s *SessionStore) Create(id, entityID, groupID string) *state.Session {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.SQLDB().Exec(
-		s.db.Dialect().Rebind(`INSERT INTO sessions (id, messages, summary, active_model, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`),
-		id, "[]", "", "", "{}", now, now)
+		s.db.Dialect().Rebind(`INSERT INTO sessions (id, messages, summary, active_model, metadata, entity_id, group_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		id, "[]", "", "", "{}", entityID, groupID, now, now)
 	if err != nil {
 		if existing, e := s.Get(id); e == nil {
 			return existing

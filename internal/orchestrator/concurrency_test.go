@@ -51,8 +51,8 @@ func newConcurrentOrch(t *testing.T, maxConcurrent int, llm LLMClient) (*Orchest
 	registry := NewToolRegistry()
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("s1")
-	sessions.Create("s2")
+	sessions.Create("s1", "", "")
+	sessions.Create("s2", "", "")
 	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions,
 		OrchestratorOpts{MaxConcurrentSessions: maxConcurrent})
 	return orch, "s1", "s2"
@@ -237,8 +237,10 @@ func (s *blockingSetSummaryStore) writeStart() {
 func (s *blockingSetSummaryStore) writeEnd() { atomic.AddInt32(&s.inWrite, -1) }
 
 func (s *blockingSetSummaryStore) Get(id string) (*state.Session, error) { return s.inner.Get(id) }
-func (s *blockingSetSummaryStore) Create(id string) *state.Session       { return s.inner.Create(id) }
-func (s *blockingSetSummaryStore) Delete(id string) error                { return s.inner.Delete(id) }
+func (s *blockingSetSummaryStore) Create(id, entityID, groupID string) *state.Session {
+	return s.inner.Create(id, entityID, groupID)
+}
+func (s *blockingSetSummaryStore) Delete(id string) error { return s.inner.Delete(id) }
 func (s *blockingSetSummaryStore) SetModel(id string, m provider.ModelRef) error {
 	return s.inner.SetModel(id, m)
 }
@@ -271,7 +273,7 @@ func TestSummarizeGoroutineHoldsSessionLock(t *testing.T) {
 	setSummaryRelease := make(chan struct{})
 
 	inner := state.NewSessionStore("")
-	inner.Create(sessionID)
+	inner.Create(sessionID, "", "")
 	ts := &blockingSetSummaryStore{
 		inner:             inner,
 		setSummaryStarted: setSummaryStarted,
@@ -339,7 +341,7 @@ func TestConcurrencySessionLockCleanup(t *testing.T) {
 
 	// Create many unique sessions.
 	for i := 0; i < 20; i++ {
-		sessions.Create(string(rune('a' + i)))
+		sessions.Create(string(rune('a'+i)), "", "")
 	}
 
 	orch := NewWithRules(&immediateLLM{resp: "ok"}, &fakeParser{parseFn: func(string) []ToolCall { return nil }},

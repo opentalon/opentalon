@@ -37,6 +37,8 @@ type HandlerConfig struct {
 // message through the Runner and returns the response.
 func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	return func(ctx context.Context, sessionKey string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
+		var entityID, groupID string
+
 		// Profile verification: required when verifier is configured.
 		if cfg.Verifier != nil {
 			token := msg.Metadata["profile_token"]
@@ -64,6 +66,8 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			}
 
 			// Scope session to entity so profiles cannot access each other's history.
+			entityID = p.EntityID
+			groupID = p.Group
 			sessionKey = p.EntityID + ":" + sessionKey
 			// Use entity ID as actor for memory scoping and permission checks.
 			ctx = actor.WithActor(ctx, p.EntityID)
@@ -76,7 +80,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		// else creating deferred work) can deliver results back to this chat.
 		ctx = actor.WithConversationID(ctx, msg.ConversationID)
 
-		cfg.EnsureSession(sessionKey)
+		cfg.EnsureSession(sessionKey, entityID, groupID)
 		content := msg.Content
 		if prep := pkg.GetContentPreparer(msg.ChannelID); prep != nil {
 			content = prep(ctx, content, cfg.RunAction, cfg.HasAction)
