@@ -296,11 +296,12 @@ type ResponseFormatterEntry struct {
 // KnowledgeConfig configures knowledge-augmented RAG: startup action sync and
 // optional knowledge directory scanning.
 type KnowledgeConfig struct {
-	SyncPlugin string `yaml:"sync_plugin"` // plugin name for action sync (e.g. "weaviate")
-	SyncAction string `yaml:"sync_action"` // action name for sync (e.g. "sync_actions")
-	Plugin     string `yaml:"plugin"`      // plugin name for knowledge ingestion (e.g. "weaviate")
-	Action     string `yaml:"action"`      // action name for single-article ingestion (e.g. "ingest")
-	Dir        string `yaml:"dir"`         // optional directory of .md files to ingest at startup
+	SyncPlugin         string `yaml:"sync_plugin"`          // plugin name for action sync (e.g. "weaviate")
+	SyncAction         string `yaml:"sync_action"`          // action name for sync (e.g. "sync_actions")
+	SyncGlossaryAction string `yaml:"sync_glossary_action"` // action name for glossary sync (e.g. "sync_glossary"); uses sync_plugin
+	Plugin             string `yaml:"plugin"`               // plugin name for knowledge ingestion (e.g. "weaviate")
+	Action             string `yaml:"action"`               // action name for single-article ingestion (e.g. "ingest")
+	Dir                string `yaml:"dir"`                  // optional directory of .md files to ingest at startup
 }
 
 type OrchestratorConfig struct {

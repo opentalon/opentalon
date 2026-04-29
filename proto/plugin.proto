@@ -61,6 +61,18 @@ message PluginCapabilities {
   // If plugin trust is ever relaxed (e.g. third-party marketplace), this field becomes a
   // prompt-injection vector and must be sanitised or sandboxed before inclusion.
   string system_prompt_addition = 4;
+  // Optional glossary entries provided by the plugin (e.g. from an MCP server).
+  // The orchestrator collects entries from all plugins and syncs them to the
+  // vector store via the sync_glossary action for automatic context injection.
+  repeated GlossaryEntry glossary = 5;
+}
+
+message GlossaryEntry {
+  string term = 1;
+  string definition = 2;
+  string category = 3;          // optional grouping (e.g. "hr", "support")
+  repeated string tags = 4;     // optional free-form tags
+  repeated string synonyms = 5; // alternative terms for better vector matching
 }
 
 message Action {

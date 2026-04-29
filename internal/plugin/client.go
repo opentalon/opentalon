@@ -154,10 +154,21 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 			InjectContextArgs: a.InjectContextArgs,
 		}
 	}
+	glossary := make([]orchestrator.GlossaryEntry, len(pb.Glossary))
+	for i, g := range pb.Glossary {
+		glossary[i] = orchestrator.GlossaryEntry{
+			Term:       g.Term,
+			Definition: g.Definition,
+			Category:   g.Category,
+			Tags:       g.Tags,
+			Synonyms:   g.Synonyms,
+		}
+	}
 	return orchestrator.PluginCapability{
 		Name:                 pb.Name,
 		Description:          pb.Description,
 		Actions:              actions,
 		SystemPromptAddition: pb.SystemPromptAddition,
+		Glossary:             glossary,
 	}
 }
