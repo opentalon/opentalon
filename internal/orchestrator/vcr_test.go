@@ -9,6 +9,7 @@ import (
 	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
+	"github.com/opentalon/opentalon/internal/scenarios"
 	"github.com/opentalon/opentalon/internal/vcr"
 	pkgchannel "github.com/opentalon/opentalon/pkg/channel"
 )
@@ -128,125 +129,56 @@ func (w *withModelLLM) Complete(ctx context.Context, req *provider.CompletionReq
 	return w.inner.Complete(ctx, req)
 }
 
-// ── Original scenarios (Anthropic-only, kept for backward compat) ─────────
+// ── Core scenarios (both providers, driven from internal/scenarios/testdata) ──
 
-func TestVCRDirectResponse(t *testing.T) {
-	llm, save := vcrLLM(t, "testdata/vcr/direct_response.json")
-	defer save()
-	orch, sessID := setupOrchestrator(llm, DefaultParser)
-	result, err := orch.Run(vcrCtx(), sessID, "hello")
+// TestVCRScenarios replays all shared scenarios for both providers.
+// Cassette paths are derived from scenario names: "direct response" → direct_response.json.
+// Adding a new scenario to testdata/*.yaml automatically queues it for VCR recording;
+// the test skips gracefully until the cassette is recorded with make vcr-record-all.
+func TestVCRScenarios(t *testing.T) {
+	all, err := scenarios.EmbeddedScenarios()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("load scenarios: %v", err)
 	}
-	if result.Response == "" {
-		t.Error("empty response")
-	}
-	if len(result.ToolCalls) != 0 {
-		t.Errorf("expected no tool calls, got %d", len(result.ToolCalls))
+	for _, s := range all {
+		s := s
+		t.Run(s.Name, func(t *testing.T) {
+			for _, prov := range vcrProviders() {
+				prov := prov
+				cassette := "testdata/vcr/" + prov.prefix + scenarios.CassetteName(s.Name)
+				t.Run(prov.name, func(t *testing.T) {
+					llm, save := prov.llmFn(t, cassette)
+					defer save()
+					orch, sessID := setupOrchestrator(withModel(llm, prov.model), DefaultParser)
+					result, err := orch.Run(prov.ctxFn(), sessID, s.Input)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !isRecording() {
+						if reason := scenarios.CheckAssertions(s, vcrRunResult(result)); reason != "" {
+							t.Error(reason)
+						}
+					}
+				})
+			}
+		})
 	}
 }
 
-func TestVCRSingleToolCall(t *testing.T) {
-	llm, save := vcrLLM(t, "testdata/vcr/single_tool_call.json")
-	defer save()
-	orch, sessID := setupOrchestrator(llm, DefaultParser)
-	result, err := orch.Run(vcrCtx(), sessID, "analyze code in myrepo")
-	if err != nil {
-		t.Fatal(err)
+// vcrRunResult converts a RunResult to scenarios.RunResult for assertion checking.
+func vcrRunResult(r *RunResult) scenarios.RunResult {
+	out := scenarios.RunResult{Response: r.Response}
+	for _, tc := range r.ToolCalls {
+		out.ToolCalls = append(out.ToolCalls, scenarios.ToolCallResult{
+			Plugin: tc.Plugin,
+			Action: tc.Action,
+			Args:   tc.Args,
+		})
 	}
-	if result.Response == "" {
-		t.Error("empty response")
-	}
-	if !isRecording() {
-		if len(result.ToolCalls) != 1 {
-			t.Fatalf("expected 1 tool call, got %d", len(result.ToolCalls))
-		}
-		tc := result.ToolCalls[0]
-		if tc.Plugin != "gitlab" || tc.Action != "analyze_code" {
-			t.Errorf("tool call = %s.%s, want gitlab.analyze_code", tc.Plugin, tc.Action)
-		}
-		if tc.Args["repo"] != "myrepo" {
-			t.Errorf("args[repo] = %q, want %q", tc.Args["repo"], "myrepo")
-		}
-	}
+	return out
 }
 
-func TestVCRMultiToolCall(t *testing.T) {
-	llm, save := vcrLLM(t, "testdata/vcr/multi_tool_call.json")
-	defer save()
-	orch, sessID := setupOrchestrator(llm, DefaultParser)
-	result, err := orch.Run(vcrCtx(), sessID, "analyze code in myrepo and create a jira issue titled 'Code review'")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Response == "" {
-		t.Error("empty response")
-	}
-	if !isRecording() && len(result.ToolCalls) < 2 {
-		t.Fatalf("expected at least 2 tool calls, got %d", len(result.ToolCalls))
-	}
-}
-
-// ── OpenRouter original scenarios ─────────────────────────────────────────
-
-func TestVCROpenRouterDirectResponse(t *testing.T) {
-	llm, save := vcrLLMOpenRouter(t, "testdata/vcr/openrouter_direct_response.json")
-	defer save()
-	orch, sessID := setupOrchestrator(llm, DefaultParser)
-	result, err := orch.Run(vcrCtxOpenRouter(), sessID, "hello")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Response == "" {
-		t.Error("empty response")
-	}
-	if len(result.ToolCalls) != 0 {
-		t.Errorf("expected no tool calls, got %d", len(result.ToolCalls))
-	}
-}
-
-func TestVCROpenRouterSingleToolCall(t *testing.T) {
-	llm, save := vcrLLMOpenRouter(t, "testdata/vcr/openrouter_single_tool_call.json")
-	defer save()
-	orch, sessID := setupOrchestrator(llm, DefaultParser)
-	result, err := orch.Run(vcrCtxOpenRouter(), sessID, "analyze code in myrepo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Response == "" {
-		t.Error("empty response")
-	}
-	if !isRecording() {
-		if len(result.ToolCalls) != 1 {
-			t.Fatalf("expected 1 tool call, got %d", len(result.ToolCalls))
-		}
-		tc := result.ToolCalls[0]
-		if tc.Plugin != "gitlab" || tc.Action != "analyze_code" {
-			t.Errorf("tool call = %s.%s, want gitlab.analyze_code", tc.Plugin, tc.Action)
-		}
-		if tc.Args["repo"] != "myrepo" {
-			t.Errorf("args[repo] = %q, want %q", tc.Args["repo"], "myrepo")
-		}
-	}
-}
-
-func TestVCROpenRouterMultiToolCall(t *testing.T) {
-	llm, save := vcrLLMOpenRouter(t, "testdata/vcr/openrouter_multi_tool_call.json")
-	defer save()
-	orch, sessID := setupOrchestrator(llm, DefaultParser)
-	result, err := orch.Run(vcrCtxOpenRouter(), sessID, "analyze code in myrepo and create a jira issue titled 'Code review'")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Response == "" {
-		t.Error("empty response")
-	}
-	if !isRecording() && len(result.ToolCalls) < 2 {
-		t.Fatalf("expected at least 2 tool calls, got %d", len(result.ToolCalls))
-	}
-}
-
-// ── New scenarios (both providers via table loop) ──────────────────────────
+// ── Special-context scenarios (both providers via table loop) ─────────────
 
 // TestVCRSelfIntroduction verifies the LLM identifies itself as OpenTalon when
 // a custom rule injects the name into the system prompt.

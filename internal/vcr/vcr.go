@@ -1,9 +1,10 @@
 // Package vcr provides record/replay infrastructure for LLM integration tests.
 //
 // Cassettes are JSON files committed to git. Each cassette stores a prompt_hash
-// computed from internal/prompts at record time. On replay, NewPlayer verifies
-// the current hash matches; a mismatch means prompts changed and the cassette
-// must be re-recorded with: make vcr-record-all
+// (from internal/prompts) and a scenarios_hash (from internal/scenarios/testdata)
+// at record time. On replay, NewPlayer verifies both hashes; a mismatch means
+// prompts or scenarios changed and the cassette must be re-recorded with:
+// make vcr-record-all
 package vcr
 
 import (
@@ -16,6 +17,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
+	"github.com/opentalon/opentalon/internal/scenarios"
 )
 
 // LLMClient mirrors orchestrator.LLMClient; both Player and Recorder satisfy it.
@@ -25,10 +27,11 @@ type LLMClient interface {
 
 // Cassette is the on-disk format for a recorded test scenario.
 type Cassette struct {
-	PromptHash   string        `json:"prompt_hash"`
-	RecordedAt   time.Time     `json:"recorded_at"`
-	Model        string        `json:"model"`
-	Interactions []Interaction `json:"interactions"`
+	PromptHash    string        `json:"prompt_hash"`
+	ScenariosHash string        `json:"scenarios_hash"`
+	RecordedAt    time.Time     `json:"recorded_at"`
+	Model         string        `json:"model"`
+	Interactions  []Interaction `json:"interactions"`
 }
 
 // Interaction is one Complete call within a cassette.
@@ -57,11 +60,16 @@ func NewPlayer(cassettePath string) (*Player, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("vcr: parse cassette %s: %w", cassettePath, err)
 	}
-	current := prompts.Hash()
-	if c.PromptHash != current {
+	if cur := prompts.Hash(); c.PromptHash != cur {
 		return nil, fmt.Errorf(
-			"vcr: cassette %s is stale\n  stored:  %s\n  current: %s\nRe-record with: make vcr-record-all",
-			cassettePath, c.PromptHash, current,
+			"vcr: cassette %s is stale (prompts changed)\n  stored:  %s\n  current: %s\nRe-record with: make vcr-record-all",
+			cassettePath, c.PromptHash, cur,
+		)
+	}
+	if cur := scenarios.Hash(); c.ScenariosHash != cur {
+		return nil, fmt.Errorf(
+			"vcr: cassette %s is stale (scenarios changed)\n  stored:  %s\n  current: %s\nRe-record with: make vcr-record-all",
+			cassettePath, c.ScenariosHash, cur,
 		)
 	}
 	return &Player{cassette: &c, path: cassettePath}, nil
@@ -92,9 +100,10 @@ func NewRecorder(inner LLMClient, path, model string) *Recorder {
 		inner: inner,
 		path:  path,
 		cassette: Cassette{
-			PromptHash: prompts.Hash(),
-			RecordedAt: time.Now().UTC(),
-			Model:      model,
+			PromptHash:    prompts.Hash(),
+			ScenariosHash: scenarios.Hash(),
+			RecordedAt:    time.Now().UTC(),
+			Model:         model,
 		},
 	}
 }

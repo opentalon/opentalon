@@ -1,4 +1,4 @@
-.PHONY: all build test lint deps setup plugin channel run clean clean-cache clean-plugins clean-channels clean-skills clean-lua-plugins proto vcr-record-all
+.PHONY: all build test lint deps setup plugin channel run clean clean-cache clean-plugins clean-channels clean-skills clean-lua-plugins proto vcr-record-all test-structural eval
 
 BINARY      := opentalon
 CMD_PKG     := ./cmd/opentalon
@@ -63,18 +63,24 @@ lint:
 # Re-record all VCR cassettes against the real Anthropic API.
 # Requires: ANTHROPIC_API_KEY to be set.
 # Run this after changing anything in internal/prompts/.
+# ── Structural integration tests ─────────────────────────────────────────────
+# Hits the real Anthropic API at temperature=0. Requires ANTHROPIC_API_KEY.
+# Run before a release to verify structural correctness.
+test-structural:
+	go test -tags integration -race -v -run TestIntegrationScenarios ./internal/orchestrator/...
+
+# ── Eval framework ────────────────────────────────────────────────────────────
+# YAML-driven scenario runner with pass-rate baseline tracking.
+# Requires ANTHROPIC_API_KEY. Fails if pass rate regresses vs stored baseline.
+eval:
+	go test -tags eval -v -run TestEval ./internal/eval/...
+
 vcr-record-all:
-	@if [ -n "$$ANTHROPIC_API_KEY" ]; then \
-		echo "==> Recording Anthropic (Haiku) cassettes..."; \
-		VCR_RECORD=1 go test -v -run "TestVCRDirect|TestVCRSingle|TestVCRMulti" ./internal/orchestrator/...; \
+	@if [ -n "$$ANTHROPIC_API_KEY" ] || [ -n "$$OPENROUTER_API_KEY" ]; then \
+		echo "==> Recording VCR cassettes..."; \
+		VCR_RECORD=1 go test -v -run "TestVCR" ./internal/orchestrator/...; \
 	else \
-		echo "Skipping Anthropic: ANTHROPIC_API_KEY not set"; \
-	fi
-	@if [ -n "$$OPENROUTER_API_KEY" ]; then \
-		echo "==> Recording OpenRouter (Ministral 8B) cassettes..."; \
-		VCR_RECORD=1 go test -v -run "TestVCROpenRouter" ./internal/orchestrator/...; \
-	else \
-		echo "Skipping OpenRouter: OPENROUTER_API_KEY not set"; \
+		echo "Skipping: set ANTHROPIC_API_KEY and/or OPENROUTER_API_KEY"; \
 	fi
 
 # ── Convenience ─────────────────────────────────────────────────────────────
