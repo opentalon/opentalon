@@ -23,20 +23,23 @@ func NewSessionStore(db *DB, maxMessages, maxIdleDays int) *SessionStore {
 	return &SessionStore{db: db, maxMessages: maxMessages, maxIdleDays: maxIdleDays}
 }
 
-// Get loads a session by id. Returns error if not found.
+// Get loads a session by id. Messages are loaded from the messages table.
 func (s *SessionStore) Get(id string) (*state.Session, error) {
-	var messagesJSON, summary, activeModel, metadataJSON, createdAt, updatedAt string
+	d := s.db.Dialect()
+	var summary, activeModel, metadataJSON, createdAt, updatedAt string
 	err := s.db.SQLDB().QueryRow(
-		s.db.Dialect().Rebind(`SELECT messages, COALESCE(summary,''), active_model, metadata, created_at, updated_at FROM sessions WHERE id = ?`),
+		d.Rebind(`SELECT COALESCE(summary,''), active_model, metadata, created_at, updated_at FROM sessions WHERE id = ?`),
 		id,
-	).Scan(&messagesJSON, &summary, &activeModel, &metadataJSON, &createdAt, &updatedAt)
+	).Scan(&summary, &activeModel, &metadataJSON, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("session %q not found", id)
 	}
-	var messages []provider.Message
-	if messagesJSON != "" {
-		_ = json.Unmarshal([]byte(messagesJSON), &messages)
+
+	messages, err := s.loadMessages(id)
+	if err != nil {
+		return nil, err
 	}
+
 	var metadata map[string]string
 	if metadataJSON != "" {
 		_ = json.Unmarshal([]byte(metadataJSON), &metadata)
@@ -64,7 +67,6 @@ func (s *SessionStore) Create(id, entityID, groupID string) *state.Session {
 		if existing, e := s.Get(id); e == nil {
 			return existing
 		}
-		// Return in-memory session so caller can continue; next AddMessage will fail or overwrite.
 		return &state.Session{
 			ID:        id,
 			Messages:  []provider.Message{},
@@ -82,93 +84,83 @@ func (s *SessionStore) Create(id, entityID, groupID string) *state.Session {
 	}
 }
 
-// AddMessage appends a message and persists. If maxMessages > 0, trims to last maxMessages.
-// Uses an exclusive transaction so concurrent writers are serialised.
+// AddMessage inserts a message into the messages table and updates the session timestamp.
 func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	ctx := context.Background()
 	d := s.db.Dialect()
-	etx, cleanup, err := d.BeginExclusive(ctx, s.db.SQLDB())
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Get next seq number for this session.
+	var maxSeq int
+	_ = s.db.SQLDB().QueryRowContext(ctx,
+		d.Rebind(`SELECT COALESCE(MAX(seq), 0) FROM messages WHERE session_id = ?`), id,
+	).Scan(&maxSeq)
+	seq := maxSeq + 1
+
+	_, err := s.db.SQLDB().ExecContext(ctx,
+		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, created_at) VALUES (?, ?, ?, ?, ?)`),
+		id, seq, string(msg.Role), msg.Content, now)
 	if err != nil {
-		return fmt.Errorf("add message begin: %w", err)
+		return fmt.Errorf("add message insert: %w", err)
 	}
-	defer cleanup()
-	var messagesJSON string
-	err = etx.QueryRowContext(ctx, d.Rebind(`SELECT messages FROM sessions WHERE id = ?`+d.ForUpdate()), id).Scan(&messagesJSON)
-	if err != nil {
-		_ = etx.Rollback()
-		return fmt.Errorf("session %q not found", id)
+
+	// Trim if maxMessages is set.
+	if s.maxMessages > 0 {
+		_, _ = s.db.SQLDB().ExecContext(ctx,
+			d.Rebind(`DELETE FROM messages WHERE session_id = ? AND seq <= (SELECT MAX(seq) - ? FROM messages WHERE session_id = ?)`),
+			id, s.maxMessages, id)
 	}
-	var messages []provider.Message
-	if messagesJSON != "" {
-		_ = json.Unmarshal([]byte(messagesJSON), &messages)
-	}
-	messages = append(messages, msg)
-	updatedAt := time.Now().UTC().Format(time.RFC3339)
-	if s.maxMessages > 0 && len(messages) > s.maxMessages {
-		keep := len(messages) - s.maxMessages
-		messages = messages[keep:]
-	}
-	newMessagesJSON, err := json.Marshal(messages)
-	if err != nil {
-		_ = etx.Rollback()
-		return fmt.Errorf("add message marshal: %w", err)
-	}
-	_, err = etx.ExecContext(ctx,
-		d.Rebind(`UPDATE sessions SET messages = ?, updated_at = ? WHERE id = ?`),
-		string(newMessagesJSON), updatedAt, id)
-	if err != nil {
-		_ = etx.Rollback()
-		return fmt.Errorf("add message update: %w", err)
-	}
-	if err := etx.Commit(); err != nil {
-		return fmt.Errorf("add message commit: %w", err)
-	}
+
+	// Touch session updated_at.
+	_, _ = s.db.SQLDB().ExecContext(ctx,
+		d.Rebind(`UPDATE sessions SET updated_at = ? WHERE id = ?`), now, id)
+
 	return nil
 }
 
 // SetModel updates the active model and persists.
 func (s *SessionStore) SetModel(id string, model provider.ModelRef) error {
-	sess, err := s.Get(id)
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.SQLDB().Exec(
+		s.db.Dialect().Rebind(`UPDATE sessions SET active_model = ?, updated_at = ? WHERE id = ?`),
+		string(model), updatedAt, id)
 	if err != nil {
-		return err
-	}
-	sess.ActiveModel = model
-	sess.UpdatedAt = time.Now()
-	return s.persist(sess)
-}
-
-// SetSummary updates the session summary (for summarization feature) and persists.
-func (s *SessionStore) SetSummary(id string, summary string, messages []provider.Message) error {
-	sess, err := s.Get(id)
-	if err != nil {
-		return err
-	}
-	sess.Summary = summary
-	sess.Messages = messages
-	sess.UpdatedAt = time.Now()
-	return s.persist(sess)
-}
-
-func (s *SessionStore) persist(sess *state.Session) error {
-	messagesJSON, err := json.Marshal(sess.Messages)
-	if err != nil {
-		return fmt.Errorf("session persist: marshal messages: %w", err)
-	}
-	metadataJSON, _ := json.Marshal(sess.Metadata)
-	if metadataJSON == nil {
-		metadataJSON = []byte("{}")
-	}
-	updatedAt := sess.UpdatedAt.UTC().Format(time.RFC3339)
-	_, err = s.db.SQLDB().Exec(
-		s.db.Dialect().Rebind(`UPDATE sessions SET messages = ?, summary = ?, active_model = ?, metadata = ?, updated_at = ? WHERE id = ?`),
-		string(messagesJSON), sess.Summary, string(sess.ActiveModel), string(metadataJSON), updatedAt, sess.ID)
-	if err != nil {
-		return fmt.Errorf("session persist: %w", err)
+		return fmt.Errorf("set model: %w", err)
 	}
 	return nil
 }
 
-// List is not used by orchestrator but may be needed for idle prune. Returns all session ids.
+// SetSummary updates the session summary and replaces messages with the given slice.
+func (s *SessionStore) SetSummary(id string, summary string, messages []provider.Message) error {
+	ctx := context.Background()
+	d := s.db.Dialect()
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Delete all existing messages for this session.
+	if _, err := s.db.SQLDB().ExecContext(ctx,
+		d.Rebind(`DELETE FROM messages WHERE session_id = ?`), id); err != nil {
+		return fmt.Errorf("set summary delete: %w", err)
+	}
+
+	// Insert the kept messages with fresh seq numbers.
+	for i, msg := range messages {
+		if _, err := s.db.SQLDB().ExecContext(ctx,
+			d.Rebind(`INSERT INTO messages (session_id, seq, role, content, created_at) VALUES (?, ?, ?, ?, ?)`),
+			id, i+1, string(msg.Role), msg.Content, now); err != nil {
+			return fmt.Errorf("set summary insert: %w", err)
+		}
+	}
+
+	// Update session summary and timestamp.
+	if _, err := s.db.SQLDB().ExecContext(ctx,
+		d.Rebind(`UPDATE sessions SET summary = ?, updated_at = ? WHERE id = ?`),
+		summary, now, id); err != nil {
+		return fmt.Errorf("set summary update: %w", err)
+	}
+	return nil
+}
+
+// List returns all session ids.
 func (s *SessionStore) List() ([]string, error) {
 	rows, err := s.db.SQLDB().Query(`SELECT id FROM sessions`)
 	if err != nil {
@@ -186,19 +178,51 @@ func (s *SessionStore) List() ([]string, error) {
 	return ids, rows.Err()
 }
 
-// Delete removes a session (for tests or admin).
+// Delete removes a session and its messages.
 func (s *SessionStore) Delete(id string) error {
-	_, err := s.db.SQLDB().Exec(s.db.Dialect().Rebind(`DELETE FROM sessions WHERE id = ?`), id)
+	d := s.db.Dialect()
+	// Delete messages first (FK may not cascade in all configs).
+	_, _ = s.db.SQLDB().Exec(d.Rebind(`DELETE FROM messages WHERE session_id = ?`), id)
+	_, err := s.db.SQLDB().Exec(d.Rebind(`DELETE FROM sessions WHERE id = ?`), id)
 	return err
 }
 
 // PruneIdleSessions deletes sessions not updated in the last maxIdleDays days.
-// No-op if maxIdleDays <= 0. Call on startup or periodically.
 func (s *SessionStore) PruneIdleSessions() error {
 	if s.maxIdleDays <= 0 {
 		return nil
 	}
+	d := s.db.Dialect()
 	cutoff := time.Now().AddDate(0, 0, -s.maxIdleDays).UTC().Format(time.RFC3339)
-	_, err := s.db.SQLDB().Exec(s.db.Dialect().Rebind(`DELETE FROM sessions WHERE updated_at < ?`), cutoff)
+	// Delete messages for pruned sessions.
+	_, _ = s.db.SQLDB().Exec(d.Rebind(`DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?)`), cutoff)
+	_, err := s.db.SQLDB().Exec(d.Rebind(`DELETE FROM sessions WHERE updated_at < ?`), cutoff)
 	return err
+}
+
+// loadMessages reads all messages for a session from the messages table, ordered by seq.
+func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error) {
+	rows, err := s.db.SQLDB().Query(
+		s.db.Dialect().Rebind(`SELECT role, content FROM messages WHERE session_id = ? ORDER BY seq`),
+		sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("load messages: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var messages []provider.Message
+	for rows.Next() {
+		var role, content string
+		if err := rows.Scan(&role, &content); err != nil {
+			return nil, fmt.Errorf("load messages scan: %w", err)
+		}
+		messages = append(messages, provider.Message{
+			Role:    provider.Role(role),
+			Content: content,
+		})
+	}
+	if messages == nil {
+		messages = []provider.Message{}
+	}
+	return messages, rows.Err()
 }
