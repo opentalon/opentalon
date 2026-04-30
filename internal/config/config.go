@@ -244,6 +244,7 @@ type PluginConfig struct {
 	GitHub      string                 `yaml:"github"`   // e.g. "owner/repo" (bundler-style)
 	Ref         string                 `yaml:"ref"`      // branch, tag, or commit; resolved and pinned in plugins.lock
 	Config      map[string]interface{} `yaml:"config,omitempty"`
+	DBAccess    bool                   `yaml:"db_access,omitempty"`    // opt-in: inject state-store credentials into plugin config
 	DialTimeout string                 `yaml:"dial_timeout,omitempty"` // e.g. "30s"; overrides the default 5s gRPC init timeout
 	ExposeHTTP  bool                   `yaml:"expose_http,omitempty"`  // opt-in: reverse-proxy /{plugin-name}/* through the webhook server
 }

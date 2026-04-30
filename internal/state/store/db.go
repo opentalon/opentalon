@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -217,6 +218,7 @@ func migrationSQL(name string) (string, error) {
 func (d *DB) backfillSessionOwnership() {
 	rows, err := d.db.Query(d.dialect.Rebind(`SELECT id FROM sessions WHERE entity_id = ''`))
 	if err != nil {
+		slog.Warn("session ownership backfill: query failed", "error", err)
 		return
 	}
 	defer func() { _ = rows.Close() }()
@@ -228,6 +230,7 @@ func (d *DB) backfillSessionOwnership() {
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			slog.Warn("session ownership backfill: scan failed", "error", err)
 			continue
 		}
 		parts := strings.SplitN(id, ":", 3)
@@ -236,12 +239,18 @@ func (d *DB) backfillSessionOwnership() {
 			updates = append(updates, update{id: id, entity: parts[0]})
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		slog.Warn("session ownership backfill: rows iteration failed", "error", err)
+	}
 
 	for _, u := range updates {
 		// Look up group from entities table.
 		var groupID string
-		_ = d.db.QueryRow(d.dialect.Rebind(`SELECT COALESCE(group_id,'') FROM entities WHERE id = ?`), u.entity).Scan(&groupID)
-		_, _ = d.db.Exec(d.dialect.Rebind(`UPDATE sessions SET entity_id = ?, group_id = ? WHERE id = ?`), u.entity, groupID, u.id)
+		if err := d.db.QueryRow(d.dialect.Rebind(`SELECT COALESCE(group_id,'') FROM entities WHERE id = ?`), u.entity).Scan(&groupID); err != nil {
+			slog.Warn("session ownership backfill: group lookup failed", "session", u.id, "entity", u.entity, "error", err)
+		}
+		if _, err := d.db.Exec(d.dialect.Rebind(`UPDATE sessions SET entity_id = ?, group_id = ? WHERE id = ?`), u.entity, groupID, u.id); err != nil {
+			slog.Warn("session ownership backfill: update failed", "session", u.id, "error", err)
+		}
 	}
 }

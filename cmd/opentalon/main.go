@@ -197,17 +197,19 @@ func main() {
 		if pluginCfg == nil {
 			pluginCfg = make(map[string]interface{})
 		}
-		// Auto-inject DB connection info so plugins can query the state store.
-		if _, ok := pluginCfg["__db_driver"]; !ok {
-			driver := cfg.State.DB.Driver
-			if driver == "" {
-				driver = "sqlite"
-			}
-			pluginCfg["__db_driver"] = driver
-			if driver == "postgres" {
-				pluginCfg["__db_dsn"] = cfg.State.DB.DSN
-			} else if dataDir != "" {
-				pluginCfg["__db_dsn"] = filepath.Join(dataDir, "state.db")
+		// Inject DB connection info only when the plugin opts in via db_access: true.
+		if p.DBAccess {
+			if _, ok := pluginCfg["__db_driver"]; !ok {
+				driver := cfg.State.DB.Driver
+				if driver == "" {
+					driver = "sqlite"
+				}
+				pluginCfg["__db_driver"] = driver
+				if driver == "postgres" {
+					pluginCfg["__db_dsn"] = cfg.State.DB.DSN
+				} else if dataDir != "" {
+					pluginCfg["__db_dsn"] = filepath.Join(dataDir, "state.db")
+				}
 			}
 		}
 		entry := plugin.PluginEntry{

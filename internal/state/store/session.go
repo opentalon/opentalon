@@ -61,8 +61,8 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 func (s *SessionStore) Create(id, entityID, groupID string) *state.Session {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.SQLDB().Exec(
-		s.db.Dialect().Rebind(`INSERT INTO sessions (id, messages, summary, active_model, metadata, entity_id, group_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		id, "[]", "", "", "{}", entityID, groupID, now, now)
+		s.db.Dialect().Rebind(`INSERT INTO sessions (id, summary, active_model, metadata, entity_id, group_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+		id, "", "", "{}", entityID, groupID, now, now)
 	if err != nil {
 		if existing, e := s.Get(id); e == nil {
 			return existing
@@ -90,16 +90,12 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	d := s.db.Dialect()
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	// Get next seq number for this session.
-	var maxSeq int
-	_ = s.db.SQLDB().QueryRowContext(ctx,
-		d.Rebind(`SELECT COALESCE(MAX(seq), 0) FROM messages WHERE session_id = ?`), id,
-	).Scan(&maxSeq)
-	seq := maxSeq + 1
-
+	// Atomically assign next seq in a single statement to avoid race conditions
+	// between concurrent AddMessage calls.
 	_, err := s.db.SQLDB().ExecContext(ctx,
-		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, created_at) VALUES (?, ?, ?, ?, ?)`),
-		id, seq, string(msg.Role), msg.Content, now)
+		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, created_at)
+		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ? FROM messages WHERE session_id = ?`),
+		id, string(msg.Role), msg.Content, now, id)
 	if err != nil {
 		return fmt.Errorf("add message insert: %w", err)
 	}
@@ -136,15 +132,21 @@ func (s *SessionStore) SetSummary(id string, summary string, messages []provider
 	d := s.db.Dialect()
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	tx, err := s.db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("set summary begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Delete all existing messages for this session.
-	if _, err := s.db.SQLDB().ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		d.Rebind(`DELETE FROM messages WHERE session_id = ?`), id); err != nil {
 		return fmt.Errorf("set summary delete: %w", err)
 	}
 
 	// Insert the kept messages with fresh seq numbers.
 	for i, msg := range messages {
-		if _, err := s.db.SQLDB().ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			d.Rebind(`INSERT INTO messages (session_id, seq, role, content, created_at) VALUES (?, ?, ?, ?, ?)`),
 			id, i+1, string(msg.Role), msg.Content, now); err != nil {
 			return fmt.Errorf("set summary insert: %w", err)
@@ -152,12 +154,12 @@ func (s *SessionStore) SetSummary(id string, summary string, messages []provider
 	}
 
 	// Update session summary and timestamp.
-	if _, err := s.db.SQLDB().ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		d.Rebind(`UPDATE sessions SET summary = ?, updated_at = ? WHERE id = ?`),
 		summary, now, id); err != nil {
 		return fmt.Errorf("set summary update: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // List returns all session ids.
