@@ -46,7 +46,7 @@ func TestPostgres_OpenAndMigrations(t *testing.T) {
 func TestPostgres_AddMessageConcurrent(t *testing.T) {
 	db := pgDB(t)
 	store := NewSessionStore(db, 0, 0)
-	store.Create("concurrent-test")
+	store.Create("concurrent-test", "", "")
 
 	const n = 10
 	var wg sync.WaitGroup

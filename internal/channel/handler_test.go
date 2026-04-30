@@ -39,7 +39,7 @@ func (e *echoRunner) Run(_ context.Context, _ string, content string, _ ...pkg.F
 }
 
 func newTestHandler(verifier ProfileVerifier, checker LimitChecker) pkg.MessageHandler {
-	ensureSession := func(_ string) {}
+	ensureSession := func(_, _, _ string) {}
 	noAction := func(_ context.Context, _, _ string, _ map[string]string) (string, error) {
 		return "", errors.New("no actions")
 	}

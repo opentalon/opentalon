@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -78,9 +79,14 @@ func Open(cfg config.DBConfig, dataDir string) (*DB, error) {
 	}
 
 	d := &DB{db: rawDB, dialect: dialect}
+	prevVersion, _ := d.currentVersion()
 	if err := d.runMigrations(); err != nil {
 		_ = rawDB.Close()
 		return nil, err
+	}
+	// Backfill entity_id/group_id on sessions created before migration 004.
+	if prevVersion < 4 {
+		d.backfillSessionOwnership()
 	}
 	return d, nil
 }
@@ -205,4 +211,46 @@ func migrationSQL(name string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// backfillSessionOwnership populates entity_id and group_id on sessions
+// created before migration 004 by parsing the session ID (entityID:channel:conv...).
+func (d *DB) backfillSessionOwnership() {
+	rows, err := d.db.Query(d.dialect.Rebind(`SELECT id FROM sessions WHERE entity_id = ''`))
+	if err != nil {
+		slog.Warn("session ownership backfill: query failed", "error", err)
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	type update struct {
+		id, entity string
+	}
+	var updates []update
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			slog.Warn("session ownership backfill: scan failed", "error", err)
+			continue
+		}
+		parts := strings.SplitN(id, ":", 3)
+		if len(parts) >= 3 {
+			// Format: entityID:channelID:conversationID[...] — first segment is entity.
+			updates = append(updates, update{id: id, entity: parts[0]})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("session ownership backfill: rows iteration failed", "error", err)
+	}
+
+	for _, u := range updates {
+		// Look up group from entities table.
+		var groupID string
+		if err := d.db.QueryRow(d.dialect.Rebind(`SELECT COALESCE(group_id,'') FROM entities WHERE id = ?`), u.entity).Scan(&groupID); err != nil {
+			slog.Warn("session ownership backfill: group lookup failed", "session", u.id, "entity", u.entity, "error", err)
+		}
+		if _, err := d.db.Exec(d.dialect.Rebind(`UPDATE sessions SET entity_id = ?, group_id = ? WHERE id = ?`), u.entity, groupID, u.id); err != nil {
+			slog.Warn("session ownership backfill: update failed", "session", u.id, "error", err)
+		}
+	}
 }

@@ -177,7 +177,8 @@ type HasActionFunc func(plugin, action string) bool
 type ContentPreparer func(ctx context.Context, content string, runAction RunActionFunc, hasAction HasActionFunc) string
 
 // EnsureSessionFunc is called to ensure a session exists for the given key before running.
-type EnsureSessionFunc func(sessionKey string)
+// entityID and groupID are stored alongside the session for ownership queries.
+type EnsureSessionFunc func(sessionKey, entityID, groupID string)
 
 // MessageHandler is called when an inbound message arrives. The implementation
 // feeds the message to the orchestrator and returns the response.

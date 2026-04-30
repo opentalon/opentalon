@@ -387,7 +387,7 @@ func TestRun_AudioFileTranscribedBeforeLLM(t *testing.T) {
 
 	mem := state.NewMemoryStore("")
 	sess := state.NewSessionStore("")
-	sess.Create("s-stt")
+	sess.Create("s-stt", "", "")
 
 	llm := &capturingLLM{responses: []string{"ok"}}
 	o := NewWithRules(llm, &fakeParser{parseFn: func(_ string) []ToolCall { return nil }},
