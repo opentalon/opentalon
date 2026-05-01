@@ -152,6 +152,41 @@ func TestStreamWriterWithUpdatableChannel(t *testing.T) {
 	}
 }
 
+func TestStreamWriterSendStatus(t *testing.T) {
+	ch := &fakeUpdatableChannel{
+		fakeChannel: fakeChannel{caps: Capabilities{ID: "test", Edits: true}},
+		captureID:   "msg-status-1",
+	}
+	sw := NewStreamWriter(ch, "conv1", "", nil)
+	ctx := context.Background()
+
+	// First status creates the message via SendAndCapture.
+	sw.SendStatus(ctx, "Thinking\u2026")
+	if ch.sentCount() != 1 {
+		t.Errorf("expected 1 send for initial status, got %d", ch.sentCount())
+	}
+	if ch.lastContent() != "_Thinking\u2026_" {
+		t.Errorf("status content = %q, want italic label", ch.lastContent())
+	}
+
+	// Second status updates the existing message.
+	sw.SendStatus(ctx, "Calling timly.list-items\u2026")
+	if ch.updateCount() < 1 {
+		t.Error("expected SendUpdate for second status")
+	}
+	last := ch.updates[len(ch.updates)-1]
+	if last.Content != "_Calling timly.list-items\u2026_" {
+		t.Errorf("updated status = %q, want italic label", last.Content)
+	}
+
+	// Real content replaces the status.
+	sw.OnChunk(ctx, "The answer is 42.", true)
+	lastUpdate := ch.updates[len(ch.updates)-1]
+	if lastUpdate.Content != "The answer is 42." {
+		t.Errorf("final content = %q, want real answer", lastUpdate.Content)
+	}
+}
+
 func TestStreamWriterFinalUpdate(t *testing.T) {
 	ch := &fakeUpdatableChannel{
 		fakeChannel: fakeChannel{caps: Capabilities{ID: "test", Edits: true}},
