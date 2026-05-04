@@ -513,11 +513,6 @@ func main() {
 				return 60 * time.Second
 			}(),
 		},
-		SkillExtraction: orchestrator.SkillExtractionConfig{
-			Enabled:      cfg.Orchestrator.SkillExtraction.Enabled,
-			MinToolCalls: cfg.Orchestrator.SkillExtraction.MinToolCalls,
-			MaxSkills:    cfg.Orchestrator.SkillExtraction.MaxSkills,
-		},
 		RunCompleteNotifier: plugin.NewRunNotifier(pluginManager),
 	})
 

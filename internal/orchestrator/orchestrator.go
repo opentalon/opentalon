@@ -147,20 +147,19 @@ type OrchestratorOpts struct {
 	SummarizeUpdatePrompt   string                        // empty = default English
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PipelineConfig          pipeline.PipelineConfig
-	ContextWindow           int                   // model context window in tokens; 0 = no trimming
-	MaxConcurrentSessions   int                   // max sessions running in parallel; default 1 (sequential)
-	GroupPluginLookup       GroupPluginLookup     // optional; when set, filters tool list by profile group
-	UsageRecorder           UsageRecorder         // optional; when set, records LLM usage after each run
-	PluginCallObserver      PluginCallObserver    // optional; when set, notified after each plugin/tool call
-	SyncActionsPlugin       string                // optional; plugin name for action sync (e.g. "weaviate")
-	SyncActionsAction       string                // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
-	SyncGlossaryAction      string                // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
-	Knowledge               KnowledgeConfig       // optional; knowledge directory ingestion
-	Subprocess              SubprocessConfig      // optional; subprocess (sub-agent) support
-	OnStreamChunk           StreamChunkCallback   // optional; when set and LLM supports streaming, final answers are streamed
-	ShowToolCalls           string                // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	SkillExtraction         SkillExtractionConfig // optional; when enabled, extracts reusable skills from multi-tool sessions
-	RunCompleteNotifier     RunCompleteNotifier   // optional; when set, notifies plugins after each run
+	ContextWindow           int                 // model context window in tokens; 0 = no trimming
+	MaxConcurrentSessions   int                 // max sessions running in parallel; default 1 (sequential)
+	GroupPluginLookup       GroupPluginLookup   // optional; when set, filters tool list by profile group
+	UsageRecorder           UsageRecorder       // optional; when set, records LLM usage after each run
+	PluginCallObserver      PluginCallObserver  // optional; when set, notified after each plugin/tool call
+	SyncActionsPlugin       string              // optional; plugin name for action sync (e.g. "weaviate")
+	SyncActionsAction       string              // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
+	SyncGlossaryAction      string              // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
+	Knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
+	Subprocess              SubprocessConfig    // optional; subprocess (sub-agent) support
+	OnStreamChunk           StreamChunkCallback // optional; when set and LLM supports streaming, final answers are streamed
+	ShowToolCalls           string              // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	RunCompleteNotifier     RunCompleteNotifier // optional; when set, notifies plugins after each run
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -224,7 +223,6 @@ type Orchestrator struct {
 	subprocessConfig        SubprocessConfig    // optional; subprocess (sub-agent) support
 	onStreamChunk           StreamChunkCallback // optional; when set, final answers stream to caller
 	showToolCalls           string              // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	skillExtractor          *SkillExtractor     // optional; when set, extracts reusable skills from multi-tool sessions
 	runCompleteNotifier     RunCompleteNotifier // optional; when set, notifies plugins after each run
 }
 
@@ -349,8 +347,6 @@ func NewWithRules(
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
 
-	// Initialize skill extractor when enabled.
-	o.skillExtractor = NewSkillExtractor(llm, memory, opts.SkillExtraction)
 	o.runCompleteNotifier = opts.RunCompleteNotifier
 
 	// Register the built-in _subprocess plugin when enabled.
@@ -821,13 +817,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// Store relevant tools in context so buildSystemPrompt and planner can filter.
 	if relevantToolsSet {
 		ctx = withRelevantTools(ctx, relevantTools)
-	}
-
-	// Inject learned skills into context for buildSystemPrompt and post-run improvement.
-	if o.skillExtractor != nil {
-		if skills := o.skillExtractor.FindMatchingSkills(ctx); len(skills) > 0 {
-			ctx = withMatchedSkills(ctx, skills)
-		}
 	}
 
 	// Block B: Run planner to check if this requires a multi-step pipeline.
@@ -1672,11 +1661,12 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		sb.WriteString("\n")
 	}
 
-	if skills := matchedSkillsFromContext(ctx); len(skills) > 0 {
+	skillMemories, _ := o.memory.MemoriesForContext(ctx, "skill")
+	if len(skillMemories) > 0 {
 		sb.WriteString("## Learned skills\n")
 		sb.WriteString("When the user's request matches a skill below, follow its steps:\n")
-		for _, s := range skills {
-			sb.WriteString(s.content)
+		for _, m := range skillMemories {
+			sb.WriteString(m.Content)
 			sb.WriteString("\n---\n")
 		}
 		sb.WriteString("\n")
@@ -2002,6 +1992,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 // Runs asynchronously to avoid blocking the response.
 func (o *Orchestrator) maybeExtractSkill(ctx context.Context, result *RunResult, userMessage string) {
 	// Notify plugins about the completed run (async).
+	// Notify plugins about the completed run (async).
 	if o.runCompleteNotifier != nil && len(result.ToolCalls) > 0 {
 		sessionID := actor.SessionID(ctx)
 		actorID := actor.Actor(ctx)
@@ -2016,18 +2007,7 @@ func (o *Orchestrator) maybeExtractSkill(ctx context.Context, result *RunResult,
 		go o.runCompleteNotifier.NotifyRunComplete(ctx, event)
 	}
 
-	if o.skillExtractor != nil {
-		// Check if an existing skill was matched for this session.
-		if matched := matchedSkillsFromContext(ctx); len(matched) > 0 {
-			// Try to improve the first matched skill based on the new execution.
-			go o.skillExtractor.ImproveSkill(ctx, matched[0].memoryID, matched[0].content, result, userMessage)
-		} else {
-			go o.skillExtractor.ExtractAndStore(ctx, result, userMessage)
-		}
-		return
-	}
-
-	// Fallback: simple workflow recording (original behavior).
+	// Simple workflow recording (original behavior).
 	if len(result.ToolCalls) < 2 {
 		return
 	}

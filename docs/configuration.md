@@ -267,21 +267,21 @@ orchestrator:
 
 See the [Hello World plugin](https://github.com/opentalon/hellow-world-plugin) for an example.
 
-### Skill extraction (built-in)
+### Skill extraction
 
-When the skills plugin is not available, the orchestrator can extract skills itself using the built-in skill extractor:
+Automatic skill extraction is handled by the **opentalon-skills** plugin. See [Plugin System — Skill Extraction](design/plugins.md#skill-extraction) for details.
 
 ```yaml
-orchestrator:
-  skill_extraction:
-    enabled: true       # default false
-    min_tool_calls: 5   # minimum tool calls to trigger extraction; default 5
-    max_skills: 50      # max stored skills per user; default 50
+plugins:
+  skills:
+    enabled: true
+    plugin: ./plugins/opentalon-skills
+    config:
+      min_tool_calls: 5   # minimum tool calls to trigger extraction; default 5
+      max_skills: 50       # max skills per user; default 50
 ```
 
-When enabled, sessions with 5+ tool calls (or error recovery) trigger an async LLM call to extract a reusable skill. Skills are stored in the memory store with a `skill` tag and injected into future sessions' system prompts.
-
-For a more capable approach, use the **opentalon-skills** plugin instead (see [Plugin System — Skill Extraction](design/plugins.md#skill-extraction)).
+Skills are stored in the shared memory store with a `skill` tag and automatically injected into future sessions' system prompts.
 
 ## Bundler-style plugins and channels
 

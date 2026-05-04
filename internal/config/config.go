@@ -312,17 +312,9 @@ type OrchestratorConfig struct {
 	PermissionPlugin      string                       `yaml:"permission_plugin,omitempty"`       // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
 	MaxConcurrentSessions int                          `yaml:"max_concurrent_sessions,omitempty"` // max sessions running in parallel (default 1 = sequential)
 	Pipeline              PipelineOrchestratorConfig   `yaml:"pipeline,omitempty"`
-	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`        // knowledge-augmented RAG configuration
-	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`       // subprocess (sub-agent) support
-	ShowToolCalls         string                       `yaml:"show_tool_calls,omitempty"`  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	SkillExtraction       SkillExtractionConfig        `yaml:"skill_extraction,omitempty"` // automatic skill extraction from multi-tool sessions
-}
-
-// SkillExtractionConfig configures automatic skill extraction from sessions.
-type SkillExtractionConfig struct {
-	Enabled      bool `yaml:"enabled"`        // default false
-	MinToolCalls int  `yaml:"min_tool_calls"` // minimum tool calls to trigger extraction; default 5
-	MaxSkills    int  `yaml:"max_skills"`     // max stored skills per actor; default 50
+	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`       // knowledge-augmented RAG configuration
+	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`      // subprocess (sub-agent) support
+	ShowToolCalls         string                       `yaml:"show_tool_calls,omitempty"` // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 }
 
 // PipelineOrchestratorConfig enables structured multi-step pipeline execution.
