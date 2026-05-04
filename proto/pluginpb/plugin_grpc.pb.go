@@ -20,9 +20,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	PluginService_Init_FullMethodName         = "/opentalon.plugin.v1.PluginService/Init"
-	PluginService_Execute_FullMethodName      = "/opentalon.plugin.v1.PluginService/Execute"
-	PluginService_Capabilities_FullMethodName = "/opentalon.plugin.v1.PluginService/Capabilities"
+	PluginService_Init_FullMethodName          = "/opentalon.plugin.v1.PluginService/Init"
+	PluginService_Execute_FullMethodName       = "/opentalon.plugin.v1.PluginService/Execute"
+	PluginService_Capabilities_FullMethodName  = "/opentalon.plugin.v1.PluginService/Capabilities"
+	PluginService_OnRunComplete_FullMethodName = "/opentalon.plugin.v1.PluginService/OnRunComplete"
 )
 
 // PluginServiceClient is the client API for PluginService service.
@@ -33,6 +34,10 @@ type PluginServiceClient interface {
 	Init(ctx context.Context, in *PluginInitRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Execute(ctx context.Context, in *ToolCallRequest, opts ...grpc.CallOption) (*ToolResultResponse, error)
 	Capabilities(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*PluginCapabilities, error)
+	// OnRunComplete is called after an orchestrator run finishes. Plugins that
+	// observe session traces (e.g. skill extraction, analytics) implement this.
+	// The default (Unimplemented) returns OK so existing plugins are unaffected.
+	OnRunComplete(ctx context.Context, in *RunCompleteEvent, opts ...grpc.CallOption) (*RunCompleteResponse, error)
 }
 
 type pluginServiceClient struct {
@@ -73,6 +78,16 @@ func (c *pluginServiceClient) Capabilities(ctx context.Context, in *emptypb.Empt
 	return out, nil
 }
 
+func (c *pluginServiceClient) OnRunComplete(ctx context.Context, in *RunCompleteEvent, opts ...grpc.CallOption) (*RunCompleteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RunCompleteResponse)
+	err := c.cc.Invoke(ctx, PluginService_OnRunComplete_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PluginServiceServer is the server API for PluginService service.
 // All implementations must embed UnimplementedPluginServiceServer
 // for forward compatibility.
@@ -81,6 +96,10 @@ type PluginServiceServer interface {
 	Init(context.Context, *PluginInitRequest) (*emptypb.Empty, error)
 	Execute(context.Context, *ToolCallRequest) (*ToolResultResponse, error)
 	Capabilities(context.Context, *emptypb.Empty) (*PluginCapabilities, error)
+	// OnRunComplete is called after an orchestrator run finishes. Plugins that
+	// observe session traces (e.g. skill extraction, analytics) implement this.
+	// The default (Unimplemented) returns OK so existing plugins are unaffected.
+	OnRunComplete(context.Context, *RunCompleteEvent) (*RunCompleteResponse, error)
 	mustEmbedUnimplementedPluginServiceServer()
 }
 
@@ -99,6 +118,9 @@ func (UnimplementedPluginServiceServer) Execute(context.Context, *ToolCallReques
 }
 func (UnimplementedPluginServiceServer) Capabilities(context.Context, *emptypb.Empty) (*PluginCapabilities, error) {
 	return nil, status.Error(codes.Unimplemented, "method Capabilities not implemented")
+}
+func (UnimplementedPluginServiceServer) OnRunComplete(context.Context, *RunCompleteEvent) (*RunCompleteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method OnRunComplete not implemented")
 }
 func (UnimplementedPluginServiceServer) mustEmbedUnimplementedPluginServiceServer() {}
 func (UnimplementedPluginServiceServer) testEmbeddedByValue()                       {}
@@ -175,6 +197,24 @@ func _PluginService_Capabilities_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PluginService_OnRunComplete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunCompleteEvent)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).OnRunComplete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_OnRunComplete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).OnRunComplete(ctx, req.(*RunCompleteEvent))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PluginService_ServiceDesc is the grpc.ServiceDesc for PluginService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -193,6 +233,236 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Capabilities",
 			Handler:    _PluginService_Capabilities_Handler,
+		},
+		{
+			MethodName: "OnRunComplete",
+			Handler:    _PluginService_OnRunComplete_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "plugin.proto",
+}
+
+const (
+	HostService_WriteMemory_FullMethodName  = "/opentalon.plugin.v1.HostService/WriteMemory"
+	HostService_ReadMemories_FullMethodName = "/opentalon.plugin.v1.HostService/ReadMemories"
+	HostService_DeleteMemory_FullMethodName = "/opentalon.plugin.v1.HostService/DeleteMemory"
+	HostService_LLMComplete_FullMethodName  = "/opentalon.plugin.v1.HostService/LLMComplete"
+)
+
+// HostServiceClient is the client API for HostService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// HostService is implemented by the host and called by plugins that need
+// access to shared resources (memory store, LLM). The host starts a
+// HostService gRPC server and passes its address to plugins via Init config
+// (key: "__host_addr").
+type HostServiceClient interface {
+	WriteMemory(ctx context.Context, in *WriteMemoryRequest, opts ...grpc.CallOption) (*WriteMemoryResponse, error)
+	ReadMemories(ctx context.Context, in *ReadMemoriesRequest, opts ...grpc.CallOption) (*ReadMemoriesResponse, error)
+	DeleteMemory(ctx context.Context, in *DeleteMemoryRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	LLMComplete(ctx context.Context, in *LLMCompleteRequest, opts ...grpc.CallOption) (*LLMCompleteResponse, error)
+}
+
+type hostServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewHostServiceClient(cc grpc.ClientConnInterface) HostServiceClient {
+	return &hostServiceClient{cc}
+}
+
+func (c *hostServiceClient) WriteMemory(ctx context.Context, in *WriteMemoryRequest, opts ...grpc.CallOption) (*WriteMemoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WriteMemoryResponse)
+	err := c.cc.Invoke(ctx, HostService_WriteMemory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) ReadMemories(ctx context.Context, in *ReadMemoriesRequest, opts ...grpc.CallOption) (*ReadMemoriesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadMemoriesResponse)
+	err := c.cc.Invoke(ctx, HostService_ReadMemories_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) DeleteMemory(ctx context.Context, in *DeleteMemoryRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, HostService_DeleteMemory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostServiceClient) LLMComplete(ctx context.Context, in *LLMCompleteRequest, opts ...grpc.CallOption) (*LLMCompleteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LLMCompleteResponse)
+	err := c.cc.Invoke(ctx, HostService_LLMComplete_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// HostServiceServer is the server API for HostService service.
+// All implementations must embed UnimplementedHostServiceServer
+// for forward compatibility.
+//
+// HostService is implemented by the host and called by plugins that need
+// access to shared resources (memory store, LLM). The host starts a
+// HostService gRPC server and passes its address to plugins via Init config
+// (key: "__host_addr").
+type HostServiceServer interface {
+	WriteMemory(context.Context, *WriteMemoryRequest) (*WriteMemoryResponse, error)
+	ReadMemories(context.Context, *ReadMemoriesRequest) (*ReadMemoriesResponse, error)
+	DeleteMemory(context.Context, *DeleteMemoryRequest) (*emptypb.Empty, error)
+	LLMComplete(context.Context, *LLMCompleteRequest) (*LLMCompleteResponse, error)
+	mustEmbedUnimplementedHostServiceServer()
+}
+
+// UnimplementedHostServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedHostServiceServer struct{}
+
+func (UnimplementedHostServiceServer) WriteMemory(context.Context, *WriteMemoryRequest) (*WriteMemoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method WriteMemory not implemented")
+}
+func (UnimplementedHostServiceServer) ReadMemories(context.Context, *ReadMemoriesRequest) (*ReadMemoriesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadMemories not implemented")
+}
+func (UnimplementedHostServiceServer) DeleteMemory(context.Context, *DeleteMemoryRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteMemory not implemented")
+}
+func (UnimplementedHostServiceServer) LLMComplete(context.Context, *LLMCompleteRequest) (*LLMCompleteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method LLMComplete not implemented")
+}
+func (UnimplementedHostServiceServer) mustEmbedUnimplementedHostServiceServer() {}
+func (UnimplementedHostServiceServer) testEmbeddedByValue()                     {}
+
+// UnsafeHostServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to HostServiceServer will
+// result in compilation errors.
+type UnsafeHostServiceServer interface {
+	mustEmbedUnimplementedHostServiceServer()
+}
+
+func RegisterHostServiceServer(s grpc.ServiceRegistrar, srv HostServiceServer) {
+	// If the following call panics, it indicates UnimplementedHostServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&HostService_ServiceDesc, srv)
+}
+
+func _HostService_WriteMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WriteMemoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).WriteMemory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_WriteMemory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).WriteMemory(ctx, req.(*WriteMemoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_ReadMemories_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadMemoriesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).ReadMemories(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_ReadMemories_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).ReadMemories(ctx, req.(*ReadMemoriesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_DeleteMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteMemoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).DeleteMemory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_DeleteMemory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).DeleteMemory(ctx, req.(*DeleteMemoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostService_LLMComplete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LLMCompleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostServiceServer).LLMComplete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostService_LLMComplete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostServiceServer).LLMComplete(ctx, req.(*LLMCompleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// HostService_ServiceDesc is the grpc.ServiceDesc for HostService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var HostService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "opentalon.plugin.v1.HostService",
+	HandlerType: (*HostServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "WriteMemory",
+			Handler:    _HostService_WriteMemory_Handler,
+		},
+		{
+			MethodName: "ReadMemories",
+			Handler:    _HostService_ReadMemories_Handler,
+		},
+		{
+			MethodName: "DeleteMemory",
+			Handler:    _HostService_DeleteMemory_Handler,
+		},
+		{
+			MethodName: "LLMComplete",
+			Handler:    _HostService_LLMComplete_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

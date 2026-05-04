@@ -267,6 +267,22 @@ orchestrator:
 
 See the [Hello World plugin](https://github.com/opentalon/hellow-world-plugin) for an example.
 
+### Skill extraction
+
+Automatic skill extraction is handled by the **opentalon-skills** plugin. See [Plugin System — Skill Extraction](design/plugins.md#skill-extraction) for details.
+
+```yaml
+plugins:
+  skills:
+    enabled: true
+    plugin: ./plugins/opentalon-skills
+    config:
+      min_tool_calls: 5   # minimum tool calls to trigger extraction; default 5
+      max_skills: 50       # max skills per user; default 50
+```
+
+Skills are stored in the shared memory store with a `skill` tag and automatically injected into future sessions' system prompts.
+
 ## Bundler-style plugins and channels
 
 Instead of a local `plugin` path, you can point a plugin or channel at a GitHub repo and a **ref** (branch, tag, or commit). OpenTalon will clone the repo, build it, and pin the resolved commit in a lock file so installs are reproducible.

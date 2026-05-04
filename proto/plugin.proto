@@ -11,6 +11,21 @@ service PluginService {
   rpc Init(PluginInitRequest) returns (google.protobuf.Empty);
   rpc Execute(ToolCallRequest) returns (ToolResultResponse);
   rpc Capabilities(google.protobuf.Empty) returns (PluginCapabilities);
+  // OnRunComplete is called after an orchestrator run finishes. Plugins that
+  // observe session traces (e.g. skill extraction, analytics) implement this.
+  // The default (Unimplemented) returns OK so existing plugins are unaffected.
+  rpc OnRunComplete(RunCompleteEvent) returns (RunCompleteResponse);
+}
+
+// HostService is implemented by the host and called by plugins that need
+// access to shared resources (memory store, LLM). The host starts a
+// HostService gRPC server and passes its address to plugins via Init config
+// (key: "__host_addr").
+service HostService {
+  rpc WriteMemory(WriteMemoryRequest) returns (WriteMemoryResponse);
+  rpc ReadMemories(ReadMemoriesRequest) returns (ReadMemoriesResponse);
+  rpc DeleteMemory(DeleteMemoryRequest) returns (google.protobuf.Empty);
+  rpc LLMComplete(LLMCompleteRequest) returns (LLMCompleteResponse);
 }
 
 message PluginInitRequest {
@@ -88,4 +103,72 @@ message Parameter {
   string description = 2;
   string type = 3;
   bool required = 4;
+}
+
+// --- OnRunComplete: post-run hook ---
+
+// RunCompleteEvent is sent to plugins after each orchestrator run completes.
+message RunCompleteEvent {
+  string session_id = 1;
+  string actor_id = 2;
+  string user_message = 3;
+  string response = 4;
+  repeated ToolCallEntry tool_calls = 5;
+}
+
+// ToolCallEntry is one tool call + result pair from a completed run.
+message ToolCallEntry {
+  string plugin = 1;
+  string action = 2;
+  map<string, string> args = 3;
+  string result_content = 4;
+  string result_error = 5;
+}
+
+message RunCompleteResponse {
+  // Empty for now; reserved for future use (e.g. plugin requesting prompt changes).
+}
+
+// --- HostService messages ---
+
+message WriteMemoryRequest {
+  string actor_id = 1;  // empty = general (no actor scope)
+  string content = 2;
+  repeated string tags = 3;
+}
+
+message WriteMemoryResponse {
+  string id = 1;
+}
+
+message ReadMemoriesRequest {
+  string actor_id = 1;  // context actor for scoping
+  string tag = 2;       // filter by tag; empty = all
+}
+
+message ReadMemoriesResponse {
+  repeated MemoryEntry memories = 1;
+}
+
+message MemoryEntry {
+  string id = 1;
+  string content = 2;
+  repeated string tags = 3;
+  string created_at = 4;
+}
+
+message DeleteMemoryRequest {
+  string id = 1;
+}
+
+message LLMCompleteRequest {
+  string system_prompt = 1;
+  string user_message = 2;
+  int32 max_tokens = 3;  // 0 = provider default
+}
+
+message LLMCompleteResponse {
+  string content = 1;
+  int32 input_tokens = 2;
+  int32 output_tokens = 3;
 }

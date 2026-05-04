@@ -109,6 +109,21 @@ type PluginCallObserver interface {
 	ObservePluginCall(plugin, action string, failed bool, inputTokens, outputTokens int)
 }
 
+// RunCompleteNotifier broadcasts post-run events to interested plugins.
+type RunCompleteNotifier interface {
+	NotifyRunComplete(ctx context.Context, event RunCompleteEvent)
+}
+
+// RunCompleteEvent describes a completed orchestrator run for plugin notification.
+type RunCompleteEvent struct {
+	SessionID   string
+	ActorID     string
+	UserMessage string
+	Response    string
+	ToolCalls   []ToolCall
+	Results     []ToolResult
+}
+
 // KnowledgeConfig configures the knowledge directory scanning feature.
 type KnowledgeConfig struct {
 	Plugin string // plugin name to call for ingestion (e.g. "weaviate")
@@ -144,12 +159,14 @@ type OrchestratorOpts struct {
 	Subprocess              SubprocessConfig    // optional; subprocess (sub-agent) support
 	OnStreamChunk           StreamChunkCallback // optional; when set and LLM supports streaming, final answers are streamed
 	ShowToolCalls           string              // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	RunCompleteNotifier     RunCompleteNotifier // optional; when set, notifies plugins after each run
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
 type MemoryStoreInterface interface {
 	AddScoped(ctx context.Context, actorID string, content string, tags ...string) (*state.Memory, error)
 	MemoriesForContext(ctx context.Context, tag string) ([]*state.Memory, error)
+	Delete(id string) error
 }
 
 // SessionStoreInterface is the session store (in-memory or SQLite).
@@ -206,6 +223,7 @@ type Orchestrator struct {
 	subprocessConfig        SubprocessConfig    // optional; subprocess (sub-agent) support
 	onStreamChunk           StreamChunkCallback // optional; when set, final answers stream to caller
 	showToolCalls           string              // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	runCompleteNotifier     RunCompleteNotifier // optional; when set, notifies plugins after each run
 }
 
 // resolveAllowedPluginNames returns a JSON array of allowed plugin names for the
@@ -328,6 +346,8 @@ func NewWithRules(
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
+
+	o.runCompleteNotifier = opts.RunCompleteNotifier
 
 	// Register the built-in _subprocess plugin when enabled.
 	o.subprocessConfig = opts.Subprocess
@@ -950,7 +970,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 						Role:    provider.RoleAssistant,
 						Content: result.Response,
 					})
-					o.maybeRecordWorkflow(ctx, result, userMessage)
+					o.maybeExtractSkill(ctx, result, userMessage)
 					return result, nil
 				}
 				stripRetries++
@@ -996,7 +1016,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				Role:    provider.RoleAssistant,
 				Content: resp.Content,
 			})
-			o.maybeRecordWorkflow(ctx, result, userMessage)
+			o.maybeExtractSkill(ctx, result, userMessage)
 			o.applyShowToolCalls(result)
 			if fmtErr := o.formatResponse(ctx, result); fmtErr != nil {
 				return nil, fmtErr
@@ -1641,6 +1661,17 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		sb.WriteString("\n")
 	}
 
+	skillMemories, _ := o.memory.MemoriesForContext(ctx, "skill")
+	if len(skillMemories) > 0 {
+		sb.WriteString("## Learned skills\n")
+		sb.WriteString("When the user's request matches a skill below, follow its steps:\n")
+		for _, m := range skillMemories {
+			sb.WriteString(m.Content)
+			sb.WriteString("\n---\n")
+		}
+		sb.WriteString("\n")
+	}
+
 	if hint := channelFormatHint(ctx); hint != "" {
 		sb.WriteString("## OUTPUT FORMAT\n")
 		sb.WriteString(hint)
@@ -1956,11 +1987,30 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	return result
 }
 
-func (o *Orchestrator) maybeRecordWorkflow(ctx context.Context, result *RunResult, userMessage string) {
+// maybeExtractSkill runs skill extraction when enabled, falling back to simple
+// workflow recording when disabled. Also notifies plugins via RunCompleteNotifier.
+// Runs asynchronously to avoid blocking the response.
+func (o *Orchestrator) maybeExtractSkill(ctx context.Context, result *RunResult, userMessage string) {
+	// Notify plugins about the completed run (async).
+	// Notify plugins about the completed run (async).
+	if o.runCompleteNotifier != nil && len(result.ToolCalls) > 0 {
+		sessionID := actor.SessionID(ctx)
+		actorID := actor.Actor(ctx)
+		event := RunCompleteEvent{
+			SessionID:   sessionID,
+			ActorID:     actorID,
+			UserMessage: userMessage,
+			Response:    result.Response,
+			ToolCalls:   result.ToolCalls,
+			Results:     result.Results,
+		}
+		go o.runCompleteNotifier.NotifyRunComplete(ctx, event)
+	}
+
+	// Simple workflow recording (original behavior).
 	if len(result.ToolCalls) < 2 {
 		return
 	}
-
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "trigger: %s\nsteps:\n", userMessage)
 	for i, call := range result.ToolCalls {

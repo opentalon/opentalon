@@ -333,6 +333,22 @@ func main() {
 			}
 		}
 	}
+	// Start the host service so plugins can call back for memory/LLM access.
+	hostServer := plugin.NewHostServer(memory, llm)
+	hostAddr, err := hostServer.Start()
+	if err != nil {
+		slog.Warn("host service failed to start, plugins will not have host access", "error", err)
+	} else {
+		slog.Info("host service started", "component", "startup", "addr", hostAddr)
+		// Inject host address into all plugin configs.
+		for i := range pluginEntries {
+			if pluginEntries[i].Config == nil {
+				pluginEntries[i].Config = make(map[string]interface{})
+			}
+			pluginEntries[i].Config["__host_addr"] = hostAddr
+		}
+	}
+
 	pluginManager := plugin.NewManager(toolRegistry)
 	retryCtx, retryCancel := context.WithCancel(ctx)
 	defer retryCancel()
@@ -497,6 +513,7 @@ func main() {
 				return 60 * time.Second
 			}(),
 		},
+		RunCompleteNotifier: plugin.NewRunNotifier(pluginManager),
 	})
 
 	// Wire on-clear actions now that the orchestrator is available.
