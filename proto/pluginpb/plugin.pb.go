@@ -579,6 +579,628 @@ func (x *Parameter) GetRequired() bool {
 	return false
 }
 
+// RunCompleteEvent is sent to plugins after each orchestrator run completes.
+type RunCompleteEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	ActorId       string                 `protobuf:"bytes,2,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`
+	UserMessage   string                 `protobuf:"bytes,3,opt,name=user_message,json=userMessage,proto3" json:"user_message,omitempty"`
+	Response      string                 `protobuf:"bytes,4,opt,name=response,proto3" json:"response,omitempty"`
+	ToolCalls     []*ToolCallEntry       `protobuf:"bytes,5,rep,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunCompleteEvent) Reset() {
+	*x = RunCompleteEvent{}
+	mi := &file_plugin_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunCompleteEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunCompleteEvent) ProtoMessage() {}
+
+func (x *RunCompleteEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunCompleteEvent.ProtoReflect.Descriptor instead.
+func (*RunCompleteEvent) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *RunCompleteEvent) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *RunCompleteEvent) GetActorId() string {
+	if x != nil {
+		return x.ActorId
+	}
+	return ""
+}
+
+func (x *RunCompleteEvent) GetUserMessage() string {
+	if x != nil {
+		return x.UserMessage
+	}
+	return ""
+}
+
+func (x *RunCompleteEvent) GetResponse() string {
+	if x != nil {
+		return x.Response
+	}
+	return ""
+}
+
+func (x *RunCompleteEvent) GetToolCalls() []*ToolCallEntry {
+	if x != nil {
+		return x.ToolCalls
+	}
+	return nil
+}
+
+// ToolCallEntry is one tool call + result pair from a completed run.
+type ToolCallEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Plugin        string                 `protobuf:"bytes,1,opt,name=plugin,proto3" json:"plugin,omitempty"`
+	Action        string                 `protobuf:"bytes,2,opt,name=action,proto3" json:"action,omitempty"`
+	Args          map[string]string      `protobuf:"bytes,3,rep,name=args,proto3" json:"args,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	ResultContent string                 `protobuf:"bytes,4,opt,name=result_content,json=resultContent,proto3" json:"result_content,omitempty"`
+	ResultError   string                 `protobuf:"bytes,5,opt,name=result_error,json=resultError,proto3" json:"result_error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolCallEntry) Reset() {
+	*x = ToolCallEntry{}
+	mi := &file_plugin_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolCallEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolCallEntry) ProtoMessage() {}
+
+func (x *ToolCallEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolCallEntry.ProtoReflect.Descriptor instead.
+func (*ToolCallEntry) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ToolCallEntry) GetPlugin() string {
+	if x != nil {
+		return x.Plugin
+	}
+	return ""
+}
+
+func (x *ToolCallEntry) GetAction() string {
+	if x != nil {
+		return x.Action
+	}
+	return ""
+}
+
+func (x *ToolCallEntry) GetArgs() map[string]string {
+	if x != nil {
+		return x.Args
+	}
+	return nil
+}
+
+func (x *ToolCallEntry) GetResultContent() string {
+	if x != nil {
+		return x.ResultContent
+	}
+	return ""
+}
+
+func (x *ToolCallEntry) GetResultError() string {
+	if x != nil {
+		return x.ResultError
+	}
+	return ""
+}
+
+type RunCompleteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunCompleteResponse) Reset() {
+	*x = RunCompleteResponse{}
+	mi := &file_plugin_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunCompleteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunCompleteResponse) ProtoMessage() {}
+
+func (x *RunCompleteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunCompleteResponse.ProtoReflect.Descriptor instead.
+func (*RunCompleteResponse) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{10}
+}
+
+type WriteMemoryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ActorId       string                 `protobuf:"bytes,1,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"` // empty = general (no actor scope)
+	Content       string                 `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	Tags          []string               `protobuf:"bytes,3,rep,name=tags,proto3" json:"tags,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WriteMemoryRequest) Reset() {
+	*x = WriteMemoryRequest{}
+	mi := &file_plugin_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WriteMemoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriteMemoryRequest) ProtoMessage() {}
+
+func (x *WriteMemoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriteMemoryRequest.ProtoReflect.Descriptor instead.
+func (*WriteMemoryRequest) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *WriteMemoryRequest) GetActorId() string {
+	if x != nil {
+		return x.ActorId
+	}
+	return ""
+}
+
+func (x *WriteMemoryRequest) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *WriteMemoryRequest) GetTags() []string {
+	if x != nil {
+		return x.Tags
+	}
+	return nil
+}
+
+type WriteMemoryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WriteMemoryResponse) Reset() {
+	*x = WriteMemoryResponse{}
+	mi := &file_plugin_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WriteMemoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriteMemoryResponse) ProtoMessage() {}
+
+func (x *WriteMemoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriteMemoryResponse.ProtoReflect.Descriptor instead.
+func (*WriteMemoryResponse) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *WriteMemoryResponse) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+type ReadMemoriesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ActorId       string                 `protobuf:"bytes,1,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"` // context actor for scoping
+	Tag           string                 `protobuf:"bytes,2,opt,name=tag,proto3" json:"tag,omitempty"`                        // filter by tag; empty = all
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadMemoriesRequest) Reset() {
+	*x = ReadMemoriesRequest{}
+	mi := &file_plugin_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadMemoriesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadMemoriesRequest) ProtoMessage() {}
+
+func (x *ReadMemoriesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadMemoriesRequest.ProtoReflect.Descriptor instead.
+func (*ReadMemoriesRequest) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ReadMemoriesRequest) GetActorId() string {
+	if x != nil {
+		return x.ActorId
+	}
+	return ""
+}
+
+func (x *ReadMemoriesRequest) GetTag() string {
+	if x != nil {
+		return x.Tag
+	}
+	return ""
+}
+
+type ReadMemoriesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Memories      []*MemoryEntry         `protobuf:"bytes,1,rep,name=memories,proto3" json:"memories,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadMemoriesResponse) Reset() {
+	*x = ReadMemoriesResponse{}
+	mi := &file_plugin_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadMemoriesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadMemoriesResponse) ProtoMessage() {}
+
+func (x *ReadMemoriesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadMemoriesResponse.ProtoReflect.Descriptor instead.
+func (*ReadMemoriesResponse) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ReadMemoriesResponse) GetMemories() []*MemoryEntry {
+	if x != nil {
+		return x.Memories
+	}
+	return nil
+}
+
+type MemoryEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Content       string                 `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	Tags          []string               `protobuf:"bytes,3,rep,name=tags,proto3" json:"tags,omitempty"`
+	CreatedAt     string                 `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MemoryEntry) Reset() {
+	*x = MemoryEntry{}
+	mi := &file_plugin_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemoryEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemoryEntry) ProtoMessage() {}
+
+func (x *MemoryEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemoryEntry.ProtoReflect.Descriptor instead.
+func (*MemoryEntry) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *MemoryEntry) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *MemoryEntry) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *MemoryEntry) GetTags() []string {
+	if x != nil {
+		return x.Tags
+	}
+	return nil
+}
+
+func (x *MemoryEntry) GetCreatedAt() string {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return ""
+}
+
+type DeleteMemoryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteMemoryRequest) Reset() {
+	*x = DeleteMemoryRequest{}
+	mi := &file_plugin_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteMemoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteMemoryRequest) ProtoMessage() {}
+
+func (x *DeleteMemoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteMemoryRequest.ProtoReflect.Descriptor instead.
+func (*DeleteMemoryRequest) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *DeleteMemoryRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+type LLMCompleteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SystemPrompt  string                 `protobuf:"bytes,1,opt,name=system_prompt,json=systemPrompt,proto3" json:"system_prompt,omitempty"`
+	UserMessage   string                 `protobuf:"bytes,2,opt,name=user_message,json=userMessage,proto3" json:"user_message,omitempty"`
+	MaxTokens     int32                  `protobuf:"varint,3,opt,name=max_tokens,json=maxTokens,proto3" json:"max_tokens,omitempty"` // 0 = provider default
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LLMCompleteRequest) Reset() {
+	*x = LLMCompleteRequest{}
+	mi := &file_plugin_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LLMCompleteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LLMCompleteRequest) ProtoMessage() {}
+
+func (x *LLMCompleteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LLMCompleteRequest.ProtoReflect.Descriptor instead.
+func (*LLMCompleteRequest) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *LLMCompleteRequest) GetSystemPrompt() string {
+	if x != nil {
+		return x.SystemPrompt
+	}
+	return ""
+}
+
+func (x *LLMCompleteRequest) GetUserMessage() string {
+	if x != nil {
+		return x.UserMessage
+	}
+	return ""
+}
+
+func (x *LLMCompleteRequest) GetMaxTokens() int32 {
+	if x != nil {
+		return x.MaxTokens
+	}
+	return 0
+}
+
+type LLMCompleteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Content       string                 `protobuf:"bytes,1,opt,name=content,proto3" json:"content,omitempty"`
+	InputTokens   int32                  `protobuf:"varint,2,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	OutputTokens  int32                  `protobuf:"varint,3,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LLMCompleteResponse) Reset() {
+	*x = LLMCompleteResponse{}
+	mi := &file_plugin_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LLMCompleteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LLMCompleteResponse) ProtoMessage() {}
+
+func (x *LLMCompleteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LLMCompleteResponse.ProtoReflect.Descriptor instead.
+func (*LLMCompleteResponse) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *LLMCompleteResponse) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *LLMCompleteResponse) GetInputTokens() int32 {
+	if x != nil {
+		return x.InputTokens
+	}
+	return 0
+}
+
+func (x *LLMCompleteResponse) GetOutputTokens() int32 {
+	if x != nil {
+		return x.OutputTokens
+	}
+	return 0
+}
+
 var File_plugin_proto protoreflect.FileDescriptor
 
 const file_plugin_proto_rawDesc = "" +
@@ -633,11 +1255,63 @@ const file_plugin_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x12\n" +
 	"\x04type\x18\x03 \x01(\tR\x04type\x12\x1a\n" +
-	"\brequired\x18\x04 \x01(\bR\brequired2\x82\x02\n" +
+	"\brequired\x18\x04 \x01(\bR\brequired\"\xce\x01\n" +
+	"\x10RunCompleteEvent\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
+	"\bactor_id\x18\x02 \x01(\tR\aactorId\x12!\n" +
+	"\fuser_message\x18\x03 \x01(\tR\vuserMessage\x12\x1a\n" +
+	"\bresponse\x18\x04 \x01(\tR\bresponse\x12A\n" +
+	"\n" +
+	"tool_calls\x18\x05 \x03(\v2\".opentalon.plugin.v1.ToolCallEntryR\ttoolCalls\"\x84\x02\n" +
+	"\rToolCallEntry\x12\x16\n" +
+	"\x06plugin\x18\x01 \x01(\tR\x06plugin\x12\x16\n" +
+	"\x06action\x18\x02 \x01(\tR\x06action\x12@\n" +
+	"\x04args\x18\x03 \x03(\v2,.opentalon.plugin.v1.ToolCallEntry.ArgsEntryR\x04args\x12%\n" +
+	"\x0eresult_content\x18\x04 \x01(\tR\rresultContent\x12!\n" +
+	"\fresult_error\x18\x05 \x01(\tR\vresultError\x1a7\n" +
+	"\tArgsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x15\n" +
+	"\x13RunCompleteResponse\"]\n" +
+	"\x12WriteMemoryRequest\x12\x19\n" +
+	"\bactor_id\x18\x01 \x01(\tR\aactorId\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\tR\acontent\x12\x12\n" +
+	"\x04tags\x18\x03 \x03(\tR\x04tags\"%\n" +
+	"\x13WriteMemoryResponse\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"B\n" +
+	"\x13ReadMemoriesRequest\x12\x19\n" +
+	"\bactor_id\x18\x01 \x01(\tR\aactorId\x12\x10\n" +
+	"\x03tag\x18\x02 \x01(\tR\x03tag\"T\n" +
+	"\x14ReadMemoriesResponse\x12<\n" +
+	"\bmemories\x18\x01 \x03(\v2 .opentalon.plugin.v1.MemoryEntryR\bmemories\"j\n" +
+	"\vMemoryEntry\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\tR\acontent\x12\x12\n" +
+	"\x04tags\x18\x03 \x03(\tR\x04tags\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\x04 \x01(\tR\tcreatedAt\"%\n" +
+	"\x13DeleteMemoryRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"{\n" +
+	"\x12LLMCompleteRequest\x12#\n" +
+	"\rsystem_prompt\x18\x01 \x01(\tR\fsystemPrompt\x12!\n" +
+	"\fuser_message\x18\x02 \x01(\tR\vuserMessage\x12\x1d\n" +
+	"\n" +
+	"max_tokens\x18\x03 \x01(\x05R\tmaxTokens\"w\n" +
+	"\x13LLMCompleteResponse\x12\x18\n" +
+	"\acontent\x18\x01 \x01(\tR\acontent\x12!\n" +
+	"\finput_tokens\x18\x02 \x01(\x05R\vinputTokens\x12#\n" +
+	"\routput_tokens\x18\x03 \x01(\x05R\foutputTokens2\xe4\x02\n" +
 	"\rPluginService\x12F\n" +
 	"\x04Init\x12&.opentalon.plugin.v1.PluginInitRequest\x1a\x16.google.protobuf.Empty\x12X\n" +
 	"\aExecute\x12$.opentalon.plugin.v1.ToolCallRequest\x1a'.opentalon.plugin.v1.ToolResultResponse\x12O\n" +
-	"\fCapabilities\x12\x16.google.protobuf.Empty\x1a'.opentalon.plugin.v1.PluginCapabilitiesB/Z-github.com/opentalon/opentalon/proto/pluginpbb\x06proto3"
+	"\fCapabilities\x12\x16.google.protobuf.Empty\x1a'.opentalon.plugin.v1.PluginCapabilities\x12`\n" +
+	"\rOnRunComplete\x12%.opentalon.plugin.v1.RunCompleteEvent\x1a(.opentalon.plugin.v1.RunCompleteResponse2\x88\x03\n" +
+	"\vHostService\x12`\n" +
+	"\vWriteMemory\x12'.opentalon.plugin.v1.WriteMemoryRequest\x1a(.opentalon.plugin.v1.WriteMemoryResponse\x12c\n" +
+	"\fReadMemories\x12(.opentalon.plugin.v1.ReadMemoriesRequest\x1a).opentalon.plugin.v1.ReadMemoriesResponse\x12P\n" +
+	"\fDeleteMemory\x12(.opentalon.plugin.v1.DeleteMemoryRequest\x1a\x16.google.protobuf.Empty\x12`\n" +
+	"\vLLMComplete\x12'.opentalon.plugin.v1.LLMCompleteRequest\x1a(.opentalon.plugin.v1.LLMCompleteResponseB/Z-github.com/opentalon/opentalon/proto/pluginpbb\x06proto3"
 
 var (
 	file_plugin_proto_rawDescOnce sync.Once
@@ -651,38 +1325,63 @@ func file_plugin_proto_rawDescGZIP() []byte {
 	return file_plugin_proto_rawDescData
 }
 
-var file_plugin_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_plugin_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_plugin_proto_goTypes = []any{
-	(*PluginInitRequest)(nil),  // 0: opentalon.plugin.v1.PluginInitRequest
-	(*ToolCallRequest)(nil),    // 1: opentalon.plugin.v1.ToolCallRequest
-	(*CredentialHeader)(nil),   // 2: opentalon.plugin.v1.CredentialHeader
-	(*ToolResultResponse)(nil), // 3: opentalon.plugin.v1.ToolResultResponse
-	(*PluginCapabilities)(nil), // 4: opentalon.plugin.v1.PluginCapabilities
-	(*GlossaryEntry)(nil),      // 5: opentalon.plugin.v1.GlossaryEntry
-	(*Action)(nil),             // 6: opentalon.plugin.v1.Action
-	(*Parameter)(nil),          // 7: opentalon.plugin.v1.Parameter
-	nil,                        // 8: opentalon.plugin.v1.ToolCallRequest.ArgsEntry
-	nil,                        // 9: opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry
-	(*emptypb.Empty)(nil),      // 10: google.protobuf.Empty
+	(*PluginInitRequest)(nil),    // 0: opentalon.plugin.v1.PluginInitRequest
+	(*ToolCallRequest)(nil),      // 1: opentalon.plugin.v1.ToolCallRequest
+	(*CredentialHeader)(nil),     // 2: opentalon.plugin.v1.CredentialHeader
+	(*ToolResultResponse)(nil),   // 3: opentalon.plugin.v1.ToolResultResponse
+	(*PluginCapabilities)(nil),   // 4: opentalon.plugin.v1.PluginCapabilities
+	(*GlossaryEntry)(nil),        // 5: opentalon.plugin.v1.GlossaryEntry
+	(*Action)(nil),               // 6: opentalon.plugin.v1.Action
+	(*Parameter)(nil),            // 7: opentalon.plugin.v1.Parameter
+	(*RunCompleteEvent)(nil),     // 8: opentalon.plugin.v1.RunCompleteEvent
+	(*ToolCallEntry)(nil),        // 9: opentalon.plugin.v1.ToolCallEntry
+	(*RunCompleteResponse)(nil),  // 10: opentalon.plugin.v1.RunCompleteResponse
+	(*WriteMemoryRequest)(nil),   // 11: opentalon.plugin.v1.WriteMemoryRequest
+	(*WriteMemoryResponse)(nil),  // 12: opentalon.plugin.v1.WriteMemoryResponse
+	(*ReadMemoriesRequest)(nil),  // 13: opentalon.plugin.v1.ReadMemoriesRequest
+	(*ReadMemoriesResponse)(nil), // 14: opentalon.plugin.v1.ReadMemoriesResponse
+	(*MemoryEntry)(nil),          // 15: opentalon.plugin.v1.MemoryEntry
+	(*DeleteMemoryRequest)(nil),  // 16: opentalon.plugin.v1.DeleteMemoryRequest
+	(*LLMCompleteRequest)(nil),   // 17: opentalon.plugin.v1.LLMCompleteRequest
+	(*LLMCompleteResponse)(nil),  // 18: opentalon.plugin.v1.LLMCompleteResponse
+	nil,                          // 19: opentalon.plugin.v1.ToolCallRequest.ArgsEntry
+	nil,                          // 20: opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry
+	nil,                          // 21: opentalon.plugin.v1.ToolCallEntry.ArgsEntry
+	(*emptypb.Empty)(nil),        // 22: google.protobuf.Empty
 }
 var file_plugin_proto_depIdxs = []int32{
-	8,  // 0: opentalon.plugin.v1.ToolCallRequest.args:type_name -> opentalon.plugin.v1.ToolCallRequest.ArgsEntry
-	9,  // 1: opentalon.plugin.v1.ToolCallRequest.credential_headers:type_name -> opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry
+	19, // 0: opentalon.plugin.v1.ToolCallRequest.args:type_name -> opentalon.plugin.v1.ToolCallRequest.ArgsEntry
+	20, // 1: opentalon.plugin.v1.ToolCallRequest.credential_headers:type_name -> opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry
 	6,  // 2: opentalon.plugin.v1.PluginCapabilities.actions:type_name -> opentalon.plugin.v1.Action
 	5,  // 3: opentalon.plugin.v1.PluginCapabilities.glossary:type_name -> opentalon.plugin.v1.GlossaryEntry
 	7,  // 4: opentalon.plugin.v1.Action.parameters:type_name -> opentalon.plugin.v1.Parameter
-	2,  // 5: opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry.value:type_name -> opentalon.plugin.v1.CredentialHeader
-	0,  // 6: opentalon.plugin.v1.PluginService.Init:input_type -> opentalon.plugin.v1.PluginInitRequest
-	1,  // 7: opentalon.plugin.v1.PluginService.Execute:input_type -> opentalon.plugin.v1.ToolCallRequest
-	10, // 8: opentalon.plugin.v1.PluginService.Capabilities:input_type -> google.protobuf.Empty
-	10, // 9: opentalon.plugin.v1.PluginService.Init:output_type -> google.protobuf.Empty
-	3,  // 10: opentalon.plugin.v1.PluginService.Execute:output_type -> opentalon.plugin.v1.ToolResultResponse
-	4,  // 11: opentalon.plugin.v1.PluginService.Capabilities:output_type -> opentalon.plugin.v1.PluginCapabilities
-	9,  // [9:12] is the sub-list for method output_type
-	6,  // [6:9] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	9,  // 5: opentalon.plugin.v1.RunCompleteEvent.tool_calls:type_name -> opentalon.plugin.v1.ToolCallEntry
+	21, // 6: opentalon.plugin.v1.ToolCallEntry.args:type_name -> opentalon.plugin.v1.ToolCallEntry.ArgsEntry
+	15, // 7: opentalon.plugin.v1.ReadMemoriesResponse.memories:type_name -> opentalon.plugin.v1.MemoryEntry
+	2,  // 8: opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry.value:type_name -> opentalon.plugin.v1.CredentialHeader
+	0,  // 9: opentalon.plugin.v1.PluginService.Init:input_type -> opentalon.plugin.v1.PluginInitRequest
+	1,  // 10: opentalon.plugin.v1.PluginService.Execute:input_type -> opentalon.plugin.v1.ToolCallRequest
+	22, // 11: opentalon.plugin.v1.PluginService.Capabilities:input_type -> google.protobuf.Empty
+	8,  // 12: opentalon.plugin.v1.PluginService.OnRunComplete:input_type -> opentalon.plugin.v1.RunCompleteEvent
+	11, // 13: opentalon.plugin.v1.HostService.WriteMemory:input_type -> opentalon.plugin.v1.WriteMemoryRequest
+	13, // 14: opentalon.plugin.v1.HostService.ReadMemories:input_type -> opentalon.plugin.v1.ReadMemoriesRequest
+	16, // 15: opentalon.plugin.v1.HostService.DeleteMemory:input_type -> opentalon.plugin.v1.DeleteMemoryRequest
+	17, // 16: opentalon.plugin.v1.HostService.LLMComplete:input_type -> opentalon.plugin.v1.LLMCompleteRequest
+	22, // 17: opentalon.plugin.v1.PluginService.Init:output_type -> google.protobuf.Empty
+	3,  // 18: opentalon.plugin.v1.PluginService.Execute:output_type -> opentalon.plugin.v1.ToolResultResponse
+	4,  // 19: opentalon.plugin.v1.PluginService.Capabilities:output_type -> opentalon.plugin.v1.PluginCapabilities
+	10, // 20: opentalon.plugin.v1.PluginService.OnRunComplete:output_type -> opentalon.plugin.v1.RunCompleteResponse
+	12, // 21: opentalon.plugin.v1.HostService.WriteMemory:output_type -> opentalon.plugin.v1.WriteMemoryResponse
+	14, // 22: opentalon.plugin.v1.HostService.ReadMemories:output_type -> opentalon.plugin.v1.ReadMemoriesResponse
+	22, // 23: opentalon.plugin.v1.HostService.DeleteMemory:output_type -> google.protobuf.Empty
+	18, // 24: opentalon.plugin.v1.HostService.LLMComplete:output_type -> opentalon.plugin.v1.LLMCompleteResponse
+	17, // [17:25] is the sub-list for method output_type
+	9,  // [9:17] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_plugin_proto_init() }
@@ -696,9 +1395,9 @@ func file_plugin_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_plugin_proto_rawDesc), len(file_plugin_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   22,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_plugin_proto_goTypes,
 		DependencyIndexes: file_plugin_proto_depIdxs,

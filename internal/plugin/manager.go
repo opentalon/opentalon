@@ -419,6 +419,20 @@ func (m *Manager) List() []string {
 	return names
 }
 
+// Clients returns all currently loaded plugin clients. The caller must not
+// modify the returned slice or close any client.
+func (m *Manager) Clients() []*Client {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*Client, 0, len(m.plugins))
+	for _, mg := range m.plugins {
+		if mg.client != nil {
+			out = append(out, mg.client)
+		}
+	}
+	return out
+}
+
 type pluginMode string
 
 const (

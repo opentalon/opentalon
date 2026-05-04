@@ -116,6 +116,19 @@ func (s *MemoryStore) SearchByTag(tag string) []*state.Memory {
 	return scanMemories(rows)
 }
 
+// Delete removes a memory by ID.
+func (s *MemoryStore) Delete(id string) error {
+	res, err := s.db.SQLDB().Exec(s.db.Dialect().Rebind(`DELETE FROM memories WHERE id = ?`), id)
+	if err != nil {
+		return fmt.Errorf("memory delete: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("memory %q not found", id)
+	}
+	return nil
+}
+
 func scanMemories(rows *sql.Rows) []*state.Memory {
 	var out []*state.Memory
 	for rows.Next() {

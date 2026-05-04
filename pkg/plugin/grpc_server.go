@@ -33,3 +33,28 @@ func (s *grpcServer) Execute(_ context.Context, req *pluginpb.ToolCallRequest) (
 	resp := s.handler.Execute(requestFromProto(req))
 	return responseToProto(resp), nil
 }
+
+func (s *grpcServer) OnRunComplete(_ context.Context, req *pluginpb.RunCompleteEvent) (*pluginpb.RunCompleteResponse, error) {
+	obs, ok := s.handler.(RunObserver)
+	if !ok {
+		return &pluginpb.RunCompleteResponse{}, nil
+	}
+	entries := make([]ToolCallEntry, len(req.GetToolCalls()))
+	for i, tc := range req.GetToolCalls() {
+		entries[i] = ToolCallEntry{
+			Plugin:        tc.Plugin,
+			Action:        tc.Action,
+			Args:          tc.Args,
+			ResultContent: tc.ResultContent,
+			ResultError:   tc.ResultError,
+		}
+	}
+	obs.OnRunComplete(RunCompleteEvent{
+		SessionID:   req.SessionId,
+		ActorID:     req.ActorId,
+		UserMessage: req.UserMessage,
+		Response:    req.Response,
+		ToolCalls:   entries,
+	})
+	return &pluginpb.RunCompleteResponse{}, nil
+}

@@ -130,6 +130,19 @@ func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall)
 	}
 }
 
+// OnRunComplete notifies the plugin that an orchestrator run has finished.
+// Returns nil if the plugin does not implement the hook (Unimplemented).
+func (c *Client) OnRunComplete(ctx context.Context, event *pluginpb.RunCompleteEvent) error {
+	_, err := c.client.OnRunComplete(ctx, event)
+	if err != nil {
+		if s, ok := status.FromError(err); ok && s.Code() == codes.Unimplemented {
+			return nil // plugin doesn't implement the hook — that's fine
+		}
+		return fmt.Errorf("on_run_complete %s: %w", c.name, err)
+	}
+	return nil
+}
+
 // Close terminates the gRPC connection.
 func (c *Client) Close() error {
 	return c.conn.Close()

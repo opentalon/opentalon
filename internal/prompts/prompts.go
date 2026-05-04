@@ -118,6 +118,12 @@ var formatTextRaw string
 
 var FormatText = strings.TrimRight(formatTextRaw, "\n")
 
+//go:embed skill_extract.txt
+var SkillExtract string
+
+//go:embed skill_improve.txt
+var SkillImprove string
+
 func splitLines(s string) []string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	out := make([]string, 0, len(lines))
