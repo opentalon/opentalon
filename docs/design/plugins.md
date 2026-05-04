@@ -89,7 +89,63 @@ message Parameter {
 }
 ```
 
-There is no method to list other plugins, query the registry, access peer state, or call the orchestrator. The surface is deliberately minimal.
+### Host Service (plugin → host callbacks)
+
+Plugins that need access to shared resources can call back into the host via **HostService** — a gRPC server the host starts on a random localhost port and advertises to plugins as `__host_addr` in their config.
+
+```protobuf
+service HostService {
+    rpc WriteMemory(WriteMemoryRequest) returns (WriteMemoryResponse);
+    rpc ReadMemories(ReadMemoriesRequest) returns (ReadMemoriesResponse);
+    rpc DeleteMemory(DeleteMemoryRequest) returns (google.protobuf.Empty);
+    rpc LLMComplete(LLMCompleteRequest) returns (LLMCompleteResponse);
+}
+```
+
+| RPC | Description |
+|---|---|
+| `WriteMemory` | Store a memory in the shared memory store (scoped by actor) |
+| `ReadMemories` | Read memories by actor + tag |
+| `DeleteMemory` | Remove a memory by ID |
+| `LLMComplete` | Send a completion request to the host's LLM provider |
+
+The host address is injected automatically into every plugin's config. On the Go SDK side, connect with:
+
+```go
+func (h *myHandler) Configure(configJSON string) error {
+    var raw map[string]interface{}
+    json.Unmarshal([]byte(configJSON), &raw)
+    hostAddr := raw["__host_addr"].(string)
+    h.host, _ = plugin.DialHost(hostAddr)
+    return nil
+}
+```
+
+### OnRunComplete hook
+
+Plugins can observe completed orchestrator runs by implementing the `RunObserver` interface:
+
+```go
+type RunObserver interface {
+    OnRunComplete(event RunCompleteEvent)
+}
+```
+
+After each run that involves tool calls, the host broadcasts `OnRunComplete` to all loaded plugins. The event includes the full session trace:
+
+```go
+type RunCompleteEvent struct {
+    SessionID   string
+    ActorID     string
+    UserMessage string
+    Response    string
+    ToolCalls   []ToolCallEntry  // plugin, action, args, result/error
+}
+```
+
+Plugins that do not implement `RunObserver` are silently skipped (the `UnimplementedPluginServiceServer` returns OK). This makes the hook backward-compatible — existing plugins need no code changes.
+
+Use cases: skill extraction, analytics, audit logging, feedback collection.
 
 ### Init and the Configurable interface
 
@@ -427,6 +483,7 @@ Both plugin tiers share the same set of extension points. Each point defines whe
 | **Tool actions** | Primary | -- | LLM-callable capabilities (code analysis, issue creation, search) |
 | **Request hooks** | Supported | Primary | Pre-process user messages before the orchestrator |
 | **Response formatters** | Supported | Primary | Post-process LLM responses before delivery (config: `orchestrator.response_formatters`) |
+| **Run observers** | Primary | -- | Post-run hooks via `OnRunComplete` (skill extraction, analytics, audit) |
 | **Auth providers** | Primary | -- | Custom authentication backends |
 | **Storage backends** | Primary | -- | Custom persistence (S3, database, etc.) |
 | **Notification sinks** | Supported | Supported | Send alerts/notifications to external systems |
@@ -483,12 +540,11 @@ The `PluginStateStore` enforces isolation at the API level:
 
 #### 5. Strict gRPC contract
 
-The plugin gRPC interface exposes three methods: `Init`, `Execute`, and `Capabilities`. There is no method to:
+The plugin gRPC interface exposes four methods: `Init`, `Execute`, `Capabilities`, and `OnRunComplete`. Plugins that need host access (memory store, LLM) connect to the **HostService** — a separate gRPC server on localhost. The HostService is opt-in: plugins that don't need it simply ignore the `__host_addr` config key. There is no method to:
 
 - List other plugins
 - Query the registry
-- Access peer state
-- Call the orchestrator
+- Access peer state directly
 
 ### Guard flow
 
@@ -580,6 +636,50 @@ outcome: success
 
 Workflows are stored in the `MemoryStore` with a `workflow` tag.
 
+## Skill Extraction
+
+When the **opentalon-skills** plugin is enabled, OpenTalon automatically learns reusable skills from complex sessions. This builds on Workflow Memory with LLM-powered extraction.
+
+### How it works
+
+1. After each run, the host sends `OnRunComplete` to the skills plugin with the full tool call trace
+2. The plugin evaluates whether the session is "skill-worthy" (5+ tool calls or error recovery)
+3. If worthy, it calls `LLMComplete` via the host service to extract a structured YAML skill
+4. The skill is stored in the shared memory store with a `skill` tag, scoped to the user
+5. On future sessions, skills tagged `skill` are injected into the system prompt
+
+### Skill format
+
+```yaml
+name: create-jira-from-slack
+trigger: "create a ticket from <message>"
+steps:
+  - plugin: slack, action: get_message — fetch the original message
+  - plugin: jira, action: create_issue — create the ticket
+  - plugin: slack, action: reply — confirm back in channel
+preconditions: "User must have Jira project access"
+error_handling: "If Jira fails, retry once then notify user"
+outcome: "Jira issue created and Slack confirmation sent"
+```
+
+### Skill improvement
+
+When a matched skill is used and the new execution differs (fewer steps, better error handling), the plugin asks the LLM to produce an improved version and replaces the old one.
+
+### Configuration
+
+```yaml
+plugins:
+  skills:
+    enabled: true
+    plugin: ./plugins/opentalon-skills    # or github: opentalon/opentalon-skills
+    config:
+      min_tool_calls: 5   # minimum tool calls to trigger extraction
+      max_skills: 50       # max skills per user
+```
+
+See [opentalon-skills](https://github.com/opentalon/opentalon-skills) for the plugin source.
+
 ## Configuration
 
 ### gRPC plugins
@@ -641,6 +741,54 @@ Your SDK / API client        Your plugin binary              OpenTalon Core
        │                           │  ToolResultResponse          │
        │                           │ ──────────────────────────▶ │
 ```
+
+### Using the Host Service
+
+Plugins that need memory or LLM access connect to the host service via `__host_addr`:
+
+```go
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "github.com/opentalon/opentalon/pkg/plugin"
+)
+
+type myHandler struct {
+    host *plugin.HostClient
+}
+
+func (h *myHandler) Configure(configJSON string) error {
+    var raw map[string]interface{}
+    json.Unmarshal([]byte(configJSON), &raw)
+    hostAddr, _ := raw["__host_addr"].(string)
+    var err error
+    h.host, err = plugin.DialHost(hostAddr)
+    return err
+}
+
+func (h *myHandler) Capabilities() plugin.CapabilitiesMsg { /* ... */ }
+func (h *myHandler) Execute(req plugin.Request) plugin.Response { /* ... */ }
+
+// OnRunComplete — implement RunObserver to receive post-run traces.
+func (h *myHandler) OnRunComplete(event plugin.RunCompleteEvent) {
+    ctx := context.Background()
+    // Write a memory via the host
+    h.host.WriteMemory(ctx, event.ActorID, "learned something", "my-tag")
+    // Call the LLM via the host
+    resp, _ := h.host.LLMComplete(ctx, "You are helpful.", "Summarize this", 512)
+    _ = resp
+}
+
+func main() { plugin.Serve(&myHandler{}) }
+```
+
+The `HostClient` provides:
+- `WriteMemory(ctx, actorID, content, tags...)` → memory ID
+- `ReadMemories(ctx, actorID, tag)` → `[]MemoryEntry`
+- `DeleteMemory(ctx, id)` → error
+- `LLMComplete(ctx, systemPrompt, userMessage, maxTokens)` → `*LLMCompleteResult`
 
 ### Building a Lua script
 
