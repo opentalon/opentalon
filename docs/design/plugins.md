@@ -680,6 +680,19 @@ plugins:
 
 See [opentalon-skills](https://github.com/opentalon/opentalon-skills) for the plugin source.
 
+### Cluster mode
+
+Skills are stored in the `memories` table of the shared database. In **cluster mode (multi-pod)**, you must use `driver: postgres` with a shared DSN so skills are visible across all pods. With the default SQLite driver, each pod has its own `state.db` — skills learned on one pod won't be available on another.
+
+```yaml
+state:
+  db:
+    driver: postgres
+    dsn: "${DATABASE_URL}"
+```
+
+This is the same requirement as for sessions, workflow memories, and usage data — see the [Cluster Guide](../cluster.md) for details.
+
 ## Configuration
 
 ### gRPC plugins
