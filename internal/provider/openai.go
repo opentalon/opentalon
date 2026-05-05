@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -148,6 +149,13 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 		return nil, err
 	}
 	oaiReq.Stream = false
+
+	if oaiReq.IncludeReasoning {
+		slog.DebugContext(ctx, "openai reasoning enabled",
+			"model", oaiReq.Model,
+			"include_reasoning", true,
+		)
+	}
 
 	body, err := json.Marshal(oaiReq)
 	if err != nil {

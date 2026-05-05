@@ -924,6 +924,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if p := profile.FromContext(ctx); p != nil && p.BudgetTokens > 0 {
 				req.BudgetTokens = p.BudgetTokens
 			}
+			log.Debug("reasoning enabled for LLM request", "round", i+1, "budget_tokens", req.BudgetTokens)
 		}
 
 		// Use streaming when a callback is registered and the LLM supports it.

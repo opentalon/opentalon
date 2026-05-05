@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -124,6 +125,16 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 
+	// Log reasoning configuration.
+	if anthReq.Thinking != nil {
+		slog.DebugContext(ctx, "anthropic reasoning enabled",
+			"model", anthReq.Model,
+			"thinking_type", anthReq.Thinking.Type,
+			"budget_tokens", anthReq.Thinking.BudgetTokens,
+			"max_tokens", anthReq.MaxTokens,
+		)
+	}
+
 	body, err := json.Marshal(anthReq)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -159,7 +170,17 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		return nil, fmt.Errorf("anthropic error [%s]: %s", anthResp.Error.Type, anthResp.Error.Message)
 	}
 
-	content := p.extractContent(anthResp.Content)
+	content, thinking := p.extractContentAndThinking(anthResp.Content)
+
+	// Log thinking blocks when present.
+	if thinking != "" {
+		slog.DebugContext(ctx, "anthropic reasoning response",
+			"model", anthResp.Model,
+			"thinking_len", len(thinking),
+			"thinking", thinking,
+			"content_len", len(content),
+		)
+	}
 
 	return &CompletionResponse{
 		ID:      anthResp.ID,
@@ -281,16 +302,17 @@ func (p *AnthropicProvider) toAnthMessage(m Message) (anthMessage, error) {
 	return anthMessage{Role: string(m.Role), Content: raw}, nil
 }
 
-func (p *AnthropicProvider) extractContent(blocks []anthContentBlock) string {
-	var parts []string
+func (p *AnthropicProvider) extractContentAndThinking(blocks []anthContentBlock) (content, thinking string) {
+	var textParts, thinkParts []string
 	for _, b := range blocks {
-		// Skip "thinking" blocks — they contain internal reasoning that
-		// should not be shown to users or parsed for tool calls.
-		if b.Type == "text" {
-			parts = append(parts, b.Text)
+		switch b.Type {
+		case "text":
+			textParts = append(textParts, b.Text)
+		case "thinking":
+			thinkParts = append(thinkParts, b.Text)
 		}
 	}
-	return joinStrings(parts)
+	return joinStrings(textParts), joinStrings(thinkParts)
 }
 
 func joinStrings(parts []string) string {
