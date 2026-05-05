@@ -670,6 +670,7 @@ readinessProbe:
   grpc:
     port: 8086
     service: "opentalon"
+  initialDelaySeconds: 10  # seconds after startup probe passes
   periodSeconds: 5
 
 startupProbe:
