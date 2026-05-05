@@ -805,7 +805,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	}
 
 	// Block B: Run planner to check if this requires a multi-step pipeline.
-	if o.planner != nil {
+	// Skip the planner when the preparer already narrowed to a small tool set —
+	// for 1-3 tools the request is clearly a single action, saving ~3s + ~12K tokens.
+	rtTools, relevantToolsActive := relevantToolsFromContext(ctx)
+	skipPlanner := relevantToolsActive && len(rtTools) > 0 && len(rtTools) <= 3
+	if o.planner != nil && !skipPlanner {
 		log.Debug("planner running", "session", sessionID, "message", content)
 		rtTools, rtSet := relevantToolsFromContext(ctx)
 		plannerCaps := filterCapabilitiesByRelevantTools(o.registry.ListCapabilities(), rtTools, rtSet)
@@ -833,6 +837,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			return &RunResult{Response: planText}, nil
 		}
 		// If "direct" or error or single step, fall through to normal agent loop
+	} else if skipPlanner {
+		log.Debug("planner skipped: few relevant tools from preparer", "tools", len(rtTools))
 	}
 
 	// Guard: never send empty user content to the LLM (would cause API errors).
