@@ -419,6 +419,13 @@ func (m *Manager) List() []string {
 	return names
 }
 
+// Ready returns true when every configured (known) plugin has been loaded.
+func (m *Manager) Ready() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.plugins) == len(m.known)
+}
+
 type pluginMode string
 
 const (

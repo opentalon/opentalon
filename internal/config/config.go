@@ -28,12 +28,18 @@ type Config struct {
 	Redis           RedisConfig              `yaml:"redis,omitempty"`
 	Cluster         ClusterConfig            `yaml:"cluster,omitempty"`
 	PluginExec      PluginExecConfig         `yaml:"plugin_exec,omitempty"`
+	Health          HealthConfig             `yaml:"health,omitempty"`
 }
 
 // MetricsConfig enables a Prometheus /metrics HTTP endpoint.
 type MetricsConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Addr    string `yaml:"addr"` // e.g. ":2112"; defaults to ":2112" when enabled
+}
+
+// HealthConfig configures the gRPC health probe server.
+type HealthConfig struct {
+	Addr string `yaml:"addr"` // e.g. ":8086"; defaults to ":8086"
 }
 
 // RedisConfig holds the connection details for the shared Redis instance used by
@@ -481,6 +487,10 @@ func Parse(data []byte) (*Config, error) {
 	cfg.Metrics.Addr = expandEnv(cfg.Metrics.Addr)
 	if cfg.Metrics.Enabled && cfg.Metrics.Addr == "" {
 		cfg.Metrics.Addr = ":2112"
+	}
+	cfg.Health.Addr = expandEnv(cfg.Health.Addr)
+	if cfg.Health.Addr == "" {
+		cfg.Health.Addr = ":8086"
 	}
 	if cfg.State.DB.DSN != "" {
 		cfg.State.DB.DSN = expandEnv(cfg.State.DB.DSN)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
@@ -23,9 +24,11 @@ type ChannelEntry struct {
 // Manager discovers, connects, and registers channel plugins with
 // the channel Registry.
 type Manager struct {
-	connector    *Connector
-	registry     *Registry
-	toolRegistry *orchestrator.ToolRegistry
+	mu            sync.Mutex
+	expectedCount int
+	connector     *Connector
+	registry      *Registry
+	toolRegistry  *orchestrator.ToolRegistry
 }
 
 // NewManager creates a channel manager.
@@ -40,6 +43,16 @@ func NewManager(registry *Registry, toolRegistry *orchestrator.ToolRegistry) *Ma
 
 // LoadAll connects all enabled channels and registers them.
 func (m *Manager) LoadAll(ctx context.Context, entries []ChannelEntry) error {
+	enabled := 0
+	for _, e := range entries {
+		if e.Enabled {
+			enabled++
+		}
+	}
+	m.mu.Lock()
+	m.expectedCount = enabled
+	m.mu.Unlock()
+
 	var errs []string
 	for _, e := range entries {
 		if !e.Enabled {
@@ -54,6 +67,14 @@ func (m *Manager) LoadAll(ctx context.Context, entries []ChannelEntry) error {
 		return fmt.Errorf("failed to load channels: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// Ready returns true when all enabled channels have been loaded.
+func (m *Manager) Ready() bool {
+	m.mu.Lock()
+	expected := m.expectedCount
+	m.mu.Unlock()
+	return len(m.registry.List()) == expected
 }
 
 // Load connects a single channel and registers it.

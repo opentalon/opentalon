@@ -261,3 +261,7 @@ state:
 # Each session gets a trace_id for correlation in kubectl logs / Grafana.
 log:
   level: info
+
+# gRPC health probes (always enabled, used by Kubernetes liveness/readiness).
+# health:
+#   addr: ":8086"  # grpc.health.v1.Health service
