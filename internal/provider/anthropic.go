@@ -73,6 +73,12 @@ type anthRequest struct {
 	System    string        `json:"system,omitempty"`
 	Messages  []anthMessage `json:"messages"`
 	MaxTokens int           `json:"max_tokens"`
+	Thinking  *anthThinking `json:"thinking,omitempty"`
+}
+
+type anthThinking struct {
+	Type         string `json:"type"`          // "enabled" or "disabled"
+	BudgetTokens int    `json:"budget_tokens"` // max tokens for thinking
 }
 
 type anthMessage struct {
@@ -192,12 +198,26 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		maxTokens = 4096
 	}
 
-	return anthRequest{
+	ar := anthRequest{
 		Model:     req.Model,
 		System:    system,
 		Messages:  msgs,
 		MaxTokens: maxTokens,
-	}, nil
+	}
+
+	if req.Reasoning {
+		budget := req.BudgetTokens
+		if budget == 0 {
+			budget = 10000 // default thinking budget
+		}
+		ar.Thinking = &anthThinking{Type: "enabled", BudgetTokens: budget}
+		// Anthropic requires max_tokens to be at least budget_tokens + expected output.
+		if ar.MaxTokens < budget+1024 {
+			ar.MaxTokens = budget + 4096
+		}
+	}
+
+	return ar, nil
 }
 
 // toAnthMessage converts a provider.Message to an anthMessage.
@@ -264,6 +284,8 @@ func (p *AnthropicProvider) toAnthMessage(m Message) (anthMessage, error) {
 func (p *AnthropicProvider) extractContent(blocks []anthContentBlock) string {
 	var parts []string
 	for _, b := range blocks {
+		// Skip "thinking" blocks — they contain internal reasoning that
+		// should not be shown to users or parsed for tool calls.
 		if b.Type == "text" {
 			parts = append(parts, b.Text)
 		}

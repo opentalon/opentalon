@@ -76,12 +76,13 @@ type oaiStreamOptions struct {
 }
 
 type oaiRequest struct {
-	Model         string            `json:"model"`
-	Messages      []oaiMessage      `json:"messages"`
-	MaxTokens     int               `json:"max_tokens,omitempty"`
-	Temperature   *float64          `json:"temperature,omitempty"`
-	Stream        bool              `json:"stream,omitempty"`
-	StreamOptions *oaiStreamOptions `json:"stream_options,omitempty"`
+	Model            string            `json:"model"`
+	Messages         []oaiMessage      `json:"messages"`
+	MaxTokens        int               `json:"max_tokens,omitempty"`
+	Temperature      *float64          `json:"temperature,omitempty"`
+	Stream           bool              `json:"stream,omitempty"`
+	StreamOptions    *oaiStreamOptions `json:"stream_options,omitempty"`
+	IncludeReasoning bool              `json:"include_reasoning,omitempty"` // OpenRouter: include reasoning in response
 }
 
 type oaiMessage struct {
@@ -307,12 +308,16 @@ func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error
 		}
 		msgs[i] = oaiMessage{Role: string(m.Role), Content: m.Content}
 	}
-	return oaiRequest{
+	oai := oaiRequest{
 		Model:       req.Model,
 		Messages:    msgs,
 		MaxTokens:   req.MaxTokens,
 		Temperature: req.Temperature,
-	}, nil
+	}
+	if req.Reasoning {
+		oai.IncludeReasoning = true
+	}
+	return oai, nil
 }
 
 func (p *OpenAIProvider) setHeaders(req *http.Request) {

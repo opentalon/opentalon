@@ -917,6 +917,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			req.Model = profileModel
 		}
 
+		// Enable reasoning when the provider supports it. Reasoning
+		// helps the model decide which tools to call instead of narrating.
+		if o.supportsReasoning() {
+			req.Reasoning = true
+			if p := profile.FromContext(ctx); p != nil && p.BudgetTokens > 0 {
+				req.BudgetTokens = p.BudgetTokens
+			}
+		}
+
 		// Use streaming when a callback is registered and the LLM supports it.
 		// Streaming delivers tokens to the channel in real-time while still
 		// collecting the full response for tool-call parsing.
@@ -1076,6 +1085,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 // resolveStreamCallback returns the streaming callback for the current request.
 // A per-request callback (from context, set by the channel handler) takes
 // priority over the global one configured in OrchestratorOpts.
+// ReasoningProvider is an optional interface that LLM providers implement
+// to indicate they support extended thinking / reasoning.
+type ReasoningProvider interface {
+	SupportsFeature(feature provider.Feature) bool
+}
+
+// supportsReasoning returns true if the underlying LLM provider supports reasoning.
+func (o *Orchestrator) supportsReasoning() bool {
+	rp, ok := o.llm.(ReasoningProvider)
+	return ok && rp.SupportsFeature(provider.FeatureReasoning)
+}
+
 func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCallback {
 	if sw := pkgchannel.StreamWriterFromContext(ctx); sw != nil {
 		return sw.OnChunk
