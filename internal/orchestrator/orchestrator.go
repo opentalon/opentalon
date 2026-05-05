@@ -943,6 +943,19 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 		calls := o.parser.Parse(resp.Content)
 		if calls == nil {
+			// Detect hallucinated results: the LLM fabricated a response with
+			// template variables (e.g. "{{plugin_output.pagination.total}}")
+			// as if it had called a tool, but it didn't. Retry with a nudge.
+			if hasHallucinatedResult(resp.Content) && stripRetries < 3 {
+				stripRetries++
+				log.Warn("hallucinated result detected, retrying", "round", i+1)
+				transientMessages = []provider.Message{
+					{Role: provider.RoleAssistant, Content: resp.Content},
+					{Role: provider.RoleUser, Content: "[system] Your response contains placeholder variables like {{...}} instead of real data. You MUST call the tool first using [tool_call] format, then answer with the actual results."},
+				}
+				continue
+			}
+
 			stripped := StripInternalBlocks(resp.Content)
 			if stripped == "" {
 				// Empty response — either the LLM returned nothing, or its output
@@ -1479,6 +1492,59 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 	}, nil
 }
 
+// sanitizeHistory removes poisoned assistant messages from session history.
+// These are messages where the LLM narrated tool calls or hallucinated
+// results instead of actually calling tools. Keeping them in history
+// teaches the LLM to repeat the same bad pattern.
+func sanitizeHistory(msgs []provider.Message) []provider.Message {
+	out := make([]provider.Message, 0, len(msgs))
+	for i, m := range msgs {
+		if m.Role == provider.RoleAssistant {
+			// Drop assistant messages that contain hallucinated template variables.
+			if hasHallucinatedResult(m.Content) {
+				// Also drop the preceding user message if it exists and is now orphaned.
+				if len(out) > 0 && out[len(out)-1].Role == provider.RoleUser {
+					out = out[:len(out)-1]
+				}
+				continue
+			}
+			// Drop assistant messages that are purely narrated intent (no tool call
+			// blocks, no [plugin_output] results) — they pollute history with
+			// "Here are the results..." without actual results.
+			if !strings.Contains(m.Content, "[tool_call]") &&
+				!strings.Contains(m.Content, "[plugin_output]") &&
+				(hasNarratedToolCall(m.Content) || hasNarratedIntent(m.Content)) {
+				if len(out) > 0 && out[len(out)-1].Role == provider.RoleUser {
+					out = out[:len(out)-1]
+				}
+				continue
+			}
+			// Drop assistant messages that claim results without evidence:
+			// short messages referencing "results" but no tool output in adjacent messages.
+			if len(m.Content) < 200 && !strings.Contains(m.Content, "[tool_call]") {
+				hasToolContext := false
+				// Check if the next message is a tool result
+				if i+1 < len(msgs) && strings.Contains(msgs[i+1].Content, "[plugin_output]") {
+					hasToolContext = true
+				}
+				// Check if previous message has tool output
+				if i > 0 && strings.Contains(msgs[i-1].Content, "[plugin_output]") {
+					hasToolContext = true
+				}
+				if !hasToolContext && (strings.Contains(strings.ToLower(m.Content), "here are the results") ||
+					strings.Contains(strings.ToLower(m.Content), "here is the result")) {
+					if len(out) > 0 && out[len(out)-1].Role == provider.RoleUser {
+						out = out[:len(out)-1]
+					}
+					continue
+				}
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 
@@ -1498,7 +1564,11 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 	// Server instructions are already in the system prompt via SystemPromptAddition,
 	// and the preparer's knowledge_context duplicates them. Stripping all turns
 	// prevents both per-turn duplication and redundancy with the system prompt.
-	messages = appendStrippingAllKC(messages, sess.Messages)
+	//
+	// Also sanitize poisoned assistant messages from session history: remove
+	// hallucinated template variables and narrated tool calls that were saved
+	// before detection was in place. These teach the LLM bad patterns.
+	messages = appendStrippingAllKC(messages, sanitizeHistory(sess.Messages))
 
 	// For weaker / OSS models that tend to ignore system-prompt formatting
 	// instructions, repeat the channel format hint as a trailing system
