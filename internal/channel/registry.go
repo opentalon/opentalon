@@ -166,7 +166,14 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 				sessionKey := pkg.SessionKey(ch.ID(), m.ConversationID, m.ThreadID)
 				traceID := logger.TraceIDFromSessionKey(sessionKey)
 				ctx := logger.WithTraceID(r.ctx, traceID)
-				ctx = pkg.WithCapabilities(ctx, ch.Capabilities())
+				caps := ch.Capabilities()
+				ctx = pkg.WithCapabilities(ctx, caps)
+				slog.Debug("channel capabilities",
+					"channel", ch.ID(),
+					"response_format", caps.ResponseFormat,
+					"response_format_prompt", caps.ResponseFormatPrompt,
+					"edits", caps.Edits,
+				)
 
 				// Deduplication: when running multiple pods each pod receives every
 				// inbound message. Only the pod that wins the Redis SET NX lock
@@ -189,7 +196,6 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 				// When the channel supports edits, attach a StreamWriter so the
 				// orchestrator can progressively deliver LLM output in real-time.
 				var sw *pkg.StreamWriter
-				caps := ch.Capabilities()
 				if caps.Edits {
 					sw = pkg.NewStreamWriter(ch, m.ConversationID, m.ThreadID, safeMetadata(m.Metadata))
 					ctx = pkg.WithStreamWriter(ctx, sw)
