@@ -77,18 +77,19 @@ type oaiStreamOptions struct {
 }
 
 type oaiRequest struct {
-	Model            string            `json:"model"`
-	Messages         []oaiMessage      `json:"messages"`
-	MaxTokens        int               `json:"max_tokens,omitempty"`
-	Temperature      *float64          `json:"temperature,omitempty"`
-	Stream           bool              `json:"stream,omitempty"`
-	StreamOptions    *oaiStreamOptions `json:"stream_options,omitempty"`
-	IncludeReasoning bool              `json:"include_reasoning,omitempty"` // OpenRouter: include reasoning in response
+	Model           string            `json:"model"`
+	Messages        []oaiMessage      `json:"messages"`
+	MaxTokens       int               `json:"max_tokens,omitempty"`
+	Temperature     *float64          `json:"temperature,omitempty"`
+	Stream          bool              `json:"stream,omitempty"`
+	StreamOptions   *oaiStreamOptions `json:"stream_options,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"` // "low", "medium", "high" for reasoning models (gpt-oss-120b, o1, etc.)
 }
 
 type oaiMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role             string `json:"role"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content,omitempty"` // reasoning models return thinking here
 }
 
 type oaiResponse struct {
@@ -150,10 +151,10 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	}
 	oaiReq.Stream = false
 
-	if oaiReq.IncludeReasoning {
+	if oaiReq.ReasoningEffort != "" {
 		slog.DebugContext(ctx, "openai reasoning enabled",
 			"model", oaiReq.Model,
-			"include_reasoning", true,
+			"reasoning_effort", oaiReq.ReasoningEffort,
 		)
 	}
 
@@ -194,7 +195,18 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 
 	content := ""
 	if len(oaiResp.Choices) > 0 {
-		content = oaiResp.Choices[0].Message.Content
+		msg := oaiResp.Choices[0].Message
+		content = msg.Content
+
+		// Log reasoning content when present.
+		if msg.ReasoningContent != "" {
+			slog.DebugContext(ctx, "openai reasoning response",
+				"model", oaiResp.Model,
+				"reasoning_len", len(msg.ReasoningContent),
+				"reasoning", msg.ReasoningContent,
+				"content_len", len(content),
+			)
+		}
 	}
 
 	return &CompletionResponse{
@@ -323,7 +335,10 @@ func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error
 		Temperature: req.Temperature,
 	}
 	if req.Reasoning {
-		oai.IncludeReasoning = true
+		oai.ReasoningEffort = req.ReasoningEffort
+		if oai.ReasoningEffort == "" {
+			oai.ReasoningEffort = "medium" // default effort
+		}
 	}
 	return oai, nil
 }
