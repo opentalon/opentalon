@@ -24,11 +24,13 @@ type Message struct {
 }
 
 type CompletionRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-	Temperature *float64  `json:"temperature,omitempty"`
-	Stream      bool      `json:"stream,omitempty"`
+	Model        string    `json:"model"`
+	Messages     []Message `json:"messages"`
+	MaxTokens    int       `json:"max_tokens,omitempty"`
+	Temperature  *float64  `json:"temperature,omitempty"`
+	Stream       bool      `json:"stream,omitempty"`
+	Reasoning    bool      `json:"reasoning,omitempty"`     // enable extended thinking / reasoning
+	BudgetTokens int       `json:"budget_tokens,omitempty"` // max tokens for thinking (0 = provider default)
 }
 
 type Usage struct {

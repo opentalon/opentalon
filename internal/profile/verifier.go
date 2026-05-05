@@ -47,6 +47,7 @@ type VerifierConfig struct {
 	LimitTimeField    string            // optional JSON field for limit window duration (e.g. "1h"); default "limit_time"
 	CredentialsField  string            // optional JSON field for per-MCP-server credential headers; default "credentials"
 	LanguageField     string            // optional JSON field for user language; default "language"
+	BudgetTokensField string            // optional JSON field for reasoning budget tokens; default "budget_tokens"
 	ExtraHeaders      map[string]string // static headers sent on every WhoAmI call; ${ENV_VAR} expanded once at construction
 }
 
@@ -97,6 +98,9 @@ func (c *VerifierConfig) setDefaults() {
 	}
 	if c.LanguageField == "" {
 		c.LanguageField = "language"
+	}
+	if c.BudgetTokensField == "" {
+		c.BudgetTokensField = "budget_tokens"
 	}
 	// Expand env vars in ExtraHeaders once at construction time so values are
 	// immutable for the verifier's lifetime and can't drift mid-run. Also guard
@@ -344,6 +348,11 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 		}
 	}
 
+	var budgetTokens int
+	if braw, ok := raw[v.cfg.BudgetTokensField]; ok {
+		_ = json.Unmarshal(braw, &budgetTokens) // best-effort; 0 if missing or malformed
+	}
+
 	var credentials map[string]CredentialHeader
 	if craw, ok := raw[v.cfg.CredentialsField]; ok {
 		if err := json.Unmarshal(craw, &credentials); err != nil {
@@ -353,16 +362,17 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 	}
 
 	p := &Profile{
-		EntityID:    entityID,
-		Group:       group,
-		Token:       token,
-		Plugins:     plugins,
-		Model:       model,
-		ChannelType: channelTypeResp,
-		Language:    language,
-		Limit:       limit,
-		LimitWindow: limitWindow,
-		Credentials: credentials,
+		EntityID:     entityID,
+		Group:        group,
+		Token:        token,
+		Plugins:      plugins,
+		Model:        model,
+		ChannelType:  channelTypeResp,
+		Language:     language,
+		Limit:        limit,
+		LimitWindow:  limitWindow,
+		BudgetTokens: budgetTokens,
+		Credentials:  credentials,
 	}
 	slog.DebugContext(ctx, "whoami profile resolved",
 		"entity_id", p.EntityID,
