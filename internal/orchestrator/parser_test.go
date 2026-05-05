@@ -576,3 +576,26 @@ func TestParseNarratedToolCall(t *testing.T) {
 		}
 	}
 }
+
+func TestHasHallucinatedResult(t *testing.T) {
+	matches := []string{
+		`You have **{{plugin_output.pagination.total}}** org-units.`,
+		`There are {{result.items.count}} items in your account.`,
+		`The total is {{data.pagination.total}}.`,
+	}
+	for _, input := range matches {
+		if !hasHallucinatedResult(input) {
+			t.Errorf("expected hallucinated result match for %q", input)
+		}
+	}
+	noMatch := []string{
+		"You have 42 items.",
+		"Here are the results.",
+		"Use {{ for templates in Go.",
+	}
+	for _, input := range noMatch {
+		if hasHallucinatedResult(input) {
+			t.Errorf("unexpected hallucinated result match for %q", input)
+		}
+	}
+}

@@ -443,6 +443,16 @@ func hasNarratedToolCall(response string) bool {
 	return narratedToolRe.MatchString(response)
 }
 
+// hallucinatedResultRe matches template-like patterns the LLM fabricates when
+// pretending it already called a tool (e.g. "{{plugin_output.pagination.total}}").
+var hallucinatedResultRe = regexp.MustCompile(`\{\{[a-zA-Z_.]+(\.[\w.]+)+\}\}`)
+
+// hasHallucinatedResult returns true if the response contains fabricated
+// template variables like {{plugin_output.pagination.total}}.
+func hasHallucinatedResult(response string) bool {
+	return hallucinatedResultRe.MatchString(response)
+}
+
 // containsInternalBlock returns true if s contains any internal protocol
 // block opening tag.
 func containsInternalBlock(s string) bool {
