@@ -1526,52 +1526,32 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 }
 
 // sanitizeHistory removes poisoned assistant messages from session history.
-// These are messages where the LLM narrated tool calls or hallucinated
-// results instead of actually calling tools. Keeping them in history
-// teaches the LLM to repeat the same bad pattern.
+// An assistant message is "legitimate" only if it contains a [tool_call] block
+// OR is immediately preceded by a [plugin_output] (meaning it's a summary of
+// real tool results). Everything else is the LLM talking without acting —
+// hallucinated numbers, narrated intent, placeholder text — and teaches the
+// model to repeat the same bad pattern.
 func sanitizeHistory(msgs []provider.Message) []provider.Message {
 	out := make([]provider.Message, 0, len(msgs))
 	for i, m := range msgs {
 		if m.Role == provider.RoleAssistant {
-			// Drop assistant messages that contain hallucinated template variables.
-			if hasHallucinatedResult(m.Content) {
-				// Also drop the preceding user message if it exists and is now orphaned.
-				if len(out) > 0 && out[len(out)-1].Role == provider.RoleUser {
-					out = out[:len(out)-1]
-				}
+			// Keep assistant messages that contain tool calls — they drove real actions.
+			if strings.Contains(m.Content, "[tool_call]") {
+				out = append(out, m)
 				continue
 			}
-			// Drop assistant messages that are purely narrated intent (no tool call
-			// blocks, no [plugin_output] results) — they pollute history with
-			// "Here are the results..." without actual results.
-			if !strings.Contains(m.Content, "[tool_call]") &&
-				!strings.Contains(m.Content, "[plugin_output]") &&
-				(hasNarratedToolCall(m.Content) || hasNarratedIntent(m.Content)) {
-				if len(out) > 0 && out[len(out)-1].Role == provider.RoleUser {
-					out = out[:len(out)-1]
-				}
+			// Keep assistant messages that follow a [plugin_output] — they summarize
+			// real tool results (the normal round-2 response after a tool call).
+			if i > 0 && strings.Contains(msgs[i-1].Content, "[plugin_output]") {
+				out = append(out, m)
 				continue
 			}
-			// Drop assistant messages that claim results without evidence:
-			// short messages referencing "results" but no tool output in adjacent messages.
-			if len(m.Content) < 200 && !strings.Contains(m.Content, "[tool_call]") {
-				hasToolContext := false
-				// Check if the next message is a tool result
-				if i+1 < len(msgs) && strings.Contains(msgs[i+1].Content, "[plugin_output]") {
-					hasToolContext = true
-				}
-				// Check if previous message has tool output
-				if i > 0 && strings.Contains(msgs[i-1].Content, "[plugin_output]") {
-					hasToolContext = true
-				}
-				if !hasToolContext && (strings.Contains(strings.ToLower(m.Content), "here are the results") ||
-					strings.Contains(strings.ToLower(m.Content), "here is the result")) {
-					if len(out) > 0 && out[len(out)-1].Role == provider.RoleUser {
-						out = out[:len(out)-1]
-					}
-					continue
-				}
+			// Everything else is the LLM answering without calling a tool.
+			// Drop it and its orphaned preceding user message.
+			if len(out) > 0 && out[len(out)-1].Role == provider.RoleUser {
+				out = out[:len(out)-1]
 			}
+			continue
 		}
 		out = append(out, m)
 	}
