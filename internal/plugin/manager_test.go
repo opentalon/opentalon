@@ -195,6 +195,44 @@ func TestWatchProcessIgnoresStaleProcess(t *testing.T) {
 	}
 }
 
+func TestReady_AllLoaded(t *testing.T) {
+	registry := orchestrator.NewToolRegistry()
+	m := NewManager(registry)
+
+	// No plugins configured → vacuously ready.
+	if !m.Ready() {
+		t.Error("expected Ready() = true when no plugins are known")
+	}
+
+	// Add known entries.
+	m.mu.Lock()
+	m.known["a"] = PluginEntry{Name: "a"}
+	m.known["b"] = PluginEntry{Name: "b"}
+	m.mu.Unlock()
+
+	if m.Ready() {
+		t.Error("expected Ready() = false when known > loaded")
+	}
+
+	// Simulate one loaded.
+	m.mu.Lock()
+	m.plugins["a"] = &managed{entry: PluginEntry{Name: "a"}}
+	m.mu.Unlock()
+
+	if m.Ready() {
+		t.Error("expected Ready() = false when 1/2 loaded")
+	}
+
+	// Simulate both loaded.
+	m.mu.Lock()
+	m.plugins["b"] = &managed{entry: PluginEntry{Name: "b"}}
+	m.mu.Unlock()
+
+	if !m.Ready() {
+		t.Error("expected Ready() = true when all plugins loaded")
+	}
+}
+
 func TestMCPServerNames(t *testing.T) {
 	tests := []struct {
 		name  string

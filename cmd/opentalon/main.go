@@ -20,6 +20,7 @@ import (
 	"github.com/opentalon/opentalon/internal/commands"
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/dedup"
+	"github.com/opentalon/opentalon/internal/health"
 	"github.com/opentalon/opentalon/internal/logger"
 	"github.com/opentalon/opentalon/internal/metrics"
 	"github.com/opentalon/opentalon/internal/orchestrator"
@@ -79,6 +80,14 @@ func main() {
 		logLevel = env
 	}
 	logger.Setup(logLevel)
+
+	// Start gRPC health probe server (always on).
+	healthSrv := health.New(cfg.Health.Addr)
+	go func() {
+		if err := healthSrv.ListenAndServe(); err != nil {
+			slog.Error("health server error", "error", err)
+		}
+	}()
 
 	// Start Prometheus metrics server if enabled.
 	var metricsCollector *metrics.Collector
@@ -561,6 +570,10 @@ func main() {
 		slog.Info("startup: sync skipped (follower), orchestrator ready", "component", "startup")
 	}
 
+	// Forward-declare channelManager so the OnPluginLoaded closure can
+	// reference it for readiness checks (channelManager is created below).
+	var channelManager *channel.Manager
+
 	// When a plugin comes online later (e.g. via the retry loop), sync its
 	// actions to the vector store automatically. In cluster mode, the lock
 	// ensures only one pod performs the sync for a given plugin.
@@ -578,6 +591,10 @@ func main() {
 				slog.Debug("plugin sync skipped (another pod is syncing)", "plugin", name)
 			}
 		}()
+		// Update readiness when a late-loaded plugin comes online.
+		if channelManager != nil && pluginManager.Ready() && channelManager.Ready() {
+			healthSrv.SetReady("opentalon", true)
+		}
 	})
 
 	// Scheduler: wired after orchestrator so it can route job actions through orch.
@@ -641,7 +658,7 @@ func main() {
 		reg.SetDeduplicator(dedup.NewFromClient(sharedRedis), dedupTTL)
 		slog.Info("cluster deduplication enabled", "ttl", dedupTTL, "sentinel", len(cfg.Redis.Sentinels) > 0)
 	}
-	channelManager := channel.NewManager(reg, toolRegistry)
+	channelManager = channel.NewManager(reg, toolRegistry)
 	channelEntries := make([]channel.ChannelEntry, 0, len(cfg.Channels))
 	for name, ch := range cfg.Channels {
 		pathRef := ch.Plugin
@@ -665,6 +682,11 @@ func main() {
 		slog.Warn("some channels failed to load", "error", err)
 	} else {
 		slog.Info("channels loaded")
+	}
+
+	// Mark readiness once all plugins and channels are loaded.
+	if pluginManager.Ready() && channelManager.Ready() {
+		healthSrv.SetReady("opentalon", true)
 	}
 
 	// Start plugin exec dispatcher (allows trusted plugins to execute ToolRegistry actions via Redis).
@@ -694,6 +716,9 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
 	<-sigCh
+
+	// Stop health server first so K8s stops routing traffic during teardown.
+	healthSrv.Shutdown()
 
 	// Stop the scheduler before channels so in-flight reminders can still
 	// be delivered via the channel registry. (deferred sched.Stop() above

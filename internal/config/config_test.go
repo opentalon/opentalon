@@ -943,3 +943,50 @@ metrics:
 		t.Errorf("Metrics.Addr = %q, want :9091", cfg.Metrics.Addr)
 	}
 }
+
+func TestParseHealthDefault(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Health.Addr != ":8086" {
+		t.Errorf("Health.Addr = %q, want :8086", cfg.Health.Addr)
+	}
+}
+
+func TestParseHealthCustomAddr(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+health:
+  addr: ":9999"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Health.Addr != ":9999" {
+		t.Errorf("Health.Addr = %q, want :9999", cfg.Health.Addr)
+	}
+}
+
+func TestParseHealthAddrEnvSubstitution(t *testing.T) {
+	t.Setenv("HEALTH_ADDR", ":7777")
+	yaml := `
+models:
+  providers: {}
+health:
+  addr: "${HEALTH_ADDR}"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Health.Addr != ":7777" {
+		t.Errorf("Health.Addr = %q, want :7777", cfg.Health.Addr)
+	}
+}
