@@ -866,13 +866,9 @@ type defaultModelClient struct {
 
 func (c *defaultModelClient) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
 	if req.Model == "" {
-		req = &provider.CompletionRequest{
-			Model:       c.model,
-			Messages:    req.Messages,
-			MaxTokens:   req.MaxTokens,
-			Temperature: req.Temperature,
-			Stream:      req.Stream,
-		}
+		cp := *req
+		cp.Model = c.model
+		req = &cp
 	}
 	return c.provider.Complete(ctx, req)
 }
@@ -881,15 +877,18 @@ func (c *defaultModelClient) Complete(ctx context.Context, req *provider.Complet
 // underlying provider's Stream method, filling in the default model if needed.
 func (c *defaultModelClient) Stream(ctx context.Context, req *provider.CompletionRequest) (provider.ResponseStream, error) {
 	if req.Model == "" {
-		req = &provider.CompletionRequest{
-			Model:       c.model,
-			Messages:    req.Messages,
-			MaxTokens:   req.MaxTokens,
-			Temperature: req.Temperature,
-			Stream:      true,
-		}
+		cp := *req
+		cp.Model = c.model
+		cp.Stream = true
+		req = &cp
 	}
 	return c.provider.Stream(ctx, req)
+}
+
+// SupportsFeature delegates to the underlying provider so the orchestrator
+// can detect reasoning support via type assertion.
+func (c *defaultModelClient) SupportsFeature(f provider.Feature) bool {
+	return c.provider.SupportsFeature(f)
 }
 
 // buildLuaScriptPaths returns a map of Lua plugin name -> path to .lua script,
