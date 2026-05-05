@@ -967,9 +967,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if hasHallucinatedResult(resp.Content) && stripRetries < 3 {
 				stripRetries++
 				log.Warn("hallucinated result detected, retrying", "round", i+1)
+				// Escape {{ to { { in the hallucinated content before sending it back —
+				// vLLM chat templates use Jinja2 which chokes on unescaped {{ in messages.
+				escaped := strings.ReplaceAll(resp.Content, "{{", "{ {")
 				transientMessages = []provider.Message{
-					{Role: provider.RoleAssistant, Content: resp.Content},
-					{Role: provider.RoleUser, Content: "[system] Your response contains placeholder variables like {{...}} instead of real data. You MUST call the tool first using [tool_call] format, then answer with the actual results."},
+					{Role: provider.RoleAssistant, Content: escaped},
+					{Role: provider.RoleUser, Content: "[system] Your previous response contained placeholder variables instead of real data. You MUST call the tool first using [tool_call] format, then answer with the actual results."},
 				}
 				continue
 			}
