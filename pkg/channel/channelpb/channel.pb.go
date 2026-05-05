@@ -613,16 +613,18 @@ func (x *FileAttachment) GetSize() int64 {
 }
 
 type ChannelCapabilities struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	Id               string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Name             string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Threads          bool                   `protobuf:"varint,3,opt,name=threads,proto3" json:"threads,omitempty"`
-	Files            bool                   `protobuf:"varint,4,opt,name=files,proto3" json:"files,omitempty"`
-	Reactions        bool                   `protobuf:"varint,5,opt,name=reactions,proto3" json:"reactions,omitempty"`
-	Edits            bool                   `protobuf:"varint,6,opt,name=edits,proto3" json:"edits,omitempty"`
-	MaxMessageLength int64                  `protobuf:"varint,7,opt,name=max_message_length,json=maxMessageLength,proto3" json:"max_message_length,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	Id                   string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name                 string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Threads              bool                   `protobuf:"varint,3,opt,name=threads,proto3" json:"threads,omitempty"`
+	Files                bool                   `protobuf:"varint,4,opt,name=files,proto3" json:"files,omitempty"`
+	Reactions            bool                   `protobuf:"varint,5,opt,name=reactions,proto3" json:"reactions,omitempty"`
+	Edits                bool                   `protobuf:"varint,6,opt,name=edits,proto3" json:"edits,omitempty"`
+	MaxMessageLength     int64                  `protobuf:"varint,7,opt,name=max_message_length,json=maxMessageLength,proto3" json:"max_message_length,omitempty"`
+	ResponseFormat       string                 `protobuf:"bytes,8,opt,name=response_format,json=responseFormat,proto3" json:"response_format,omitempty"`
+	ResponseFormatPrompt string                 `protobuf:"bytes,9,opt,name=response_format_prompt,json=responseFormatPrompt,proto3" json:"response_format_prompt,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *ChannelCapabilities) Reset() {
@@ -704,6 +706,20 @@ func (x *ChannelCapabilities) GetMaxMessageLength() int64 {
 	return 0
 }
 
+func (x *ChannelCapabilities) GetResponseFormat() string {
+	if x != nil {
+		return x.ResponseFormat
+	}
+	return ""
+}
+
+func (x *ChannelCapabilities) GetResponseFormatPrompt() string {
+	if x != nil {
+		return x.ResponseFormatPrompt
+	}
+	return ""
+}
+
 var File_channel_proto protoreflect.FileDescriptor
 
 const file_channel_proto_rawDesc = "" +
@@ -764,7 +780,7 @@ const file_channel_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1b\n" +
 	"\tmime_type\x18\x02 \x01(\tR\bmimeType\x12\x12\n" +
 	"\x04data\x18\x03 \x01(\fR\x04data\x12\x12\n" +
-	"\x04size\x18\x04 \x01(\x03R\x04size\"\xcb\x01\n" +
+	"\x04size\x18\x04 \x01(\x03R\x04size\"\xaa\x02\n" +
 	"\x13ChannelCapabilities\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
@@ -772,7 +788,9 @@ const file_channel_proto_rawDesc = "" +
 	"\x05files\x18\x04 \x01(\bR\x05files\x12\x1c\n" +
 	"\treactions\x18\x05 \x01(\bR\treactions\x12\x14\n" +
 	"\x05edits\x18\x06 \x01(\bR\x05edits\x12,\n" +
-	"\x12max_message_length\x18\a \x01(\x03R\x10maxMessageLength2\xa3\x03\n" +
+	"\x12max_message_length\x18\a \x01(\x03R\x10maxMessageLength\x12'\n" +
+	"\x0fresponse_format\x18\b \x01(\tR\x0eresponseFormat\x124\n" +
+	"\x16response_format_prompt\x18\t \x01(\tR\x14responseFormatPrompt2\xa3\x03\n" +
 	"\x0eChannelService\x12Q\n" +
 	"\fCapabilities\x12\x16.google.protobuf.Empty\x1a).opentalon.channel.v1.ChannelCapabilities\x12\\\n" +
 	"\tConfigure\x12&.opentalon.channel.v1.ConfigureRequest\x1a'.opentalon.channel.v1.ConfigureResponse\x12D\n" +

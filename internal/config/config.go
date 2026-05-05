@@ -347,8 +347,12 @@ type StateConfig struct {
 // DBConfig selects the database backend. Driver defaults to "sqlite".
 // For postgres, set driver: "postgres" and provide a DSN.
 type DBConfig struct {
-	Driver string `yaml:"driver"` // "sqlite" (default) or "postgres"
-	DSN    string `yaml:"dsn"`    // postgres only: e.g. "postgres://user:pass@host:5432/dbname?sslmode=require"
+	Driver          string `yaml:"driver"`             // "sqlite" (default) or "postgres"
+	DSN             string `yaml:"dsn"`                // postgres only: e.g. "postgres://user:pass@host:5432/dbname?sslmode=require"
+	MaxOpenConns    int    `yaml:"max_open_conns"`     // max open connections (postgres only; 0 = default 25)
+	MaxIdleConns    int    `yaml:"max_idle_conns"`     // max idle connections (postgres only; 0 = default 10)
+	ConnMaxLifetime string `yaml:"conn_max_lifetime"`  // max connection lifetime (postgres only; Go duration, e.g. "5m"; empty = default 5m)
+	ConnMaxIdleTime string `yaml:"conn_max_idle_time"` // max idle time per connection (postgres only; Go duration; empty = default 5m)
 }
 
 // SessionConfig limits session size and optional idle pruning.

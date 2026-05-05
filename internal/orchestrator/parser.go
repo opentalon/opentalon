@@ -128,7 +128,7 @@ func (defaultParser) Parse(response string) []ToolCall {
 		// Fallback: detect narrated tool calls in plain text.
 		// Weak LLMs sometimes say "We need to call timly__list-items" instead
 		// of using [tool_call] format. Flag this so the orchestrator can retry.
-		if hasNarratedToolCall(response) {
+		if hasNarratedToolCall(response) || hasNarratedIntent(response) {
 			return narratedToolCallPlaceholder
 		}
 		// We found [tool_call] blocks (or Claude's native XML variants) but
@@ -411,7 +411,20 @@ func parseXMLParameters(body string) map[string]string {
 
 // narratedToolRe matches tool names in plain text narration from weak LLMs.
 // Captures patterns like "call timly.timly__list-items" or "use timly__list-container-types".
-var narratedToolRe = regexp.MustCompile(`(?i)(?:call|use|invoke|execute|run)\s+` + "`?" + `([a-zA-Z0-9_.-]+(?:\.[a-zA-Z0-9_.-]+|__[a-zA-Z0-9_-]+))` + "`?")
+var narratedToolRe = regexp.MustCompile(`(?i)(?:call|use|invoke|execute|run|fetch|query|check|search|look\s*up|retrieve)\s+` + "`?" + `([a-zA-Z0-9_.-]+(?:\.[a-zA-Z0-9_.-]+|__[a-zA-Z0-9_-]+))` + "`?")
+
+// narratedIntentRe matches broad narration patterns where the LLM announces it
+// will do something without naming a specific tool. Examples:
+//   - "We'll fetch the total count of items."
+//   - "I'll look up your inventory."
+//   - "Let me check how many items you have."
+var narratedIntentRe = regexp.MustCompile(`(?i)^(?:we'?(?:ll| will)|i'?(?:ll| will)|let me|let'?s|i'?m going to|i need to|we need to|we should)\s+(?:fetch|get|check|look|search|query|retrieve|find|list|count|pull|grab|load)`)
+
+// hasNarratedIntent returns true if the response is the LLM announcing its
+// intent to act without producing a [tool_call] block.
+func hasNarratedIntent(response string) bool {
+	return narratedIntentRe.MatchString(strings.TrimSpace(response))
+}
 
 // narratedToolCallPlaceholder is returned when the LLM narrated a tool call
 // instead of using [tool_call] format. The orchestrator detects this via

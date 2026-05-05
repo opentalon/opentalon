@@ -10,13 +10,15 @@ import (
 
 func capabilitiesToProto(c Capabilities) *channelpb.ChannelCapabilities {
 	return &channelpb.ChannelCapabilities{
-		Id:               c.ID,
-		Name:             c.Name,
-		Threads:          c.Threads,
-		Files:            c.Files,
-		Reactions:        c.Reactions,
-		Edits:            c.Edits,
-		MaxMessageLength: c.MaxMessageLength,
+		Id:                   c.ID,
+		Name:                 c.Name,
+		Threads:              c.Threads,
+		Files:                c.Files,
+		Reactions:            c.Reactions,
+		Edits:                c.Edits,
+		MaxMessageLength:     c.MaxMessageLength,
+		ResponseFormat:       string(c.ResponseFormat),
+		ResponseFormatPrompt: c.ResponseFormatPrompt,
 	}
 }
 

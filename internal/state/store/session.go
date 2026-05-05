@@ -85,33 +85,39 @@ func (s *SessionStore) Create(id, entityID, groupID string) *state.Session {
 }
 
 // AddMessage inserts a message into the messages table and updates the session timestamp.
+// All statements run in a single transaction to reduce network roundtrips to PostgreSQL.
 func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	ctx := context.Background()
 	d := s.db.Dialect()
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	tx, err := s.db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("add message begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Atomically assign next seq in a single statement to avoid race conditions
 	// between concurrent AddMessage calls.
-	_, err := s.db.SQLDB().ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, created_at)
 		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ? FROM messages WHERE session_id = ?`),
-		id, string(msg.Role), msg.Content, now, id)
-	if err != nil {
+		id, string(msg.Role), msg.Content, now, id); err != nil {
 		return fmt.Errorf("add message insert: %w", err)
 	}
 
 	// Trim if maxMessages is set.
 	if s.maxMessages > 0 {
-		_, _ = s.db.SQLDB().ExecContext(ctx,
+		_, _ = tx.ExecContext(ctx,
 			d.Rebind(`DELETE FROM messages WHERE session_id = ? AND seq <= (SELECT MAX(seq) - ? FROM messages WHERE session_id = ?)`),
 			id, s.maxMessages, id)
 	}
 
 	// Touch session updated_at.
-	_, _ = s.db.SQLDB().ExecContext(ctx,
+	_, _ = tx.ExecContext(ctx,
 		d.Rebind(`UPDATE sessions SET updated_at = ? WHERE id = ?`), now, id)
 
-	return nil
+	return tx.Commit()
 }
 
 // SetModel updates the active model and persists.

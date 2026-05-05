@@ -468,13 +468,22 @@ func TestParseBareJSONToolCall(t *testing.T) {
 }
 
 func TestParseBareJSONToolCall_WithSurroundingText(t *testing.T) {
-	// Bare JSON mixed with text should NOT be parsed (avoid false positives).
+	// "Let me look that up." matches narrated intent detection, so
+	// it correctly returns a narrated placeholder for retry.
 	response := `Let me look that up.
 {"tool": "myapp.search", "args": {"q": "test"}}`
 
 	calls := DefaultParser.Parse(response)
-	if calls != nil {
-		t.Errorf("expected nil for bare JSON with surrounding text, got %v", calls)
+	if !IsNarratedPlaceholder(calls) {
+		t.Errorf("expected narrated placeholder for bare JSON with narration prefix, got %v", calls)
+	}
+
+	// Non-narrated text with bare JSON should NOT be parsed.
+	response2 := `Here are some results:
+{"tool": "myapp.search", "args": {"q": "test"}}`
+	calls2 := DefaultParser.Parse(response2)
+	if calls2 != nil {
+		t.Errorf("expected nil for bare JSON with non-narrated text, got %v", calls2)
 	}
 }
 
@@ -528,11 +537,25 @@ func TestParseXMLFunctionCalls_NoArgs(t *testing.T) {
 func TestParseNarratedToolCall(t *testing.T) {
 	// Narrated tool calls return a placeholder — the orchestrator retries with "?".
 	matches := []string{
+		// Tool-name narration (narratedToolRe):
 		"We need to call timly.timly__list-container-types.",
 		"I'll call timly__list-items to check.",
 		"Let me use timly.timly__show-person to look that up.",
 		"We should call `timly.timly__list-items`.",
 		"Call timly.timly__list-items and also call timly.timly__list-persons.",
+		"I need to fetch timly__list-items to check.",
+		"Let me query timly.timly__list-items.",
+		// Intent narration without tool name (narratedIntentRe):
+		"We'll fetch the total count of items (including regular items, twins, and stock items).",
+		"I'll check how many items you have.",
+		"Let me look up your inventory.",
+		"I'll get the item count for you.",
+		"We'll search for all items in your account.",
+		"I'll retrieve the data now.",
+		"Let me find the matching records.",
+		"I'll list all items.",
+		"We'll count the items for you.",
+		"I'm going to fetch the list.",
 	}
 	for _, input := range matches {
 		calls := DefaultParser.Parse(input)
@@ -541,8 +564,15 @@ func TestParseNarratedToolCall(t *testing.T) {
 		}
 	}
 	// No match — should return nil.
-	calls := DefaultParser.Parse("Here are your results.")
-	if calls != nil {
-		t.Errorf("expected nil for non-narrated text, got %v", calls)
+	noMatch := []string{
+		"Here are your results.",
+		"You have 42 items in your account.",
+		"The item was successfully assigned.",
+	}
+	for _, input := range noMatch {
+		calls := DefaultParser.Parse(input)
+		if calls != nil {
+			t.Errorf("expected nil for non-narrated text %q, got %v", input, calls)
+		}
 	}
 }

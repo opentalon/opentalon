@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/opentalon/opentalon/internal/config"
@@ -72,6 +73,28 @@ func Open(cfg config.DBConfig, dataDir string) (*DB, error) {
 		if err = rawDB.Ping(); err != nil {
 			_ = rawDB.Close()
 			return nil, fmt.Errorf("state store: ping postgres: %w", err)
+		}
+		// Connection pool tuning — sensible defaults for a system doing 10-15+
+		// queries per request. Operators can override via config.
+		maxOpen := cfg.MaxOpenConns
+		if maxOpen <= 0 {
+			maxOpen = 25
+		}
+		rawDB.SetMaxOpenConns(maxOpen)
+		maxIdle := cfg.MaxIdleConns
+		if maxIdle <= 0 {
+			maxIdle = 10
+		}
+		rawDB.SetMaxIdleConns(maxIdle)
+		if lt, err := time.ParseDuration(cfg.ConnMaxLifetime); err == nil && lt > 0 {
+			rawDB.SetConnMaxLifetime(lt)
+		} else {
+			rawDB.SetConnMaxLifetime(5 * time.Minute)
+		}
+		if it, err := time.ParseDuration(cfg.ConnMaxIdleTime); err == nil && it > 0 {
+			rawDB.SetConnMaxIdleTime(it)
+		} else {
+			rawDB.SetConnMaxIdleTime(5 * time.Minute)
 		}
 
 	default:
