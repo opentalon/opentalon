@@ -1010,12 +1010,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 
 		// The LLM narrated a tool call ("We need to call timly__list-items")
-		// instead of using [tool_call] format. Retry with "?" to nudge it.
+		// instead of using [tool_call] format. Retry with an explicit nudge.
 		if IsNarratedPlaceholder(calls) {
 			log.Debug("narrated tool call detected, retrying with nudge", "round", i+1)
 			transientMessages = []provider.Message{
 				{Role: provider.RoleAssistant, Content: resp.Content},
-				{Role: provider.RoleUser, Content: "?"},
+				{Role: provider.RoleUser, Content: "[system] Do not describe what you will do. Execute the tool call NOW using the [tool_call] format shown in your instructions."},
 			}
 			continue
 		}
