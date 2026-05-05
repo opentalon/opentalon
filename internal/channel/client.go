@@ -153,13 +153,15 @@ func capabilitiesFromProto(pb *channelpb.ChannelCapabilities) pkg.Capabilities {
 		return pkg.Capabilities{}
 	}
 	return pkg.Capabilities{
-		ID:               pb.Id,
-		Name:             pb.Name,
-		Threads:          pb.Threads,
-		Files:            pb.Files,
-		Reactions:        pb.Reactions,
-		Edits:            pb.Edits,
-		MaxMessageLength: pb.MaxMessageLength,
+		ID:                   pb.Id,
+		Name:                 pb.Name,
+		Threads:              pb.Threads,
+		Files:                pb.Files,
+		Reactions:            pb.Reactions,
+		Edits:                pb.Edits,
+		MaxMessageLength:     pb.MaxMessageLength,
+		ResponseFormat:       pkg.ResponseFormat(pb.ResponseFormat),
+		ResponseFormatPrompt: pb.ResponseFormatPrompt,
 	}
 }
 

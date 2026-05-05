@@ -100,6 +100,47 @@ func TestStreamTagFilter_HiddenMode(t *testing.T) {
 	}
 }
 
+func TestStreamTagFilter_NarratedToolCallSuppressed(t *testing.T) {
+	f := newStreamTagFilter(false)
+	out := f.Feed("We will call timly__list-containers with subcategory filter.")
+	out += f.Flush()
+	if out != "" {
+		t.Errorf("narrated tool call should be suppressed, got %q", out)
+	}
+}
+
+func TestStreamTagFilter_NarratedChunked(t *testing.T) {
+	f := newStreamTagFilter(false)
+	var out string
+	out += f.Feed("We will ")
+	out += f.Feed("call timly__list-containers")
+	out += f.Feed(" with subcategory filter.")
+	out += f.Flush()
+	if out != "" {
+		t.Errorf("chunked narrated tool call should be suppressed, got %q", out)
+	}
+}
+
+func TestStreamTagFilter_NarratedFollowedByRealContent(t *testing.T) {
+	f := newStreamTagFilter(false)
+	var out string
+	out += f.Feed("Let me use timly__show-container to look that up.\nHere are the details.")
+	out += f.Flush()
+	// The narrated sentence should be suppressed, the real content kept.
+	if out != "\nHere are the details." {
+		t.Errorf("expected real content only, got %q", out)
+	}
+}
+
+func TestStreamTagFilter_NormalTextPassesThrough(t *testing.T) {
+	f := newStreamTagFilter(false)
+	out := f.Feed("The container has 5 items inside it.")
+	out += f.Flush()
+	if out != "The container has 5 items inside it." {
+		t.Errorf("normal text should pass through, got %q", out)
+	}
+}
+
 func TestToolCallFriendlyLabel(t *testing.T) {
 	tests := []struct {
 		body string

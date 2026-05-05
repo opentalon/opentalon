@@ -714,7 +714,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	sm := o.acquireSessionLock(sessionID)
 	defer o.releaseSessionLock(sessionID, sm)
 
-	if _, err := o.sessions.Get(sessionID); err != nil {
+	// Request-scoped session cache: avoids redundant DB roundtrips for
+	// sessions.Get() on every agent loop iteration. The per-session lock
+	// above guarantees single-writer access.
+	sessions := newCachedSessionStore(o.sessions)
+
+	if _, err := sessions.Get(sessionID); err != nil {
 		return nil, fmt.Errorf("session lookup: %w", err)
 	}
 	ctx = actor.WithSessionID(ctx, sessionID)
@@ -745,7 +750,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			decision = pipeline.ParseConfirmation(userMessage)
 		}
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
-		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
+		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 		if decision == pipeline.Approved {
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
 			res, err := o.executePipeline(ctx, sessionID, p)
@@ -758,7 +763,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			return res, err
 		}
 		resp := "Pipeline cancelled."
-		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
+		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
 		log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
 		return &RunResult{Response: resp}, nil
 	}
@@ -822,8 +827,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			} else {
 				planText = narrated
 			}
-			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
-			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
+			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
 			return &RunResult{Response: planText}, nil
 		}
@@ -843,7 +848,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		content = "[The user sent a file attachment.]"
 	}
 
-	if err := o.sessions.AddMessage(sessionID, provider.Message{
+	if err := sessions.AddMessage(sessionID, provider.Message{
 		Role:    provider.RoleUser,
 		Content: content,
 		Files:   files,
@@ -886,7 +891,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var lastCallSig string // "plugin.action\x00arg1=val1\x00..." for loop detection
 	var repeatCount int
 	for i := 0; i < maxAgentLoopIterations; i++ {
-		sess, _ := o.sessions.Get(sessionID)
+		sess, _ := sessions.Get(sessionID)
 
 		// Include server instructions only on the first round — they are large
 		// (can be 10KB+) and the LLM doesn't need them again just to process
@@ -946,7 +951,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				if stripRetries >= 5 {
 					log.Debug("LLM repeatedly produced empty/unparseable response, giving up", "round", i+1)
 					result.Response = "(no response)"
-					_ = o.sessions.AddMessage(sessionID, provider.Message{
+					_ = sessions.AddMessage(sessionID, provider.Message{
 						Role:    provider.RoleAssistant,
 						Content: result.Response,
 					})
@@ -992,7 +997,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				}
 				result.InputForDisplay = strings.TrimSpace(strings.Join(parts, "\n"))
 			}
-			_ = o.sessions.AddMessage(sessionID, provider.Message{
+			_ = sessions.AddMessage(sessionID, provider.Message{
 				Role:    provider.RoleAssistant,
 				Content: resp.Content,
 			})
@@ -1054,11 +1059,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", perCallInput, perCallOutput)
 			}
 
-			_ = o.sessions.AddMessage(sessionID, provider.Message{
+			_ = sessions.AddMessage(sessionID, provider.Message{
 				Role:    provider.RoleAssistant,
 				Content: formatToolCallMessage(call),
 			})
-			_ = o.sessions.AddMessage(sessionID, provider.Message{
+			_ = sessions.AddMessage(sessionID, provider.Message{
 				Role:    provider.RoleUser,
 				Content: o.guard.WrapContent(toolResult),
 			})
@@ -1155,6 +1160,10 @@ type streamTagFilter struct {
 	pending    string // buffered text that might be the start of a tag
 	blockBody  string // accumulated body inside a [tool_call] block
 	showLabels bool   // when true, emit friendly "_plugin → action…_" labels
+
+	// Narration holdback: buffer outgoing text and suppress it if it
+	// turns out to be a narrated tool call like "We will call list-containers…"
+	narrationBuf string // text held back while checking for narration
 }
 
 func newStreamTagFilter(showLabels bool) *streamTagFilter {
@@ -1219,7 +1228,71 @@ func (f *streamTagFilter) Feed(text string) string {
 			f.pending = ""
 		}
 	}
+	return f.filterNarration(out.String())
+}
+
+// filterNarration buffers outgoing text and suppresses it if it matches a
+// narrated tool call pattern (e.g. "We will call list-containers…"). Text is
+// held back until a sentence boundary (period, newline) confirms or refutes
+// the narration. If the sentence is not a narration, the held-back text is
+// flushed to the caller.
+func (f *streamTagFilter) filterNarration(text string) string {
+	if text == "" {
+		return ""
+	}
+	f.narrationBuf += text
+
+	var out strings.Builder
+
+	// Process sentence by sentence. A "sentence" ends at '.' or '\n'.
+	for {
+		idx := strings.IndexAny(f.narrationBuf, ".\n")
+		if idx < 0 {
+			// No sentence boundary yet — keep buffering if the text so far
+			// could still be the start of a narration.
+			if couldBeNarration(f.narrationBuf) {
+				break
+			}
+			// Not a narration prefix — release everything.
+			out.WriteString(f.narrationBuf)
+			f.narrationBuf = ""
+			break
+		}
+
+		sentence := f.narrationBuf[:idx+1]
+		f.narrationBuf = f.narrationBuf[idx+1:]
+
+		if hasNarratedToolCall(sentence) || hasNarratedIntent(sentence) {
+			// Suppress the narrated sentence; continue processing remainder.
+			continue
+		}
+		out.WriteString(sentence)
+	}
+
 	return out.String()
+}
+
+// couldBeNarration returns true if s could be the beginning of a narrated
+// tool call sentence. Matches common LLM narration prefixes.
+func couldBeNarration(s string) bool {
+	lower := strings.ToLower(strings.TrimSpace(s))
+	prefixes := []string{
+		"we will", "we'll", "we need to", "we should",
+		"i will", "i'll", "i need to", "i'm going to",
+		"let me", "let's",
+		"now ", "next ",
+		"i'll fetch", "we'll fetch", "i'll check", "we'll check",
+		"i'll get", "we'll get", "i'll look", "we'll look",
+		"i'll search", "we'll search", "i'll query", "we'll query",
+		"i'll find", "we'll find", "i'll list", "we'll list",
+		"i'll count", "we'll count", "i'll retrieve", "we'll retrieve",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Flush returns any buffered text that was held back for partial tag matching.
@@ -1231,7 +1304,18 @@ func (f *streamTagFilter) Flush() string {
 	if f.inside {
 		// Unclosed block — drop the buffered content.
 		f.inside = false
-		return ""
+		s = ""
+	}
+	// Release any narration buffer — fail-open: if the stream ends
+	// mid-sentence, show the text rather than swallowing it.
+	if f.narrationBuf != "" {
+		held := f.narrationBuf
+		f.narrationBuf = ""
+		// Even on flush, suppress confirmed narrations.
+		if hasNarratedToolCall(held) || hasNarratedIntent(held) {
+			return s
+		}
+		return s + held
 	}
 	return s
 }
