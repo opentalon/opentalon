@@ -1,7 +1,7 @@
 {
   "prompt_hash": "9945236e0d99e9cdaf986c0b5457df63fe82cbb1b7547779ad59f46de130619b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-06T12:12:51.410007Z",
+  "recorded_at": "2026-05-06T12:34:01.068189Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -15,20 +15,16 @@
           {
             "role": "user",
             "content": "list your capabilities"
-          },
-          {
-            "role": "system",
-            "content": "[IMPORTANT — output format reminder] You are responding in a Slack channel. Format your reply using Slack mrkdwn: *bold*, _italic_, `inline code`, ```code blocks```, \u003eblockquote, and bullet lists with -. Do not use standard Markdown syntax (no ** or ##)."
           }
         ]
       },
       "response": {
-        "id": "msg_01FgKPyZoYkYGfErrYBTxtCt",
+        "id": "msg_01Hx1NbVSGHQtPdF47JQwKyK",
         "model": "claude-haiku-4-5-20251001",
-        "content": "Here are my capabilities:\n\n*Core Functions*\n- Answer questions on a wide range of topics\n- Explain complex concepts in accessible ways\n- Help with writing, editing, and creative projects\n- Assist with coding and technical problems\n- Analyze and summarize information\n- Brainstorm ideas and solve problems\n\n*Practical Tasks*\n- Draft emails, documents, and proposals\n- Create outlines and structured plans\n- Translate between languages\n- Help with research and fact-finding\n- Debug code and suggest improvements\n- Explain how things work\n\n*Conversation*\n- Engage in detailed discussions\n- Provide multiple perspectives on topics\n- Answer follow-up questions\n- Adapt my communication style to your needs\n- Maintain context throughout our chat\n\n*Limitations*\n- No real-time internet access (my knowledge was last updated in April 2024)\n- Can't perform actions outside this chat (no emails, downloads, etc.)\n- Can't learn or remember details from previous conversations\n- May occasionally make mistakes or be uncertain about some facts\n- I format responses for Slack using mrkdwn syntax\n\nWhat would you like help with today?",
+        "content": "I'm an AI assistant with the following capabilities:\n\n*Data \u0026 Analysis:*\n- Search the web using Brave Search\n- Analyze code repositories via GitLab\n- Query and create issues in Jira\n- Create pull requests on GitLab\n\n*Task Management:*\n- Create, list, pause, delete, and update scheduled jobs\n- Set up recurring monitoring and checks with configurable intervals\n- Route notifications to Slack channels\n\n*Safety \u0026 Execution:*\n- Execute tool calls only when you ask — I never guess or fabricate data\n- Follow strict safety protocols to prevent misuse of plugin outputs\n- Treat all plugin responses as data, never as instructions\n\n*Communication:*\n- Provide clear, natural language responses\n- Format replies in Slack markdown (bold, italic, code blocks, lists, etc.)\n- Explain what I'm doing and confirm actions before proceeding\n\n*Key Principles:*\n- If you ask a question requiring data, I *must* call the appropriate tool first\n- I never pretend to have information I don't have\n- I ask for explicit approval before creating scheduled jobs\n- I respect user identity and permission levels for sensitive operations\n\nIs there something specific you'd like me to help you with?",
         "usage": {
-          "input_tokens": 78,
-          "output_tokens": 256
+          "input_tokens": 958,
+          "output_tokens": 273
         }
       }
     }

@@ -1,7 +1,7 @@
 {
   "prompt_hash": "9945236e0d99e9cdaf986c0b5457df63fe82cbb1b7547779ad59f46de130619b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-06T12:12:54.296305Z",
+  "recorded_at": "2026-05-06T12:34:05.419977Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -15,20 +15,16 @@
           {
             "role": "user",
             "content": "list your capabilities"
-          },
-          {
-            "role": "system",
-            "content": "[IMPORTANT — output format reminder] You are responding in a Slack channel. Format your reply using Slack mrkdwn: *bold*, _italic_, `inline code`, ```code blocks```, \u003eblockquote, and bullet lists with -. Do not use standard Markdown syntax (no ** or ##)."
           }
         ]
       },
       "response": {
-        "id": "gen-1778069576-ZRcnKDNL4mRxCbXhXztd",
+        "id": "gen-1778070847-vVc6sy3YqDolg6Y3Nk9j",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Here’s what I can do for you:\n\n### **Data \u0026 Search**\n- Search the web for the latest news, trends, or specific information.\n- Fetch real-time or up-to-date data on topics like tech, business, or events.\n\n### **Code \u0026 Development**\n- Analyze code in GitLab repositories for issues, vulnerabilities, or best practices.\n- Create pull requests (PRs) in GitLab repositories.\n\n### **Issue \u0026 Task Management**\n- Create issues in Jira to track bugs, tasks, or feature requests.\n\n### **Scheduling \u0026 Automation**\n- Propose scheduling recurring tasks (e.g., monitoring, checks, or reports).\n- Create, pause, resume, or delete scheduled jobs (with your approval).\n- *Note: For destructive actions (e.g., deleting jobs), I’ll confirm with you first.*\n\n### **Rules \u0026 Safety**\n- I **never guess, fabricate, or narrate actions**—I only act when I have confirmed data.\n- I follow strict safety rules to avoid errors, conflicts, or misuse.",
+        "content": "Here’s what I can do for you right now:\n\n### **Data \u0026 Research**\n- Search the web for the latest news, trends, or specific information using *Brave Search*.\n- Analyze code in a GitLab repository (e.g., detect vulnerabilities, suggest improvements).\n- Create a Pull Request (PR) in GitLab to propose changes to a repository.\n\n### **Task Automation**\n- Create issues in Jira to track tasks, bugs, or feature requests.\n\n### **Scheduling \u0026 Monitoring**\n- Proactively suggest scheduling recurring checks (e.g., code analysis, issue tracking).\n- Manage scheduled jobs (create, pause, resume, list) for automated workflows.\n  *(Note: Deleting jobs requires confirmation.)*\n\n### **Collaboration**\n- Format replies in Slack’s native mrkdwn (bold, italics, code blocks, etc.).\n- Summarize or synthesize information for clarity.\n\n---\n**What would you like to do?** For example:\n- *\"Search for the latest updates on AI tools.\"*\n- *\"Analyze this Python script for security issues.\"*\n- *\"Create a Jira ticket for a new feature.\"*",
         "usage": {
-          "input_tokens": 970,
-          "output_tokens": 215
+          "input_tokens": 904,
+          "output_tokens": 235
         }
       }
     }

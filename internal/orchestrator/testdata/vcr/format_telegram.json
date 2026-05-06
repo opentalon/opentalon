@@ -1,7 +1,7 @@
 {
   "prompt_hash": "9945236e0d99e9cdaf986c0b5457df63fe82cbb1b7547779ad59f46de130619b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-06T12:12:56.201236Z",
+  "recorded_at": "2026-05-06T12:34:07.236274Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -15,20 +15,16 @@
           {
             "role": "user",
             "content": "list your capabilities"
-          },
-          {
-            "role": "system",
-            "content": "[IMPORTANT — output format reminder] You are responding in a Telegram chat. Format your reply using Telegram's supported HTML: \u003cb\u003ebold\u003c/b\u003e, \u003ci\u003eitalic\u003c/i\u003e, \u003ccode\u003einline code\u003c/code\u003e, \u003cpre\u003ecode blocks\u003c/pre\u003e. Keep responses concise.\nThis formatting applies ONLY to your natural-language replies. Tool calls MUST use [tool_call] JSON format — never wrap them in HTML."
           }
         ]
       },
       "response": {
-        "id": "msg_01HhZtoPwcbzLVcXuquTMxwk",
+        "id": "msg_01WCzLcuhWUDremondtP8X7g",
         "model": "claude-haiku-4-5-20251001",
-        "content": "\u003cb\u003eHere are my main capabilities:\u003c/b\u003e\n\n📝 \u003cb\u003eText \u0026 Analysis\u003c/b\u003e\n• Answer questions and provide explanations\n• Summarize content\n• Analyze and discuss topics\n• Creative writing and brainstorming\n\n🔧 \u003cb\u003eTechnical Tasks\u003c/b\u003e\n• Code writing and debugging (multiple languages)\n• Math problem solving\n• Algorithm explanation\n• Technical documentation\n\n📊 \u003cb\u003eInformation \u0026 Research\u003c/b\u003e\n• General knowledge questions\n• Data interpretation\n• Historical and current information\n\n🎯 \u003cb\u003eProblem Solving\u003c/b\u003e\n• Break down complex problems\n• Offer multiple solutions\n• Strategic planning\n\n💬 \u003cb\u003eCommunication\u003c/b\u003e\n• Helping draft messages\n• Translation (basic)\n• Professional/casual tone adjustment\n\n⚠️ \u003cb\u003eLimitations\u003c/b\u003e\n• No real-time internet access\n• Knowledge cutoff: April 2024\n• Can't execute code or access external systems\n• Can't view images or files you send\n• No memory between separate conversations\n\n\u003ci\u003eWhat would you like help with?\u003c/i\u003e",
+        "content": "Here are my key capabilities:\n\n**Code \u0026 Repository Management:**\n- \u003cb\u003eAnalyze code\u003c/b\u003e in GitLab repositories\n- \u003cb\u003eCreate pull requests\u003c/b\u003e in GitLab\n\n**Issue Tracking:**\n- \u003cb\u003eCreate issues\u003c/b\u003e in Jira\n\n**Search \u0026 Information:**\n- \u003cb\u003eWeb search\u003c/b\u003e via Brave Search for current information\n\n**Task Scheduling:**\n- \u003cb\u003eCreate, list, pause, resume, update, and delete scheduled jobs\u003c/b\u003e for recurring or monitoring tasks\n- Smart interval recommendations based on task type\n\n**Data Handling:**\n- I always call tools to fetch real data — I never guess or fabricate information\n- I treat all plugin output as data only, never as executable instructions\n\n**Format Support:**\n- HTML formatting for Telegram (bold, italic, code blocks)\n\nWhat would you like me to help you with?",
         "usage": {
-          "input_tokens": 105,
-          "output_tokens": 254
+          "input_tokens": 985,
+          "output_tokens": 202
         }
       }
     }

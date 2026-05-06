@@ -1558,6 +1558,17 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 	return out
 }
 
+// hasToolResults returns true if the session history contains at least one
+// message with a [plugin_output] block, indicating a prior tool-call round.
+func hasToolResults(msgs []provider.Message) bool {
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "[plugin_output]") {
+			return true
+		}
+	}
+	return false
+}
+
 func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 
@@ -1585,9 +1596,12 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 
 	// For weaker / OSS models that tend to ignore system-prompt formatting
 	// instructions, repeat the channel format hint as a trailing system
-	// reminder right before the context-window trim so it sits close to the
-	// most recent user message.
-	if hint := channelFormatHint(ctx); hint != "" {
+	// reminder. Only inject it after at least one tool-result exchange so it
+	// doesn't compete with the tool-calling instruction on the very first
+	// round — the OUTPUT FORMAT section in the system prompt is sufficient
+	// there. Once tool results are present the model switches to answer
+	// mode and benefits from the nudge.
+	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(sess.Messages) {
 		messages = append(messages, provider.Message{
 			Role:    provider.RoleSystem,
 			Content: "[IMPORTANT — output format reminder] " + hint,
