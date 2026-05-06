@@ -1046,6 +1046,42 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				continue
 			}
 
+			// Fallback: retries exhausted but planner has concrete steps.
+			// Execute them server-side and feed results to the LLM for
+			// summarisation. This rescues weak models that understand the
+			// task but cannot produce [tool_call] format output.
+			if invokeSteps := plannerStepsToInvoke(steps); len(invokeSteps) > 0 {
+				log.Warn("retries exhausted, executing planner steps server-side",
+					"round", i+1, "steps", len(invokeSteps))
+				invokeResult, invokeErr := o.runInvokeSteps(ctx, invokeSteps)
+				if invokeErr != nil {
+					return nil, fmt.Errorf("server-side invoke: %w", invokeErr)
+				}
+				// Record tool calls in session so the LLM sees real data
+				// on the next iteration and can produce a natural-language
+				// summary.
+				for j, call := range invokeResult.ToolCalls {
+					result.ToolCalls = append(result.ToolCalls, call)
+					if j < len(invokeResult.Results) {
+						tr := invokeResult.Results[j]
+						result.Results = append(result.Results, tr)
+						_ = sessions.AddMessage(sessionID, provider.Message{
+							Role:    provider.RoleAssistant,
+							Content: formatToolCallMessage(call),
+						})
+						_ = sessions.AddMessage(sessionID, provider.Message{
+							Role:    provider.RoleUser,
+							Content: o.guard.WrapContent(tr),
+						})
+					}
+				}
+				// Clear expected tools so the next LLM round doesn't
+				// retry again — it should just summarise.
+				ctx = withExpectedTools(ctx, nil)
+				transientMessages = nil
+				continue
+			}
+
 			result.Response = stripped
 			if len(result.Results) > 0 {
 				var parts []string
@@ -2502,6 +2538,28 @@ func buildToolCallNudge(steps []*pipeline.Step) string {
 	}
 	// Fallback: no concrete step available (sentinel "direct" step).
 	return "[system] Do not describe what you will do. Execute the tool call NOW using the [tool_call] format shown in your instructions."
+}
+
+// plannerStepsToInvoke converts planner pipeline steps to InvokeSteps for
+// server-side execution. Steps without a concrete command (e.g. sentinel
+// "direct" steps) are skipped.
+func plannerStepsToInvoke(steps []*pipeline.Step) []InvokeStep {
+	var out []InvokeStep
+	for _, s := range steps {
+		if s.Command == nil || s.Command.Plugin == "" || s.Command.Action == "" {
+			continue
+		}
+		args := make(map[string]string)
+		for k, v := range s.Command.Args {
+			args[k] = v
+		}
+		out = append(out, InvokeStep{
+			Plugin: s.Command.Plugin,
+			Action: s.Command.Action,
+			Args:   args,
+		})
+	}
+	return out
 }
 
 // resolveAllowedPlugins returns the set of plugin IDs allowed for the current profile.
