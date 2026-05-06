@@ -1,7 +1,7 @@
 {
   "prompt_hash": "9945236e0d99e9cdaf986c0b5457df63fe82cbb1b7547779ad59f46de130619b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-06T12:33:26.003488Z",
+  "recorded_at": "2026-05-06T14:59:24.278123Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_019uisA1Ks7Adtt5YmLfpgb2",
+        "id": "msg_01S2bNZFUJ5oWwbFZJcbg9vA",
         "model": "claude-haiku-4-5-20251001",
-        "content": "Hello! 👋 I'm an AI assistant here to help you. I can assist with various tasks including:\n\n- **Code analysis** (GitLab)\n- **Creating pull requests** (GitLab)\n- **Creating issues** (Jira)\n- **Searching information** (web search)\n- **Scheduling recurring tasks**\n\nWhat would you like help with today?",
+        "content": "Hello! 👋 I'm an AI assistant here to help you. I can assist with various tasks like:\n\n- **Searching for information** (using web search)\n- **Working with GitLab** (analyzing code, creating PRs)\n- **Working with Jira** (creating issues)\n- **Scheduling recurring tasks** (with your approval)\n- **Answering questions** across many topics\n\nWhat would you like help with today?",
         "usage": {
           "input_tokens": 892,
-          "output_tokens": 89
+          "output_tokens": 103
         }
       }
     }

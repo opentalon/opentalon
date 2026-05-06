@@ -841,7 +841,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// LLM fails to call them (language-independent tool-call detection).
 		// For "direct" with no steps, use a sentinel step — the planner decided
 		// this needs a tool call even though it didn't name a specific one.
-		if o.retryToolCallsEnabled() {
+		retryEnabled := o.retryToolCallsEnabled()
+		log.Debug("planner hint storage check", "retry_enabled", retryEnabled,
+			"plan_type", planResult.Type, "plan_steps", len(planResult.Steps))
+		if retryEnabled {
 			if planResult != nil && len(planResult.Steps) > 0 {
 				log.Debug("planner expected tools stored in context", "steps", len(planResult.Steps))
 				ctx = withExpectedTools(ctx, planResult.Steps)
@@ -1029,7 +1032,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// Planner-informed retry: the planner expected tool calls but the
 			// LLM returned plain text. Retry up to 2 times with a nudge.
 			// This is language-independent — no regex needed.
-			if steps := expectedToolsFromContext(ctx); len(steps) > 0 && toolRetries < 2 {
+			steps := expectedToolsFromContext(ctx)
+			log.Debug("planner retry check", "expected_steps", len(steps), "tool_retries", toolRetries, "will_retry", len(steps) > 0 && toolRetries < 2)
+			if len(steps) > 0 && toolRetries < 2 {
 				toolRetries++
 				log.Warn("planner expected tool calls but LLM returned plain text, retrying",
 					"round", i+1, "retry", toolRetries, "expected_steps", len(steps))
@@ -1161,7 +1166,13 @@ func (o *Orchestrator) supportsReasoning() bool {
 // tool-call retries (for weak models that intermittently skip [tool_call] blocks).
 func (o *Orchestrator) retryToolCallsEnabled() bool {
 	rp, ok := o.llm.(ReasoningProvider)
-	return ok && rp.SupportsFeature(provider.FeatureRetryToolCalls)
+	if !ok {
+		slog.Debug("retry_tool_calls: LLM does not implement SupportsFeature interface")
+		return false
+	}
+	enabled := rp.SupportsFeature(provider.FeatureRetryToolCalls)
+	slog.Debug("retry_tool_calls feature check", "enabled", enabled)
+	return enabled
 }
 
 func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCallback {
@@ -1615,13 +1626,15 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 
 	inclSI := len(includeServerInstructions) == 0 || includeServerInstructions[0]
-	// For models with retry_tool_calls: suppress the OUTPUT FORMAT section
-	// in the system prompt until tool results exist. The HTML format hint
-	// prevents weak models from generating [tool_call] blocks.
+	// Suppress the OUTPUT FORMAT section in the system prompt until tool
+	// results exist. The HTML format hint prevents weak models from
+	// generating [tool_call] blocks on the first round.
 	buildCtx := ctx
-	if o.retryToolCallsEnabled() && !hasToolResults(sess.Messages) {
+	hasResults := hasToolResults(sess.Messages)
+	if !hasResults {
 		buildCtx = withSkipFormatHint(ctx)
 	}
+	slog.Debug("format hint decision", "has_tool_results", hasResults, "skip_format_hint", !hasResults)
 	systemPrompt := o.buildSystemPrompt(buildCtx, userMessage, inclSI)
 	messages = append(messages, provider.Message{
 		Role:    provider.RoleSystem,
