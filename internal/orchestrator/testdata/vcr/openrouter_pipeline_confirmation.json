@@ -1,7 +1,7 @@
 {
   "prompt_hash": "9945236e0d99e9cdaf986c0b5457df63fe82cbb1b7547779ad59f46de130619b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-06T12:33:58.915606Z",
+  "recorded_at": "2026-05-06T14:59:50.629024Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778070841-IuLEqXG5SvQadthIgqIO",
+        "id": "gen-1778079592-Vw5i9mRlb6Jxr0hJVo4Z",
         "model": "mistralai/ministral-8b-2512",
-        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1_analyze_code\",\n      \"name\": \"Analyze code in repo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2_create_jira_issue\",\n      \"name\": \"Create Jira issue for code findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {},\n      \"depends_on\": [\"step1_analyze_code\"]\n    }\n  ]\n}\n```",
+        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue for code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {},\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
         "usage": {
           "input_tokens": 226,
-          "output_tokens": 154
+          "output_tokens": 143
         }
       }
     },
@@ -38,17 +38,17 @@
           },
           {
             "role": "user",
-            "content": "Plan steps:\n1. Analyze code in repo (gitlab.analyze_code)\n2. Create Jira issue for code findings (jira.create_issue)\n"
+            "content": "Plan steps:\n1. Analyze code in myrepo (gitlab.analyze_code)\n2. Create Jira issue for code analysis findings (jira.create_issue)\n"
           }
         ]
       },
       "response": {
-        "id": "gen-1778070842-zJAKhlEdkxTur1DBzU7V",
+        "id": "gen-1778079593-evfHjVi4aqKr0B37Wfdt",
         "model": "mistralai/ministral-8b-2512",
-        "content": "This plan will first scan your repository to identify any potential code issues or vulnerabilities, then automatically create a Jira ticket summarizing the findings for you to review and address. After analyzing the codebase, I’ll generate a detailed report that you can use to prioritize fixes.\n\nWould you like to proceed with this process?",
+        "content": "Here’s a simple breakdown of the plan:\n\nFirst, I’ll scan your repository for any potential issues or improvements in the code. Then, I’ll automatically create a Jira ticket summarizing the key findings so your team can address them. Would you like to proceed with this?",
         "usage": {
-          "input_tokens": 88,
-          "output_tokens": 65
+          "input_tokens": 90,
+          "output_tokens": 57
         }
       }
     }

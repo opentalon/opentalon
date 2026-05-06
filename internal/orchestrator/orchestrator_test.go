@@ -1955,17 +1955,29 @@ func TestBuildSystemPromptIncludesFormatSection(t *testing.T) {
 		t.Error("system prompt should not contain OUTPUT FORMAT when no format is set")
 	}
 
-	// With Slack format — system messages must contain the section.
+	// With Slack format but no tool results — format hint is deferred.
 	ctx := pkgchannel.WithCapabilities(context.Background(), pkgchannel.Capabilities{
 		ResponseFormat: pkgchannel.FormatSlack,
 	})
 	msgs = o.buildMessages(ctx, sess, "hi")
 	allSystem = collectSystem(msgs)
+	if strings.Contains(allSystem, "OUTPUT FORMAT") {
+		t.Error("system messages should NOT contain OUTPUT FORMAT before tool results")
+	}
+
+	// After tool results exist — format hint should appear.
+	_ = o.sessions.AddMessage(sessionID, provider.Message{
+		Role:    provider.RoleUser,
+		Content: "[plugin_output]\ntest\n[/plugin_output]",
+	})
+	sess, _ = o.sessions.Get(sessionID)
+	msgs = o.buildMessages(ctx, sess, "hi")
+	allSystem = collectSystem(msgs)
 	if !strings.Contains(allSystem, "OUTPUT FORMAT") {
-		t.Error("system messages should contain OUTPUT FORMAT for Slack channel")
+		t.Error("system messages should contain OUTPUT FORMAT after tool results")
 	}
 	if !strings.Contains(allSystem, "Slack") {
-		t.Error("system messages should mention Slack formatting")
+		t.Error("system messages should mention Slack formatting after tool results")
 	}
 }
 

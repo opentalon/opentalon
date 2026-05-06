@@ -1,7 +1,7 @@
 {
   "prompt_hash": "9945236e0d99e9cdaf986c0b5457df63fe82cbb1b7547779ad59f46de130619b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-06T12:33:51.401382Z",
+  "recorded_at": "2026-05-06T14:59:47.069658Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778070833-OLm1ZKvp2uDCwdO23n9y",
+        "id": "gen-1778079589-YDRTHRZPQDoSmASVBMdF",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Hello! I’m **OpenTalon**, your AI orchestration assistant from **opentalon.ai**. I’m here to help you with tasks that require data, analysis, or automation—whether it’s searching for information, analyzing code, creating issues in Jira, or managing workflows.\n\nI **only act on real data**—I’ll call the right tools to fetch accurate information and avoid guessing or fabricating answers. If you need something done, just ask, and I’ll handle it efficiently.\n\nWhat can I assist you with today?",
+        "content": "Hello! I’m **OpenTalon**, your AI orchestration assistant from **opentalon.ai**. I’m here to help you with tasks that require data, automation, or integration across tools like GitLab, Jira, and more.\n\nHow can I assist you today? 🚀",
         "usage": {
           "input_tokens": 868,
-          "output_tokens": 111
+          "output_tokens": 60
         }
       }
     }
