@@ -185,6 +185,43 @@ func (sw *StreamWriter) flush(ctx context.Context) {
 	}
 }
 
+// SendStatus shows a transient status label (e.g. "Thinking...", "Calling timly.list-items...")
+// on the channel. The status is displayed as a standalone message that will be replaced
+// by the first real content chunk or the next status update. Only works on updatable channels.
+func (sw *StreamWriter) SendStatus(ctx context.Context, label string) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+
+	msg := OutboundMessage{
+		ConversationID: sw.convID,
+		ThreadID:       sw.threadID,
+		Content:        "_" + label + "_",
+		Metadata:       sw.cloneMetadata(),
+	}
+
+	if sw.flushed && sw.messageID != "" {
+		if uch, ok := sw.ch.(UpdatableChannel); ok {
+			if err := uch.SendUpdate(ctx, sw.messageID, msg); err != nil {
+				slog.Debug("status update failed", "error", err)
+			}
+			return
+		}
+	}
+
+	if !sw.flushed {
+		if uch, ok := sw.ch.(UpdatableChannel); ok {
+			msgID, err := uch.SendAndCapture(ctx, msg)
+			if err != nil {
+				slog.Debug("status send failed", "error", err)
+				return
+			}
+			sw.messageID = msgID
+			sw.flushed = true
+			return
+		}
+	}
+}
+
 // FinalUpdate replaces the streamed message content with the final processed
 // response. Called by the registry after the handler returns, so the user sees
 // the clean formatted text (tool-call blocks stripped, Lua formatting applied)

@@ -953,6 +953,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// Streaming delivers tokens to the channel in real-time while still
 		// collecting the full response for tool-call parsing.
 		// A per-request callback (from context) takes priority over the global one.
+		if i == 0 {
+			sendStatus(ctx, "Thinking\u2026")
+		}
 		var resp *provider.CompletionResponse
 		llmStart := time.Now()
 		streamCB := o.resolveStreamCallback(ctx)
@@ -1112,6 +1115,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 		for i := range calls {
 			calls[i].FromLLM = true
+			sendStatus(ctx, fmt.Sprintf("Calling %s.%s\u2026", calls[i].Plugin, calls[i].Action))
 			pluginStart := time.Now()
 			toolResult := o.executeCall(ctx, calls[i])
 			pluginDuration := time.Since(pluginStart)
@@ -1169,6 +1173,13 @@ func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCal
 		return sw.OnChunk
 	}
 	return o.onStreamChunk
+}
+
+// sendStatus sends a transient status label to the channel if a StreamWriter is available.
+func sendStatus(ctx context.Context, label string) {
+	if sw := pkgchannel.StreamWriterFromContext(ctx); sw != nil {
+		sw.SendStatus(ctx, label)
+	}
 }
 
 // streamComplete attempts a streaming LLM call, forwarding chunks via the
