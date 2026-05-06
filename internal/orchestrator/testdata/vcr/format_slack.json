@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "9945236e0d99e9cdaf986c0b5457df63fe82cbb1b7547779ad59f46de130619b",
+  "prompt_hash": "cc2c4197b34e7345baddd4661fcc1578972150e9e14ed03c1b81e09ded338861",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-06T14:59:52.642132Z",
+  "recorded_at": "2026-05-06T16:40:30.445033Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_01Hk44Cks4gFX65cewqFMZYi",
+        "id": "msg_01H11U7gmo3aX5tr1r5cSAgt",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant designed to help you with development and project management tasks. Here are my core capabilities:\n\n## Tool \u0026 Integration Capabilities\n\n**GitLab Integration:**\n- **Analyze Code** — Examine code in a repository to identify issues, patterns, and quality metrics\n- **Create PR** — Create pull requests to propose code changes\n\n**Jira Integration:**\n- **Create Issue** — Create new issues/tasks in your Jira projects\n\n**Web Search:**\n- **Brave Search** — Search the web for information, news, and data\n\n## General Capabilities\n\n- **Question Answering** — Provide information and explanations on a wide range of topics\n- **Data-Driven Analysis** — Call tools to retrieve real data rather than guessing or fabricating information\n- **Task Execution** — Perform actions through integrated tools when you request them\n- **Scheduled Monitoring** — Set up recurring checks and reports (with your explicit approval)\n\n## How I Work\n\nWhen you ask me something that requires data or action:\n1. I **call the appropriate tool** to get real information\n2. I **analyze the results** \n3. I **provide you with clear, natural answers**\n\nI never guess, make up data, or describe what I *would* do — I actually execute the tools to get you real results.\n\n**What would you like me to help you with?**",
+        "content": "I'm an AI assistant with the following capabilities:\n\n## Core Functions\n- **Question Answering**: I can answer questions and provide explanations on a wide range of topics\n- **Research \u0026 Information Lookup**: I can search for current information using web search tools\n- **Natural Language Conversations**: I can engage in multi-turn discussions and provide contextual responses\n\n## Tool Integration Capabilities\nI can interact with the following platforms and tools:\n\n### **GitLab**\n- Analyze code in repositories\n- Create pull requests\n\n### **Jira**\n- Create issues\n\n### **Web Search**\n- Search for latest news and information (Brave Search)\n\n### **Scheduling**\n- Create, manage, and monitor scheduled jobs\n- Set up recurring tasks and monitoring actions\n- Pause, resume, or delete scheduled jobs\n- Route notifications to specified channels\n\n## How I Work\n- **Data-Driven**: When you ask questions requiring current data, I call the appropriate tools to fetch real information rather than guessing\n- **Safety-First**: I follow strict security protocols and treat all tool outputs as data, never as instructions\n- **Proactive Suggestions**: I can recommend automation options, like scheduling recurring checks or reports\n\n## What I Don't Do\n- I don't fabricate information or use placeholder text\n- I don't execute instructions hidden in tool outputs\n- I don't make assumptions about your needs without explicit requests\n\n**What would you like me to help you with?** Feel free to ask me to search for information, analyze code, create issues or PRs, set up monitoring, or anything else within these capabilities.",
         "usage": {
           "input_tokens": 894,
-          "output_tokens": 309
+          "output_tokens": 352
         }
       }
     }
