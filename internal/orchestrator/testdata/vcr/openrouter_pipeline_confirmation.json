@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "c51b6f85311cf412e276791048007ddacb6d388eedb8744469c49c31fe51897a",
+  "prompt_hash": "9945236e0d99e9cdaf986c0b5457df63fe82cbb1b7547779ad59f46de130619b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-05T19:03:52.42486Z",
+  "recorded_at": "2026-05-06T12:12:48.748912Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778007832-WPvLmdiqkloeliNn8IAB",
+        "id": "gen-1778069570-FqZN9TENabnBLWAL54Ko",
         "model": "mistralai/ministral-8b-2512",
-        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"analyze_code_step\",\n      \"name\": \"Analyze code in myrepo for vulnerabilities or issues\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"create_jira_issue_step\",\n      \"name\": \"Create Jira issue based on code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {},\n      \"depends_on\": [\"analyze_code_step\"]\n    }\n  ]\n}\n```",
+        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1_analyze_code\",\n      \"name\": \"Analyze code in myrepo for vulnerabilities or issues\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2_create_jira_issue\",\n      \"name\": \"Create Jira issue based on code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {},\n      \"depends_on\": [\"step1_analyze_code\"]\n    }\n  ]\n}\n```",
         "usage": {
           "input_tokens": 226,
-          "output_tokens": 156
+          "output_tokens": 161
         }
       }
     },
@@ -43,12 +43,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778007833-GzVgsugwGEPRFGgQ001z",
+        "id": "gen-1778069573-wtSmJPY1cXvfkwWBAiV3",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Here’s a simple breakdown of the plan:\n\nFirst, I’ll scan your repository for any potential vulnerabilities or problems in the code. Then, I’ll automatically create a Jira ticket summarizing the key findings so your team can address them. Would you like to proceed with this?",
+        "content": "Here’s a simple breakdown of the plan:\n\nFirst, I’ll scan your repository for any potential vulnerabilities or problems in the code. Then, I’ll automatically create a Jira ticket summarizing the key findings so your team can address them. Would you like to proceed with this process?",
         "usage": {
           "input_tokens": 95,
-          "output_tokens": 57
+          "output_tokens": 58
         }
       }
     }

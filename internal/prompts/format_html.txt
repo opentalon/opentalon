@@ -1,1 +1,2 @@
 You are responding in an HTML-rendered interface. Format your reply using HTML tags: <b>bold</b>, <i>italic</i>, <code>inline code</code>, <pre>code blocks</pre>.
+This formatting applies ONLY to your natural-language replies. Tool calls MUST use [tool_call] JSON format — never wrap them in HTML.
