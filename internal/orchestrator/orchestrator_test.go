@@ -3177,3 +3177,98 @@ func TestBuildToolCallNudgeWithArgs(t *testing.T) {
 		t.Errorf("nudge should contain args, got: %s", nudge)
 	}
 }
+
+func TestPlannerStepsToInvoke(t *testing.T) {
+	steps := []*pipeline.Step{
+		{
+			ID:   "1",
+			Name: "List person types",
+			Command: &pipeline.PluginCommand{
+				Plugin: "timly",
+				Action: "timly__list-person-types",
+				Args:   map[string]string{"per_page": "1"},
+			},
+		},
+	}
+	invoke := plannerStepsToInvoke(steps)
+	if len(invoke) != 1 {
+		t.Fatalf("expected 1 invoke step, got %d", len(invoke))
+	}
+	if invoke[0].Plugin != "timly" || invoke[0].Action != "timly__list-person-types" {
+		t.Errorf("unexpected step: %+v", invoke[0])
+	}
+	if invoke[0].Args["per_page"] != "1" {
+		t.Errorf("args not copied: %+v", invoke[0].Args)
+	}
+}
+
+func TestPlannerStepsToInvokeSkipsSentinel(t *testing.T) {
+	steps := []*pipeline.Step{{ID: "direct"}}
+	invoke := plannerStepsToInvoke(steps)
+	if len(invoke) != 0 {
+		t.Errorf("sentinel step should be skipped, got %d steps", len(invoke))
+	}
+}
+
+// fakeLLMWithFeatures wraps fakeLLM but also implements SupportsFeature
+// so that retryToolCallsEnabled() returns true.
+type fakeLLMWithFeatures struct {
+	*fakeLLM
+	features map[provider.Feature]bool
+}
+
+func (f *fakeLLMWithFeatures) SupportsFeature(feat provider.Feature) bool {
+	return f.features[feat]
+}
+
+func TestServerSideFallbackOnRetryExhaustion(t *testing.T) {
+	// LLM responses:
+	//   [0] planner: returns a single-step pipeline
+	//   [1] round 1: plain text (hallucinated) → triggers retry
+	//   [2] round 2: plain text again → retry exhausted → server-side exec
+	//   [3] round 3: LLM sees real tool results → summarises
+	planJSON := `{"type": "pipeline", "steps": [{"id": "1", "name": "List person types", "plugin": "timly", "action": "timly__list-person-types", "args": {}, "depends_on": []}]}`
+	llm := &fakeLLMWithFeatures{
+		fakeLLM: &fakeLLM{responses: []string{
+			planJSON,                                      // [0] planner
+			"You have 5 person types.",                    // [1] round 1: hallucinated → retry 1
+			"You have 5 person types.",                    // [2] round 2: hallucinated → retry 2
+			"You have 5 person types.",                    // [3] round 3: hallucinated → server-side exec
+			"Based on the data, you have 3 person types.", // [4] round 4: summarises real data
+		}},
+		features: map[provider.Feature]bool{
+			provider.FeatureRetryToolCalls: true,
+		},
+	}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:        "timly",
+		Description: "Timly MCP",
+		Actions:     []Action{{Name: "timly__list-person-types", Description: "List person types"}},
+	}, &fixedResultExecutor{content: `{"person_types": [{"id":1},{"id":2},{"id":3}], "pagination": {"total": 3}}`})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("test-session", "", "")
+
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		PipelineEnabled: true,
+	})
+
+	result, err := orch.Run(context.Background(), "test-session", "how many person types do i have?")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The orchestrator should have executed the tool server-side.
+	if len(result.ToolCalls) == 0 {
+		t.Fatal("expected server-side tool call, got none")
+	}
+	if result.ToolCalls[0].Plugin != "timly" || result.ToolCalls[0].Action != "timly__list-person-types" {
+		t.Errorf("unexpected tool call: %+v", result.ToolCalls[0])
+	}
+	// The final response should be from the 4th LLM call (summarisation with real data).
+	if !strings.Contains(result.Response, "3 person types") {
+		t.Errorf("expected summarised response with real data, got: %s", result.Response)
+	}
+}
