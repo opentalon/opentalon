@@ -1039,6 +1039,10 @@ func buildProvider(cfg *config.Config) (provider.Provider, string, error) {
 
 	models := make([]provider.ModelInfo, 0, len(pc.Models))
 	for _, m := range pc.Models {
+		features := make([]provider.Feature, len(m.Features))
+		for i, f := range m.Features {
+			features[i] = provider.Feature(f)
+		}
 		models = append(models, provider.ModelInfo{
 			ID:            m.ID,
 			Name:          m.Name,
@@ -1048,6 +1052,7 @@ func buildProvider(cfg *config.Config) (provider.Provider, string, error) {
 			ContextWindow: m.ContextWindow,
 			MaxTokens:     m.MaxTokens,
 			Cost:          provider.ModelCost{Input: m.Cost.Input, Output: m.Cost.Output},
+			Features:      features,
 		})
 	}
 

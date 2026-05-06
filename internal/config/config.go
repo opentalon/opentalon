@@ -381,6 +381,7 @@ type ModelDefinition struct {
 	ID            string     `yaml:"id"`
 	Name          string     `yaml:"name"`
 	Reasoning     bool       `yaml:"reasoning"`
+	Features      []string   `yaml:"features"`
 	InputTypes    []string   `yaml:"input"`
 	ContextWindow int        `yaml:"context_window"`
 	MaxTokens     int        `yaml:"max_tokens"`
