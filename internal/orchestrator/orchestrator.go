@@ -1038,9 +1038,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				toolRetries++
 				log.Warn("planner expected tool calls but LLM returned plain text, retrying",
 					"round", i+1, "retry", toolRetries, "expected_steps", len(steps))
+				nudge := buildToolCallNudge(steps)
 				transientMessages = []provider.Message{
 					{Role: provider.RoleAssistant, Content: resp.Content},
-					{Role: provider.RoleUser, Content: "[system] Do not describe what you will do. Execute the tool call NOW using the [tool_call] format shown in your instructions."},
+					{Role: provider.RoleUser, Content: nudge},
 				}
 				continue
 			}
@@ -2473,6 +2474,34 @@ func withExpectedTools(ctx context.Context, steps []*pipeline.Step) context.Cont
 func expectedToolsFromContext(ctx context.Context) []*pipeline.Step {
 	steps, _ := ctx.Value(expectedToolsKey{}).([]*pipeline.Step)
 	return steps
+}
+
+// buildToolCallNudge creates a retry nudge message that includes a concrete
+// tool call example derived from the planner's expected steps. Weak LLMs that
+// ignore the generic "use [tool_call] format" instruction are much more likely
+// to comply when they see the exact JSON they need to produce.
+func buildToolCallNudge(steps []*pipeline.Step) string {
+	// Find the first step with a concrete command to use as the example.
+	for _, s := range steps {
+		if s.Command == nil || s.Command.Plugin == "" || s.Command.Action == "" {
+			continue
+		}
+		tool := s.Command.Plugin + "." + s.Command.Action
+		args := map[string]string{}
+		if s.Command.Args != nil {
+			args = s.Command.Args
+		}
+		argsJSON, err := json.Marshal(args)
+		if err != nil {
+			break
+		}
+		return "[system] You answered without calling a tool — your answer may be fabricated. " +
+			"You MUST call the tool first, then answer with real data. " +
+			"Output ONLY a [tool_call] block like this:\n\n" +
+			"[tool_call]\n{\"tool\": \"" + tool + "\", \"args\": " + string(argsJSON) + "}\n[/tool_call]"
+	}
+	// Fallback: no concrete step available (sentinel "direct" step).
+	return "[system] Do not describe what you will do. Execute the tool call NOW using the [tool_call] format shown in your instructions."
 }
 
 // resolveAllowedPlugins returns the set of plugin IDs allowed for the current profile.

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
@@ -3123,5 +3124,56 @@ func TestStreamingFallbackToComplete(t *testing.T) {
 	// Callback should NOT be called when falling back to Complete.
 	if callbackCalled {
 		t.Error("callback should not be called when LLM doesn't support streaming")
+	}
+}
+
+func TestBuildToolCallNudgeWithConcreteStep(t *testing.T) {
+	steps := []*pipeline.Step{
+		{
+			ID:   "1",
+			Name: "List person types",
+			Command: &pipeline.PluginCommand{
+				Plugin: "timly",
+				Action: "timly__list-person-types",
+				Args:   map[string]string{},
+			},
+		},
+	}
+	nudge := buildToolCallNudge(steps)
+	if !strings.Contains(nudge, `"tool": "timly.timly__list-person-types"`) {
+		t.Errorf("nudge should contain concrete tool name, got: %s", nudge)
+	}
+	if !strings.Contains(nudge, "[tool_call]") {
+		t.Errorf("nudge should contain [tool_call] example, got: %s", nudge)
+	}
+}
+
+func TestBuildToolCallNudgeSentinel(t *testing.T) {
+	// Sentinel step from "direct" planner result — no command.
+	steps := []*pipeline.Step{{ID: "direct"}}
+	nudge := buildToolCallNudge(steps)
+	if !strings.Contains(nudge, "Execute the tool call NOW") {
+		t.Errorf("sentinel nudge should use generic fallback, got: %s", nudge)
+	}
+}
+
+func TestBuildToolCallNudgeWithArgs(t *testing.T) {
+	steps := []*pipeline.Step{
+		{
+			ID:   "1",
+			Name: "List items",
+			Command: &pipeline.PluginCommand{
+				Plugin: "timly",
+				Action: "timly__list-items",
+				Args:   map[string]string{"query": "status:active", "per_page": "1"},
+			},
+		},
+	}
+	nudge := buildToolCallNudge(steps)
+	if !strings.Contains(nudge, `"timly.timly__list-items"`) {
+		t.Errorf("nudge should contain tool name, got: %s", nudge)
+	}
+	if !strings.Contains(nudge, `"query"`) {
+		t.Errorf("nudge should contain args, got: %s", nudge)
 	}
 }
