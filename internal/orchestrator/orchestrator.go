@@ -839,9 +839,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// If "direct" or error or single step, fall through to normal agent loop.
 		// Store the planner's expected tools so the agent loop can retry if the
 		// LLM fails to call them (language-independent tool-call detection).
-		if planResult != nil && len(planResult.Steps) > 0 {
-			log.Debug("planner expected tools stored in context", "steps", len(planResult.Steps))
-			ctx = withExpectedTools(ctx, planResult.Steps)
+		// For "direct" with no steps, use a sentinel step — the planner decided
+		// this needs a tool call even though it didn't name a specific one.
+		if o.retryToolCallsEnabled() {
+			if planResult != nil && len(planResult.Steps) > 0 {
+				log.Debug("planner expected tools stored in context", "steps", len(planResult.Steps))
+				ctx = withExpectedTools(ctx, planResult.Steps)
+			} else if planResult != nil && planResult.Type == "direct" {
+				log.Debug("planner returned direct (tool call expected), storing sentinel")
+				ctx = withExpectedTools(ctx, []*pipeline.Step{{ID: "direct"}})
+			}
 		}
 	} else if skipPlanner {
 		log.Debug("planner skipped: few relevant tools from preparer", "tools", len(rtTools))
@@ -1148,6 +1155,13 @@ type ReasoningProvider interface {
 func (o *Orchestrator) supportsReasoning() bool {
 	rp, ok := o.llm.(ReasoningProvider)
 	return ok && rp.SupportsFeature(provider.FeatureReasoning)
+}
+
+// retryToolCallsEnabled returns true if the model opts in to planner-informed
+// tool-call retries (for weak models that intermittently skip [tool_call] blocks).
+func (o *Orchestrator) retryToolCallsEnabled() bool {
+	rp, ok := o.llm.(ReasoningProvider)
+	return ok && rp.SupportsFeature(provider.FeatureRetryToolCalls)
 }
 
 func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCallback {
