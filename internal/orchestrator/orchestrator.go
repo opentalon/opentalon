@@ -836,7 +836,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
 			return &RunResult{Response: planText}, nil
 		}
-		// If "direct" or error or single step, fall through to normal agent loop
+		// If "direct" or error or single step, fall through to normal agent loop.
+		// Store the planner's expected tools so the agent loop can retry if the
+		// LLM fails to call them (language-independent tool-call detection).
+		if planResult != nil && len(planResult.Steps) > 0 {
+			log.Debug("planner expected tools stored in context", "steps", len(planResult.Steps))
+			ctx = withExpectedTools(ctx, planResult.Steps)
+		}
 	} else if skipPlanner {
 		log.Debug("planner skipped: few relevant tools from preparer", "tools", len(rtTools))
 	}
@@ -893,6 +899,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	ctx = withAllowedPlugins(ctx, o.resolveAllowedPlugins(ctx))
 
 	var stripRetries int
+	var toolRetries int // retries when planner expected tools but LLM didn't call any
 	var transientMessages []provider.Message
 	var lastCallSig string // "plugin.action\x00arg1=val1\x00..." for loop detection
 	var repeatCount int
@@ -1012,6 +1019,20 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				}
 				continue
 			}
+			// Planner-informed retry: the planner expected tool calls but the
+			// LLM returned plain text. Retry up to 2 times with a nudge.
+			// This is language-independent — no regex needed.
+			if steps := expectedToolsFromContext(ctx); len(steps) > 0 && toolRetries < 2 {
+				toolRetries++
+				log.Warn("planner expected tool calls but LLM returned plain text, retrying",
+					"round", i+1, "retry", toolRetries, "expected_steps", len(steps))
+				transientMessages = []provider.Message{
+					{Role: provider.RoleAssistant, Content: resp.Content},
+					{Role: provider.RoleUser, Content: "[system] Do not describe what you will do. Execute the tool call NOW using the [tool_call] format shown in your instructions."},
+				}
+				continue
+			}
+
 			result.Response = stripped
 			if len(result.Results) > 0 {
 				var parts []string
@@ -1069,6 +1090,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				{Role: provider.RoleUser, Content: "[system] You are repeating the same tool call. Stop calling tools and answer the user based on the information you already have."},
 			}
 			continue
+		}
+
+		// LLM called tools — planner expectation satisfied, clear the hint
+		// so the final answer (no tool calls) is not retried.
+		if len(expectedToolsFromContext(ctx)) > 0 {
+			log.Debug("planner tool expectation satisfied, clearing hint")
+			ctx = withExpectedTools(ctx, nil)
 		}
 
 		// Attribute this LLM round's tokens evenly across the tool calls it produced.
@@ -2385,6 +2413,19 @@ type cachedAllowedPlugins struct {
 
 func withAllowedPlugins(ctx context.Context, c cachedAllowedPlugins) context.Context {
 	return context.WithValue(ctx, allowedPluginsKey{}, c)
+}
+
+// expectedToolsKey stores the planner's expected tool steps in context so the
+// agent loop can detect when the LLM fails to call tools that were expected.
+type expectedToolsKey struct{}
+
+func withExpectedTools(ctx context.Context, steps []*pipeline.Step) context.Context {
+	return context.WithValue(ctx, expectedToolsKey{}, steps)
+}
+
+func expectedToolsFromContext(ctx context.Context) []*pipeline.Step {
+	steps, _ := ctx.Value(expectedToolsKey{}).([]*pipeline.Step)
+	return steps
 }
 
 // resolveAllowedPlugins returns the set of plugin IDs allowed for the current profile.
