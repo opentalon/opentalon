@@ -410,15 +410,17 @@ func parseXMLParameters(body string) map[string]string {
 }
 
 // narratedToolRe matches tool names in plain text narration from weak LLMs.
-// Captures patterns like "call timly.timly__list-items" or "use timly__list-container-types".
-var narratedToolRe = regexp.MustCompile(`(?i)(?:call|use|invoke|execute|run|fetch|query|check|search|look\s*up|retrieve)\s+` + "`?" + `([a-zA-Z0-9_.-]+(?:\.[a-zA-Z0-9_.-]+|__[a-zA-Z0-9_-]+))` + "`?")
+// Captures patterns like "call timly.timly__list-items", "call the list-items tool",
+// or "use timly__list-container-types".  Allows optional articles (the/a) between
+// the verb and the tool name.
+var narratedToolRe = regexp.MustCompile(`(?i)(?:call|use|invoke|execute|run|fetch|query|check|search|look\s*up|retrieve)\s+(?:the\s+|a\s+)?` + "`?" + `([a-zA-Z0-9_.-]+(?:\.[a-zA-Z0-9_.-]+|__[a-zA-Z0-9_-]+|[-][a-zA-Z0-9_-]+))` + "`?")
 
 // narratedIntentRe matches broad narration patterns where the LLM announces it
 // will do something without naming a specific tool. Examples:
 //   - "We'll fetch the total count of items."
 //   - "I'll look up your inventory."
 //   - "Let me check how many items you have."
-var narratedIntentRe = regexp.MustCompile(`(?i)^(?:we'?(?:ll| will)|i'?(?:ll| will)|let me|let'?s|i'?m going to|i need to|we need to|we should)\s+(?:fetch|get|check|look|search|query|retrieve|find|list|count|pull|grab|load)`)
+var narratedIntentRe = regexp.MustCompile(`(?i)^(?:we'?(?:ll| will)|i'?(?:ll| will)|let me|let'?s|i'?m going to|i need to|we need to|we should)\s+(?:call|fetch|get|check|look|search|query|retrieve|find|list|count|pull|grab|load)`)
 
 // hasNarratedIntent returns true if the response is the LLM announcing its
 // intent to act without producing a [tool_call] block.

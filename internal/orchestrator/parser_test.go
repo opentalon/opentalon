@@ -538,14 +538,19 @@ func TestParseNarratedToolCall(t *testing.T) {
 	// Narrated tool calls return a placeholder — the orchestrator retries with "?".
 	matches := []string{
 		// Tool-name narration (narratedToolRe):
-		"We need to call timly.timly__list-container-types.",
-		"I'll call timly__list-items to check.",
-		"Let me use timly.timly__show-person to look that up.",
-		"We should call `timly.timly__list-items`.",
-		"Call timly.timly__list-items and also call timly.timly__list-persons.",
-		"I need to fetch timly__list-items to check.",
-		"Let me query timly.timly__list-items.",
+		"We need to call myplugin.myplugin__list-container-types.",
+		"I'll call myplugin__list-items to check.",
+		"Let me use myplugin.myplugin__show-person to look that up.",
+		"We should call `myplugin.myplugin__list-items`.",
+		"Call myplugin.myplugin__list-items and also call myplugin.myplugin__list-persons.",
+		"I need to fetch myplugin__list-items to check.",
+		"Let me query myplugin.myplugin__list-items.",
+		// Tool-name narration with articles (narratedToolRe):
+		"We need to call the list-items tool.",
+		"call the list-items tool with per_page=1",
 		// Intent narration without tool name (narratedIntentRe):
+		"We need to call the appropriate tool.",
+		"We'll call list-items with per_page=1 to get total count.",
 		"We'll fetch the total count of items (including regular items, twins, and stock items).",
 		"I'll check how many items you have.",
 		"Let me look up your inventory.",
