@@ -80,14 +80,14 @@ type mockUpdatableChannel struct {
 	mockChannel
 }
 
-func (m *mockUpdatableChannel) SendAndCapture(ctx context.Context, msg pkg.OutboundMessage) (string, error) {
+func (m *mockUpdatableChannel) SendAndCapture(_ context.Context, msg pkg.OutboundMessage) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sent = append(m.sent, msg)
 	return "msg-1", nil
 }
 
-func (m *mockUpdatableChannel) SendUpdate(ctx context.Context, msgID string, msg pkg.OutboundMessage) error {
+func (m *mockUpdatableChannel) SendUpdate(_ context.Context, _ string, msg pkg.OutboundMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sent = append(m.sent, msg)
@@ -533,8 +533,6 @@ func TestRegistryDispatchNoStreamWriterWithoutEdits(t *testing.T) {
 func TestRegistryDispatchNoStreamWriterForNonUpdatableChannel(t *testing.T) {
 	// A channel that reports Edits=true but does NOT implement
 	// UpdatableChannel (e.g. gRPC plugin) should NOT get a StreamWriter.
-	// Without this guard, StreamWriter falls back to plain Send() for
-	// every flush, spamming the client with intermediate frames.
 	var gotSW bool
 	done := make(chan struct{})
 
@@ -547,7 +545,6 @@ func TestRegistryDispatchNoStreamWriterForNonUpdatableChannel(t *testing.T) {
 	reg := NewRegistry(handler)
 	defer reg.StopAll()
 
-	// mockChannel does NOT implement UpdatableChannel, even with Edits: true.
 	ch := &mockChannel{
 		id:   "grpc-plugin",
 		caps: pkg.Capabilities{ID: "grpc-plugin", Name: "WebSocket", Edits: true},

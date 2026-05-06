@@ -1801,9 +1801,26 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	workflowMemories, _ := o.memory.MemoriesForContext(ctx, "workflow")
 	if len(workflowMemories) > 0 {
 		sb.WriteString("## Relevant past workflows\n")
+		const maxWorkflows = 5
+		count := 0
 		for _, m := range workflowMemories {
+			if count >= maxWorkflows {
+				break
+			}
+			// Skip garbage workflow entries with very short triggers
+			// (e.g. "trigger: ?", "trigger: ,") that waste tokens.
+			if idx := strings.Index(m.Content, "trigger: "); idx >= 0 {
+				trigger := m.Content[idx+9:]
+				if nl := strings.Index(trigger, "\n"); nl >= 0 {
+					trigger = trigger[:nl]
+				}
+				if len(strings.TrimSpace(trigger)) < 5 {
+					continue
+				}
+			}
 			sb.WriteString(m.Content)
 			sb.WriteString("\n")
+			count++
 		}
 		sb.WriteString("\n")
 	}
