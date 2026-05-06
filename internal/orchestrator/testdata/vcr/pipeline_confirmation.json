@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "9945236e0d99e9cdaf986c0b5457df63fe82cbb1b7547779ad59f46de130619b",
+  "prompt_hash": "cc2c4197b34e7345baddd4661fcc1578972150e9e14ed03c1b81e09ded338861",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-06T14:59:47.658199Z",
+  "recorded_at": "2026-05-06T16:40:26.076831Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -10,7 +10,7 @@
         "messages": [
           {
             "role": "system",
-            "content": "You are a task planner. Given the user's request and available tools, decide:\n1. If this is a simple single-action request, return: {\"type\": \"direct\"}\n2. If this requires multiple steps, return: {\"type\": \"pipeline\", \"steps\": [...]}\n\nEach step must have: {\"id\": \"\u003cunique\u003e\", \"name\": \"\u003chuman description\u003e\", \"plugin\": \"\u003cplugin\u003e\", \"action\": \"\u003caction\u003e\", \"args\": {}, \"depends_on\": []}\nThe \"plugin\" field must be the exact plugin name shown below (the part before the \"|\"). The \"action\" field must be the exact action name shown below (the part after \"action=\").\n\nAvailable tools:\n- plugin=jira | action=create_issue: Create issue\n- plugin=gitlab | action=analyze_code: Analyze code\n  - repo: Repository\n- plugin=gitlab | action=create_pr: Create PR\n\nRespond ONLY with valid JSON, no other text."
+            "content": "You are a task planner. Given the user's request and available tools, return a plan.\nAlways return: {\"type\": \"pipeline\", \"steps\": [...]}\nEven for single-action requests, return a pipeline with one step.\n\nEach step must have: {\"id\": \"\u003cunique\u003e\", \"name\": \"\u003chuman description\u003e\", \"plugin\": \"\u003cplugin\u003e\", \"action\": \"\u003caction\u003e\", \"args\": {}, \"depends_on\": []}\nThe \"plugin\" field must be the exact plugin name shown below (the part before the \"|\"). The \"action\" field must be the exact action name shown below (the part after \"action=\").\n\nAvailable tools:\n- plugin=gitlab | action=analyze_code: Analyze code\n  - repo: Repository\n- plugin=gitlab | action=create_pr: Create PR\n- plugin=jira | action=create_issue: Create issue\n\nRespond ONLY with valid JSON, no other text."
           },
           {
             "role": "user",
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_01QTHxtgG5E32Q2SH9upTRmp",
+        "id": "msg_01JVdvfHphb8fRMWMC5Yo7Th",
         "model": "claude-haiku-4-5-20251001",
-        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue with analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {},\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
+        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue for findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {},\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
         "usage": {
-          "input_tokens": 241,
-          "output_tokens": 168
+          "input_tokens": 230,
+          "output_tokens": 167
         }
       }
     },
@@ -38,17 +38,17 @@
           },
           {
             "role": "user",
-            "content": "Plan steps:\n1. Analyze code in myrepo (gitlab.analyze_code)\n2. Create Jira issue with analysis findings (jira.create_issue)\n"
+            "content": "Plan steps:\n1. Analyze code in myrepo (gitlab.analyze_code)\n2. Create Jira issue for findings (jira.create_issue)\n"
           }
         ]
       },
       "response": {
-        "id": "msg_018A4y6QN8WBCq5sT1PHefuS",
+        "id": "msg_01RiPNWHTimEWPWGMscidUY9",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'll help you set up a workflow that analyzes your code in myrepo and then automatically creates a Jira issue with the findings. First, we'll examine your code to identify any issues or insights, and then we'll document those results by creating a ticket in Jira for tracking and follow-up. Would you like to proceed with this plan?",
+        "content": "Here's what will happen: First, I'll analyze the code in your myrepo repository to identify any issues or findings. Then, I'll create a Jira issue to document those findings so your team can track and address them.\n\nWould you like me to go ahead with this process?",
         "usage": {
-          "input_tokens": 99,
-          "output_tokens": 78
+          "input_tokens": 98,
+          "output_tokens": 64
         }
       }
     }
