@@ -3112,3 +3112,45 @@ func TestStreamingFallbackToComplete(t *testing.T) {
 		t.Error("callback should not be called when LLM doesn't support streaming")
 	}
 }
+
+func TestStripOutputSchema(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "no schema",
+			in:   "List all items with optional filters.",
+			want: "List all items with optional filters.",
+		},
+		{
+			name: "double newline before schema",
+			in:   "List items.\n\nOutput schema (return JSON matching this): {\"type\":\"object\",\"properties\":{\"items\":{\"type\":\"array\"}}}",
+			want: "List items.",
+		},
+		{
+			name: "single newline before schema",
+			in:   "List items.\nOutput schema (return JSON matching this): {\"type\":\"object\"}",
+			want: "List items.",
+		},
+		{
+			name: "schema with trailing content",
+			in:   "List items.\n\nOutput schema: {\"type\":\"object\"}\n\nExtra notes here.",
+			want: "List items.",
+		},
+		{
+			name: "empty description",
+			in:   "",
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripOutputSchema(tt.in)
+			if got != tt.want {
+				t.Errorf("stripOutputSchema() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

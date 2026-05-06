@@ -1763,7 +1763,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n", cap.Name, cap.SystemPromptAddition, cap.Name)
 		}
 		for _, action := range visibleActions {
-			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
+			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, stripOutputSchema(action.Description))
 			for _, p := range action.Parameters {
 				req := ""
 				if p.Required {
@@ -2971,4 +2971,18 @@ func parsePermissionResult(content string) bool {
 		return true
 	}
 	return false
+}
+
+// stripOutputSchema removes the trailing "Output schema ..." block from a tool
+// description. MCP tool descriptions often embed a full JSON schema for the
+// return value which inflates the system prompt by ~200-500 tokens per tool.
+// The LLM does not need output schemas to call tools.
+func stripOutputSchema(desc string) string {
+	if idx := strings.Index(desc, "\n\nOutput schema"); idx >= 0 {
+		return strings.TrimSpace(desc[:idx])
+	}
+	if idx := strings.Index(desc, "\nOutput schema"); idx >= 0 {
+		return strings.TrimSpace(desc[:idx])
+	}
+	return desc
 }
