@@ -3230,11 +3230,11 @@ func TestServerSideFallbackOnRetryExhaustion(t *testing.T) {
 	planJSON := `{"type": "pipeline", "steps": [{"id": "1", "name": "List person types", "plugin": "timly", "action": "timly__list-person-types", "args": {}, "depends_on": []}]}`
 	llm := &fakeLLMWithFeatures{
 		fakeLLM: &fakeLLM{responses: []string{
-			planJSON,                                        // [0] planner
-			"You have 5 person types.",                      // [1] round 1: hallucinated → retry 1
-			"You have 5 person types.",                      // [2] round 2: hallucinated → retry 2
-			"You have 5 person types.",                      // [3] round 3: hallucinated → retries exhausted → server-side exec
-			"Based on the data, you have 3 person types.",   // [4] round 4: sees real tool results → summarises
+			planJSON,                                      // [0] planner
+			"You have 5 person types.",                    // [1] round 1: hallucinated → retry 1
+			"You have 5 person types.",                    // [2] round 2: hallucinated → retry 2
+			"You have 5 person types.",                    // [3] round 3: hallucinated → server-side exec
+			"Based on the data, you have 3 person types.", // [4] round 4: summarises real data
 		}},
 		features: map[provider.Feature]bool{
 			provider.FeatureRetryToolCalls: true,
