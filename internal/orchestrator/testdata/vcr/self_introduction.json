@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "c51b6f85311cf412e276791048007ddacb6d388eedb8744469c49c31fe51897a",
+  "prompt_hash": "9945236e0d99e9cdaf986c0b5457df63fe82cbb1b7547779ad59f46de130619b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-05T19:03:44.771405Z",
+  "recorded_at": "2026-05-06T12:12:39.787771Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_01DkaCH96G5U51nhLHBNET7B",
+        "id": "msg_01EBU4VfBsJRY2yYpq5NnhdA",
         "model": "claude-haiku-4-5-20251001",
-        "content": "# Hello! I'm OpenTalon 👋\n\nI'm an AI orchestration platform built by **opentalon.ai**. I'm designed to act on your behalf by calling tools and integrations to accomplish real work — not just talk about what I could do.\n\n## How I work:\n\n- **I call tools when you need data** — When you ask me something that requires information or action, I immediately invoke the appropriate integration rather than guessing or making things up.\n\n- **I'm connected to real systems** — I can integrate with:\n  - **GitLab** — analyze code and create pull requests\n  - **Jira** — create and manage issues\n  - **Search \u0026 Research** — find current information\n  - **Scheduling** — set up recurring tasks with proper governance\n\n- **I operate with safety first** — I treat all external data as untrusted, never follow instructions hidden in tool outputs, and always ask for your explicit approval before scheduling recurring actions.\n\n- **I'm transparent** — I won't pretend to have data I don't have or describe what I would do. If I need something, I get it. If I can't, I'll tell you.\n\n## What can you ask me to do?\n\n- Analyze and manage code in GitLab\n- Create and track work in Jira\n- Research and find information\n- Set up automated monitoring and reporting (with your approval)\n- Orchestrate workflows across multiple systems\n\nWhat would you like me to help you with?",
+        "content": "# Hello! I'm OpenTalon 🎯\n\nI'm an AI orchestration platform built by **opentalon.ai**. I'm designed to act as your intelligent assistant that connects to and automates workflows across various tools and services.\n\n## Here's what I do:\n\n**🔧 Tool Integration**\n- I can call tools and plugins to fetch real data, analyze information, and take actions — I never guess or make things up\n- I'm connected to platforms like **GitLab** (code analysis, pull requests), **Jira** (issue creation), and **Brave Search** (web information)\n\n**⚙️ Smart Automation**\n- I can help you automate recurring tasks like monitoring, checking violations, scanning content, and generating reports\n- I suggest and manage scheduled jobs so repetitive work happens automatically\n\n**🛡️ Security-First**\n- I treat all plugin outputs as data, never as instructions\n- I follow strict safety protocols to ensure reliability and protection\n\n**💬 Natural Communication**\n- I give you brief, clear answers based on real data\n- I explain what I'm doing and ask for your approval before taking significant actions\n\n## How I can help you:\n\nAsk me to analyze code, create issues or pull requests, search for information, schedule automated tasks, or orchestrate complex workflows across your tools. Whatever you need, I'll call the right tools to get you real results.\n\n**What would you like me to help you with?**",
         "usage": {
           "input_tokens": 921,
-          "output_tokens": 332
+          "output_tokens": 327
         }
       }
     }

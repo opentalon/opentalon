@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "c51b6f85311cf412e276791048007ddacb6d388eedb8744469c49c31fe51897a",
+  "prompt_hash": "9945236e0d99e9cdaf986c0b5457df63fe82cbb1b7547779ad59f46de130619b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-05T19:03:36.929065Z",
+  "recorded_at": "2026-05-06T12:12:21.030314Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,7 +19,7 @@
         ]
       },
       "response": {
-        "id": "gen-1778007816-yEvvN2NVHxAT1oG3Wh4n",
+        "id": "gen-1778069543-zxnyuT2QdXovm0LPpdkw",
         "model": "mistralai/ministral-8b-2512",
         "content": "[tool_call]\n{\"tool\": \"gitlab.analyze_code\", \"args\": {\"repo\": \"myrepo\"}}\n[/tool_call]",
         "usage": {
@@ -51,12 +51,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778007817-TtZV66pwp2O41ROSdiKy",
+        "id": "gen-1778069543-MgUlYXMrFMGov3aW0ADQ",
         "model": "mistralai/ministral-8b-2512",
-        "content": "The code in your repository **`myrepo`** has been analyzed successfully. Would you like a summary of the findings, or should I check for specific issues (e.g., vulnerabilities, style violations, or performance bottlenecks)? Let me know how I can assist further!",
+        "content": "The code in your repository `myrepo` has been analyzed successfully. Would you like a summary of the findings or any specific details (e.g., vulnerabilities, best practices, or code quality metrics)? Let me know how I can assist further!",
         "usage": {
           "input_tokens": 884,
-          "output_tokens": 56
+          "output_tokens": 50
         }
       }
     }
