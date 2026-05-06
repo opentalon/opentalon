@@ -195,10 +195,17 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 
 				// When the channel supports edits, attach a StreamWriter so the
 				// orchestrator can progressively deliver LLM output in real-time.
+				// gRPC plugin channels report Edits=true but their PluginClient
+				// doesn't implement UpdatableChannel, so StreamWriter would fall
+				// back to plain Send() for every flush — spamming the client with
+				// intermediate frames. Only create StreamWriter when the channel
+				// actually supports in-place message updates.
 				var sw *pkg.StreamWriter
 				if caps.Edits {
-					sw = pkg.NewStreamWriter(ch, m.ConversationID, m.ThreadID, safeMetadata(m.Metadata))
-					ctx = pkg.WithStreamWriter(ctx, sw)
+					if _, ok := ch.(pkg.UpdatableChannel); ok {
+						sw = pkg.NewStreamWriter(ch, m.ConversationID, m.ThreadID, safeMetadata(m.Metadata))
+						ctx = pkg.WithStreamWriter(ctx, sw)
+					}
 				}
 
 				resp, err := r.handler(ctx, sessionKey, m)

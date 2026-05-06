@@ -74,6 +74,26 @@ func (m *mockChannel) stopped() bool {
 	return m.stop
 }
 
+// mockUpdatableChannel extends mockChannel with UpdatableChannel methods
+// so StreamWriter recognises it and uses SendAndCapture/SendUpdate.
+type mockUpdatableChannel struct {
+	mockChannel
+}
+
+func (m *mockUpdatableChannel) SendAndCapture(ctx context.Context, msg pkg.OutboundMessage) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sent = append(m.sent, msg)
+	return "msg-1", nil
+}
+
+func (m *mockUpdatableChannel) SendUpdate(ctx context.Context, msgID string, msg pkg.OutboundMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sent = append(m.sent, msg)
+	return nil
+}
+
 type failStartChannel struct{ mockChannel }
 
 func (f *failStartChannel) Start(_ context.Context, _ chan<- pkg.InboundMessage) error {
@@ -433,9 +453,11 @@ func TestRegistryDispatchStreamWriterInjected(t *testing.T) {
 	reg := NewRegistry(handler)
 	defer reg.StopAll()
 
-	ch := &mockChannel{
-		id:   "slack-stream",
-		caps: pkg.Capabilities{ID: "slack-stream", Name: "Slack", Edits: true},
+	ch := &mockUpdatableChannel{
+		mockChannel: mockChannel{
+			id:   "slack-stream",
+			caps: pkg.Capabilities{ID: "slack-stream", Name: "Slack", Edits: true},
+		},
 	}
 	_ = reg.Register(ch)
 
@@ -505,5 +527,52 @@ func TestRegistryDispatchNoStreamWriterWithoutEdits(t *testing.T) {
 	sent := ch.sentMessages()
 	if len(sent) != 1 {
 		t.Errorf("expected 1 Send call, got %d", len(sent))
+	}
+}
+
+func TestRegistryDispatchNoStreamWriterForNonUpdatableChannel(t *testing.T) {
+	// A channel that reports Edits=true but does NOT implement
+	// UpdatableChannel (e.g. gRPC plugin) should NOT get a StreamWriter.
+	// Without this guard, StreamWriter falls back to plain Send() for
+	// every flush, spamming the client with intermediate frames.
+	var gotSW bool
+	done := make(chan struct{})
+
+	handler := func(ctx context.Context, _ string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
+		gotSW = pkg.StreamWriterFromContext(ctx) != nil
+		close(done)
+		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "reply"}, nil
+	}
+
+	reg := NewRegistry(handler)
+	defer reg.StopAll()
+
+	// mockChannel does NOT implement UpdatableChannel, even with Edits: true.
+	ch := &mockChannel{
+		id:   "grpc-plugin",
+		caps: pkg.Capabilities{ID: "grpc-plugin", Name: "WebSocket", Edits: true},
+	}
+	_ = reg.Register(ch)
+
+	ch.pushMessage(pkg.InboundMessage{
+		ChannelID:      "grpc-plugin",
+		ConversationID: "c1",
+		Content:        "hello",
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	if gotSW {
+		t.Error("StreamWriter should NOT be injected for Edits:true channel that doesn't implement UpdatableChannel")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	sent := ch.sentMessages()
+	if len(sent) != 1 {
+		t.Errorf("expected 1 Send call (final response only), got %d", len(sent))
 	}
 }
