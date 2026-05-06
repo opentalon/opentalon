@@ -839,9 +839,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// If "direct" or error or single step, fall through to normal agent loop.
 		// Store the planner's expected tools so the agent loop can retry if the
 		// LLM fails to call them (language-independent tool-call detection).
-		if planResult != nil && len(planResult.Steps) > 0 {
-			log.Debug("planner expected tools stored in context", "steps", len(planResult.Steps))
-			ctx = withExpectedTools(ctx, planResult.Steps)
+		// For "direct" with no steps, use a sentinel step — the planner decided
+		// this needs a tool call even though it didn't name a specific one.
+		if o.retryToolCallsEnabled() {
+			if planResult != nil && len(planResult.Steps) > 0 {
+				log.Debug("planner expected tools stored in context", "steps", len(planResult.Steps))
+				ctx = withExpectedTools(ctx, planResult.Steps)
+			} else if planResult != nil && planResult.Type == "direct" {
+				log.Debug("planner returned direct (tool call expected), storing sentinel")
+				ctx = withExpectedTools(ctx, []*pipeline.Step{{ID: "direct"}})
+			}
 		}
 	} else if skipPlanner {
 		log.Debug("planner skipped: few relevant tools from preparer", "tools", len(rtTools))
@@ -1148,6 +1155,13 @@ type ReasoningProvider interface {
 func (o *Orchestrator) supportsReasoning() bool {
 	rp, ok := o.llm.(ReasoningProvider)
 	return ok && rp.SupportsFeature(provider.FeatureReasoning)
+}
+
+// retryToolCallsEnabled returns true if the model opts in to planner-informed
+// tool-call retries (for weak models that intermittently skip [tool_call] blocks).
+func (o *Orchestrator) retryToolCallsEnabled() bool {
+	rp, ok := o.llm.(ReasoningProvider)
+	return ok && rp.SupportsFeature(provider.FeatureRetryToolCalls)
 }
 
 func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCallback {
@@ -1601,7 +1615,14 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 
 	inclSI := len(includeServerInstructions) == 0 || includeServerInstructions[0]
-	systemPrompt := o.buildSystemPrompt(ctx, userMessage, inclSI)
+	// For models with retry_tool_calls: suppress the OUTPUT FORMAT section
+	// in the system prompt until tool results exist. The HTML format hint
+	// prevents weak models from generating [tool_call] blocks.
+	buildCtx := ctx
+	if o.retryToolCallsEnabled() && !hasToolResults(sess.Messages) {
+		buildCtx = withSkipFormatHint(ctx)
+	}
+	systemPrompt := o.buildSystemPrompt(buildCtx, userMessage, inclSI)
 	messages = append(messages, provider.Message{
 		Role:    provider.RoleSystem,
 		Content: systemPrompt,
@@ -1867,7 +1888,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		sb.WriteString("\n")
 	}
 
-	if hint := channelFormatHint(ctx); hint != "" {
+	if hint := channelFormatHint(ctx); hint != "" && !skipFormatHintFromContext(ctx) {
 		sb.WriteString("## OUTPUT FORMAT\n")
 		sb.WriteString(hint)
 		sb.WriteString("\n")
@@ -2413,6 +2434,19 @@ type cachedAllowedPlugins struct {
 
 func withAllowedPlugins(ctx context.Context, c cachedAllowedPlugins) context.Context {
 	return context.WithValue(ctx, allowedPluginsKey{}, c)
+}
+
+// skipFormatHintKey suppresses the OUTPUT FORMAT section in the system prompt
+// so the HTML format hint doesn't interfere with tool-call generation.
+type skipFormatHintKey struct{}
+
+func withSkipFormatHint(ctx context.Context) context.Context {
+	return context.WithValue(ctx, skipFormatHintKey{}, true)
+}
+
+func skipFormatHintFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(skipFormatHintKey{}).(bool)
+	return v
 }
 
 // expectedToolsKey stores the planner's expected tool steps in context so the

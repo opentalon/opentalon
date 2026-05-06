@@ -46,10 +46,11 @@ func ParseModelRef(s string) (ModelRef, error) {
 type Feature string
 
 const (
-	FeatureStreaming Feature = "streaming"
-	FeatureReasoning Feature = "reasoning"
-	FeatureImages    Feature = "images"
-	FeatureTools     Feature = "tools"
+	FeatureStreaming      Feature = "streaming"
+	FeatureReasoning      Feature = "reasoning"
+	FeatureImages         Feature = "images"
+	FeatureTools          Feature = "tools"
+	FeatureRetryToolCalls Feature = "retry_tool_calls"
 )
 
 type ModelCost struct {

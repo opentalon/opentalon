@@ -1066,7 +1066,8 @@ func TestPipelineDisabledNormalFlow(t *testing.T) {
 }
 
 func TestPlannerReturnsDirect_FallsThrough(t *testing.T) {
-	// Planner returns "direct" → falls through to normal agent loop
+	// Planner returns "direct" → falls through to normal agent loop.
+	// retry_tool_calls feature is off by default, so no retries.
 	llm := &fakeLLM{responses: []string{
 		`{"type": "direct"}`,       // planner response
 		"I'll help you with that!", // agent response
