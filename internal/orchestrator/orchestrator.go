@@ -842,13 +842,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// For "direct" with no steps, use a sentinel step — the planner decided
 		// this needs a tool call even though it didn't name a specific one.
 		retryEnabled := o.retryToolCallsEnabled()
-		log.Debug("planner hint storage check", "retry_enabled", retryEnabled,
-			"plan_type", planResult.Type, "plan_steps", len(planResult.Steps))
-		if retryEnabled {
-			if planResult != nil && len(planResult.Steps) > 0 {
+		if retryEnabled && planResult != nil {
+			log.Debug("planner hint storage check", "retry_enabled", retryEnabled,
+				"plan_type", planResult.Type, "plan_steps", len(planResult.Steps))
+			if len(planResult.Steps) > 0 {
 				log.Debug("planner expected tools stored in context", "steps", len(planResult.Steps))
 				ctx = withExpectedTools(ctx, planResult.Steps)
-			} else if planResult != nil && planResult.Type == "direct" {
+			} else if planResult.Type == "direct" {
 				log.Debug("planner returned direct (tool call expected), storing sentinel")
 				ctx = withExpectedTools(ctx, []*pipeline.Step{{ID: "direct"}})
 			}
