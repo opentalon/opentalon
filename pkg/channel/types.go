@@ -159,11 +159,17 @@ func (m PluginMode) String() string {
 	}
 }
 
+// RunResponse is the structured response from Runner.Run.
+type RunResponse struct {
+	Response        string            // LLM answer
+	InputForDisplay string            // optional: what was sent to the LLM (e.g. tool results), for channels that want to show it
+	Metadata        map[string]string // optional: key-value pairs that flow to OutboundMessage.Metadata (e.g. prompt_type for confirmations)
+}
+
 // Runner runs a user message through the orchestrator and returns the response.
-// InputForDisplay is optional (e.g. what was sent to the LLM); channels may use it for display.
 // Files are optional binary attachments (images, documents, etc.) to include with the message.
 type Runner interface {
-	Run(ctx context.Context, sessionKey, content string, files ...FileAttachment) (response string, inputForDisplay string, err error)
+	Run(ctx context.Context, sessionKey, content string, files ...FileAttachment) (RunResponse, error)
 }
 
 // RunActionFunc runs a single plugin action. Used by channel-specific preparers.

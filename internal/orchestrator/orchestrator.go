@@ -356,6 +356,7 @@ type RunResult struct {
 	InputForDisplay string // optional: what we sent to the LLM (e.g. tool results), for channels that want to show it
 	ToolCalls       []ToolCall
 	Results         []ToolResult
+	Metadata        map[string]string // optional: flows to OutboundMessage.Metadata (e.g. prompt_type for confirmations)
 }
 
 // InvokeStep is one step in a preparer-driven invoke (run this plugin action without LLM).
@@ -834,7 +835,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
-			return &RunResult{Response: planText}, nil
+			return &RunResult{
+				Response: planText,
+				Metadata: map[string]string{
+					"prompt_type": "confirmation",
+					"pipeline_id": p.ID,
+					"options":     "approve,reject",
+				},
+			}, nil
 		}
 		// If "direct" or error or single step, fall through to normal agent loop.
 		// Store the planner's expected tools so the agent loop can retry if the
