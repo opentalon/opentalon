@@ -211,9 +211,7 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 				// Send periodic typing indicators while the handler is
 				// processing. This keeps WebSocket connections (and any
 				// intermediate proxies) alive during long LLM calls.
-				// Skip when StreamWriter is active — it already sends
-				// progressive updates that keep the connection alive.
-				typingStop := startTypingIndicator(ctx, ch, m, sw != nil)
+				typingStop := startTypingIndicator(ctx, ch, m)
 
 				resp, err := r.handler(ctx, sessionKey, m)
 				typingStop()
@@ -251,13 +249,8 @@ var typingIndicatorInterval = 25 * time.Second
 // startTypingIndicator launches a background goroutine that sends periodic
 // typing-indicator messages to the channel. This prevents WebSocket and
 // reverse-proxy idle timeouts from killing connections during long LLM calls.
-// Call the returned function to stop the goroutine. If streaming is true the
-// StreamWriter already keeps the connection alive, so no typing indicator is
-// sent.
-func startTypingIndicator(ctx context.Context, ch pkg.Channel, m pkg.InboundMessage, streaming bool) func() {
-	if streaming {
-		return func() {}
-	}
+// Call the returned function to stop the goroutine.
+func startTypingIndicator(ctx context.Context, ch pkg.Channel, m pkg.InboundMessage) func() {
 	stop := make(chan struct{})
 	done := make(chan struct{})
 

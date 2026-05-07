@@ -602,9 +602,11 @@ func TestTypingIndicatorSentDuringLongHandler(t *testing.T) {
 	}
 }
 
-func TestTypingIndicatorSkippedWhenStreaming(t *testing.T) {
-	// When StreamWriter is active, typing indicators should not be sent
-	// because the StreamWriter already keeps the connection alive.
+func TestTypingIndicatorSentEvenWithStreamWriter(t *testing.T) {
+	// Typing indicators should be sent even when StreamWriter is active,
+	// because some channels (e.g. websocket-channel) suppress streaming
+	// by returning errors from SendAndCapture. The typing indicator is the
+	// only thing keeping the connection alive in that case.
 	origInterval := typingIndicatorInterval
 	typingIndicatorInterval = 50 * time.Millisecond
 	t.Cleanup(func() { typingIndicatorInterval = origInterval })
@@ -612,11 +614,7 @@ func TestTypingIndicatorSkippedWhenStreaming(t *testing.T) {
 	unblock := make(chan struct{})
 	handler := func(ctx context.Context, _ string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		<-unblock
-		sw := pkg.StreamWriterFromContext(ctx)
-		if sw != nil {
-			sw.OnChunk(ctx, "streamed", true)
-		}
-		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "streamed"}, nil
+		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "done"}, nil
 	}
 
 	reg := NewRegistry(handler)
@@ -624,25 +622,36 @@ func TestTypingIndicatorSkippedWhenStreaming(t *testing.T) {
 
 	ch := &mockUpdatableChannel{
 		mockChannel: mockChannel{
-			id:   "stream-notyping",
-			caps: pkg.Capabilities{ID: "stream-notyping", Name: "Test", Edits: true},
+			id:   "stream-typing",
+			caps: pkg.Capabilities{ID: "stream-typing", Name: "Test", Edits: true},
 		},
 	}
 	_ = reg.Register(ch)
 
 	ch.pushMessage(pkg.InboundMessage{
-		ChannelID:      "stream-notyping",
+		ChannelID:      "stream-typing",
 		ConversationID: "c1",
 		Content:        "hello",
 	})
 
-	// Wait enough time for typing indicators to fire if they were active.
-	time.Sleep(200 * time.Millisecond)
-
-	sent := ch.sentMessages()
-	for _, m := range sent {
-		if m.Metadata != nil && m.Metadata["_typing"] == "true" {
-			t.Error("typing indicator should NOT be sent when StreamWriter is active")
+	// Wait for typing indicators.
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := ch.sentMessages()
+		typingCount := 0
+		for _, m := range sent {
+			if m.Metadata != nil && m.Metadata["_typing"] == "true" {
+				typingCount++
+			}
+		}
+		if typingCount >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for typing indicator with StreamWriter active, got %d", typingCount)
+		default:
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 
