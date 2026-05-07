@@ -3210,6 +3210,23 @@ func TestPlannerStepsToInvokeSkipsSentinel(t *testing.T) {
 	}
 }
 
+// failOnceLLM errors on the first Complete call, then delegates to the inner fakeLLM.
+// This simulates a planner timeout while the agent loop still works.
+type failOnceLLM struct {
+	err   error
+	inner *fakeLLM
+	once  sync.Once
+}
+
+func (f *failOnceLLM) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	var shouldFail bool
+	f.once.Do(func() { shouldFail = true })
+	if shouldFail {
+		return nil, f.err
+	}
+	return f.inner.Complete(ctx, req)
+}
+
 // fakeLLMWithFeatures wraps fakeLLM but also implements SupportsFeature
 // so that retryToolCallsEnabled() returns true.
 type fakeLLMWithFeatures struct {
@@ -3218,6 +3235,20 @@ type fakeLLMWithFeatures struct {
 }
 
 func (f *fakeLLMWithFeatures) SupportsFeature(feat provider.Feature) bool {
+	return f.features[feat]
+}
+
+// failOnceLLMWithFeatures combines failOnceLLM with SupportsFeature.
+type failOnceLLMWithFeatures struct {
+	failOnceLLM
+	features map[provider.Feature]bool
+}
+
+func (f *failOnceLLMWithFeatures) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	return f.failOnceLLM.Complete(ctx, req)
+}
+
+func (f *failOnceLLMWithFeatures) SupportsFeature(feat provider.Feature) bool {
 	return f.features[feat]
 }
 
@@ -3270,5 +3301,78 @@ func TestServerSideFallbackOnRetryExhaustion(t *testing.T) {
 	// The final response should be from the 4th LLM call (summarisation with real data).
 	if !strings.Contains(result.Response, "3 person types") {
 		t.Errorf("expected summarised response with real data, got: %s", result.Response)
+	}
+}
+
+func TestPlannerError_FallsThroughWithoutPanic(t *testing.T) {
+	// When the planner LLM call fails (e.g. timeout), planResult is nil.
+	// The orchestrator must not dereference nil and should fall through
+	// to the normal agent loop.
+	llm := &failOnceLLM{
+		err:   fmt.Errorf("http request: context deadline exceeded"),
+		inner: &fakeLLM{responses: []string{"I can help with that!"}},
+	}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:        "timly",
+		Description: "Timly",
+		Actions:     []Action{{Name: "create-item", Description: "Create item"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		PipelineEnabled: true,
+	})
+
+	result, err := orch.Run(context.Background(), "s1", "Can you create an item?")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response != "I can help with that!" {
+		t.Errorf("Response = %q, want agent fallback", result.Response)
+	}
+}
+
+func TestPlannerError_RetryEnabledWithoutPanic(t *testing.T) {
+	// Same as above but with retryToolCallsEnabled == true.
+	// This is the exact code path that panicked before the fix:
+	// retryEnabled was true, planResult was nil, and planResult.Type
+	// was dereferenced in the debug log.
+	inner := &fakeLLM{responses: []string{"I can help with that!"}}
+	llm := &failOnceLLMWithFeatures{
+		failOnceLLM: failOnceLLM{
+			err:   fmt.Errorf("http request: context deadline exceeded"),
+			inner: inner,
+		},
+		features: map[provider.Feature]bool{
+			provider.FeatureRetryToolCalls: true,
+		},
+	}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:        "timly",
+		Description: "Timly",
+		Actions:     []Action{{Name: "create-item", Description: "Create item"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		PipelineEnabled: true,
+	})
+
+	result, err := orch.Run(context.Background(), "s1", "Can you create an item?")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response != "I can help with that!" {
+		t.Errorf("Response = %q, want agent fallback", result.Response)
 	}
 }
