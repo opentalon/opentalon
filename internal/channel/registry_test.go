@@ -530,6 +530,126 @@ func TestRegistryDispatchNoStreamWriterWithoutEdits(t *testing.T) {
 	}
 }
 
+func TestTypingIndicatorSentDuringLongHandler(t *testing.T) {
+	// When the handler takes longer than the typing indicator interval,
+	// the registry should send keepalive typing-indicator messages.
+	origInterval := typingIndicatorInterval
+	typingIndicatorInterval = 50 * time.Millisecond
+	t.Cleanup(func() { typingIndicatorInterval = origInterval })
+
+	unblock := make(chan struct{})
+	handler := func(_ context.Context, _ string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
+		<-unblock
+		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "done"}, nil
+	}
+
+	reg := NewRegistry(handler)
+	defer reg.StopAll()
+
+	ch := newMockChannel("typing-test")
+	_ = reg.Register(ch)
+
+	ch.pushMessage(pkg.InboundMessage{
+		ChannelID:      "typing-test",
+		ConversationID: "c1",
+		Content:        "slow request",
+	})
+
+	// Wait for at least 2 typing indicators to be sent.
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := ch.sentMessages()
+		typingCount := 0
+		for _, m := range sent {
+			if m.Metadata != nil && m.Metadata["_typing"] == "true" {
+				typingCount++
+			}
+		}
+		if typingCount >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for typing indicators, got %d", typingCount)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	close(unblock)
+
+	// Wait for the final response.
+	deadline = time.After(2 * time.Second)
+	for {
+		sent := ch.sentMessages()
+		for _, m := range sent {
+			if m.Content == "done" {
+				// Verify typing indicators have empty content.
+				for _, s := range sent {
+					if s.Metadata != nil && s.Metadata["_typing"] == "true" && s.Content != "" {
+						t.Errorf("typing indicator should have empty content, got %q", s.Content)
+					}
+				}
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for final response")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestTypingIndicatorSkippedWhenStreaming(t *testing.T) {
+	// When StreamWriter is active, typing indicators should not be sent
+	// because the StreamWriter already keeps the connection alive.
+	origInterval := typingIndicatorInterval
+	typingIndicatorInterval = 50 * time.Millisecond
+	t.Cleanup(func() { typingIndicatorInterval = origInterval })
+
+	unblock := make(chan struct{})
+	handler := func(ctx context.Context, _ string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
+		<-unblock
+		sw := pkg.StreamWriterFromContext(ctx)
+		if sw != nil {
+			sw.OnChunk(ctx, "streamed", true)
+		}
+		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "streamed"}, nil
+	}
+
+	reg := NewRegistry(handler)
+	defer reg.StopAll()
+
+	ch := &mockUpdatableChannel{
+		mockChannel: mockChannel{
+			id:   "stream-notyping",
+			caps: pkg.Capabilities{ID: "stream-notyping", Name: "Test", Edits: true},
+		},
+	}
+	_ = reg.Register(ch)
+
+	ch.pushMessage(pkg.InboundMessage{
+		ChannelID:      "stream-notyping",
+		ConversationID: "c1",
+		Content:        "hello",
+	})
+
+	// Wait enough time for typing indicators to fire if they were active.
+	time.Sleep(200 * time.Millisecond)
+
+	sent := ch.sentMessages()
+	for _, m := range sent {
+		if m.Metadata != nil && m.Metadata["_typing"] == "true" {
+			t.Error("typing indicator should NOT be sent when StreamWriter is active")
+		}
+	}
+
+	close(unblock)
+	time.Sleep(100 * time.Millisecond)
+}
+
 func TestRegistryDispatchNoStreamWriterForNonUpdatableChannel(t *testing.T) {
 	// A channel that reports Edits=true but does NOT implement
 	// UpdatableChannel (e.g. gRPC plugin) should NOT get a StreamWriter.

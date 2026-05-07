@@ -208,7 +208,15 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 					}
 				}
 
+				// Send periodic typing indicators while the handler is
+				// processing. This keeps WebSocket connections (and any
+				// intermediate proxies) alive during long LLM calls.
+				// Skip when StreamWriter is active — it already sends
+				// progressive updates that keep the connection alive.
+				typingStop := startTypingIndicator(ctx, ch, m, sw != nil)
+
 				resp, err := r.handler(ctx, sessionKey, m)
+				typingStop()
 				if err != nil {
 					logger.FromContext(ctx).Error("handling message failed", "channel", ch.ID(), "session", sessionKey, "error", err)
 					return
@@ -232,5 +240,56 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 				}
 			}(msg)
 		}
+	}
+}
+
+// typingIndicatorInterval is how often keepalive typing messages are sent
+// while the handler is processing. 25 s keeps connections alive through
+// most proxy idle timeouts (commonly 30–60 s) without spamming the client.
+var typingIndicatorInterval = 25 * time.Second
+
+// startTypingIndicator launches a background goroutine that sends periodic
+// typing-indicator messages to the channel. This prevents WebSocket and
+// reverse-proxy idle timeouts from killing connections during long LLM calls.
+// Call the returned function to stop the goroutine. If streaming is true the
+// StreamWriter already keeps the connection alive, so no typing indicator is
+// sent.
+func startTypingIndicator(ctx context.Context, ch pkg.Channel, m pkg.InboundMessage, streaming bool) func() {
+	if streaming {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(typingIndicatorInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				msg := pkg.OutboundMessage{
+					ConversationID: m.ConversationID,
+					ThreadID:       m.ThreadID,
+					Metadata: map[string]string{
+						"_typing": "true",
+					},
+				}
+				if err := ch.Send(ctx, msg); err != nil {
+					slog.Debug("typing indicator send failed", "channel", ch.ID(), "error", err)
+					return
+				}
+				slog.Debug("typing indicator sent", "channel", ch.ID(), "conversation", m.ConversationID)
+			}
+		}
+	}()
+
+	return func() {
+		close(stop)
+		<-done
 	}
 }
