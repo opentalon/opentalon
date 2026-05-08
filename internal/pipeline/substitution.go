@@ -241,7 +241,7 @@ func splitPath(path string) ([]any, error) {
 func stringifyForInterpolation(v any) string {
 	switch x := v.(type) {
 	case nil:
-		return ""
+		return "null"
 	case string:
 		return x
 	case bool:
