@@ -1018,7 +1018,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 		// Prefer native tool calls from the API response over text-based parsing.
 		var calls []ToolCall
-		if len(resp.ToolCalls) > 0 {
+		nativeToolCalls := len(resp.ToolCalls) > 0
+		if nativeToolCalls {
 			for _, tc := range resp.ToolCalls {
 				plugin, action, _ := parseToolName(tc.Name)
 				calls = append(calls, ToolCall{
@@ -1028,8 +1029,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					Args:    tc.Arguments,
 					FromLLM: true,
 				})
+				log.Debug("native tool call", "id", tc.ID, "name", tc.Name, "args", tc.Arguments)
 			}
-			log.Debug("native tool calls received", "count", len(calls))
+			log.Info("native tool calls received", "round", i+1, "count", len(calls))
 		} else {
 			calls = o.parser.Parse(resp.Content)
 		}
@@ -1226,14 +1228,34 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", perCallInput, perCallOutput)
 			}
 
-			_ = sessions.AddMessage(sessionID, provider.Message{
-				Role:    provider.RoleAssistant,
-				Content: formatToolCallMessage(call),
-			})
-			_ = sessions.AddMessage(sessionID, provider.Message{
-				Role:    provider.RoleUser,
-				Content: o.guard.WrapContent(toolResult),
-			})
+			if nativeToolCalls {
+				// Native tool calling: store assistant message with tool_calls
+				// and tool result as role=tool with tool_call_id.
+				_ = sessions.AddMessage(sessionID, provider.Message{
+					Role:    provider.RoleAssistant,
+					Content: resp.Content,
+					ToolCalls: []provider.ToolCall{{
+						ID:        call.ID,
+						Name:      call.Plugin + "." + call.Action,
+						Arguments: call.Args,
+					}},
+				})
+				_ = sessions.AddMessage(sessionID, provider.Message{
+					Role:       provider.RoleTool,
+					Content:    toolResult.Content,
+					ToolCallID: call.ID,
+				})
+			} else {
+				// Text-based tool calling: store as assistant + user messages.
+				_ = sessions.AddMessage(sessionID, provider.Message{
+					Role:    provider.RoleAssistant,
+					Content: formatToolCallMessage(call),
+				})
+				_ = sessions.AddMessage(sessionID, provider.Message{
+					Role:    provider.RoleUser,
+					Content: o.guard.WrapContent(toolResult),
+				})
+			}
 		}
 	}
 

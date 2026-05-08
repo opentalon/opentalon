@@ -8,6 +8,7 @@ const (
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool" // tool result message (native function calling)
 )
 
 // MessageFile is a binary file (image, document, etc.) attached to a message.
@@ -18,9 +19,11 @@ type MessageFile struct {
 }
 
 type Message struct {
-	Role    Role          `json:"role"`
-	Content string        `json:"content"`
-	Files   []MessageFile `json:"files,omitempty"`
+	Role       Role          `json:"role"`
+	Content    string        `json:"content"`
+	Files      []MessageFile `json:"files,omitempty"`
+	ToolCallID string        `json:"tool_call_id,omitempty"` // for role=tool messages (native function calling)
+	ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`   // for role=assistant messages with native tool calls
 }
 
 // ToolDefinition describes a tool the LLM can call (native function calling).
