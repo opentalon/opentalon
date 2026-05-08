@@ -810,6 +810,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// for 1-3 tools the request is clearly a single action, saving ~3s + ~12K tokens.
 	rtTools, relevantToolsActive := relevantToolsFromContext(ctx)
 	skipPlanner := relevantToolsActive && len(rtTools) > 0 && len(rtTools) <= 3
+	singleStepSeeded := false
 	if o.planner != nil && !skipPlanner {
 		log.Debug("planner running", "session", sessionID, "message", content)
 		rtTools, rtSet := relevantToolsFromContext(ctx)
@@ -837,13 +838,43 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
 			return &RunResult{Response: planText}, nil
 		}
-		// If "direct" or error or single step, fall through to normal agent loop.
+		// Single-step pipeline: execute the tool call server-side and seed the
+		// agent loop with the result so the LLM only needs one round to summarize.
+		// This avoids the common failure where the LLM narrates instead of calling
+		// the tool, saving ~20s on the first attempt.
+		if err == nil && planResult != nil && len(planResult.Steps) == 1 {
+			step := planResult.Steps[0]
+			if step.Command != nil && step.Command.Plugin != "" && step.Command.Action != "" {
+				log.Debug("single-step pipeline: executing server-side",
+					"plugin", step.Command.Plugin, "action", step.Command.Action)
+				call := ToolCall{
+					ID:     fmt.Sprintf("planner-%s-%s", step.Command.Plugin, step.Command.Action),
+					Plugin: step.Command.Plugin,
+					Action: step.Command.Action,
+					Args:   step.Command.Args,
+				}
+				toolResult := o.executeCall(ctx, call)
+				if toolResult.Error == "" {
+					// Seed session: user message, assistant tool call, tool result.
+					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(call)})
+					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(toolResult)})
+					singleStepSeeded = true
+					log.Debug("single-step pipeline: tool result seeded, entering agent loop for summary")
+				} else {
+					log.Warn("single-step pipeline: tool call failed, falling through to agent loop",
+						"plugin", step.Command.Plugin, "action", step.Command.Action, "error", toolResult.Error)
+				}
+			}
+		}
+		// If "direct" or error, fall through to normal agent loop.
 		// Store the planner's expected tools so the agent loop can retry if the
 		// LLM fails to call them (language-independent tool-call detection).
 		// For "direct" with no steps, use a sentinel step — the planner decided
 		// this needs a tool call even though it didn't name a specific one.
+		// Skip hint storage when we already executed the single step above.
 		retryEnabled := o.retryToolCallsEnabled()
-		if retryEnabled && planResult != nil {
+		if retryEnabled && planResult != nil && !singleStepSeeded {
 			log.Debug("planner hint storage check", "retry_enabled", retryEnabled,
 				"plan_type", planResult.Type, "plan_steps", len(planResult.Steps))
 			if len(planResult.Steps) > 0 {
@@ -861,22 +892,25 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// Guard: never send empty user content to the LLM (would cause API errors).
 	// Channels with media rules should always produce non-empty content, but this
 	// catches misconfigured channels or unexpected message types.
-	if content == "" && len(files) == 0 {
-		log.Debug("empty content and no files, returning fallback")
-		return &RunResult{
-			Response: "I received your message but couldn't read its content. Could you try sending it as text?",
-		}, nil
-	}
-	if content == "" && len(files) > 0 {
-		content = "[The user sent a file attachment.]"
-	}
+	// Skip when single-step pipeline already seeded the session with messages.
+	if !singleStepSeeded {
+		if content == "" && len(files) == 0 {
+			log.Debug("empty content and no files, returning fallback")
+			return &RunResult{
+				Response: "I received your message but couldn't read its content. Could you try sending it as text?",
+			}, nil
+		}
+		if content == "" && len(files) > 0 {
+			content = "[The user sent a file attachment.]"
+		}
 
-	if err := sessions.AddMessage(sessionID, provider.Message{
-		Role:    provider.RoleUser,
-		Content: content,
-		Files:   files,
-	}); err != nil {
-		return nil, fmt.Errorf("adding user message: %w", err)
+		if err := sessions.AddMessage(sessionID, provider.Message{
+			Role:    provider.RoleUser,
+			Content: content,
+			Files:   files,
+		}); err != nil {
+			return nil, fmt.Errorf("adding user message: %w", err)
+		}
 	}
 	// Run summarization asynchronously so it doesn't block the user's request.
 	go o.maybeSummarizeSession(context.Background(), sessionID)
