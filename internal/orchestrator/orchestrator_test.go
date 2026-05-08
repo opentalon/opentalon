@@ -2759,6 +2759,125 @@ func TestSyncActionsOmitsServerInstructionsWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestSyncActionsCarriesKnowledgeArticles(t *testing.T) {
+	// Knowledge articles contributed by a plugin (e.g. an MCP server's
+	// initialize._meta.knowledge_articles) must be forwarded on the first
+	// batch's payload alongside server_instructions. Empty articles
+	// (missing id/title/content) are filtered out.
+	var syncCalls []string
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "weaviate", Description: "Vector DB",
+		Actions: []Action{{Name: "sync_actions", Description: "Sync actions", Parameters: []Parameter{{Name: "payload", Description: "JSON"}}}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		syncCalls = append(syncCalls, call.Args["payload"])
+		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
+	}})
+	_ = registry.Register(PluginCapability{
+		Name: "timly", Description: "Timly",
+		Actions: []Action{{Name: "list-items", Description: "List items"}},
+		KnowledgeArticles: []KnowledgeArticle{
+			{ID: "org-units-vs-containers", Title: "Org-units vs Containers (Places)", Content: "A Place is a storage unit; an Org-unit is a structural unit.", Tags: []string{"places"}},
+			{ID: "users-vs-persons", Title: "Users vs Persons", Content: "A User logs in; a Person is a managed record."},
+			{ID: "incomplete-no-title", Title: "", Content: "x"}, // dropped
+			{ID: "", Title: "no-id", Content: "x"},               // dropped
+		},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		SyncActionsPlugin: "weaviate",
+		SyncActionsAction: "sync_actions",
+	})
+
+	orch.SyncActions(context.Background())
+
+	if len(syncCalls) != 1 {
+		t.Fatalf("expected 1 sync call, got %d: %v", len(syncCalls), syncCalls)
+	}
+	payload := syncCalls[0]
+	if !strings.Contains(payload, `"knowledge_articles"`) {
+		t.Errorf("knowledge_articles key missing from payload: %s", payload)
+	}
+	if !strings.Contains(payload, `"id":"org-units-vs-containers"`) {
+		t.Errorf("expected first article id in payload: %s", payload)
+	}
+	if !strings.Contains(payload, `"id":"users-vs-persons"`) {
+		t.Errorf("expected second article id in payload: %s", payload)
+	}
+	if strings.Contains(payload, `"id":"incomplete-no-title"`) {
+		t.Errorf("article missing title should have been filtered: %s", payload)
+	}
+	if strings.Contains(payload, `"title":"no-id"`) {
+		t.Errorf("article missing id should have been filtered: %s", payload)
+	}
+}
+
+func TestSyncActionsOmitsKnowledgeArticlesWhenAbsent(t *testing.T) {
+	// Backward-compat: plugins that don't contribute knowledge articles must
+	// not cause the orchestrator to ship an empty knowledge_articles array.
+	var syncCalls []string
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "weaviate", Description: "Vector DB",
+		Actions: []Action{{Name: "sync_actions", Description: "Sync actions", Parameters: []Parameter{{Name: "payload", Description: "JSON"}}}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		syncCalls = append(syncCalls, call.Args["payload"])
+		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
+	}})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze code"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		SyncActionsPlugin: "weaviate",
+		SyncActionsAction: "sync_actions",
+	})
+
+	orch.SyncActions(context.Background())
+
+	if len(syncCalls) != 1 {
+		t.Fatalf("expected 1 sync call, got %d", len(syncCalls))
+	}
+	if strings.Contains(syncCalls[0], "knowledge_articles") {
+		t.Errorf("knowledge_articles key should be omitted when none contributed: %s", syncCalls[0])
+	}
+}
+
+func TestCapabilityHashIncludesKnowledgeArticles(t *testing.T) {
+	// Adding or changing a knowledge article must change the hash so the sync
+	// plugin re-runs the upsert (otherwise the new section would never reach
+	// the vector store on a hash-match skip).
+	entries := []syncActionEntry{{Name: "list-items", Description: "List items"}}
+	prose := "Server preamble"
+
+	base := capabilityHash(entries, prose, nil)
+	withOne := capabilityHash(entries, prose, []syncKnowledgeArticleEntry{
+		{ID: "a", Title: "A", Content: "first"},
+	})
+	withTwo := capabilityHash(entries, prose, []syncKnowledgeArticleEntry{
+		{ID: "a", Title: "A", Content: "first"},
+		{ID: "b", Title: "B", Content: "second"},
+	})
+	withDifferentContent := capabilityHash(entries, prose, []syncKnowledgeArticleEntry{
+		{ID: "a", Title: "A", Content: "first revised"},
+	})
+
+	if base == withOne {
+		t.Error("hash unchanged after adding a knowledge article")
+	}
+	if withOne == withTwo {
+		t.Error("hash unchanged after adding a second knowledge article")
+	}
+	if withOne == withDifferentContent {
+		t.Error("hash unchanged after editing knowledge article content")
+	}
+}
+
 func TestSyncActionsCarriesKeepPlugins(t *testing.T) {
 	// During a full startup sync, every sync_actions call should ship the live
 	// plugin list as keep_plugins so the sync plugin can prune orphans. The

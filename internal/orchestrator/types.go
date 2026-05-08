@@ -21,12 +21,13 @@ type Action struct {
 }
 
 type PluginCapability struct {
-	Name                 string          `yaml:"name"`
-	Description          string          `yaml:"description"`
-	Actions              []Action        `yaml:"actions"`
-	AllowedGroups        []string        `yaml:"allowed_groups,omitempty"`         // empty = unrestricted; when set, only listed groups can use this plugin
-	SystemPromptAddition string          `yaml:"system_prompt_addition,omitempty"` // optional text appended to LLM system prompt when this plugin is loaded
-	Glossary             []GlossaryEntry `yaml:"glossary,omitempty"`               // optional glossary term/definition pairs from the plugin
+	Name                 string             `yaml:"name"`
+	Description          string             `yaml:"description"`
+	Actions              []Action           `yaml:"actions"`
+	AllowedGroups        []string           `yaml:"allowed_groups,omitempty"`         // empty = unrestricted; when set, only listed groups can use this plugin
+	SystemPromptAddition string             `yaml:"system_prompt_addition,omitempty"` // optional text appended to LLM system prompt when this plugin is loaded
+	Glossary             []GlossaryEntry    `yaml:"glossary,omitempty"`               // optional glossary term/definition pairs from the plugin
+	KnowledgeArticles    []KnowledgeArticle `yaml:"knowledge_articles,omitempty"`     // optional per-section knowledge for retrieval-time injection (mcp-knowledge:* in vector store)
 }
 
 // GlossaryEntry is a domain term with its definition, provided by a plugin
@@ -38,6 +39,18 @@ type GlossaryEntry struct {
 	Category   string   `yaml:"category,omitempty"`
 	Tags       []string `yaml:"tags,omitempty"`
 	Synonyms   []string `yaml:"synonyms,omitempty"`
+}
+
+// KnowledgeArticle is one self-contained reference section a plugin
+// contributes for retrieval-time injection (rather than always-on inclusion
+// via SystemPromptAddition). The orchestrator forwards these to the vector
+// store via sync_actions's knowledge_articles[] field; the prepare-path RAG
+// then pulls just the relevant section into [knowledge_context] per query.
+type KnowledgeArticle struct {
+	ID      string   `yaml:"id"`
+	Title   string   `yaml:"title"`
+	Content string   `yaml:"content"`
+	Tags    []string `yaml:"tags,omitempty"`
 }
 
 type ToolCall struct {

@@ -65,6 +65,13 @@ message PluginCapabilities {
   // The orchestrator collects entries from all plugins and syncs them to the
   // vector store via the sync_glossary action for automatic context injection.
   repeated GlossaryEntry glossary = 5;
+  // Optional per-section knowledge articles provided by the plugin (e.g. an
+  // MCP server's `initialize._meta.knowledge_articles`). Each entry becomes
+  // one KnowledgeArticles record on the vector store with source
+  // "mcp-knowledge:<plugin>:<id>" so the prepare-path RAG can pull just
+  // the relevant section into [knowledge_context], instead of having the
+  // whole prose go into every system prompt via system_prompt_addition.
+  repeated KnowledgeArticle knowledge_articles = 6;
 }
 
 message GlossaryEntry {
@@ -73,6 +80,16 @@ message GlossaryEntry {
   string category = 3;          // optional grouping (e.g. "hr", "support")
   repeated string tags = 4;     // optional free-form tags
   repeated string synonyms = 5; // alternative terms for better vector matching
+}
+
+// KnowledgeArticle is one self-contained reference section a plugin
+// contributes for retrieval-time injection (as opposed to always-on
+// inclusion via system_prompt_addition). Required fields: id, title, content.
+message KnowledgeArticle {
+  string id = 1;
+  string title = 2;
+  string content = 3;
+  repeated string tags = 4; // optional free-form tags merged with the auto-set ["opentalon", "mcp", "knowledge", <plugin>] on storage
 }
 
 message Action {

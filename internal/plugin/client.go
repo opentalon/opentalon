@@ -164,11 +164,21 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 			Synonyms:   g.Synonyms,
 		}
 	}
+	knowledge := make([]orchestrator.KnowledgeArticle, len(pb.KnowledgeArticles))
+	for i, k := range pb.KnowledgeArticles {
+		knowledge[i] = orchestrator.KnowledgeArticle{
+			ID:      k.Id,
+			Title:   k.Title,
+			Content: k.Content,
+			Tags:    k.Tags,
+		}
+	}
 	return orchestrator.PluginCapability{
 		Name:                 pb.Name,
 		Description:          pb.Description,
 		Actions:              actions,
 		SystemPromptAddition: pb.SystemPromptAddition,
 		Glossary:             glossary,
+		KnowledgeArticles:    knowledge,
 	}
 }
