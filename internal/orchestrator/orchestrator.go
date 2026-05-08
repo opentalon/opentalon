@@ -990,9 +990,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		sess, _ := sessions.Get(sessionID)
 
-		// Include server instructions only on the first round — they are large
-		// (can be 10KB+) and the LLM doesn't need them again just to process
-		// tool results and format the final response.
+		// Include server instructions and tool descriptions only on the first
+		// round — they are large (10KB+) and the LLM doesn't need them to
+		// process tool results and format the final response.
 		messages := o.buildMessages(ctx, sess, content, i == 0)
 		messages = append(messages, transientMessages...)
 		transientMessages = nil
@@ -2106,14 +2106,19 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		if includeServerInstructions && cap.SystemPromptAddition != "" {
 			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n", cap.Name, cap.SystemPromptAddition, cap.Name)
 		}
-		for _, action := range visibleActions {
-			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, stripOutputSchema(action.Description))
-			for _, p := range action.Parameters {
-				req := ""
-				if p.Required {
-					req = " (required)"
+		// On summary rounds (includeServerInstructions=false), skip tool
+		// descriptions entirely — the LLM already has data and just needs
+		// to format a response. This saves ~3-4K tokens per round.
+		if includeServerInstructions {
+			for _, action := range visibleActions {
+				fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, stripOutputSchema(action.Description))
+				for _, p := range action.Parameters {
+					req := ""
+					if p.Required {
+						req = " (required)"
+					}
+					fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 				}
-				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 			}
 		}
 		sb.WriteString("\n")
