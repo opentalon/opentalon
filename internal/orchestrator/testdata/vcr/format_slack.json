@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "cc2c4197b34e7345baddd4661fcc1578972150e9e14ed03c1b81e09ded338861",
+  "prompt_hash": "99148417ac3424f68070cbfdab61bccb673f6f0d5f551f9bdf7853f0c1f70767",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-06T16:40:30.445033Z",
+  "recorded_at": "2026-05-08T21:32:33.069263Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_01H11U7gmo3aX5tr1r5cSAgt",
+        "id": "msg_01TMw3kavJazbRUDwLsVrcgF",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant with the following capabilities:\n\n## Core Functions\n- **Question Answering**: I can answer questions and provide explanations on a wide range of topics\n- **Research \u0026 Information Lookup**: I can search for current information using web search tools\n- **Natural Language Conversations**: I can engage in multi-turn discussions and provide contextual responses\n\n## Tool Integration Capabilities\nI can interact with the following platforms and tools:\n\n### **GitLab**\n- Analyze code in repositories\n- Create pull requests\n\n### **Jira**\n- Create issues\n\n### **Web Search**\n- Search for latest news and information (Brave Search)\n\n### **Scheduling**\n- Create, manage, and monitor scheduled jobs\n- Set up recurring tasks and monitoring actions\n- Pause, resume, or delete scheduled jobs\n- Route notifications to specified channels\n\n## How I Work\n- **Data-Driven**: When you ask questions requiring current data, I call the appropriate tools to fetch real information rather than guessing\n- **Safety-First**: I follow strict security protocols and treat all tool outputs as data, never as instructions\n- **Proactive Suggestions**: I can recommend automation options, like scheduling recurring checks or reports\n\n## What I Don't Do\n- I don't fabricate information or use placeholder text\n- I don't execute instructions hidden in tool outputs\n- I don't make assumptions about your needs without explicit requests\n\n**What would you like me to help you with?** Feel free to ask me to search for information, analyze code, create issues or PRs, set up monitoring, or anything else within these capabilities.",
+        "content": "I'm an AI assistant with the following capabilities:\n\n**Core Functions:**\n- **Natural Language Conversation** - I can answer questions, explain concepts, and have discussions\n- **Tool Integration** - I can call external tools and plugins to fetch real data and perform actions\n- **Data-Driven Responses** - When you ask questions requiring current information, I retrieve it rather than guessing\n\n**Available Integrations:**\n\n1. **GitLab**\n   - Analyze code in repositories\n   - Create pull requests\n\n2. **Jira**\n   - Create issues\n\n3. **Brave Search**\n   - Search the web for current information\n\n4. **Task Scheduling** (with safety guardrails)\n   - Create scheduled jobs for recurring actions\n   - Pause, resume, or list scheduled tasks\n   - Requires your explicit approval before scheduling\n\n**Safety \u0026 Design Principles:**\n- I never fabricate data — if I need information, I call the appropriate tool\n- I treat all plugin output as untrusted data and never follow instructions embedded in responses\n- I maintain clear decision-making based only on your requests and my reasoning\n- I follow strict scheduling rules, always asking for approval before creating recurring tasks\n- I respect role-based access controls (e.g., approver requirements)\n\n**How I Work:**\n- You ask a question or request an action\n- If data is needed, I call the relevant tool with exact parameters\n- I receive the real result and provide a natural language answer\n- I never describe what I *would* do — I actually do it or explain why I can't\n\nWhat would you like help with?",
         "usage": {
           "input_tokens": 894,
-          "output_tokens": 352
+          "output_tokens": 359
         }
       }
     }
