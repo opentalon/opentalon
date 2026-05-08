@@ -60,11 +60,12 @@ type Planner struct {
 	llm LLMClient
 }
 
-// PlanResult holds the planner's decision: either "direct" (single action, use normal agent loop)
-// or "pipeline" with multiple steps.
+// PlanResult holds the planner's decision: "direct" (no steps, use normal agent loop)
+// or "pipeline" with one or more steps. Single-step pipelines are preserved so the
+// orchestrator can execute them server-side without an LLM round-trip.
 type PlanResult struct {
 	Type  string  // "direct" | "pipeline"
-	Steps []*Step // only when Type == "pipeline"
+	Steps []*Step // populated when Type == "pipeline"
 }
 
 // NewPlanner creates a planner backed by the given LLM client.
@@ -79,12 +80,12 @@ type planResponse struct {
 }
 
 type planStepJSON struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Plugin    string            `json:"plugin"`
-	Action    string            `json:"action"`
-	Args      map[string]string `json:"args"`
-	DependsOn []string          `json:"depends_on"`
+	ID        string                 `json:"id"`
+	Name      string                 `json:"name"`
+	Plugin    string                 `json:"plugin"`
+	Action    string                 `json:"action"`
+	Args      map[string]interface{} `json:"args"`
+	DependsOn []string               `json:"depends_on"`
 }
 
 // PlanTimeout is the maximum time the planner waits for an LLM response.
@@ -167,9 +168,9 @@ func parsePlanResponse(content string) (*PlanResult, error) {
 		if id == "" {
 			id = fmt.Sprintf("%d", i+1)
 		}
-		args := s.Args
-		if args == nil {
-			args = make(map[string]string)
+		args := make(map[string]string, len(s.Args))
+		for k, v := range s.Args {
+			args[k] = fmt.Sprintf("%v", v)
 		}
 		steps[i] = &Step{
 			ID:   id,
