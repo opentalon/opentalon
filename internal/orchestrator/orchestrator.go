@@ -870,7 +870,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					ID:     fmt.Sprintf("planner-%s-%s", step.Command.Plugin, step.Command.Action),
 					Plugin: step.Command.Plugin,
 					Action: step.Command.Action,
-					Args:   step.Command.Args,
+					Args:   pipelineArgsToWire(step.Command.Args),
 				}
 				toolResult := o.executeCall(ctx, call)
 				if toolResult.Error == "" {
@@ -1756,13 +1756,17 @@ func (o *Orchestrator) runGuardPlugins(ctx context.Context, messages []provider.
 
 func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p *pipeline.Pipeline) (*RunResult, error) {
 	log := logger.FromContext(ctx)
-	runner := func(ctx context.Context, pluginName, action string, args map[string]string) pipeline.StepRunResult {
-		log.Debug("pipeline executing step", "plugin", pluginName, "action", action, "args", args)
+	runner := func(ctx context.Context, pluginName, action string, args map[string]any) pipeline.StepRunResult {
+		// Stringify typed args at the wire boundary; ToolCall.Args is
+		// map[string]string by gRPC contract. The downstream plugin re-
+		// coerces per its declared input schema.
+		wireArgs := pipelineArgsToWire(args)
+		log.Debug("pipeline executing step", "plugin", pluginName, "action", action, "args", wireArgs)
 		call := ToolCall{
 			ID:     fmt.Sprintf("pipeline-%s-%s", pluginName, action),
 			Plugin: pluginName,
 			Action: action,
-			Args:   args,
+			Args:   wireArgs,
 		}
 		result := o.executeCall(ctx, call)
 		if result.Error != "" {
@@ -1774,7 +1778,11 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 			}
 			log.Debug("pipeline step succeeded", "plugin", pluginName, "action", action, "result", preview)
 		}
-		return pipeline.StepRunResult{Content: result.Content, Error: result.Error}
+		return pipeline.StepRunResult{
+			Content:           result.Content,
+			StructuredContent: result.StructuredContent,
+			Error:             result.Error,
+		}
 	}
 	executor := pipeline.NewExecutor(runner, p.Config)
 	execResult, err := executor.Run(ctx, p)
@@ -1784,7 +1792,8 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 
 	log.Debug("pipeline execution done", "success", execResult.Success, "steps_executed", len(execResult.Steps))
 
-	// Record step results in session history
+	// Record step results in session history. Args are stringified at the
+	// recording boundary so the trace mirrors what hit the wire.
 	var toolCalls []ToolCall
 	var toolResults []ToolResult
 	for _, es := range execResult.Steps {
@@ -1792,7 +1801,7 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 			ID:     fmt.Sprintf("pipeline-%s-%s", es.Plugin, es.Action),
 			Plugin: es.Plugin,
 			Action: es.Action,
-			Args:   es.Args,
+			Args:   pipelineArgsToWire(es.Args),
 		}
 		tr := ToolResult{CallID: tc.ID, Content: es.Content, Error: es.Error}
 		toolCalls = append(toolCalls, tc)
@@ -2782,9 +2791,14 @@ func buildToolCallNudge(steps []*pipeline.Step) string {
 			continue
 		}
 		tool := s.Command.Plugin + "." + s.Command.Action
-		args := map[string]string{}
-		if s.Command.Args != nil {
-			args = s.Command.Args
+		// Marshal typed args directly — JSON preserves number/bool/array
+		// shape exactly as the LLM should re-emit them in the [tool_call]
+		// block. Stringification (used for the gRPC wire) would force the
+		// LLM to read "2037838" and decide whether to quote it; better to
+		// hand the JSON form straight back.
+		args := s.Command.Args
+		if args == nil {
+			args = map[string]any{}
 		}
 		argsJSON, err := json.Marshal(args)
 		if err != nil {
@@ -2801,21 +2815,18 @@ func buildToolCallNudge(steps []*pipeline.Step) string {
 
 // plannerStepsToInvoke converts planner pipeline steps to InvokeSteps for
 // server-side execution. Steps without a concrete command (e.g. sentinel
-// "direct" steps) are skipped.
+// "direct" steps) are skipped. Typed args are stringified at this boundary
+// — InvokeStep is a wire-shaped value passed to the websocket / hint layer.
 func plannerStepsToInvoke(steps []*pipeline.Step) []InvokeStep {
 	var out []InvokeStep
 	for _, s := range steps {
 		if s.Command == nil || s.Command.Plugin == "" || s.Command.Action == "" {
 			continue
 		}
-		args := make(map[string]string)
-		for k, v := range s.Command.Args {
-			args[k] = v
-		}
 		out = append(out, InvokeStep{
 			Plugin: s.Command.Plugin,
 			Action: s.Command.Action,
-			Args:   args,
+			Args:   pipelineArgsToWire(s.Command.Args),
 		})
 	}
 	return out

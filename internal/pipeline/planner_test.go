@@ -177,6 +177,26 @@ func TestBuildPlannerPrompt(t *testing.T) {
 	}
 }
 
+// TestBuildPlannerPrompt_DocumentsChainingSyntax pins the cross-step
+// reference contract into the planner prompt: an LLM that doesn't know
+// the {{<step>.output.<path>}} form invents one (we observed
+// {{step1.output.results[0].id}} against responses that use
+// `containers[]`/`items[]`), and the executor's substitution layer is
+// only useful if the planner emits paths it can actually resolve.
+func TestBuildPlannerPrompt_DocumentsChainingSyntax(t *testing.T) {
+	prompt := buildPlannerPrompt(nil, "")
+	for _, want := range []string{
+		"Referencing prior step output",
+		"{{<step-id>.output.<json-path>}}",
+		"depends_on",
+		"Inspect the action description for the actual response shape",
+	} {
+		if !containsStr(prompt, want) {
+			t.Errorf("planner prompt missing %q", want)
+		}
+	}
+}
+
 // TestBuildPlannerPromptMCPDotActions verifies that when a plugin (e.g. "mcp") has
 // action names containing dots (e.g. "appsignal.get_applications"), the prompt uses
 // an explicit plugin= | action= format so the LLM cannot misparse the boundary.

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -66,9 +67,16 @@ func (p *Pipeline) FormatForConfirmation() string {
 			fmt.Fprintf(&sb, "   Action: `%s.%s`\n", step.Command.Plugin, step.Command.Action)
 			if len(step.Command.Args) > 0 {
 				sb.WriteString("   Args: ")
-				parts := make([]string, 0, len(step.Command.Args))
-				for k, v := range step.Command.Args {
-					parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+				// Stable order so the confirmation message is deterministic
+				// across renders (Go map iteration is randomised).
+				keys := make([]string, 0, len(step.Command.Args))
+				for k := range step.Command.Args {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				parts := make([]string, 0, len(keys))
+				for _, k := range keys {
+					parts = append(parts, fmt.Sprintf("%s=%v", k, step.Command.Args[k]))
 				}
 				sb.WriteString(strings.Join(parts, ", "))
 				sb.WriteString("\n")

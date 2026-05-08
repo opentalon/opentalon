@@ -5,4 +5,33 @@ Even for single-action requests, return a pipeline with one step.
 Each step must have: {"id": "<unique>", "name": "<human description>", "plugin": "<plugin>", "action": "<action>", "args": {}, "depends_on": []}
 The "plugin" field must be the exact plugin name shown below (the part before the "|"). The "action" field must be the exact action name shown below (the part after "action=").
 
-Available tools:
+## Referencing prior step output
+
+A later step may need a value produced by an earlier step (e.g. an id from a list lookup). Use the placeholder
+
+  {{<step-id>.output.<json-path>}}
+
+inside any string arg. The path walks the structured JSON returned by the referenced step using dot-separated keys and `[N]` for array indices. The runtime substitutes placeholders before dispatching the step; an unresolved or malformed reference fails the step before any tool call.
+
+Inspect the action description for the actual response shape — keys differ per tool (a list-containers response holds `containers[]`, a list-items response holds `items[]`, etc.). Do NOT invent a generic key like "results" if the tool's response uses a specific name.
+
+When an entire arg is one placeholder the resolved value's type is preserved (an integer id stays integer); when a placeholder is embedded into surrounding text the resolved value is interpolated as a string ("ticket-{{step1.output.tickets[0].id}}" → "ticket-42").
+
+Example:
+  [
+    {"id": "step1", "plugin": "timly", "action": "list-containers", "args": {"query": "name:\"Berlin Garage\""}, "depends_on": []},
+    {"id": "step2", "plugin": "timly", "action": "list-items",      "args": {"query": "name:Tesla"},                "depends_on": []},
+    {"id": "step3", "plugin": "timly", "action": "schedule-item",
+                "args": {
+                  "container_id": "{{step1.output.containers[0].id}}",
+                  "item_id":      "{{step2.output.items[0].id}}",
+                  "start_date":   "2026-06-01T00:00:00",
+                  "end_date":     "2026-06-05T23:59:59"
+                },
+                "depends_on": ["step1", "step2"]}
+  ]
+
+A step that needs a prior step's output MUST list it under "depends_on" so execution order is correct.
+
+## Available tools
+
