@@ -70,6 +70,7 @@ orchestrator:
   #   enabled: true
   #   max_step_retries: 3    # retries per step before giving up (default 3)
   #   step_timeout: "60s"    # per-step timeout as Go duration (default "60s")
+  #   plan_timeout: "15s"    # max time for planner LLM call (default "15s"); increase for slower models
   # Knowledge-augmented RAG: sync plugin actions to vector store on startup and
   # optionally ingest markdown files from a directory. Articles can also arrive
   # via the weaviate plugin's HTTP API (POST /api/v1/articles).
