@@ -234,6 +234,14 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 			)
 		}
 
+		// Log native tool calls when present.
+		if len(msg.ToolCalls) > 0 {
+			slog.DebugContext(ctx, "openai native tool calls",
+				"model", oaiResp.Model,
+				"count", len(msg.ToolCalls),
+			)
+		}
+
 		// Parse native tool calls from the response.
 		for _, tc := range msg.ToolCalls {
 			if tc.Type != "function" {
@@ -367,12 +375,29 @@ func (s *oaiResponseStream) Close() error {
 }
 
 func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error) {
-	msgs := make([]oaiMessage, len(req.Messages))
-	for i, m := range req.Messages {
+	msgs := make([]oaiMessage, 0, len(req.Messages))
+	for _, m := range req.Messages {
 		if len(m.Files) > 0 {
 			return oaiRequest{}, fmt.Errorf("provider %s does not support file attachments", p.id)
 		}
-		msgs[i] = oaiMessage{Role: string(m.Role), Content: m.Content}
+		oMsg := oaiMessage{Role: string(m.Role), Content: m.Content}
+		// Native tool calling: pass tool_call_id for tool result messages.
+		if m.Role == RoleTool && m.ToolCallID != "" {
+			oMsg.ToolCallID = m.ToolCallID
+		}
+		// Native tool calling: pass tool_calls for assistant messages.
+		for _, tc := range m.ToolCalls {
+			args, _ := json.Marshal(tc.Arguments)
+			oMsg.ToolCalls = append(oMsg.ToolCalls, oaiToolCall{
+				ID:   tc.ID,
+				Type: "function",
+				Function: oaiToolCallFunction{
+					Name:      tc.Name,
+					Arguments: string(args),
+				},
+			})
+		}
+		msgs = append(msgs, oMsg)
 	}
 	oai := oaiRequest{
 		Model:       req.Model,
