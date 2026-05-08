@@ -834,7 +834,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
-			return &RunResult{Response: planText}, nil
+			return &RunResult{
+				Response: planText,
+				Metadata: map[string]string{
+					"type":        "confirmation",
+					"prompt_type": "confirmation",
+					"pipeline_id": p.ID,
+					"options":     "approve,reject",
+				},
+			}, nil
 		}
 		// Single-step pipeline: execute the tool call server-side and seed the
 		// agent loop with the result so the LLM only needs one round to summarize.
@@ -986,6 +994,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			req.Reasoning = true
 			if p := profile.FromContext(ctx); p != nil && p.BudgetTokens > 0 {
 				req.BudgetTokens = p.BudgetTokens
+			}
+			// Downgrade reasoning effort on summary rounds: when tool results
+			// are already in session, the LLM only needs to format a response,
+			// not reason deeply about which tools to call. Saves ~10s per round.
+			if hasToolResults(sess.Messages) && req.ReasoningEffort == "high" {
+				req.ReasoningEffort = "medium"
+				log.Debug("reasoning effort downgraded for summary round", "round", i+1)
 			}
 			log.Debug("reasoning enabled for LLM request", "round", i+1,
 				"budget_tokens", req.BudgetTokens,
@@ -2862,6 +2877,7 @@ func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.Completi
 // subsequent occurrences are replaced with a short stub to save context.
 func appendStrippingAllKC(dst []provider.Message, msgs []provider.Message) []provider.Message {
 	seenKnowledge := make(map[uint64]bool)
+	seenToolResults := make(map[uint64]bool)
 	for _, m := range msgs {
 		if m.Role == provider.RoleUser {
 			stripped := stripKnowledgeContext(m.Content)
@@ -2870,10 +2886,43 @@ func appendStrippingAllKC(dst []provider.Message, msgs []provider.Message) []pro
 			}
 			// Deduplicate knowledge article plugin outputs.
 			m = deduplicateKnowledgeOutput(m, seenKnowledge)
+			// Deduplicate large repeated tool results (>1KB).
+			m = deduplicateLargeToolResult(m, seenToolResults)
 		}
 		dst = append(dst, m)
 	}
 	return dst
+}
+
+// deduplicateLargeToolResult replaces repeated large plugin output blocks
+// (>1KB) with a stub. This catches duplicate tool results when the same
+// tool is called multiple times with the same result (e.g. list-items
+// called twice in a conversation).
+func deduplicateLargeToolResult(m provider.Message, seen map[uint64]bool) provider.Message {
+	const openTag = "[plugin_output]"
+	const closeTag = "[/plugin_output]"
+	const minSize = 1024 // only deduplicate blocks >1KB
+	if !strings.Contains(m.Content, openTag) {
+		return m
+	}
+	start := strings.Index(m.Content, openTag)
+	end := strings.LastIndex(m.Content, closeTag)
+	if start < 0 || end < 0 || end <= start {
+		return m
+	}
+	body := m.Content[start+len(openTag) : end]
+	if len(body) < minSize {
+		return m // too small to bother deduplicating
+	}
+	h := fnv64a(body)
+	if !seen[h] {
+		seen[h] = true
+		return m
+	}
+	replaced := m.Content[:start] +
+		"[plugin_output]\n(Same tool result as a previous call — see above.)\n[/plugin_output]" +
+		m.Content[end+len(closeTag):]
+	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files}
 }
 
 // deduplicateKnowledgeOutput replaces repeated knowledge article plugin
