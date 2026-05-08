@@ -1033,7 +1033,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// Downgrade reasoning effort on summary rounds: when tool results
 			// are already in session, the LLM only needs to format a response,
 			// not reason deeply about which tools to call. Saves ~10s per round.
-			if hasToolResults(sess.Messages) && req.ReasoningEffort == "high" {
+			// Check for empty too — applyModelDefaults sets it later, so at this
+			// point it's "" which would become "high" from config.
+			if hasToolResults(sess.Messages) && (req.ReasoningEffort == "high" || req.ReasoningEffort == "") {
 				req.ReasoningEffort = "medium"
 				log.Debug("reasoning effort downgraded for summary round", "round", i+1)
 			}
@@ -1824,9 +1826,14 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 				out = append(out, m)
 				continue
 			}
-			// Keep assistant messages that follow a [plugin_output] — they summarize
-			// real tool results (the normal round-2 response after a tool call).
-			if i > 0 && strings.Contains(msgs[i-1].Content, "[plugin_output]") {
+			// Keep assistant messages with native tool calls (ToolCalls field set).
+			if len(m.ToolCalls) > 0 {
+				out = append(out, m)
+				continue
+			}
+			// Keep assistant messages that follow a tool result — they summarize
+			// real data (the normal round-2 response after a tool call).
+			if i > 0 && (strings.Contains(msgs[i-1].Content, "[plugin_output]") || msgs[i-1].Role == provider.RoleTool) {
 				out = append(out, m)
 				continue
 			}
