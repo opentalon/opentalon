@@ -36,12 +36,22 @@ func capsToProto(c CapabilitiesMsg) *pluginpb.PluginCapabilities {
 			Synonyms:   g.Synonyms,
 		}
 	}
+	knowledge := make([]*pluginpb.KnowledgeArticle, len(c.KnowledgeArticles))
+	for i, k := range c.KnowledgeArticles {
+		knowledge[i] = &pluginpb.KnowledgeArticle{
+			Id:      k.ID,
+			Title:   k.Title,
+			Content: k.Content,
+			Tags:    k.Tags,
+		}
+	}
 	return &pluginpb.PluginCapabilities{
 		Name:                 c.Name,
 		Description:          c.Description,
 		Actions:              actions,
 		SystemPromptAddition: c.SystemPromptAddition,
 		Glossary:             glossary,
+		KnowledgeArticles:    knowledge,
 	}
 }
 

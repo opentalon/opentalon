@@ -3112,6 +3112,16 @@ type syncActionEntry struct {
 	Parameters  []Parameter `json:"parameters"`
 }
 
+// syncKnowledgeArticleEntry mirrors the weaviate-plugin's expected JSON shape
+// for one knowledge article. ID, Title and Content are required; Tags is
+// optional and will be merged with the plugin-augmented tag set on storage.
+type syncKnowledgeArticleEntry struct {
+	ID      string   `json:"id"`
+	Title   string   `json:"title"`
+	Content string   `json:"content"`
+	Tags    []string `json:"tags,omitempty"`
+}
+
 // syncActionsPayload is the JSON shape expected by the sync_actions action.
 //
 // ServerInstructions carries the plugin's SystemPromptAddition (e.g. an MCP
@@ -3130,11 +3140,21 @@ type syncActionsPayload struct {
 	PluginName         string            `json:"plugin_name"`
 	Actions            []syncActionEntry `json:"actions"`
 	ServerInstructions string            `json:"server_instructions,omitempty"`
-	KeepPlugins        []string          `json:"keep_plugins,omitempty"`
-	// Hash is a SHA-256 digest of the plugin's actions + server_instructions.
-	// When the sync plugin receives the same hash on consecutive calls for a
-	// given plugin_name, it can skip the upsert (the data hasn't changed).
-	// Computed by the orchestrator; older sync plugins ignore unknown fields.
+	// KnowledgeArticles ships per-section knowledge contributed by the plugin
+	// (e.g. an MCP server's `initialize._meta.knowledge_articles`). The sync
+	// plugin stores each as a KnowledgeArticles record with source
+	// "mcp-knowledge:<plugin>:<id>" so the prepare-path RAG can pull just the
+	// relevant section into [knowledge_context], instead of the full prose
+	// being injected via SystemPromptAddition into every system prompt.
+	// Optional; older sync plugins that don't recognize the field MUST ignore
+	// it — the upsert path is unaffected.
+	KnowledgeArticles []syncKnowledgeArticleEntry `json:"knowledge_articles,omitempty"`
+	KeepPlugins       []string                    `json:"keep_plugins,omitempty"`
+	// Hash is a SHA-256 digest of the plugin's actions + server_instructions
+	// + knowledge_articles. When the sync plugin receives the same hash on
+	// consecutive calls for a given plugin_name, it can skip the upsert (the
+	// data hasn't changed). Computed by the orchestrator; older sync plugins
+	// ignore unknown fields.
 	Hash string `json:"hash,omitempty"`
 	// IsContinuationBatch tells the sync plugin to skip the per-plugin
 	// pre-delete on this call. Set on batches 1..N of a chunked plugin sync
@@ -3228,7 +3248,15 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 			Parameters:  a.Parameters,
 		})
 	}
-	if len(entries) == 0 && cap.SystemPromptAddition == "" {
+	knowledge := make([]syncKnowledgeArticleEntry, 0, len(cap.KnowledgeArticles))
+	for _, ka := range cap.KnowledgeArticles {
+		if ka.ID == "" || ka.Title == "" || ka.Content == "" {
+			continue
+		}
+		knowledge = append(knowledge, syncKnowledgeArticleEntry(ka))
+	}
+
+	if len(entries) == 0 && cap.SystemPromptAddition == "" && len(knowledge) == 0 {
 		return nil
 	}
 
@@ -3238,9 +3266,10 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 	}
 
 	// Compute a deterministic hash over the full set of actions + server
-	// instructions. The sync plugin stores this per plugin and skips the
-	// upsert when unchanged — avoids redundant Weaviate writes on restart.
-	hash := capabilityHash(entries, cap.SystemPromptAddition)
+	// instructions + knowledge articles. The sync plugin stores this per
+	// plugin and skips the upsert when unchanged — avoids redundant Weaviate
+	// writes on restart.
+	hash := capabilityHash(entries, cap.SystemPromptAddition, knowledge)
 
 	// Batch actions into chunks to avoid oversized payloads that time out
 	// on the vector store side. Instructions and keep_plugins go on the
@@ -3265,7 +3294,13 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 			// via search_instructions. The prepare action excludes mcp:-sourced
 			// articles from [knowledge_context] to avoid duplication with the
 			// system prompt's SystemPromptAddition.
+			//
+			// Knowledge articles take a different route: stored under
+			// "mcp-knowledge:<plugin>:<id>" sources which are not filtered by
+			// the prepare path, so each section can be retrieved on-demand
+			// instead of injected into every system prompt.
 			payload.ServerInstructions = cap.SystemPromptAddition
+			payload.KnowledgeArticles = knowledge
 			payload.KeepPlugins = keepPlugins
 		}
 		b, err := json.Marshal(payload)
@@ -3287,10 +3322,11 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 	return nil
 }
 
-// capabilityHash computes a SHA-256 digest over a plugin's actions and server
-// instructions. The sync plugin stores this hash and skips re-syncing when it
-// matches — avoiding redundant Weaviate writes on restart.
-func capabilityHash(entries []syncActionEntry, serverInstructions string) string {
+// capabilityHash computes a SHA-256 digest over a plugin's actions, server
+// instructions and knowledge articles. The sync plugin stores this hash and
+// skips re-syncing when it matches — avoiding redundant Weaviate writes on
+// restart.
+func capabilityHash(entries []syncActionEntry, serverInstructions string, knowledge []syncKnowledgeArticleEntry) string {
 	h := sha256.New()
 	// Deterministic: entries are built in stable order from cap.Actions.
 	for _, e := range entries {
@@ -3301,7 +3337,16 @@ func capabilityHash(entries []syncActionEntry, serverInstructions string) string
 		}
 		h.Write([]byte{'\n'})
 	}
-	_, _ = fmt.Fprintf(h, "instructions:%s", serverInstructions)
+	_, _ = fmt.Fprintf(h, "instructions:%s\n", serverInstructions)
+	// Knowledge articles arrive in stable order from cap.KnowledgeArticles.
+	for _, ka := range knowledge {
+		_, _ = fmt.Fprintf(h, "knowledge:%s\n%s\n%s\n", ka.ID, ka.Title, ka.Content)
+		if len(ka.Tags) > 0 {
+			b, _ := json.Marshal(ka.Tags)
+			h.Write(b)
+		}
+		h.Write([]byte{'\n'})
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 

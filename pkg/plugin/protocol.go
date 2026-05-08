@@ -47,11 +47,12 @@ type Response struct {
 
 // CapabilitiesMsg carries the plugin's self-description.
 type CapabilitiesMsg struct {
-	Name                 string             `json:"name"`
-	Description          string             `json:"description"`
-	Actions              []ActionMsg        `json:"actions"`
-	SystemPromptAddition string             `json:"system_prompt_addition,omitempty"`
-	Glossary             []GlossaryEntryMsg `json:"glossary,omitempty"`
+	Name                 string                `json:"name"`
+	Description          string                `json:"description"`
+	Actions              []ActionMsg           `json:"actions"`
+	SystemPromptAddition string                `json:"system_prompt_addition,omitempty"`
+	Glossary             []GlossaryEntryMsg    `json:"glossary,omitempty"`
+	KnowledgeArticles    []KnowledgeArticleMsg `json:"knowledge_articles,omitempty"`
 }
 
 // GlossaryEntryMsg is a single term/definition pair provided by a plugin.
@@ -61,6 +62,17 @@ type GlossaryEntryMsg struct {
 	Category   string   `json:"category,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
 	Synonyms   []string `json:"synonyms,omitempty"`
+}
+
+// KnowledgeArticleMsg is one self-contained reference section a plugin
+// contributes for retrieval-time injection (rather than always-on inclusion
+// via SystemPromptAddition). The orchestrator forwards these to the vector
+// store via sync_actions's knowledge_articles[] field for per-section RAG.
+type KnowledgeArticleMsg struct {
+	ID      string   `json:"id"`
+	Title   string   `json:"title"`
+	Content string   `json:"content"`
+	Tags    []string `json:"tags,omitempty"`
 }
 
 // ActionMsg describes one action a plugin supports.
