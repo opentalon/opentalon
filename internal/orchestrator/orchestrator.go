@@ -1826,9 +1826,14 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 				out = append(out, m)
 				continue
 			}
-			// Keep assistant messages that follow a [plugin_output] — they summarize
-			// real tool results (the normal round-2 response after a tool call).
-			if i > 0 && strings.Contains(msgs[i-1].Content, "[plugin_output]") {
+			// Keep assistant messages with native tool calls (ToolCalls field set).
+			if len(m.ToolCalls) > 0 {
+				out = append(out, m)
+				continue
+			}
+			// Keep assistant messages that follow a tool result — they summarize
+			// real data (the normal round-2 response after a tool call).
+			if i > 0 && (strings.Contains(msgs[i-1].Content, "[plugin_output]") || msgs[i-1].Role == provider.RoleTool) {
 				out = append(out, m)
 				continue
 			}
