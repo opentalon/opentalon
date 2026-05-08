@@ -401,7 +401,13 @@ func (o *Orchestrator) handlePreparerFailure(prep ContentPreparerEntry, details 
 	if prep.FailOpen {
 		return nil
 	}
-	return &RunResult{Response: fmt.Sprintf("Request blocked: guard %s failed.", name)}
+	return &RunResult{
+		Response: fmt.Sprintf("Request blocked: guard %s failed.", name),
+		Metadata: map[string]string{
+			"type":       "error",
+			"error_code": "guard_blocked",
+		},
+	}
 }
 
 // runSTTPreparers transcribes audio/* files using STT-flagged preparers.
@@ -767,7 +773,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		resp := "Pipeline cancelled."
 		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
 		log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
-		return &RunResult{Response: resp}, nil
+		return &RunResult{
+			Response: resp,
+			Metadata: map[string]string{
+				"type":   "system",
+				"action": "pipeline_cancelled",
+			},
+		}, nil
 	}
 
 	content := userMessage
@@ -903,6 +915,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("empty content and no files, returning fallback")
 			return &RunResult{
 				Response: "I received your message but couldn't read its content. Could you try sending it as text?",
+				Metadata: map[string]string{
+					"type":       "error",
+					"error_code": "empty_content",
+				},
 			}, nil
 		}
 		if content == "" && len(files) > 0 {

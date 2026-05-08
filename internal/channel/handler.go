@@ -43,12 +43,16 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		if cfg.Verifier != nil {
 			token := msg.Metadata["profile_token"]
 			if token == "" {
-				return errorResponse(msg, "profile token required"), nil
+				return errorResponse(msg, "profile token required", map[string]string{
+					"type": "error", "error_code": "token_required",
+				}), nil
 			}
 			p, err := cfg.Verifier.Verify(ctx, token, msg.ChannelID)
 			if err != nil {
 				slog.Warn("profile verification failed", "error", err, "channel", msg.ChannelID)
-				return errorResponse(msg, "authentication failed"), nil
+				return errorResponse(msg, "authentication failed", map[string]string{
+					"type": "error", "error_code": "auth_failed",
+				}), nil
 			}
 			p.ChannelID = msg.ChannelID
 			ctx = profile.WithProfile(ctx, p)
@@ -61,7 +65,9 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 					slog.Warn("limit check failed", "error", lerr, "entity", p.EntityID)
 				} else if used >= p.Limit {
 					slog.Info("token limit exceeded", "entity", p.EntityID, "used", used, "limit", p.Limit, "window", p.LimitWindow)
-					return errorResponse(msg, "token limit reached, please try again later"), nil
+					return errorResponse(msg, "token limit reached, please try again later", map[string]string{
+						"type": "error", "error_code": "token_limit_exceeded",
+					}), nil
 				}
 			}
 
@@ -88,12 +94,10 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		response, inputForDisplay, resultMeta, err := cfg.Runner.Run(ctx, sessionKey, content, msg.Files...)
 		if err != nil {
 			logger.FromContext(ctx).Error("handler run failed", "error", err)
-			return pkg.OutboundMessage{
-				ConversationID: msg.ConversationID,
-				ThreadID:       msg.ThreadID,
-				Content:        friendlyError(err),
-				Metadata:       safeMetadata(msg.Metadata),
-			}, nil
+			errText, errCode := friendlyError(err)
+			return errorResponse(msg, errText, map[string]string{
+				"type": "error", "error_code": errCode,
+			}), nil
 		}
 		outContent := response
 		if outContent == "" {
@@ -118,12 +122,21 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	}
 }
 
-func errorResponse(msg pkg.InboundMessage, text string) pkg.OutboundMessage {
+func errorResponse(msg pkg.InboundMessage, text string, meta ...map[string]string) pkg.OutboundMessage {
+	outMeta := safeMetadata(msg.Metadata)
+	if len(meta) > 0 && meta[0] != nil {
+		if outMeta == nil {
+			outMeta = make(map[string]string)
+		}
+		for k, v := range meta[0] {
+			outMeta[k] = v
+		}
+	}
 	return pkg.OutboundMessage{
 		ConversationID: msg.ConversationID,
 		ThreadID:       msg.ThreadID,
 		Content:        text,
-		Metadata:       safeMetadata(msg.Metadata),
+		Metadata:       outMeta,
 	}
 }
 
@@ -140,17 +153,19 @@ func safeMetadata(m map[string]string) map[string]string {
 	return out
 }
 
-// friendlyError returns a user-facing message for known error conditions.
-func friendlyError(err error) string {
+// friendlyError returns a user-facing message and machine-readable error code
+// for known error conditions. The error_code is stable and can be used by
+// frontends for i18n translations.
+func friendlyError(err error) (message string, errorCode string) {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "maximum context length") || strings.Contains(msg, "context_length_exceeded"):
-		return "Sorry, this conversation has grown too long for the model to process. Please start a new conversation or clear the session."
+		return "Sorry, this conversation has grown too long for the model to process. Please start a new conversation or clear the session.", "context_length_exceeded"
 	case strings.Contains(msg, "rate_limit") || strings.Contains(msg, "429"):
-		return "I'm being rate-limited right now. Please try again in a moment."
+		return "I'm being rate-limited right now. Please try again in a moment.", "rate_limited"
 	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded"):
-		return "The request timed out. Please try again."
+		return "The request timed out. Please try again.", "timeout"
 	default:
-		return "Something went wrong processing your message. Please try again or start a new conversation."
+		return "Something went wrong processing your message. Please try again or start a new conversation.", "internal_error"
 	}
 }
