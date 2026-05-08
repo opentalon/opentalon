@@ -378,14 +378,15 @@ type ProviderConfig struct {
 }
 
 type ModelDefinition struct {
-	ID            string     `yaml:"id"`
-	Name          string     `yaml:"name"`
-	Reasoning     bool       `yaml:"reasoning"`
-	Features      []string   `yaml:"features"`
-	InputTypes    []string   `yaml:"input"`
-	ContextWindow int        `yaml:"context_window"`
-	MaxTokens     int        `yaml:"max_tokens"`
-	Cost          CostConfig `yaml:"cost"`
+	ID              string     `yaml:"id"`
+	Name            string     `yaml:"name"`
+	Reasoning       bool       `yaml:"reasoning"`
+	ReasoningEffort string     `yaml:"reasoning_effort"` // "low", "medium", "high" (OpenAI); empty = provider default
+	Features        []string   `yaml:"features"`
+	InputTypes      []string   `yaml:"input"`
+	ContextWindow   int        `yaml:"context_window"`
+	MaxTokens       int        `yaml:"max_tokens"`
+	Cost            CostConfig `yaml:"cost"`
 }
 
 type CostConfig struct {

@@ -33,13 +33,21 @@ func (f *fakeProvider) Stream(_ context.Context, req *provider.CompletionRequest
 	return nil, nil
 }
 
+func modelMap(models []provider.ModelInfo) map[string]provider.ModelInfo {
+	m := make(map[string]provider.ModelInfo, len(models))
+	for _, mi := range models {
+		m[mi.ID] = mi
+	}
+	return m
+}
+
 func TestDefaultModelClient_SupportsFeature_Reasoning(t *testing.T) {
 	fp := &fakeProvider{
 		models: []provider.ModelInfo{
 			{ID: "gpt-oss-120b", Features: []provider.Feature{provider.FeatureStreaming, provider.FeatureReasoning}},
 		},
 	}
-	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b"}
+	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
 
 	if !c.SupportsFeature(provider.FeatureReasoning) {
 		t.Error("expected SupportsFeature(FeatureReasoning) = true")
@@ -58,7 +66,7 @@ func TestDefaultModelClient_SupportsFeature_NoReasoning(t *testing.T) {
 			{ID: "some-model", Features: []provider.Feature{provider.FeatureStreaming}},
 		},
 	}
-	c := &defaultModelClient{provider: fp, model: "some-model"}
+	c := &defaultModelClient{provider: fp, model: "some-model", models: modelMap(fp.models)}
 
 	if c.SupportsFeature(provider.FeatureReasoning) {
 		t.Error("expected SupportsFeature(FeatureReasoning) = false")
@@ -69,7 +77,7 @@ func TestDefaultModelClient_Complete_PreservesReasoningFields(t *testing.T) {
 	fp := &fakeProvider{
 		models: []provider.ModelInfo{{ID: "gpt-oss-120b"}},
 	}
-	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b"}
+	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
 
 	req := &provider.CompletionRequest{
 		Messages:        []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
@@ -100,7 +108,7 @@ func TestDefaultModelClient_Stream_PreservesReasoningFields(t *testing.T) {
 	fp := &fakeProvider{
 		models: []provider.ModelInfo{{ID: "gpt-oss-120b"}},
 	}
-	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b"}
+	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
 
 	req := &provider.CompletionRequest{
 		Messages:        []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
@@ -117,5 +125,90 @@ func TestDefaultModelClient_Stream_PreservesReasoningFields(t *testing.T) {
 	}
 	if fp.streamReq.ReasoningEffort != "medium" {
 		t.Errorf("expected ReasoningEffort=medium, got %s", fp.streamReq.ReasoningEffort)
+	}
+}
+
+func TestDefaultModelClient_ApplyModelDefaults_MaxTokens(t *testing.T) {
+	fp := &fakeProvider{
+		models: []provider.ModelInfo{{ID: "gpt-oss-120b", MaxTokens: 32768}},
+	}
+	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
+
+	req := &provider.CompletionRequest{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}
+	_, _ = c.Complete(context.Background(), req)
+
+	if fp.lastReq.MaxTokens != 32768 {
+		t.Errorf("expected MaxTokens=32768 from model config, got %d", fp.lastReq.MaxTokens)
+	}
+}
+
+func TestDefaultModelClient_ApplyModelDefaults_MaxTokensNotOverridden(t *testing.T) {
+	fp := &fakeProvider{
+		models: []provider.ModelInfo{{ID: "gpt-oss-120b", MaxTokens: 32768}},
+	}
+	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
+
+	req := &provider.CompletionRequest{
+		Messages:  []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+		MaxTokens: 1024,
+	}
+	_, _ = c.Complete(context.Background(), req)
+
+	if fp.lastReq.MaxTokens != 1024 {
+		t.Errorf("expected MaxTokens=1024 (explicit), got %d", fp.lastReq.MaxTokens)
+	}
+}
+
+func TestDefaultModelClient_ApplyModelDefaults_ReasoningEffort(t *testing.T) {
+	fp := &fakeProvider{
+		models: []provider.ModelInfo{{ID: "gpt-oss-120b", ReasoningEffort: "high"}},
+	}
+	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
+
+	req := &provider.CompletionRequest{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}
+	_, _ = c.Complete(context.Background(), req)
+
+	if fp.lastReq.ReasoningEffort != "high" {
+		t.Errorf("expected ReasoningEffort=high from model config, got %s", fp.lastReq.ReasoningEffort)
+	}
+}
+
+func TestDefaultModelClient_ApplyModelDefaults_ReasoningEffortNotOverridden(t *testing.T) {
+	fp := &fakeProvider{
+		models: []provider.ModelInfo{{ID: "gpt-oss-120b", ReasoningEffort: "high"}},
+	}
+	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
+
+	req := &provider.CompletionRequest{
+		Messages:        []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+		ReasoningEffort: "low",
+	}
+	_, _ = c.Complete(context.Background(), req)
+
+	if fp.lastReq.ReasoningEffort != "low" {
+		t.Errorf("expected ReasoningEffort=low (explicit), got %s", fp.lastReq.ReasoningEffort)
+	}
+}
+
+func TestDefaultModelClient_ApplyModelDefaults_StreamInjects(t *testing.T) {
+	fp := &fakeProvider{
+		models: []provider.ModelInfo{{ID: "gpt-oss-120b", MaxTokens: 65536, ReasoningEffort: "high"}},
+	}
+	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
+
+	req := &provider.CompletionRequest{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}
+	_, _ = c.Stream(context.Background(), req)
+
+	if fp.streamReq.MaxTokens != 65536 {
+		t.Errorf("expected MaxTokens=65536 from model config in stream, got %d", fp.streamReq.MaxTokens)
+	}
+	if fp.streamReq.ReasoningEffort != "high" {
+		t.Errorf("expected ReasoningEffort=high from model config in stream, got %s", fp.streamReq.ReasoningEffort)
 	}
 }
