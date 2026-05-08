@@ -888,7 +888,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 						})
 						_ = sessions.AddMessage(sessionID, provider.Message{
 							Role:       provider.RoleTool,
-							Content:    toolResult.Content,
+							Content:    nativeToolContent(toolResult),
 							ToolCallID: call.ID,
 						})
 					} else {
@@ -1294,7 +1294,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				})
 				_ = sessions.AddMessage(sessionID, provider.Message{
 					Role:       provider.RoleTool,
-					Content:    toolResult.Content,
+					Content:    nativeToolContent(toolResult),
 					ToolCallID: call.ID,
 				})
 			} else {
@@ -2606,6 +2606,21 @@ func (o *Orchestrator) RunAction(ctx context.Context, plugin, action string, arg
 		return "", fmt.Errorf("%s.%s: %s", plugin, action, result.Error)
 	}
 	return result.Content, nil
+}
+
+// nativeToolContent returns the content string for a role=tool message in
+// the native tool-calling format.  When the plugin returned an error the
+// error text is used so the LLM can read and react to it instead of seeing
+// an empty string and hallucinating a response.  When structured content is
+// available it is appended so the LLM has the authoritative payload.
+func nativeToolContent(r ToolResult) string {
+	if r.Error != "" {
+		return "error: " + r.Error
+	}
+	if r.StructuredContent != "" {
+		return r.Content + "\n\n[structured]\n" + r.StructuredContent + "\n[/structured]"
+	}
+	return r.Content
 }
 
 func formatToolCallMessage(call ToolCall) string {
