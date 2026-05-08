@@ -1033,7 +1033,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// Downgrade reasoning effort on summary rounds: when tool results
 			// are already in session, the LLM only needs to format a response,
 			// not reason deeply about which tools to call. Saves ~10s per round.
-			if hasToolResults(sess.Messages) && req.ReasoningEffort == "high" {
+			// Check for empty too — applyModelDefaults sets it later, so at this
+			// point it's "" which would become "high" from config.
+			if hasToolResults(sess.Messages) && (req.ReasoningEffort == "high" || req.ReasoningEffort == "") {
 				req.ReasoningEffort = "medium"
 				log.Debug("reasoning effort downgraded for summary round", "round", i+1)
 			}
