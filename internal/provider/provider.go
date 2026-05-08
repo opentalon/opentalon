@@ -23,15 +23,30 @@ type Message struct {
 	Files   []MessageFile `json:"files,omitempty"`
 }
 
+// ToolDefinition describes a tool the LLM can call (native function calling).
+type ToolDefinition struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Parameters  map[string]interface{} `json:"parameters"` // JSON Schema object
+}
+
+// ToolCall represents a tool call returned by the LLM (native function calling).
+type ToolCall struct {
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`      // "plugin.action"
+	Arguments map[string]string `json:"arguments"` // parsed args
+}
+
 type CompletionRequest struct {
-	Model           string    `json:"model"`
-	Messages        []Message `json:"messages"`
-	MaxTokens       int       `json:"max_tokens,omitempty"`
-	Temperature     *float64  `json:"temperature,omitempty"`
-	Stream          bool      `json:"stream,omitempty"`
-	Reasoning       bool      `json:"reasoning,omitempty"`        // enable extended thinking / reasoning
-	BudgetTokens    int       `json:"budget_tokens,omitempty"`    // Anthropic: max tokens for thinking (0 = provider default)
-	ReasoningEffort string    `json:"reasoning_effort,omitempty"` // OpenAI: "low", "medium", "high" (0 = "medium")
+	Model           string           `json:"model"`
+	Messages        []Message        `json:"messages"`
+	Tools           []ToolDefinition `json:"tools,omitempty"` // native tool definitions; nil = text-based tool calling
+	MaxTokens       int              `json:"max_tokens,omitempty"`
+	Temperature     *float64         `json:"temperature,omitempty"`
+	Stream          bool             `json:"stream,omitempty"`
+	Reasoning       bool             `json:"reasoning,omitempty"`        // enable extended thinking / reasoning
+	BudgetTokens    int              `json:"budget_tokens,omitempty"`    // Anthropic: max tokens for thinking (0 = provider default)
+	ReasoningEffort string           `json:"reasoning_effort,omitempty"` // OpenAI: "low", "medium", "high" (0 = "medium")
 }
 
 type Usage struct {
@@ -40,10 +55,11 @@ type Usage struct {
 }
 
 type CompletionResponse struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
-	Content string `json:"content"`
-	Usage   Usage  `json:"usage"`
+	ID        string     `json:"id"`
+	Model     string     `json:"model"`
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // native tool calls from LLM; nil = check Content for text-based calls
+	Usage     Usage      `json:"usage"`
 }
 
 type StreamChunk struct {
