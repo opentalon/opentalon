@@ -1935,7 +1935,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n", cap.Name, cap.SystemPromptAddition, cap.Name)
 		}
 		for _, action := range visibleActions {
-			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
+			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, stripOutputSchema(action.Description))
 			for _, p := range action.Parameters {
 				req := ""
 				if p.Required {
@@ -2819,6 +2819,21 @@ func stripKnowledgeContext(s string) string {
 		return s
 	}
 	return strings.TrimSpace(s[:start] + s[end+len(close):])
+}
+
+// stripOutputSchema removes the "Output schema (return JSON matching this): {...}"
+// block from tool descriptions. These schemas are large (500-2000 chars each) and
+// the LLM doesn't need them to decide which tool to call or what args to pass —
+// the parameter list already covers that. Stripping them saves ~30-50% of the
+// tool description tokens in the system prompt.
+func stripOutputSchema(desc string) string {
+	if idx := strings.Index(desc, "\n\nOutput schema"); idx >= 0 {
+		return strings.TrimSpace(desc[:idx])
+	}
+	if idx := strings.Index(desc, "\nOutput schema"); idx >= 0 {
+		return strings.TrimSpace(desc[:idx])
+	}
+	return desc
 }
 
 func capabilitiesToPlannerInfo(caps []PluginCapability) []pipeline.CapabilityInfo {
