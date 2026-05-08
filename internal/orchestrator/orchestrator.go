@@ -356,6 +356,7 @@ type RunResult struct {
 	InputForDisplay string // optional: what we sent to the LLM (e.g. tool results), for channels that want to show it
 	ToolCalls       []ToolCall
 	Results         []ToolResult
+	Metadata        map[string]string // optional key-value pairs passed to the channel response (e.g. type=system for commands)
 }
 
 // InvokeStep is one step in a preparer-driven invoke (run this plugin action without LLM).
@@ -2063,6 +2064,10 @@ func (o *Orchestrator) runInvokeSteps(ctx context.Context, steps []InvokeStep) (
 				Response:  "Invoke step failed: " + toolResult.Error,
 				ToolCalls: toolCalls,
 				Results:   results,
+				Metadata: map[string]string{
+					"type":   "system",
+					"action": step.Action,
+				},
 			}, nil
 		}
 		lastContent = toolResult.Content
@@ -2075,6 +2080,10 @@ func (o *Orchestrator) runInvokeSteps(ctx context.Context, steps []InvokeStep) (
 		ToolCalls:       toolCalls,
 		Results:         results,
 		InputForDisplay: lastContent,
+		Metadata: map[string]string{
+			"type":   "system",
+			"action": steps[len(steps)-1].Action,
+		},
 	}, nil
 }
 

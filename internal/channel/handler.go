@@ -85,7 +85,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		if prep := pkg.GetContentPreparer(msg.ChannelID); prep != nil {
 			content = prep(ctx, content, cfg.RunAction, cfg.HasAction)
 		}
-		response, inputForDisplay, err := cfg.Runner.Run(ctx, sessionKey, content, msg.Files...)
+		response, inputForDisplay, resultMeta, err := cfg.Runner.Run(ctx, sessionKey, content, msg.Files...)
 		if err != nil {
 			logger.FromContext(ctx).Error("handler run failed", "error", err)
 			return pkg.OutboundMessage{
@@ -102,11 +102,18 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		if msg.ChannelID == "console" && inputForDisplay != "" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 			outContent = "Input to LLM:\n" + inputForDisplay + "\n\n---\n\nResponse:\n" + response
 		}
+		outMeta := safeMetadata(msg.Metadata)
+		for k, v := range resultMeta {
+			if outMeta == nil {
+				outMeta = make(map[string]string)
+			}
+			outMeta[k] = v
+		}
 		return pkg.OutboundMessage{
 			ConversationID: msg.ConversationID,
 			ThreadID:       msg.ThreadID,
 			Content:        outContent,
-			Metadata:       safeMetadata(msg.Metadata),
+			Metadata:       outMeta,
 		}, nil
 	}
 }

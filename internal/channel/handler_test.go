@@ -34,8 +34,8 @@ func (s *stubLimitChecker) TotalTokensSince(_ context.Context, _ string, _ time.
 // echoRunner returns the message content as the response.
 type echoRunner struct{}
 
-func (e *echoRunner) Run(_ context.Context, _ string, content string, _ ...pkg.FileAttachment) (string, string, error) {
-	return "echo: " + content, "", nil
+func (e *echoRunner) Run(_ context.Context, _ string, content string, _ ...pkg.FileAttachment) (string, string, map[string]string, error) {
+	return "echo: " + content, "", nil, nil
 }
 
 func newTestHandler(verifier ProfileVerifier, checker LimitChecker) pkg.MessageHandler {
