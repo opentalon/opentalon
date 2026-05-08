@@ -131,6 +131,7 @@ type OrchestratorOpts struct {
 	SummarizePrompt         string                        // empty = default English
 	SummarizeUpdatePrompt   string                        // empty = default English
 	PipelineEnabled         bool                          // when true, create Planner from llm
+	PlanTimeout             time.Duration                 // max time for planner LLM call; 0 = default 15s
 	PipelineConfig          pipeline.PipelineConfig
 	ContextWindow           int                 // model context window in tokens; 0 = no trimming
 	MaxConcurrentSessions   int                 // max sessions running in parallel; default 1 (sequential)
@@ -270,7 +271,7 @@ func NewWithRules(
 	}
 	var planner *pipeline.Planner
 	if opts.PipelineEnabled {
-		planner = pipeline.NewPlanner(&plannerLLMAdapter{llm: llm})
+		planner = pipeline.NewPlanner(&plannerLLMAdapter{llm: llm}, opts.PlanTimeout)
 	}
 	pipelineCfg := opts.PipelineConfig
 	if pipelineCfg.MaxStepRetries == 0 && pipelineCfg.StepTimeout == 0 {

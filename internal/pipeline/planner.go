@@ -57,7 +57,8 @@ type ParamInfo struct {
 
 // Planner uses an LLM to decompose user requests into pipeline steps.
 type Planner struct {
-	llm LLMClient
+	llm     LLMClient
+	timeout time.Duration
 }
 
 // PlanResult holds the planner's decision: "direct" (no steps, use normal agent loop)
@@ -69,8 +70,12 @@ type PlanResult struct {
 }
 
 // NewPlanner creates a planner backed by the given LLM client.
-func NewPlanner(llm LLMClient) *Planner {
-	return &Planner{llm: llm}
+// timeout controls how long the planner waits for an LLM response (0 = default 15s).
+func NewPlanner(llm LLMClient, timeout time.Duration) *Planner {
+	if timeout <= 0 {
+		timeout = DefaultPlanTimeout
+	}
+	return &Planner{llm: llm, timeout: timeout}
 }
 
 // planResponse is the JSON shape we expect from the LLM.
@@ -88,10 +93,9 @@ type planStepJSON struct {
 	DependsOn []string               `json:"depends_on"`
 }
 
-// PlanTimeout is the maximum time the planner waits for an LLM response.
-// The planner is a lightweight classifier (direct vs pipeline); if it takes
-// longer than this the agent loop handles the request instead.
-const PlanTimeout = 15 * time.Second
+// DefaultPlanTimeout is the maximum time the planner waits for an LLM response
+// when no custom timeout is configured.
+const DefaultPlanTimeout = 15 * time.Second
 
 // Plan asks the LLM whether the user's message requires a multi-step pipeline or a direct action.
 func (p *Planner) Plan(ctx context.Context, message string, capabilities []CapabilityInfo) (*PlanResult, error) {
@@ -103,7 +107,7 @@ func (p *Planner) Plan(ctx context.Context, message string, capabilities []Capab
 	slog.Debug("planner system prompt", "prompt", systemPrompt)
 	slog.Debug("planner user message", "message", message)
 
-	planCtx, cancel := context.WithTimeout(ctx, PlanTimeout)
+	planCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	resp, err := p.llm.Complete(planCtx, &CompletionRequest{

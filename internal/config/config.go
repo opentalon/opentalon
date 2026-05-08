@@ -328,6 +328,7 @@ type PipelineOrchestratorConfig struct {
 	Enabled        bool   `yaml:"enabled"`          // default false
 	MaxStepRetries int    `yaml:"max_step_retries"` // default 3
 	StepTimeout    string `yaml:"step_timeout"`     // Go duration, default "60s"
+	PlanTimeout    string `yaml:"plan_timeout"`     // Go duration, default "15s"; max time for planner LLM call
 }
 
 // SubprocessOrchestratorConfig enables subprocess (sub-agent) forking from the main agent loop.

@@ -26,7 +26,7 @@ func (c *capturingPlannerLLM) Complete(_ context.Context, req *CompletionRequest
 
 func TestPlannerReturnsDirect(t *testing.T) {
 	llm := &fakePlannerLLM{response: `{"type": "direct"}`}
-	planner := NewPlanner(llm)
+	planner := NewPlanner(llm, 0)
 
 	result, err := planner.Plan(context.Background(), "hello", nil)
 	if err != nil {
@@ -48,7 +48,7 @@ func TestPlannerReturnsPipeline(t *testing.T) {
 			{"id": "2", "name": "Create Jira issue", "plugin": "jira", "action": "create_issue", "args": {"title": "Fix error"}, "depends_on": ["1"]}
 		]
 	}`}
-	planner := NewPlanner(llm)
+	planner := NewPlanner(llm, 0)
 
 	result, err := planner.Plan(context.Background(), "investigate error 123 and create a ticket", nil)
 	if err != nil {
@@ -79,7 +79,7 @@ func TestPlannerReturnsPipeline(t *testing.T) {
 
 func TestPlannerHandlesMarkdownCodeFence(t *testing.T) {
 	llm := &fakePlannerLLM{response: "```json\n{\"type\": \"pipeline\", \"steps\": [{\"id\": \"1\", \"name\": \"Step one\", \"plugin\": \"p\", \"action\": \"a\"}]}\n```"}
-	planner := NewPlanner(llm)
+	planner := NewPlanner(llm, 0)
 
 	result, err := planner.Plan(context.Background(), "do things", nil)
 	if err != nil {
@@ -95,7 +95,7 @@ func TestPlannerHandlesMarkdownCodeFence(t *testing.T) {
 
 func TestPlannerFallsBackOnInvalidJSON(t *testing.T) {
 	llm := &fakePlannerLLM{response: "I'm not sure what you mean, here's some text"}
-	planner := NewPlanner(llm)
+	planner := NewPlanner(llm, 0)
 
 	result, err := planner.Plan(context.Background(), "something", nil)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestPlannerFallsBackOnInvalidJSON(t *testing.T) {
 
 func TestPlannerFallsBackOnEmptySteps(t *testing.T) {
 	llm := &fakePlannerLLM{response: `{"type": "pipeline", "steps": []}`}
-	planner := NewPlanner(llm)
+	planner := NewPlanner(llm, 0)
 
 	result, err := planner.Plan(context.Background(), "something", nil)
 	if err != nil {
@@ -121,7 +121,7 @@ func TestPlannerFallsBackOnEmptySteps(t *testing.T) {
 
 func TestPlannerAssignsDefaultIDs(t *testing.T) {
 	llm := &fakePlannerLLM{response: `{"type": "pipeline", "steps": [{"name": "Step A", "plugin": "p", "action": "a"}, {"name": "Step B", "plugin": "p", "action": "b"}]}`}
-	planner := NewPlanner(llm)
+	planner := NewPlanner(llm, 0)
 
 	result, err := planner.Plan(context.Background(), "do things", nil)
 	if err != nil {
@@ -254,7 +254,7 @@ func TestBuildPlannerPromptWithLanguage(t *testing.T) {
 func TestNarratePlanReturnsLLMResponse(t *testing.T) {
 	want := "I'll fetch error details from AppSignal, then create a Jira ticket. Want me to proceed?"
 	llm := &fakePlannerLLM{response: want}
-	planner := NewPlanner(llm)
+	planner := NewPlanner(llm, 0)
 	steps := []*Step{
 		{ID: "1", Name: "Get error details", Command: &PluginCommand{Plugin: "appsignal", Action: "get_error"}},
 		{ID: "2", Name: "Create Jira issue", Command: &PluginCommand{Plugin: "jira", Action: "create_issue"}},
@@ -270,7 +270,7 @@ func TestNarratePlanReturnsLLMResponse(t *testing.T) {
 
 func TestNarratePlanIncludesStepNamesInPrompt(t *testing.T) {
 	c := &capturingPlannerLLM{response: "ok"}
-	planner := NewPlanner(c)
+	planner := NewPlanner(c, 0)
 	steps := []*Step{
 		{ID: "1", Name: "Fetch metrics", Command: &PluginCommand{Plugin: "p", Action: "a"}},
 	}
@@ -291,7 +291,7 @@ func TestNarratePlanIncludesStepNamesInPrompt(t *testing.T) {
 
 func TestClassifyConfirmationApproved(t *testing.T) {
 	llm := &fakePlannerLLM{response: `{"approved": true}`}
-	planner := NewPlanner(llm)
+	planner := NewPlanner(llm, 0)
 	d, err := planner.ClassifyConfirmation(context.Background(), "yes please go ahead")
 	if err != nil {
 		t.Fatal(err)
@@ -303,7 +303,7 @@ func TestClassifyConfirmationApproved(t *testing.T) {
 
 func TestClassifyConfirmationRejected(t *testing.T) {
 	llm := &fakePlannerLLM{response: `{"approved": false}`}
-	planner := NewPlanner(llm)
+	planner := NewPlanner(llm, 0)
 	d, err := planner.ClassifyConfirmation(context.Background(), "no thanks cancel it")
 	if err != nil {
 		t.Fatal(err)
@@ -315,7 +315,7 @@ func TestClassifyConfirmationRejected(t *testing.T) {
 
 func TestClassifyConfirmationMarkdownWrapped(t *testing.T) {
 	llm := &fakePlannerLLM{response: "```json\n{\"approved\": true}\n```"}
-	planner := NewPlanner(llm)
+	planner := NewPlanner(llm, 0)
 	d, err := planner.ClassifyConfirmation(context.Background(), "sure go for it")
 	if err != nil {
 		t.Fatal(err)
@@ -327,7 +327,7 @@ func TestClassifyConfirmationMarkdownWrapped(t *testing.T) {
 
 func TestClassifyConfirmationMalformedJSON(t *testing.T) {
 	llm := &fakePlannerLLM{response: "I cannot determine that"}
-	planner := NewPlanner(llm)
+	planner := NewPlanner(llm, 0)
 	d, err := planner.ClassifyConfirmation(context.Background(), "sure")
 	if err == nil {
 		t.Error("expected error on malformed JSON")

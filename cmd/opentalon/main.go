@@ -428,6 +428,12 @@ func main() {
 			pipelineCfg.StepTimeout = d
 		}
 	}
+	var planTimeout time.Duration
+	if cfg.Orchestrator.Pipeline.PlanTimeout != "" {
+		if d, err := time.ParseDuration(cfg.Orchestrator.Pipeline.PlanTimeout); err == nil {
+			planTimeout = d
+		}
+	}
 	// Build profile verifier (nil when profiles.who_am_i.url is not configured).
 	var profileVerifier channel.ProfileVerifier
 	if cfg.Profiles.WhoAmI.URL != "" {
@@ -481,6 +487,7 @@ func main() {
 		SummarizePrompt:         cfg.State.Session.SummarizePrompt,
 		SummarizeUpdatePrompt:   cfg.State.Session.SummarizeUpdatePrompt,
 		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
+		PlanTimeout:             planTimeout,
 		PipelineConfig:          pipelineCfg,
 		ContextWindow:           contextWindow,
 		MaxConcurrentSessions:   cfg.Orchestrator.MaxConcurrentSessions,
