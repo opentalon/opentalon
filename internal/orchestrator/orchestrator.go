@@ -3241,12 +3241,7 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 		if ka.ID == "" || ka.Title == "" || ka.Content == "" {
 			continue
 		}
-		knowledge = append(knowledge, syncKnowledgeArticleEntry{
-			ID:      ka.ID,
-			Title:   ka.Title,
-			Content: ka.Content,
-			Tags:    ka.Tags,
-		})
+		knowledge = append(knowledge, syncKnowledgeArticleEntry(ka))
 	}
 
 	if len(entries) == 0 && cap.SystemPromptAddition == "" && len(knowledge) == 0 {

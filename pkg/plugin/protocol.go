@@ -47,12 +47,12 @@ type Response struct {
 
 // CapabilitiesMsg carries the plugin's self-description.
 type CapabilitiesMsg struct {
-	Name                 string                 `json:"name"`
-	Description          string                 `json:"description"`
-	Actions              []ActionMsg            `json:"actions"`
-	SystemPromptAddition string                 `json:"system_prompt_addition,omitempty"`
-	Glossary             []GlossaryEntryMsg     `json:"glossary,omitempty"`
-	KnowledgeArticles    []KnowledgeArticleMsg  `json:"knowledge_articles,omitempty"`
+	Name                 string                `json:"name"`
+	Description          string                `json:"description"`
+	Actions              []ActionMsg           `json:"actions"`
+	SystemPromptAddition string                `json:"system_prompt_addition,omitempty"`
+	Glossary             []GlossaryEntryMsg    `json:"glossary,omitempty"`
+	KnowledgeArticles    []KnowledgeArticleMsg `json:"knowledge_articles,omitempty"`
 }
 
 // GlossaryEntryMsg is a single term/definition pair provided by a plugin.
