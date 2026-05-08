@@ -806,12 +806,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	}
 
 	// Block B: Run planner to check if this requires a multi-step pipeline.
-	// Skip the planner when the preparer already narrowed to a small tool set —
-	// for 1-3 tools the request is clearly a single action, saving ~3s + ~12K tokens.
-	rtTools, relevantToolsActive := relevantToolsFromContext(ctx)
-	skipPlanner := relevantToolsActive && len(rtTools) > 0 && len(rtTools) <= 3
+	// The planner cost (~3s) is always worth it: even for single-action requests,
+	// it enables server-side tool execution which saves ~20s of failed LLM rounds.
 	singleStepSeeded := false
-	if o.planner != nil && !skipPlanner {
+	if o.planner != nil {
 		log.Debug("planner running", "session", sessionID, "message", content)
 		rtTools, rtSet := relevantToolsFromContext(ctx)
 		plannerCaps := filterCapabilitiesByRelevantTools(o.registry.ListCapabilities(), rtTools, rtSet)
@@ -885,8 +883,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				ctx = withExpectedTools(ctx, []*pipeline.Step{{ID: "direct"}})
 			}
 		}
-	} else if skipPlanner {
-		log.Debug("planner skipped: few relevant tools from preparer", "tools", len(rtTools))
 	}
 
 	// Guard: never send empty user content to the LLM (would cause API errors).
@@ -1660,8 +1656,10 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 	out := make([]provider.Message, 0, len(msgs))
 	for i, m := range msgs {
 		if m.Role == provider.RoleAssistant {
-			// Keep assistant messages that contain tool calls — they drove real actions.
-			if strings.Contains(m.Content, "[tool_call]") {
+			// Keep assistant messages that contain VALID tool calls — they drove real actions.
+			// Drop broken tool calls like "[tool_call] ." or "[tool_call] " that were
+			// malformed by the LLM; keeping them in history teaches bad patterns.
+			if strings.Contains(m.Content, "[tool_call]") && !isBrokenToolCall(m.Content) {
 				out = append(out, m)
 				continue
 			}
@@ -1681,6 +1679,32 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 		out = append(out, m)
 	}
 	return out
+}
+
+// isBrokenToolCall returns true if the message contains a [tool_call] block
+// that is malformed — e.g. "[tool_call] ." or "[tool_call] " without a valid
+// JSON body or plugin.action identifier. These are LLM mistakes that should
+// be stripped from history to avoid teaching bad patterns.
+func isBrokenToolCall(content string) bool {
+	idx := strings.Index(content, "[tool_call]")
+	if idx < 0 {
+		return false
+	}
+	after := strings.TrimSpace(content[idx+len("[tool_call]"):])
+	// A valid tool call must contain either JSON ({) or a plugin.action identifier (at least "a.b").
+	// Broken calls are typically just ".", empty, or a single word.
+	if after == "" || after == "." {
+		return true
+	}
+	// Check for the compact format: "[tool_call] plugin.action(args)" — valid if it has a dot before any paren.
+	// Check for JSON format: "[tool_call]\n{...}\n[/tool_call]" — valid if it has a brace.
+	if strings.ContainsAny(after, "{") {
+		return false // has JSON body
+	}
+	if strings.Contains(after, ".") && len(after) > 3 {
+		return false // has plugin.action
+	}
+	return true
 }
 
 // hasToolResults returns true if the session history contains at least one
