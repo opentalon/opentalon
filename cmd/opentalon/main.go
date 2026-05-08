@@ -846,16 +846,16 @@ type channelRunner struct {
 	orch *orchestrator.Orchestrator
 }
 
-func (r *channelRunner) Run(ctx context.Context, sessionKey, content string, files ...chanpkg.FileAttachment) (string, string, error) {
+func (r *channelRunner) Run(ctx context.Context, sessionKey, content string, files ...chanpkg.FileAttachment) (string, string, map[string]string, error) {
 	providerFiles := make([]provider.MessageFile, len(files))
 	for i, f := range files {
 		providerFiles[i] = provider.MessageFile{MimeType: f.MimeType, Data: f.Data}
 	}
 	result, err := r.orch.Run(ctx, sessionKey, content, providerFiles...)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
-	return result.Response, result.InputForDisplay, nil
+	return result.Response, result.InputForDisplay, result.Metadata, nil
 }
 
 // defaultModelClient wraps a provider and sets req.Model when empty.
