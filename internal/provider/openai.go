@@ -79,6 +79,7 @@ type oaiStreamOptions struct {
 type oaiRequest struct {
 	Model           string            `json:"model"`
 	Messages        []oaiMessage      `json:"messages"`
+	Tools           []oaiTool         `json:"tools,omitempty"`
 	MaxTokens       int               `json:"max_tokens,omitempty"`
 	Temperature     *float64          `json:"temperature,omitempty"`
 	Stream          bool              `json:"stream,omitempty"`
@@ -86,10 +87,34 @@ type oaiRequest struct {
 	ReasoningEffort string            `json:"reasoning_effort,omitempty"` // "low", "medium", "high" for reasoning models (gpt-oss-120b, o1, etc.)
 }
 
+type oaiTool struct {
+	Type     string          `json:"type"` // "function"
+	Function oaiToolFunction `json:"function"`
+}
+
+type oaiToolFunction struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Parameters  map[string]interface{} `json:"parameters,omitempty"`
+}
+
 type oaiMessage struct {
-	Role             string `json:"role"`
-	Content          string `json:"content"`
-	ReasoningContent string `json:"reasoning_content,omitempty"` // reasoning models return thinking here
+	Role             string        `json:"role"`
+	Content          string        `json:"content"`
+	ReasoningContent string        `json:"reasoning_content,omitempty"` // reasoning models return thinking here
+	ToolCalls        []oaiToolCall `json:"tool_calls,omitempty"`        // native tool calls from LLM
+	ToolCallID       string        `json:"tool_call_id,omitempty"`      // for role=tool messages
+}
+
+type oaiToolCall struct {
+	ID       string              `json:"id"`
+	Type     string              `json:"type"` // "function"
+	Function oaiToolCallFunction `json:"function"`
+}
+
+type oaiToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON string
 }
 
 type oaiResponse struct {
@@ -194,6 +219,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	}
 
 	content := ""
+	var toolCalls []ToolCall
 	if len(oaiResp.Choices) > 0 {
 		msg := oaiResp.Choices[0].Message
 		content = msg.Content
@@ -207,12 +233,32 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 				"content_len", len(content),
 			)
 		}
+
+		// Parse native tool calls from the response.
+		for _, tc := range msg.ToolCalls {
+			if tc.Type != "function" {
+				continue
+			}
+			args := make(map[string]string)
+			var rawArgs map[string]interface{}
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &rawArgs); err == nil {
+				for k, v := range rawArgs {
+					args[k] = fmt.Sprintf("%v", v)
+				}
+			}
+			toolCalls = append(toolCalls, ToolCall{
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: args,
+			})
+		}
 	}
 
 	return &CompletionResponse{
-		ID:      oaiResp.ID,
-		Model:   oaiResp.Model,
-		Content: content,
+		ID:        oaiResp.ID,
+		Model:     oaiResp.Model,
+		Content:   content,
+		ToolCalls: toolCalls,
 		Usage: Usage{
 			InputTokens:  oaiResp.Usage.PromptTokens,
 			OutputTokens: oaiResp.Usage.CompletionTokens,
@@ -339,6 +385,14 @@ func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error
 		if oai.ReasoningEffort == "" {
 			oai.ReasoningEffort = "medium" // default effort
 		}
+	}
+	// Native tool calling: pass tool definitions so the LLM returns
+	// structured tool_calls instead of text-based [tool_call] blocks.
+	for _, t := range req.Tools {
+		oai.Tools = append(oai.Tools, oaiTool{
+			Type:     "function",
+			Function: oaiToolFunction(t),
+		})
 	}
 	return oai, nil
 }

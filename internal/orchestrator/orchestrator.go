@@ -971,6 +971,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			req.Model = profileModel
 		}
 
+		// Native tool calling: pass tool definitions so the LLM returns
+		// structured tool_calls instead of text-based [tool_call] blocks.
+		// Only on rounds where we expect tool calls (not after tool results
+		// when the LLM should just summarize).
+		if o.supportsNativeTools() && !hasToolResults(sess.Messages) {
+			req.Tools = o.buildToolDefinitions(ctx)
+			log.Debug("native tools attached", "count", len(req.Tools))
+		}
+
 		// Enable reasoning when the provider supports it. Reasoning
 		// helps the model decide which tools to call instead of narrating.
 		if o.supportsReasoning() {
@@ -1007,7 +1016,23 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		totalInputTokens += resp.Usage.InputTokens
 		totalOutputTokens += resp.Usage.OutputTokens
 
-		calls := o.parser.Parse(resp.Content)
+		// Prefer native tool calls from the API response over text-based parsing.
+		var calls []ToolCall
+		if len(resp.ToolCalls) > 0 {
+			for _, tc := range resp.ToolCalls {
+				plugin, action, _ := parseToolName(tc.Name)
+				calls = append(calls, ToolCall{
+					ID:      tc.ID,
+					Plugin:  plugin,
+					Action:  action,
+					Args:    tc.Arguments,
+					FromLLM: true,
+				})
+			}
+			log.Debug("native tool calls received", "count", len(calls))
+		} else {
+			calls = o.parser.Parse(resp.Content)
+		}
 		if calls == nil {
 			// Detect hallucinated results: the LLM fabricated a response with
 			// template variables (e.g. "{{plugin_output.pagination.total}}")
@@ -1228,6 +1253,70 @@ type ReasoningProvider interface {
 func (o *Orchestrator) supportsReasoning() bool {
 	rp, ok := o.llm.(ReasoningProvider)
 	return ok && rp.SupportsFeature(provider.FeatureReasoning)
+}
+
+// supportsNativeTools returns true if the LLM provider supports native function calling
+// (structured tools parameter in the request, structured tool_calls in the response).
+func (o *Orchestrator) supportsNativeTools() bool {
+	rp, ok := o.llm.(ReasoningProvider)
+	return ok && rp.SupportsFeature(provider.FeatureTools)
+}
+
+// buildToolDefinitions converts the visible plugin actions into provider.ToolDefinition
+// for native function calling. Only includes actions visible to the current profile.
+func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.ToolDefinition {
+	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
+	preparerAction := make(map[string]bool)
+	for _, prep := range o.preparers {
+		preparerAction[prep.Plugin+"."+prep.Action] = true
+	}
+	for _, g := range o.guards {
+		preparerAction[g.Plugin+"."+g.Action] = true
+	}
+
+	relevantToolSet := make(map[string]bool)
+	rtTools, relevantToolsActive := relevantToolsFromContext(ctx)
+	for _, t := range rtTools {
+		relevantToolSet[t] = true
+	}
+
+	var tools []provider.ToolDefinition
+	for _, cap := range o.registry.ListCapabilities() {
+		if !o.pluginAllowed(cap, allowedPlugins) {
+			continue
+		}
+		for _, action := range cap.Actions {
+			if preparerAction[cap.Name+"."+action.Name] || action.UserOnly {
+				continue
+			}
+			if relevantToolsActive && !relevantToolSet[cap.Name+"."+action.Name] {
+				continue
+			}
+			// Build JSON Schema for parameters.
+			properties := make(map[string]interface{})
+			var required []string
+			for _, p := range action.Parameters {
+				properties[p.Name] = map[string]interface{}{
+					"type":        "string",
+					"description": p.Description,
+				}
+				if p.Required {
+					required = append(required, p.Name)
+				}
+			}
+			tools = append(tools, provider.ToolDefinition{
+				Name:        cap.Name + "." + action.Name,
+				Description: stripOutputSchema(action.Description),
+				Parameters: map[string]interface{}{
+					"type":                 "object",
+					"properties":           properties,
+					"required":             required,
+					"additionalProperties": false,
+				},
+			})
+		}
+	}
+	return tools
 }
 
 // retryToolCallsEnabled returns true if the model opts in to planner-informed
