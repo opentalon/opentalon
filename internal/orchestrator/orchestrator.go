@@ -2721,17 +2721,65 @@ func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.Completi
 // are already in the system prompt via SystemPromptAddition, so the
 // preparer-injected knowledge_context is redundant. Stripping all turns
 // prevents both historical accumulation and current-turn duplication.
+//
+// Also deduplicates knowledge article plugin outputs: when ask_knowledge
+// returns the same MCP server instructions block repeatedly (~5KB each),
+// subsequent occurrences are replaced with a short stub to save context.
 func appendStrippingAllKC(dst []provider.Message, msgs []provider.Message) []provider.Message {
+	seenKnowledge := make(map[uint64]bool)
 	for _, m := range msgs {
 		if m.Role == provider.RoleUser {
 			stripped := stripKnowledgeContext(m.Content)
 			if stripped != m.Content {
 				m = provider.Message{Role: m.Role, Content: stripped, Files: m.Files}
 			}
+			// Deduplicate knowledge article plugin outputs.
+			m = deduplicateKnowledgeOutput(m, seenKnowledge)
 		}
 		dst = append(dst, m)
 	}
 	return dst
+}
+
+// deduplicateKnowledgeOutput replaces repeated knowledge article plugin
+// outputs with a short stub. Each unique knowledge block is kept on first
+// occurrence; subsequent identical blocks are replaced to save context.
+func deduplicateKnowledgeOutput(m provider.Message, seen map[uint64]bool) provider.Message {
+	const marker = "## Knowledge Articles"
+	const openTag = "[plugin_output]"
+	const closeTag = "[/plugin_output]"
+	if !strings.Contains(m.Content, marker) {
+		return m
+	}
+	// Extract the knowledge section between [plugin_output] tags.
+	start := strings.Index(m.Content, openTag)
+	end := strings.LastIndex(m.Content, closeTag)
+	if start < 0 || end < 0 || end <= start {
+		return m
+	}
+	body := m.Content[start+len(openTag) : end]
+	h := fnv64a(body)
+	if !seen[h] {
+		seen[h] = true
+		return m
+	}
+	// Replace duplicate knowledge output with a short stub.
+	replaced := m.Content[:start] +
+		"[plugin_output]\n(Same knowledge articles as a previous lookup — see above.)\n[/plugin_output]" +
+		m.Content[end+len(closeTag):]
+	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files}
+}
+
+// fnv64a computes a fast FNV-1a hash for deduplication.
+func fnv64a(s string) uint64 {
+	const offset64 = 14695981039346656037
+	const prime64 = 1099511628211
+	h := uint64(offset64)
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= prime64
+	}
+	return h
 }
 
 // stripKnowledgeContext removes [knowledge_context]...[/knowledge_context] blocks
