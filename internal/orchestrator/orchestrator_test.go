@@ -3366,3 +3366,44 @@ func TestPlannerError_RetryEnabledWithoutPanic(t *testing.T) {
 		t.Errorf("Response = %q, want agent fallback", result.Response)
 	}
 }
+
+func TestDeduplicateKnowledgeOutput(t *testing.T) {
+	knowledgeBlock := "[plugin_output]\n## Knowledge Articles\n\n### 1. timly MCP server instructions\nSource: mcp:timly\n## timly\nTimly MCP server. Read/write operations...\n\n## Available Tools\n\n### 1. timly.timly__list-items\nList items in your account.\n[/plugin_output]"
+
+	msgs := []provider.Message{
+		{Role: provider.RoleUser, Content: "how many items?"},
+		{Role: provider.RoleAssistant, Content: "[tool_call] weaviate.ask_knowledge(query=items)"},
+		{Role: provider.RoleUser, Content: knowledgeBlock},
+		{Role: provider.RoleAssistant, Content: "[tool_call] timly.timly__list-items"},
+		{Role: provider.RoleUser, Content: "[plugin_output]\nItems: 370 total\n[/plugin_output]"},
+		{Role: provider.RoleAssistant, Content: "You have 370 items."},
+		{Role: provider.RoleUser, Content: "show me categories"},
+		{Role: provider.RoleAssistant, Content: "[tool_call] weaviate.ask_knowledge(query=categories)"},
+		{Role: provider.RoleUser, Content: knowledgeBlock}, // duplicate
+		{Role: provider.RoleAssistant, Content: "[tool_call] timly.timly__list-categories"},
+	}
+
+	var dst []provider.Message
+	deduped := appendStrippingAllKC(dst, msgs)
+
+	// First knowledge output should be preserved.
+	if !strings.Contains(deduped[2].Content, "## Knowledge Articles") {
+		t.Error("first knowledge output should be preserved")
+	}
+	if !strings.Contains(deduped[2].Content, "timly MCP server") {
+		t.Error("first knowledge output should contain full content")
+	}
+
+	// Second (duplicate) should be replaced with stub.
+	if strings.Contains(deduped[8].Content, "timly MCP server") {
+		t.Error("duplicate knowledge output should be replaced with stub")
+	}
+	if !strings.Contains(deduped[8].Content, "Same knowledge articles") {
+		t.Errorf("duplicate should contain stub text, got: %s", deduped[8].Content)
+	}
+
+	// Non-knowledge plugin outputs should be untouched.
+	if !strings.Contains(deduped[4].Content, "Items: 370 total") {
+		t.Error("non-knowledge plugin output should be preserved")
+	}
+}
