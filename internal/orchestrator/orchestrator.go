@@ -863,8 +863,26 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				if toolResult.Error == "" {
 					// Seed session: user message, assistant tool call, tool result.
 					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
-					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(call)})
-					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(toolResult)})
+					if o.supportsNativeTools() {
+						// Native format: assistant with tool_calls + tool result with tool_call_id.
+						_ = sessions.AddMessage(sessionID, provider.Message{
+							Role: provider.RoleAssistant,
+							ToolCalls: []provider.ToolCall{{
+								ID:        call.ID,
+								Name:      call.Plugin + "." + call.Action,
+								Arguments: call.Args,
+							}},
+						})
+						_ = sessions.AddMessage(sessionID, provider.Message{
+							Role:       provider.RoleTool,
+							Content:    toolResult.Content,
+							ToolCallID: call.ID,
+						})
+					} else {
+						// Text-based format: assistant + user with [plugin_output].
+						_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(call)})
+						_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(toolResult)})
+					}
 					singleStepSeeded = true
 					log.Debug("single-step pipeline: tool result seeded, entering agent loop for summary")
 				} else {
@@ -1838,6 +1856,10 @@ func isBrokenToolCall(content string) bool {
 func hasToolResults(msgs []provider.Message) bool {
 	for _, m := range msgs {
 		if strings.Contains(m.Content, "[plugin_output]") {
+			return true
+		}
+		// Native tool calling: role=tool messages are tool results.
+		if m.Role == provider.RoleTool {
 			return true
 		}
 	}
