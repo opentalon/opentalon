@@ -138,16 +138,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Build model lookup map for defaultModelClient.
+	modelMap := make(map[string]provider.ModelInfo)
+	for _, m := range prov.Models() {
+		modelMap[m.ID] = m
+	}
+
 	// LLM client that sets default model when orchestrator doesn't
-	llm := &defaultModelClient{provider: prov, model: defaultModel}
+	llm := &defaultModelClient{provider: prov, model: defaultModel, models: modelMap}
 
 	// Look up context window for the default model.
 	var contextWindow int
-	for _, m := range prov.Models() {
-		if m.ID == defaultModel {
-			contextWindow = m.ContextWindow
-			break
-		}
+	if m, ok := modelMap[defaultModel]; ok {
+		contextWindow = m.ContextWindow
 	}
 
 	dataDir := cfg.State.DataDir
@@ -859,9 +862,12 @@ func (r *channelRunner) Run(ctx context.Context, sessionKey, content string, fil
 }
 
 // defaultModelClient wraps a provider and sets req.Model when empty.
+// It also injects model-level defaults (MaxTokens, ReasoningEffort)
+// from the provider's model config when the request doesn't set them.
 type defaultModelClient struct {
 	provider provider.Provider
 	model    string
+	models   map[string]provider.ModelInfo
 }
 
 func (c *defaultModelClient) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
@@ -870,6 +876,7 @@ func (c *defaultModelClient) Complete(ctx context.Context, req *provider.Complet
 		cp.Model = c.model
 		req = &cp
 	}
+	c.applyModelDefaults(req)
 	return c.provider.Complete(ctx, req)
 }
 
@@ -882,7 +889,23 @@ func (c *defaultModelClient) Stream(ctx context.Context, req *provider.Completio
 		cp.Stream = true
 		req = &cp
 	}
+	c.applyModelDefaults(req)
 	return c.provider.Stream(ctx, req)
+}
+
+// applyModelDefaults injects MaxTokens and ReasoningEffort from the model
+// config when the request doesn't already set them.
+func (c *defaultModelClient) applyModelDefaults(req *provider.CompletionRequest) {
+	m, ok := c.models[req.Model]
+	if !ok {
+		return
+	}
+	if req.MaxTokens == 0 && m.MaxTokens > 0 {
+		req.MaxTokens = m.MaxTokens
+	}
+	if req.ReasoningEffort == "" && m.ReasoningEffort != "" {
+		req.ReasoningEffort = m.ReasoningEffort
+	}
 }
 
 // SupportsFeature delegates to the underlying provider so the orchestrator
@@ -1044,15 +1067,16 @@ func buildProvider(cfg *config.Config) (provider.Provider, string, error) {
 			features[i] = provider.Feature(f)
 		}
 		models = append(models, provider.ModelInfo{
-			ID:            m.ID,
-			Name:          m.Name,
-			ProviderID:    providerID,
-			Reasoning:     m.Reasoning,
-			InputTypes:    m.InputTypes,
-			ContextWindow: m.ContextWindow,
-			MaxTokens:     m.MaxTokens,
-			Cost:          provider.ModelCost{Input: m.Cost.Input, Output: m.Cost.Output},
-			Features:      features,
+			ID:              m.ID,
+			Name:            m.Name,
+			ProviderID:      providerID,
+			Reasoning:       m.Reasoning,
+			ReasoningEffort: m.ReasoningEffort,
+			InputTypes:      m.InputTypes,
+			ContextWindow:   m.ContextWindow,
+			MaxTokens:       m.MaxTokens,
+			Cost:            provider.ModelCost{Input: m.Cost.Input, Output: m.Cost.Output},
+			Features:        features,
 		})
 	}
 
