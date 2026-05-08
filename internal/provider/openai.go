@@ -380,6 +380,15 @@ func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error
 		if len(m.Files) > 0 {
 			return oaiRequest{}, fmt.Errorf("provider %s does not support file attachments", p.id)
 		}
+		// Skip malformed messages from old sessions:
+		// - role=tool without tool_call_id (OpenAI API rejects these)
+		// - role=assistant with empty content and no tool calls (orphans)
+		if m.Role == RoleTool && m.ToolCallID == "" {
+			continue
+		}
+		if m.Role == RoleAssistant && m.Content == "" && len(m.ToolCalls) == 0 {
+			continue
+		}
 		oMsg := oaiMessage{Role: string(m.Role), Content: m.Content}
 		// Native tool calling: pass tool_call_id for tool result messages.
 		if m.Role == RoleTool && m.ToolCallID != "" {
