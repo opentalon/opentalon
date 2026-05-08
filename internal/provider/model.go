@@ -59,16 +59,15 @@ type ModelCost struct {
 }
 
 type ModelInfo struct {
-	ID              string    `json:"id" yaml:"id"`
-	Name            string    `json:"name" yaml:"name"`
-	ProviderID      string    `json:"provider_id" yaml:"provider_id"`
-	Reasoning       bool      `json:"reasoning" yaml:"reasoning"`
-	ReasoningEffort string    `json:"reasoning_effort" yaml:"reasoning_effort"` // "low", "medium", "high"
-	InputTypes      []string  `json:"input" yaml:"input"`
-	ContextWindow   int       `json:"context_window" yaml:"context_window"`
-	MaxTokens       int       `json:"max_tokens" yaml:"max_tokens"`
-	Cost            ModelCost `json:"cost" yaml:"cost"`
-	Features        []Feature `json:"features" yaml:"features"`
+	ID            string    `json:"id" yaml:"id"`
+	Name          string    `json:"name" yaml:"name"`
+	ProviderID    string    `json:"provider_id" yaml:"provider_id"`
+	Reasoning     bool      `json:"reasoning" yaml:"reasoning"`
+	InputTypes    []string  `json:"input" yaml:"input"`
+	ContextWindow int       `json:"context_window" yaml:"context_window"`
+	MaxTokens     int       `json:"max_tokens" yaml:"max_tokens"`
+	Cost          ModelCost `json:"cost" yaml:"cost"`
+	Features      []Feature `json:"features" yaml:"features"`
 }
 
 func (m ModelInfo) Ref() ModelRef {
