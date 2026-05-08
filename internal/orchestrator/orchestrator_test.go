@@ -3254,7 +3254,7 @@ func TestBuildToolCallNudgeWithConcreteStep(t *testing.T) {
 			Command: &pipeline.PluginCommand{
 				Plugin: "timly",
 				Action: "timly__list-person-types",
-				Args:   map[string]string{},
+				Args:   map[string]any{},
 			},
 		},
 	}
@@ -3284,7 +3284,7 @@ func TestBuildToolCallNudgeWithArgs(t *testing.T) {
 			Command: &pipeline.PluginCommand{
 				Plugin: "timly",
 				Action: "timly__list-items",
-				Args:   map[string]string{"query": "status:active", "per_page": "1"},
+				Args:   map[string]any{"query": "status:active", "per_page": "1"},
 			},
 		},
 	}
@@ -3305,7 +3305,7 @@ func TestPlannerStepsToInvoke(t *testing.T) {
 			Command: &pipeline.PluginCommand{
 				Plugin: "timly",
 				Action: "timly__list-person-types",
-				Args:   map[string]string{"per_page": "1"},
+				Args:   map[string]any{"per_page": "1"},
 			},
 		},
 	}

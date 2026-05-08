@@ -172,9 +172,13 @@ func parsePlanResponse(content string) (*PlanResult, error) {
 		if id == "" {
 			id = fmt.Sprintf("%d", i+1)
 		}
-		args := make(map[string]string, len(s.Args))
-		for k, v := range s.Args {
-			args[k] = fmt.Sprintf("%v", v)
+		// Pass the planner's args through unchanged; types are preserved
+		// (numbers stay float64, strings carry placeholder text). Stringification
+		// happens at the orchestrator/pipeline-runner boundary where typed-aware
+		// rendering avoids the float→scientific-notation pitfall on large IDs.
+		args := s.Args
+		if args == nil {
+			args = map[string]any{}
 		}
 		steps[i] = &Step{
 			ID:   id,

@@ -47,7 +47,7 @@ func TestFormatForConfirmation(t *testing.T) {
 			Command: &PluginCommand{
 				Plugin: "appsignal",
 				Action: "get_error",
-				Args:   map[string]string{"error_id": "123"},
+				Args:   map[string]any{"error_id": "123"},
 			},
 		},
 		{
@@ -56,7 +56,7 @@ func TestFormatForConfirmation(t *testing.T) {
 			Command: &PluginCommand{
 				Plugin: "jira",
 				Action: "create_issue",
-				Args:   map[string]string{"title": "Fix error"},
+				Args:   map[string]any{"title": "Fix error"},
 			},
 			DependsOn: []string{"1"},
 		},
