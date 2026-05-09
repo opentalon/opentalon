@@ -815,7 +815,7 @@ type providerDebugSink struct {
 	writer *store.DebugEventWriter
 }
 
-func (s *providerDebugSink) Submit(ctx context.Context, e provider.DebugEvent) {
+func (s *providerDebugSink) Submit(_ context.Context, e provider.DebugEvent) {
 	s.writer.Submit(store.DebugEvent{
 		SessionID: e.SessionID,
 		TraceID:   e.TraceID,

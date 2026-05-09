@@ -29,7 +29,6 @@ func TestDebugEventStore_InsertAndCount(t *testing.T) {
 			SessionID: "sess-A",
 			TraceID:   "trace-A",
 			Direction: "request",
-			URL:       "https://example.invalid/v1/chat/completions",
 			Body:      `{"model":"x"}`,
 			Timestamp: time.Now(),
 		})

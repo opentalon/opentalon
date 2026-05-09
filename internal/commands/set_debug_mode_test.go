@@ -9,12 +9,10 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
-// stubCounter satisfies DebugEventCounter for status-reply tests.
-type stubCounter struct{ n int64 }
+// counterFunc adapts a plain func to DebugEventCounter for status-reply tests.
+type counterFunc func() (int64, error)
 
-func (s *stubCounter) CountForSession(ctx context.Context, _ string) (int64, error) {
-	return s.n, nil
-}
+func (f counterFunc) CountForSession(_ context.Context, _ string) (int64, error) { return f() }
 
 func newDebugTestExecutor(t *testing.T) (*Executor, *state.SessionStore) {
 	t.Helper()
@@ -100,7 +98,7 @@ func TestSetDebugMode_ExplicitOnOff(t *testing.T) {
 
 func TestSetDebugMode_StatusWithCounter(t *testing.T) {
 	exec, sessions := newDebugTestExecutor(t)
-	exec.WithDebugEventCounter(&stubCounter{n: 7})
+	exec.WithDebugEventCounter(counterFunc(func() (int64, error) { return 7, nil }))
 
 	// Turn debug on first.
 	_ = exec.Execute(context.Background(), orchestrator.ToolCall{

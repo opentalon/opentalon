@@ -433,37 +433,25 @@ func (e *Executor) setDebugMode(ctx context.Context, call orchestrator.ToolCall)
 		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("persist debug flag: %v", err)}
 	}
 
+	// Reply is honest about persistence: the counter being non-nil is the
+	// proxy for "state store + async writer are wired", so sessions that
+	// only get console promotion say so explicitly instead of promising a
+	// table that's not being written.
+	persistenceWired := e.debugEventCounter != nil
 	if enable {
-		return orchestrator.ToolResult{
-			CallID:  call.ID,
-			Content: "Debug mode ON. " + e.debugCaptureScopeText() + " Send /debug off to stop.",
+		body := "Debug mode ON. The next LLM exchange will be logged at INFO level on stderr"
+		if persistenceWired {
+			body += " and persisted to the ai_debug_events table."
+		} else {
+			body += " (no state store configured, so events are not persisted)."
 		}
+		return orchestrator.ToolResult{CallID: call.ID, Content: body + " Send /debug off to stop."}
 	}
-	return orchestrator.ToolResult{
-		CallID:  call.ID,
-		Content: "Debug mode OFF." + e.debugRetentionTrailerText(),
+	body := "Debug mode OFF."
+	if persistenceWired {
+		body += " Already-captured events stay in ai_debug_events until they age out."
 	}
-}
-
-// debugCaptureScopeText describes what /debug-on actually captures, honest
-// about whether persistence is wired. The Counter being non-nil is the
-// proxy for "state-store + async writer are configured" — sessions that
-// only get console promotion say so explicitly.
-func (e *Executor) debugCaptureScopeText() string {
-	if e.debugEventCounter == nil {
-		return "The next LLM exchange will be logged at INFO level on stderr (no state store configured, so events are not persisted)."
-	}
-	return "The next LLM exchange will be logged at INFO level on stderr and persisted to the ai_debug_events table."
-}
-
-// debugRetentionTrailerText is the second sentence of the OFF reply: only
-// meaningful when persistence is wired, otherwise omitted to avoid the
-// false promise of historical retention.
-func (e *Executor) debugRetentionTrailerText() string {
-	if e.debugEventCounter == nil {
-		return ""
-	}
-	return " Already-captured events stay in ai_debug_events until they age out."
+	return orchestrator.ToolResult{CallID: call.ID, Content: body}
 }
 
 func (e *Executor) debugStatusReply(ctx context.Context, callID, sessionID string, on bool) orchestrator.ToolResult {

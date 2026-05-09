@@ -27,28 +27,14 @@ type DebugEventWriter struct {
 	done     chan struct{}
 }
 
-// debugWriterBufferSize is intentionally hardcoded. /debug is opt-in per
-// session and the worker drains at ~1k inserts/s on Postgres — 100 is
-// plenty for any realistic concurrent-debug-session load, and exposing a
-// knob nobody will turn is just configuration surface area to maintain.
-const debugWriterBufferSize = 100
-
-// NewDebugEventWriter constructs a writer. The caller must call Start()
-// once and Stop() during shutdown.
+// NewDebugEventWriter constructs a writer with a buffer cap of 100 — plenty
+// for any realistic /debug load (opt-in per session, worker drains at
+// ~1k/s on Postgres). The caller must call Start() once and Stop() during
+// shutdown.
 func NewDebugEventWriter(store *DebugEventStore) *DebugEventWriter {
-	return newDebugEventWriterSized(store, debugWriterBufferSize)
-}
-
-// newDebugEventWriterSized is the test-internal constructor that lets
-// drop-policy and flush tests pin a tiny buffer; production code uses
-// NewDebugEventWriter with the constant.
-func newDebugEventWriterSized(store *DebugEventStore, bufferSize int) *DebugEventWriter {
-	if bufferSize <= 0 {
-		bufferSize = debugWriterBufferSize
-	}
 	return &DebugEventWriter{
 		store: store,
-		ch:    make(chan DebugEvent, bufferSize),
+		ch:    make(chan DebugEvent, 100),
 		done:  make(chan struct{}),
 	}
 }
