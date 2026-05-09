@@ -3,8 +3,10 @@ package channel
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 	"github.com/opentalon/opentalon/pkg/channel/channelpb"
@@ -196,10 +198,10 @@ func inboundFromProto(pb *channelpb.InboundMessage) pkg.InboundMessage {
 
 func outboundToProto(m pkg.OutboundMessage) *channelpb.OutboundMessage {
 	pb := &channelpb.OutboundMessage{
-		ConversationId: m.ConversationID,
-		ThreadId:       m.ThreadID,
-		Content:        m.Content,
-		Metadata:       m.Metadata,
+		ConversationId: ensureValidUTF8(m.ConversationID),
+		ThreadId:       ensureValidUTF8(m.ThreadID),
+		Content:        ensureValidUTF8(m.Content),
+		Metadata:       ensureValidUTF8Map(m.Metadata),
 	}
 	for _, f := range m.Files {
 		pb.Files = append(pb.Files, &channelpb.FileAttachment{
@@ -210,6 +212,27 @@ func outboundToProto(m pkg.OutboundMessage) *channelpb.OutboundMessage {
 		})
 	}
 	return pb
+}
+
+// ensureValidUTF8 replaces invalid UTF-8 sequences with U+FFFD.
+// gRPC proto marshaling rejects string fields with invalid UTF-8.
+func ensureValidUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "\ufffd")
+}
+
+func ensureValidUTF8Map(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	for k, v := range m {
+		if !utf8.ValidString(v) {
+			m[k] = strings.ToValidUTF8(v, "\ufffd")
+		}
+	}
+	return m
 }
 
 func toolsFromProto(pbs []*channelpb.ToolDefinition) []pkg.ToolDefinition {
