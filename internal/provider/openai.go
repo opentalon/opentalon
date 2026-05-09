@@ -197,6 +197,19 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	}
 	p.setHeaders(httpReq)
 
+	// Raw HTTP capture for live A/B comparison against parallel clients
+	// (e.g. RubyLLM-based mockups hitting the same OVH endpoint). Off until
+	// LOG_LEVEL=debug. Body is passed as json.RawMessage so the JSON log
+	// handler embeds it as a nested object, not a quote-escaped string —
+	// `kubectl logs -f | jq 'select(.msg=="openai raw http")'` becomes a
+	// usable live tail. Tagged "openai raw http" + direction so a single
+	// jq selector covers request and response.
+	slog.DebugContext(ctx, "openai raw http",
+		"direction", "request",
+		"url", p.baseURL+openAICompletionsPath,
+		"body", json.RawMessage(body),
+	)
+
 	httpResp, err := p.client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
@@ -207,6 +220,12 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
+
+	slog.DebugContext(ctx, "openai raw http",
+		"direction", "response",
+		"status", httpResp.StatusCode,
+		"body", rawJSONOrString(respBody),
+	)
 
 	if httpResp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("openai api error (status %d): %s", httpResp.StatusCode, string(respBody))
@@ -297,6 +316,15 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	p.setHeaders(httpReq)
+
+	// Capture the request only — streaming responses arrive as SSE chunks
+	// and logging each one would flood the debug stream without serving
+	// the A/B parity goal (which is "what did we send to the model").
+	slog.DebugContext(ctx, "openai raw http",
+		"direction", "request",
+		"url", p.baseURL+openAICompletionsPath,
+		"body", json.RawMessage(body),
+	)
 
 	// Use a client without timeout for streaming; context handles cancellation.
 	streamClient := &http.Client{}
@@ -438,6 +466,20 @@ func (p *OpenAIProvider) setHeaders(req *http.Request) {
 	if p.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
+}
+
+// rawJSONOrString returns body as json.RawMessage when the bytes are valid
+// JSON (so the JSON log handler embeds it inline), or as the literal
+// string otherwise (so an HTTP error page or a truncated chunk still
+// surfaces in the log instead of vanishing). Used by the raw HTTP
+// capture path on the response side, where upstream surprises are most
+// likely.
+func rawJSONOrString(body []byte) any {
+	var probe json.RawMessage
+	if json.Unmarshal(body, &probe) == nil {
+		return json.RawMessage(body)
+	}
+	return string(body)
 }
 
 // nativeArgToString converts a JSON-decoded value to a string suitable for
