@@ -990,10 +990,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		sess, _ := sessions.Get(sessionID)
 
-		// Include server instructions and tool descriptions only on the first
-		// round — they are large (10KB+) and the LLM doesn't need them to
-		// process tool results and format the final response.
-		messages := o.buildMessages(ctx, sess, content, i == 0)
+		// Always include tool descriptions so the LLM can call additional
+		// tools after processing results (multi-step workflows).
+		messages := o.buildMessages(ctx, sess, content, true)
 		messages = append(messages, transientMessages...)
 		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
@@ -1380,7 +1379,7 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 			}
 			tools = append(tools, provider.ToolDefinition{
 				Name:        cap.Name + "." + action.Name,
-				Description: stripOutputSchema(action.Description),
+				Description: action.Description,
 				Parameters: map[string]interface{}{
 					"type":                 "object",
 					"properties":           properties,
@@ -2115,19 +2114,14 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		if includeServerInstructions && cap.SystemPromptAddition != "" {
 			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n", cap.Name, cap.SystemPromptAddition, cap.Name)
 		}
-		// On summary rounds (includeServerInstructions=false), skip tool
-		// descriptions entirely — the LLM already has data and just needs
-		// to format a response. This saves ~3-4K tokens per round.
-		if includeServerInstructions {
-			for _, action := range visibleActions {
-				fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, stripOutputSchema(action.Description))
-				for _, p := range action.Parameters {
-					req := ""
-					if p.Required {
-						req = " (required)"
-					}
-					fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
+		for _, action := range visibleActions {
+			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
+			for _, p := range action.Parameters {
+				req := ""
+				if p.Required {
+					req = " (required)"
 				}
+				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 			}
 		}
 		sb.WriteString("\n")
@@ -3058,20 +3052,6 @@ func stripKnowledgeContext(s string) string {
 	return strings.TrimSpace(s[:start] + s[end+len(close):])
 }
 
-// stripOutputSchema removes the "Output schema (return JSON matching this): {...}"
-// block from tool descriptions. These schemas are large (500-2000 chars each) and
-// the LLM doesn't need them to decide which tool to call or what args to pass —
-// the parameter list already covers that. Stripping them saves ~30-50% of the
-// tool description tokens in the system prompt.
-func stripOutputSchema(desc string) string {
-	if idx := strings.Index(desc, "\n\nOutput schema"); idx >= 0 {
-		return strings.TrimSpace(desc[:idx])
-	}
-	if idx := strings.Index(desc, "\nOutput schema"); idx >= 0 {
-		return strings.TrimSpace(desc[:idx])
-	}
-	return desc
-}
 
 func capabilitiesToPlannerInfo(caps []PluginCapability) []pipeline.CapabilityInfo {
 	result := make([]pipeline.CapabilityInfo, len(caps))
