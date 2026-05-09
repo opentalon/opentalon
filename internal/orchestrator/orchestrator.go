@@ -1909,8 +1909,24 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 		tr := ToolResult{CallID: tc.ID, Content: es.Content, Error: es.Error}
 		toolCalls = append(toolCalls, tc)
 		toolResults = append(toolResults, tr)
-		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(tc)})
-		_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)})
+		if o.supportsNativeTools() {
+			_ = o.sessions.AddMessage(sessionID, provider.Message{
+				Role: provider.RoleAssistant,
+				ToolCalls: []provider.ToolCall{{
+					ID:        tc.ID,
+					Name:      tc.Plugin + "." + tc.Action,
+					Arguments: tc.Args,
+				}},
+			})
+			_ = o.sessions.AddMessage(sessionID, provider.Message{
+				Role:       provider.RoleTool,
+				Content:    nativeToolContent(tr),
+				ToolCallID: tc.ID,
+			})
+		} else {
+			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(tc)})
+			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)})
+		}
 	}
 	_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: execResult.Summary})
 
