@@ -133,6 +133,8 @@ type OrchestratorOpts struct {
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PlanTimeout             time.Duration                 // max time for planner LLM call; 0 = default 15s
 	PipelineConfig          pipeline.PipelineConfig
+	ConfirmationPlugin      string              // optional; plugin name for confirmation strategy (e.g. "planner")
+	ConfirmationAction      string              // optional; action name (e.g. "check_confirmation")
 	ContextWindow           int                 // model context window in tokens; 0 = no trimming
 	MaxConcurrentSessions   int                 // max sessions running in parallel; default 1 (sequential)
 	GroupPluginLookup       GroupPluginLookup   // optional; when set, filters tool list by profile group
@@ -197,6 +199,8 @@ type Orchestrator struct {
 	pendingMu               sync.Mutex                    // guards pendingPipelines map
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline (access via pendingMu)
 	pipelineConfig          pipeline.PipelineConfig
+	confirmationPlugin      string              // optional; plugin for confirmation strategy
+	confirmationAction      string              // optional; action name for confirmation check
 	contextWindow           int                 // model context window in tokens; 0 = no trimming
 	groupPluginLookup       GroupPluginLookup   // optional; nil = no group-based filtering
 	usageRecorder           UsageRecorder       // optional; nil = no usage tracking
@@ -317,6 +321,8 @@ func NewWithRules(
 		planner:                 planner,
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
 		pipelineConfig:          pipelineCfg,
+		confirmationPlugin:      opts.ConfirmationPlugin,
+		confirmationAction:      opts.ConfirmationAction,
 		contextWindow:           opts.ContextWindow,
 		groupPluginLookup:       opts.GroupPluginLookup,
 		usageRecorder:           opts.UsageRecorder,
@@ -860,29 +866,40 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("planner result", "type", planResult.Type, "steps", len(planResult.Steps))
 		}
 		if err == nil && planResult.Type == "pipeline" && len(planResult.Steps) > 1 {
-			p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
-			o.pendingMu.Lock()
-			o.pendingPipelines[sessionID] = p
-			o.pendingMu.Unlock()
-			var planText string
-			if narrated, narrateErr := o.planner.NarratePlan(ctx, planResult.Steps); narrateErr != nil {
-				log.Warn("plan narration failed, using fallback", "error", narrateErr)
-				planText = p.FormatForConfirmation()
-			} else {
-				planText = narrated
+			needsConfirmation := true
+			if o.confirmationPlugin != "" && o.confirmationAction != "" {
+				needsConfirmation = o.checkConfirmationPlugin(ctx, planResult.Steps)
 			}
+			if needsConfirmation {
+				p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
+				o.pendingMu.Lock()
+				o.pendingPipelines[sessionID] = p
+				o.pendingMu.Unlock()
+				var planText string
+				if narrated, narrateErr := o.planner.NarratePlan(ctx, planResult.Steps); narrateErr != nil {
+					log.Warn("plan narration failed, using fallback", "error", narrateErr)
+					planText = p.FormatForConfirmation()
+				} else {
+					planText = narrated
+				}
+				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
+				log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
+				return &RunResult{
+					Response: planText,
+					Metadata: map[string]string{
+						"type":        "confirmation",
+						"prompt_type": "confirmation",
+						"pipeline_id": p.ID,
+						"options":     "approve,reject",
+					},
+				}, nil
+			}
+			// Confirmation skipped by plugin — execute pipeline directly.
+			log.Info("pipeline confirmation skipped by plugin", "steps", len(planResult.Steps))
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
-			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
-			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
-			return &RunResult{
-				Response: planText,
-				Metadata: map[string]string{
-					"type":        "confirmation",
-					"prompt_type": "confirmation",
-					"pipeline_id": p.ID,
-					"options":     "approve,reject",
-				},
-			}, nil
+			p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
+			return o.executePipeline(ctx, sessionID, p)
 		}
 		// Single-step pipeline: execute the tool call server-side and seed the
 		// agent loop with the result so the LLM only needs one round to summarize.
@@ -1793,6 +1810,51 @@ func (o *Orchestrator) runGuardPlugins(ctx context.Context, messages []provider.
 	copy(result, messages)
 	result[lastIdx].Content = content
 	return result, nil, nil
+}
+
+// checkConfirmationPlugin asks the configured confirmation plugin whether a
+// pipeline requires user confirmation. Returns true (require confirmation) on
+// any error — fail-safe.
+func (o *Orchestrator) checkConfirmationPlugin(ctx context.Context, steps []*pipeline.Step) bool {
+	log := logger.FromContext(ctx)
+	type stepInfo struct {
+		Plugin string `json:"plugin"`
+		Action string `json:"action"`
+		Name   string `json:"name"`
+	}
+	infos := make([]stepInfo, len(steps))
+	for i, s := range steps {
+		infos[i] = stepInfo{Plugin: s.Command.Plugin, Action: s.Command.Action, Name: s.Name}
+	}
+	stepsJSON, err := json.Marshal(infos)
+	if err != nil {
+		log.Warn("confirmation plugin: marshal error, requiring confirmation", "error", err)
+		return true
+	}
+	call := ToolCall{
+		ID:     "confirmation-check",
+		Plugin: o.confirmationPlugin,
+		Action: o.confirmationAction,
+		Args:   map[string]string{"steps": string(stepsJSON)},
+	}
+	result := o.executeCall(ctx, call)
+	if result.Error != "" {
+		log.Warn("confirmation plugin error, requiring confirmation", "error", result.Error)
+		return true
+	}
+	var resp struct {
+		RequiresConfirmation bool `json:"requires_confirmation"`
+	}
+	content := result.StructuredContent
+	if content == "" {
+		content = result.Content
+	}
+	if err := json.Unmarshal([]byte(content), &resp); err != nil {
+		log.Warn("confirmation plugin: invalid response, requiring confirmation", "error", err, "content", content)
+		return true
+	}
+	log.Debug("confirmation plugin result", "requires_confirmation", resp.RequiresConfirmation)
+	return resp.RequiresConfirmation
 }
 
 func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p *pipeline.Pipeline) (*RunResult, error) {
