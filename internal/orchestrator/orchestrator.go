@@ -792,13 +792,23 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// filter to empty (LLM sees no tools except those the plugin always
 	// includes, such as ask_knowledge).
 	// STT preparers are skipped here — they already ran in runSTTPreparers above.
+	//
+	// Enrich the content sent to preparers with the last user message from
+	// session history so RAG semantic search matches the full intent, not
+	// just a bare follow-up like "Item" (which would miss "create-item").
+	preparerContent := content
+	if sess, _ := sessions.Get(sessionID); sess != nil {
+		if prev := lastUserMessage(sess.Messages); prev != "" && prev != content {
+			preparerContent = prev + " " + content
+		}
+	}
 	var relevantTools []string
 	relevantToolsSet := false
 	for _, prep := range o.preparers {
 		if prep.STT {
 			continue
 		}
-		guardedContent, blocked, tools, err := o.runSinglePreparer(ctx, prep, content, "preparer", true)
+		guardedContent, blocked, tools, err := o.runSinglePreparer(ctx, prep, preparerContent, "preparer", true)
 		if err != nil {
 			return nil, err
 		}
@@ -3051,6 +3061,22 @@ func deduplicateKnowledgeOutput(m provider.Message, seen map[uint64]bool) provid
 		"[plugin_output]\n(Same knowledge articles as a previous lookup — see above.)\n[/plugin_output]" +
 		m.Content[end+len(closeTag):]
 	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files}
+}
+
+// lastUserMessage returns the most recent user message from the session,
+// stripping knowledge context. Used to enrich short follow-up messages
+// (e.g. "Item") with the prior intent ("Create some arbitrary test object")
+// so RAG semantic search matches the right tools.
+func lastUserMessage(messages []provider.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == provider.RoleUser {
+			text := stripKnowledgeContext(messages[i].Content)
+			if text != "" {
+				return text
+			}
+		}
+	}
+	return ""
 }
 
 // buildPlannerConversationContext extracts a compact summary of recent
