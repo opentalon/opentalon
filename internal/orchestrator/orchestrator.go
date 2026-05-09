@@ -3052,7 +3052,6 @@ func stripKnowledgeContext(s string) string {
 	return strings.TrimSpace(s[:start] + s[end+len(close):])
 }
 
-
 func capabilitiesToPlannerInfo(caps []PluginCapability) []pipeline.CapabilityInfo {
 	result := make([]pipeline.CapabilityInfo, len(caps))
 	for i, cap := range caps {
