@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -45,7 +46,21 @@ func (g *Guard) Sanitize(result ToolResult) ToolResult {
 	// intact.
 	result.StructuredContent = g.truncate(result.StructuredContent)
 	result.Error = g.sanitizeContent(result.Error)
+	// Plugin responses can contain invalid UTF-8 from external sources.
+	// gRPC proto marshaling rejects any string field with invalid UTF-8,
+	// so replace bad sequences with the Unicode replacement character.
+	result.Content = toValidUTF8(result.Content)
+	result.StructuredContent = toValidUTF8(result.StructuredContent)
+	result.Error = toValidUTF8(result.Error)
 	return result
+}
+
+// toValidUTF8 replaces invalid UTF-8 sequences with U+FFFD.
+func toValidUTF8(s string) string {
+	if s == "" || utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "\ufffd")
 }
 
 func (g *Guard) sanitizeContent(s string) string {
@@ -63,7 +78,14 @@ func (g *Guard) sanitizeContent(s string) string {
 
 func (g *Guard) truncate(s string) string {
 	if g.MaxResponseBytes > 0 && len(s) > g.MaxResponseBytes {
-		return s[:g.MaxResponseBytes] + "\n[truncated: response exceeded size limit]"
+		// Back up to the last valid UTF-8 boundary to avoid splitting
+		// a multi-byte character, which produces invalid UTF-8 that
+		// gRPC proto marshaling rejects.
+		cut := g.MaxResponseBytes
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + "\n[truncated: response exceeded size limit]"
 	}
 	return s
 }

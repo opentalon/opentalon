@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestSanitizeCleanContent(t *testing.T) {
@@ -279,5 +280,41 @@ func TestSanitizeZeroMaxDisablesTruncation(t *testing.T) {
 	result := g.Sanitize(ToolResult{CallID: "1", Content: content})
 	if strings.Contains(result.Content, "[truncated") {
 		t.Error("MaxResponseBytes=0 should disable truncation")
+	}
+}
+
+func TestTruncatePreservesUTF8Boundary(t *testing.T) {
+	g := NewGuard()
+	// "ä" is 2 bytes (0xC3 0xA4); set limit to split mid-character
+	g.MaxResponseBytes = 5
+	content := "abcdä" // 4 bytes + 2 bytes = 6 bytes
+	result := g.Sanitize(ToolResult{CallID: "1", Content: content})
+	if !utf8.ValidString(result.Content) {
+		t.Errorf("truncated content is not valid UTF-8: %q", result.Content)
+	}
+	if !strings.HasPrefix(result.Content, "abcd") {
+		t.Errorf("unexpected prefix: %q", result.Content)
+	}
+}
+
+func TestSanitizeReplacesInvalidUTF8(t *testing.T) {
+	g := NewGuard()
+	// 0xff is invalid UTF-8
+	content := "hello\xffworld"
+	result := g.Sanitize(ToolResult{CallID: "1", Content: content})
+	if !utf8.ValidString(result.Content) {
+		t.Errorf("content still contains invalid UTF-8: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "hello") || !strings.Contains(result.Content, "world") {
+		t.Errorf("valid parts lost: %q", result.Content)
+	}
+}
+
+func TestSanitizeReplacesInvalidUTF8InStructuredContent(t *testing.T) {
+	g := NewGuard()
+	structured := "{\"key\":\"val\xfeue\"}"
+	result := g.Sanitize(ToolResult{CallID: "1", StructuredContent: structured})
+	if !utf8.ValidString(result.StructuredContent) {
+		t.Errorf("structured content still contains invalid UTF-8: %q", result.StructuredContent)
 	}
 }

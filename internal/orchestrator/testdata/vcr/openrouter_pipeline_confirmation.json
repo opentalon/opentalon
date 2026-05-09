@@ -1,7 +1,7 @@
 {
   "prompt_hash": "99148417ac3424f68070cbfdab61bccb673f6f0d5f551f9bdf7853f0c1f70767",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-08T21:32:30.986146Z",
+  "recorded_at": "2026-05-09T08:15:19.459192Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -10,7 +10,7 @@
         "messages": [
           {
             "role": "system",
-            "content": "You are a task planner. Given the user's request and available tools, return a plan.\nAlways return: {\"type\": \"pipeline\", \"steps\": [...]}\nEven for single-action requests, return a pipeline with one step.\n\nEach step must have: {\"id\": \"\u003cunique\u003e\", \"name\": \"\u003chuman description\u003e\", \"plugin\": \"\u003cplugin\u003e\", \"action\": \"\u003caction\u003e\", \"args\": {}, \"depends_on\": []}\nThe \"plugin\" field must be the exact plugin name shown below (the part before the \"|\"). The \"action\" field must be the exact action name shown below (the part after \"action=\").\n\n## Referencing prior step output\n\nA later step may need a value produced by an earlier step (e.g. an id from a list lookup). Use the placeholder\n\n  {{\u003cstep-id\u003e.output.\u003cjson-path\u003e}}\n\ninside any string arg. The path walks the structured JSON returned by the referenced step using dot-separated keys and `[N]` for array indices. The runtime substitutes placeholders before dispatching the step; an unresolved or malformed reference fails the step before any tool call.\n\nInspect the action description for the actual response shape — keys differ per tool (a list-containers response holds `containers[]`, a list-items response holds `items[]`, etc.). Do NOT invent a generic key like \"results\" if the tool's response uses a specific name.\n\nWhen an entire arg is one placeholder the resolved value's type is preserved (an integer id stays integer); when a placeholder is embedded into surrounding text the resolved value is interpolated as a string (\"ticket-{{step1.output.tickets[0].id}}\" → \"ticket-42\").\n\nExample:\n  [\n    {\"id\": \"step1\", \"plugin\": \"timly\", \"action\": \"list-containers\", \"args\": {\"query\": \"name:\\\"Berlin Garage\\\"\"}, \"depends_on\": []},\n    {\"id\": \"step2\", \"plugin\": \"timly\", \"action\": \"list-items\",      \"args\": {\"query\": \"name:Tesla\"},                \"depends_on\": []},\n    {\"id\": \"step3\", \"plugin\": \"timly\", \"action\": \"schedule-item\",\n                \"args\": {\n                  \"container_id\": \"{{step1.output.containers[0].id}}\",\n                  \"item_id\":      \"{{step2.output.items[0].id}}\",\n                  \"start_date\":   \"2026-06-01T00:00:00\",\n                  \"end_date\":     \"2026-06-05T23:59:59\"\n                },\n                \"depends_on\": [\"step1\", \"step2\"]}\n  ]\n\nA step that needs a prior step's output MUST list it under \"depends_on\" so execution order is correct.\n\n## Available tools\n\n- plugin=gitlab | action=analyze_code: Analyze code\n  - repo: Repository\n- plugin=gitlab | action=create_pr: Create PR\n- plugin=jira | action=create_issue: Create issue\n\nRespond ONLY with valid JSON, no other text."
+            "content": "You are a task planner. Given the user's request and available tools, return a plan.\nAlways return: {\"type\": \"pipeline\", \"steps\": [...]}\nEven for single-action requests, return a pipeline with one step.\n\nEach step must have: {\"id\": \"\u003cunique\u003e\", \"name\": \"\u003chuman description\u003e\", \"plugin\": \"\u003cplugin\u003e\", \"action\": \"\u003caction\u003e\", \"args\": {}, \"depends_on\": []}\nThe \"plugin\" field must be the exact plugin name shown below (the part before the \"|\"). The \"action\" field must be the exact action name shown below (the part after \"action=\").\n\n## Referencing prior step output\n\nA later step may need a value produced by an earlier step (e.g. an id from a list lookup). Use the placeholder\n\n  {{\u003cstep-id\u003e.output.\u003cjson-path\u003e}}\n\ninside any string arg. The path walks the structured JSON returned by the referenced step using dot-separated keys and `[N]` for array indices. The runtime substitutes placeholders before dispatching the step; an unresolved or malformed reference fails the step before any tool call.\n\nInspect the action description for the actual response shape — keys differ per tool (a list-containers response holds `containers[]`, a list-items response holds `items[]`, etc.). Do NOT invent a generic key like \"results\" if the tool's response uses a specific name.\n\nWhen an entire arg is one placeholder the resolved value's type is preserved (an integer id stays integer); when a placeholder is embedded into surrounding text the resolved value is interpolated as a string (\"ticket-{{step1.output.tickets[0].id}}\" → \"ticket-42\").\n\nExample:\n  [\n    {\"id\": \"step1\", \"plugin\": \"timly\", \"action\": \"list-containers\", \"args\": {\"query\": \"name:\\\"Berlin Garage\\\"\"}, \"depends_on\": []},\n    {\"id\": \"step2\", \"plugin\": \"timly\", \"action\": \"list-items\",      \"args\": {\"query\": \"name:Tesla\"},                \"depends_on\": []},\n    {\"id\": \"step3\", \"plugin\": \"timly\", \"action\": \"schedule-item\",\n                \"args\": {\n                  \"container_id\": \"{{step1.output.containers[0].id}}\",\n                  \"item_id\":      \"{{step2.output.items[0].id}}\",\n                  \"start_date\":   \"2026-06-01T00:00:00\",\n                  \"end_date\":     \"2026-06-05T23:59:59\"\n                },\n                \"depends_on\": [\"step1\", \"step2\"]}\n  ]\n\nA step that needs a prior step's output MUST list it under \"depends_on\" so execution order is correct.\n\n## Available tools\n\n- plugin=jira | action=create_issue: Create issue\n- plugin=gitlab | action=analyze_code: Analyze code\n  - repo: Repository\n- plugin=gitlab | action=create_pr: Create PR\n\nRespond ONLY with valid JSON, no other text."
           },
           {
             "role": "user",
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778275951-oQSh9A9NpP2XKpnGkFNR",
+        "id": "gen-1778314519-qXzXoKOhwEcFVjofQnSG",
         "model": "mistralai/ministral-8b-2512",
-        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo for vulnerabilities and issues\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create a Jira issue based on code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"summary\": \"Code Analysis Findings for {{step1.output.repo}}\",\n        \"description\": \"Automated findings from GitLab code analysis:\\n\\n{{step1.output.analysis_results}}\",\n        \"project_key\": \"{{step1.output.project_key}}\"\n      },\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
+        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue for code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"summary\": \"Code Analysis Findings for myrepo\",\n        \"description\": \"Automated findings from GitLab code analysis:\\n\\n{{step1.output.findings}}\",\n        \"project\": \"{{step1.output.project}}\",\n        \"issuetype\": \"{{step1.output.issue_type}}\"\n      },\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
         "usage": {
           "input_tokens": 684,
-          "output_tokens": 207
+          "output_tokens": 208
         }
       }
     },
@@ -38,17 +38,17 @@
           },
           {
             "role": "user",
-            "content": "Plan steps:\n1. Analyze code in myrepo for vulnerabilities and issues (gitlab.analyze_code)\n2. Create a Jira issue based on code analysis findings (jira.create_issue)\n"
+            "content": "Plan steps:\n1. Analyze code in myrepo (gitlab.analyze_code)\n2. Create Jira issue for code analysis findings (jira.create_issue)\n"
           }
         ]
       },
       "response": {
-        "id": "gen-1778275952-nASjHUE1yAKTtH8HHgmX",
+        "id": "gen-1778314521-p0X9abMTwe80afF1bcRl",
         "model": "mistralai/ministral-8b-2512",
-        "content": "This plan will first scan your repository for any security weaknesses or problems, then automatically create a Jira ticket summarizing the findings so your team can address them. After reviewing the results, I’ll generate a Jira issue for you to track and fix the issues.\n\nWould you like me to start this process now?",
+        "content": "Here’s a simple breakdown of the plan:\n\nFirst, I’ll scan your code in the repository to identify any potential issues or improvements. Then, I’ll automatically create a Jira ticket summarizing the key findings so your team can address them. Would you like me to get started?",
         "usage": {
-          "input_tokens": 96,
-          "output_tokens": 64
+          "input_tokens": 90,
+          "output_tokens": 58
         }
       }
     }

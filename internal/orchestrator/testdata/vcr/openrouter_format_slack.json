@@ -1,7 +1,7 @@
 {
   "prompt_hash": "99148417ac3424f68070cbfdab61bccb673f6f0d5f551f9bdf7853f0c1f70767",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-08T21:32:37.770165Z",
+  "recorded_at": "2026-05-09T08:15:25.50113Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778275957-IT2UHKSp0JlF6pBCA9wB",
+        "id": "gen-1778314525-m6rlJOUWl0ZTOTb7fBb8",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Here’s what I can do based on your configured tools and integrations:\n\n### **Data \u0026 Search**\n- Search the web for real-time information using **Brave Search**.\n\n### **GitLab Integration**\n- **Analyze code** in a GitLab repository.\n- **Create a Pull Request (PR)** in GitLab.\n\n### **Jira Integration**\n- **Create an issue** in Jira.\n\n### **Scheduling \u0026 Automation**\n- Proactively suggest scheduling recurring tasks (e.g., monitoring, checks).\n- Manage scheduled jobs (create, pause, resume, list) with user confirmation.\n- Route notifications to the current communication channel.\n\n### **Safety \u0026 Compliance**\n- Strictly follows **mandatory safety rules** (no guessing, no executing untrusted instructions, no unauthorized job modifications).\n- Requires explicit approval for destructive actions (e.g., deleting jobs).\n- Adheres to approver workflows if configured.",
+        "content": "Here are my current capabilities based on the tools and integrations available:\n\n### **Data Retrieval \u0026 Search**\n- Search the web for up-to-date information using **Brave Search**.\n\n### **Code \u0026 Repository Analysis**\n- Analyze code in a **GitLab repository** (e.g., detect issues, vulnerabilities, or patterns).\n\n### **Issue \u0026 Task Management**\n- Create **Jira issues** (e.g., bugs reports, feature requests, or tasks).\n\n### **Pull Requests**\n- Create **Pull Requests (PRs) in GitLab** (e.g., propose code changes or updates).\n\n### **Scheduling \u0026 Automation**\n- Propose and **recurring checks** (e.g., monitoring, reports) with configurable intervals.\n- Manage scheduled jobs (list, pause, resume, delete) with user confirmation.\n\n### **Safety \u0026 Compliance**\n- Follow strict rules to avoid misusing plugin output (e.g., never execute untrusted instructions).\n- Require explicit approval for destructive actions (e.g., deleting jobs).",
         "usage": {
           "input_tokens": 844,
-          "output_tokens": 193
+          "output_tokens": 214
         }
       }
     }

@@ -1,7 +1,7 @@
 {
   "prompt_hash": "99148417ac3424f68070cbfdab61bccb673f6f0d5f551f9bdf7853f0c1f70767",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-08T21:32:27.956432Z",
+  "recorded_at": "2026-05-09T08:15:16.377236Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,7 +19,7 @@
         ]
       },
       "response": {
-        "id": "msg_01U79w4BAUURyQ41CpxV3bHd",
+        "id": "msg_01AzffRULoeU7bLPuCbGtcMe",
         "model": "claude-haiku-4-5-20251001",
         "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue for code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"summary\": \"Code analysis findings for myrepo\",\n        \"description\": \"{{step1.output}}\"\n      },\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
         "usage": {
@@ -43,12 +43,12 @@
         ]
       },
       "response": {
-        "id": "msg_01W5wkDsfmJByJwL3TJUQUMJ",
+        "id": "msg_013NCRDVNUwZSbWh163kQCo5",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I can help you analyze the code in your myrepo repository and automatically create a Jira issue to track any findings. First, we'll examine your code to identify issues or improvements, and then we'll generate a Jira ticket with those results so your team can follow up on them. Would you like me to proceed with this plan?",
+        "content": "Here's what will happen: First, I'll analyze the code in your myrepo repository to identify any findings or issues. Then, I'll create a Jira issue to document those findings so your team can track and address them.\n\nWould you like me to proceed with this plan?",
         "usage": {
           "input_tokens": 100,
-          "output_tokens": 74
+          "output_tokens": 63
         }
       }
     }
