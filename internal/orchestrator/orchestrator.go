@@ -160,6 +160,7 @@ type SessionStoreInterface interface {
 	AddMessage(id string, msg provider.Message) error
 	SetModel(id string, model provider.ModelRef) error
 	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op
+	SetMetadata(id, key, value string) error                                 // upsert a single metadata key; empty value removes it
 	Delete(id string) error                                                  // remove session (e.g. for clear_session command)
 }
 
@@ -727,7 +728,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// above guarantees single-writer access.
 	sessions := newCachedSessionStore(o.sessions)
 
-	if _, err := sessions.Get(sessionID); err != nil {
+	sess, err := sessions.Get(sessionID)
+	if err != nil {
 		return nil, fmt.Errorf("session lookup: %w", err)
 	}
 	ctx = actor.WithSessionID(ctx, sessionID)
@@ -735,6 +737,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// Set up trace_id for this session so all logs are correlated.
 	traceID := logger.TraceIDFromSessionKey(sessionID)
 	ctx = logger.WithTraceID(ctx, traceID)
+
+	// Per-session deep debug: enabled by the set_debug_mode command, which
+	// stores debug=true in session metadata. With the flag set, the slog
+	// session-debug handler promotes all Debug records on this ctx to Info
+	// and the OpenAI provider tees raw HTTP bodies into the persistent
+	// ai_debug_events table. Sessions without the flag are unaffected.
+	if sess != nil && sess.Metadata["debug"] == "true" {
+		ctx = logger.WithSessionDebug(ctx)
+	}
+
 	log := logger.FromContext(ctx)
 
 	// Block A: Check for pending pipeline confirmation.

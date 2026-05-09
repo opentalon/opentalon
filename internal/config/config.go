@@ -343,6 +343,29 @@ type StateConfig struct {
 	DataDir string        `yaml:"data_dir"`
 	DB      DBConfig      `yaml:"db,omitempty"`
 	Session SessionConfig `yaml:"session,omitempty"`
+	Debug   DebugConfig   `yaml:"debug,omitempty"`
+}
+
+// DebugConfig configures per-session deep debug capture (toggled by the
+// /debug command). Without an /debug-active session, this subsystem does
+// nothing — the table stays empty and the writer goroutine is idle.
+//
+// Retention semantics, deliberately split into two fields rather than a
+// sentinel value (e.g. "0 means disabled"):
+//   - RetentionDays:    integer days; 0 or omitted means "use default 30"
+//   - RetentionDisabled: explicit off-switch; takes precedence over
+//     RetentionDays. Use this to turn pruning off,
+//     not RetentionDays=0 — that path applies the
+//     default and would surprise an operator who
+//     meant "off".
+//
+// The async-writer buffer size is intentionally not configurable: 100 is
+// adequate for any realistic /debug load (opt-in per session, drained at
+// ~1k inserts/s by the worker), and a knob nobody will turn is just
+// surface area.
+type DebugConfig struct {
+	RetentionDays     int  `yaml:"retention_days,omitempty"`     // default 30 when 0 or omitted
+	RetentionDisabled bool `yaml:"retention_disabled,omitempty"` // when true, never prune (overrides RetentionDays)
 }
 
 // DBConfig selects the database backend. Driver defaults to "sqlite".

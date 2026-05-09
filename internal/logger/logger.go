@@ -53,17 +53,22 @@ func (l *Logger) Error(msg string, args ...any) {
 // (debug, info, warn, error). Default: info. Also redirects the old
 // log.Printf through slog at Info level.
 //
-// The handler is JSON. Earlier versions used TextHandler, which collapsed
+// The handler chain is: JSONHandler at the configured level, wrapped by
+// sessionDebugHandler. The wrapper promotes Debug records carrying the
+// session-debug ctx flag (set by /debug command) to Info, so the per-
+// session deep-debug stream is visible on stderr without having to flip
+// the global level.
+//
+// JSON instead of Text: earlier versions used TextHandler, which collapsed
 // multi-field events onto a single line of `key=value` pairs and quote-
 // escaped any string value containing whitespace or punctuation — fine for
-// short attrs but unreadable for the bigger payloads we already log
-// (planner system prompts, MCP tool descriptions, the raw OpenAI HTTP
-// bodies introduced for live A/B comparison). JSON keeps every attr a
-// real value (nested objects, numbers, arrays stay typed), and `kubectl
-// logs -f opentalon-0 | jq` becomes a usable live tail. The cost is one
-// extra layer for human grep'ing — solved by piping through `jq` or a
-// small awk filter — and that trade is overwhelmingly worth it as soon
-// as any single attr is bigger than a screen line.
+// short attrs but unreadable for the bigger payloads we log (planner
+// system prompts, MCP tool descriptions, raw OpenAI HTTP bodies). JSON
+// keeps every attr a real value (nested objects, numbers, arrays stay
+// typed), and `kubectl logs -f opentalon-0 | jq` becomes a usable live
+// tail. The cost is one extra layer for human grep'ing — solved by piping
+// through `jq` — and that trade is overwhelmingly worth it as soon as any
+// single attr is bigger than a screen line.
 func Setup(level string) {
 	var lvl slog.Level
 	switch strings.ToLower(level) {
@@ -76,8 +81,8 @@ func Setup(level string) {
 	default:
 		lvl = slog.LevelInfo
 	}
-	handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
-	slog.SetDefault(slog.New(handler))
+	base := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
+	slog.SetDefault(slog.New(NewSessionDebugHandler(base)))
 	log.SetOutput(&slogWriter{level: slog.LevelInfo})
 	log.SetFlags(0)
 }

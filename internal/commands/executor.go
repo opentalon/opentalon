@@ -24,6 +24,7 @@ const (
 	ActionSetPrompt        = "set_prompt"
 	ActionClearSession     = "clear_session"
 	ActionReloadMCP        = "reload_mcp"
+	ActionSetDebugMode     = "set_debug_mode"
 	ActionProfileAssign    = "profile_assign"
 	ActionProfileRevoke    = "profile_revoke"
 	ActionProfileListGroup = "profile_list_group"
@@ -47,6 +48,14 @@ type GroupPluginManager interface {
 	RevokePlugin(ctx context.Context, groupID, pluginID string) error
 }
 
+// DebugEventCounter reports the per-session row count in ai_debug_events.
+// Used by ActionSetDebugMode "status" replies so users can see whether
+// capture is actually filling the table. Optional — when nil the status
+// reply just reports on/off without a row count.
+type DebugEventCounter interface {
+	CountForSession(ctx context.Context, sessionID string) (int64, error)
+}
+
 // Executor runs built-in opentalon actions (install_skill, show_config, list_commands, set_prompt, clear_session, reload_mcp).
 // It implements orchestrator.PluginExecutor.
 type Executor struct {
@@ -58,6 +67,7 @@ type Executor struct {
 	pluginReloader     PluginReloader     // optional; enables reload_mcp
 	mcpCacheDir        string             // optional; mcp-cache dir for cache invalidation on reload
 	groupPluginManager GroupPluginManager // optional; enables profile_assign/revoke/list_group
+	debugEventCounter  DebugEventCounter  // optional; populates "status" reply with row counts
 	onClearActions     []OnClearAction
 	runAction          func(ctx context.Context, plugin, action string, args map[string]string) (string, error)
 }
@@ -74,6 +84,7 @@ func Capability() orchestrator.PluginCapability {
 			{Name: ActionSetPrompt, Description: "Set the editable runtime prompt.", Parameters: []orchestrator.Parameter{{Name: "text", Description: "Prompt text", Required: true}}},
 			{Name: ActionClearSession, Description: "Clear the current session.", Parameters: nil, InjectContextArgs: []string{"session_id"}},
 			{Name: ActionReloadMCP, Description: "Reload MCP server connections and refresh available tools. Optionally target one server by name.", Parameters: []orchestrator.Parameter{{Name: "server", Description: "MCP server name to reload (leave empty to reload all)", Required: false}}},
+			{Name: ActionSetDebugMode, Description: "Toggle per-session deep debug logging (the user-facing /debug command). When on, raw LLM HTTP request and response bodies for this session are emitted on stderr at INFO level and persisted to the ai_debug_events table for 30 days. Use to capture the full prompt/response pair when diagnosing why the model produced a wrong answer. Other sessions are unaffected. Persistence requires the state store to be configured.", Parameters: []orchestrator.Parameter{{Name: "mode", Description: "on, off, toggle (default), or status", Required: false}}, InjectContextArgs: []string{"session_id"}},
 			{Name: ActionProfileAssign, Description: "Assign a plugin to a profile group (admin). Source is set to 'admin' and cannot be overwritten by WhoAmI.", Parameters: []orchestrator.Parameter{{Name: "group", Description: "Group name", Required: true}, {Name: "plugin", Description: "Plugin ID", Required: true}}, AuditLog: true, UserOnly: true},
 			{Name: ActionProfileRevoke, Description: "Revoke a plugin from a profile group (admin).", Parameters: []orchestrator.Parameter{{Name: "group", Description: "Group name", Required: true}, {Name: "plugin", Description: "Plugin ID", Required: true}}, AuditLog: true, UserOnly: true},
 			{Name: ActionProfileListGroup, Description: "List plugins assigned to a profile group.", Parameters: []orchestrator.Parameter{{Name: "group", Description: "Group name", Required: true}}, UserOnly: true},
@@ -121,6 +132,14 @@ func (e *Executor) WithProfileStore(m GroupPluginManager) *Executor {
 	return e
 }
 
+// WithDebugEventCounter wires the row-count source for set_debug_mode status
+// replies. Optional — without it the status reply still works but skips the
+// row-count line.
+func (e *Executor) WithDebugEventCounter(c DebugEventCounter) *Executor {
+	e.debugEventCounter = c
+	return e
+}
+
 // Execute implements orchestrator.PluginExecutor.
 func (e *Executor) Execute(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 	switch call.Action {
@@ -136,6 +155,8 @@ func (e *Executor) Execute(ctx context.Context, call orchestrator.ToolCall) orch
 		return e.clearSession(ctx, call)
 	case ActionReloadMCP:
 		return e.reloadMCP(ctx, call)
+	case ActionSetDebugMode:
+		return e.setDebugMode(ctx, call)
 	case ActionProfileAssign:
 		return e.profileAssign(ctx, call)
 	case ActionProfileRevoke:
@@ -303,7 +324,8 @@ func (e *Executor) listCommands(call orchestrator.ToolCall) orchestrator.ToolRes
 /commands — List available commands (this message).
 /set prompt <text> — Set the editable runtime prompt; applies to the next message.
 /clear or /new — Clear the current session.
-/reload mcp [server] — Reload MCP server connections and refresh available tools. Optionally name a specific server (e.g. /reload mcp magtuner).`
+/reload mcp [server] — Reload MCP server connections and refresh available tools. Optionally name a specific server (e.g. /reload mcp magtuner).
+/debug [on|off|status] — Toggle per-session deep debug logging. With no arg the flag toggles. Captured raw LLM HTTP bodies stay in ai_debug_events for 30 days.`
 	return orchestrator.ToolResult{CallID: call.ID, Content: msg}
 }
 
@@ -360,6 +382,104 @@ func (e *Executor) setPrompt(call orchestrator.ToolCall) orchestrator.ToolResult
 		CallID:  call.ID,
 		Content: "Prompt updated. It will apply to the next message.",
 	}
+}
+
+// setDebugMode toggles per-session deep debug capture. The flag lives in
+// session.Metadata["debug"]; orchestrator.Run() reads it on every turn and
+// promotes the slog level + tees raw HTTP bodies into the ai_debug_events
+// table accordingly. Persistence requires the state store to be configured —
+// without it the toggle still works but only the slog promotion takes
+// effect.
+func (e *Executor) setDebugMode(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+	sessionID := call.Args["session_id"]
+	if sessionID == "" {
+		return orchestrator.ToolResult{CallID: call.ID, Error: "session_id not set (internal error)"}
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(call.Args["mode"]))
+	if mode == "" {
+		mode = "toggle"
+	}
+
+	sess, err := e.sessions.Get(sessionID)
+	if err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("session lookup: %v", err)}
+	}
+	current := sess != nil && sess.Metadata["debug"] == "true"
+
+	var enable bool
+	switch mode {
+	case "on", "enable", "true":
+		enable = true
+	case "off", "disable", "false":
+		enable = false
+	case "status":
+		return e.debugStatusReply(ctx, call.ID, sessionID, current)
+	case "toggle":
+		enable = !current
+	default:
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("unknown mode %q (expected on, off, toggle, or status)", mode)}
+	}
+
+	if enable == current {
+		return e.debugStatusReply(ctx, call.ID, sessionID, current)
+	}
+
+	value := ""
+	if enable {
+		value = "true"
+	}
+	if err := e.sessions.SetMetadata(sessionID, "debug", value); err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("persist debug flag: %v", err)}
+	}
+
+	if enable {
+		return orchestrator.ToolResult{
+			CallID:  call.ID,
+			Content: "Debug mode ON. " + e.debugCaptureScopeText() + " Send /debug off to stop.",
+		}
+	}
+	return orchestrator.ToolResult{
+		CallID:  call.ID,
+		Content: "Debug mode OFF." + e.debugRetentionTrailerText(),
+	}
+}
+
+// debugCaptureScopeText describes what /debug-on actually captures, honest
+// about whether persistence is wired. The Counter being non-nil is the
+// proxy for "state-store + async writer are configured" — sessions that
+// only get console promotion say so explicitly.
+func (e *Executor) debugCaptureScopeText() string {
+	if e.debugEventCounter == nil {
+		return "The next LLM exchange will be logged at INFO level on stderr (no state store configured, so events are not persisted)."
+	}
+	return "The next LLM exchange will be logged at INFO level on stderr and persisted to the ai_debug_events table."
+}
+
+// debugRetentionTrailerText is the second sentence of the OFF reply: only
+// meaningful when persistence is wired, otherwise omitted to avoid the
+// false promise of historical retention.
+func (e *Executor) debugRetentionTrailerText() string {
+	if e.debugEventCounter == nil {
+		return ""
+	}
+	return " Already-captured events stay in ai_debug_events until they age out."
+}
+
+func (e *Executor) debugStatusReply(ctx context.Context, callID, sessionID string, on bool) orchestrator.ToolResult {
+	state := "OFF"
+	if on {
+		state = "ON"
+	}
+	msg := "Debug mode " + state + "."
+	if e.debugEventCounter != nil {
+		if n, err := e.debugEventCounter.CountForSession(ctx, sessionID); err == nil {
+			msg = fmt.Sprintf("Debug mode %s. %d events captured for this session so far.", state, n)
+		}
+	} else {
+		msg += " (Persistence disabled — no state store configured.)"
+	}
+	return orchestrator.ToolResult{CallID: callID, Content: msg}
 }
 
 func (e *Executor) clearSession(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {

@@ -132,6 +132,52 @@ func (s *SessionStore) SetModel(id string, model provider.ModelRef) error {
 	return nil
 }
 
+// SetMetadata upserts a single key in the session's metadata JSON column. An
+// empty value removes the key. The whole map is read, mutated in memory, and
+// written back in one transaction — debug-toggle traffic is rare (one row per
+// /debug command), so the simpler read-modify-write loses nothing here and
+// avoids a JSON-merge UDF that would only work on one dialect.
+func (s *SessionStore) SetMetadata(id, key, value string) error {
+	ctx := context.Background()
+	d := s.db.Dialect()
+
+	tx, cleanup, err := d.BeginExclusive(ctx, s.db.SQLDB())
+	if err != nil {
+		return fmt.Errorf("set metadata begin: %w", err)
+	}
+	defer cleanup()
+	defer func() { _ = tx.Rollback() }()
+
+	var mdJSON string
+	err = tx.QueryRowContext(ctx,
+		d.Rebind(`SELECT COALESCE(metadata,'{}') FROM sessions WHERE id = ?`+d.ForUpdate()),
+		id,
+	).Scan(&mdJSON)
+	if err != nil {
+		return fmt.Errorf("set metadata select: %w", err)
+	}
+	md := map[string]string{}
+	if mdJSON != "" {
+		_ = json.Unmarshal([]byte(mdJSON), &md)
+	}
+	if value == "" {
+		delete(md, key)
+	} else {
+		md[key] = value
+	}
+	updated, err := json.Marshal(md)
+	if err != nil {
+		return fmt.Errorf("set metadata marshal: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.ExecContext(ctx,
+		d.Rebind(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`),
+		string(updated), now, id); err != nil {
+		return fmt.Errorf("set metadata update: %w", err)
+	}
+	return tx.Commit()
+}
+
 // SetSummary updates the session summary and replaces messages with the given slice.
 func (s *SessionStore) SetSummary(id string, summary string, messages []provider.Message) error {
 	ctx := context.Background()
