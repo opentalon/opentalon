@@ -2007,7 +2007,15 @@ func trimToContextWindow(ctx context.Context, messages []provider.Message, conte
 
 func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string, includeServerInstructions bool) string {
 	var sb strings.Builder
-	sb.WriteString(prompts.OrchestratorPreamble)
+	// When the provider supports native tool calling, use a preamble that
+	// omits the text-based [tool_call] format instructions. Sending both
+	// the text format and native tools confuses weaker models — they
+	// narrate instead of calling tools.
+	if o.supportsNativeTools() {
+		sb.WriteString(prompts.OrchestratorPreambleNative)
+	} else {
+		sb.WriteString(prompts.OrchestratorPreamble)
+	}
 
 	sb.WriteString(o.rules.BuildPromptSection())
 

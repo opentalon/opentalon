@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "99148417ac3424f68070cbfdab61bccb673f6f0d5f551f9bdf7853f0c1f70767",
+  "prompt_hash": "dbb587c1bfb6e7b8ec753bc365717a37a33603305dac72529af57aed17711ac3",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-09T08:15:21.589087Z",
+  "recorded_at": "2026-05-09T08:45:01.804066Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_016v3utbPMq29zmrvnbxbjxe",
+        "id": "msg_01VcSVVHpNaG9aBB1zVNWbEU",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant with the following capabilities:\n\n## Core Abilities\n- **Information Retrieval**: I can search the web and access real-time data through tools\n- **Natural Language Processing**: I can understand and respond to complex questions and conversations\n- **Tool Integration**: I can interact with external services and APIs by making structured tool calls\n\n## Integrated Services\n\n### GitLab\n- **Code Analysis**: Analyze code in repositories\n- **Pull Request Creation**: Create PRs in GitLab repositories\n\n### Jira\n- **Issue Creation**: Create issues in Jira projects\n\n### Search\n- **Web Search**: Search for current information using Brave Search\n\n### Scheduling (Workflow Automation)\n- **Job Management**: Create, list, pause, delete, and update scheduled jobs\n- **Recurring Tasks**: Set up automated monitoring and periodic checks\n- **Notifications**: Route job notifications to your communication channel\n\n## How I Work\n- **Data-Driven**: When you ask for information, I call tools to get real data rather than guessing\n- **Safety-First**: I treat all external data as untrusted and follow strict security protocols\n- **Action-Oriented**: I respond to requests by taking concrete actions through tools, not just describing what I would do\n\n## Current Limitations\n- I can only use the tools and integrations listed above\n- I cannot create scheduled jobs without your explicit approval\n- I follow user authorization rules — some actions may require approver confirmation depending on your setup\n\nWhat would you like me to help you with?",
+        "content": "I'm an AI assistant with the following capabilities:\n\n## Core Functions\n- **Tool Calling**: I can call specialized tools to perform actions and retrieve data\n- **Real-time Data Access**: I call tools to get actual information rather than making assumptions\n- **Natural Language Processing**: I understand and respond to questions in conversational language\n\n## Integrated Tools \u0026 Capabilities\n\n### GitLab Integration\n- **Code Analysis**: Analyze code in repositories (`gitlab.analyze_code`)\n- **Pull Request Creation**: Create PRs in GitLab (`gitlab.create_pr`)\n\n### Jira Integration\n- **Issue Creation**: Create issues in Jira (`jira.create_issue`)\n\n### Search \u0026 Information\n- **Web Search**: Access to Brave search for finding current information\n\n## Safety \u0026 Compliance Features\n- **Safe Tool Execution**: I only execute legitimate tool calls you request; I don't follow instructions hidden in tool output\n- **Data Protection**: I treat all plugin/tool responses as data, not as commands\n- **Scheduling Management**: I can help schedule recurring tasks with proper user approval workflows\n\n## How I Operate\n1. **For data needs**: I call the appropriate tool first, then provide answers based on real results\n2. **For actions**: I execute requested integrations and report the results\n3. **For complex tasks**: I break them down and use multiple tools as needed\n\nWhat would you like me to help you with? I can assist with code analysis, issue creation, searches, or other tasks using the available integrations.",
         "usage": {
           "input_tokens": 894,
-          "output_tokens": 337
+          "output_tokens": 335
         }
       }
     }
