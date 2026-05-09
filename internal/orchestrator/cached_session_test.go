@@ -64,6 +64,22 @@ func (s *stubSessionStore) SetSummary(id string, summary string, messages []prov
 	return nil
 }
 
+func (s *stubSessionStore) SetMetadata(id, key, value string) error {
+	sess := s.sessions[id]
+	if sess == nil {
+		return &sessionNotFoundError{id}
+	}
+	if sess.Metadata == nil {
+		sess.Metadata = map[string]string{}
+	}
+	if value == "" {
+		delete(sess.Metadata, key)
+	} else {
+		sess.Metadata[key] = value
+	}
+	return nil
+}
+
 func (s *stubSessionStore) Delete(id string) error {
 	delete(s.sessions, id)
 	return nil

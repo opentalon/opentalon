@@ -14,6 +14,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/bootstrap"
 	"github.com/opentalon/opentalon/internal/bundle"
 	"github.com/opentalon/opentalon/internal/channel"
@@ -131,34 +132,19 @@ func main() {
 		}
 	}
 
-	// Build LLM provider and default model from config
-	prov, defaultModel, err := buildProvider(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error building provider: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Build model lookup map for defaultModelClient.
-	modelMap := make(map[string]provider.ModelInfo)
-	for _, m := range prov.Models() {
-		modelMap[m.ID] = m
-	}
-
-	// LLM client that sets default model when orchestrator doesn't
-	llm := &defaultModelClient{provider: prov, model: defaultModel, models: modelMap}
-
-	// Look up context window for the default model.
-	var contextWindow int
-	if m, ok := modelMap[defaultModel]; ok {
-		contextWindow = m.ContextWindow
-	}
-
+	// State store is opened first because the LLM provider needs the
+	// per-session debug-capture sink (an async writer over the state DB)
+	// at construction time. Sessions and other state pieces are wired the
+	// same way as before — just earlier in the bootstrap.
 	dataDir := cfg.State.DataDir
 	var memory orchestrator.MemoryStoreInterface
 	var sessions orchestrator.SessionStoreInterface
 	var groupPluginStore *store.GroupPluginStore
 	var usageStore *store.UsageStore
 	var entityStore *store.EntityStore
+	var debugStore *store.DebugEventStore
+	var debugWriter *store.DebugEventWriter
+	var debugRetentionCancel context.CancelFunc
 	if dataDir != "" || cfg.State.DB.Driver == "postgres" {
 		db, err := store.Open(cfg.State.DB, dataDir)
 		if err != nil {
@@ -175,6 +161,25 @@ func main() {
 			groupPluginStore = store.NewGroupPluginStore(db)
 			usageStore = store.NewUsageStore(db)
 			entityStore = store.NewEntityStore(db)
+			debugStore = store.NewDebugEventStore(db)
+			debugWriter = store.NewDebugEventWriter(debugStore)
+			debugWriter.Start(context.Background())
+			// Retention: explicit RetentionDisabled overrides the days field;
+			// RetentionDays==0 means "use the default 30", not "disable" —
+			// see DebugConfig docstring for the reasoning. retentionCtx is
+			// cancelled in the shutdown sequence at the bottom of main(),
+			// alongside dispatcher and writer teardown.
+			var retention time.Duration
+			if !cfg.State.Debug.RetentionDisabled {
+				days := cfg.State.Debug.RetentionDays
+				if days <= 0 {
+					days = 30
+				}
+				retention = time.Duration(days) * 24 * time.Hour
+			}
+			var retentionCtx context.Context
+			retentionCtx, debugRetentionCancel = context.WithCancel(context.Background())
+			go store.RunDebugRetention(retentionCtx, debugStore, retention)
 			// Seed static group→plugin assignments from config (source="config"; does not overwrite whoami/admin).
 			seedGroupPlugins(context.Background(), groupPluginStore, cfg.Profiles.Groups)
 			// Seed group→plugin assignments from remote bootstrap response (source="bootstrap"; lower priority than "config", does not overwrite whoami/admin).
@@ -182,6 +187,46 @@ func main() {
 		}
 	} else {
 		memory, sessions = newInMemoryState()
+	}
+
+	// Build the resolver for /debug capture: trace_id is derived from the
+	// session key and stamped onto ctx by orchestrator.Run; logger.IsSession-
+	// Debug reflects whether the session has metadata["debug"]=true. When
+	// debugStore is nil (no state DB configured) we still build a sink
+	// adapter for completeness, but the resolver short-circuits anyway.
+	var debugSink provider.DebugEventSink
+	var debugResolver provider.DebugContextResolver
+	if debugWriter != nil {
+		debugSink = &providerDebugSink{writer: debugWriter}
+		debugResolver = func(ctx context.Context) (string, string, bool) {
+			if !logger.IsSessionDebug(ctx) {
+				return "", "", false
+			}
+			return actor.SessionID(ctx), logger.TraceID(ctx), true
+		}
+	}
+
+	// Build LLM provider and default model from config. The (sink,resolver)
+	// pair feeds per-session /debug capture; either nil disables capture.
+	prov, defaultModel, err := buildProvider(cfg, debugSink, debugResolver)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error building provider: %v\n", err)
+		os.Exit(1) //nolint:gocritic // matches the other main()-level fatal paths; the deferred db.Close is best-effort, the OS reclaims handles on exit
+	}
+
+	// Build model lookup map for defaultModelClient.
+	modelMap := make(map[string]provider.ModelInfo)
+	for _, m := range prov.Models() {
+		modelMap[m.ID] = m
+	}
+
+	// LLM client that sets default model when orchestrator doesn't
+	llm := &defaultModelClient{provider: prov, model: defaultModel, models: modelMap}
+
+	// Look up context window for the default model.
+	var contextWindow int
+	if m, ok := modelMap[defaultModel]; ok {
+		contextWindow = m.ContextWindow
 	}
 
 	// Sessions created on first message per channel (session key from channel ID)
@@ -379,6 +424,9 @@ func main() {
 	cmdExecutor := commands.NewExecutor(toolRegistry, sessions, dataDir, cfg, runtimePromptPath).
 		WithMCPReload(pluginManager, mcpCacheDir).
 		WithProfileStore(groupPluginStore)
+	if debugStore != nil {
+		cmdExecutor.WithDebugEventCounter(debugStore)
+	}
 	if err := toolRegistry.Register(commands.Capability(), cmdExecutor); err != nil {
 		slog.Warn("register opentalon commands failed", "error", err)
 	}
@@ -727,6 +775,15 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt)
 	<-sigCh
 
+	// Flush debug-event writer first so any /debug rows captured up to the
+	// signal are persisted. Bounded wait — never block shutdown forever.
+	if debugWriter != nil {
+		debugWriter.Stop(5 * time.Second)
+	}
+	if debugRetentionCancel != nil {
+		debugRetentionCancel()
+	}
+
 	// Stop health server first so K8s stops routing traffic during teardown.
 	healthSrv.Shutdown()
 
@@ -747,6 +804,27 @@ func main() {
 		dispatchCancel()
 		dispatcher.Wait()
 	}
+}
+
+// providerDebugSink adapts the state-store async writer to the
+// provider.DebugEventSink interface. The provider package can't import
+// store directly without dragging the SQL drivers into every test build,
+// so this thin shim keeps the dependency direction one-way: main.go
+// composes both packages.
+type providerDebugSink struct {
+	writer *store.DebugEventWriter
+}
+
+func (s *providerDebugSink) Submit(ctx context.Context, e provider.DebugEvent) {
+	s.writer.Submit(store.DebugEvent{
+		SessionID: e.SessionID,
+		TraceID:   e.TraceID,
+		Direction: e.Direction,
+		Status:    e.Status,
+		URL:       e.URL,
+		Body:      e.Body,
+		Timestamp: e.Timestamp,
+	})
 }
 
 // seedGroupPlugins seeds the static group→plugin config baseline to the DB.
@@ -1025,7 +1103,7 @@ func runClean(configPath, category string) {
 }
 
 // buildProvider returns a provider and the default model ID from config.
-func buildProvider(cfg *config.Config) (provider.Provider, string, error) {
+func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver) (provider.Provider, string, error) {
 	providerID := ""
 	modelID := ""
 
@@ -1088,11 +1166,13 @@ func buildProvider(cfg *config.Config) (provider.Provider, string, error) {
 	}
 
 	provCfg := provider.ProviderConfig{
-		ID:      providerID,
-		BaseURL: pc.BaseURL,
-		APIKey:  pc.APIKey,
-		API:     pc.API,
-		Models:  models,
+		ID:           providerID,
+		BaseURL:      pc.BaseURL,
+		APIKey:       pc.APIKey,
+		API:          pc.API,
+		Models:       models,
+		DebugSink:    debugSink,
+		DebugResolve: debugResolve,
 	}
 	prov, err := provider.FromConfig(provCfg)
 	if err != nil {

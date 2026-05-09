@@ -87,6 +87,30 @@ func (s *SessionStore) SetModel(id string, model provider.ModelRef) error {
 	return nil
 }
 
+// SetMetadata upserts a single metadata key on the session. An empty value
+// removes the key so callers can both set and clear flags through one path.
+// Used today by the set_debug_mode command to persist `debug=true` and the
+// orchestrator's per-session debug-context flag reads it on every Run().
+func (s *SessionStore) SetMetadata(id, key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[id]
+	if !ok {
+		return fmt.Errorf("session %q not found", id)
+	}
+	if sess.Metadata == nil {
+		sess.Metadata = make(map[string]string)
+	}
+	if value == "" {
+		delete(sess.Metadata, key)
+	} else {
+		sess.Metadata[key] = value
+	}
+	sess.UpdatedAt = time.Now()
+	return nil
+}
+
 // SetSummary updates the session summary and trims messages to the given slice (for summarization).
 func (s *SessionStore) SetSummary(id string, summary string, messages []provider.Message) error {
 	s.mu.Lock()

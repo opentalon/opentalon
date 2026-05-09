@@ -63,6 +63,23 @@ func (c *cachedSessionStore) SetModel(id string, model provider.ModelRef) error 
 	return nil
 }
 
+func (c *cachedSessionStore) SetMetadata(id, key, value string) error {
+	if err := c.inner.SetMetadata(id, key, value); err != nil {
+		return err
+	}
+	if s, ok := c.cache[id]; ok {
+		if s.Metadata == nil {
+			s.Metadata = make(map[string]string)
+		}
+		if value == "" {
+			delete(s.Metadata, key)
+		} else {
+			s.Metadata[key] = value
+		}
+	}
+	return nil
+}
+
 func (c *cachedSessionStore) SetSummary(id string, summary string, messages []provider.Message) error {
 	if err := c.inner.SetSummary(id, summary, messages); err != nil {
 		return err

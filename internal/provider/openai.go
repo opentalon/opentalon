@@ -24,11 +24,13 @@ const (
 // OpenAI-compatible API (OpenAI, Azure, Ollama, vLLM, Groq,
 // Together, OVH, etc.).
 type OpenAIProvider struct {
-	id      string
-	baseURL string
-	apiKey  string
-	models  []ModelInfo
-	client  *http.Client
+	id           string
+	baseURL      string
+	apiKey       string
+	models       []ModelInfo
+	client       *http.Client
+	debugSink    DebugEventSink       // optional; nil disables persistent debug capture
+	debugResolve DebugContextResolver // optional; returns (sessionID, traceID, enabled?) for this ctx
 }
 
 // OpenAIOption configures an OpenAIProvider.
@@ -37,6 +39,32 @@ type OpenAIOption func(*OpenAIProvider)
 // WithOpenAIHTTPClient sets a custom HTTP client.
 func WithOpenAIHTTPClient(c *http.Client) OpenAIOption {
 	return func(p *OpenAIProvider) { p.client = c }
+}
+
+// WithOpenAIDebugSink wires a DebugEventSink so request/response/error
+// exchanges are persisted whenever the resolver (see WithOpenAIDebugResolver)
+// reports enabled=true. Both options are required to actually capture: a nil
+// sink or a missing resolver disables the path entirely.
+func WithOpenAIDebugSink(s DebugEventSink) OpenAIOption {
+	return func(p *OpenAIProvider) { p.debugSink = s }
+}
+
+// WithOpenAIDebugResolver wires the per-request resolver that returns
+// (sessionID, traceID, enabled?). In production this is fed by
+// actor.SessionID + logger.TraceID + logger.IsSessionDebug from main.go.
+func WithOpenAIDebugResolver(r DebugContextResolver) OpenAIOption {
+	return func(p *OpenAIProvider) { p.debugResolve = r }
+}
+
+// resolveDebug returns capture metadata for ctx. When any wiring is missing
+// or the session has not opted in, ok is false and the caller skips capture
+// before any body work — keeping the LLM hot path zero-cost for non-debug
+// sessions.
+func (p *OpenAIProvider) resolveDebug(ctx context.Context) (sessionID, traceID string, ok bool) {
+	if p.debugSink == nil || p.debugResolve == nil {
+		return "", "", false
+	}
+	return p.debugResolve(ctx)
 }
 
 // NewOpenAIProvider creates a provider for any OpenAI-compatible endpoint.
@@ -165,9 +193,48 @@ type oaiStreamDelta struct {
 }
 
 // oaiResponseStream implements ResponseStream over an SSE connection.
+//
+// When debug capture is on for the originating session, accumulator collects
+// every SSE line the bufio.Scanner returns, joined back with single '\n'
+// separators. This is line-normalized SSE replay (it would render any real
+// `\r\n\r\n` event boundary as a single '\n'), not byte-for-byte wire
+// fidelity — sufficient for diagnosing what the upstream actually sent
+// (deltas, malformed chunks, the [DONE] marker) without the cost of a
+// TeeReader on the raw response body. On Close() the accumulated body is
+// forwarded to onClose, which writes it as a single `direction=response`
+// row. We capture the line stream rather than the assembled
+// CompletionResponse so /debug shows what came over the network — including
+// chunks the orchestrator skipped on parse failure — which is exactly the
+// surface area /debug exists to expose.
 type oaiResponseStream struct {
-	body    io.ReadCloser
-	scanner *bufio.Scanner
+	body        io.ReadCloser
+	scanner     *bufio.Scanner
+	accumulator *streamAccumulator // nil when capture disabled for this stream
+	onClose     func(rawBody []byte)
+	closed      bool // guard for double-Close (body.Close + onClose flush)
+}
+
+// streamAccumulator buffers the raw SSE wire bytes for end-of-stream debug
+// capture. Bounded so a runaway stream cannot blow up memory: events
+// truncate at maxStreamCaptureBytes with a sentinel marker.
+type streamAccumulator struct {
+	buf       []byte
+	truncated bool
+}
+
+const maxStreamCaptureBytes = 4 * 1024 * 1024 // 4MB; large gpt-oss responses fit, runaway streams do not
+
+func (a *streamAccumulator) append(line string) {
+	if a == nil || a.truncated {
+		return
+	}
+	if len(a.buf)+len(line)+1 > maxStreamCaptureBytes {
+		a.buf = append(a.buf, []byte("\n[truncated by /debug capture]\n")...)
+		a.truncated = true
+		return
+	}
+	a.buf = append(a.buf, line...)
+	a.buf = append(a.buf, '\n')
 }
 
 // Complete sends a non-streaming completion request.
@@ -204,35 +271,28 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	}
 	p.setHeaders(httpReq)
 
-	// Raw HTTP capture for live A/B comparison against parallel clients
-	// (e.g. RubyLLM-based mockups hitting the same OVH endpoint). Off until
-	// LOG_LEVEL=debug. Body is passed as json.RawMessage so the JSON log
-	// handler embeds it as a nested object, not a quote-escaped string —
-	// `kubectl logs -f | jq 'select(.msg=="openai raw http")'` becomes a
-	// usable live tail. Tagged "openai raw http" + direction so a single
-	// jq selector covers request and response.
-	slog.DebugContext(ctx, "openai raw http",
-		"direction", "request",
-		"url", p.baseURL+openAICompletionsPath,
-		"body", json.RawMessage(body),
-	)
+	// Raw HTTP capture: emitted as a slog event for live tailing and (when
+	// /debug capture is wired + this session opted in) persisted to the
+	// ai_debug_events table. Tagged "openai raw http" + direction so a
+	// single `kubectl logs -f | jq 'select(.msg=="openai raw http")'`
+	// covers both request and response.
+	url := p.baseURL + openAICompletionsPath
+	p.captureRawHTTP(ctx, "request", url, 0, body)
 
 	httpResp, err := p.client.Do(httpReq)
 	if err != nil {
+		p.captureRawHTTPError(ctx, url, err)
 		return nil, fmt.Errorf("http request: %w", err)
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
+		p.captureRawHTTPError(ctx, url, err)
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	slog.DebugContext(ctx, "openai raw http",
-		"direction", "response",
-		"status", httpResp.StatusCode,
-		"body", rawJSONOrString(respBody),
-	)
+	p.captureRawHTTP(ctx, "response", url, httpResp.StatusCode, respBody)
 
 	if httpResp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("openai api error (status %d): %s", httpResp.StatusCode, string(respBody))
@@ -329,37 +389,64 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 	}
 	p.setHeaders(httpReq)
 
-	// Capture the request only — streaming responses arrive as SSE chunks
-	// and logging each one would flood the debug stream without serving
-	// the A/B parity goal (which is "what did we send to the model").
-	slog.DebugContext(ctx, "openai raw http",
-		"direction", "request",
-		"url", p.baseURL+openAICompletionsPath,
-		"body", json.RawMessage(body),
-	)
+	// Request is captured the same way as in the non-streaming path; the
+	// streaming response is captured at end-of-stream by the accumulator
+	// inside oaiResponseStream.
+	url := p.baseURL + openAICompletionsPath
+	p.captureRawHTTP(ctx, "request", url, 0, body)
 
 	// Use a client without timeout for streaming; context handles cancellation.
 	streamClient := &http.Client{}
 	httpResp, err := streamClient.Do(httpReq)
 	if err != nil {
+		p.captureRawHTTPError(ctx, url, err)
 		return nil, fmt.Errorf("http request: %w", err)
 	}
 
 	if httpResp.StatusCode != http.StatusOK {
 		defer func() { _ = httpResp.Body.Close() }()
 		respBody, _ := io.ReadAll(httpResp.Body)
+		p.captureRawHTTP(ctx, "response", url, httpResp.StatusCode, respBody)
 		return nil, fmt.Errorf("openai api error (status %d): %s", httpResp.StatusCode, string(respBody))
 	}
 
-	return &oaiResponseStream{
+	stream := &oaiResponseStream{
 		body:    httpResp.Body,
 		scanner: bufio.NewScanner(httpResp.Body),
-	}, nil
+	}
+	// Wire end-of-stream capture only when this session opted in. Sessions
+	// without /debug get the lighter struct without the buffer.
+	if sessionID, traceID, ok := p.resolveDebug(ctx); ok {
+		stream.accumulator = &streamAccumulator{}
+		sink := p.debugSink
+		stream.onClose = func(rawBody []byte) {
+			sink.Submit(ctx, DebugEvent{
+				SessionID: sessionID,
+				TraceID:   traceID,
+				Direction: "response",
+				Status:    httpResp.StatusCode,
+				URL:       url,
+				Body:      string(rawBody),
+				Timestamp: time.Now().UTC(),
+			})
+			slog.DebugContext(ctx, "openai raw http",
+				"direction", "response",
+				"url", url,
+				"status", httpResp.StatusCode,
+				"body", rawJSONOrString(rawBody),
+				"streaming", true,
+			)
+		}
+	}
+	return stream, nil
 }
 
 func (s *oaiResponseStream) Recv() (StreamChunk, error) {
 	for s.scanner.Scan() {
 		line := s.scanner.Text()
+		// Capture every SSE line (data: payloads, blank separators, anything
+		// the upstream sent) so /debug shows the wire-level stream verbatim.
+		s.accumulator.append(line)
 
 		// SSE format: lines prefixed with "data: "
 		if !strings.HasPrefix(line, "data: ") {
@@ -412,7 +499,21 @@ func (s *oaiResponseStream) Recv() (StreamChunk, error) {
 	return StreamChunk{Done: true}, nil
 }
 
+// Close flushes the captured body (if any) to the debug sink and closes the
+// underlying response body. Idempotent: a second Close is a no-op rather
+// than re-running onClose or returning the "use of closed network
+// connection" error from the body. The orchestrator calls Close via defer,
+// so a panic-during-Recv path could in principle hit Close twice if the
+// caller has its own defer too — guarding here costs one bool.
 func (s *oaiResponseStream) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.onClose != nil && s.accumulator != nil {
+		s.onClose(s.accumulator.buf)
+		s.onClose = nil
+	}
 	return s.body.Close()
 }
 
@@ -492,6 +593,59 @@ func rawJSONOrString(body []byte) any {
 		return json.RawMessage(body)
 	}
 	return string(body)
+}
+
+// captureRawHTTP is the single point where raw OpenAI HTTP exchanges are
+// surfaced — both as a slog event (for live tailing on stderr) and, when
+// /debug capture is wired and the session opted in, as a row in the
+// ai_debug_events table.
+//
+// The slog call is unconditional at DebugContext level — the global handler
+// chain decides what to emit: the session-debug wrapper promotes it to Info
+// for sessions that toggled /debug, the underlying JSON handler still gates
+// non-debug sessions at the configured LOG_LEVEL.
+//
+// Persistence is gated on resolveDebug() reporting enabled=true so non-debug
+// sessions cost nothing beyond the slog call (which itself short-circuits
+// when the level filters it out).
+func (p *OpenAIProvider) captureRawHTTP(ctx context.Context, direction, url string, status int, body []byte) {
+	slog.DebugContext(ctx, "openai raw http",
+		"direction", direction,
+		"url", url,
+		"status", status,
+		"body", rawJSONOrString(body),
+	)
+	sessionID, traceID, ok := p.resolveDebug(ctx)
+	if !ok {
+		return
+	}
+	p.debugSink.Submit(ctx, DebugEvent{
+		SessionID: sessionID,
+		TraceID:   traceID,
+		Direction: direction,
+		Status:    status,
+		URL:       url,
+		Body:      string(body),
+		Timestamp: time.Now().UTC(),
+	})
+}
+
+// captureRawHTTPError records a non-HTTP failure (DNS, dial, marshalling,
+// stream-read aborts) so /debug session histories show the failure in the
+// same row stream as successful exchanges.
+func (p *OpenAIProvider) captureRawHTTPError(ctx context.Context, url string, err error) {
+	sessionID, traceID, ok := p.resolveDebug(ctx)
+	if !ok {
+		return
+	}
+	p.debugSink.Submit(ctx, DebugEvent{
+		SessionID: sessionID,
+		TraceID:   traceID,
+		Direction: "error",
+		URL:       url,
+		Body:      fmt.Sprintf("%T: %s", err, err.Error()),
+		Timestamp: time.Now().UTC(),
+	})
 }
 
 // nativeArgToString converts a JSON-decoded value to a string suitable for
