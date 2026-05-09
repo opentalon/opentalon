@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -251,7 +253,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 			var rawArgs map[string]interface{}
 			if err := json.Unmarshal([]byte(tc.Function.Arguments), &rawArgs); err == nil {
 				for k, v := range rawArgs {
-					args[k] = fmt.Sprintf("%v", v)
+					args[k] = nativeArgToString(v)
 				}
 			}
 			toolCalls = append(toolCalls, ToolCall{
@@ -435,5 +437,38 @@ func (p *OpenAIProvider) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	if p.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+}
+
+// nativeArgToString converts a JSON-decoded value to a string suitable for
+// the wire-level map[string]string in ToolCall.Arguments.
+//
+// Unlike toStringMap in parser.go, this preserves all values including nil,
+// false, and zero — the LLM explicitly chose these in structured tool calls.
+func nativeArgToString(v interface{}) string {
+	if v == nil {
+		return "null"
+	}
+	switch x := v.(type) {
+	case string:
+		return x
+	case bool:
+		return strconv.FormatBool(x)
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return fmt.Sprintf("%v", x)
+		}
+		if x == math.Trunc(x) && math.Abs(x) < 1e18 {
+			return strconv.FormatInt(int64(x), 10)
+		}
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case json.Number:
+		return string(x)
+	default:
+		b, err := json.Marshal(x)
+		if err != nil {
+			return fmt.Sprintf("%v", x)
+		}
+		return string(b)
 	}
 }
