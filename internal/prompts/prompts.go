@@ -52,6 +52,9 @@ var PlannerNarrate = strings.TrimRight(plannerNarrateRaw, "\n")
 //go:embed orchestrator_preamble.txt
 var OrchestratorPreamble string
 
+//go:embed orchestrator_preamble_native.txt
+var OrchestratorPreambleNative string
+
 //go:embed orchestrator_subprocess.txt
 var OrchestratorSubprocess string
 

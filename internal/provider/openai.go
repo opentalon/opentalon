@@ -190,6 +190,13 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
+	slog.DebugContext(ctx, "openai request",
+		"model", oaiReq.Model,
+		"messages", len(oaiReq.Messages),
+		"tools", len(oaiReq.Tools),
+		"body_bytes", len(body),
+	)
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		p.baseURL+openAICompletionsPath, bytes.NewReader(body))
 	if err != nil {
@@ -257,9 +264,14 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 
 		// Log native tool calls when present.
 		if len(msg.ToolCalls) > 0 {
+			tcNames := make([]string, 0, len(msg.ToolCalls))
+			for _, tc := range msg.ToolCalls {
+				tcNames = append(tcNames, tc.Function.Name)
+			}
 			slog.DebugContext(ctx, "openai native tool calls",
 				"model", oaiResp.Model,
 				"count", len(msg.ToolCalls),
+				"tools", tcNames,
 			)
 		}
 

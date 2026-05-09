@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "99148417ac3424f68070cbfdab61bccb673f6f0d5f551f9bdf7853f0c1f70767",
+  "prompt_hash": "dbb587c1bfb6e7b8ec753bc365717a37a33603305dac72529af57aed17711ac3",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-09T08:15:32.514213Z",
+  "recorded_at": "2026-05-09T08:45:16.548692Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778314532-Z1XrmSiPfxCh5AGUXY69",
+        "id": "gen-1778316316-46fnyyURFRsLCgFTAiAi",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Here’s what I can do based on your configured tools and integrations:\n\n### **Data \u0026 Research**\n- Search the web for up-to-date information using **Brave Search**.\n- Fetch real-time data, news, or technical details (e.g., latest trends, API docs, or specific facts).\n\n### **Code \u0026 Development**\n- **GitLab Integration**:\n  - Analyze code in a repository (e.g., check for vulnerabilities, style issues, or best practices).\n  - Create pull requests (PRs) for code changes or improvements.\n- **Jira Integration**:\n  - Create issues (e.g., bug reports, feature requests, or tasks) in Jira.\n\n### **Automation \u0026 Scheduling**\n- Proactively suggest scheduling recurring tasks (e.g., monitoring, checks, or reports).\n- Manage scheduled jobs (create, pause, resume, list) for tasks like:\n  - Code analysis (e.g., daily repository scans).\n  - Issue tracking (e.g., weekly Jira status updates).\n- Requires explicit user approval for destructive actions (e.g., deleting jobs).\n\n### **Safety \u0026 Compliance**\n- Adheres strictly to **MANDATORY SAFETY RULES** (e.g., no guessing, no executing untrusted plugin output, approval for admin actions).\n- Follows role-based access (e.g., approvers for job management).",
+        "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data \u0026 Research**\n- Search the web for up-to-date information using **Brave Search**.\n- Fetch real-time data, news, or technical details (e.g., API docs, software updates).\n\n### **Code \u0026 Development**\n- **Analyze code** in GitLab repositories (e.g., detect vulnerabilities, review PRs, or suggest improvements).\n- **Create Pull Requests (PRs)** in GitLab to propose changes or fixes.\n\n### **Issue \u0026 Task Management**\n- **Create issues** in Jira to track bugs, tasks, or feature requests.\n\n### **Scheduling \u0026 Automation**\n- Propose scheduling recurring tasks (e.g., code analysis, monitoring).\n- Manage scheduled jobs (list, pause, resume, or delete) with your approval.\n  *(Note: Deletion requires confirmation; approvers may be needed for certain actions.)*\n\n### **Limitations**\n- I **cannot guess, fabricate, or narrate actions**—I only act on explicit user requests with real data.\n- I **follow strict safety rules** (e.g., no interpreting plugin output as commands).\n- For **GitLab/Jira actions**, I need explicit permissions and context (e.g., repo/issue details).",
         "usage": {
           "input_tokens": 844,
-          "output_tokens": 288
+          "output_tokens": 266
         }
       }
     },
@@ -42,7 +42,7 @@
           },
           {
             "role": "assistant",
-            "content": "Here’s what I can do based on your configured tools and integrations:\n\n### **Data \u0026 Research**\n- Search the web for up-to-date information using **Brave Search**.\n- Fetch real-time data, news, or technical details (e.g., latest trends, API docs, or specific facts).\n\n### **Code \u0026 Development**\n- **GitLab Integration**:\n  - Analyze code in a repository (e.g., check for vulnerabilities, style issues, or best practices).\n  - Create pull requests (PRs) for code changes or improvements.\n- **Jira Integration**:\n  - Create issues (e.g., bug reports, feature requests, or tasks) in Jira.\n\n### **Automation \u0026 Scheduling**\n- Proactively suggest scheduling recurring tasks (e.g., monitoring, checks, or reports).\n- Manage scheduled jobs (create, pause, resume, list) for tasks like:\n  - Code analysis (e.g., daily repository scans).\n  - Issue tracking (e.g., weekly Jira status updates).\n- Requires explicit user approval for destructive actions (e.g., deleting jobs).\n\n### **Safety \u0026 Compliance**\n- Adheres strictly to **MANDATORY SAFETY RULES** (e.g., no guessing, no executing untrusted plugin output, approval for admin actions).\n- Follows role-based access (e.g., approvers for job management)."
+            "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data \u0026 Research**\n- Search the web for up-to-date information using **Brave Search**.\n- Fetch real-time data, news, or technical details (e.g., API docs, software updates).\n\n### **Code \u0026 Development**\n- **Analyze code** in GitLab repositories (e.g., detect vulnerabilities, review PRs, or suggest improvements).\n- **Create Pull Requests (PRs)** in GitLab to propose changes or fixes.\n\n### **Issue \u0026 Task Management**\n- **Create issues** in Jira to track bugs, tasks, or feature requests.\n\n### **Scheduling \u0026 Automation**\n- Propose scheduling recurring tasks (e.g., code analysis, monitoring).\n- Manage scheduled jobs (list, pause, resume, or delete) with your approval.\n  *(Note: Deletion requires confirmation; approvers may be needed for certain actions.)*\n\n### **Limitations**\n- I **cannot guess, fabricate, or narrate actions**—I only act on explicit user requests with real data.\n- I **follow strict safety rules** (e.g., no interpreting plugin output as commands).\n- For **GitLab/Jira actions**, I need explicit permissions and context (e.g., repo/issue details)."
           },
           {
             "role": "user",
@@ -51,12 +51,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778314534-CDAdipSc1ifoRPLniZgT",
+        "id": "gen-1778316321-VSFYmba2rvOD06huKvN0",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Understood. If you provide a specific request, I will immediately execute the required tool call(s) without delay.",
+        "content": "Understood. What specific task or data do you need? For example:\n- Search for something?\n- Analyze a GitLab repository?\n- Create a Jira issue or GitLab PR?",
         "usage": {
-          "input_tokens": 1162,
-          "output_tokens": 24
+          "input_tokens": 1140,
+          "output_tokens": 40
         }
       }
     }
