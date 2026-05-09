@@ -299,3 +299,33 @@ func TestOpenAIRejectsFileAttachments(t *testing.T) {
 		t.Fatal("expected error for file attachment, got nil")
 	}
 }
+
+func TestNativeArgToString(t *testing.T) {
+	cases := []struct {
+		name string
+		v    interface{}
+		want string
+	}{
+		{"string", "hello", "hello"},
+		{"bool true", true, "true"},
+		{"bool false", false, "false"},
+		{"nil", nil, "null"},
+		{"integer float64", float64(42), "42"},
+		{"large integer float64", float64(2037838), "2037838"},
+		{"fractional float64", float64(3.14), "3.14"},
+		{"array", []interface{}{"all"}, `["all"]`},
+		{"nested object", map[string]interface{}{"status": "active"}, `{"status":"active"}`},
+		{"empty array", []interface{}{}, `[]`},
+		{"integer array", []interface{}{float64(1), float64(2)}, `[1,2]`},
+		{"zero float64", float64(0), "0"},
+		{"json.Number", json.Number("999"), "999"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nativeArgToString(tc.v)
+			if got != tc.want {
+				t.Errorf("nativeArgToString(%v) = %q, want %q", tc.v, got, tc.want)
+			}
+		})
+	}
+}
