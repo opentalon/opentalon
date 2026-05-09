@@ -43,7 +43,7 @@ func TestEndToEnd_DebugCaptureFlowsThroughEveryLayer(t *testing.T) {
 	debugStore := NewDebugEventStore(db)
 
 	// 2. Async writer.
-	writer := newDebugEventWriterSized(debugStore, 16)
+	writer := NewDebugEventWriter(debugStore)
 	writer.Start(context.Background())
 	defer writer.Stop(2 * time.Second)
 
@@ -100,7 +100,7 @@ func TestEndToEnd_DebugCaptureFlowsThroughEveryLayer(t *testing.T) {
 	}
 
 	// Restart writer for path B.
-	writer = newDebugEventWriterSized(debugStore, 16)
+	writer = NewDebugEventWriter(debugStore)
 	writer.Start(context.Background())
 	defer writer.Stop(2 * time.Second)
 	sink.w = writer

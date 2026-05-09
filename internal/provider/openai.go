@@ -276,23 +276,22 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	// ai_debug_events table. Tagged "openai raw http" + direction so a
 	// single `kubectl logs -f | jq 'select(.msg=="openai raw http")'`
 	// covers both request and response.
-	url := p.baseURL + openAICompletionsPath
-	p.captureRawHTTP(ctx, "request", url, 0, body)
+	p.captureRawHTTP(ctx, "request", 0, body, nil)
 
 	httpResp, err := p.client.Do(httpReq)
 	if err != nil {
-		p.captureRawHTTPError(ctx, url, err)
+		p.captureRawHTTP(ctx, "error", 0, nil, err)
 		return nil, fmt.Errorf("http request: %w", err)
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		p.captureRawHTTPError(ctx, url, err)
+		p.captureRawHTTP(ctx, "error", 0, nil, err)
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	p.captureRawHTTP(ctx, "response", url, httpResp.StatusCode, respBody)
+	p.captureRawHTTP(ctx, "response", httpResp.StatusCode, respBody, nil)
 
 	if httpResp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("openai api error (status %d): %s", httpResp.StatusCode, string(respBody))
@@ -392,21 +391,20 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 	// Request is captured the same way as in the non-streaming path; the
 	// streaming response is captured at end-of-stream by the accumulator
 	// inside oaiResponseStream.
-	url := p.baseURL + openAICompletionsPath
-	p.captureRawHTTP(ctx, "request", url, 0, body)
+	p.captureRawHTTP(ctx, "request", 0, body, nil)
 
 	// Use a client without timeout for streaming; context handles cancellation.
 	streamClient := &http.Client{}
 	httpResp, err := streamClient.Do(httpReq)
 	if err != nil {
-		p.captureRawHTTPError(ctx, url, err)
+		p.captureRawHTTP(ctx, "error", 0, nil, err)
 		return nil, fmt.Errorf("http request: %w", err)
 	}
 
 	if httpResp.StatusCode != http.StatusOK {
 		defer func() { _ = httpResp.Body.Close() }()
 		respBody, _ := io.ReadAll(httpResp.Body)
-		p.captureRawHTTP(ctx, "response", url, httpResp.StatusCode, respBody)
+		p.captureRawHTTP(ctx, "response", httpResp.StatusCode, respBody, nil)
 		return nil, fmt.Errorf("openai api error (status %d): %s", httpResp.StatusCode, string(respBody))
 	}
 
@@ -416,26 +414,10 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 	}
 	// Wire end-of-stream capture only when this session opted in. Sessions
 	// without /debug get the lighter struct without the buffer.
-	if sessionID, traceID, ok := p.resolveDebug(ctx); ok {
+	if _, _, ok := p.resolveDebug(ctx); ok {
 		stream.accumulator = &streamAccumulator{}
-		sink := p.debugSink
 		stream.onClose = func(rawBody []byte) {
-			sink.Submit(ctx, DebugEvent{
-				SessionID: sessionID,
-				TraceID:   traceID,
-				Direction: "response",
-				Status:    httpResp.StatusCode,
-				URL:       url,
-				Body:      string(rawBody),
-				Timestamp: time.Now().UTC(),
-			})
-			slog.DebugContext(ctx, "openai raw http",
-				"direction", "response",
-				"url", url,
-				"status", httpResp.StatusCode,
-				"body", rawJSONOrString(rawBody),
-				"streaming", true,
-			)
+			p.captureRawHTTP(ctx, "response", httpResp.StatusCode, rawBody, nil)
 		}
 	}
 	return stream, nil
@@ -608,44 +590,40 @@ func rawJSONOrString(body []byte) any {
 // Persistence is gated on resolveDebug() reporting enabled=true so non-debug
 // sessions cost nothing beyond the slog call (which itself short-circuits
 // when the level filters it out).
-func (p *OpenAIProvider) captureRawHTTP(ctx context.Context, direction, url string, status int, body []byte) {
-	slog.DebugContext(ctx, "openai raw http",
-		"direction", direction,
-		"url", url,
-		"status", status,
-		"body", rawJSONOrString(body),
-	)
+//
+// captureErr is non-nil for transport / read failures (DNS, dial, body
+// read aborts); in that case direction is forced to "error" and body is
+// ignored — the failure class+message become the captured Body so /debug
+// histories show the failure inline with successful exchanges.
+func (p *OpenAIProvider) captureRawHTTP(ctx context.Context, direction string, status int, body []byte, captureErr error) {
+	url := p.baseURL + openAICompletionsPath
+	if captureErr == nil {
+		slog.DebugContext(ctx, "openai raw http",
+			"direction", direction,
+			"url", url,
+			"status", status,
+			"body", rawJSONOrString(body),
+		)
+	}
 	sessionID, traceID, ok := p.resolveDebug(ctx)
 	if !ok {
 		return
 	}
-	p.debugSink.Submit(ctx, DebugEvent{
+	rec := DebugEvent{
 		SessionID: sessionID,
 		TraceID:   traceID,
 		Direction: direction,
 		Status:    status,
 		URL:       url,
-		Body:      string(body),
 		Timestamp: time.Now().UTC(),
-	})
-}
-
-// captureRawHTTPError records a non-HTTP failure (DNS, dial, marshalling,
-// stream-read aborts) so /debug session histories show the failure in the
-// same row stream as successful exchanges.
-func (p *OpenAIProvider) captureRawHTTPError(ctx context.Context, url string, err error) {
-	sessionID, traceID, ok := p.resolveDebug(ctx)
-	if !ok {
-		return
 	}
-	p.debugSink.Submit(ctx, DebugEvent{
-		SessionID: sessionID,
-		TraceID:   traceID,
-		Direction: "error",
-		URL:       url,
-		Body:      fmt.Sprintf("%T: %s", err, err.Error()),
-		Timestamp: time.Now().UTC(),
-	})
+	if captureErr != nil {
+		rec.Direction = "error"
+		rec.Body = fmt.Sprintf("%T: %s", captureErr, captureErr.Error())
+	} else {
+		rec.Body = string(body)
+	}
+	p.debugSink.Submit(ctx, rec)
 }
 
 // nativeArgToString converts a JSON-decoded value to a string suitable for
