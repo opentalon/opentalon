@@ -325,10 +325,12 @@ type OrchestratorConfig struct {
 
 // PipelineOrchestratorConfig enables structured multi-step pipeline execution.
 type PipelineOrchestratorConfig struct {
-	Enabled        bool   `yaml:"enabled"`          // default false
-	MaxStepRetries int    `yaml:"max_step_retries"` // default 3
-	StepTimeout    string `yaml:"step_timeout"`     // Go duration, default "60s"
-	PlanTimeout    string `yaml:"plan_timeout"`     // Go duration, default "15s"; max time for planner LLM call
+	Enabled            bool   `yaml:"enabled"`             // default false
+	MaxStepRetries     int    `yaml:"max_step_retries"`    // default 3
+	StepTimeout        string `yaml:"step_timeout"`        // Go duration, default "60s"
+	PlanTimeout        string `yaml:"plan_timeout"`        // Go duration, default "15s"; max time for planner LLM call
+	ConfirmationPlugin string `yaml:"confirmation_plugin"` // plugin name for confirmation strategy (e.g. "planner")
+	ConfirmationAction string `yaml:"confirmation_action"` // action name (e.g. "check_confirmation")
 }
 
 // SubprocessOrchestratorConfig enables subprocess (sub-agent) forking from the main agent loop.

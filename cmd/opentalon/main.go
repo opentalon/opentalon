@@ -537,6 +537,8 @@ func main() {
 		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
 		PlanTimeout:             planTimeout,
 		PipelineConfig:          pipelineCfg,
+		ConfirmationPlugin:      cfg.Orchestrator.Pipeline.ConfirmationPlugin,
+		ConfirmationAction:      cfg.Orchestrator.Pipeline.ConfirmationAction,
 		ContextWindow:           contextWindow,
 		MaxConcurrentSessions:   cfg.Orchestrator.MaxConcurrentSessions,
 		GroupPluginLookup:       groupPluginStore,
