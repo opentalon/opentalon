@@ -1,9 +1,11 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -325,6 +327,173 @@ func TestNativeArgToString(t *testing.T) {
 			got := nativeArgToString(tc.v)
 			if got != tc.want {
 				t.Errorf("nativeArgToString(%v) = %q, want %q", tc.v, got, tc.want)
+			}
+		})
+	}
+}
+
+// withSlogCapture redirects the package-default slog handler at the given
+// level to a buffer and returns the buffer + a restore func. Mirrors the
+// JSONHandler used in production so tests assert against the actual log
+// shape operators see.
+func withSlogCapture(t *testing.T, level slog.Level) (*bytes.Buffer, func()) {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: level})))
+	return &buf, func() { slog.SetDefault(prev) }
+}
+
+// rawHTTPRecord parses one captured "openai raw http" event from the JSON
+// log buffer, returning its parsed `body` and the surrounding attrs.
+// Test helper — fails the calling test if the matching record isn't
+// present or its shape is wrong.
+func rawHTTPRecord(t *testing.T, buf *bytes.Buffer, direction string) map[string]any {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		if rec["msg"] != "openai raw http" {
+			continue
+		}
+		if rec["direction"] != direction {
+			continue
+		}
+		return rec
+	}
+	t.Fatalf("no openai raw http record with direction=%q in:\n%s", direction, buf.String())
+	return nil
+}
+
+// TestOpenAIComplete_RawHTTPLogAtDebug pins the contract that operators
+// rely on for the live A/B comparison: at LOG_LEVEL=debug, the full
+// request body and full response body are emitted on stderr (kubectl
+// logs) under a single "openai raw http" message tag with a `direction`
+// attribute, with `body` as a nested JSON object — `kubectl logs -f
+// opentalon-0 | jq 'select(.msg=="openai raw http")'` is the supported
+// live tail.
+func TestOpenAIComplete_RawHTTPLogAtDebug(t *testing.T) {
+	buf, restore := withSlogCapture(t, slog.LevelDebug)
+	defer restore()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(oaiResponse{
+			ID:      "chatcmpl-raw",
+			Model:   "gpt-4o",
+			Choices: []oaiChoice{{Index: 0, Message: oaiMessage{Role: "assistant", Content: "ok"}}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewOpenAIProvider("openai", server.URL, "test-key", nil)
+	if _, err := p.Complete(context.Background(), &CompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []Message{{Role: RoleUser, Content: "Hi"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Request side — body must be a nested JSON object; a request_body
+	// rendered as a quote-escaped string would defeat the purpose of the
+	// JSON log handler. We assert on shape, not on string substring.
+	reqRec := rawHTTPRecord(t, buf, "request")
+	reqBody, ok := reqRec["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("request body is not a JSON object: %v (%T)", reqRec["body"], reqRec["body"])
+	}
+	if reqBody["model"] != "gpt-4o" {
+		t.Errorf("request body model = %v, want gpt-4o", reqBody["model"])
+	}
+	msgs, ok := reqBody["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		t.Fatalf("request body messages missing or wrong type: %v (%T)", reqBody["messages"], reqBody["messages"])
+	}
+	first := msgs[0].(map[string]any)
+	if first["role"] != "user" || first["content"] != "Hi" {
+		t.Errorf("first message = %v, want role=user content=Hi", first)
+	}
+
+	// Response side — same nested-JSON shape expectation.
+	respRec := rawHTTPRecord(t, buf, "response")
+	if respRec["status"].(float64) != 200 {
+		t.Errorf("response status = %v, want 200", respRec["status"])
+	}
+	respBody, ok := respRec["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("response body is not a JSON object: %v (%T)", respRec["body"], respRec["body"])
+	}
+	if respBody["id"] != "chatcmpl-raw" {
+		t.Errorf("response body id = %v, want chatcmpl-raw", respBody["id"])
+	}
+}
+
+// TestOpenAIComplete_RawHTTPLogSilentAtInfo guarantees the capture is
+// gated by LOG_LEVEL — operators can leave the patched binary running
+// at the default `info` level without stderr getting flooded with
+// 30 KB request bodies.
+func TestOpenAIComplete_RawHTTPLogSilentAtInfo(t *testing.T) {
+	buf, restore := withSlogCapture(t, slog.LevelInfo)
+	defer restore()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(oaiResponse{
+			Choices: []oaiChoice{{Index: 0, Message: oaiMessage{Role: "assistant", Content: "ok"}}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewOpenAIProvider("openai", server.URL, "test-key", nil)
+	if _, err := p.Complete(context.Background(), &CompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []Message{{Role: RoleUser, Content: "Hi"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(buf.String(), "openai raw http") {
+		t.Errorf("info-level log must not include raw http capture; got:\n%s", buf.String())
+	}
+}
+
+// TestRawJSONOrString covers the response-body fallback: valid JSON keeps
+// its shape, anything else (HTML error page, truncated chunk) survives
+// as a literal string instead of vanishing.
+func TestRawJSONOrString(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want any
+	}{
+		{"json object", `{"a":1}`, json.RawMessage(`{"a":1}`)},
+		{"json array", `[1,2,3]`, json.RawMessage(`[1,2,3]`)},
+		{"html error page", `<html><body>500</body></html>`, "<html><body>500</body></html>"},
+		{"truncated json", `{"a":`, `{"a":`},
+		{"empty", ``, ``},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := rawJSONOrString([]byte(c.in))
+			switch w := c.want.(type) {
+			case json.RawMessage:
+				rm, ok := got.(json.RawMessage)
+				if !ok {
+					t.Fatalf("got %T, want json.RawMessage", got)
+				}
+				if string(rm) != string(w) {
+					t.Errorf("got %q, want %q", string(rm), string(w))
+				}
+			case string:
+				s, ok := got.(string)
+				if !ok {
+					t.Fatalf("got %T (%v), want string", got, got)
+				}
+				if s != w {
+					t.Errorf("got %q, want %q", s, w)
+				}
 			}
 		})
 	}

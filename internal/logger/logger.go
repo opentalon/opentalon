@@ -52,6 +52,18 @@ func (l *Logger) Error(msg string, args ...any) {
 // Setup configures the global slog default with the given level string
 // (debug, info, warn, error). Default: info. Also redirects the old
 // log.Printf through slog at Info level.
+//
+// The handler is JSON. Earlier versions used TextHandler, which collapsed
+// multi-field events onto a single line of `key=value` pairs and quote-
+// escaped any string value containing whitespace or punctuation — fine for
+// short attrs but unreadable for the bigger payloads we already log
+// (planner system prompts, MCP tool descriptions, the raw OpenAI HTTP
+// bodies introduced for live A/B comparison). JSON keeps every attr a
+// real value (nested objects, numbers, arrays stay typed), and `kubectl
+// logs -f opentalon-0 | jq` becomes a usable live tail. The cost is one
+// extra layer for human grep'ing — solved by piping through `jq` or a
+// small awk filter — and that trade is overwhelmingly worth it as soon
+// as any single attr is bigger than a screen line.
 func Setup(level string) {
 	var lvl slog.Level
 	switch strings.ToLower(level) {
@@ -64,7 +76,7 @@ func Setup(level string) {
 	default:
 		lvl = slog.LevelInfo
 	}
-	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
+	handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
 	slog.SetDefault(slog.New(handler))
 	log.SetOutput(&slogWriter{level: slog.LevelInfo})
 	log.SetFlags(0)
