@@ -1017,12 +1017,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			req.Model = profileModel
 		}
 
-		// Native tool calling: pass tool definitions so the LLM returns
-		// structured tool_calls instead of text-based [tool_call] blocks.
-		// Only on rounds where we expect tool calls (not after tool results
-		// when the LLM should just summarize).
+		// Native tool calling: pass tool definitions on every round so the
+		// LLM can chain multiple tool calls (e.g. list-categories → list-org-units
+		// → create-item). Without tools on follow-up rounds, the LLM just
+		// summarizes the first result instead of continuing.
 		nativeMode := o.supportsNativeTools()
-		if nativeMode && !hasToolResults(sess.Messages) {
+		if nativeMode {
 			req.Tools = o.buildToolDefinitions(ctx)
 			toolNames := make([]string, len(req.Tools))
 			for ti, td := range req.Tools {
