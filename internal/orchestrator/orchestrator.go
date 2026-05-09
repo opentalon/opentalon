@@ -826,7 +826,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		log.Debug("planner running", "session", sessionID, "message", content)
 		rtTools, rtSet := relevantToolsFromContext(ctx)
 		plannerCaps := filterCapabilitiesByRelevantTools(o.registry.ListCapabilities(), rtTools, rtSet)
-		planResult, err := o.planner.Plan(ctx, stripKnowledgeContext(content), capabilitiesToPlannerInfo(plannerCaps))
+		// Build conversation context from session history so the planner
+		// understands follow-up messages (e.g. "Item" after being asked
+		// "which type of object?").
+		sess, _ := sessions.Get(sessionID)
+		convContext := buildPlannerConversationContext(sess)
+		planResult, err := o.planner.Plan(ctx, stripKnowledgeContext(content), capabilitiesToPlannerInfo(plannerCaps), convContext)
 		if err != nil {
 			log.Warn("planner error, falling through to agent loop", "error", err)
 		} else {
@@ -3046,6 +3051,50 @@ func deduplicateKnowledgeOutput(m provider.Message, seen map[uint64]bool) provid
 		"[plugin_output]\n(Same knowledge articles as a previous lookup — see above.)\n[/plugin_output]" +
 		m.Content[end+len(closeTag):]
 	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files}
+}
+
+// buildPlannerConversationContext extracts a compact summary of recent
+// conversation turns so the planner can interpret follow-up messages.
+// Only includes user and assistant text messages (no tool results or system
+// messages) and caps at the last 6 turns to keep the planner prompt small.
+func buildPlannerConversationContext(sess *state.Session) string {
+	if sess == nil || len(sess.Messages) == 0 {
+		return ""
+	}
+	var parts []string
+	// Walk backwards to find the last few user/assistant exchanges.
+	for i := len(sess.Messages) - 1; i >= 0 && len(parts) < 6; i-- {
+		m := sess.Messages[i]
+		if m.Role != provider.RoleUser && m.Role != provider.RoleAssistant {
+			continue
+		}
+		text := m.Content
+		if text == "" {
+			continue
+		}
+		// Strip knowledge context blocks — they're huge and not useful for the planner.
+		text = stripKnowledgeContext(text)
+		if text == "" {
+			continue
+		}
+		// Truncate long messages to keep context compact.
+		if len(text) > 300 {
+			text = text[:300] + "..."
+		}
+		prefix := "User"
+		if m.Role == provider.RoleAssistant {
+			prefix = "Assistant"
+		}
+		parts = append(parts, prefix+": "+text)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	// Reverse to chronological order.
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return "Previous conversation:\n" + strings.Join(parts, "\n")
 }
 
 // fnv64a computes a fast FNV-1a hash for deduplication.
