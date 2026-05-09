@@ -1003,6 +1003,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			return blocked, nil
 		}
 
+		// Log system prompt size from the first message (role=system).
+		if len(guardedMessages) > 0 && guardedMessages[0].Role == provider.RoleSystem {
+			log.Debug("system prompt", "round", i+1, "length", len(guardedMessages[0].Content))
+		}
 		log.Debug("LLM request", "round", i+1, "messages", len(guardedMessages))
 		for j, m := range guardedMessages {
 			log.Debug("LLM request message", "index", j+1, "role", m.Role, "content", m.Content)
@@ -1017,10 +1021,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// structured tool_calls instead of text-based [tool_call] blocks.
 		// Only on rounds where we expect tool calls (not after tool results
 		// when the LLM should just summarize).
-		if o.supportsNativeTools() && !hasToolResults(sess.Messages) {
+		nativeMode := o.supportsNativeTools()
+		if nativeMode && !hasToolResults(sess.Messages) {
 			req.Tools = o.buildToolDefinitions(ctx)
-			log.Debug("native tools attached", "count", len(req.Tools))
+			toolNames := make([]string, len(req.Tools))
+			for ti, td := range req.Tools {
+				toolNames[ti] = td.Name
+			}
+			log.Debug("native tools attached", "count", len(req.Tools), "tools", toolNames)
 		}
+		log.Debug("tool calling mode", "native", nativeMode, "model", req.Model)
 
 		// Enable reasoning when the provider supports it. Reasoning
 		// helps the model decide which tools to call instead of narrating.
@@ -1356,13 +1366,17 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 	var tools []provider.ToolDefinition
 	for _, cap := range o.registry.ListCapabilities() {
 		if !o.pluginAllowed(cap, allowedPlugins) {
+			slog.Debug("tool registration: plugin excluded", "plugin", cap.Name)
 			continue
 		}
 		for _, action := range cap.Actions {
-			if preparerAction[cap.Name+"."+action.Name] || action.UserOnly {
+			fqn := cap.Name + "." + action.Name
+			if preparerAction[fqn] || action.UserOnly {
+				slog.Debug("tool registration: action skipped (internal/user-only)", "tool", fqn)
 				continue
 			}
-			if relevantToolsActive && !relevantToolSet[cap.Name+"."+action.Name] {
+			if relevantToolsActive && !relevantToolSet[fqn] {
+				slog.Debug("tool registration: action skipped (RAG filter)", "tool", fqn)
 				continue
 			}
 			// Build JSON Schema for parameters.
@@ -1378,7 +1392,7 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 				}
 			}
 			tools = append(tools, provider.ToolDefinition{
-				Name:        cap.Name + "." + action.Name,
+				Name:        fqn,
 				Description: action.Description,
 				Parameters: map[string]interface{}{
 					"type":                 "object",
@@ -1387,6 +1401,7 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 					"additionalProperties": false,
 				},
 			})
+			slog.Debug("tool registration: registered", "tool", fqn, "params", len(action.Parameters))
 		}
 	}
 	return tools
