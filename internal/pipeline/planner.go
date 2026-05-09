@@ -98,14 +98,22 @@ type planStepJSON struct {
 const DefaultPlanTimeout = 15 * time.Second
 
 // Plan asks the LLM whether the user's message requires a multi-step pipeline or a direct action.
-func (p *Planner) Plan(ctx context.Context, message string, capabilities []CapabilityInfo) (*PlanResult, error) {
+// conversationContext is an optional summary of prior turns so the planner understands
+// follow-up messages (e.g. "Item" after "Create some arbitrary test object").
+func (p *Planner) Plan(ctx context.Context, message string, capabilities []CapabilityInfo, conversationContext string) (*PlanResult, error) {
 	lang := ""
 	if prof := profile.FromContext(ctx); prof != nil {
 		lang = prof.Language
 	}
 	systemPrompt := buildPlannerPrompt(capabilities, lang)
 	slog.Debug("planner system prompt", "prompt", systemPrompt)
-	slog.Debug("planner user message", "message", message)
+
+	// Prepend conversation context so the planner can interpret follow-up messages.
+	plannerMessage := message
+	if conversationContext != "" {
+		plannerMessage = conversationContext + "\n\nCurrent user message: " + message
+	}
+	slog.Debug("planner user message", "message", plannerMessage)
 
 	planCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
@@ -113,7 +121,7 @@ func (p *Planner) Plan(ctx context.Context, message string, capabilities []Capab
 	resp, err := p.llm.Complete(planCtx, &CompletionRequest{
 		Messages: []Message{
 			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: message},
+			{Role: "user", Content: plannerMessage},
 		},
 	})
 	if err != nil {

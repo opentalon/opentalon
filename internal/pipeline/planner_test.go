@@ -28,7 +28,7 @@ func TestPlannerReturnsDirect(t *testing.T) {
 	llm := &fakePlannerLLM{response: `{"type": "direct"}`}
 	planner := NewPlanner(llm, 0)
 
-	result, err := planner.Plan(context.Background(), "hello", nil)
+	result, err := planner.Plan(context.Background(), "hello", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestPlannerReturnsPipeline(t *testing.T) {
 	}`}
 	planner := NewPlanner(llm, 0)
 
-	result, err := planner.Plan(context.Background(), "investigate error 123 and create a ticket", nil)
+	result, err := planner.Plan(context.Background(), "investigate error 123 and create a ticket", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestPlannerHandlesMarkdownCodeFence(t *testing.T) {
 	llm := &fakePlannerLLM{response: "```json\n{\"type\": \"pipeline\", \"steps\": [{\"id\": \"1\", \"name\": \"Step one\", \"plugin\": \"p\", \"action\": \"a\"}]}\n```"}
 	planner := NewPlanner(llm, 0)
 
-	result, err := planner.Plan(context.Background(), "do things", nil)
+	result, err := planner.Plan(context.Background(), "do things", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestPlannerFallsBackOnInvalidJSON(t *testing.T) {
 	llm := &fakePlannerLLM{response: "I'm not sure what you mean, here's some text"}
 	planner := NewPlanner(llm, 0)
 
-	result, err := planner.Plan(context.Background(), "something", nil)
+	result, err := planner.Plan(context.Background(), "something", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestPlannerFallsBackOnEmptySteps(t *testing.T) {
 	llm := &fakePlannerLLM{response: `{"type": "pipeline", "steps": []}`}
 	planner := NewPlanner(llm, 0)
 
-	result, err := planner.Plan(context.Background(), "something", nil)
+	result, err := planner.Plan(context.Background(), "something", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestPlannerAssignsDefaultIDs(t *testing.T) {
 	llm := &fakePlannerLLM{response: `{"type": "pipeline", "steps": [{"name": "Step A", "plugin": "p", "action": "a"}, {"name": "Step B", "plugin": "p", "action": "b"}]}`}
 	planner := NewPlanner(llm, 0)
 
-	result, err := planner.Plan(context.Background(), "do things", nil)
+	result, err := planner.Plan(context.Background(), "do things", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
