@@ -1494,11 +1494,23 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					o.pendingToolCalls[sessionID] = &pending
 					o.pendingMu.Unlock()
 					// Build a confirmation message describing what will be done.
-					confirmMsg := fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", calls[i].Action)
-					for k, v := range calls[i].Args {
-						confirmMsg += fmt.Sprintf("- %s: %s\n", k, v)
+					// Prefer LLM narration to hide raw tool names from the user.
+					var confirmMsg string
+					if o.planner != nil {
+						narrated, narrErr := o.planner.NarrateToolCall(ctx, calls[i].Action, calls[i].Args, userMessage)
+						if narrErr != nil {
+							log.Warn("tool call narration failed, using fallback", "error", narrErr)
+						} else {
+							confirmMsg = narrated
+						}
 					}
-					confirmMsg += "\nWould you like me to proceed?"
+					if confirmMsg == "" {
+						confirmMsg = fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", calls[i].Action)
+						for k, v := range calls[i].Args {
+							confirmMsg += fmt.Sprintf("- %s: %s\n", k, v)
+						}
+						confirmMsg += "\nWould you like me to proceed?"
+					}
 					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg})
 					return &RunResult{
 						Response: confirmMsg,

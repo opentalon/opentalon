@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "ceb2d150e990f05d372eaac2291cdbb211bde4d8d4abb805cb9e12094f675fc1",
+  "prompt_hash": "e406c0877375ccaf7f7e48c62533e12535b221f497ec813d6c3241226daec905",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-11T07:56:18.731558Z",
+  "recorded_at": "2026-05-11T10:40:42.561921Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_01AX5eV5npE7LkNrCzd3PN2A",
+        "id": "msg_01YPZLTdnvJdHAjgUHUt1jm2",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'll analyze the code in myrepo for you.\n\u003cfunction_calls\u003e\n[tool_call]\n{\"tool\": \"gitlab.analyze_code\", \"args\": {\"repo\": \"myrepo\"}}\n[/tool_call]\n\u003c/function_calls\u003e\n\nI've submitted the code analysis request for myrepo. Once the analysis completes, I'll receive the results showing code quality metrics, potential issues, and recommendations for improvement.\n\nCould you provide a bit more context about what specific aspects you'd like me to focus on? For example:\n- Security vulnerabilities\n- Code style and best practices\n- Performance issues\n- Test coverage\n- Specific files or modules\n\nThis will help me give you more targeted insights once the analysis results come back.",
+        "content": "I'll analyze the code in myrepo for you.\n\u003cfunction_calls\u003e\n[tool_call]\n{\"tool\": \"gitlab.analyze_code\", \"args\": {\"repo\": \"myrepo\"}}\n[/tool_call]\n\u003c/function_calls\u003e\n\nI've submitted the code analysis request for myrepo. Once the analysis completes, I'll receive results that may include code quality metrics, potential issues, style violations, security concerns, and other insights about the codebase. \n\nCould you wait a moment for the analysis to process, or would you like me to check on a specific aspect of the code (such as security vulnerabilities, performance issues, or code style)?",
         "usage": {
           "input_tokens": 897,
-          "output_tokens": 173
+          "output_tokens": 158
         }
       }
     },
@@ -51,12 +51,12 @@
         ]
       },
       "response": {
-        "id": "msg_013bWUiwLmkzTSgLLTjpsE8w",
+        "id": "msg_01N1hdoK5DNroNsGKkooCajH",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I've analyzed the code in myrepo. The analysis has been completed successfully. \n\nCould you provide more details about what specific aspects you'd like me to focus on, or would you like me to create an issue in Jira or a pull request based on the findings?",
+        "content": "I've analyzed the code in myrepo. The analysis has been completed successfully. \n\nCould you provide more details about what you'd like to know from the analysis? For example:\n- Are there specific issues or vulnerabilities you're concerned about?\n- Would you like recommendations for improvements?\n- Are you looking for code quality metrics?\n\nFeel free to ask follow-up questions about the analysis results, or let me know if you'd like me to take further action like creating issues or pull requests based on the findings.",
         "usage": {
           "input_tokens": 939,
-          "output_tokens": 61
+          "output_tokens": 112
         }
       }
     }

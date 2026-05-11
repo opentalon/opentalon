@@ -282,6 +282,41 @@ func (p *Planner) NarratePlan(ctx context.Context, steps []*Step, userMessage ..
 	return resp.Content, nil
 }
 
+// NarrateToolCall asks the LLM to describe a single tool call in natural language,
+// hiding plugin/action names. userMessage is optional; when set, the LLM uses it
+// to detect the user's language.
+func (p *Planner) NarrateToolCall(ctx context.Context, action string, args map[string]string, userMessage ...string) (string, error) {
+	lang := ""
+	if prof := profile.FromContext(ctx); prof != nil {
+		lang = prof.Language
+	}
+	var sb strings.Builder
+	if len(userMessage) > 0 && userMessage[0] != "" {
+		fmt.Fprintf(&sb, "User's original request: %s\n\n", userMessage[0])
+	}
+	fmt.Fprintf(&sb, "Action: %s\n", action)
+	if len(args) > 0 {
+		sb.WriteString("Parameters:\n")
+		for k, v := range args {
+			fmt.Fprintf(&sb, "- %s: %s\n", k, v)
+		}
+	}
+	systemContent := prompts.PlannerNarrateTool
+	if lang != "" {
+		systemContent += fmt.Sprintf(" Respond in %s.", lang)
+	}
+	resp, err := p.llm.Complete(ctx, &CompletionRequest{
+		Messages: []Message{
+			{Role: "system", Content: systemContent},
+			{Role: "user", Content: sb.String()},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
+}
+
 // ClassifyConfirmation asks the LLM whether the user approved or rejected the plan.
 // Returns Rejected on parse failure.
 func (p *Planner) ClassifyConfirmation(ctx context.Context, userReply string) (ConfirmationDecision, error) {

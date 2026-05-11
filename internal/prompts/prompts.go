@@ -49,6 +49,12 @@ var plannerNarrateRaw string
 // PlannerNarrate has no trailing newline; callers append language suffix when needed.
 var PlannerNarrate = strings.TrimRight(plannerNarrateRaw, "\n")
 
+//go:embed planner_narrate_tool.txt
+var plannerNarrateToolRaw string
+
+// PlannerNarrateTool has no trailing newline; callers append language suffix when needed.
+var PlannerNarrateTool = strings.TrimRight(plannerNarrateToolRaw, "\n")
+
 //go:embed orchestrator_preamble.txt
 var OrchestratorPreamble string
 
