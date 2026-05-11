@@ -2723,13 +2723,26 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		}
 	}
 	if !o.registry.HasAction(call.Plugin, call.Action) {
-		// LLMs often drop the plugin prefix from double-underscore action names,
-		// emitting "timly__list-items" which parseToolName splits into
-		// plugin="timly" action="list-items". Try plugin__action as fallback.
-		prefixed := call.Plugin + "__" + call.Action
-		if o.registry.HasAction(call.Plugin, prefixed) {
-			call.Action = prefixed
-		} else {
+		// LLMs frequently mangle action names in two ways:
+		// 1. Underscores instead of hyphens: "list_persons" → "list-persons"
+		// 2. Dropping plugin prefix: "list-items" → "plugin__list-items"
+		// Try each normalization and their combination before giving up.
+		resolved := false
+		candidates := []string{
+			strings.ReplaceAll(call.Action, "_", "-"),                                 // list_persons → list-persons
+			call.Plugin + "__" + call.Action,                                           // list-items → plugin__list-items
+			call.Plugin + "__" + strings.ReplaceAll(call.Action, "_", "-"),             // list_items → plugin__list-items
+			strings.ReplaceAll(call.Action, "-", "_"),                                 // list-persons → list_persons (reverse)
+			call.Plugin + "__" + strings.ReplaceAll(call.Action, "-", "_"),             // list-persons → plugin__list_persons
+		}
+		for _, candidate := range candidates {
+			if candidate != call.Action && o.registry.HasAction(call.Plugin, candidate) {
+				call.Action = candidate
+				resolved = true
+				break
+			}
+		}
+		if !resolved {
 			return ToolResult{
 				CallID: call.ID,
 				Error:  fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin),
