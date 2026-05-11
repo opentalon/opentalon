@@ -317,6 +317,7 @@ type OrchestratorConfig struct {
 	ResponseFormatters    []ResponseFormatterEntry     `yaml:"response_formatters,omitempty"`
 	PermissionPlugin      string                       `yaml:"permission_plugin,omitempty"`       // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
 	MaxConcurrentSessions int                          `yaml:"max_concurrent_sessions,omitempty"` // max sessions running in parallel (default 1 = sequential)
+	DebounceWindow        string                       `yaml:"debounce_window,omitempty"`         // Go duration (e.g. "800ms"); merges rapid messages into one LLM call; default "0" = disabled
 	Pipeline              PipelineOrchestratorConfig   `yaml:"pipeline,omitempty"`
 	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`       // knowledge-augmented RAG configuration
 	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`      // subprocess (sub-agent) support
