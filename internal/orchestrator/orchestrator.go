@@ -1290,9 +1290,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		log.Debug("tool calling mode", "native", nativeMode, "model", req.Model)
 
-		// Enable reasoning when the provider supports it. Reasoning
-		// helps the model decide which tools to call instead of narrating.
-		if o.supportsReasoning() {
+		// Enable reasoning only for pure text generation (no tools).
+		// When tools are attached, the LLM's job is picking the right
+		// tool + args — chain-of-thought adds ~10s overhead without
+		// improving tool-calling accuracy.
+		if o.supportsReasoning() && len(req.Tools) == 0 {
 			req.Reasoning = true
 			if p := profile.FromContext(ctx); p != nil && p.BudgetTokens > 0 {
 				req.BudgetTokens = p.BudgetTokens
