@@ -765,6 +765,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		defer timing.log(log)
 	}
 
+	// Snapshot session state before this Run so we can rollback on rejection.
+	var msgCountAtStart int
+	if sess != nil {
+		msgCountAtStart = len(sess.Messages)
+	}
+
 	// Block A: Check for pending pipeline confirmation.
 	if timing != nil {
 		timing.begin("confirmation_check")
@@ -877,9 +883,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// LLM summarizes the result for the user.
 			toolCallConfirmed = true
 		} else {
-			// Don't record the cancellation in session history — if the LLM
-			// sees a prior rejection it avoids re-calling the write tool and
-			// either narrates or fabricates results instead.
+			// Rollback session to before this Run — remove the user message
+			// and any tool calls/results that were added during the
+			// confirmation attempt. Without this, the LLM sees prior tool
+			// results and narrates instead of re-calling the tool.
+			if s, _ := sessions.Get(sessionID); s != nil && msgCountAtStart < len(s.Messages) {
+				_ = sessions.SetSummary(sessionID, s.Summary, s.Messages[:msgCountAtStart])
+			}
 			return &RunResult{
 				Response: "OK, action cancelled.",
 				Metadata: map[string]string{
