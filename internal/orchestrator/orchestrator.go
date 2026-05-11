@@ -1118,6 +1118,44 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					Action: step.Command.Action,
 					Args:   pipelineArgsToWire(step.Command.Args),
 				}
+				// Check confirmation before executing — write actions like
+				// create-item need user approval even on the planner path.
+				if o.confirmationPlugin != "" && o.confirmationAction != "" {
+					confResult := o.checkConfirmationPlugin(ctx, []*pipeline.Step{step})
+					if confResult.RequiresConfirmation {
+						log.Info("single-step pipeline: requires confirmation", "plugin", call.Plugin, "action", call.Action)
+						pending := call
+						o.pendingMu.Lock()
+						o.pendingToolCalls[sessionID] = &pending
+						o.pendingMu.Unlock()
+						savePendingToolCall(sessions, sessionID, &pending)
+						var confirmMsg string
+						if o.planner != nil {
+							narrated, narrErr := o.planner.NarrateToolCall(ctx, call.Action, call.Args, userMessage)
+							if narrErr != nil {
+								log.Warn("tool call narration failed, using fallback", "error", narrErr)
+							} else {
+								confirmMsg = narrated
+							}
+						}
+						if confirmMsg == "" {
+							confirmMsg = fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", call.Action)
+							for k, v := range call.Args {
+								confirmMsg += fmt.Sprintf("- %s: %s\n", k, v)
+							}
+							confirmMsg += "\nWould you like me to proceed?"
+						}
+						_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+						return &RunResult{
+							Response: confirmMsg,
+							Metadata: map[string]string{
+								"type":        "confirmation",
+								"prompt_type": "tool_confirmation",
+								"options":     "approve,reject",
+							},
+						}, nil
+					}
+				}
 				toolResult := o.executeCall(ctx, call)
 				if toolResult.Error == "" {
 					// Seed session: user message, assistant tool call, tool result.
