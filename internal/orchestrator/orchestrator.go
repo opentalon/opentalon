@@ -884,7 +884,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				// Execute read steps directly (not through executePipeline which
 				// enters the LLM agent loop). Collect their context so the write
 				// steps can resolve {{stepN.output}} references.
-				fullPipeline := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
 				readSteps := planResult.Steps[:confResult.ConfirmBeforeStep]
 				executor := pipeline.NewExecutor(func(ctx context.Context, pluginName, action string, args map[string]any) pipeline.StepRunResult {
 					wireArgs := pipelineArgsToWire(args)
@@ -931,13 +930,27 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					"read_steps", confResult.ConfirmBeforeStep,
 					"remaining_steps", len(planResult.Steps)-confResult.ConfirmBeforeStep)
 
-				// Build write pipeline with the full pipeline's steps but seeded
-				// with read step context so {{step1.output}} references resolve.
+				// Build write pipeline seeded with read step context.
+				// Strip depends_on references to read steps — they already
+				// executed and their output is in the context. The executor
+				// would skip the write step otherwise because it checks
+				// completed[dep] and the read steps aren't in its tracking.
+				readStepIDs := make(map[string]bool, len(readSteps))
+				for _, rs := range readSteps {
+					readStepIDs[rs.ID] = true
+				}
 				writeSteps := planResult.Steps[confResult.ConfirmBeforeStep:]
+				for _, ws := range writeSteps {
+					var remaining []string
+					for _, dep := range ws.DependsOn {
+						if !readStepIDs[dep] {
+							remaining = append(remaining, dep)
+						}
+					}
+					ws.DependsOn = remaining
+				}
 				p := pipeline.NewPipeline(writeSteps, o.pipelineConfig)
 				p.Context = readPipeline.Context
-				// Also copy into fullPipeline context for reference.
-				fullPipeline.Context = readPipeline.Context
 				o.pendingMu.Lock()
 				o.pendingPipelines[sessionID] = p
 				o.pendingMu.Unlock()
