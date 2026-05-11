@@ -828,8 +828,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		delete(o.pendingToolCalls, sessionID)
 	}
 	o.pendingMu.Unlock()
-	if pendingCall == nil {
+	if pendingCall != nil {
+		log.Debug("pending tool call found in memory", "plugin", pendingCall.Plugin, "action", pendingCall.Action)
+	} else {
 		pendingCall = loadPendingToolCall(sessions, sessionID)
+		if pendingCall != nil {
+			log.Debug("pending tool call found in session metadata", "plugin", pendingCall.Plugin, "action", pendingCall.Action)
+		} else {
+			log.Debug("no pending tool call found", "session", sessionID,
+				"confirmation_decision", actor.ConfirmationDecision(ctx))
+		}
 	}
 	if pendingCall != nil {
 		_ = sessions.SetMetadata(sessionID, "pending_tool_call", "")
