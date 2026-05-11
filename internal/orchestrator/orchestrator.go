@@ -868,6 +868,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		} else {
 			resp := "Tool call cancelled."
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
+			// Add a system note so the LLM doesn't become overly cautious
+			// on the next turn — it should still use tool calls directly
+			// rather than narrating what it would do.
+			_ = sessions.AddMessage(sessionID, provider.Message{
+				Role:    provider.RoleUser,
+				Content: "[system] The user cancelled this specific action. For future requests, continue calling tools directly using the tool_call format — do not narrate or ask for permission in natural language.",
+			})
 			return &RunResult{Response: resp}, nil
 		}
 	}
