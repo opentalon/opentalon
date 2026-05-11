@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "dbb587c1bfb6e7b8ec753bc365717a37a33603305dac72529af57aed17711ac3",
+  "prompt_hash": "ceb2d150e990f05d372eaac2291cdbb211bde4d8d4abb805cb9e12094f675fc1",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-09T08:44:25.882121Z",
+  "recorded_at": "2026-05-11T07:56:17.902723Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,7 +19,7 @@
         ]
       },
       "response": {
-        "id": "gen-1778316266-gn8PnXK04g8EKLcW9iAT",
+        "id": "gen-1778486178-8XWFVvUbOsOXiMwjiJxa",
         "model": "mistralai/ministral-8b-2512",
         "content": "Hello! How can I assist you today?",
         "usage": {

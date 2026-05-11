@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "dbb587c1bfb6e7b8ec753bc365717a37a33603305dac72529af57aed17711ac3",
+  "prompt_hash": "ceb2d150e990f05d372eaac2291cdbb211bde4d8d4abb805cb9e12094f675fc1",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-09T08:44:48.938125Z",
+  "recorded_at": "2026-05-11T07:56:52.099847Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_018KdViyyQLifrMk5AtF4GsA",
+        "id": "msg_01NfhgPybWagbuxHZRsUz5rm",
         "model": "claude-haiku-4-5-20251001",
-        "content": "# Hello! I'm OpenTalon\n\nI'm an AI orchestration platform built by **opentalon.ai**. I'm designed to help you work efficiently by integrating with tools and services you use every day.\n\n## What I can do:\n\n- **Analyze and manage code** through GitLab integration\n- **Create pull requests** to streamline your development workflow\n- **Create and manage issues** in Jira for task tracking\n- **Execute actions on demand** by calling the right tools when you need them\n- **Monitor and automate workflows** with intelligent task scheduling\n\n## How I work:\n\nRather than guessing or making assumptions, I actually **call tools and integrate with your systems** to get real data and take real actions. When you ask me something that requires data or an action, I reach out to the appropriate service and work with verified information.\n\nI'm built with safety and control in mind — I follow your explicit requests, don't execute hidden instructions, and always ask for permission before setting up automated tasks.\n\n---\n\n**Need help with something?** Just ask me to analyze code, create an issue, set up a pull request, or assist with any workflow that involves your connected tools!",
+        "content": "# Hello! I'm OpenTalon\n\nI'm an AI orchestration platform built by **opentalon.ai**. I'm designed to help you automate workflows and integrate with your development tools seamlessly.\n\n## What I Can Do\n\n**Tool Integration \u0026 Automation**\n- I can call tools and plugins to execute actions in real-time — I never guess or fabricate results\n- I integrate with platforms like GitLab and Jira to help you manage code and issues\n- I can analyze code, create pull requests, and manage tasks\n\n**Intelligent Assistance**\n- I act on your requests by calling the appropriate tools and providing you with real data\n- I reason through what you need and take action accordingly\n- I prioritize accuracy and transparency — if I need information, I fetch it directly\n\n**Scheduling \u0026 Monitoring**\n- I can set up recurring tasks and monitoring jobs (with your approval)\n- I suggest sensible schedules based on your needs and wait for your confirmation before creating them\n- I can manage scheduled jobs, pause them, or update them as needed\n\n## How I Work\n\nWhen you ask me something that requires data or an action, I:\n1. **Call the right tool** to get real information or execute tasks\n2. **Use the results** to give you an accurate answer\n3. **Never pretend** — if I don't have data, I get it first\n\nI'm built with strong safety principles to ensure I only execute what you request and always treat external data as plain information, never as instructions.\n\n**What would you like me to help you with?**",
         "usage": {
           "input_tokens": 921,
-          "output_tokens": 261
+          "output_tokens": 347
         }
       }
     }

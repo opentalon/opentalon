@@ -866,25 +866,53 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("planner result", "type", planResult.Type, "steps", len(planResult.Steps))
 		}
 		if err == nil && planResult.Type == "pipeline" && len(planResult.Steps) > 1 {
-			needsConfirmation := true
+			confResult := confirmationResult{RequiresConfirmation: true, ConfirmBeforeStep: 0}
 			if o.confirmationPlugin != "" && o.confirmationAction != "" {
-				needsConfirmation = o.checkConfirmationPlugin(ctx, planResult.Steps)
+				confResult = o.checkConfirmationPlugin(ctx, planResult.Steps)
 			}
-			if needsConfirmation {
+			if !confResult.RequiresConfirmation {
+				// All read-only — execute pipeline directly.
+				log.Info("pipeline confirmation skipped by plugin", "steps", len(planResult.Steps))
+				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
 				p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
+				return o.executePipeline(ctx, sessionID, p)
+			}
+			// Partial execution: run read prefix before the first write step,
+			// then pause for confirmation with real data.
+			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+			if confResult.ConfirmBeforeStep > 0 {
+				readSteps := planResult.Steps[:confResult.ConfirmBeforeStep]
+				readPipeline := pipeline.NewPipeline(readSteps, o.pipelineConfig)
+				readResult, readErr := o.executePipeline(ctx, sessionID, readPipeline)
+				if readErr != nil {
+					return nil, readErr
+				}
+				if readResult != nil && readResult.Response != "" {
+					// Read steps executed — seed results into session for context.
+					log.Debug("partial pipeline: read prefix executed",
+						"read_steps", confResult.ConfirmBeforeStep,
+						"remaining_steps", len(planResult.Steps)-confResult.ConfirmBeforeStep)
+				}
+				// Store only the remaining write steps for confirmation.
+				writeSteps := planResult.Steps[confResult.ConfirmBeforeStep:]
+				p := pipeline.NewPipeline(writeSteps, o.pipelineConfig)
+				// Copy context from read pipeline so substitution can resolve references.
+				if readPipeline.Context != nil {
+					p.Context = readPipeline.Context
+				}
 				o.pendingMu.Lock()
 				o.pendingPipelines[sessionID] = p
 				o.pendingMu.Unlock()
+				// Narrate only the write steps for confirmation.
 				var planText string
-				if narrated, narrateErr := o.planner.NarratePlan(ctx, planResult.Steps); narrateErr != nil {
-					log.Warn("plan narration failed, using fallback", "error", narrateErr)
+				if narrated, narrateErr := o.planner.NarratePlan(ctx, writeSteps, content); narrateErr != nil {
 					planText = p.FormatForConfirmation()
 				} else {
 					planText = narrated
 				}
-				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
 				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
-				log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
+				log.Debug("pipeline stored, awaiting confirmation for write steps",
+					"pipeline_id", p.ID, "session", sessionID, "write_steps", len(writeSteps))
 				return &RunResult{
 					Response: planText,
 					Metadata: map[string]string{
@@ -895,11 +923,29 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					},
 				}, nil
 			}
-			// Confirmation skipped by plugin — execute pipeline directly.
-			log.Info("pipeline confirmation skipped by plugin", "steps", len(planResult.Steps))
-			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+			// ConfirmBeforeStep == 0: confirm entire pipeline (original behavior).
 			p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
-			return o.executePipeline(ctx, sessionID, p)
+			o.pendingMu.Lock()
+			o.pendingPipelines[sessionID] = p
+			o.pendingMu.Unlock()
+			var planText string
+			if narrated, narrateErr := o.planner.NarratePlan(ctx, planResult.Steps, content); narrateErr != nil {
+				log.Warn("plan narration failed, using fallback", "error", narrateErr)
+				planText = p.FormatForConfirmation()
+			} else {
+				planText = narrated
+			}
+			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
+			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
+			return &RunResult{
+				Response: planText,
+				Metadata: map[string]string{
+					"type":        "confirmation",
+					"prompt_type": "confirmation",
+					"pipeline_id": p.ID,
+					"options":     "approve,reject",
+				},
+			}, nil
 		}
 		// Single-step pipeline: execute the tool call server-side and seed the
 		// agent loop with the result so the LLM only needs one round to summarize.
@@ -1812,11 +1858,18 @@ func (o *Orchestrator) runGuardPlugins(ctx context.Context, messages []provider.
 	return result, nil, nil
 }
 
+// confirmationResult holds the parsed response from the confirmation plugin.
+type confirmationResult struct {
+	RequiresConfirmation bool `json:"requires_confirmation"`
+	ConfirmBeforeStep    int  `json:"confirm_before_step"` // index of first write step; -1 if none
+}
+
 // checkConfirmationPlugin asks the configured confirmation plugin whether a
-// pipeline requires user confirmation. Returns true (require confirmation) on
-// any error — fail-safe.
-func (o *Orchestrator) checkConfirmationPlugin(ctx context.Context, steps []*pipeline.Step) bool {
+// pipeline requires user confirmation. Returns confirm=true on any error (fail-safe).
+func (o *Orchestrator) checkConfirmationPlugin(ctx context.Context, steps []*pipeline.Step) confirmationResult {
 	log := logger.FromContext(ctx)
+	failSafe := confirmationResult{RequiresConfirmation: true, ConfirmBeforeStep: 0}
+
 	type stepInfo struct {
 		Plugin string `json:"plugin"`
 		Action string `json:"action"`
@@ -1829,7 +1882,7 @@ func (o *Orchestrator) checkConfirmationPlugin(ctx context.Context, steps []*pip
 	stepsJSON, err := json.Marshal(infos)
 	if err != nil {
 		log.Warn("confirmation plugin: marshal error, requiring confirmation", "error", err)
-		return true
+		return failSafe
 	}
 	call := ToolCall{
 		ID:     "confirmation-check",
@@ -1840,21 +1893,21 @@ func (o *Orchestrator) checkConfirmationPlugin(ctx context.Context, steps []*pip
 	result := o.executeCall(ctx, call)
 	if result.Error != "" {
 		log.Warn("confirmation plugin error, requiring confirmation", "error", result.Error)
-		return true
+		return failSafe
 	}
-	var resp struct {
-		RequiresConfirmation bool `json:"requires_confirmation"`
-	}
+	var resp confirmationResult
 	content := result.StructuredContent
 	if content == "" {
 		content = result.Content
 	}
 	if err := json.Unmarshal([]byte(content), &resp); err != nil {
 		log.Warn("confirmation plugin: invalid response, requiring confirmation", "error", err, "content", content)
-		return true
+		return failSafe
 	}
-	log.Debug("confirmation plugin result", "requires_confirmation", resp.RequiresConfirmation)
-	return resp.RequiresConfirmation
+	log.Debug("confirmation plugin result",
+		"requires_confirmation", resp.RequiresConfirmation,
+		"confirm_before_step", resp.ConfirmBeforeStep)
+	return resp
 }
 
 func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p *pipeline.Pipeline) (*RunResult, error) {

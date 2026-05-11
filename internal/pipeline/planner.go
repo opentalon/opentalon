@@ -247,13 +247,17 @@ func extractJSON(s string) string {
 }
 
 // NarratePlan asks the LLM to describe the pipeline steps in natural language
-// and invite the user to confirm or cancel.
-func (p *Planner) NarratePlan(ctx context.Context, steps []*Step) (string, error) {
+// and invite the user to confirm or cancel. userMessage is optional; when set,
+// the LLM uses it to detect the user's language and respond accordingly.
+func (p *Planner) NarratePlan(ctx context.Context, steps []*Step, userMessage ...string) (string, error) {
 	lang := ""
 	if prof := profile.FromContext(ctx); prof != nil {
 		lang = prof.Language
 	}
 	var sb strings.Builder
+	if len(userMessage) > 0 && userMessage[0] != "" {
+		fmt.Fprintf(&sb, "User's original request: %s\n\n", userMessage[0])
+	}
 	sb.WriteString("Plan steps:\n")
 	for i, s := range steps {
 		fmt.Fprintf(&sb, "%d. %s", i+1, s.Name)
