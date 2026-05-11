@@ -757,7 +757,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 	log := logger.FromContext(ctx)
 
+	// Phase timing: when debug is active, track wall-clock duration of each
+	// major phase so operators can see where time is spent.
+	var timing *runTiming
+	if logger.IsSessionDebug(ctx) {
+		timing = newRunTiming()
+		defer timing.log(log)
+	}
+
 	// Block A: Check for pending pipeline confirmation.
+	if timing != nil {
+		timing.begin("confirmation_check")
+	}
 	o.pendingMu.Lock()
 	pendingPipeline := o.pendingPipelines[sessionID]
 	if pendingPipeline != nil {
@@ -868,6 +879,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	toolCallSeeded := toolCallConfirmed
 
 	// Transcribe any audio files using STT-flagged preparers before the main preparer loop.
+	if timing != nil {
+		timing.begin("preparers")
+	}
 	if !toolCallSeeded {
 		content, files = o.runSTTPreparers(ctx, content, files)
 	}
@@ -916,6 +930,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 	}
 
+	if timing != nil {
+		timing.begin("planner")
+	}
 	// Block B: Run planner to check if this requires a multi-step pipeline.
 	// The planner cost (~3s) is always worth it: even for single-action requests,
 	// it enables server-side tool execution which saves ~20s of failed LLM rounds.
@@ -1198,7 +1215,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var transientMessages []provider.Message
 	var lastCallSig string // "plugin.action\x00arg1=val1\x00..." for loop detection
 	var repeatCount int
+	agentRound := 0
 	for i := 0; i < maxAgentLoopIterations; i++ {
+		agentRound = i + 1
 		sess, _ := sessions.Get(sessionID)
 
 		// Always include tool descriptions so the LLM can call additional
@@ -1269,6 +1288,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// collecting the full response for tool-call parsing.
 		// A per-request callback (from context) takes priority over the global one.
 		var resp *provider.CompletionResponse
+		if timing != nil {
+			timing.begin(fmt.Sprintf("llm_round_%d", agentRound))
+		}
 		llmStart := time.Now()
 		streamCB := o.resolveStreamCallback(ctx)
 		if streamCB != nil {
@@ -1437,8 +1459,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			})
 			o.maybeRecordWorkflow(ctx, result, userMessage)
 			o.applyShowToolCalls(result)
+			if timing != nil {
+				timing.begin("format")
+			}
 			if fmtErr := o.formatResponse(ctx, result); fmtErr != nil {
 				return nil, fmtErr
+			}
+			if timing != nil {
+				timing.end()
 			}
 			return result, nil
 		}
@@ -1534,6 +1562,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				}
 			}
 
+			if timing != nil {
+				timing.begin(fmt.Sprintf("tool_%s.%s", calls[i].Plugin, calls[i].Action))
+			}
 			pluginStart := time.Now()
 			toolResult := o.executeCall(ctx, calls[i])
 			pluginDuration := time.Since(pluginStart)
