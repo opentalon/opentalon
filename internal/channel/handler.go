@@ -86,6 +86,12 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		// else creating deferred work) can deliver results back to this chat.
 		ctx = actor.WithConversationID(ctx, msg.ConversationID)
 
+		// Pass explicit confirmation decision from frontend metadata so
+		// the orchestrator can bypass LLM-based classification.
+		if cd := msg.Metadata["confirmation"]; cd != "" {
+			ctx = actor.WithConfirmationDecision(ctx, cd)
+		}
+
 		cfg.EnsureSession(sessionKey, entityID, groupID)
 		content := msg.Content
 		if prep := pkg.GetContentPreparer(msg.ChannelID); prep != nil {

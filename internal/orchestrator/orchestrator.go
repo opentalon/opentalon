@@ -831,7 +831,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	toolCallConfirmed := false
 	if tc := pendingCall; tc != nil {
 		var decision pipeline.ConfirmationDecision
-		if o.planner != nil {
+		// Prefer explicit frontend signal (metadata["confirmation"]) over
+		// LLM-based or text-based classification — faster and deterministic.
+		if explicit := actor.ConfirmationDecision(ctx); explicit == "approve" {
+			decision = pipeline.Approved
+		} else if explicit == "reject" {
+			decision = pipeline.Rejected
+		} else if o.planner != nil {
 			d, classErr := o.planner.ClassifyConfirmation(ctx, userMessage)
 			if classErr != nil {
 				decision = pipeline.ParseConfirmation(userMessage)

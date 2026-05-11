@@ -5,6 +5,7 @@ import "context"
 type contextKey struct{}
 type sessionKey struct{}
 type conversationKey struct{}
+type confirmationKey struct{}
 
 // WithActor returns a context that carries the given actor ID (e.g. channel_id:sender_id).
 // Use Actor(ctx) to retrieve it. When the request has no actor, do not call WithActor.
@@ -66,6 +67,31 @@ func ConversationID(ctx context.Context) string {
 		return ""
 	}
 	v := ctx.Value(conversationKey{})
+	if v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// WithConfirmationDecision attaches the frontend's explicit confirmation
+// decision ("approve" or "reject") to the context. The orchestrator reads
+// this to bypass LLM-based classification when the frontend sends a
+// structured signal via inbound metadata["confirmation"].
+func WithConfirmationDecision(ctx context.Context, decision string) context.Context {
+	if decision == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, confirmationKey{}, decision)
+}
+
+// ConfirmationDecision returns the explicit confirmation decision from
+// the context, or empty string if not set.
+func ConfirmationDecision(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v := ctx.Value(confirmationKey{})
 	if v == nil {
 		return ""
 	}
