@@ -1238,6 +1238,21 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// buildSystemPrompt and executeCall share the result without a second DB hit.
 	ctx = withAllowedPlugins(ctx, o.resolveAllowedPlugins(ctx))
 
+	// Cache static parts of the LLM request once per Run so every agent-loop
+	// round sends a byte-identical prefix. This maximizes provider-side KV
+	// cache hits (vLLM automatic prefix caching, OpenAI prompt caching) and
+	// avoids rebuilding ~25k tokens of tool definitions on every round.
+	var cachedTools []provider.ToolDefinition
+	nativeMode := o.supportsNativeTools()
+	if nativeMode {
+		cachedTools = o.buildToolDefinitions(ctx)
+	}
+	// Build system prompt variants: the only difference between rounds is the
+	// format hint (suppressed until tool results exist). Pre-build both so the
+	// prompt text is identical across rounds that share the same variant.
+	sysPromptNoHint := o.buildSystemPrompt(withSkipFormatHint(ctx), content, true)
+	sysPromptWithHint := o.buildSystemPrompt(ctx, content, true)
+
 	var stripRetries int
 	var toolRetries int // retries when planner expected tools but LLM didn't call any
 	var transientMessages []provider.Message
@@ -1248,9 +1263,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		agentRound = i + 1
 		sess, _ := sessions.Get(sessionID)
 
-		// Always include tool descriptions so the LLM can call additional
-		// tools after processing results (multi-step workflows).
-		messages := o.buildMessages(ctx, sess, content, true)
+		// Pick the cached system prompt variant based on whether tool
+		// results exist (format hint is only useful after the first tool round).
+		cachedSysPrompt := sysPromptNoHint
+		if hasToolResults(sess.Messages) {
+			cachedSysPrompt = sysPromptWithHint
+		}
+		messages := o.buildMessagesWithPrompt(ctx, sess, cachedSysPrompt)
 		messages = append(messages, transientMessages...)
 		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
@@ -1275,18 +1294,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			req.Model = profileModel
 		}
 
-		// Native tool calling: pass tool definitions on every round so the
-		// LLM can chain multiple tool calls (e.g. list-categories → list-org-units
-		// → create-item). Without tools on follow-up rounds, the LLM just
-		// summarizes the first result instead of continuing.
-		nativeMode := o.supportsNativeTools()
+		// Native tool calling: reuse cached tool definitions on every round
+		// so the LLM can chain multiple tool calls. The identical prefix
+		// maximizes provider-side KV cache hits.
 		if nativeMode {
-			req.Tools = o.buildToolDefinitions(ctx)
-			toolNames := make([]string, len(req.Tools))
-			for ti, td := range req.Tools {
-				toolNames[ti] = td.Name
+			req.Tools = cachedTools
+			if i == 0 {
+				toolNames := make([]string, len(req.Tools))
+				for ti, td := range req.Tools {
+					toolNames[ti] = td.Name
+				}
+				log.Debug("native tools attached", "count", len(req.Tools), "tools", toolNames)
 			}
-			log.Debug("native tools attached", "count", len(req.Tools), "tools", toolNames)
 		}
 		log.Debug("tool calling mode", "native", nativeMode, "model", req.Model)
 
@@ -2371,6 +2390,37 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 	// round — the OUTPUT FORMAT section in the system prompt is sufficient
 	// there. Once tool results are present the model switches to answer
 	// mode and benefits from the nudge.
+	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(sess.Messages) {
+		messages = append(messages, provider.Message{
+			Role:    provider.RoleSystem,
+			Content: "[IMPORTANT — output format reminder] " + hint,
+		})
+	}
+
+	if o.contextWindow > 0 {
+		messages = trimToContextWindow(ctx, messages, o.contextWindow)
+	}
+
+	return messages
+}
+
+// buildMessagesWithPrompt assembles the LLM message list using a pre-built
+// system prompt. This avoids rebuilding the prompt on every agent-loop round,
+// keeping the prefix byte-identical for provider-side KV cache hits.
+func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.Session, systemPrompt string) []provider.Message {
+	messages := make([]provider.Message, 0, len(sess.Messages)+4)
+	messages = append(messages, provider.Message{
+		Role:    provider.RoleSystem,
+		Content: systemPrompt,
+	})
+	if sess.Summary != "" {
+		messages = append(messages, provider.Message{
+			Role:    provider.RoleSystem,
+			Content: "Previous conversation summary: " + sess.Summary,
+		})
+	}
+	messages = appendStrippingAllKC(messages, sanitizeHistory(sess.Messages))
+
 	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(sess.Messages) {
 		messages = append(messages, provider.Message{
 			Role:    provider.RoleSystem,
