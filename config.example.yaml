@@ -41,6 +41,7 @@ routing:
 orchestrator:
   rules: []
   # permission_plugin: permission   # optional; core calls this plugin with action "check"(actor, plugin) before running a tool
+  # debounce_window: "800ms"       # merge rapid messages into one LLM call (default "0" = disabled)
   # Run these plugin actions before the first LLM call; their output becomes the user message (or they can block with send_to_llm: false).
   # List order = execution order: the first entry runs first and receives the user message; each preparer's output is the next one's input.
   content_preparers:
