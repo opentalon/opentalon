@@ -58,9 +58,7 @@ func (t *runTiming) log(log *logger.Logger) {
 		parts = append(parts, fmt.Sprintf("%s=%s", p.name, p.duration.Round(time.Millisecond)))
 	}
 
-	attrs := []any{
-		"total", total.Round(time.Millisecond),
-		"breakdown", strings.Join(parts, " "),
-	}
-	log.Info("run timing", attrs...)
+	log.Info("run timing",
+		"total", total.Round(time.Millisecond).String(),
+		"breakdown", strings.Join(parts, " "))
 }
