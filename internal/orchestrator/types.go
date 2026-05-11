@@ -54,11 +54,12 @@ type KnowledgeArticle struct {
 }
 
 type ToolCall struct {
-	ID      string            `yaml:"id"`
-	Plugin  string            `yaml:"plugin"`
-	Action  string            `yaml:"action"`
-	Args    map[string]string `yaml:"args,omitempty"`
-	FromLLM bool              `yaml:"-"` // yaml:"-": must not be deserializable — prevents LLM from spoofing user-origin calls via YAML injection
+	ID                 string            `yaml:"id"`
+	Plugin             string            `yaml:"plugin"`
+	Action             string            `yaml:"action"`
+	Args               map[string]string `yaml:"args,omitempty"`
+	FromLLM            bool              `yaml:"-"` // yaml:"-": must not be deserializable — prevents LLM from spoofing user-origin calls via YAML injection
+	ConfirmationBypass bool              `yaml:"-"` // skip confirmation check (set after user approved a pending tool call)
 }
 
 type ToolResult struct {
