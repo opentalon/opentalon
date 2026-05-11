@@ -809,6 +809,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		delete(o.pendingToolCalls, sessionID)
 	}
 	o.pendingMu.Unlock()
+	toolCallConfirmed := false
 	if tc := pendingCall; tc != nil {
 		var decision pipeline.ConfirmationDecision
 		if o.planner != nil {
@@ -841,8 +842,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(*tc)})
 				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)})
 			}
-			// The tool result is now in session history. Fall through to the
-			// agent loop so the LLM summarizes the result for the user.
+			// The tool result is now in session history. Skip preparers, planner,
+			// and user-message addition — jump straight to the agent loop so the
+			// LLM summarizes the result for the user.
+			toolCallConfirmed = true
 		} else {
 			resp := "Tool call cancelled."
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
@@ -851,8 +854,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	}
 
 	content := userMessage
+	// When a tool call was just confirmed and executed, the result is already
+	// in session history. Skip preparers, planner, and user-message addition
+	// — the LLM only needs to summarize the result.
+	toolCallSeeded := toolCallConfirmed
+
 	// Transcribe any audio files using STT-flagged preparers before the main preparer loop.
-	content, files = o.runSTTPreparers(ctx, content, files)
+	if !toolCallSeeded {
+		content, files = o.runSTTPreparers(ctx, content, files)
+	}
 
 	// Run content preparers before the first LLM call (config-driven).
 	// relevantTools stays nil when no preparer returns a tools list.
@@ -864,43 +874,45 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// Enrich the content sent to preparers with the last user message from
 	// session history so RAG semantic search matches the full intent, not
 	// just a bare follow-up like "Item" (which would miss "create-item").
-	preparerContent := content
-	if sess, _ := sessions.Get(sessionID); sess != nil {
-		if prev := lastUserMessage(sess.Messages); prev != "" && prev != content {
-			preparerContent = prev + " " + content
+	if !toolCallSeeded {
+		preparerContent := content
+		if sess, _ := sessions.Get(sessionID); sess != nil {
+			if prev := lastUserMessage(sess.Messages); prev != "" && prev != content {
+				preparerContent = prev + " " + content
+			}
 		}
-	}
-	var relevantTools []string
-	relevantToolsSet := false
-	for _, prep := range o.preparers {
-		if prep.STT {
-			continue
+		var relevantTools []string
+		relevantToolsSet := false
+		for _, prep := range o.preparers {
+			if prep.STT {
+				continue
+			}
+			guardedContent, blocked, tools, err := o.runSinglePreparer(ctx, prep, preparerContent, "preparer", true)
+			if err != nil {
+				return nil, err
+			}
+			if blocked != nil {
+				return blocked, nil
+			}
+			content = guardedContent
+			// Last preparer that returns relevant_tools wins.
+			// Distinguish nil (no tools field) from [] (explicitly empty).
+			if tools != nil {
+				relevantTools = tools
+				relevantToolsSet = true
+			}
 		}
-		guardedContent, blocked, tools, err := o.runSinglePreparer(ctx, prep, preparerContent, "preparer", true)
-		if err != nil {
-			return nil, err
+		// Store relevant tools in context so buildSystemPrompt and planner can filter.
+		if relevantToolsSet {
+			ctx = withRelevantTools(ctx, relevantTools)
 		}
-		if blocked != nil {
-			return blocked, nil
-		}
-		content = guardedContent
-		// Last preparer that returns relevant_tools wins.
-		// Distinguish nil (no tools field) from [] (explicitly empty).
-		if tools != nil {
-			relevantTools = tools
-			relevantToolsSet = true
-		}
-	}
-	// Store relevant tools in context so buildSystemPrompt and planner can filter.
-	if relevantToolsSet {
-		ctx = withRelevantTools(ctx, relevantTools)
 	}
 
 	// Block B: Run planner to check if this requires a multi-step pipeline.
 	// The planner cost (~3s) is always worth it: even for single-action requests,
 	// it enables server-side tool execution which saves ~20s of failed LLM rounds.
-	singleStepSeeded := false
-	if o.planner != nil {
+	singleStepSeeded := toolCallSeeded
+	if o.planner != nil && !toolCallSeeded {
 		log.Debug("planner running", "session", sessionID, "message", content)
 		rtTools, rtSet := relevantToolsFromContext(ctx)
 		plannerCaps := filterCapabilitiesByRelevantTools(o.registry.ListCapabilities(), rtTools, rtSet)
