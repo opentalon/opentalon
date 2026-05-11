@@ -833,19 +833,22 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		var decision pipeline.ConfirmationDecision
 		// Prefer explicit frontend signal (metadata["confirmation"]) over
 		// LLM-based or text-based classification — faster and deterministic.
-		if explicit := actor.ConfirmationDecision(ctx); explicit == "approve" {
+		switch explicit := actor.ConfirmationDecision(ctx); explicit {
+		case "approve":
 			decision = pipeline.Approved
-		} else if explicit == "reject" {
+		case "reject":
 			decision = pipeline.Rejected
-		} else if o.planner != nil {
-			d, classErr := o.planner.ClassifyConfirmation(ctx, userMessage)
-			if classErr != nil {
-				decision = pipeline.ParseConfirmation(userMessage)
+		default:
+			if o.planner != nil {
+				d, classErr := o.planner.ClassifyConfirmation(ctx, userMessage)
+				if classErr != nil {
+					decision = pipeline.ParseConfirmation(userMessage)
+				} else {
+					decision = d
+				}
 			} else {
-				decision = d
+				decision = pipeline.ParseConfirmation(userMessage)
 			}
-		} else {
-			decision = pipeline.ParseConfirmation(userMessage)
 		}
 		if decision == pipeline.Approved {
 			// Only record the user's approval in session — rejections are
