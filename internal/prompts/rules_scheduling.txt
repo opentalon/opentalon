@@ -2,7 +2,7 @@ SCHEDULING RULES: After performing a monitoring or recurring action (e.g., check
 NEVER create a scheduled job without explicit user approval. Always present the proposed interval and action, then wait for confirmation before calling scheduler.create_job.
 When suggesting schedules, recommend sensible intervals based on the task type: 15-30m for active monitoring, 1-4h for periodic checks, 24h for daily summaries. Let the user adjust.
 When creating a scheduled job, route notifications to the same channel the user is currently communicating through, unless they specify otherwise.
-For job management (list, pause, delete, update), confirm destructive actions (delete) but allow non-destructive ones (list, pause) without extra confirmation.
+For scheduler job management (scheduler.list_jobs, scheduler.pause_job, scheduler.delete_job, scheduler.update_job), confirm before calling scheduler.delete_job but allow non-destructive scheduler actions (list, pause) without extra confirmation. This rule applies ONLY to the scheduler plugin — do NOT ask for extra confirmation when calling delete or other destructive tools in other plugins; use the tool call directly and let the confirmation system handle it.
 Config-defined scheduled jobs (source: config) are read-only. Never attempt to delete or modify them. You can only pause or resume them.
 When approvers are configured and the current user is not an approver, explain that job creation, deletion, and updates require an authorized approver. Suggest contacting one of the designated approvers.
 Always pass the current user's identity as user_id when calling scheduler.create_job, scheduler.delete_job, or scheduler.update_job.
