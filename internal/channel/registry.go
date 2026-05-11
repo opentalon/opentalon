@@ -224,11 +224,14 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 				// handler response may differ (tool-call blocks stripped,
 				// Lua formatting applied). Update the streamed message
 				// with the clean response so users see the processed text.
+				hasMeta := len(resp.Metadata) > 0
 				if sw != nil && sw.Flushed() {
+					logger.FromContext(ctx).Debug("registry: streaming path",
+						"channel", ch.ID(), "has_metadata", hasMeta, "metadata", resp.Metadata)
 					// Merge handler result metadata (e.g. confirmation type,
 					// options) into the stream writer so FinalUpdate carries it.
 					sw.MergeMetadata(resp.Metadata)
-					if resp.Content != sw.FullContent() || len(resp.Metadata) > 0 {
+					if resp.Content != sw.FullContent() || hasMeta {
 						if err := sw.FinalUpdate(ctx, resp.Content); err != nil {
 							logger.FromContext(ctx).Debug("stream final update failed", "channel", ch.ID(), "error", err)
 						}
@@ -236,6 +239,8 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 					return
 				}
 
+				logger.FromContext(ctx).Debug("registry: direct send path",
+					"channel", ch.ID(), "has_metadata", hasMeta, "sw_nil", sw == nil)
 				if err := ch.Send(ctx, resp); err != nil {
 					logger.FromContext(ctx).Error("sending response failed", "channel", ch.ID(), "error", err)
 				}
