@@ -803,12 +803,20 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	}
 
 	// Block A2: Check for pending tool call confirmation.
+	// First check the in-memory map (fast path), then fall back to session
+	// metadata (survives restarts and multi-instance deployments).
 	o.pendingMu.Lock()
 	pendingCall := o.pendingToolCalls[sessionID]
 	if pendingCall != nil {
 		delete(o.pendingToolCalls, sessionID)
 	}
 	o.pendingMu.Unlock()
+	if pendingCall == nil {
+		pendingCall = loadPendingToolCall(sessions, sessionID)
+	}
+	if pendingCall != nil {
+		_ = sessions.SetMetadata(sessionID, "pending_tool_call", "")
+	}
 	toolCallConfirmed := false
 	if tc := pendingCall; tc != nil {
 		var decision pipeline.ConfirmationDecision
@@ -1493,12 +1501,27 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					o.pendingMu.Lock()
 					o.pendingToolCalls[sessionID] = &pending
 					o.pendingMu.Unlock()
+					// Also persist to session metadata so pending calls survive
+					// restarts and work across multiple instances.
+					savePendingToolCall(sessions, sessionID, &pending)
 					// Build a confirmation message describing what will be done.
-					confirmMsg := fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", calls[i].Action)
-					for k, v := range calls[i].Args {
-						confirmMsg += fmt.Sprintf("- %s: %s\n", k, v)
+					// Prefer LLM narration to hide raw tool names from the user.
+					var confirmMsg string
+					if o.planner != nil {
+						narrated, narrErr := o.planner.NarrateToolCall(ctx, calls[i].Action, calls[i].Args, userMessage)
+						if narrErr != nil {
+							log.Warn("tool call narration failed, using fallback", "error", narrErr)
+						} else {
+							confirmMsg = narrated
+						}
 					}
-					confirmMsg += "\nWould you like me to proceed?"
+					if confirmMsg == "" {
+						confirmMsg = fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", calls[i].Action)
+						for k, v := range calls[i].Args {
+							confirmMsg += fmt.Sprintf("- %s: %s\n", k, v)
+						}
+						confirmMsg += "\nWould you like me to proceed?"
+					}
 					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg})
 					return &RunResult{
 						Response: confirmMsg,
@@ -2700,13 +2723,26 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		}
 	}
 	if !o.registry.HasAction(call.Plugin, call.Action) {
-		// LLMs often drop the plugin prefix from double-underscore action names,
-		// emitting "timly__list-items" which parseToolName splits into
-		// plugin="timly" action="list-items". Try plugin__action as fallback.
-		prefixed := call.Plugin + "__" + call.Action
-		if o.registry.HasAction(call.Plugin, prefixed) {
-			call.Action = prefixed
-		} else {
+		// LLMs frequently mangle action names in two ways:
+		// 1. Underscores instead of hyphens: "list_persons" → "list-persons"
+		// 2. Dropping plugin prefix: "list-items" → "plugin__list-items"
+		// Try each normalization and their combination before giving up.
+		resolved := false
+		candidates := []string{
+			strings.ReplaceAll(call.Action, "_", "-"),
+			call.Plugin + "__" + call.Action,
+			call.Plugin + "__" + strings.ReplaceAll(call.Action, "_", "-"),
+			strings.ReplaceAll(call.Action, "-", "_"),
+			call.Plugin + "__" + strings.ReplaceAll(call.Action, "-", "_"),
+		}
+		for _, candidate := range candidates {
+			if candidate != call.Action && o.registry.HasAction(call.Plugin, candidate) {
+				call.Action = candidate
+				resolved = true
+				break
+			}
+		}
+		if !resolved {
 			return ToolResult{
 				CallID: call.ID,
 				Error:  fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin),
@@ -2971,6 +3007,40 @@ func formatToolCallMessage(call ToolCall) string {
 		sb.WriteString(")")
 	}
 	return sb.String()
+}
+
+// pendingToolCallMeta is the JSON-serializable form of a pending tool call
+// stored in session metadata so it survives restarts.
+type pendingToolCallMeta struct {
+	ID     string            `json:"id"`
+	Plugin string            `json:"plugin"`
+	Action string            `json:"action"`
+	Args   map[string]string `json:"args,omitempty"`
+}
+
+func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall) {
+	meta := pendingToolCallMeta{ID: tc.ID, Plugin: tc.Plugin, Action: tc.Action, Args: tc.Args}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return
+	}
+	_ = sessions.SetMetadata(sessionID, "pending_tool_call", string(data))
+}
+
+func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) *ToolCall {
+	sess, err := sessions.Get(sessionID)
+	if err != nil || sess == nil {
+		return nil
+	}
+	raw := sess.Metadata["pending_tool_call"]
+	if raw == "" {
+		return nil
+	}
+	var meta pendingToolCallMeta
+	if json.Unmarshal([]byte(raw), &meta) != nil {
+		return nil
+	}
+	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args}
 }
 
 // toolCallSignature builds a deterministic string from a set of tool calls

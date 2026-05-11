@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "ceb2d150e990f05d372eaac2291cdbb211bde4d8d4abb805cb9e12094f675fc1",
+  "prompt_hash": "e406c0877375ccaf7f7e48c62533e12535b221f497ec813d6c3241226daec905",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-11T07:57:10.255163Z",
+  "recorded_at": "2026-05-11T10:54:43.825003Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_01GVDMeGAkU3bjc2oHizJEzV",
+        "id": "msg_01MJpTVSd7R4fZtkf7UUPXo4",
         "model": "claude-haiku-4-5-20251001",
-        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"analyze_code\",\n      \"name\": \"Analyze code in myrepo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"create_issue\",\n      \"name\": \"Create Jira issue for code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"summary\": \"Code analysis findings for myrepo\",\n        \"description\": \"{{analyze_code.output.findings}}\"\n      },\n      \"depends_on\": [\"analyze_code\"]\n    }\n  ]\n}\n```",
+        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue for code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"summary\": \"Code analysis findings for myrepo\",\n        \"description\": \"{{step1.output}}\"\n      },\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
         "usage": {
           "input_tokens": 728,
-          "output_tokens": 205
+          "output_tokens": 199
         }
       }
     },
@@ -43,12 +43,12 @@
         ]
       },
       "response": {
-        "id": "msg_017E4ZkzCzj8UoHGJqSuGUys",
+        "id": "msg_01F7a9wSC3wsHcDVRQp3D5d6",
         "model": "claude-haiku-4-5-20251001",
-        "content": "Ich werde Ihren Code im Repository \"myrepo\" analysieren und basierend auf den Erkenntnissen automatisch ein Jira-Ticket erstellen. Dabei werden zunächst potenzielle Probleme, Best-Practice-Verstöße oder andere relevante Befunde identifiziert und anschließend direkt als Issue in Jira dokumentiert.\n\nMöchten Sie, dass ich mit dieser Analyse und Ticketerstellung fortfahre?",
+        "content": "Ich werde Ihren Code im Repository \"myrepo\" analysieren und basierend auf den Erkenntnissen automatisch ein Jira-Ticket für Sie erstellen. Dies geschieht in zwei Schritten: zunächst die Code-Analyse und dann die Erstellung des Issues mit den gefundenen Problemen.\n\nMöchten Sie, dass ich mit diesem Plan fortfahre?",
         "usage": {
           "input_tokens": 153,
-          "output_tokens": 113
+          "output_tokens": 97
         }
       }
     }

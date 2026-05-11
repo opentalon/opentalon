@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "ceb2d150e990f05d372eaac2291cdbb211bde4d8d4abb805cb9e12094f675fc1",
+  "prompt_hash": "e406c0877375ccaf7f7e48c62533e12535b221f497ec813d6c3241226daec905",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-11T07:59:40.802971Z",
+  "recorded_at": "2026-05-11T10:54:47.494856Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778486380-PyQEPiVF4D8BK5q7tKyu",
+        "id": "gen-1778496887-AOBJxnCcbFvKL6K5pIbb",
         "model": "mistralai/ministral-8b-2512",
-        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo repository\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue based on code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"summary\": \"{{step1.output.summary}}\",\n        \"description\": \"{{step1.output.description}}\",\n        \"issuetype\": \"{{step1.output.issue_type | default: 'Bug'}}\"\n      },\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
+        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo for vulnerabilities or issues\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create a Jira issue based on code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"summary\": \"Code Analysis Findings - {{step1.output.summary}}\",\n        \"description\": \"Automated findings from code analysis:\\n\\n{{step1.output.details}}\",\n        \"project\": \"{{step1.output.project}}\",  // Assuming the output contains project info; adjust as needed\n        \"issuetype\": \"Bug\"  // Default type; adjust based on findings\n      },\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
         "usage": {
           "input_tokens": 684,
-          "output_tokens": 189
+          "output_tokens": 233
         }
       }
     },
@@ -38,17 +38,17 @@
           },
           {
             "role": "user",
-            "content": "User's original request: analyze code in myrepo and then create a jira issue for the findings\n\nPlan steps:\n1. Analyze code in myrepo repository (gitlab.analyze_code)\n2. Create Jira issue based on code analysis findings (jira.create_issue)\n"
+            "content": "User's original request: analyze code in myrepo and then create a jira issue for the findings\n\nPlan steps:\n1. Analyze code in myrepo for vulnerabilities or issues (gitlab.analyze_code)\n2. Create a Jira issue based on code analysis findings (jira.create_issue)\n"
           }
         ]
       },
       "response": {
-        "id": "gen-1778486382-3VxoiNEfFjbFUbjCH8kn",
+        "id": "gen-1778496890-JwaSg0LpuL9MbvLkVkeX",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Hier ist dein Plan in einfachen Schritten:\n\nZuerst werde ich den Code in deinem Repository **myrepo** systematisch prüfen, um mögliche Probleme oder Verbesserungspotenziale zu finden. Anschließend erstelle ich dafür eine **Jira-Ticket**, damit das Team die Ergebnisse nachverfolgen und bearbeiten kann.\n\nMöchtest du mit diesem Plan fortfahren?",
+        "content": "Hier ist dein Plan in einfachen Schritten:\n\nZuerst analysiere ich den Code in deinem Repository **myrepo** auf mögliche Probleme oder Sicherheitslücken. Anschließend erstelle ich daraus eine **Jira-Ticket**, damit du die Ergebnisse direkt nachverfolgen kannst.\n\nMöchtest du mit diesem Plan fortfahren?",
         "usage": {
-          "input_tokens": 143,
-          "output_tokens": 79
+          "input_tokens": 147,
+          "output_tokens": 67
         }
       }
     }

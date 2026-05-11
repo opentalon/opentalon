@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "ceb2d150e990f05d372eaac2291cdbb211bde4d8d4abb805cb9e12094f675fc1",
+  "prompt_hash": "e406c0877375ccaf7f7e48c62533e12535b221f497ec813d6c3241226daec905",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-11T07:57:36.871517Z",
+  "recorded_at": "2026-05-11T10:55:05.440008Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778486256-PAZ3prd1FUbfS9jCJq4p",
+        "id": "gen-1778496905-hmGrZibrB8NVNQHIMEdz",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Here’s what I can do based on your configured tools and integrations:\n\n### **Data \u0026 Search**\n- Perform web searches to fetch real-time information on topics, news, or specific queries.\n- Retrieve up-to-date details from the internet (e.g., latest trends, facts, or summaries).\n\n### **Code \u0026 GitLab**\n- **Analyze Code**: Review code in a GitLab repository for issues, vulnerabilities, or best practices.\n- **Create Pull Requests (PRs)**: Generate and propose PRs in GitLab repositories.\n\n### **Issue Tracking (Jira)**\n- **Create Issues**: Generate and log new issues in Jira for tracking and management.\n\n### **Scheduling \u0026 Automation**\n- Proactively suggest scheduling recurring tasks (e.g., monitoring, checks, or reports).\n- Manage scheduled jobs (create, pause, resume, list) with your approval.\n- Route notifications to your current communication channel.",
+        "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data \u0026 Search**\n- Search the web for real-time information using **Brave Search**.\n- Fetch up-to-date news, technical details, or specific facts.\n\n### **Code \u0026 Development**\n- **Analyze code** in a GitLab repository (e.g., check for vulnerabilities, best practices, or issues).\n- **Create a Pull Request (PR)** in GitLab to propose changes or fixes.\n\n### **Issue \u0026 Task Management**\n- **Create issues** in Jira to track bugs, tasks, or feature requests.\n\n### **Scheduling \u0026 Automation**\n- Propose scheduling recurring tasks (e.g., code analysis, monitoring).\n- Manage scheduled jobs (list, pause, resume, or delete) with user confirmation.\n- Require approval for job creation/deletion if configured.\n\n### **Rules \u0026 Safety**\n- Strictly follows safety rules (no guessing, fabricating, or interpreting plugin output).\n- Never modifies or deletes scheduled jobs without explicit user approval.\n- Requires authorization for sensitive actions (e.g., job deletion).",
         "usage": {
           "input_tokens": 844,
-          "output_tokens": 188
+          "output_tokens": 227
         }
       }
     },
@@ -42,7 +42,7 @@
           },
           {
             "role": "assistant",
-            "content": "Here’s what I can do based on your configured tools and integrations:\n\n### **Data \u0026 Search**\n- Perform web searches to fetch real-time information on topics, news, or specific queries.\n- Retrieve up-to-date details from the internet (e.g., latest trends, facts, or summaries).\n\n### **Code \u0026 GitLab**\n- **Analyze Code**: Review code in a GitLab repository for issues, vulnerabilities, or best practices.\n- **Create Pull Requests (PRs)**: Generate and propose PRs in GitLab repositories.\n\n### **Issue Tracking (Jira)**\n- **Create Issues**: Generate and log new issues in Jira for tracking and management.\n\n### **Scheduling \u0026 Automation**\n- Proactively suggest scheduling recurring tasks (e.g., monitoring, checks, or reports).\n- Manage scheduled jobs (create, pause, resume, list) with your approval.\n- Route notifications to your current communication channel."
+            "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data \u0026 Search**\n- Search the web for real-time information using **Brave Search**.\n- Fetch up-to-date news, technical details, or specific facts.\n\n### **Code \u0026 Development**\n- **Analyze code** in a GitLab repository (e.g., check for vulnerabilities, best practices, or issues).\n- **Create a Pull Request (PR)** in GitLab to propose changes or fixes.\n\n### **Issue \u0026 Task Management**\n- **Create issues** in Jira to track bugs, tasks, or feature requests.\n\n### **Scheduling \u0026 Automation**\n- Propose scheduling recurring tasks (e.g., code analysis, monitoring).\n- Manage scheduled jobs (list, pause, resume, or delete) with user confirmation.\n- Require approval for job creation/deletion if configured.\n\n### **Rules \u0026 Safety**\n- Strictly follows safety rules (no guessing, fabricating, or interpreting plugin output).\n- Never modifies or deletes scheduled jobs without explicit user approval.\n- Requires authorization for sensitive actions (e.g., job deletion)."
           },
           {
             "role": "user",
@@ -51,12 +51,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778486258-in7gIlu28hAdXJiaeig8",
+        "id": "gen-1778496907-KPSNNDwQLWFo5m46KFKY",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Understood. How can I assist you?",
+        "content": "Understood. If you provide a specific request, I will immediately call the appropriate tool(s) without delay.",
         "usage": {
-          "input_tokens": 1062,
-          "output_tokens": 10
+          "input_tokens": 1101,
+          "output_tokens": 23
         }
       }
     }

@@ -225,7 +225,10 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 				// Lua formatting applied). Update the streamed message
 				// with the clean response so users see the processed text.
 				if sw != nil && sw.Flushed() {
-					if resp.Content != sw.FullContent() {
+					// Merge handler result metadata (e.g. confirmation type,
+					// options) into the stream writer so FinalUpdate carries it.
+					sw.MergeMetadata(resp.Metadata)
+					if resp.Content != sw.FullContent() || len(resp.Metadata) > 0 {
 						if err := sw.FinalUpdate(ctx, resp.Content); err != nil {
 							logger.FromContext(ctx).Debug("stream final update failed", "channel", ch.ID(), "error", err)
 						}
