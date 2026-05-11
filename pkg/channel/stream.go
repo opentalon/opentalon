@@ -209,6 +209,23 @@ func (sw *StreamWriter) FinalUpdate(ctx context.Context, content string) error {
 	return sw.ch.Send(ctx, msg)
 }
 
+// MergeMetadata adds entries from extra into the stream writer's metadata,
+// overwriting existing keys. This allows the handler to inject result metadata
+// (e.g. confirmation type) after the stream has started.
+func (sw *StreamWriter) MergeMetadata(extra map[string]string) {
+	if len(extra) == 0 {
+		return
+	}
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	if sw.metadata == nil {
+		sw.metadata = make(map[string]string, len(extra))
+	}
+	for k, v := range extra {
+		sw.metadata[k] = v
+	}
+}
+
 func (sw *StreamWriter) cloneMetadata() map[string]string {
 	if len(sw.metadata) == 0 {
 		return nil
