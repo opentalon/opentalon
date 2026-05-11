@@ -881,25 +881,63 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// then pause for confirmation with real data.
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
 			if confResult.ConfirmBeforeStep > 0 {
+				// Execute read steps directly (not through executePipeline which
+				// enters the LLM agent loop). Collect their context so the write
+				// steps can resolve {{stepN.output}} references.
+				fullPipeline := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
 				readSteps := planResult.Steps[:confResult.ConfirmBeforeStep]
+				executor := pipeline.NewExecutor(func(ctx context.Context, pluginName, action string, args map[string]any) pipeline.StepRunResult {
+					wireArgs := pipelineArgsToWire(args)
+					log.Debug("partial pipeline: executing read step", "plugin", pluginName, "action", action)
+					call := ToolCall{
+						ID:     fmt.Sprintf("pipeline-%s-%s", pluginName, action),
+						Plugin: pluginName,
+						Action: action,
+						Args:   wireArgs,
+					}
+					result := o.executeCall(ctx, call)
+					// Record in session history so the LLM has context.
+					tr := ToolResult{CallID: call.ID, Content: result.Content, Error: result.Error}
+					if o.supportsNativeTools() {
+						_ = sessions.AddMessage(sessionID, provider.Message{
+							Role: provider.RoleAssistant,
+							ToolCalls: []provider.ToolCall{{
+								ID:        call.ID,
+								Name:      call.Plugin + "." + call.Action,
+								Arguments: call.Args,
+							}},
+						})
+						_ = sessions.AddMessage(sessionID, provider.Message{
+							Role:       provider.RoleTool,
+							Content:    nativeToolContent(tr),
+							ToolCallID: call.ID,
+						})
+					} else {
+						_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(call)})
+						_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)})
+					}
+					return pipeline.StepRunResult{
+						Content:           result.Content,
+						StructuredContent: result.StructuredContent,
+						Error:             result.Error,
+					}
+				}, o.pipelineConfig)
 				readPipeline := pipeline.NewPipeline(readSteps, o.pipelineConfig)
-				readResult, readErr := o.executePipeline(ctx, sessionID, readPipeline)
+				_, readErr := executor.Run(ctx, readPipeline)
 				if readErr != nil {
 					return nil, readErr
 				}
-				if readResult != nil && readResult.Response != "" {
-					// Read steps executed — seed results into session for context.
-					log.Debug("partial pipeline: read prefix executed",
-						"read_steps", confResult.ConfirmBeforeStep,
-						"remaining_steps", len(planResult.Steps)-confResult.ConfirmBeforeStep)
-				}
-				// Store only the remaining write steps for confirmation.
+				log.Debug("partial pipeline: read prefix executed",
+					"read_steps", confResult.ConfirmBeforeStep,
+					"remaining_steps", len(planResult.Steps)-confResult.ConfirmBeforeStep)
+
+				// Build write pipeline with the full pipeline's steps but seeded
+				// with read step context so {{step1.output}} references resolve.
 				writeSteps := planResult.Steps[confResult.ConfirmBeforeStep:]
 				p := pipeline.NewPipeline(writeSteps, o.pipelineConfig)
-				// Copy context from read pipeline so substitution can resolve references.
-				if readPipeline.Context != nil {
-					p.Context = readPipeline.Context
-				}
+				p.Context = readPipeline.Context
+				// Also copy into fullPipeline context for reference.
+				fullPipeline.Context = readPipeline.Context
 				o.pendingMu.Lock()
 				o.pendingPipelines[sessionID] = p
 				o.pendingMu.Unlock()
