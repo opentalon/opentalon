@@ -311,7 +311,7 @@ func TestNativeArgToString(t *testing.T) {
 		{"string", "hello", "hello"},
 		{"bool true", true, "true"},
 		{"bool false", false, "false"},
-		{"nil", nil, "null"},
+		{"nil", nil, ""},
 		{"integer float64", float64(42), "42"},
 		{"large integer float64", float64(2037838), "2037838"},
 		{"fractional float64", float64(3.14), "3.14"},

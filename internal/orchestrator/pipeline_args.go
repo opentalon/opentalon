@@ -26,6 +26,11 @@ import (
 func pipelineArgsToWire(args map[string]any) map[string]string {
 	out := make(map[string]string, len(args))
 	for k, v := range args {
+		// Drop nil values — the planner sometimes emits null for optional
+		// params. Sending "null" as a string causes schema validation failures.
+		if k == "" || v == nil {
+			continue
+		}
 		out[k] = argToWireString(v)
 	}
 	return out

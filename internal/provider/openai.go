@@ -343,6 +343,13 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 			var rawArgs map[string]interface{}
 			if err := json.Unmarshal([]byte(tc.Function.Arguments), &rawArgs); err == nil {
 				for k, v := range rawArgs {
+					// Drop null values and empty keys — LLMs sometimes
+					// emit {"page": null} for optional params or {"": ...}
+					// for zero-arg tools. Passing null as the string "null"
+					// causes schema validation failures downstream.
+					if k == "" || v == nil {
+						continue
+					}
 					args[k] = nativeArgToString(v)
 				}
 			}
@@ -629,11 +636,11 @@ func (p *OpenAIProvider) captureRawHTTP(ctx context.Context, direction string, s
 // nativeArgToString converts a JSON-decoded value to a string suitable for
 // the wire-level map[string]string in ToolCall.Arguments.
 //
-// Unlike toStringMap in parser.go, this preserves all values including nil,
-// false, and zero — the LLM explicitly chose these in structured tool calls.
+// nil values are normally filtered at the call site (LLMs emit null for
+// optional params they don't intend to set). The guard here is defense-in-depth.
 func nativeArgToString(v interface{}) string {
 	if v == nil {
-		return "null"
+		return ""
 	}
 	switch x := v.(type) {
 	case string:
