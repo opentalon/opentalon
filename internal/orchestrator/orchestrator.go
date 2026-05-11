@@ -196,8 +196,9 @@ type Orchestrator struct {
 	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
 	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
 	planner                 *pipeline.Planner             // nil = pipeline disabled
-	pendingMu               sync.Mutex                    // guards pendingPipelines map
+	pendingMu               sync.Mutex                    // guards pendingPipelines and pendingToolCalls maps
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline (access via pendingMu)
+	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
 	pipelineConfig          pipeline.PipelineConfig
 	confirmationPlugin      string              // optional; plugin for confirmation strategy
 	confirmationAction      string              // optional; action name for confirmation check
@@ -320,6 +321,7 @@ func NewWithRules(
 		summarizeUpdatePrompt:   opts.SummarizeUpdatePrompt,
 		planner:                 planner,
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
+		pendingToolCalls:        make(map[string]*ToolCall),
 		pipelineConfig:          pipelineCfg,
 		confirmationPlugin:      opts.ConfirmationPlugin,
 		confirmationAction:      opts.ConfirmationAction,
@@ -798,6 +800,54 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				"action": "pipeline_cancelled",
 			},
 		}, nil
+	}
+
+	// Block A2: Check for pending tool call confirmation.
+	o.pendingMu.Lock()
+	pendingCall := o.pendingToolCalls[sessionID]
+	if pendingCall != nil {
+		delete(o.pendingToolCalls, sessionID)
+	}
+	o.pendingMu.Unlock()
+	if tc := pendingCall; tc != nil {
+		var decision pipeline.ConfirmationDecision
+		if o.planner != nil {
+			d, classErr := o.planner.ClassifyConfirmation(ctx, userMessage)
+			if classErr != nil {
+				decision = pipeline.ParseConfirmation(userMessage)
+			} else {
+				decision = d
+			}
+		} else {
+			decision = pipeline.ParseConfirmation(userMessage)
+		}
+		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
+		if decision == pipeline.Approved {
+			log.Debug("tool call confirmed, executing", "plugin", tc.Plugin, "action", tc.Action)
+			result := o.executeCall(ctx, *tc)
+			// Record in session history.
+			tr := ToolResult{CallID: tc.ID, Content: result.Content, StructuredContent: result.StructuredContent, Error: result.Error}
+			if o.supportsNativeTools() {
+				_ = sessions.AddMessage(sessionID, provider.Message{
+					Role: provider.RoleAssistant,
+					ToolCalls: []provider.ToolCall{{
+						ID: tc.ID, Name: tc.Plugin + "." + tc.Action, Arguments: tc.Args,
+					}},
+				})
+				_ = sessions.AddMessage(sessionID, provider.Message{
+					Role: provider.RoleTool, Content: nativeToolContent(tr), ToolCallID: tc.ID,
+				})
+			} else {
+				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(*tc)})
+				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)})
+			}
+			// The tool result is now in session history. Fall through to the
+			// agent loop so the LLM summarizes the result for the user.
+		} else {
+			resp := "Tool call cancelled."
+			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
+			return &RunResult{Response: resp}, nil
+		}
 	}
 
 	content := userMessage
@@ -1414,6 +1464,41 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 		for i := range calls {
 			calls[i].FromLLM = true
+
+			// Tool-level confirmation: if the confirmation plugin says this
+			// action needs confirmation, pause the agent loop and return a
+			// confirmation prompt to the user. The pending call is stored
+			// and executed on the next message if approved.
+			if o.confirmationPlugin != "" && o.confirmationAction != "" && !calls[i].ConfirmationBypass {
+				confResult := o.checkConfirmationPlugin(ctx, []*pipeline.Step{{
+					ID:      calls[i].ID,
+					Name:    calls[i].Action,
+					Command: &pipeline.PluginCommand{Plugin: calls[i].Plugin, Action: calls[i].Action},
+				}})
+				if confResult.RequiresConfirmation {
+					log.Info("tool call requires confirmation", "plugin", calls[i].Plugin, "action", calls[i].Action)
+					pending := calls[i]
+					o.pendingMu.Lock()
+					o.pendingToolCalls[sessionID] = &pending
+					o.pendingMu.Unlock()
+					// Build a confirmation message describing what will be done.
+					confirmMsg := fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", calls[i].Action)
+					for k, v := range calls[i].Args {
+						confirmMsg += fmt.Sprintf("- %s: %s\n", k, v)
+					}
+					confirmMsg += "\nWould you like me to proceed?"
+					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg})
+					return &RunResult{
+						Response: confirmMsg,
+						Metadata: map[string]string{
+							"type":        "confirmation",
+							"prompt_type": "tool_confirmation",
+							"options":     "approve,reject",
+						},
+					}, nil
+				}
+			}
+
 			pluginStart := time.Now()
 			toolResult := o.executeCall(ctx, calls[i])
 			pluginDuration := time.Since(pluginStart)
