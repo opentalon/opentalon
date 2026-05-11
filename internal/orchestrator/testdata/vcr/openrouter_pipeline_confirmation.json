@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "3185a486105cd40e82296beca0c04e79f12eff4c4c23cb2966988847eb2014e2",
+  "prompt_hash": "27fc50fc8d8d57449740482cc718be864dd93289b5eb2eb89993b7e3e862fdaa",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-11T11:59:17.580835Z",
+  "recorded_at": "2026-05-11T16:20:51.277379Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778500757-6Cs7tymzLMaFUmWrpE1Z",
+        "id": "gen-1778516451-uHPcIB37h6lNhEmMRDsd",
         "model": "mistralai/ministral-8b-2512",
-        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo for vulnerabilities and issues\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create a Jira issue based on code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"summary\": \"Code Analysis Findings for {{step1.output.repo}}\",\n        \"description\": \"Automated Jira issue created based on code analysis results:\\n\\n{{step1.output.analysis_results}}\",\n        \"project\": \"{{step1.output.project_key}}\",  // Assuming the analysis includes project key; adjust if needed\n        \"issuetype\": \"Bug\"  // Default type; adjust if needed\n      },\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
+        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue for code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"summary\": \"{{step1.output.summary}}\",\n        \"description\": \"{{step1.output.description}}\",\n        \"project\": \"{{step1.output.project}}\",  // Assuming the analysis output includes project details; adjust as needed\n        \"issuetype\": \"Bug\"  // Default type; adjust based on findings\n      },\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
         "usage": {
           "input_tokens": 684,
-          "output_tokens": 240
+          "output_tokens": 211
         }
       }
     },
@@ -38,17 +38,17 @@
           },
           {
             "role": "user",
-            "content": "User's original request: analyze code in myrepo and then create a jira issue for the findings\n\nPlan steps:\n1. Analyze code in myrepo for vulnerabilities and issues (gitlab.analyze_code)\n2. Create a Jira issue based on code analysis findings (jira.create_issue)\n"
+            "content": "User's original request: analyze code in myrepo and then create a jira issue for the findings\n\nPlan steps:\n1. Analyze code in myrepo (gitlab.analyze_code)\n2. Create Jira issue for code analysis findings (jira.create_issue)\n"
           }
         ]
       },
       "response": {
-        "id": "gen-1778500760-hLGRXMG8T2d90epLGIPX",
+        "id": "gen-1778516453-VYgT4X76Og7BBqp3htg5",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Hier ist dein mehrstufiger Plan in einfachen Worten:\n\nZuerst werde ich den Code in deinem Repository **auf mögliche Probleme und Sicherheitslücken scannen**, um alle kritischen Punkte zu identifizieren. Anschließend **erstelle ich eine Jira-Ticket basierend auf den gefundenen Ergebnissen**, damit du die Mängel direkt nachverfolgen und beheben kannst.\n\nMöchtest du mit diesem Plan fortfahren?",
+        "content": "Hier ist dein mehrstufiger Plan in einfachen Worten:\n\nZuerst werde ich den Code in deinem Repository **durchgehen und auf mögliche Probleme oder Verbesserungsmöglichkeiten prüfen**. Anschließend erstelle ich daraus eine **Jira-Ticket**, damit dein Team die Ergebnisse nachverfolgen und bearbeiten kann.\n\nMöchtest du mit der Umsetzung fortfahren?",
         "usage": {
-          "input_tokens": 147,
-          "output_tokens": 91
+          "input_tokens": 141,
+          "output_tokens": 78
         }
       }
     }
