@@ -2729,11 +2729,11 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		// Try each normalization and their combination before giving up.
 		resolved := false
 		candidates := []string{
-			strings.ReplaceAll(call.Action, "_", "-"),                                 // list_persons → list-persons
-			call.Plugin + "__" + call.Action,                                           // list-items → plugin__list-items
-			call.Plugin + "__" + strings.ReplaceAll(call.Action, "_", "-"),             // list_items → plugin__list-items
-			strings.ReplaceAll(call.Action, "-", "_"),                                 // list-persons → list_persons (reverse)
-			call.Plugin + "__" + strings.ReplaceAll(call.Action, "-", "_"),             // list-persons → plugin__list_persons
+			strings.ReplaceAll(call.Action, "_", "-"),
+			call.Plugin + "__" + call.Action,
+			call.Plugin + "__" + strings.ReplaceAll(call.Action, "_", "-"),
+			strings.ReplaceAll(call.Action, "-", "_"),
+			call.Plugin + "__" + strings.ReplaceAll(call.Action, "-", "_"),
 		}
 		for _, candidate := range candidates {
 			if candidate != call.Action && o.registry.HasAction(call.Plugin, candidate) {

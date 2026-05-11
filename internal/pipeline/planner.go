@@ -273,9 +273,10 @@ func stripJSONLineComments(s string) string {
 		}
 		if inString {
 			sb.WriteByte(c)
-			if c == '\\' {
+			switch c {
+			case '\\':
 				escaped = true
-			} else if c == '"' {
+			case '"':
 				inString = false
 			}
 			continue
