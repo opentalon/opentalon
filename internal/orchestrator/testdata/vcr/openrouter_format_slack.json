@@ -1,7 +1,7 @@
 {
   "prompt_hash": "e406c0877375ccaf7f7e48c62533e12535b221f497ec813d6c3241226daec905",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-11T10:41:29.775037Z",
+  "recorded_at": "2026-05-11T10:54:54.847544Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778496089-1UhwXNVI9OkCzxD1cC1Y",
+        "id": "gen-1778496894-k07h0iU21rQDQ4i6p2L8",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Here’s what I can do based on your configured tools and rules:\n\n### **Data RetrieGitLab Integration**\n- **Code Analysis**: Analyze code in a GitLab repository (e.g., for vulnerabilities, quality checks, or best practices).\n- **Pull Requests (PRs)**: Create or manage pull requests in GitLab repositories.\n\n### **Jira Integration**\n- **Issue Creation**: Create new issues in Jira (e.g., bugs reports, tasks, or feature requests).\n\n### **Scheduling \u0026 Automation**\n- **Proactive Monitoring**: Suggest scheduling recurring checkschecks (e.g., code analysis, issue tracking) at intervals like hourly, daily, or weekly.\n- **Job Management**: List, pause, or resume scheduled tasks (if configured).\n  - *Note*: Cannot delete or modify preconfigureconfigured scheduled (only pause/resume).\n\n### **Safety \u0026 Compliance**\n- FollowFollows strict rules to avoid hallucmisinterpretation of tool outputs, unauthorized actions, or data fabrication.\n- Requires explicit approval for destructive actions (e.g., deleting jobs).\n- Adheres to approver workflows if configured.\n\n---\n**Example Use Cases**:\n- *\"Analyze this GitLab repo for vulnerabilities\"* → Use `gitlab.analyze_code`.\n- *\"Create a Jira issue for this bug.\"* → Use `jira.create_issue`.\n- *\"Check this codebase weekly.\"* → Suggest scheduling `gitlab.analyze_code` with a weeklycustom interval.",
+        "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data Retrieval \u0026 Search**\n- Search the web for real-time information using **Brave Search**.\n- Fetch up-to-date news, facts, or details on any topic.\n\n### **Jira Integration**\n- **Create Issues**: Generate and log new issues in Jira with custom details.\n\n### **GitLab Integration**\n- **Code Analysis**: Analyze code in a GitLab repository for potential issues, vulnerabilities, or best practices.\n- **Pull Requests (PRs)**: Create pull requests in GitLab repositories.\n\n### **Scheduling \u0026 Automation**\n- Propose and **schedule recurring tasks** (e.g., monitoring, checks, reports) with customizable intervals (e.g., hourly, daily).\n- Manage scheduled jobs (list, pause, resume, delete) with user confirmation for destructive actions.",
         "usage": {
           "input_tokens": 844,
-          "output_tokens": 307
+          "output_tokens": 180
         }
       }
     },
@@ -42,7 +42,7 @@
           },
           {
             "role": "assistant",
-            "content": "Here’s what I can do based on your configured tools and rules:\n\n### **Data RetrieGitLab Integration**\n- **Code Analysis**: Analyze code in a GitLab repository (e.g., for vulnerabilities, quality checks, or best practices).\n- **Pull Requests (PRs)**: Create or manage pull requests in GitLab repositories.\n\n### **Jira Integration**\n- **Issue Creation**: Create new issues in Jira (e.g., bugs reports, tasks, or feature requests).\n\n### **Scheduling \u0026 Automation**\n- **Proactive Monitoring**: Suggest scheduling recurring checkschecks (e.g., code analysis, issue tracking) at intervals like hourly, daily, or weekly.\n- **Job Management**: List, pause, or resume scheduled tasks (if configured).\n  - *Note*: Cannot delete or modify preconfigureconfigured scheduled (only pause/resume).\n\n### **Safety \u0026 Compliance**\n- FollowFollows strict rules to avoid hallucmisinterpretation of tool outputs, unauthorized actions, or data fabrication.\n- Requires explicit approval for destructive actions (e.g., deleting jobs).\n- Adheres to approver workflows if configured.\n\n---\n**Example Use Cases**:\n- *\"Analyze this GitLab repo for vulnerabilities\"* → Use `gitlab.analyze_code`.\n- *\"Create a Jira issue for this bug.\"* → Use `jira.create_issue`.\n- *\"Check this codebase weekly.\"* → Suggest scheduling `gitlab.analyze_code` with a weeklycustom interval."
+            "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data Retrieval \u0026 Search**\n- Search the web for real-time information using **Brave Search**.\n- Fetch up-to-date news, facts, or details on any topic.\n\n### **Jira Integration**\n- **Create Issues**: Generate and log new issues in Jira with custom details.\n\n### **GitLab Integration**\n- **Code Analysis**: Analyze code in a GitLab repository for potential issues, vulnerabilities, or best practices.\n- **Pull Requests (PRs)**: Create pull requests in GitLab repositories.\n\n### **Scheduling \u0026 Automation**\n- Propose and **schedule recurring tasks** (e.g., monitoring, checks, reports) with customizable intervals (e.g., hourly, daily).\n- Manage scheduled jobs (list, pause, resume, delete) with user confirmation for destructive actions."
           },
           {
             "role": "user",
@@ -51,12 +51,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778496096-9fKDue3u2HA3SC9Fn5Pk",
+        "id": "gen-1778496896-kHqiJAkhsDx39enh65zr",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Understood. If you provide a specific request, I will immediately execute the appropriate tool call.",
+        "content": "Understood. If you have a specific request that requires data or action, provide it, and I will execute the appropriate tool call immediately.",
         "usage": {
-          "input_tokens": 1181,
-          "output_tokens": 20
+          "input_tokens": 1054,
+          "output_tokens": 29
         }
       }
     }

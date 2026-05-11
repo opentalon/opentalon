@@ -1,7 +1,7 @@
 {
   "prompt_hash": "e406c0877375ccaf7f7e48c62533e12535b221f497ec813d6c3241226daec905",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-11T10:40:46.265818Z",
+  "recorded_at": "2026-05-11T10:54:29.057152Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,7 +19,7 @@
         ]
       },
       "response": {
-        "id": "gen-1778496046-mYLzonka2H7v7YtZVjas",
+        "id": "gen-1778496869-7GtzMPSZbSOikrGr1hA3",
         "model": "mistralai/ministral-8b-2512",
         "content": "[tool_call]\n{\"tool\": \"gitlab.analyze_code\", \"args\": {\"repo\": \"myrepo\"}}\n[/tool_call]",
         "usage": {
@@ -51,12 +51,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778496047-i6uC1OlxDhb3FWcezLOv",
+        "id": "gen-1778496869-G5sy1mPHK7sDcAGOEmiK",
         "model": "mistralai/ministral-8b-2512",
-        "content": "The code in your repository **`myrepo`** has been analyzed successfully.\n\nWould you like a summary of the findings, or should I check for specific issues (e.g., vulnerabilities, style violations)? Let me know how you'd like to proceed!",
+        "content": "The code in your repository **`myrepo`** has been analyzed successfully.\n\nWould you like me to:\n1. **Review specific findings** (e.g., vulnerabilities, code smells)?\n2. **Generate a detailed report** (e.g., security, performance, or compliance)?\n3. **Check for open pull requests or issues** related to the analysis?",
         "usage": {
           "input_tokens": 884,
-          "output_tokens": 52
+          "output_tokens": 76
         }
       }
     }

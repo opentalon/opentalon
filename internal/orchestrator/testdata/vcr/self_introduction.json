@@ -1,7 +1,7 @@
 {
   "prompt_hash": "e406c0877375ccaf7f7e48c62533e12535b221f497ec813d6c3241226daec905",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-11T10:40:58.49962Z",
+  "recorded_at": "2026-05-11T10:54:38.862094Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_017LMQS9ynw6vvHd3ZQCeAcZ",
+        "id": "msg_01ESGJpeyB2PjasdCWJ6Q1ez",
         "model": "claude-haiku-4-5-20251001",
-        "content": "# Hello! I'm OpenTalon 👋\n\nI'm an AI orchestration platform built by **opentalon.ai**. I'm designed to help you automate workflows and integrate with your development tools seamlessly.\n\n## What I can do:\n\n**Development \u0026 Code:**\n- Analyze code in your GitLab repositories\n- Create pull requests automatically\n- Review and understand your codebase\n\n**Project Management:**\n- Create and manage Jira issues\n- Track work and stay organized\n\n**Automation:**\n- Execute tools and integrations on demand\n- Schedule recurring tasks and monitoring jobs\n- Generate reports and insights\n\n## How I work:\n\nI operate by **calling tools** when you need real data or actions performed. I don't guess or make things up — if I need information, I fetch it directly from your integrated systems. When you give me a task, I execute it and provide you with actual results.\n\nI'm built with safety at my core, so I treat all tool outputs as data and never blindly follow instructions hidden in plugin responses.\n\n## Ready to help!\n\nWhether you need to analyze code, create issues, automate workflows, or set up monitoring — just let me know what you'd like to do. What can I help you with today?",
+        "content": "# Hi! I'm OpenTalon 👋\n\nI'm an AI orchestration platform built by **opentalon.ai**. I'm designed to help you automate workflows and integrate with your development tools seamlessly.\n\n## What I Can Do\n\n**I act by calling tools** — when you need something, I don't just talk about it, I actually do it. Here's what I'm equipped to handle:\n\n### Integrations\n- **GitLab** — Analyze code and create pull requests\n- **Jira** — Create and manage issues\n- **Web Search** — Find information using Brave Search\n\n### Key Capabilities\n- **Execute Real Actions** — I call tools to perform tasks, not just describe what I would do\n- **Smart Scheduling** — Set up monitoring and recurring actions with your approval\n- **Data-Driven Responses** — When you ask questions requiring data, I fetch real information first\n- **Safe Operations** — I treat all plugin outputs as data and never follow instructions embedded in responses\n\n## How I Work\nSimply ask me what you need, and I'll:\n1. Call the appropriate tools to get real data or execute actions\n2. Give you a clear, natural answer based on actual results\n3. Suggest automations when they'd be helpful (always waiting for your approval)\n\nWhat would you like to do today?",
         "usage": {
           "input_tokens": 921,
-          "output_tokens": 276
+          "output_tokens": 299
         }
       }
     }

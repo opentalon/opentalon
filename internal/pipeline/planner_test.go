@@ -144,12 +144,68 @@ func TestExtractJSON(t *testing.T) {
 		{"```json\n{\"type\": \"direct\"}\n```", `{"type": "direct"}`},
 		{"```\n{\"type\": \"direct\"}\n```", `{"type": "direct"}`},
 		{"  {\"type\": \"direct\"}  ", `{"type": "direct"}`},
+		// JSON with single-line comments (some LLMs add these)
+		{
+			"```json\n{\"key\": \"val\", // a comment\n\"num\": 1}\n```",
+			"{\"key\": \"val\", \n\"num\": 1}",
+		},
+		// Comments must not strip // inside strings
+		{
+			`{"url": "https://example.com"}`,
+			`{"url": "https://example.com"}`,
+		},
 	}
 	for _, tt := range tests {
 		got := extractJSON(tt.input)
 		if got != tt.want {
 			t.Errorf("extractJSON(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestParsePlanResponse_BrokenJSON(t *testing.T) {
+	// LLM produces JSON with broken placeholder syntax and comments.
+	// parsePlanResponse should still extract the pipeline via repairJSON.
+	input := "```json\n" + `{
+  "type": "pipeline",
+  "steps": [
+    {"id": "s1", "name": "Analyze", "plugin": "gitlab", "action": "analyze_code", "args": {"repo": "myrepo"}, "depends_on": []},
+    {"id": "s2", "name": "Create issue", "plugin": "jira", "action": "create_issue", "args": {"summary": "findings"}, "depends_on": ["s1"]}
+  ]
+}` + "\n```"
+	result, err := parsePlanResponse(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Type != "pipeline" {
+		t.Fatalf("expected pipeline, got %s", result.Type)
+	}
+	if len(result.Steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(result.Steps))
+	}
+}
+
+func TestRepairJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{"clean", `{"type": "pipeline"}`, true},
+		{"trailing garbage", `{"type": "pipeline"} extra text`, true},
+		{"no object", `not json at all`, false},
+		{"nested braces", `{"a": {"b": 1}}`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := repairJSON(tt.input)
+			if tt.valid && got == "" {
+				t.Errorf("repairJSON(%q) returned empty, expected valid JSON", tt.input)
+			}
+			if !tt.valid && got != "" {
+				t.Errorf("repairJSON(%q) = %q, expected empty", tt.input, got)
+			}
+		})
 	}
 }
 

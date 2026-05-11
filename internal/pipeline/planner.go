@@ -166,8 +166,17 @@ func parsePlanResponse(content string) (*PlanResult, error) {
 
 	var resp planResponse
 	if err := json.Unmarshal([]byte(jsonStr), &resp); err != nil {
-		// Parse failure → fallback to direct
-		return &PlanResult{Type: "direct"}, nil
+		// LLMs sometimes produce broken JSON (unescaped quotes inside values,
+		// broken placeholder syntax, etc.). Try a lenient re-extraction:
+		// find the outermost { } and decode only that span with
+		// the json.Decoder which may accept a valid prefix.
+		if repaired := repairJSON(jsonStr); repaired != "" {
+			if json.Unmarshal([]byte(repaired), &resp) != nil {
+				return &PlanResult{Type: "direct"}, nil
+			}
+		} else {
+			return &PlanResult{Type: "direct"}, nil
+		}
 	}
 
 	if resp.Type != "pipeline" || len(resp.Steps) == 0 {
@@ -233,17 +242,89 @@ func extractJSON(s string) string {
 	if idx := strings.Index(s, "```json"); idx >= 0 {
 		s = s[idx+7:]
 		if end := strings.Index(s, "```"); end >= 0 {
-			return strings.TrimSpace(s[:end])
+			s = strings.TrimSpace(s[:end])
 		}
-	}
-	if idx := strings.Index(s, "```"); idx >= 0 {
+	} else if idx := strings.Index(s, "```"); idx >= 0 {
 		s = s[idx+3:]
 		if end := strings.Index(s, "```"); end >= 0 {
-			return strings.TrimSpace(s[:end])
+			s = strings.TrimSpace(s[:end])
 		}
 	}
 
+	// Strip single-line comments (// ...) that some LLMs add inside JSON.
+	s = stripJSONLineComments(s)
+
 	return s
+}
+
+// stripJSONLineComments removes // comments from JSON text while preserving
+// double-slash sequences inside quoted strings.
+func stripJSONLineComments(s string) string {
+	var sb strings.Builder
+	sb.Grow(len(s))
+	inString := false
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			sb.WriteByte(c)
+			escaped = false
+			continue
+		}
+		if inString {
+			sb.WriteByte(c)
+			if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		// Outside string: check for //
+		if c == '/' && i+1 < len(s) && s[i+1] == '/' {
+			// Skip until end of line.
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+			// Preserve the newline itself.
+			if i < len(s) {
+				sb.WriteByte('\n')
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+		}
+		sb.WriteByte(c)
+	}
+	return sb.String()
+}
+
+// repairJSON attempts to salvage broken JSON by using json.Decoder to parse a
+// valid prefix. LLMs often produce JSON with broken string values (unescaped
+// quotes, broken placeholders like "{{"Bug"), trailing garbage, etc. The
+// Decoder stops at the first valid top-level value, so truncated or trailing
+// junk is ignored. Returns "" if no valid JSON object can be decoded.
+func repairJSON(s string) string {
+	s = strings.TrimSpace(s)
+	// Must start with { for a plan object.
+	idx := strings.IndexByte(s, '{')
+	if idx < 0 {
+		return ""
+	}
+	// Try progressively shorter substrings ending at each '}' from the end.
+	// This handles trailing garbage after the JSON.
+	for end := len(s); end > idx; end-- {
+		if s[end-1] != '}' {
+			continue
+		}
+		candidate := s[idx:end]
+		var obj json.RawMessage
+		if json.Unmarshal([]byte(candidate), &obj) == nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // NarratePlan asks the LLM to describe the pipeline steps in natural language

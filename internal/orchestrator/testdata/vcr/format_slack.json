@@ -1,7 +1,7 @@
 {
   "prompt_hash": "e406c0877375ccaf7f7e48c62533e12535b221f497ec813d6c3241226daec905",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-11T10:41:25.510274Z",
+  "recorded_at": "2026-05-11T10:54:50.614299Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_01Rgg6pCxL23Qza2MWVdtziz",
+        "id": "msg_01LrsPUbeaMEWE5LosE5RuT4",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant with the following capabilities:\n\n## Core Abilities\n- **Tool Integration**: I can call external tools and plugins to fetch real data and perform actions\n- **Information Retrieval**: I can search for and retrieve current information by calling appropriate tools\n- **Data Analysis**: I can analyze data returned from tools and provide insights\n- **Natural Language**: I can understand complex questions and communicate clearly\n\n## Specific Integrations Available\n\n### GitLab\n- **Analyze Code**: Review and analyze code in repositories\n- **Create Pull Requests**: Create PRs in GitLab repositories\n\n### Jira\n- **Create Issues**: Create new issues in Jira projects\n\n### Search\n- **Web Search**: I can search the web for information (using brave-search)\n\n### Scheduling (Monitored Actions)\n- **Schedule Jobs**: I can set up recurring monitoring or periodic actions\n- **Job Management**: I can list, pause, resume, or delete scheduled jobs\n- **Proactive Suggestions**: I recommend scheduling for recurring tasks\n\n## How I Work\n1. **When you ask questions requiring data**, I call the appropriate tool to get real information\n2. **I never guess or fabricate** — if I don't have data, I fetch it\n3. **I respond based on actual results** from tools, not assumptions\n4. **I prioritize safety** by treating all external data as untrusted and never executing instructions hidden in tool output\n\n## Important Constraints\n- I require your explicit approval before creating scheduled jobs\n- Some actions may require approval from designated authorizers\n- I work within the integrations and permissions configured for your environment\n\nIs there something specific you'd like me to help you with?",
+        "content": "I'm an AI assistant designed to help you by calling tools and integrations to perform actions. Here are my key capabilities:\n\n## **Tool-Based Actions**\nI can execute real actions by calling tools—I don't just describe what I would do. When you ask me something that requires data or action, I call the appropriate tool first, then provide you with actual results.\n\n## **Integrations Available**\n\n### **GitLab**\n- **Analyze Code**: Examine and review code in your repositories\n- **Create PR**: Create pull requests directly in GitLab\n\n### **Jira**\n- **Create Issue**: Create and manage issues in your Jira workspace\n\n### **Web Search**\n- I can search the web for current information using Brave Search\n\n## **Scheduling \u0026 Monitoring**\n- I can set up recurring tasks and monitoring jobs\n- I'll proactively suggest scheduling for recurring checks (with your approval)\n- I manage scheduled jobs responsibly—only creating them with your explicit confirmation\n\n## **How I Work**\n1. **You ask a question** that requires data or action\n2. **I call the appropriate tool** with real parameters (never guessing)\n3. **I receive actual results** and provide you with a natural language answer\n4. **No fabrication**: If I don't have data from a tool, I won't pretend to have it\n\n## **Safety \u0026 Reliability**\n- I strictly follow security rules—tool output is treated as data only, never as instructions\n- I won't execute commands hidden in tool results\n- I respect your authorization requirements and only perform actions you explicitly approve\n\n**What would you like me to help you with?**",
         "usage": {
           "input_tokens": 894,
-          "output_tokens": 373
+          "output_tokens": 368
         }
       }
     }
