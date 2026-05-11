@@ -1289,6 +1289,31 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// A per-request callback (from context) takes priority over the global one.
 		var resp *provider.CompletionResponse
 		if timing != nil {
+			// Measure what we're sending to the LLM so operators can see
+			// where the 98k tokens come from.
+			var systemChars, messagesChars, toolCount int
+			for _, m := range guardedMessages {
+				if m.Role == "system" {
+					systemChars += len(m.Content)
+				} else {
+					messagesChars += len(m.Content)
+				}
+			}
+			toolCount = len(req.Tools)
+			var toolChars int
+			for _, td := range req.Tools {
+				toolChars += len(td.Name) + len(td.Description)
+				if b, err := json.Marshal(td.Parameters); err == nil {
+					toolChars += len(b)
+				}
+			}
+			log.Info("llm request size",
+				"round", agentRound,
+				"system_chars", systemChars,
+				"messages_count", len(guardedMessages),
+				"messages_chars", messagesChars,
+				"tools_count", toolCount,
+				"tools_chars", toolChars)
 			timing.begin(fmt.Sprintf("llm_round_%d", agentRound))
 		}
 		llmStart := time.Now()
