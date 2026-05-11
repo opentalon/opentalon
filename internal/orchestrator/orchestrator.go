@@ -841,8 +841,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		} else {
 			decision = pipeline.ParseConfirmation(userMessage)
 		}
-		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 		if decision == pipeline.Approved {
+			// Only record the user's approval in session — rejections are
+			// kept out so the LLM doesn't avoid re-calling the tool later.
+			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 			log.Debug("tool call confirmed, executing", "plugin", tc.Plugin, "action", tc.Action)
 			result := o.executeCall(ctx, *tc)
 			// Record in session history.
@@ -866,14 +868,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// LLM summarizes the result for the user.
 			toolCallConfirmed = true
 		} else {
+			// Don't record the cancellation in session history — if the LLM
+			// sees a prior rejection it avoids re-calling the write tool and
+			// either narrates or fabricates results instead.
 			resp := "Tool call cancelled."
-			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
-			// Add a system note so the LLM doesn't hallucinate results
-			// or become overly cautious on subsequent requests.
-			_ = sessions.AddMessage(sessionID, provider.Message{
-				Role:    provider.RoleUser,
-				Content: "[system] The user cancelled this specific action. This does NOT mean the action was performed. If the user asks for the same action again, you MUST call the tool again using tool_call format. NEVER pretend a tool was executed or fabricate results — only report data you received from an actual tool call.",
-			})
 			return &RunResult{Response: resp}, nil
 		}
 	}
@@ -1581,7 +1579,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 						}
 						confirmMsg += "\nWould you like me to proceed?"
 					}
-					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg})
+					// Don't record the confirmation message in session history —
+					// if the user rejects and asks again, the LLM sees the prior
+					// confirmation + rejection and avoids re-calling the tool.
 					return &RunResult{
 						Response: confirmMsg,
 						Metadata: map[string]string{
