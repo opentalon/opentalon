@@ -871,8 +871,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// Don't record the cancellation in session history — if the LLM
 			// sees a prior rejection it avoids re-calling the write tool and
 			// either narrates or fabricates results instead.
-			resp := "Tool call cancelled."
-			return &RunResult{Response: resp}, nil
+			return &RunResult{
+				Response: "OK, action cancelled.",
+				Metadata: map[string]string{
+					"type":   "system",
+					"action": "confirmation_rejected",
+				},
+			}, nil
 		}
 	}
 
