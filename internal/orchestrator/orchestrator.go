@@ -2397,6 +2397,16 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 		})
 	}
 
+	// Only inject the "don't repeat" reminder when there's actual prior
+	// conversation (at least one assistant reply). On the first turn there's
+	// nothing to repeat.
+	if len(sess.Messages) > 2 {
+		messages = append(messages, provider.Message{
+			Role:    provider.RoleSystem,
+			Content: "[IMPORTANT] Answer ONLY the user's last message above. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.",
+		})
+	}
+
 	if o.contextWindow > 0 {
 		messages = trimToContextWindow(ctx, messages, o.contextWindow)
 	}
@@ -2425,6 +2435,19 @@ func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.
 		messages = append(messages, provider.Message{
 			Role:    provider.RoleSystem,
 			Content: "[IMPORTANT — output format reminder] " + hint,
+		})
+	}
+
+	// Trailing instruction placed close to the generation point where
+	// the model is most likely to follow it. The same instruction in the
+	// preamble (far away) gets buried under 50-100k tokens.
+	// Only inject the "don't repeat" reminder when there's actual prior
+	// conversation (at least one assistant reply). On the first turn there's
+	// nothing to repeat.
+	if len(sess.Messages) > 2 {
+		messages = append(messages, provider.Message{
+			Role:    provider.RoleSystem,
+			Content: "[IMPORTANT] Answer ONLY the user's last message above. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.",
 		})
 	}
 
