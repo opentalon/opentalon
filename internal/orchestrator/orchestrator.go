@@ -506,6 +506,15 @@ func (o *Orchestrator) runSTTPreparer(ctx context.Context, prep ContentPreparerE
 
 // runSinglePreparer executes one content preparer. Returns (new content, blocked result, relevant tools, error).
 // relevantTools is non-nil only when the preparer explicitly returns a relevant_tools list.
+// runSinglePreparerWithSearch calls runSinglePreparer and injects a
+// `search_text` arg when the enriched search query differs from the content.
+// The preparer can use search_text for RAG lookup while returning the
+// original content for the LLM.
+func (o *Orchestrator) runSinglePreparerWithSearch(ctx context.Context, prep ContentPreparerEntry, content, searchText, callPrefix string, allowInvoke bool) (string, *RunResult, []string, error) {
+	ctx = withSearchQuery(ctx, searchText)
+	return o.runSinglePreparer(ctx, prep, content, callPrefix, allowInvoke)
+}
+
 func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPreparerEntry, content, callPrefix string, allowInvoke bool) (string, *RunResult, []string, error) {
 	if strings.HasPrefix(prep.Plugin, "lua:") {
 		scriptName := strings.TrimPrefix(prep.Plugin, "lua:")
@@ -560,6 +569,11 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 	// Inject allowed_plugins for preparers so RAG plugins can filter by profile.
 	if allowed := resolveAllowedPluginNames(ctx, o); allowed != "" {
 		call.Args["allowed_plugins"] = allowed
+	}
+	// Inject enriched search query so RAG preparers can use it for semantic
+	// search while the main text arg stays as the original user message.
+	if sq := SearchQueryFromContext(ctx); sq != "" && sq != content {
+		call.Args["search_text"] = sq
 	}
 	toolResult := o.executeCall(ctx, call)
 	if toolResult.Error != "" {
@@ -925,15 +939,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// session history so RAG semantic search matches the full intent, not
 	// just a bare follow-up like "Item" (which would miss "create-item").
 	if !toolCallSeeded {
-		// Enrich the query sent to preparers (RAG) with the previous user
-		// message so semantic search catches follow-ups like "Item" after
-		// "create-item". But keep `content` as the original user message —
-		// we must NOT send the enriched text to the LLM or it sees both
-		// the previous and current questions merged into one.
-		preparerContent := content
+		// Enrich the search query with the previous user message so RAG
+		// catches follow-ups like "delete it" after "create item Bla1".
+		// The enriched text is passed as a separate `search_text` arg to
+		// preparers — it's used for RAG search only, while the main
+		// content (the actual user message) flows through to the LLM.
+		searchText := content
 		if sess, _ := sessions.Get(sessionID); sess != nil {
 			if prev := lastUserMessage(sess.Messages); prev != "" && prev != content {
-				preparerContent = prev + " " + content
+				searchText = prev + " " + content
 			}
 		}
 		var relevantTools []string
@@ -942,20 +956,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if prep.STT {
 				continue
 			}
-			guardedContent, blocked, tools, err := o.runSinglePreparer(ctx, prep, preparerContent, "preparer", true)
+			guardedContent, blocked, tools, err := o.runSinglePreparerWithSearch(ctx, prep, content, searchText, "preparer", true)
 			if err != nil {
 				return nil, err
 			}
 			if blocked != nil {
 				return blocked, nil
 			}
-			// Only update content from preparers that actually transform it
-			// (e.g. slash commands). RAG preparers pass through the enriched
-			// preparerContent unchanged — don't let that overwrite the
-			// original user message with prev + current merged text.
-			if guardedContent != preparerContent {
-				content = guardedContent
-			}
+			content = guardedContent
 			// Last preparer that returns relevant_tools wins.
 			// Distinguish nil (no tools field) from [] (explicitly empty).
 			if tools != nil {
@@ -3271,6 +3279,22 @@ func relevantToolsFromContext(ctx context.Context) ([]string, bool) {
 		return nil, false
 	}
 	return r.tools, true
+}
+
+type searchQueryKey struct{}
+
+// withSearchQuery stores an enriched search query in the context so the RAG
+// preparer can use it for semantic search while the original user message
+// stays intact for the LLM.
+func withSearchQuery(ctx context.Context, query string) context.Context {
+	return context.WithValue(ctx, searchQueryKey{}, query)
+}
+
+// SearchQueryFromContext returns the enriched search query, or empty string if none.
+// Exported so channel plugins (weaviate preparer) can access it.
+func SearchQueryFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(searchQueryKey{}).(string)
+	return v
 }
 
 // filterCapabilitiesByRelevantTools returns only the capabilities and actions
