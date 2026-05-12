@@ -925,6 +925,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// session history so RAG semantic search matches the full intent, not
 	// just a bare follow-up like "Item" (which would miss "create-item").
 	if !toolCallSeeded {
+		// Enrich the query sent to preparers (RAG) with the previous user
+		// message so semantic search catches follow-ups like "Item" after
+		// "create-item". But keep `content` as the original user message —
+		// we must NOT send the enriched text to the LLM or it sees both
+		// the previous and current questions merged into one.
 		preparerContent := content
 		if sess, _ := sessions.Get(sessionID); sess != nil {
 			if prev := lastUserMessage(sess.Messages); prev != "" && prev != content {
@@ -944,7 +949,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if blocked != nil {
 				return blocked, nil
 			}
-			content = guardedContent
+			// Only update content from preparers that actually transform it
+			// (e.g. slash commands). RAG preparers pass through the enriched
+			// preparerContent unchanged — don't let that overwrite the
+			// original user message with prev + current merged text.
+			if guardedContent != preparerContent {
+				content = guardedContent
+			}
 			// Last preparer that returns relevant_tools wins.
 			// Distinguish nil (no tools field) from [] (explicitly empty).
 			if tools != nil {
