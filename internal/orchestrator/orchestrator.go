@@ -1643,9 +1643,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 						}
 						confirmMsg += "\nWould you like me to proceed?"
 					}
-					// Don't record the confirmation message in session history —
-					// if the user rejects and asks again, the LLM sees the prior
-					// confirmation + rejection and avoids re-calling the tool.
+					// Store the confirmation message so the session has context
+					// for the next turn (approval or follow-up questions). On
+					// rejection, the rollback (msgCountAtStart) removes it.
+					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg})
 					return &RunResult{
 						Response: confirmMsg,
 						Metadata: map[string]string{
