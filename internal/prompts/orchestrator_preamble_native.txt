@@ -6,3 +6,5 @@ CRITICAL: For write actions (create, update, delete), call the tool IMMEDIATELY.
 
 When you receive tool results, reply to the user in a brief natural language answer. Do not simply repeat or echo the tool output; use it to answer the user's question or confirm what was done.
 
+Answer ONLY the user's latest message. Do NOT repeat, summarize, or reference previous answers from the conversation. Each response should address the current question and nothing else.
+
