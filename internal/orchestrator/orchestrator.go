@@ -1376,7 +1376,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
-		log.Info("LLM response", "round", i+1, "duration", llmDuration, "input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens, "content", resp.Content)
+		log.Info("LLM response", "round", i+1, "duration", llmDuration.Round(time.Millisecond).String(), "input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens, "content", resp.Content)
 
 		if modelUsed == "" {
 			modelUsed = resp.Model
@@ -1649,7 +1649,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			result.Results = append(result.Results, toolResult)
 			totalToolCalls++
 
-			log.Info("plugin call", "plugin", call.Plugin, "action", call.Action, "duration", pluginDuration, "error", toolResult.Error != "")
+			log.Info("plugin call", "plugin", call.Plugin, "action", call.Action, "duration", pluginDuration.Round(time.Millisecond).String(), "error", toolResult.Error != "")
 			if toolResult.Error != "" {
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
 			}
