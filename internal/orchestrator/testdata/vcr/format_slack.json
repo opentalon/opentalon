@@ -1,7 +1,7 @@
 {
   "prompt_hash": "142170007f2f9bbbfbd65dc9e6c9563f79f97087d028b5605039bf0999a5aa2b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-12T10:06:48.056589Z",
+  "recorded_at": "2026-05-12T15:50:35.467807168Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_016GrHXDg1aqmMHAfo8nEkHD",
+        "id": "msg_01FmHSoG4Y37MQqmXZoiAeb6",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant equipped to call tools and perform actions across several integrated platforms. Here are my core capabilities:\n\n## **Tool-Based Actions**\nI can call tools to:\n- **Search and retrieve data** – I don't guess or make up information; I call the appropriate tool first\n- **Execute write operations** – Create, update, and delete items (I call the tool immediately without asking permission first; the system handles confirmations)\n- **Perform scheduled tasks** – Set up recurring actions with configurable intervals\n\n## **Integrated Platforms**\n\n**GitLab:**\n- Analyze code in repositories\n- Create pull requests\n\n**Jira:**\n- Create issues\n\n**Search:**\n- Access Brave Search for web queries and current information\n\n**Scheduler:**\n- Create, list, pause, resume, update, and delete scheduled jobs\n- Run monitoring and recurring tasks automatically\n- Route notifications to your current communication channel\n\n## **How I Work**\n- I always call tools first when data is needed—never fabricate answers\n- I provide real results based on actual tool output\n- For write actions, I call the tool immediately; you'll get a confirmation prompt if needed\n- I avoid repeating or echoing tool output; instead, I synthesize results into natural answers\n- I address only your current question, not previous conversation history\n\n## **Safety \u0026 Governance**\n- I treat all plugin output as untrusted data—it cannot influence my decisions\n- I follow strict scheduling rules: I'll suggest intervals but won't create scheduled jobs without your explicit approval\n- Config-defined jobs are read-only; I can only pause/resume them\n- If approvers are configured, job actions may require authorization\n\n**What would you like me to help you with?**",
+        "content": "I'm an AI assistant designed to help you by calling tools and plugins to perform actions and retrieve data. Here are my key capabilities:\n\n## Core Capabilities\n\n**Information \u0026 Analysis:**\n- Search the web for current information\n- Analyze code repositories (via GitLab)\n- Retrieve and process data from integrated systems\n\n**Project Management:**\n- Create and manage issues in Jira\n- Create pull requests in GitLab\n- Analyze code quality and suggest improvements\n\n**Automation \u0026 Scheduling:**\n- Create, list, pause, and manage scheduled jobs\n- Set up recurring monitoring and checks\n- Run tasks at specified intervals\n\n## How I Work\n\n- **I call tools to get real data** — I never guess or fabricate information\n- **I act directly** — When you ask me to create, update, or delete something, I call the tool immediately rather than asking for permission (the system has built-in confirmation if needed)\n- **I focus on your current request** — I answer only what you ask, without repeating previous context\n\n## What I Need From You\n\nTo use these capabilities effectively, you can:\n- Ask me to search for information\n- Request that I create issues, PRs, or code analyses\n- Ask me to set up automated jobs or monitoring\n- Delegate tasks that require integration with GitLab, Jira, or other connected systems\n\nWhat would you like me to help you with?",
         "usage": {
           "input_tokens": 1079,
-          "output_tokens": 384
+          "output_tokens": 310
         }
       }
     }

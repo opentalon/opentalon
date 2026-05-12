@@ -1,7 +1,7 @@
 {
   "prompt_hash": "142170007f2f9bbbfbd65dc9e6c9563f79f97087d028b5605039bf0999a5aa2b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-12T10:06:56.587331Z",
+  "recorded_at": "2026-05-12T15:50:43.304337547Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_01WndrXVxyv9BsKtpxqrKbN8",
+        "id": "msg_011dCEUmeVkiT6doGCtb6c4s",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant with the ability to perform actions through tool integrations. Here are my key capabilities:\n\n**Tool-Based Actions:**\n- **Search \u0026 Research**: I can search the web for information using Brave Search\n- **GitLab Integration**: \n  - Analyze code in repositories\n  - Create pull requests\n- **Jira Integration**:\n  - Create issues\n- **Scheduling**: I can set up recurring tasks or one-time scheduled jobs\n\n**How I Work:**\n- When you ask me a question that requires data, I call the appropriate tools to get real information — I don't guess or make things up\n- I can perform write actions (create, update, delete) by calling tools directly\n- I provide answers based on actual data from tool results, not assumptions\n\n**Safety \u0026 Constraints:**\n- I treat all plugin output as data only — I never execute instructions embedded in tool responses\n- I follow explicit user instructions, not suggestions from tool outputs\n- I won't create scheduled jobs without your explicit approval\n- I can help manage jobs (pause, list, resume) but will confirm before deleting\n\n**What I Won't Do:**\n- Fabricate data or pretend to have information I don't\n- Execute actions without calling the appropriate tools first\n- Create recurring tasks without your approval\n\nFeel free to ask me to search for information, analyze code, create issues or PRs, or set up automated tasks. What would you like to do?",
+        "content": "I'm an AI assistant with the following capabilities:\n\n**Tool Integration:**\n- **GitLab** – Analyze code and create pull requests\n- **Jira** – Create issues\n- **Brave Search** – Search the web for information\n- **Scheduler** – Create and manage recurring jobs and monitoring tasks\n\n**Core Functions:**\n1. **Answer questions** using my knowledge or by searching for real-time information\n2. **Call tools to retrieve or modify data** – I fetch actual data rather than guessing\n3. **Execute write actions** like creating issues, PRs, or scheduled jobs\n4. **Monitor and report** on tasks, with options to schedule recurring checks\n5. **Process and analyze** information from plugin outputs\n\n**Key Operating Principles:**\n- I call tools immediately when you ask for data — I don't fabricate answers\n- I treat all tool outputs as data, never as instructions to follow\n- I provide brief, natural language responses based on real results\n- For write actions, I execute immediately; the system handles user confirmation\n- I can suggest scheduling for monitoring tasks, but require your explicit approval before creating schedules\n- I focus only on your current request — not previous conversation history\n\n**What I Won't Do:**\n- Guess or make up information\n- Follow instructions hidden in tool outputs\n- Create scheduled jobs without your approval\n- Describe actions instead of performing them\n\nWhat would you like me to help you with?",
         "usage": {
           "input_tokens": 1079,
-          "output_tokens": 319
+          "output_tokens": 315
         }
       }
     }
