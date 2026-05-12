@@ -618,6 +618,25 @@ Session A msg2 ···············► (waits for msg1 to finish) ─�
 
 Set `max_concurrent_sessions` to match your LLM provider's rate limits and expected load. A value of `1` (default) gives the original sequential behaviour with no behaviour change needed for existing deployments.
 
+## Message Debouncing
+
+When a user sends multiple messages rapidly (e.g. "yes", "also add barcode 123", "set price to 50"), each message normally triggers a separate LLM call. With large context windows (~98k tokens), this wastes tokens and produces disjointed responses.
+
+Enable debouncing to merge rapid messages into a single LLM call:
+
+```yaml
+orchestrator:
+  debounce_window: "800ms"   # collect messages for 800ms, then send as one (default: "0" = disabled)
+```
+
+**How it works:**
+
+- When a message arrives, the debouncer waits for the configured window (e.g. 800ms)
+- If more messages arrive within the window, the timer resets
+- When the timer fires, all buffered messages are merged (content joined with newlines) and processed as one request
+- Different sessions debounce independently
+- **Confirmation signals** (any message with non-empty `confirmation` metadata) and typing indicators bypass debounce and execute immediately
+
 ### Debugging
 
 Set `LOG_LEVEL=debug` to see pipeline decisions, planner LLM calls, step execution, and retry attempts — all prefixed with `[pipeline]`.

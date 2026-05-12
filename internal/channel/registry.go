@@ -26,8 +26,9 @@ type Registry struct {
 	channels map[string]pkg.Channel
 	handler  pkg.MessageHandler
 
-	dedup    MessageDeduplicator
-	dedupTTL time.Duration
+	dedup          MessageDeduplicator
+	dedupTTL       time.Duration
+	debounceWindow time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -38,11 +39,24 @@ type Registry struct {
 func NewRegistry(handler pkg.MessageHandler) *Registry {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Registry{
-		channels: make(map[string]pkg.Channel),
-		handler:  handler,
-		ctx:      ctx,
-		cancel:   cancel,
+		channels:       make(map[string]pkg.Channel),
+		handler:        handler,
+		debounceWindow: defaultDebounceWindow,
+		ctx:            ctx,
+		cancel:         cancel,
 	}
+}
+
+// SetDebounceWindow overrides the default debounce window for message batching.
+// Set to 0 to disable debouncing (each message dispatched immediately).
+// Must be called before any channels are registered.
+func (r *Registry) SetDebounceWindow(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.channels) > 0 {
+		panic("channel: SetDebounceWindow called after channels registered")
+	}
+	r.debounceWindow = d
 }
 
 // SetDeduplicator attaches a Redis-backed deduplicator to the registry.
@@ -50,6 +64,9 @@ func NewRegistry(handler pkg.MessageHandler) *Registry {
 func (r *Registry) SetDeduplicator(d MessageDeduplicator, ttl time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if len(r.channels) > 0 {
+		panic("channel: SetDeduplicator called after channels registered")
+	}
 	r.dedup = d
 	r.dedupTTL = ttl
 }
@@ -146,6 +163,32 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 	var wg sync.WaitGroup
 	defer wg.Wait() // drain in-flight goroutines before signalling outer WaitGroup
 
+	// processMessage is the callback for both direct dispatch and debounced dispatch.
+	processMessage := func(m pkg.InboundMessage) {
+		wg.Add(1)
+		go func(m pkg.InboundMessage) {
+			defer wg.Done()
+			r.handleMessage(ch, m)
+		}(m)
+	}
+
+	// Create debouncer if window > 0.
+	r.mu.RLock()
+	debounceWindow := r.debounceWindow
+	r.mu.RUnlock()
+	var debouncer *sessionDebouncer
+	if debounceWindow > 0 {
+		debouncer = newSessionDebouncer(debounceWindow, func(_ string, merged pkg.InboundMessage) {
+			processMessage(merged)
+		})
+	}
+
+	defer func() {
+		if debouncer != nil {
+			debouncer.stop()
+		}
+	}()
+
 	for {
 		select {
 		case <-r.ctx.Done():
@@ -159,93 +202,92 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 			dedup, dedupTTL := r.dedup, r.dedupTTL
 			r.mu.RUnlock()
 
-			wg.Add(1)
-			go func(m pkg.InboundMessage) {
-				defer wg.Done()
-
-				sessionKey := pkg.SessionKey(ch.ID(), m.ConversationID, m.ThreadID)
-				traceID := logger.TraceIDFromSessionKey(sessionKey)
-				ctx := logger.WithTraceID(r.ctx, traceID)
-				caps := ch.Capabilities()
-				ctx = pkg.WithCapabilities(ctx, caps)
-				slog.Debug("channel capabilities",
-					"channel", ch.ID(),
-					"response_format", caps.ResponseFormat,
-					"response_format_prompt", caps.ResponseFormatPrompt,
-					"edits", caps.Edits,
-				)
-
-				// Deduplication: when running multiple pods each pod receives every
-				// inbound message. Only the pod that wins the Redis SET NX lock
-				// processes the message; others silently skip it.
-				if dedup != nil {
-					if m.Timestamp.IsZero() {
-						slog.Warn("dedup skipped: message has no timestamp", "channel", ch.ID(), "session", sessionKey)
-					} else {
-						key := fmt.Sprintf("dedup:%s:%s:%d", m.ChannelID, m.ConversationID, m.Timestamp.UnixNano())
-						won, err := dedup.TryAcquire(ctx, key, dedupTTL)
-						if err != nil {
-							slog.Warn("dedup acquire failed, processing anyway", "channel", ch.ID(), "error", err)
-						} else if !won {
-							slog.Debug("dedup skipped duplicate message", "channel", ch.ID(), "session", sessionKey)
-							return
-						}
+			// Dedup runs before debounce — this ordering is load-bearing.
+			// Each original message is deduped by its own timestamp so that
+			// pod-level duplicates (delivered by at-least-once channels) are
+			// suppressed before they enter the debounce buffer. If dedup ran
+			// after debounce, the merged message would carry only the last
+			// original's timestamp, and earlier duplicates arriving on another
+			// pod could slip through.
+			if dedup != nil {
+				if msg.Timestamp.IsZero() {
+					slog.Warn("dedup skipped: message has no timestamp", "channel", ch.ID())
+				} else {
+					key := fmt.Sprintf("dedup:%s:%s:%d", msg.ChannelID, msg.ConversationID, msg.Timestamp.UnixNano())
+					won, err := dedup.TryAcquire(r.ctx, key, dedupTTL)
+					if err != nil {
+						slog.Warn("dedup acquire failed, processing anyway", "channel", ch.ID(), "error", err)
+					} else if !won {
+						slog.Debug("dedup skipped duplicate message", "channel", ch.ID())
+						continue
 					}
 				}
+			}
 
-				// When the channel supports edits, attach a StreamWriter so the
-				// orchestrator can progressively deliver LLM output in real-time.
-				// gRPC plugin channels report Edits=true but their PluginClient
-				// doesn't implement UpdatableChannel, so StreamWriter would fall
-				// back to plain Send() for every flush — spamming the client with
-				// intermediate frames. Only create StreamWriter when the channel
-				// actually supports in-place message updates.
-				var sw *pkg.StreamWriter
-				if caps.Edits {
-					if _, ok := ch.(pkg.UpdatableChannel); ok {
-						sw = pkg.NewStreamWriter(ch, m.ConversationID, m.ThreadID, safeMetadata(m.Metadata))
-						ctx = pkg.WithStreamWriter(ctx, sw)
-					}
-				}
+			sessionKey := pkg.SessionKey(ch.ID(), msg.ConversationID, msg.ThreadID)
 
-				// Send periodic typing indicators while the handler is
-				// processing. This keeps WebSocket connections (and any
-				// intermediate proxies) alive during long LLM calls.
-				typingStop := startTypingIndicator(ctx, ch, m)
-
-				resp, err := r.handler(ctx, sessionKey, m)
-				typingStop()
-				if err != nil {
-					logger.FromContext(ctx).Error("handling message failed", "channel", ch.ID(), "session", sessionKey, "error", err)
-					return
-				}
-
-				// Streaming delivered content progressively, but the final
-				// handler response may differ (tool-call blocks stripped,
-				// Lua formatting applied). Update the streamed message
-				// with the clean response so users see the processed text.
-				hasMeta := len(resp.Metadata) > 0
-				if sw != nil && sw.Flushed() {
-					logger.FromContext(ctx).Debug("registry: streaming path",
-						"channel", ch.ID(), "has_metadata", hasMeta, "metadata", resp.Metadata)
-					// Merge handler result metadata (e.g. confirmation type,
-					// options) into the stream writer so FinalUpdate carries it.
-					sw.MergeMetadata(resp.Metadata)
-					if resp.Content != sw.FullContent() || hasMeta {
-						if err := sw.FinalUpdate(ctx, resp.Content); err != nil {
-							logger.FromContext(ctx).Debug("stream final update failed", "channel", ch.ID(), "error", err)
-						}
-					}
-					return
-				}
-
-				logger.FromContext(ctx).Debug("registry: direct send path",
-					"channel", ch.ID(), "has_metadata", hasMeta, "sw_nil", sw == nil)
-				if err := ch.Send(ctx, resp); err != nil {
-					logger.FromContext(ctx).Error("sending response failed", "channel", ch.ID(), "error", err)
-				}
-			}(msg)
+			// Try debouncing. If the message bypasses debounce (confirmation, typing),
+			// or debouncing is disabled, dispatch immediately.
+			if debouncer != nil && debouncer.submit(sessionKey, msg) {
+				slog.Debug("message debounced", "channel", ch.ID(), "session", sessionKey)
+				continue
+			}
+			processMessage(msg)
 		}
+	}
+}
+
+// handleMessage processes a single (possibly merged) inbound message:
+// sets up tracing, streaming, typing indicators, calls the handler,
+// and delivers the response back to the channel.
+func (r *Registry) handleMessage(ch pkg.Channel, m pkg.InboundMessage) {
+	sessionKey := pkg.SessionKey(ch.ID(), m.ConversationID, m.ThreadID)
+	traceID := logger.TraceIDFromSessionKey(sessionKey)
+	ctx := logger.WithTraceID(r.ctx, traceID)
+	caps := ch.Capabilities()
+	ctx = pkg.WithCapabilities(ctx, caps)
+
+	// When the channel supports edits, attach a StreamWriter so the
+	// orchestrator can progressively deliver LLM output in real-time.
+	var sw *pkg.StreamWriter
+	if caps.Edits {
+		if _, ok := ch.(pkg.UpdatableChannel); ok {
+			sw = pkg.NewStreamWriter(ch, m.ConversationID, m.ThreadID, safeMetadata(m.Metadata))
+			ctx = pkg.WithStreamWriter(ctx, sw)
+		}
+	}
+
+	// Send periodic typing indicators while the handler is processing.
+	typingStop := startTypingIndicator(ctx, ch, m)
+
+	resp, err := r.handler(ctx, sessionKey, m)
+	typingStop()
+	if err != nil {
+		logger.FromContext(ctx).Error("handling message failed", "channel", ch.ID(), "session", sessionKey, "error", err)
+		return
+	}
+
+	// Streaming delivered content progressively, but the final
+	// handler response may differ (tool-call blocks stripped,
+	// Lua formatting applied). Update the streamed message
+	// with the clean response so users see the processed text.
+	hasMeta := len(resp.Metadata) > 0
+	if sw != nil && sw.Flushed() {
+		logger.FromContext(ctx).Debug("registry: streaming path",
+			"channel", ch.ID(), "has_metadata", hasMeta, "metadata", resp.Metadata)
+		sw.MergeMetadata(resp.Metadata)
+		if resp.Content != sw.FullContent() || hasMeta {
+			if err := sw.FinalUpdate(ctx, resp.Content); err != nil {
+				logger.FromContext(ctx).Debug("stream final update failed", "channel", ch.ID(), "error", err)
+			}
+		}
+		return
+	}
+
+	logger.FromContext(ctx).Debug("registry: direct send path",
+		"channel", ch.ID(), "has_metadata", hasMeta, "sw_nil", sw == nil)
+	if err := ch.Send(ctx, resp); err != nil {
+		logger.FromContext(ctx).Error("sending response failed", "channel", ch.ID(), "error", err)
 	}
 }
 

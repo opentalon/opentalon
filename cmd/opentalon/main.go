@@ -706,6 +706,15 @@ func main() {
 	reg := channel.NewRegistry(handler)
 	notifier.reg = reg
 
+	if dw := cfg.Orchestrator.DebounceWindow; dw != "" {
+		if d, err := time.ParseDuration(dw); err == nil && d > 0 {
+			reg.SetDebounceWindow(d)
+			slog.Info("message debounce enabled", "window", d)
+		} else if err != nil {
+			slog.Warn("invalid orchestrator.debounce_window, debounce disabled", "value", dw, "error", err)
+		}
+	}
+
 	if cfg.Cluster.Enabled {
 		dedupTTL := 5 * time.Minute
 		if cfg.Cluster.DedupTTL != "" {
