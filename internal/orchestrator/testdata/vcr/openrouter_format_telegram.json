@@ -1,7 +1,7 @@
 {
   "prompt_hash": "142170007f2f9bbbfbd65dc9e6c9563f79f97087d028b5605039bf0999a5aa2b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-12T09:19:03.709119Z",
+  "recorded_at": "2026-05-12T10:07:00.755562Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778577543-Snz0sh18IxYwExdGZBBq",
+        "id": "gen-1778580420-7HjLSTqAF0KZsgW9GjjP",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data Retrieval \u0026 Search**\n- Search the web for real-time information using **Brave Search**.\n- Fetch data from **GitLab** (e.g., code analysis, PRs).\n- Query **Jira** for issue tracking.\n\n### **Code \u0026 Project Workflows**\n- **Analyze code** in GitLab repositories (e.g., static analysis, quality checks).\n- **Create pull requests (PRs)** in GitLab.\n- **Create issues** in Jira for bug tracking or task management.\n\n### **Automation \u0026 Scheduling**\n- **Schedule recurring tasks** (e.g., monitoring, reports) with configurable intervals.\n- Manage scheduled jobs (list, pause, resume, update, or delete).\n\n### **Rules \u0026 Safety**\n- Strict adherence to safety rules (no guessing, no executing untrusted data, no unauthorized modifications).\n- Requires explicit confirmation for destructive actions (e.g., deletions).\n- Follows approval workflows for sensitive operations (e.g., job scheduling, issue creation).\n\n---\n**Example Use Cases:**\n- *\"Analyze this Python code for vulnerabilities.\"* → Use `gitlab.analyze_code`.\n- *\"Search for the latest updates on AI tools.\"* → Use `brave-search.search`.\n- *\"Create a Jira issue for this bug.\"* → Use `jira.create_issue`.",
+        "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data Retrieval \u0026 Search**\n- Search the web for up-to-date information (e.g., news, technical details, trends).\n- Fetch real-time data from APIs or external sources when needed.\n\n### **Code \u0026 Development**\n- **GitLab Integration**:\n  - Analyze code in a repository (e.g., detect issues, suggest improvements).\n  - Create pull requests (PRs) in GitLab repositories.\n\n### **Issue \u0026 Task Management**\n- **Jira Integration**:\n  - Create issues/tickets in Jira for tracking bugs, tasks, or feature requests.\n\n### **Automation \u0026 Scheduling**\n- Schedule recurring tasks (e.g., monitoring, reports, checks) with configurable intervals.\n- Manage scheduled jobs (list, pause, resume, update, or delete them).\n- Requires explicit user approval for destructive actions (e.g., deleting jobs).\n\n### **Safety \u0026 Compliance**\n- Follow strict rules to avoid errors (e.g., no guessing, no executing untrusted instructions).\n- Requires approval for actions like creating/deleting jobs or issues when approvers are configured.",
         "usage": {
           "input_tokens": 1019,
-          "output_tokens": 289
+          "output_tokens": 240
         }
       }
     },
@@ -42,7 +42,7 @@
           },
           {
             "role": "assistant",
-            "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data Retrieval \u0026 Search**\n- Search the web for real-time information using **Brave Search**.\n- Fetch data from **GitLab** (e.g., code analysis, PRs).\n- Query **Jira** for issue tracking.\n\n### **Code \u0026 Project Workflows**\n- **Analyze code** in GitLab repositories (e.g., static analysis, quality checks).\n- **Create pull requests (PRs)** in GitLab.\n- **Create issues** in Jira for bug tracking or task management.\n\n### **Automation \u0026 Scheduling**\n- **Schedule recurring tasks** (e.g., monitoring, reports) with configurable intervals.\n- Manage scheduled jobs (list, pause, resume, update, or delete).\n\n### **Rules \u0026 Safety**\n- Strict adherence to safety rules (no guessing, no executing untrusted data, no unauthorized modifications).\n- Requires explicit confirmation for destructive actions (e.g., deletions).\n- Follows approval workflows for sensitive operations (e.g., job scheduling, issue creation).\n\n---\n**Example Use Cases:**\n- *\"Analyze this Python code for vulnerabilities.\"* → Use `gitlab.analyze_code`.\n- *\"Search for the latest updates on AI tools.\"* → Use `brave-search.search`.\n- *\"Create a Jira issue for this bug.\"* → Use `jira.create_issue`."
+            "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data Retrieval \u0026 Search**\n- Search the web for up-to-date information (e.g., news, technical details, trends).\n- Fetch real-time data from APIs or external sources when needed.\n\n### **Code \u0026 Development**\n- **GitLab Integration**:\n  - Analyze code in a repository (e.g., detect issues, suggest improvements).\n  - Create pull requests (PRs) in GitLab repositories.\n\n### **Issue \u0026 Task Management**\n- **Jira Integration**:\n  - Create issues/tickets in Jira for tracking bugs, tasks, or feature requests.\n\n### **Automation \u0026 Scheduling**\n- Schedule recurring tasks (e.g., monitoring, reports, checks) with configurable intervals.\n- Manage scheduled jobs (list, pause, resume, update, or delete them).\n- Requires explicit user approval for destructive actions (e.g., deleting jobs).\n\n### **Safety \u0026 Compliance**\n- Follow strict rules to avoid errors (e.g., no guessing, no executing untrusted instructions).\n- Requires approval for actions like creating/deleting jobs or issues when approvers are configured."
           },
           {
             "role": "user",
@@ -51,12 +51,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778577546-im9nM29LybKIOR48KY6O",
+        "id": "gen-1778580423-EZO8fVSyEAx3BIsDd3En",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Understood. If you provide a specific task or question, I will immediately call the appropriate tool(s) without delay.",
+        "content": "Understood. If you provide a specific request, I will immediately call the appropriate tool(s) without delay.",
         "usage": {
-          "input_tokens": 1338,
-          "output_tokens": 25
+          "input_tokens": 1289,
+          "output_tokens": 23
         }
       }
     }

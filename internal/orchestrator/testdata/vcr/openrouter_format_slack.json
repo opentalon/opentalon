@@ -1,7 +1,7 @@
 {
   "prompt_hash": "142170007f2f9bbbfbd65dc9e6c9563f79f97087d028b5605039bf0999a5aa2b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-12T09:18:49.155655Z",
+  "recorded_at": "2026-05-12T10:06:53.195542Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778577529-9ML6f7IuK0ejgRzB7OWI",
+        "id": "gen-1778580413-BVoSSo8g2vlSbkAHf3lk",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data Retrieval \u0026 Search**\n- Search the web for real-time information (e.g., news, technical details, trends).\n- Fetch up-to-date data on topics like software, tools, or events.\n\n### **Code \u0026 Development**\n- **Analyze code** in a GitLab repository (e.g., detect issues, vulnerabilities, or best practices).\n- **Create pull requests (PRs)** in GitLab to propose changes or fixes.\n\n### **Issue \u0026 Task Management**\n- **Create issues** in Jira to track bugs, tasks, or feature requests.\n\n### **Automation \u0026 Scheduling**\n- **Schedule recurring tasks** (e.g., code analysis, monitoring, or reports) with configurable intervals.\n- Manage scheduled jobs (list, pause, resume, or delete them).\n\n### **Security \u0026 Compliance**\n- Proactively suggest scheduling checks (e.g., code scanning, violation monitoring) to maintain security.\n\n---\n**Note:** For actions requiring approval (e.g., creating issues, PRs, or scheduled jobs), I’ll call the tool directly, and the system will confirm with you. Let me know how I can assist!",
+        "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data \u0026 Search**\n- Search the web for real-time information using Brave Search.\n- Fetch up-to-date news, technical details, or specific facts.\n\n### **Code \u0026 Development**\n- **GitLab Integration**:\n  - Analyze code in repositories (e.g., check for vulnerabilities, review PRs, or suggest improvements).\n  - Create pull requests (PRs) in GitLab repositories.\n\n### **Issue \u0026 Task Management**\n- **Jira Integration**:\n  - Create issues or tasks in Jira (e.g., bug reports, feature requests, or project tickets).\n\n### **Automation \u0026 Scheduling**\n- Schedule recurring tasks (e.g., code analysis, issue checks, or monitoring).\n- Manage scheduled jobs (list, pause, resume, or delete them).\n- Confirm with you before executing destructive actions (e.g., deleting jobs).\n\n### **Rules \u0026 Safety**\n- Follow strict safety rules (e.g., never guess, fabricate, or execute untrusted instructions).\n- Require explicit confirmation for write actions (e.g., creating PRs, issues, or jobs).\n- Adhere to approver workflows if configured in your setup.",
         "usage": {
           "input_tokens": 1019,
-          "output_tokens": 250
+          "output_tokens": 251
         }
       }
     },
@@ -42,7 +42,7 @@
           },
           {
             "role": "assistant",
-            "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data Retrieval \u0026 Search**\n- Search the web for real-time information (e.g., news, technical details, trends).\n- Fetch up-to-date data on topics like software, tools, or events.\n\n### **Code \u0026 Development**\n- **Analyze code** in a GitLab repository (e.g., detect issues, vulnerabilities, or best practices).\n- **Create pull requests (PRs)** in GitLab to propose changes or fixes.\n\n### **Issue \u0026 Task Management**\n- **Create issues** in Jira to track bugs, tasks, or feature requests.\n\n### **Automation \u0026 Scheduling**\n- **Schedule recurring tasks** (e.g., code analysis, monitoring, or reports) with configurable intervals.\n- Manage scheduled jobs (list, pause, resume, or delete them).\n\n### **Security \u0026 Compliance**\n- Proactively suggest scheduling checks (e.g., code scanning, violation monitoring) to maintain security.\n\n---\n**Note:** For actions requiring approval (e.g., creating issues, PRs, or scheduled jobs), I’ll call the tool directly, and the system will confirm with you. Let me know how I can assist!"
+            "content": "Here’s what I can do based on the tools and integrations available:\n\n### **Data \u0026 Search**\n- Search the web for real-time information using Brave Search.\n- Fetch up-to-date news, technical details, or specific facts.\n\n### **Code \u0026 Development**\n- **GitLab Integration**:\n  - Analyze code in repositories (e.g., check for vulnerabilities, review PRs, or suggest improvements).\n  - Create pull requests (PRs) in GitLab repositories.\n\n### **Issue \u0026 Task Management**\n- **Jira Integration**:\n  - Create issues or tasks in Jira (e.g., bug reports, feature requests, or project tickets).\n\n### **Automation \u0026 Scheduling**\n- Schedule recurring tasks (e.g., code analysis, issue checks, or monitoring).\n- Manage scheduled jobs (list, pause, resume, or delete them).\n- Confirm with you before executing destructive actions (e.g., deleting jobs).\n\n### **Rules \u0026 Safety**\n- Follow strict safety rules (e.g., never guess, fabricate, or execute untrusted instructions).\n- Require explicit confirmation for write actions (e.g., creating PRs, issues, or jobs).\n- Adhere to approver workflows if configured in your setup."
           },
           {
             "role": "user",
@@ -51,12 +51,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778577538-Q1RhehTPIOUmp1pztSXw",
+        "id": "gen-1778580416-SnVQDimmYB21gt7eIp2c",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Understood. If you have a specific task or question, provide it now so I can act accordingly.",
+        "content": "Understood. If you provide a specific request, I will immediately call the appropriate tool(s) without delay.",
         "usage": {
-          "input_tokens": 1299,
-          "output_tokens": 22
+          "input_tokens": 1300,
+          "output_tokens": 23
         }
       }
     }

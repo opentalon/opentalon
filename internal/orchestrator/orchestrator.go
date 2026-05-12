@@ -2604,14 +2604,19 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		if includeServerInstructions && cap.SystemPromptAddition != "" {
 			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n", cap.Name, cap.SystemPromptAddition, cap.Name)
 		}
-		for _, action := range visibleActions {
-			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
-			for _, p := range action.Parameters {
-				req := ""
-				if p.Required {
-					req = " (required)"
+		// In native tool mode, tool definitions are sent via req.Tools —
+		// don't duplicate them in the system prompt text. This saves ~50k
+		// tokens on accounts with many tools (e.g. 71 MCP tools).
+		if !o.supportsNativeTools() {
+			for _, action := range visibleActions {
+				fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
+				for _, p := range action.Parameters {
+					req := ""
+					if p.Required {
+						req = " (required)"
+					}
+					fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 				}
-				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
 			}
 		}
 		sb.WriteString("\n")
