@@ -53,6 +53,9 @@ func NewRegistry(handler pkg.MessageHandler) *Registry {
 func (r *Registry) SetDebounceWindow(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if len(r.channels) > 0 {
+		panic("channel: SetDebounceWindow called after channels registered")
+	}
 	r.debounceWindow = d
 }
 
@@ -61,6 +64,9 @@ func (r *Registry) SetDebounceWindow(d time.Duration) {
 func (r *Registry) SetDeduplicator(d MessageDeduplicator, ttl time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if len(r.channels) > 0 {
+		panic("channel: SetDeduplicator called after channels registered")
+	}
 	r.dedup = d
 	r.dedupTTL = ttl
 }
@@ -177,6 +183,12 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 		})
 	}
 
+	defer func() {
+		if debouncer != nil {
+			debouncer.stop()
+		}
+	}()
+
 	for {
 		select {
 		case <-r.ctx.Done():
@@ -190,7 +202,13 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 			dedup, dedupTTL := r.dedup, r.dedupTTL
 			r.mu.RUnlock()
 
-			// Deduplication check before debouncing.
+			// Dedup runs before debounce — this ordering is load-bearing.
+			// Each original message is deduped by its own timestamp so that
+			// pod-level duplicates (delivered by at-least-once channels) are
+			// suppressed before they enter the debounce buffer. If dedup ran
+			// after debounce, the merged message would carry only the last
+			// original's timestamp, and earlier duplicates arriving on another
+			// pod could slip through.
 			if dedup != nil {
 				if msg.Timestamp.IsZero() {
 					slog.Warn("dedup skipped: message has no timestamp", "channel", ch.ID())

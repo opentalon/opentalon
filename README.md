@@ -635,7 +635,7 @@ orchestrator:
 - If more messages arrive within the window, the timer resets
 - When the timer fires, all buffered messages are merged (content joined with newlines) and processed as one request
 - Different sessions debounce independently
-- **Confirmation signals** (`approve`/`reject`) bypass debounce and execute immediately
+- **Confirmation signals** (any message with non-empty `confirmation` metadata) and typing indicators bypass debounce and execute immediately
 
 ### Debugging
 

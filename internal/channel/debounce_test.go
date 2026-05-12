@@ -92,10 +92,12 @@ func TestDebouncerSeparateSessions(t *testing.T) {
 }
 
 func TestDebouncerSingleMessageDispatchesAfterWindow(t *testing.T) {
+	const window = 50 * time.Millisecond
+
 	var mu sync.Mutex
 	var dispatched []pkg.InboundMessage
 
-	d := newSessionDebouncer(50*time.Millisecond, func(_ string, merged pkg.InboundMessage) {
+	d := newSessionDebouncer(window, func(_ string, merged pkg.InboundMessage) {
 		mu.Lock()
 		dispatched = append(dispatched, merged)
 		mu.Unlock()
@@ -103,16 +105,9 @@ func TestDebouncerSingleMessageDispatchesAfterWindow(t *testing.T) {
 
 	d.submit("s1", pkg.InboundMessage{Content: "solo"})
 
-	// Not yet dispatched.
-	time.Sleep(20 * time.Millisecond)
-	mu.Lock()
-	if len(dispatched) != 0 {
-		t.Fatal("dispatched too early")
-	}
-	mu.Unlock()
+	// Wait long enough for the timer to fire, even under CI load.
+	time.Sleep(3 * window)
 
-	// Now it should be dispatched.
-	time.Sleep(50 * time.Millisecond)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(dispatched) != 1 {

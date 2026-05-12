@@ -21,6 +21,7 @@ type sessionDebouncer struct {
 	window   time.Duration
 	buffers  map[string]*debounceBuf
 	dispatch func(sessionKey string, merged pkg.InboundMessage)
+	stopped  bool
 }
 
 type debounceBuf struct {
@@ -33,6 +34,21 @@ func newSessionDebouncer(window time.Duration, dispatch func(string, pkg.Inbound
 		window:   window,
 		buffers:  make(map[string]*debounceBuf),
 		dispatch: dispatch,
+	}
+}
+
+// stop cancels all pending timers and prevents future dispatches.
+// Buffered messages are discarded. Call when the dispatch loop exits.
+func (d *sessionDebouncer) stop() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.stopped = true
+	for key, buf := range d.buffers {
+		if buf.timer != nil {
+			buf.timer.Stop()
+		}
+		delete(d.buffers, key)
 	}
 }
 
@@ -49,6 +65,10 @@ func (d *sessionDebouncer) submit(sessionKey string, msg pkg.InboundMessage) boo
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	if d.stopped {
+		return false
+	}
 
 	buf, exists := d.buffers[sessionKey]
 	if !exists {
@@ -73,7 +93,7 @@ func (d *sessionDebouncer) submit(sessionKey string, msg pkg.InboundMessage) boo
 func (d *sessionDebouncer) flush(sessionKey string) {
 	d.mu.Lock()
 	buf, exists := d.buffers[sessionKey]
-	if !exists || len(buf.messages) == 0 {
+	if d.stopped || !exists || len(buf.messages) == 0 {
 		d.mu.Unlock()
 		return
 	}
