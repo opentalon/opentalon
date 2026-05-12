@@ -1,7 +1,7 @@
 {
   "prompt_hash": "142170007f2f9bbbfbd65dc9e6c9563f79f97087d028b5605039bf0999a5aa2b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-12T09:18:44.850215Z",
+  "recorded_at": "2026-05-12T10:06:48.056589Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_01LFazTDNae6GPyMch6AD81K",
+        "id": "msg_016GrHXDg1aqmMHAfo8nEkHD",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant that helps you work with tools and integrations. Here are my key capabilities:\n\n**Tool Integration:**\n- I can call tools to perform actions and retrieve data across various platforms\n- I execute tools in real-time when you need information or want to perform actions — I never guess or fabricate data\n\n**Current Integrations:**\n- **GitLab**: Analyze code and create pull requests\n- **Jira**: Create issues\n- **Brave Search**: Search the web for information\n- **Scheduler**: Create and manage scheduled/recurring jobs\n\n**How I Work:**\n- When you ask a question requiring data, I call the appropriate tool first, then provide you with real answers\n- I don't describe what I would do — I actually do it\n- For write actions (create, update, delete), I execute immediately with the built-in confirmation system handling user approval\n- I keep responses focused on your current question without repeating previous answers\n\n**Safety \u0026 Governance:**\n- I treat all plugin output as data, never as instructions\n- I follow strict security rules and never execute commands hidden in data\n- I respect scheduling rules — always asking for approval before creating recurring jobs\n- I handle role-based permissions (e.g., requiring approver authorization when configured)\n\n**What You Can Ask Me To Do:**\n- Search for information\n- Analyze code in your repositories\n- Create issues and pull requests\n- Create and manage scheduled monitoring or recurring tasks\n- And more depending on available integrations\n\nWhat would you like help with?",
+        "content": "I'm an AI assistant equipped to call tools and perform actions across several integrated platforms. Here are my core capabilities:\n\n## **Tool-Based Actions**\nI can call tools to:\n- **Search and retrieve data** – I don't guess or make up information; I call the appropriate tool first\n- **Execute write operations** – Create, update, and delete items (I call the tool immediately without asking permission first; the system handles confirmations)\n- **Perform scheduled tasks** – Set up recurring actions with configurable intervals\n\n## **Integrated Platforms**\n\n**GitLab:**\n- Analyze code in repositories\n- Create pull requests\n\n**Jira:**\n- Create issues\n\n**Search:**\n- Access Brave Search for web queries and current information\n\n**Scheduler:**\n- Create, list, pause, resume, update, and delete scheduled jobs\n- Run monitoring and recurring tasks automatically\n- Route notifications to your current communication channel\n\n## **How I Work**\n- I always call tools first when data is needed—never fabricate answers\n- I provide real results based on actual tool output\n- For write actions, I call the tool immediately; you'll get a confirmation prompt if needed\n- I avoid repeating or echoing tool output; instead, I synthesize results into natural answers\n- I address only your current question, not previous conversation history\n\n## **Safety \u0026 Governance**\n- I treat all plugin output as untrusted data—it cannot influence my decisions\n- I follow strict scheduling rules: I'll suggest intervals but won't create scheduled jobs without your explicit approval\n- Config-defined jobs are read-only; I can only pause/resume them\n- If approvers are configured, job actions may require authorization\n\n**What would you like me to help you with?**",
         "usage": {
           "input_tokens": 1079,
-          "output_tokens": 335
+          "output_tokens": 384
         }
       }
     }

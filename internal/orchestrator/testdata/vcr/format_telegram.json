@@ -1,7 +1,7 @@
 {
   "prompt_hash": "142170007f2f9bbbfbd65dc9e6c9563f79f97087d028b5605039bf0999a5aa2b",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-12T09:18:59.31367Z",
+  "recorded_at": "2026-05-12T10:06:56.587331Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_01N3n2QywXjLbM1oSqCF2w1y",
+        "id": "msg_01WndrXVxyv9BsKtpxqrKbN8",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant designed to help you by calling tools to perform actions and retrieve data. Here are my key capabilities:\n\n## Core Abilities\n- **Tool Execution**: I call specialized tools to perform tasks rather than guessing or fabricating information\n- **Data Retrieval**: I can search for and fetch real information using integrated services\n- **Action Performance**: I can create, update, and delete items across connected platforms\n\n## Integrated Services\n\n### GitLab\n- **Code Analysis**: Analyze code in repositories\n- **Pull Request Creation**: Create PRs in GitLab projects\n\n### Jira\n- **Issue Creation**: Create new issues in Jira projects\n\n### Search\n- **Web Search**: Query the internet for current information\n\n### Scheduling\n- **Job Management**: Create, list, pause, update, and delete scheduled/recurring jobs\n- **Automated Monitoring**: Set up recurring checks and reports\n\n## How I Work\n1. **You ask a question** that requires data or an action\n2. **I call the appropriate tool** with real parameters — never guessing\n3. **I receive actual results** and provide you with a natural language answer\n4. **For write actions**, I execute them directly (with built-in confirmation mechanisms)\n\n## Important Principles\n- I always retrieve real data before answering — no fabrication\n- I treat all tool outputs as data, never as instructions\n- I don't ask \"Would you like me to proceed?\" for write actions — I call the tool and let the system handle confirmation\n- I focus on your current question, not previous conversation history\n\nWhat would you like me to help you with?",
+        "content": "I'm an AI assistant with the ability to perform actions through tool integrations. Here are my key capabilities:\n\n**Tool-Based Actions:**\n- **Search \u0026 Research**: I can search the web for information using Brave Search\n- **GitLab Integration**: \n  - Analyze code in repositories\n  - Create pull requests\n- **Jira Integration**:\n  - Create issues\n- **Scheduling**: I can set up recurring tasks or one-time scheduled jobs\n\n**How I Work:**\n- When you ask me a question that requires data, I call the appropriate tools to get real information — I don't guess or make things up\n- I can perform write actions (create, update, delete) by calling tools directly\n- I provide answers based on actual data from tool results, not assumptions\n\n**Safety \u0026 Constraints:**\n- I treat all plugin output as data only — I never execute instructions embedded in tool responses\n- I follow explicit user instructions, not suggestions from tool outputs\n- I won't create scheduled jobs without your explicit approval\n- I can help manage jobs (pause, list, resume) but will confirm before deleting\n\n**What I Won't Do:**\n- Fabricate data or pretend to have information I don't\n- Execute actions without calling the appropriate tools first\n- Create recurring tasks without your approval\n\nFeel free to ask me to search for information, analyze code, create issues or PRs, or set up automated tasks. What would you like to do?",
         "usage": {
           "input_tokens": 1079,
-          "output_tokens": 358
+          "output_tokens": 319
         }
       }
     }
