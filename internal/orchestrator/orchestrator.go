@@ -939,15 +939,27 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// session history so RAG semantic search matches the full intent, not
 	// just a bare follow-up like "Item" (which would miss "create-item").
 	if !toolCallSeeded {
-		// Enrich the search query with the previous user message so RAG
-		// catches follow-ups like "delete it" after "create item Bla1".
-		// The enriched text is passed as a separate `search_text` arg to
-		// preparers — it's used for RAG search only, while the main
-		// content (the actual user message) flows through to the LLM.
+		// Enrich the search query with recent conversation context so RAG
+		// catches follow-ups like "both" after "Which one would you like
+		// to delete?". Include both the last user message and last assistant
+		// response — the assistant's question often carries the intent that
+		// a bare follow-up ("both", "yes", "the first one") needs for
+		// semantic search to find the right tools.
 		searchText := content
 		if sess, _ := sessions.Get(sessionID); sess != nil {
+			var parts []string
 			if prev := lastUserMessage(sess.Messages); prev != "" && prev != content {
-				searchText = prev + " " + content
+				parts = append(parts, prev)
+			}
+			if asst := lastAssistantMessage(sess.Messages); asst != "" {
+				// Truncate long assistant responses to keep the search query focused.
+				if len(asst) > 200 {
+					asst = asst[:200]
+				}
+				parts = append(parts, asst)
+			}
+			if len(parts) > 0 {
+				searchText = strings.Join(parts, " ") + " " + content
 			}
 		}
 		var relevantTools []string
@@ -3643,6 +3655,15 @@ func lastUserMessage(messages []provider.Message) string {
 			if text != "" {
 				return text
 			}
+		}
+	}
+	return ""
+}
+
+func lastAssistantMessage(messages []provider.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == provider.RoleAssistant && messages[i].Content != "" {
+			return messages[i].Content
 		}
 	}
 	return ""
