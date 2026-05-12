@@ -1818,6 +1818,12 @@ func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCal
 // resolved callback and returning the fully assembled response. If the LLM
 // does not support streaming it falls back to a regular Complete call.
 func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	// When tools are attached, fall back to non-streaming — the streaming
+	// parser doesn't capture tool_calls from SSE deltas, so native tool
+	// calls are silently lost and the agent loop sees empty responses.
+	if len(req.Tools) > 0 {
+		return o.llm.Complete(ctx, req)
+	}
 	sllm, ok := o.llm.(StreamingLLMClient)
 	if !ok {
 		return o.llm.Complete(ctx, req)
