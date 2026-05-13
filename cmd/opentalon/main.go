@@ -531,7 +531,7 @@ func main() {
 		PermissionPluginName:    permPluginName,
 		RuntimePromptPath:       runtimePromptPath,
 		SummarizeAfterMessages:  defaultInt(cfg.State.Session.SummarizeAfter, 5),
-		MaxMessagesAfterSummary: defaultInt(cfg.State.Session.MaxMessagesAfterSummary, 2),
+		MaxMessagesAfterSummary: defaultInt(cfg.State.Session.MaxMessagesAfterSummary, 5),
 		SummarizePrompt:         cfg.State.Session.SummarizePrompt,
 		SummarizeUpdatePrompt:   cfg.State.Session.SummarizeUpdatePrompt,
 		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
