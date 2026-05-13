@@ -530,8 +530,8 @@ func main() {
 		PermissionChecker:       permChecker,
 		PermissionPluginName:    permPluginName,
 		RuntimePromptPath:       runtimePromptPath,
-		SummarizeAfterMessages:  cfg.State.Session.SummarizeAfter,
-		MaxMessagesAfterSummary: cfg.State.Session.MaxMessagesAfterSummary,
+		SummarizeAfterMessages:  defaultInt(cfg.State.Session.SummarizeAfter, 5),
+		MaxMessagesAfterSummary: defaultInt(cfg.State.Session.MaxMessagesAfterSummary, 2),
 		SummarizePrompt:         cfg.State.Session.SummarizePrompt,
 		SummarizeUpdatePrompt:   cfg.State.Session.SummarizeUpdatePrompt,
 		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
@@ -1190,4 +1190,11 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 		return nil, "", err
 	}
 	return prov, modelID, nil
+}
+
+func defaultInt(v, fallback int) int {
+	if v != 0 {
+		return v
+	}
+	return fallback
 }
