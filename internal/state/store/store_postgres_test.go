@@ -3,6 +3,7 @@
 package store
 
 import (
+	"database/sql"
 	"os"
 	"sync"
 	"testing"
@@ -77,5 +78,58 @@ func TestPostgres_AddMessageConcurrent(t *testing.T) {
 	}
 	if len(sess.Messages) != n {
 		t.Errorf("got %d messages, want %d", len(sess.Messages), n)
+	}
+}
+
+func TestPostgres_NativeToolCallsRoundTrip(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 0)
+	store.Create("tool-call-test", "", "")
+
+	calls := []provider.ToolCall{{
+		ID: "call_pg_1", Name: "tickets.show", Arguments: map[string]string{"id": "42"},
+	}}
+	if err := store.AddMessage("tool-call-test", provider.Message{
+		Role: provider.RoleAssistant, ToolCalls: calls,
+	}); err != nil {
+		t.Fatalf("AddMessage assistant: %v", err)
+	}
+	if err := store.AddMessage("tool-call-test", provider.Message{
+		Role: provider.RoleTool, Content: `{"status":"open"}`, ToolCallID: "call_pg_1",
+	}); err != nil {
+		t.Fatalf("AddMessage tool: %v", err)
+	}
+
+	sess, err := store.Get("tool-call-test")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(sess.Messages) != 2 {
+		t.Fatalf("len(Messages) = %d, want 2", len(sess.Messages))
+	}
+	if got := sess.Messages[0].ToolCalls; len(got) != 1 || got[0].ID != "call_pg_1" {
+		t.Errorf("assistant ToolCalls mismatch on postgres: %+v", got)
+	}
+	if sess.Messages[1].ToolCallID != "call_pg_1" {
+		t.Errorf("tool ToolCallID mismatch on postgres: %q", sess.Messages[1].ToolCallID)
+	}
+
+	// Empty slice must persist as NULL on Postgres as well (no "[]" sentinel).
+	store.Create("empty-tool-calls", "", "")
+	if err := store.AddMessage("empty-tool-calls", provider.Message{
+		Role: provider.RoleAssistant, Content: "no tools", ToolCalls: []provider.ToolCall{},
+	}); err != nil {
+		t.Fatalf("AddMessage empty: %v", err)
+	}
+	var toolCalls sql.NullString
+	err = db.SQLDB().QueryRow(
+		db.Dialect().Rebind(`SELECT tool_calls FROM messages WHERE session_id = ? AND seq = ?`),
+		"empty-tool-calls", 1,
+	).Scan(&toolCalls)
+	if err != nil {
+		t.Fatalf("read empty row: %v", err)
+	}
+	if toolCalls.Valid {
+		t.Errorf("empty-slice tool_calls = %q on postgres, want NULL", toolCalls.String)
 	}
 }

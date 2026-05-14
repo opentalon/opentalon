@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -9,6 +10,20 @@ import (
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
+
+// toolCallsAsNullString marshals a non-empty ToolCalls slice into JSON; an
+// empty slice persists as SQL NULL (not "[]") so consumers can cheaply filter
+// for rows that carry structured tool-call data.
+func toolCallsAsNullString(calls []provider.ToolCall) (sql.NullString, error) {
+	if len(calls) == 0 {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(calls)
+	if err != nil {
+		return sql.NullString{}, fmt.Errorf("marshal tool_calls: %w", err)
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
+}
 
 // SessionStore is the database-backed session store.
 type SessionStore struct {
@@ -91,6 +106,12 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	d := s.db.Dialect()
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	toolCallsJSON, err := toolCallsAsNullString(msg.ToolCalls)
+	if err != nil {
+		return err
+	}
+	toolCallID := sql.NullString{String: msg.ToolCallID, Valid: msg.ToolCallID != ""}
+
 	tx, err := s.db.SQLDB().BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("add message begin: %w", err)
@@ -100,9 +121,9 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	// Atomically assign next seq in a single statement to avoid race conditions
 	// between concurrent AddMessage calls.
 	if _, err := tx.ExecContext(ctx,
-		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, created_at)
-		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ? FROM messages WHERE session_id = ?`),
-		id, string(msg.Role), msg.Content, now, id); err != nil {
+		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, created_at)
+		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
+		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, now, id); err != nil {
 		return fmt.Errorf("add message insert: %w", err)
 	}
 
@@ -198,9 +219,14 @@ func (s *SessionStore) SetSummary(id string, summary string, messages []provider
 
 	// Insert the kept messages with fresh seq numbers.
 	for i, msg := range messages {
+		toolCallsJSON, err := toolCallsAsNullString(msg.ToolCalls)
+		if err != nil {
+			return err
+		}
+		toolCallID := sql.NullString{String: msg.ToolCallID, Valid: msg.ToolCallID != ""}
 		if _, err := tx.ExecContext(ctx,
-			d.Rebind(`INSERT INTO messages (session_id, seq, role, content, created_at) VALUES (?, ?, ?, ?, ?)`),
-			id, i+1, string(msg.Role), msg.Content, now); err != nil {
+			d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`),
+			id, i+1, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, now); err != nil {
 			return fmt.Errorf("set summary insert: %w", err)
 		}
 	}
@@ -257,7 +283,7 @@ func (s *SessionStore) PruneIdleSessions() error {
 // loadMessages reads all messages for a session from the messages table, ordered by seq.
 func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error) {
 	rows, err := s.db.SQLDB().Query(
-		s.db.Dialect().Rebind(`SELECT role, content FROM messages WHERE session_id = ? ORDER BY seq`),
+		s.db.Dialect().Rebind(`SELECT role, content, tool_calls, tool_call_id FROM messages WHERE session_id = ? ORDER BY seq`),
 		sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load messages: %w", err)
@@ -267,13 +293,21 @@ func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error
 	var messages []provider.Message
 	for rows.Next() {
 		var role, content string
-		if err := rows.Scan(&role, &content); err != nil {
+		var toolCallsJSON, toolCallID sql.NullString
+		if err := rows.Scan(&role, &content, &toolCallsJSON, &toolCallID); err != nil {
 			return nil, fmt.Errorf("load messages scan: %w", err)
 		}
-		messages = append(messages, provider.Message{
-			Role:    provider.Role(role),
-			Content: content,
-		})
+		msg := provider.Message{
+			Role:       provider.Role(role),
+			Content:    content,
+			ToolCallID: toolCallID.String, // zero value "" when NULL — safe
+		}
+		if toolCallsJSON.Valid {
+			if err := json.Unmarshal([]byte(toolCallsJSON.String), &msg.ToolCalls); err != nil {
+				return nil, fmt.Errorf("load messages unmarshal tool_calls: %w", err)
+			}
+		}
+		messages = append(messages, msg)
 	}
 	if messages == nil {
 		messages = []provider.Message{}
