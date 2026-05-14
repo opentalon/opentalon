@@ -625,3 +625,497 @@ func findTurnStart(t *testing.T, evs []emit.Event) events.TurnStartPayload {
 	t.Fatal("turn_start event not found")
 	return events.TurnStartPayload{}
 }
+
+// -----------------------------------------------------------------------------
+// Phase 3 — tool dispatcher instrumentation tests
+// -----------------------------------------------------------------------------
+
+// nativeToolCallingLLM returns native ToolCalls on its first Complete call,
+// then a plain text response on subsequent rounds so the agent loop
+// terminates. Implements FeatureTools so the orchestrator picks the native
+// path. Embedding by value so SupportsFeature is promoted on the value.
+type nativeToolCallingLLM struct {
+	toolCalls []provider.ToolCall
+	textAfter string
+	calls     int
+}
+
+func (l *nativeToolCallingLLM) Complete(_ context.Context, _ *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	l.calls++
+	if l.calls == 1 {
+		return &provider.CompletionResponse{ToolCalls: l.toolCalls}, nil
+	}
+	return &provider.CompletionResponse{Content: l.textAfter}, nil
+}
+
+func (l *nativeToolCallingLLM) SupportsFeature(f provider.Feature) bool {
+	return f == provider.FeatureTools
+}
+
+// errorExecutor returns a tool error result, exercising the
+// tool_call_result status=error branch.
+type errorExecutor struct{ msg string }
+
+func (e *errorExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
+	return ToolResult{CallID: call.ID, Error: e.msg}
+}
+
+// findToolCallEvents collects all events of the given type into typed payloads.
+func findToolCallExtractedPayloads(t *testing.T, evs []emit.Event) []events.ToolCallExtractedPayload {
+	t.Helper()
+	var out []events.ToolCallExtractedPayload
+	for _, e := range evs {
+		if e.EventType != events.TypeToolCallExtracted {
+			continue
+		}
+		var p events.ToolCallExtractedPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("unmarshal tool_call_extracted: %v", err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func findToolCallResultPayloads(t *testing.T, evs []emit.Event) []events.ToolCallResultPayload {
+	t.Helper()
+	var out []events.ToolCallResultPayload
+	for _, e := range evs {
+		if e.EventType != events.TypeToolCallResult {
+			continue
+		}
+		var p events.ToolCallResultPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("unmarshal tool_call_result: %v", err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func TestOrchestrator_ExecuteCall_EmitsExtractedAndResult_NativeMode(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &nativeToolCallingLLM{
+		toolCalls: []provider.ToolCall{{
+			ID:   "call-1",
+			Name: "gitlab.analyze_code",
+			// gitlab.analyze_code declares no Parameters in the test fixture,
+			// so any args would trip rejectUnknownArgs. Leave empty for the
+			// happy-path assertion.
+			Arguments: map[string]string{},
+		}},
+		textAfter: "analysis complete",
+	}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+
+	if _, err := orch.Run(context.Background(), sessID, "analyze main.go"); err != nil {
+		t.Fatal(err)
+	}
+
+	extracted := findToolCallExtractedPayloads(t, sink.snapshot())
+	if len(extracted) != 1 {
+		t.Fatalf("tool_call_extracted count = %d, want 1", len(extracted))
+	}
+	got := extracted[0]
+	if got.V != events.ToolCallExtractedVersion {
+		t.Errorf("Header.V = %d, want %d", got.V, events.ToolCallExtractedVersion)
+	}
+	if got.Mode != "native" {
+		t.Errorf("Mode = %q, want native", got.Mode)
+	}
+	if got.CallID != "call-1" {
+		t.Errorf("CallID = %q, want call-1", got.CallID)
+	}
+	if got.Plugin != "gitlab" || got.Action != "analyze_code" {
+		t.Errorf("Plugin/Action = %q/%q, want gitlab/analyze_code", got.Plugin, got.Action)
+	}
+
+	results := findToolCallResultPayloads(t, sink.snapshot())
+	if len(results) != 1 {
+		t.Fatalf("tool_call_result count = %d, want 1", len(results))
+	}
+	if results[0].CallID != "call-1" {
+		t.Errorf("result.CallID = %q, want call-1", results[0].CallID)
+	}
+	if results[0].Status != "ok" {
+		t.Errorf("result.Status = %q, want ok", results[0].Status)
+	}
+	if results[0].ResponseExcerpt == "" {
+		t.Errorf("result.ResponseExcerpt is empty; want echoed body")
+	}
+}
+
+func TestOrchestrator_ExecuteCall_EmitsExtractedAndResult_TextMode(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"call the tool", "done"}}
+	parseCount := 0
+	parser := &fakeParser{parseFn: func(string) []ToolCall {
+		parseCount++
+		if parseCount == 1 {
+			return []ToolCall{{
+				ID:     "call-text-1",
+				Plugin: "gitlab",
+				Action: "analyze_code",
+				// gitlab.analyze_code declares no Parameters; args would
+				// trip rejectUnknownArgs. Happy-path assertion uses none.
+				Args: map[string]string{},
+			}}
+		}
+		return nil
+	}}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+
+	if _, err := orch.Run(context.Background(), sessID, "do it"); err != nil {
+		t.Fatal(err)
+	}
+
+	extracted := findToolCallExtractedPayloads(t, sink.snapshot())
+	if len(extracted) != 1 {
+		t.Fatalf("tool_call_extracted count = %d, want 1", len(extracted))
+	}
+	if extracted[0].Mode != "text" {
+		t.Errorf("Mode = %q, want text (plain fakeLLM has no FeatureTools)", extracted[0].Mode)
+	}
+
+	results := findToolCallResultPayloads(t, sink.snapshot())
+	if len(results) != 1 {
+		t.Fatalf("tool_call_result count = %d, want 1", len(results))
+	}
+	if results[0].Status != "ok" {
+		t.Errorf("result.Status = %q, want ok", results[0].Status)
+	}
+}
+
+func TestOrchestrator_ExecuteCall_ResultStatus_ErrorOnDispatchError(t *testing.T) {
+	sink := &recordingEventSink{}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "broken",
+		Actions: []Action{{Name: "do"}},
+	}, &errorExecutor{msg: "exec blew up"})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, memory, sessions, OrchestratorOpts{EventSink: sink})
+
+	call := ToolCall{ID: "c1", Plugin: "broken", Action: "do", FromLLM: true}
+	res := orch.executeCall(context.Background(), call)
+	if res.Error == "" {
+		t.Fatal("expected error result")
+	}
+
+	results := findToolCallResultPayloads(t, sink.snapshot())
+	if len(results) != 1 {
+		t.Fatalf("tool_call_result count = %d, want 1", len(results))
+	}
+	if results[0].Status != "error" {
+		t.Errorf("Status = %q, want error", results[0].Status)
+	}
+	if results[0].ResponseExcerpt != "exec blew up" {
+		t.Errorf("ResponseExcerpt = %q, want %q", results[0].ResponseExcerpt, "exec blew up")
+	}
+}
+
+func TestOrchestrator_ExecuteCall_EmitsNotFound_UnknownPlugin(t *testing.T) {
+	sink := &recordingEventSink{}
+	orch, _ := setupOrchestratorWithSink(&fakeLLM{},
+		&fakeParser{parseFn: func(string) []ToolCall { return nil }}, sink)
+
+	res := orch.executeCall(context.Background(), ToolCall{
+		ID: "c1", Plugin: "no-such-plugin", Action: "anything", FromLLM: true,
+	})
+	if res.Error == "" {
+		t.Fatal("expected error result")
+	}
+
+	evs := sink.snapshot()
+	var notFound []emit.Event
+	var extracted int
+	for _, e := range evs {
+		switch e.EventType {
+		case events.TypeToolCallNotFound:
+			notFound = append(notFound, e)
+		case events.TypeToolCallExtracted:
+			extracted++
+		}
+	}
+	if extracted != 1 {
+		t.Errorf("extracted count = %d, want 1", extracted)
+	}
+	if len(notFound) != 1 {
+		t.Fatalf("not_found count = %d, want 1", len(notFound))
+	}
+	var p events.ToolCallNotFoundPayload
+	if err := json.Unmarshal(notFound[0].Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.RequestedName != "no-such-plugin.anything" {
+		t.Errorf("RequestedName = %q, want no-such-plugin.anything", p.RequestedName)
+	}
+	// A tool_call_result MUST NOT fire on the not-found path (no dispatch happened).
+	if len(findToolCallResultPayloads(t, evs)) != 0 {
+		t.Errorf("tool_call_result emitted on not_found path; should not be")
+	}
+}
+
+func TestOrchestrator_ExecuteCall_EmitsNotFound_UnknownAction(t *testing.T) {
+	sink := &recordingEventSink{}
+	orch, _ := setupOrchestratorWithSink(&fakeLLM{},
+		&fakeParser{parseFn: func(string) []ToolCall { return nil }}, sink)
+
+	res := orch.executeCall(context.Background(), ToolCall{
+		ID: "c1", Plugin: "gitlab", Action: "totally-bogus-action", FromLLM: true,
+	})
+	if res.Error == "" {
+		t.Fatal("expected error result")
+	}
+
+	var notFound int
+	for _, e := range sink.snapshot() {
+		if e.EventType == events.TypeToolCallNotFound {
+			notFound++
+		}
+	}
+	if notFound != 1 {
+		t.Errorf("not_found count = %d, want 1", notFound)
+	}
+}
+
+func TestOrchestrator_ExecuteCall_EmitsArgsInvalid_OnRejectUnknownArgs(t *testing.T) {
+	sink := &recordingEventSink{}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "strict",
+		Actions: []Action{{
+			Name:       "do",
+			Parameters: []Parameter{{Name: "expected", Required: false}},
+		}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, memory, sessions, OrchestratorOpts{EventSink: sink})
+
+	res := orch.executeCall(context.Background(), ToolCall{
+		ID:      "c1",
+		Plugin:  "strict",
+		Action:  "do",
+		Args:    map[string]string{"stray": "value"},
+		FromLLM: true,
+	})
+	if res.Error == "" {
+		t.Fatal("expected validation error")
+	}
+
+	evs := sink.snapshot()
+	var invalid []emit.Event
+	for _, e := range evs {
+		if e.EventType == events.TypeToolCallArgsInvalid {
+			invalid = append(invalid, e)
+		}
+	}
+	if len(invalid) != 1 {
+		t.Fatalf("args_invalid count = %d, want 1", len(invalid))
+	}
+	var p events.ToolCallArgsInvalidPayload
+	if err := json.Unmarshal(invalid[0].Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.CallID != "c1" || p.Plugin != "strict" || p.Action != "do" {
+		t.Errorf("payload identity drift: %+v", p)
+	}
+	if p.ValidationError == "" {
+		t.Errorf("ValidationError empty; want non-empty error text")
+	}
+	// No tool_call_result on the args_invalid path (validation rejects before dispatch).
+	if len(findToolCallResultPayloads(t, evs)) != 0 {
+		t.Errorf("tool_call_result emitted on args_invalid path; should not be")
+	}
+}
+
+func TestOrchestrator_ExecuteCall_NoEmission_WhenFromLLMFalse(t *testing.T) {
+	// Internal calls (preparers, guards, pipelines) carry FromLLM=false.
+	// They are host-orchestrated, not part of the LLM reasoning trace, and
+	// must not pollute session_events analytics.
+	sink := &recordingEventSink{}
+	orch, _ := setupOrchestratorWithSink(&fakeLLM{},
+		&fakeParser{parseFn: func(string) []ToolCall { return nil }}, sink)
+
+	res := orch.executeCall(context.Background(), ToolCall{
+		ID: "internal-1", Plugin: "gitlab", Action: "analyze_code", FromLLM: false,
+	})
+	if res.Error != "" {
+		t.Fatalf("internal call failed unexpectedly: %s", res.Error)
+	}
+
+	for _, e := range sink.snapshot() {
+		switch e.EventType {
+		case events.TypeToolCallExtracted, events.TypeToolCallResult,
+			events.TypeToolCallNotFound, events.TypeToolCallArgsInvalid:
+			t.Errorf("internal call emitted %q; should not emit any tool_call_* event", e.EventType)
+		}
+	}
+}
+
+func TestOrchestrator_ExecuteCall_RawCapture_ExtractedHasOriginalActionBeforeNormalization(t *testing.T) {
+	// LLMs frequently emit underscore-style action names (list_persons)
+	// when the registry uses hyphen-style (list-persons). The orchestrator
+	// normalizes silently; raw-capture rule says the extracted event MUST
+	// preserve the original (un-normalized) action the LLM emitted.
+	sink := &recordingEventSink{}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "persons",
+		Actions: []Action{{Name: "list-persons"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, memory, sessions, OrchestratorOpts{EventSink: sink})
+
+	res := orch.executeCall(context.Background(), ToolCall{
+		ID: "c1", Plugin: "persons", Action: "list_persons", FromLLM: true,
+	})
+	if res.Error != "" {
+		t.Fatalf("normalization should have succeeded: %s", res.Error)
+	}
+
+	extracted := findToolCallExtractedPayloads(t, sink.snapshot())
+	if len(extracted) != 1 {
+		t.Fatalf("extracted count = %d", len(extracted))
+	}
+	if extracted[0].Action != "list_persons" {
+		t.Errorf("extracted.Action = %q, want raw %q (pre-normalization)",
+			extracted[0].Action, "list_persons")
+	}
+}
+
+func TestOrchestrator_ExecuteCall_LatencyMSPopulatedAndNonNegative(t *testing.T) {
+	sink := &recordingEventSink{}
+	orch, _ := setupOrchestratorWithSink(&fakeLLM{},
+		&fakeParser{parseFn: func(string) []ToolCall { return nil }}, sink)
+
+	res := orch.executeCall(context.Background(), ToolCall{
+		ID: "c1", Plugin: "gitlab", Action: "analyze_code", FromLLM: true,
+	})
+	if res.Error != "" {
+		t.Fatal(res.Error)
+	}
+	results := findToolCallResultPayloads(t, sink.snapshot())
+	if len(results) != 1 {
+		t.Fatalf("result count = %d", len(results))
+	}
+	if results[0].LatencyMS < 0 {
+		t.Errorf("LatencyMS = %d, want >= 0", results[0].LatencyMS)
+	}
+}
+
+func TestOrchestrator_ExecuteCall_EmitsResultError_OnUserOnlyRefusal(t *testing.T) {
+	// Policy refusal: UserOnly actions cannot be called by the LLM. The
+	// call was extracted and identified before the gate fired, so the
+	// orchestrator emits tool_call_result with status="error" (NOT
+	// tool_call_not_found — the action was found, just refused).
+	sink := &recordingEventSink{}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "admin",
+		Actions: []Action{{Name: "destroy", UserOnly: true}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, memory, sessions, OrchestratorOpts{EventSink: sink})
+
+	res := orch.executeCall(context.Background(), ToolCall{
+		ID: "c1", Plugin: "admin", Action: "destroy", FromLLM: true,
+	})
+	if res.Error == "" {
+		t.Fatal("expected UserOnly refusal")
+	}
+
+	evs := sink.snapshot()
+	results := findToolCallResultPayloads(t, evs)
+	if len(results) != 1 {
+		t.Fatalf("tool_call_result count = %d, want 1", len(results))
+	}
+	if results[0].Status != "error" {
+		t.Errorf("Status = %q, want error", results[0].Status)
+	}
+	if results[0].ResponseExcerpt == "" {
+		t.Errorf("ResponseExcerpt empty; want refusal message")
+	}
+	// Must NOT emit not_found / args_invalid — the action was found and
+	// args are not the issue; this is a policy refusal.
+	for _, e := range evs {
+		if e.EventType == events.TypeToolCallNotFound || e.EventType == events.TypeToolCallArgsInvalid {
+			t.Errorf("unexpected %q on UserOnly refusal path", e.EventType)
+		}
+	}
+}
+
+func TestOrchestrator_ExecuteCall_EmitsResultError_OnRestrictedPluginRefusal(t *testing.T) {
+	// Policy refusal via strict allowlist (profile.Plugins). The LLM's
+	// extracted plugin name resolves, but the profile excludes it →
+	// pluginAllowed returns false → tool_call_result with status="error".
+	sink := &recordingEventSink{}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "restricted",
+		Actions: []Action{{Name: "do"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, memory, sessions, OrchestratorOpts{EventSink: sink})
+
+	// Strict allowlist that excludes the "restricted" plugin.
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{
+		Plugins: []string{"other-plugin"},
+	})
+	res := orch.executeCall(ctx, ToolCall{
+		ID: "c1", Plugin: "restricted", Action: "do", FromLLM: true,
+	})
+	if res.Error == "" {
+		t.Fatal("expected restricted-plugin refusal")
+	}
+
+	results := findToolCallResultPayloads(t, sink.snapshot())
+	if len(results) != 1 {
+		t.Fatalf("tool_call_result count = %d, want 1", len(results))
+	}
+	if results[0].Status != "error" {
+		t.Errorf("Status = %q, want error", results[0].Status)
+	}
+}
+
+func TestOrchestrator_ExecuteCall_NoEventSink_DoesNotPanic(t *testing.T) {
+	// Mirrors the NoOpSink default-path coverage from Phase 2 — must also
+	// hold for the dispatcher path.
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Actions: []Action{{Name: "analyze_code"}},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, memory, sessions, OrchestratorOpts{}) // no EventSink
+
+	_ = orch.executeCall(context.Background(), ToolCall{
+		ID: "c1", Plugin: "gitlab", Action: "analyze_code", FromLLM: true,
+	})
+	_ = orch.executeCall(context.Background(), ToolCall{
+		ID: "c2", Plugin: "missing", Action: "anything", FromLLM: true,
+	})
+}

@@ -113,14 +113,21 @@ func ParentID(ctx context.Context) string {
 // ----- internal helper shared by every Emit<Type> -----
 
 // send marshals payload, stamps the canonical fields from ctx, and
-// hands the resulting Event to sink.Emit. A nil sink is a silent no-op,
-// so callers don't need to nil-check at every emission site.
+// hands the resulting Event to sink.Emit. A nil sink and the NoOpSink
+// zero-value are silent no-ops, so callers don't need to nil-check at
+// every emission site. Short-circuiting NoOpSink BEFORE json.Marshal
+// is important: it's the default when the orchestrator runs without a
+// state DB, and the hot path emits multiple events per LLM turn — we
+// don't want to pay marshalling cost just to discard the bytes.
 //
 // durationMS is split out from payload because the row-level column is
 // what analytics queries index — payloads that carry a latency_ms field
 // of their own pass the same value here so the column stays in sync.
 func send(ctx context.Context, sink Sink, eventType string, payload any, durationMS int64) {
 	if sink == nil {
+		return
+	}
+	if _, ok := sink.(NoOpSink); ok {
 		return
 	}
 	raw, err := json.Marshal(payload)

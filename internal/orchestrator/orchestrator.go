@@ -3041,7 +3041,41 @@ func rejectUnknownArgs(call ToolCall, action *Action) error {
 }
 
 func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResult {
+	// Phase 3: emit tool_call_extracted at the very top for LLM-originated
+	// calls so the raw decoded view is captured before any validation,
+	// normalization, policy gating, or context-arg injection mutates it
+	// (raw-capture rule). Internal calls (preparers, guards, pipelines)
+	// are host-orchestrated, not part of the LLM reasoning trace, and are
+	// not emitted. CallID joins the matching tool_call_result emitted
+	// further down; session_events.parent_id linkage is reserved for a
+	// follow-up that introduces producer-side event_id generation.
+	//
+	// dispatchStart is initialized unconditionally so emitRefusalResult
+	// can compute a meaningful LatencyMS regardless of where the policy
+	// gate fires. Even non-FromLLM calls pay one time.Now() — cheap and
+	// keeps the contract simple.
+	dispatchStart := time.Now()
+	if call.FromLLM {
+		mode := emit.ToolCallModeText
+		if o.supportsNativeTools() {
+			mode = emit.ToolCallModeNative
+		}
+		// Arguments captured as the raw map ref; send() in the emit
+		// package marshals payload synchronously, so the JSON snapshot is
+		// frozen here BEFORE the context-arg injection below mutates
+		// call.Args. If this emit ever becomes async, the call.Args map
+		// must be copied first to preserve the raw-capture invariant.
+		emit.EmitToolCallExtracted(ctx, o.eventSink, emit.ToolCallExtractedArgs{
+			CallID:    call.ID,
+			Plugin:    call.Plugin,
+			Action:    call.Action,
+			Arguments: call.Args,
+			Mode:      mode,
+		})
+	}
+
 	if call.Plugin == "" {
+		o.emitToolCallNotFound(ctx, call)
 		return ToolResult{
 			CallID: call.ID,
 			Error:  `tool call format not recognized. You MUST use this exact format: [tool_call] {"tool": "plugin.action", "args": {"key": "value"}} [/tool_call]. Do NOT use XML or any other format. Retry the same action now using the correct format.`,
@@ -3049,6 +3083,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	}
 	exec, ok := o.registry.GetExecutor(call.Plugin)
 	if !ok {
+		o.emitToolCallNotFound(ctx, call)
 		return ToolResult{
 			CallID: call.ID,
 			Error:  fmt.Sprintf("plugin %q not found", call.Plugin),
@@ -3075,6 +3110,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 			}
 		}
 		if !resolved {
+			o.emitToolCallNotFound(ctx, call)
 			return ToolResult{
 				CallID: call.ID,
 				Error:  fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin),
@@ -3091,16 +3127,10 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		allowed, err := o.permissionChecker.Allowed(ctx, actorID, call.Plugin)
 		if err != nil {
 			slog.Warn("permission check failed", "actor", actorID, "plugin", call.Plugin, "error", err)
-			return ToolResult{
-				CallID: call.ID,
-				Error:  "permission denied",
-			}
+			return o.emitRefusalResult(ctx, call, "permission denied", dispatchStart)
 		}
 		if !allowed {
-			return ToolResult{
-				CallID: call.ID,
-				Error:  "permission denied",
-			}
+			return o.emitRefusalResult(ctx, call, "permission denied", dispatchStart)
 		}
 	}
 
@@ -3134,10 +3164,9 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 				"in_allowlist", allowed.m[capForCheck.Name],
 				"allowlist_keys", mapKeys(allowed.m),
 			)
-			return ToolResult{
-				CallID: call.ID,
-				Error:  fmt.Sprintf("plugin %q is not available for this profile", call.Plugin),
-			}
+			return o.emitRefusalResult(ctx, call,
+				fmt.Sprintf("plugin %q is not available for this profile", call.Plugin),
+				dispatchStart)
 		} else {
 			slog.Debug("tool call allowed",
 				"plugin", call.Plugin,
@@ -3150,10 +3179,9 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 
 	if call.FromLLM && action != nil && action.UserOnly {
 		slog.Warn("BLOCKED LLM attempt to invoke user_only action", "actor", actorID, "plugin", call.Plugin, "action", call.Action, "args", call.Args)
-		return ToolResult{
-			CallID: call.ID,
-			Error:  fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
-		}
+		return o.emitRefusalResult(ctx, call,
+			fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
+			dispatchStart)
 	}
 	// Reject unknown args from LLM-originated calls. Without this, stray keys
 	// (e.g. Haiku emitting `message=` at top level instead of inside `args`)
@@ -3163,9 +3191,22 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	// exempt — they construct calls programmatically and may legitimately use
 	// names outside the declared Parameters set. InjectContextArgs are not
 	// accepted from the LLM; the host injects them below.
+	// rejectUnknownArgs is pre-dispatch validation: emit
+	// tool_call_args_invalid (its own typed failure event) and return
+	// early. Unlike the policy refusals further up, no tool_call_result
+	// fires here — the dispatcher never ran, so there is no "result" to
+	// record. Consumer-side analytics count
+	//   extracted == not_found + args_invalid + result
+	// for orthogonality.
 	if call.FromLLM && action != nil && len(call.Args) > 0 {
 		if err := rejectUnknownArgs(call, action); err != nil {
 			slog.Warn("BLOCKED LLM call with unknown args", "plugin", call.Plugin, "action", call.Action, "error", err.Error())
+			emit.EmitToolCallArgsInvalid(ctx, o.eventSink, emit.ToolCallArgsInvalidArgs{
+				CallID:          call.ID,
+				Plugin:          call.Plugin,
+				Action:          call.Action,
+				ValidationError: err.Error(),
+			})
 			return ToolResult{CallID: call.ID, Error: err.Error()}
 		}
 	}
@@ -3194,7 +3235,50 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	result := o.guard.ExecuteWithTimeout(ctx, exec, call)
 	result = o.guard.ValidateResult(call, result)
 	result = o.guard.Sanitize(result)
+	if call.FromLLM {
+		status := "ok"
+		respBody := result.Content
+		if result.Error != "" {
+			status = "error"
+			respBody = result.Error
+		}
+		emit.EmitToolCallResult(ctx, o.eventSink, emit.ToolCallResultArgs{
+			CallID:    call.ID,
+			Status:    status,
+			Response:  respBody,
+			LatencyMS: time.Since(dispatchStart).Milliseconds(),
+		})
+	}
 	return result
+}
+
+// emitToolCallNotFound emits a tool_call_not_found event for an LLM-originated
+// call whose plugin or action could not be resolved. The requested-name format
+// matches the LLM's own "plugin.action" naming convention so analytics can
+// group mis-spellings without re-parsing.
+func (o *Orchestrator) emitToolCallNotFound(ctx context.Context, call ToolCall) {
+	if !call.FromLLM {
+		return
+	}
+	emit.EmitToolCallNotFound(ctx, o.eventSink, call.Plugin+"."+call.Action)
+}
+
+// emitRefusalResult emits a tool_call_result with status="error" for policy
+// refusals (permission denied, restricted plugin, user-only action) and
+// returns the matching ToolResult. The call was extracted and identified
+// before the refusal, so tool_call_result — not tool_call_not_found — is
+// the right shape; the error message is captured verbatim in response_excerpt
+// for downstream attribution.
+func (o *Orchestrator) emitRefusalResult(ctx context.Context, call ToolCall, errMsg string, dispatchStart time.Time) ToolResult {
+	if call.FromLLM {
+		emit.EmitToolCallResult(ctx, o.eventSink, emit.ToolCallResultArgs{
+			CallID:    call.ID,
+			Status:    "error",
+			Response:  errMsg,
+			LatencyMS: time.Since(dispatchStart).Milliseconds(),
+		})
+	}
+	return ToolResult{CallID: call.ID, Error: errMsg}
 }
 
 func (o *Orchestrator) maybeRecordWorkflow(ctx context.Context, result *RunResult, userMessage string) {
