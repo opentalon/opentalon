@@ -29,8 +29,21 @@ func pgDB(t *testing.T) *DB {
 		t.Fatalf("Open postgres: %v", err)
 	}
 	t.Cleanup(func() {
-		// Drop tables so each test starts clean.
-		db.SQLDB().Exec("DROP TABLE IF EXISTS sessions, memories, schema_version")
+		// Drop every table the migrations create so each test starts clean.
+		// Order matters only insofar as schema_version is re-created by the
+		// next Open(); dropping it ensures a fresh migration replay. Keep
+		// this list in sync with internal/state/store/migrations/*.sql.
+		db.SQLDB().Exec(`DROP TABLE IF EXISTS
+			session_events,
+			prompt_snapshots,
+			ai_debug_events,
+			messages,
+			profile_usage,
+			group_plugins,
+			entities,
+			sessions,
+			memories,
+			schema_version`)
 		db.Close()
 	})
 	return db
