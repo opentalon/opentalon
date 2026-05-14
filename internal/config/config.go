@@ -343,10 +343,11 @@ type SubprocessOrchestratorConfig struct {
 }
 
 type StateConfig struct {
-	DataDir string        `yaml:"data_dir"`
-	DB      DBConfig      `yaml:"db,omitempty"`
-	Session SessionConfig `yaml:"session,omitempty"`
-	Debug   DebugConfig   `yaml:"debug,omitempty"`
+	DataDir       string              `yaml:"data_dir"`
+	DB            DBConfig            `yaml:"db,omitempty"`
+	Session       SessionConfig       `yaml:"session,omitempty"`
+	Debug         DebugConfig         `yaml:"debug,omitempty"`
+	SessionEvents SessionEventsConfig `yaml:"session_events,omitempty"`
 }
 
 // DebugConfig configures per-session deep debug capture (toggled by the
@@ -368,6 +369,26 @@ type StateConfig struct {
 // surface area.
 type DebugConfig struct {
 	RetentionDays     int  `yaml:"retention_days,omitempty"`     // default 30 when 0 or omitted
+	RetentionDisabled bool `yaml:"retention_disabled,omitempty"` // when true, never prune (overrides RetentionDays)
+}
+
+// SessionEventsConfig configures the always-on structured session_events
+// log. Unlike DebugConfig (opt-in per session), the event log is always
+// populated by the orchestrator — retention is the only knob.
+//
+// Retention semantics mirror DebugConfig:
+//   - RetentionDays:    integer days; 0 or omitted means "use default 90"
+//   - RetentionDisabled: explicit off-switch; takes precedence over
+//     RetentionDays. Use this to keep events forever (alpha-phase tuning),
+//     not RetentionDays=0 — that path applies the default and would
+//     surprise an operator who meant "off".
+//
+// Default 90 days (vs DebugConfig's 30) reflects the analytics use case:
+// regression triage often needs weeks-old comparison points, and the
+// table is small enough (TEXT JSON per event) that 90 days of alpha
+// traffic stays well within a single Postgres tablespace.
+type SessionEventsConfig struct {
+	RetentionDays     int  `yaml:"retention_days,omitempty"`     // default 90 when 0 or omitted
 	RetentionDisabled bool `yaml:"retention_disabled,omitempty"` // when true, never prune (overrides RetentionDays)
 }
 
