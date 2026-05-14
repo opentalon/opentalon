@@ -199,7 +199,7 @@ func TestParseFormatA_MixedArgTypes(t *testing.T) {
 
 func TestParseFormatA_LargeNumericID(t *testing.T) {
 	// Large numeric IDs must not be converted to scientific notation (e.g. 2.004555e+06).
-	response := `[tool_call] {"tool": "timly.timly__assign-item", "args": {"item_id": 2004555, "container_id": 170909}}
+	response := `[tool_call] {"tool": "inventory.inventory__assign-item", "args": {"item_id": 2004555, "container_id": 170909}}
 `
 	calls := DefaultParser.Parse(response)
 	if len(calls) != 1 {
@@ -499,7 +499,7 @@ func TestParseBareJSONToolCall_NoToolKey(t *testing.T) {
 
 func TestParseXMLFunctionCalls(t *testing.T) {
 	response := `<function_calls>
-<invoke name="timly.timly__list-person-types">
+<invoke name="inventory.inventory__list-person-types">
 <parameter name="per_page">1</parameter>
 </invoke>
 </function_calls>`
@@ -507,11 +507,11 @@ func TestParseXMLFunctionCalls(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(calls))
 	}
-	if calls[0].Plugin != "timly" {
-		t.Errorf("plugin = %q, want timly", calls[0].Plugin)
+	if calls[0].Plugin != "inventory" {
+		t.Errorf("plugin = %q, want inventory", calls[0].Plugin)
 	}
-	if calls[0].Action != "timly__list-person-types" {
-		t.Errorf("action = %q, want timly__list-person-types", calls[0].Action)
+	if calls[0].Action != "inventory__list-person-types" {
+		t.Errorf("action = %q, want inventory__list-person-types", calls[0].Action)
 	}
 	if calls[0].Args["per_page"] != "1" {
 		t.Errorf("per_page = %q, want 1", calls[0].Args["per_page"])
@@ -520,16 +520,16 @@ func TestParseXMLFunctionCalls(t *testing.T) {
 
 func TestParseXMLFunctionCalls_NoArgs(t *testing.T) {
 	response := `<function_calls>
-<invoke name="timly.timly__list-items"/>
+<invoke name="inventory.inventory__list-items"/>
 </function_calls>`
 	calls := DefaultParser.Parse(response)
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(calls))
 	}
-	if calls[0].Plugin != "timly" {
+	if calls[0].Plugin != "inventory" {
 		t.Errorf("plugin = %q", calls[0].Plugin)
 	}
-	if calls[0].Action != "timly__list-items" {
+	if calls[0].Action != "inventory__list-items" {
 		t.Errorf("action = %q", calls[0].Action)
 	}
 }

@@ -47,7 +47,7 @@ func TestSanitizeHistory_RemovesNarratedAndFabricatedAnswers(t *testing.T) {
 func TestSanitizeHistory_KeepsToolCallAndResults(t *testing.T) {
 	msgs := []provider.Message{
 		{Role: provider.RoleUser, Content: "how many items?"},
-		{Role: provider.RoleAssistant, Content: "[tool_call]{\"tool\":\"timly.list-items\"}[/tool_call]"},
+		{Role: provider.RoleAssistant, Content: "[tool_call]{\"tool\":\"inventory.list-items\"}[/tool_call]"},
 		{Role: provider.RoleUser, Content: "[plugin_output]{\"pagination\":{\"total\":370}}[/plugin_output]"},
 		{Role: provider.RoleAssistant, Content: "You have 370 items."},
 	}
@@ -64,7 +64,7 @@ func TestSanitizeHistory_KeepsMixedSession(t *testing.T) {
 		{Role: provider.RoleAssistant, Content: "You have 0 items."},
 		// Second turn: real tool call (should be kept)
 		{Role: provider.RoleUser, Content: "list my items"},
-		{Role: provider.RoleAssistant, Content: "[tool_call]{\"tool\":\"timly.list-items\"}[/tool_call]"},
+		{Role: provider.RoleAssistant, Content: "[tool_call]{\"tool\":\"inventory.list-items\"}[/tool_call]"},
 		{Role: provider.RoleUser, Content: "[plugin_output]Items: 370 total[/plugin_output]"},
 		{Role: provider.RoleAssistant, Content: "You have 370 items."},
 		// Third turn: hallucinated again (should be removed)

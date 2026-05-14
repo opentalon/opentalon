@@ -7,7 +7,7 @@ package profile
 import "time"
 
 // CredentialHeader is a per-MCP-server credential returned by the WhoAmI server.
-// Header is the HTTP header name to set (e.g. "X-Timly-User") and Value is the
+// Header is the HTTP header name to set (e.g. "X-App-User") and Value is the
 // header value. When making requests to the named MCP server, these are merged
 // with the server's static config headers; WhoAmI-returned headers take priority.
 type CredentialHeader struct {
