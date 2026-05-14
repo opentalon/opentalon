@@ -35,6 +35,7 @@ import (
 	"github.com/opentalon/opentalon/internal/scheduler"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store"
+	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 	"github.com/opentalon/opentalon/internal/synclock"
 	"github.com/opentalon/opentalon/internal/version"
 	chanpkg "github.com/opentalon/opentalon/pkg/channel"
@@ -227,6 +228,17 @@ func main() {
 			return actor.SessionID(ctx), logger.TraceID(ctx), true
 		}
 	}
+
+	// Build the structured session-event sink. Unlike debugSink (opt-in
+	// via /debug), this one is always-on whenever the state store is
+	// available — the producer side will be wired up subsystem by
+	// subsystem in subsequent PRs. For the first introduction of the
+	// adapter we keep it unused; later constructors take it as an arg.
+	var sessionSink emit.Sink = emit.NoOpSink{}
+	if sessionEventWriter != nil {
+		sessionSink = &sessionSinkAdapter{writer: sessionEventWriter}
+	}
+	_ = sessionSink // wired into subsystems in follow-up PRs (phase 1+)
 
 	// Build LLM provider and default model from config. The (sink,resolver)
 	// pair feeds per-session /debug capture; either nil disables capture.
@@ -864,6 +876,25 @@ func (s *providerDebugSink) Submit(_ context.Context, e provider.DebugEvent) {
 		URL:       e.URL,
 		Body:      e.Body,
 		Timestamp: e.Timestamp,
+	})
+}
+
+// sessionSinkAdapter adapts the state-store async session-event writer
+// to the emit.Sink interface. Stays in main.go for the same dependency-
+// direction reason as providerDebugSink: the emit package cannot import
+// store without inviting an import cycle through provider, so this
+// composition layer is the natural home for the conversion.
+type sessionSinkAdapter struct {
+	writer *store.SessionEventWriter
+}
+
+func (s *sessionSinkAdapter) Emit(_ context.Context, e emit.Event) {
+	s.writer.Submit(store.SessionEvent{
+		SessionID:  e.SessionID,
+		EventType:  e.EventType,
+		ParentID:   e.ParentID,
+		DurationMS: e.DurationMS,
+		Payload:    e.Payload,
 	})
 }
 
