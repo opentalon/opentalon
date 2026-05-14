@@ -23,6 +23,8 @@ import (
 	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
+	"github.com/opentalon/opentalon/internal/state/store/events"
+	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 	pkgchannel "github.com/opentalon/opentalon/pkg/channel"
 )
 
@@ -104,6 +106,17 @@ type UsageRecorder interface {
 	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int)
 }
 
+// PromptSnapshotUpserter persists content-addressed prompt bodies so a
+// consumer reading a turn_start event can resolve its system_prompt_sha256,
+// server_instructions[].sha256, and available_tools[].desc_sha256 back to
+// the original text. SessionEventStore satisfies this interface in
+// production; tests may inject a fake. Implementations must be safe to
+// call concurrently and idempotent on conflicting sha256 (first insert
+// wins; later identical writes are no-ops).
+type PromptSnapshotUpserter interface {
+	UpsertPromptSnapshot(ctx context.Context, sha256, kind, content string) error
+}
+
 // PluginCallObserver is notified after each plugin/tool call executed by the orchestrator.
 type PluginCallObserver interface {
 	ObservePluginCall(plugin, action string, failed bool, inputTokens, outputTokens int)
@@ -133,20 +146,22 @@ type OrchestratorOpts struct {
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PlanTimeout             time.Duration                 // max time for planner LLM call; 0 = default 15s
 	PipelineConfig          pipeline.PipelineConfig
-	ConfirmationPlugin      string              // optional; plugin name for confirmation strategy (e.g. "planner")
-	ConfirmationAction      string              // optional; action name (e.g. "check_confirmation")
-	ContextWindow           int                 // model context window in tokens; 0 = no trimming
-	MaxConcurrentSessions   int                 // max sessions running in parallel; default 1 (sequential)
-	GroupPluginLookup       GroupPluginLookup   // optional; when set, filters tool list by profile group
-	UsageRecorder           UsageRecorder       // optional; when set, records LLM usage after each run
-	PluginCallObserver      PluginCallObserver  // optional; when set, notified after each plugin/tool call
-	SyncActionsPlugin       string              // optional; plugin name for action sync (e.g. "weaviate")
-	SyncActionsAction       string              // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
-	SyncGlossaryAction      string              // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
-	Knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
-	Subprocess              SubprocessConfig    // optional; subprocess (sub-agent) support
-	OnStreamChunk           StreamChunkCallback // optional; when set and LLM supports streaming, final answers are streamed
-	ShowToolCalls           string              // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	ConfirmationPlugin      string                 // optional; plugin name for confirmation strategy (e.g. "planner")
+	ConfirmationAction      string                 // optional; action name (e.g. "check_confirmation")
+	ContextWindow           int                    // model context window in tokens; 0 = no trimming
+	MaxConcurrentSessions   int                    // max sessions running in parallel; default 1 (sequential)
+	GroupPluginLookup       GroupPluginLookup      // optional; when set, filters tool list by profile group
+	UsageRecorder           UsageRecorder          // optional; when set, records LLM usage after each run
+	PluginCallObserver      PluginCallObserver     // optional; when set, notified after each plugin/tool call
+	EventSink               emit.Sink              // optional; when set, structured session events are emitted; nil defaults to emit.NoOpSink
+	PromptSnapshotStore     PromptSnapshotUpserter // optional; when set, system prompt + server instructions + tool descriptions are persisted by sha256 so turn_start hashes resolve to content
+	SyncActionsPlugin       string                 // optional; plugin name for action sync (e.g. "weaviate")
+	SyncActionsAction       string                 // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
+	SyncGlossaryAction      string                 // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
+	Knowledge               KnowledgeConfig        // optional; knowledge directory ingestion
+	Subprocess              SubprocessConfig       // optional; subprocess (sub-agent) support
+	OnStreamChunk           StreamChunkCallback    // optional; when set and LLM supports streaming, final answers are streamed
+	ShowToolCalls           string                 // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -200,19 +215,21 @@ type Orchestrator struct {
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline (access via pendingMu)
 	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
 	pipelineConfig          pipeline.PipelineConfig
-	confirmationPlugin      string              // optional; plugin for confirmation strategy
-	confirmationAction      string              // optional; action name for confirmation check
-	contextWindow           int                 // model context window in tokens; 0 = no trimming
-	groupPluginLookup       GroupPluginLookup   // optional; nil = no group-based filtering
-	usageRecorder           UsageRecorder       // optional; nil = no usage tracking
-	pluginCallObserver      PluginCallObserver  // optional; nil = no plugin call observation
-	syncActionsPlugin       string              // optional; plugin name for action sync
-	syncActionsAction       string              // optional; action name for action sync
-	syncGlossaryAction      string              // optional; action name for glossary sync (uses syncActionsPlugin)
-	knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
-	subprocessConfig        SubprocessConfig    // optional; subprocess (sub-agent) support
-	onStreamChunk           StreamChunkCallback // optional; when set, final answers stream to caller
-	showToolCalls           string              // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	confirmationPlugin      string                 // optional; plugin for confirmation strategy
+	confirmationAction      string                 // optional; action name for confirmation check
+	contextWindow           int                    // model context window in tokens; 0 = no trimming
+	groupPluginLookup       GroupPluginLookup      // optional; nil = no group-based filtering
+	usageRecorder           UsageRecorder          // optional; nil = no usage tracking
+	pluginCallObserver      PluginCallObserver     // optional; nil = no plugin call observation
+	eventSink               emit.Sink              // structured session event sink; always non-nil (NoOpSink default)
+	snapshotStore           PromptSnapshotUpserter // optional; nil = turn_start hashes are emitted but content is not persisted
+	syncActionsPlugin       string                 // optional; plugin name for action sync
+	syncActionsAction       string                 // optional; action name for action sync
+	syncGlossaryAction      string                 // optional; action name for glossary sync (uses syncActionsPlugin)
+	knowledge               KnowledgeConfig        // optional; knowledge directory ingestion
+	subprocessConfig        SubprocessConfig       // optional; subprocess (sub-agent) support
+	onStreamChunk           StreamChunkCallback    // optional; when set, final answers stream to caller
+	showToolCalls           string                 // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 }
 
 // resolveAllowedPluginNames returns a JSON array of allowed plugin names for the
@@ -298,6 +315,11 @@ func NewWithRules(
 	// Always create a semaphore. cap=1 = sequential (default); cap=N = N parallel sessions.
 	semaphore := make(chan struct{}, maxConcurrent)
 
+	eventSink := opts.EventSink
+	if eventSink == nil {
+		eventSink = emit.NoOpSink{}
+	}
+
 	o := &Orchestrator{
 		sessionMuxes:            make(map[string]*sessionMutex),
 		semaphore:               semaphore,
@@ -329,6 +351,8 @@ func NewWithRules(
 		groupPluginLookup:       opts.GroupPluginLookup,
 		usageRecorder:           opts.UsageRecorder,
 		pluginCallObserver:      opts.PluginCallObserver,
+		eventSink:               eventSink,
+		snapshotStore:           opts.PromptSnapshotStore,
 		syncActionsPlugin:       opts.SyncActionsPlugin,
 		syncActionsAction:       opts.SyncActionsAction,
 		syncGlossaryAction:      opts.SyncGlossaryAction,
@@ -759,6 +783,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// Set up trace_id for this session so all logs are correlated.
 	traceID := logger.TraceIDFromSessionKey(sessionID)
 	ctx = logger.WithTraceID(ctx, traceID)
+
+	// Emit user_message exactly as the orchestrator received it, before any
+	// preparer mutates it. Fires on every Run — including paths that exit
+	// without reaching the agent loop (pending pipeline / tool-call
+	// confirmation), because the user did send a message regardless of how
+	// the orchestrator routes it.
+	emit.EmitUserMessage(ctx, o.eventSink, userMessage)
 
 	// Per-session deep debug: enabled by the set_debug_mode command, which
 	// stores debug=true in session metadata. With the flag set, the slog
@@ -1284,6 +1315,24 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	sysPromptNoHint := o.buildSystemPrompt(withSkipFormatHint(ctx), content, true)
 	sysPromptWithHint := o.buildSystemPrompt(ctx, content, true)
 
+	// Emit turn_start once per Run — captures the static request shape
+	// (system prompt digest, tool catalogue, model intent) that all agent
+	// rounds in this turn share. prepareTurnStart also upserts the
+	// underlying prompt bodies into prompt_snapshots when a store is
+	// configured, so a consumer reading the event can resolve every
+	// sha256 reference to content. Per-round mutations (e.g.
+	// reasoning-effort downgrade on summary rounds) are NOT reflected
+	// here; they remain on the individual llm_request events. The hinted
+	// variant is canonical: the unhinted one only differs by suppressing
+	// the format directive on round 1, which doesn't change tool
+	// selection.
+	//
+	// Early-exit paths above (pending pipeline / pending tool-call
+	// confirmation) intentionally bypass this emission: the LLM is not
+	// driving those decisions, so there's no "turn" to start. They still
+	// emit user_message (above) because the user did send input.
+	emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, sysPromptWithHint, profileModel, cachedTools))
+
 	var stripRetries int
 	var toolRetries int // retries when planner expected tools but LLM didn't call any
 	var transientMessages []provider.Message
@@ -1805,6 +1854,85 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 		}
 	}
 	return tools
+}
+
+// prepareTurnStart assembles the turn_start event payload from the static
+// request shape held at agent-loop entry AND, when a PromptSnapshotStore
+// is configured, synchronously upserts the underlying prompt bodies into
+// prompt_snapshots BEFORE returning — so the emitted sha256 references
+// resolve to content the moment the event becomes visible.
+//
+// Doing both in one place keeps the invariant tight: every (sha256, body)
+// pair is durable in the store before the event referencing the sha256
+// is emitted to the (potentially async-buffered) sink. A consumer
+// reading the event can then look up the snapshot without racing the
+// write.
+//
+// server_instructions are gathered from every registered capability's
+// SystemPromptAddition — unfiltered by allowed_plugins on purpose: a
+// consumer correlating system_prompt_sha256 to its server_instructions
+// list should see the same set of additions that contributed to that
+// hash. available_tools mirrors the cachedTools list used by the agent
+// loop; when native tool calling is off the slice is empty (text-mode
+// tools are described inside the system prompt and are already covered
+// by system_prompt_sha256). Both slices are sorted by Name so consumers
+// see stable order across runs — ListCapabilities() and cachedTools
+// both depend on Go map iteration, which is not deterministic.
+//
+// snapshot upsert errors are logged and swallowed: a transient DB
+// failure must not break the turn. The resulting event still ships;
+// the consumer just sees a hash without a resolvable body until the
+// snapshot is re-upserted on the next identical turn.
+func (o *Orchestrator) prepareTurnStart(ctx context.Context, systemPrompt, modelID string, cachedTools []provider.ToolDefinition) emit.TurnStartArgs {
+	args := emit.TurnStartArgs{ModelID: modelID}
+	if systemPrompt != "" {
+		sum := sha256.Sum256([]byte(systemPrompt))
+		args.SystemPromptSHA256 = hex.EncodeToString(sum[:])
+		o.upsertSnapshot(ctx, args.SystemPromptSHA256, events.PromptKindSystemPrompt, systemPrompt)
+	}
+	for _, cap := range o.registry.ListCapabilities() {
+		if cap.SystemPromptAddition == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(cap.SystemPromptAddition))
+		sha := hex.EncodeToString(sum[:])
+		args.ServerInstructions = append(args.ServerInstructions, events.ServerInstructionRef{
+			Name:   cap.Name,
+			SHA256: sha,
+		})
+		o.upsertSnapshot(ctx, sha, events.PromptKindServerInstructions, cap.SystemPromptAddition)
+	}
+	sort.Slice(args.ServerInstructions, func(i, j int) bool {
+		return args.ServerInstructions[i].Name < args.ServerInstructions[j].Name
+	})
+	for _, td := range cachedTools {
+		sum := sha256.Sum256([]byte(td.Description))
+		sha := hex.EncodeToString(sum[:])
+		args.AvailableTools = append(args.AvailableTools, events.ToolRef{
+			Name:       td.Name,
+			DescSHA256: sha,
+		})
+		o.upsertSnapshot(ctx, sha, events.PromptKindToolDescription, td.Description)
+	}
+	sort.Slice(args.AvailableTools, func(i, j int) bool {
+		return args.AvailableTools[i].Name < args.AvailableTools[j].Name
+	})
+	return args
+}
+
+// upsertSnapshot writes a (sha256, kind, content) tuple to the configured
+// PromptSnapshotStore, swallowing nil-store and errors. Errors are
+// logged at warn level — the turn continues regardless because the
+// alternative (failing a user turn over an analytics snapshot write) is
+// worse than a dangling hash reference.
+func (o *Orchestrator) upsertSnapshot(ctx context.Context, sha256, kind, content string) {
+	if o.snapshotStore == nil {
+		return
+	}
+	if err := o.snapshotStore.UpsertPromptSnapshot(ctx, sha256, kind, content); err != nil {
+		slog.WarnContext(ctx, "prompt_snapshot upsert failed",
+			"sha256", sha256, "kind", kind, "error", err)
+	}
 }
 
 // retryToolCallsEnabled returns true if the model opts in to planner-informed

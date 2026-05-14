@@ -578,6 +578,8 @@ func main() {
 		GroupPluginLookup:       groupPluginStore,
 		UsageRecorder:           usageRecorder,
 		PluginCallObserver:      pluginObserver,
+		EventSink:               sessionSink,       // async-buffered via SessionEventWriter
+		PromptSnapshotStore:     sessionEventStore, // direct/sync store; intentionally not async-buffered so a consumer reading a turn_start event can resolve its sha256 references without racing the writer. nil when state DB is not configured
 		SyncActionsPlugin:       cfg.Orchestrator.Knowledge.SyncPlugin,
 		SyncActionsAction:       cfg.Orchestrator.Knowledge.SyncAction,
 		SyncGlossaryAction:      cfg.Orchestrator.Knowledge.SyncGlossaryAction,
