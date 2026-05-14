@@ -1099,6 +1099,199 @@ func TestOrchestrator_ExecuteCall_EmitsResultError_OnRestrictedPluginRefusal(t *
 	}
 }
 
+// -----------------------------------------------------------------------------
+// Phase 4 — text-parser instrumentation tests
+// -----------------------------------------------------------------------------
+
+// findParseFailedPayloads collects all tool_call_parse_failed payloads.
+func findParseFailedPayloads(t *testing.T, evs []emit.Event) []events.ToolCallParseFailedPayload {
+	t.Helper()
+	var out []events.ToolCallParseFailedPayload
+	for _, e := range evs {
+		if e.EventType != events.TypeToolCallParseFailed {
+			continue
+		}
+		var p events.ToolCallParseFailedPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("unmarshal tool_call_parse_failed: %v", err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func TestOrchestrator_ParseFailed_EmittedOnMalformedToolCallBody(t *testing.T) {
+	// LLM emits a [tool_call] block whose body is unparseable. Default
+	// parser falls through every format (json.Unmarshal fails, body
+	// doesn't start with '{' so the bare-JSON placeholder doesn't fire,
+	// inline parse fails) and at end-of-function returns the sawBlock
+	// empty-plugin placeholder. tool_call_parse_failed must fire once.
+	sink := &recordingEventSink{}
+	// Use DefaultParser so the real parser logic decides — fakeParser
+	// would bypass the marker-vs-empty-plugin signal that drives Phase 4.
+	llm := &fakeLLM{responses: []string{
+		"[tool_call] this is not a valid tool call body [/tool_call]",
+		"fallback final answer",
+	}}
+	orch, sessID := setupOrchestratorWithSink(llm, DefaultParser, sink)
+
+	if _, err := orch.Run(context.Background(), sessID, "do it"); err != nil {
+		t.Fatal(err)
+	}
+
+	parseFailed := findParseFailedPayloads(t, sink.snapshot())
+	if len(parseFailed) != 1 {
+		t.Fatalf("tool_call_parse_failed count = %d, want 1", len(parseFailed))
+	}
+	got := parseFailed[0]
+	if got.V != events.ToolCallParseFailedVersion {
+		t.Errorf("Header.V = %d, want %d", got.V, events.ToolCallParseFailedVersion)
+	}
+	if got.ParserUsed != "default" {
+		t.Errorf("ParserUsed = %q, want default", got.ParserUsed)
+	}
+	if got.ParseError == "" {
+		t.Errorf("ParseError empty; want non-empty error text")
+	}
+	if got.RawSnippet == "" {
+		t.Errorf("RawSnippet empty; want full response content")
+	}
+}
+
+func TestOrchestrator_ParseFailed_EmittedOnBareJSONWithoutToolKey(t *testing.T) {
+	// LLM wraps a JSON object in [tool_call] markers but forgets the
+	// "tool" key. Parser's Format-A json.Unmarshal succeeds but
+	// block.Tool=="", so it falls through to Format B/C. Body starts
+	// with '{' → bare-JSON placeholder fires inside the loop (Plugin="").
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{
+		`[tool_call]{"args": {"name": "test"}}[/tool_call]`,
+		"final",
+	}}
+	orch, sessID := setupOrchestratorWithSink(llm, DefaultParser, sink)
+	if _, err := orch.Run(context.Background(), sessID, "do it"); err != nil {
+		t.Fatal(err)
+	}
+	parseFailed := findParseFailedPayloads(t, sink.snapshot())
+	if len(parseFailed) != 1 {
+		t.Fatalf("tool_call_parse_failed count = %d, want 1", len(parseFailed))
+	}
+}
+
+func TestOrchestrator_ParseFailed_NotEmittedOnPlainTextResponse(t *testing.T) {
+	// Pure text response with no tool-call markers — parser returns nil,
+	// containsToolCallMarker returns false. No event must fire (this is
+	// the most common path and would drown analytics).
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"Just a plain answer with no tool call attempts."}}
+	orch, sessID := setupOrchestratorWithSink(llm, DefaultParser, sink)
+	if _, err := orch.Run(context.Background(), sessID, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if pf := findParseFailedPayloads(t, sink.snapshot()); len(pf) != 0 {
+		t.Errorf("tool_call_parse_failed fired on plain-text response (%d events); should not", len(pf))
+	}
+}
+
+func TestOrchestrator_ParseFailed_NotEmittedOnSuccessfulParse(t *testing.T) {
+	// LLM emits a valid Format A tool call. Parser returns one call with
+	// a real Plugin name. emitParseFailedIfApplicable sees no empty-plugin
+	// entry → no event.
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{
+		`[tool_call]{"tool": "gitlab.analyze_code", "args": {}}[/tool_call]`,
+		"summary after tool call",
+	}}
+	orch, sessID := setupOrchestratorWithSink(llm, DefaultParser, sink)
+	if _, err := orch.Run(context.Background(), sessID, "do it"); err != nil {
+		t.Fatal(err)
+	}
+	if pf := findParseFailedPayloads(t, sink.snapshot()); len(pf) != 0 {
+		t.Errorf("tool_call_parse_failed fired on successful parse (%d events); should not", len(pf))
+	}
+	// Sanity: Phase 3 events still fire for the successful path.
+	if len(findToolCallExtractedPayloads(t, sink.snapshot())) != 1 {
+		t.Errorf("expected one tool_call_extracted on successful parse")
+	}
+}
+
+func TestOrchestrator_ParseFailed_NotEmittedOnNarratedPlaceholder(t *testing.T) {
+	// LLM narrates a tool call in plain text without using markers
+	// ("We'll fetch the inventory."). Parser detects via narratedIntentRe
+	// and returns narratedToolCallPlaceholder. containsToolCallMarker
+	// returns false (no [tool_call] tag); even if it did,
+	// IsNarratedPlaceholder check would skip emission.
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{
+		"I'll fetch the inventory list for you.",
+		"final after narration retry",
+	}}
+	orch, sessID := setupOrchestratorWithSink(llm, DefaultParser, sink)
+	if _, err := orch.Run(context.Background(), sessID, "show inventory"); err != nil {
+		t.Fatal(err)
+	}
+	if pf := findParseFailedPayloads(t, sink.snapshot()); len(pf) != 0 {
+		t.Errorf("tool_call_parse_failed fired on narrated placeholder (%d events); should not", len(pf))
+	}
+}
+
+func TestOrchestrator_ParseFailed_EmittedOnAnthropicXMLLeak(t *testing.T) {
+	// Claude sometimes leaks <function_calls> XML when our prompt asks
+	// for [tool_call] format. Parser's parseXMLFunctionCalls path can
+	// extract calls — but if the XML is malformed (missing name attr,
+	// invalid tool name), no calls come out and the sawBlock fallback
+	// fires because containsInternalBlock detects <function_calls>.
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{
+		`<function_calls><invoke>no name attribute</invoke></function_calls>`,
+		"final",
+	}}
+	orch, sessID := setupOrchestratorWithSink(llm, DefaultParser, sink)
+	if _, err := orch.Run(context.Background(), sessID, "do it"); err != nil {
+		t.Fatal(err)
+	}
+	if pf := findParseFailedPayloads(t, sink.snapshot()); len(pf) != 1 {
+		t.Errorf("tool_call_parse_failed count = %d, want 1 on malformed XML", len(pf))
+	}
+}
+
+func TestOrchestrator_ParseFailed_EmittedOnUnclosedToolCallMarker(t *testing.T) {
+	// [tool_call] opens but no closing [/tool_call] tag. The default
+	// parser's "no closing tag" branch (parser.go line 61-64) takes the
+	// rest-of-string as body, attempts Format A then Format B/C, and
+	// produces an empty-plugin placeholder via the sawBlock fallback.
+	// Phase 4 must catch this — without a closing marker, the response
+	// is incoherent and analytics needs to see the failure.
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{
+		"[tool_call] this has no closing marker and is malformed",
+		"final",
+	}}
+	orch, sessID := setupOrchestratorWithSink(llm, DefaultParser, sink)
+	if _, err := orch.Run(context.Background(), sessID, "do it"); err != nil {
+		t.Fatal(err)
+	}
+	if pf := findParseFailedPayloads(t, sink.snapshot()); len(pf) != 1 {
+		t.Errorf("tool_call_parse_failed count = %d, want 1 on unclosed marker", len(pf))
+	}
+}
+
+func TestOrchestrator_ParseFailed_NoEventSink_DoesNotPanic(t *testing.T) {
+	// NoOpSink default path coverage for the Phase 4 emit site.
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	llm := &fakeLLM{responses: []string{
+		"[tool_call] garbage [/tool_call]",
+		"final",
+	}}
+	orch := NewWithRules(llm, DefaultParser, registry, memory, sessions, OrchestratorOpts{})
+	if _, err := orch.Run(context.Background(), "sess", "ping"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOrchestrator_ExecuteCall_NoEventSink_DoesNotPanic(t *testing.T) {
 	// Mirrors the NoOpSink default-path coverage from Phase 2 — must also
 	// hold for the dispatcher path.

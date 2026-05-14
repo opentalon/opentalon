@@ -1482,6 +1482,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Info("native tool calls received", "round", i+1, "count", len(calls))
 		} else {
 			calls = o.parser.Parse(resp.Content)
+			// Phase 4: emit tool_call_parse_failed when the LLM clearly
+			// attempted a structured tool call (a [tool_call] / <invoke> /
+			// <function_calls> marker is present) but the parser produced
+			// no valid call. Detected post-Parse rather than instrumenting
+			// the parser to avoid an interface-signature ripple. raw_snippet
+			// is the full response content (excerpted + sanitized by the
+			// emit helper); per-block error detail is not surfaced today
+			// because the default parser silently continues on each
+			// individual decode failure — capturing that would require a
+			// failures slice on the ToolCallParser interface, deferred.
+			o.emitParseFailedIfApplicable(ctx, resp.Content, calls)
 		}
 		if calls == nil {
 			// Detect hallucinated results: the LLM fabricated a response with
@@ -3261,6 +3272,42 @@ func (o *Orchestrator) emitToolCallNotFound(ctx context.Context, call ToolCall) 
 		return
 	}
 	emit.EmitToolCallNotFound(ctx, o.eventSink, call.Plugin+"."+call.Action)
+}
+
+// emitParseFailedIfApplicable emits one tool_call_parse_failed event when
+// the response contains a structured tool-call marker but the parser
+// produced no valid call. Narrated-placeholder is excluded — that path
+// signals "LLM never tried the format", not a decode failure. An
+// empty-plugin placeholder in calls indicates "parser saw a block but
+// could not decode its body" (default parser's sawBlock fallback +
+// bare-JSON-without-tool-key fallback both produce this signal). Mixed
+// success (some valid calls + a discarded malformed block) does NOT
+// trigger this — len(calls) > 0 with no empty-plugin entry is treated as
+// success, accepting the v1 limitation noted at the call site.
+func (o *Orchestrator) emitParseFailedIfApplicable(ctx context.Context, response string, calls []ToolCall) {
+	if !containsToolCallMarker(response) {
+		return
+	}
+	if IsNarratedPlaceholder(calls) {
+		return
+	}
+	if calls != nil {
+		hasEmptyPlugin := false
+		for _, c := range calls {
+			if c.Plugin == "" {
+				hasEmptyPlugin = true
+				break
+			}
+		}
+		if !hasEmptyPlugin {
+			return
+		}
+	}
+	emit.EmitToolCallParseFailed(ctx, o.eventSink, emit.ToolCallParseFailedArgs{
+		RawSnippet: response,
+		ParserUsed: "default",
+		ParseError: "tool-call marker present but no valid tool call could be decoded",
+	})
 }
 
 // emitRefusalResult emits a tool_call_result with status="error" for policy

@@ -466,6 +466,20 @@ func containsInternalBlock(s string) bool {
 	return false
 }
 
+// containsToolCallMarker returns true if s carries any syntactic marker
+// the parser would treat as a structured tool-call attempt: the
+// orchestrator's own [tool_call] tag, Claude's <function_calls> XML, or a
+// bare <invoke ...> / <invoke> tag (the namespaced antml:* form is
+// caught by the same prefix scan in parseXMLFunctionCalls). Used by
+// Phase 4 to gate tool_call_parse_failed emission so plain-text replies
+// never trigger the event.
+func containsToolCallMarker(s string) bool {
+	if containsInternalBlock(s) {
+		return true
+	}
+	return strings.Contains(s, "<invoke ") || strings.Contains(s, "<invoke>")
+}
+
 // internalBlockTags lists the open/close tag pairs for internal protocol
 // blocks that must never be forwarded to channel users.
 //
