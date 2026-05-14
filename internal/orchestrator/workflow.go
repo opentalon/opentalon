@@ -1,5 +1,11 @@
 package orchestrator
 
+import (
+	"context"
+	"log/slog"
+	"strings"
+)
+
 // WorkflowExecutor runs Talon workflow blocks. The Talon language runtime
 // implements this interface; the orchestrator calls it when the planner
 // detects a multi-step request that benefits from deterministic execution
@@ -12,7 +18,7 @@ type WorkflowExecutor interface {
 	// workflow are routed through the provided MCPCaller.
 	//
 	// Returns the final result as a human-readable summary and any error.
-	Execute(workflow string, caller MCPCaller) (*WorkflowResult, error)
+	Execute(ctx context.Context, workflow string, caller MCPCaller) (*WorkflowResult, error)
 }
 
 // MCPCaller routes MCP tool calls from the Talon workflow runtime to the
@@ -21,7 +27,7 @@ type WorkflowExecutor interface {
 type MCPCaller interface {
 	// CallTool invokes an MCP tool by server and tool name with the given
 	// arguments. Returns the structured result or an error.
-	CallTool(server, tool string, args map[string]any) (map[string]any, error)
+	CallTool(ctx context.Context, server, tool string, args map[string]any) (map[string]any, error)
 }
 
 // WorkflowResult holds the output of a Talon workflow execution.
@@ -33,24 +39,46 @@ type WorkflowResult struct {
 	// StepResults holds the result of each step, keyed by step name.
 	StepResults map[string]any
 
+	// StepsExecuted is the number of steps that ran successfully.
+	StepsExecuted int
+
+	// StepsSkipped is the number of steps skipped due to a dependency failure.
+	StepsSkipped int
+
 	// Error is set if any step failed. Dependent steps are skipped.
 	Error string
 }
 
-// WorkflowDetector determines whether a user request should be handled by
+// workflowKeywords are terms that suggest the user wants a batch/multi-step
+// operation better handled by the Talon workflow engine.
+var workflowKeywords = []string{
+	"all", "every", "batch", "bulk", "mass",
+	"alle", "jeden", "jedes", // German
+	"todos", "cada", // Spanish
+	"tous", "chaque", // French
+}
+
+// isWorkflowCandidate determines whether a user request should be handled by
 // the Talon workflow engine instead of the standard agent loop. Criteria:
 //   - Batch operations: "delete all X", "assign these 50 items"
 //   - Pagination-heavy: "list all items matching X" when count > per_page
 //   - Multi-step with dependencies: "create blueprint, then 100 twins"
-//
-// This is a placeholder for the detection logic. Initially the planner
-// can flag workflow-worthy requests based on keywords and tool count.
-func isWorkflowCandidate(userMessage string, toolCount int) bool {
-	// TODO: implement heuristic detection
-	// For now, return false — all requests go through the standard agent loop.
-	// When the Talon runtime is ready, enable this based on:
-	//   - "all", "every", "batch", "bulk" in the message
-	//   - toolCount >= 3 same-shape operations expected
-	//   - pagination.total > per_page in a prior tool result
+func isWorkflowCandidate(userMessage string, workflowEnabled bool) bool {
+	if !workflowEnabled {
+		slog.Debug("workflow: disabled in config")
+		return false
+	}
+
+	lower := strings.ToLower(userMessage)
+	for _, kw := range workflowKeywords {
+		if strings.Contains(lower, kw) {
+			slog.Debug("workflow: candidate detected",
+				"keyword", kw,
+				"message", userMessage)
+			return true
+		}
+	}
+
+	slog.Debug("workflow: not a candidate", "message", userMessage)
 	return false
 }
