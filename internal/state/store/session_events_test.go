@@ -269,6 +269,17 @@ func TestEvents_ExcerptCapAndUTF8(t *testing.T) {
 		t.Errorf("Excerpt: len = %d, want <= %d", len(got), events.ExcerptCap)
 	}
 
+	// Invalid UTF-8 (only continuation bytes, no rune starts): falls back
+	// to a raw-byte cut at the cap rather than returning empty.
+	invalid := strings.Repeat("\x80", events.ExcerptCap+10)
+	got, truncated = events.Excerpt(invalid)
+	if !truncated {
+		t.Errorf("Excerpt(invalid UTF-8): truncated = false, want true")
+	}
+	if len(got) != events.ExcerptCap {
+		t.Errorf("Excerpt(invalid UTF-8): len = %d, want %d (raw-byte fallback)", len(got), events.ExcerptCap)
+	}
+
 	// SanitizeUTF8 leaves valid input untouched and replaces invalid bytes.
 	if got := events.SanitizeUTF8("hello"); got != "hello" {
 		t.Errorf("SanitizeUTF8 valid input modified to %q", got)
@@ -280,5 +291,38 @@ func TestEvents_ExcerptCapAndUTF8(t *testing.T) {
 	}
 	if !strings.Contains(clean, "hello") || !strings.Contains(clean, "world") {
 		t.Errorf("SanitizeUTF8 corrupted valid surrounding text: %q", clean)
+	}
+}
+
+// TestLLMResponsePayload_NativeToolCallsRawInlinesAsJSON pins the wire
+// format: NativeToolCallsRaw must embed as inline JSON, not as an escaped
+// string. This is the contract the api-plugin (TIM-868x follow-up) and
+// psql inspection rely on.
+func TestLLMResponsePayload_NativeToolCallsRawInlinesAsJSON(t *testing.T) {
+	raw := json.RawMessage(`[{"id":"call_1","name":"tickets.show","arguments":{"id":"42"}}]`)
+	p := events.LLMResponsePayload{
+		Header:             events.Header{V: events.LLMResponseVersion},
+		RawContentExcerpt:  "ok",
+		NativeToolCallsRaw: raw,
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	out := string(b)
+	if !strings.Contains(out, `"native_tool_calls_raw":[{"id":"call_1"`) {
+		t.Errorf("native_tool_calls_raw not embedded inline; got: %s", out)
+	}
+	if strings.Contains(out, `"native_tool_calls_raw":"`) {
+		t.Errorf("native_tool_calls_raw marshalled as escaped string (regression); got: %s", out)
+	}
+
+	// Round-trip survives a re-decode with the same struct.
+	var decoded events.LLMResponsePayload
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if string(decoded.NativeToolCallsRaw) != string(raw) {
+		t.Errorf("round-trip mismatch: got %s, want %s", decoded.NativeToolCallsRaw, raw)
 	}
 }

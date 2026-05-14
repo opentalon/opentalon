@@ -23,6 +23,7 @@
 package events
 
 import (
+	"encoding/json"
 	"unicode/utf8"
 )
 
@@ -79,14 +80,25 @@ const ExcerptCap = 4 * 1024
 // Excerpt clips s at ExcerptCap bytes and reports whether truncation
 // happened. Use this for any free-form payload field whose source is the
 // LLM or a tool response.
+//
+// Trim happens at a rune boundary so the stored excerpt stays valid UTF-8.
+// If the input is itself invalid UTF-8 (no rune boundary in the trailing
+// few bytes), we fall back to a raw byte cut at ExcerptCap rather than
+// returning an empty string — pair with SanitizeUTF8 before storing if
+// the source is untrusted.
 func Excerpt(s string) (string, bool) {
 	if len(s) <= ExcerptCap {
 		return s, false
 	}
-	// Trim at a rune boundary so the stored excerpt remains valid UTF-8.
 	cut := ExcerptCap
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
+	}
+	if cut == 0 && !utf8.RuneStart(s[0]) {
+		// Invalid UTF-8: prefer a too-long-by-a-few-bytes raw cut over an
+		// empty excerpt that loses all forensic value. SanitizeUTF8 will
+		// scrub continuation-byte fragments at the boundary on its own pass.
+		cut = ExcerptCap
 	}
 	return s[:cut], true
 }
@@ -158,20 +170,25 @@ const LLMRequestVersion = 1
 // LLMResponsePayload — captured at provider edge BEFORE the orchestrator
 // parses native tool calls or interprets text-based tool-call syntax.
 // RawContentExcerpt is the exact bytes (subject to ExcerptCap), and
-// NativeToolCallsRaw is the exact provider ToolCalls struct as
-// json.RawMessage so consumers see whatever the provider sent — even if
-// it doesn't match our current ToolCall shape.
+// NativeToolCallsRaw is the provider's ToolCalls structure embedded as
+// raw JSON so consumers see exactly what the provider sent — even if the
+// shape drifts from the current ToolCall struct.
+//
+// NativeToolCallsRaw uses json.RawMessage (not string) so it inlines
+// directly into the parent payload: `{"native_tool_calls_raw":[{...}]}`
+// instead of an escaped-string form. This matters for psql inspection and
+// for the api-plugin which would otherwise need a double unmarshal.
 type LLMResponsePayload struct {
 	Header
-	RawContentExcerpt   string `json:"raw_content_excerpt"`
-	RawContentTruncated bool   `json:"raw_content_truncated,omitempty"`
-	RawContentSHA256    string `json:"raw_content_sha256,omitempty"`
-	NativeToolCallsRaw  string `json:"native_tool_calls_raw,omitempty"` // JSON text exactly as received
-	FinishReason        string `json:"finish_reason,omitempty"`
-	TokensIn            int    `json:"tokens_in,omitempty"`
-	TokensOut           int    `json:"tokens_out,omitempty"`
-	LatencyMS           int64  `json:"latency_ms,omitempty"`
-	ProviderResponseID  string `json:"provider_response_id,omitempty"`
+	RawContentExcerpt   string          `json:"raw_content_excerpt"`
+	RawContentTruncated bool            `json:"raw_content_truncated,omitempty"`
+	RawContentSHA256    string          `json:"raw_content_sha256,omitempty"`
+	NativeToolCallsRaw  json.RawMessage `json:"native_tool_calls_raw,omitempty"`
+	FinishReason        string          `json:"finish_reason,omitempty"`
+	TokensIn            int             `json:"tokens_in,omitempty"`
+	TokensOut           int             `json:"tokens_out,omitempty"`
+	LatencyMS           int64           `json:"latency_ms,omitempty"`
+	ProviderResponseID  string          `json:"provider_response_id,omitempty"`
 }
 
 const LLMResponseVersion = 1
