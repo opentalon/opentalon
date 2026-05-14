@@ -231,18 +231,18 @@ func main() {
 
 	// Build the structured session-event sink. Unlike debugSink (opt-in
 	// via /debug), this one is always-on whenever the state store is
-	// available — the producer side will be wired up subsystem by
-	// subsystem in subsequent PRs. For the first introduction of the
-	// adapter we keep it unused; later constructors take it as an arg.
+	// available. Wired into the LLM provider via buildProvider; future
+	// PRs route it into the orchestrator subsystems too.
 	var sessionSink emit.Sink = emit.NoOpSink{}
 	if sessionEventWriter != nil {
 		sessionSink = &sessionSinkAdapter{writer: sessionEventWriter}
 	}
-	_ = sessionSink // wired into subsystems in follow-up PRs (phase 1+)
 
-	// Build LLM provider and default model from config. The (sink,resolver)
-	// pair feeds per-session /debug capture; either nil disables capture.
-	prov, defaultModel, err := buildProvider(cfg, debugSink, debugResolver)
+	// Build LLM provider and default model from config. The debug sink
+	// + resolver pair feeds per-session /debug capture (either nil
+	// disables it); sessionSink captures the structured event stream
+	// for every LLM call.
+	prov, defaultModel, err := buildProvider(cfg, debugSink, debugResolver, sessionSink)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error building provider: %v\n", err)
 		os.Exit(1) //nolint:gocritic // matches the other main()-level fatal paths; the deferred db.Close is best-effort, the OS reclaims handles on exit
@@ -1174,7 +1174,7 @@ func runClean(configPath, category string) {
 }
 
 // buildProvider returns a provider and the default model ID from config.
-func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver) (provider.Provider, string, error) {
+func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver, eventSink emit.Sink) (provider.Provider, string, error) {
 	providerID := ""
 	modelID := ""
 
@@ -1244,6 +1244,7 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 		Models:       models,
 		DebugSink:    debugSink,
 		DebugResolve: debugResolve,
+		EventSink:    eventSink,
 	}
 	prov, err := provider.FromConfig(provCfg)
 	if err != nil {

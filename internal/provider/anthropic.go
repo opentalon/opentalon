@@ -20,6 +20,13 @@ const (
 
 // AnthropicProvider implements the Provider interface for the
 // Anthropic Messages API.
+//
+// TODO: instrument with emit.Sink in a follow-up phase. The OpenAI
+// provider emits llm_request / llm_response / llm_error / llm_refused
+// at every HTTP call; the Anthropic path produces none of those today,
+// so sessions routed via Anthropic models are absent from session_events
+// analytics. ProviderConfig.EventSink is wired through factory.go but
+// the Anthropic constructor does not yet consume it.
 type AnthropicProvider struct {
 	id      string
 	baseURL string
