@@ -48,6 +48,45 @@ type WorkflowResult struct {
 	Error string
 }
 
+// executeWorkflow handles the execute_workflow native tool call. It extracts
+// the workflow text from the tool arguments and routes it to the Talon runtime.
+// If no runtime is registered, it returns an error guiding the LLM to fall
+// back to individual tool calls.
+func (o *Orchestrator) executeWorkflow(ctx context.Context, call ToolCall) ToolResult {
+	workflow := call.Args["workflow"]
+	if workflow == "" {
+		slog.Warn("workflow: execute_workflow called with empty workflow",
+			"call_id", call.ID)
+		return ToolResult{
+			CallID: call.ID,
+			Error:  "workflow argument is required. Provide a Talon workflow block.",
+		}
+	}
+
+	slog.Info("workflow: execute_workflow called",
+		"call_id", call.ID,
+		"workflow_len", len(workflow),
+		"workflow_preview", truncate(workflow, 200))
+
+	// TODO: route to the Talon runtime when available.
+	// For now, return an informative error so the LLM falls back to
+	// individual tool calls. This allows the tool to be registered and
+	// tested before the runtime is ready.
+	slog.Warn("workflow: Talon runtime not yet available, workflow not executed",
+		"call_id", call.ID)
+	return ToolResult{
+		CallID: call.ID,
+		Error:  "Talon workflow runtime is not yet available. Please use individual tool calls instead (list-items, submit-workorder, etc.).",
+	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
 // isWorkflowCandidate determines whether a planner result should be executed
 // by the Talon workflow engine instead of the standard pipeline/agent loop.
 //

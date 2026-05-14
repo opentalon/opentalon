@@ -131,6 +131,7 @@ type OrchestratorOpts struct {
 	SummarizePrompt         string                        // empty = default English
 	SummarizeUpdatePrompt   string                        // empty = default English
 	PipelineEnabled         bool                          // when true, create Planner from llm
+	WorkflowEnabled         bool                          // when true, register execute_workflow tool for Talon workflows
 	PlanTimeout             time.Duration                 // max time for planner LLM call; 0 = default 15s
 	PipelineConfig          pipeline.PipelineConfig
 	ConfirmationPlugin      string              // optional; plugin name for confirmation strategy (e.g. "planner")
@@ -196,6 +197,7 @@ type Orchestrator struct {
 	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
 	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
 	planner                 *pipeline.Planner             // nil = pipeline disabled
+	workflowEnabled         bool                          // when true, execute_workflow tool is available
 	pendingMu               sync.Mutex                    // guards pendingPipelines and pendingToolCalls maps
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline (access via pendingMu)
 	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
@@ -320,6 +322,7 @@ func NewWithRules(
 		summarizePrompt:         opts.SummarizePrompt,
 		summarizeUpdatePrompt:   opts.SummarizeUpdatePrompt,
 		planner:                 planner,
+		workflowEnabled:         opts.WorkflowEnabled,
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
 		pendingToolCalls:        make(map[string]*ToolCall),
 		pipelineConfig:          pipelineCfg,
@@ -1804,6 +1807,25 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 			slog.Debug("tool registration: registered", "tool", fqn, "params", len(action.Parameters))
 		}
 	}
+	// Register the execute_workflow native tool when Talon workflows are enabled.
+	if o.workflowEnabled {
+		tools = append(tools, provider.ToolDefinition{
+			Name:        "execute_workflow",
+			Description: prompts.WorkflowTool,
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"workflow": map[string]interface{}{
+						"type":        "string",
+						"description": "Talon workflow block to execute. See tool description for syntax.",
+					},
+				},
+				"required":             []string{"workflow"},
+				"additionalProperties": false,
+			},
+		})
+		slog.Debug("tool registration: execute_workflow registered (Talon workflows enabled)")
+	}
 	return tools
 }
 
@@ -2913,6 +2935,10 @@ func rejectUnknownArgs(call ToolCall, action *Action) error {
 }
 
 func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResult {
+	// Native tool: execute_workflow — route to Talon workflow executor.
+	if call.Plugin == "execute_workflow" || (call.Plugin == "" && call.Action == "execute_workflow") {
+		return o.executeWorkflow(ctx, call)
+	}
 	if call.Plugin == "" {
 		return ToolResult{
 			CallID: call.ID,

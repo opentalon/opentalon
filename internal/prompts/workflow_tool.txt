@@ -1,0 +1,88 @@
+Execute a multi-step workflow as a single atomic operation. Use this tool instead of calling tools one-by-one when you need to:
+- Delete/update/assign MANY items (≥3) matching a query
+- Chain multiple tool calls where later steps depend on earlier results
+- Paginate through ALL results before acting on them
+
+Write a Talon workflow block. The runtime handles pagination, ID collection, error handling, and MCP tool routing automatically.
+
+## Syntax
+
+```
+workflow "short description" {
+  step "step_name" {
+    mcp "server" "tool-name" {
+      arg_name value
+      arg_name "string value"
+      collect_all true
+    }
+  }
+
+  step "next_step" depends_on "step_name" {
+    mcp "server" "tool-name" {
+      arg_name step("step_name").result.field
+      tasks step("step_name").result.items.map(id)
+    }
+  }
+}
+```
+
+## Key features
+- `collect_all true` — auto-paginates until has_more=false, concatenates all results
+- `step("name").result.field` — reference a previous step's result
+- `.map(field)` — extract one field from an array (e.g., items.map(id) → [123, 456, ...])
+- `depends_on "step"` or `depends_on ["step1", "step2"]` — execution order
+
+## Example: delete all items matching a query
+
+```
+workflow "Delete all Test items" {
+  step "find" {
+    mcp "timly" "list-items" {
+      query "name:*Test*"
+      collect_all true
+    }
+  }
+  step "delete" depends_on "find" {
+    mcp "timly" "submit-workorder" {
+      default_tool_name "delete-item"
+      description "Bulk delete Test items"
+      mode "parallel"
+      tasks step("find").result.items.map(id)
+    }
+  }
+}
+```
+
+## Example: assign all items in a category to a person
+
+```
+workflow "Assign category items to John" {
+  step "find_person" {
+    mcp "timly" "list-persons" {
+      query "last_name:Smith AND first_name:John"
+    }
+  }
+  step "find_items" {
+    mcp "timly" "list-items" {
+      query "category_id:5"
+      collect_all true
+    }
+  }
+  step "assign" depends_on ["find_person", "find_items"] {
+    mcp "timly" "submit-workorder" {
+      default_tool_name "assign-item"
+      description "Assign category items to John Smith"
+      mode "parallel"
+      tasks step("find_items").result.items.map_with(id, person_id, step("find_person").result.persons[0].id)
+    }
+  }
+}
+```
+
+## Rules
+- Use ONLY tool names available in your current tool set
+- Tool names use the MCP format: "server" "tool-name" (e.g., "timly" "list-items")
+- Always use collect_all true when you need ALL matching records
+- Always use submit-workorder for ≥3 write operations
+- Step names must be unique within a workflow
+- The workflow description should be 5-12 words

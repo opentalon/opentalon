@@ -127,6 +127,12 @@ var formatTextRaw string
 
 var FormatText = strings.TrimRight(formatTextRaw, "\n")
 
+//go:embed workflow_tool.txt
+var workflowToolRaw string
+
+// WorkflowTool is the tool description for the execute_workflow native tool.
+var WorkflowTool = strings.TrimRight(workflowToolRaw, "\n")
+
 func splitLines(s string) []string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	out := make([]string, 0, len(lines))

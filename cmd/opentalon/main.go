@@ -535,6 +535,7 @@ func main() {
 		SummarizePrompt:         cfg.State.Session.SummarizePrompt,
 		SummarizeUpdatePrompt:   cfg.State.Session.SummarizeUpdatePrompt,
 		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
+		WorkflowEnabled:         cfg.Orchestrator.Workflow.Enabled,
 		PlanTimeout:             planTimeout,
 		PipelineConfig:          pipelineCfg,
 		ConfirmationPlugin:      cfg.Orchestrator.Pipeline.ConfirmationPlugin,
