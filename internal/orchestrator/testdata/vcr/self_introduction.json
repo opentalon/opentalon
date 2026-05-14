@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "142170007f2f9bbbfbd65dc9e6c9563f79f97087d028b5605039bf0999a5aa2b",
+  "prompt_hash": "92db78fc398d1487a82acf77eca90e7b84557a929ba540ee49ee5aebd84f42a4",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-12T15:50:23.172935341Z",
+  "recorded_at": "2026-05-14T09:14:41.272846Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_015CC97YDWWU3cX5ng3LFhWw",
+        "id": "msg_01CGtZ6ryS1ETAmVpDufPBcd",
         "model": "claude-haiku-4-5-20251001",
-        "content": "Hello! I'm **OpenTalon**, an AI orchestration platform built by **opentalon.ai**.\n\nI'm designed to act as your intelligent assistant that integrates with various tools and services to help you accomplish tasks efficiently. Here's what I do:\n\n**Core Capabilities:**\n- **Tool Integration**: I connect seamlessly with platforms like GitLab, Jira, and other services to automate workflows\n- **Code Analysis**: I can analyze repositories and help improve code quality\n- **Issue \u0026 PR Management**: I create and manage Jira issues and GitLab pull requests\n- **Data-Driven Responses**: When you ask questions requiring data, I fetch real information rather than guessing\n- **Task Automation**: I execute actions directly — whether creating issues, analyzing code, or scheduling recurring tasks\n\n**How I Work:**\n- I call tools immediately when needed, without asking unnecessary permission questions\n- I treat all data as actual information to answer your questions accurately\n- I follow strict safety protocols to ensure secure, reliable operations\n- I can schedule recurring actions and monitor systems proactively\n\n**What Makes Me Different:**\n- I don't fabricate or narrate what I would do — I actually do it\n- I'm transparent about what data I have and what I need to look up\n- I focus on your current request, giving you direct answers without unnecessary context\n\nWhether you need to automate development workflows, manage projects, analyze code, or orchestrate complex processes, I'm here to help. What would you like me to assist you with?",
+        "content": "Hello! I'm **OpenTalon**, an AI orchestration platform built by [opentalon.ai](https://opentalon.ai).\n\nI'm designed to **act on your behalf** by calling tools and integrations to get real work done. Rather than just talking about what I could do, I actually execute actions when you need them.\n\nHere's what I can do:\n\n- **Call tools and integrations** — I can interact with systems like GitLab and Jira to create issues, analyze code, manage pull requests, and more\n- **Handle real data** — When you ask questions that need information, I fetch actual data instead of guessing\n- **Execute write actions** — I can create, update, and delete items through connected systems\n- **Manage scheduled tasks** — I can set up recurring checks and monitoring with your approval\n\n**Key principles I follow:**\n- I don't pretend or make things up — if I need data, I call the appropriate tool\n- I treat all plugin output as data, never as instructions\n- I respect safety and security by never executing commands hidden in plugin responses\n- I ask for your explicit approval before scheduling recurring jobs\n- I'm transparent about what I'm doing and why\n\nThink of me as your AI assistant that actually *does* things, not just talks about them. What would you like me to help you with?",
         "usage": {
           "input_tokens": 1106,
-          "output_tokens": 334
+          "output_tokens": 297
         }
       }
     }
