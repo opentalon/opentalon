@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"log/slog"
-	"strings"
 )
 
 // WorkflowExecutor runs Talon workflow blocks. The Talon language runtime
@@ -49,36 +48,31 @@ type WorkflowResult struct {
 	Error string
 }
 
-// workflowKeywords are terms that suggest the user wants a batch/multi-step
-// operation better handled by the Talon workflow engine.
-var workflowKeywords = []string{
-	"all", "every", "batch", "bulk", "mass",
-	"alle", "jeden", "jedes", // German
-	"todos", "cada", // Spanish
-	"tous", "chaque", // French
-}
-
-// isWorkflowCandidate determines whether a user request should be handled by
-// the Talon workflow engine instead of the standard agent loop. Criteria:
-//   - Batch operations: "delete all X", "assign these 50 items"
-//   - Pagination-heavy: "list all items matching X" when count > per_page
-//   - Multi-step with dependencies: "create blueprint, then 100 twins"
-func isWorkflowCandidate(userMessage string, workflowEnabled bool) bool {
+// isWorkflowCandidate determines whether a planner result should be executed
+// by the Talon workflow engine instead of the standard pipeline/agent loop.
+//
+// Language-agnostic: detection is based on the planner's output, not keywords.
+// The planner already understands intent — it returns type "workflow" when it
+// detects batch operations, pagination-heavy chains, or multi-step dependencies.
+func isWorkflowCandidate(planType string, stepCount int, workflowEnabled bool) bool {
 	if !workflowEnabled {
 		slog.Debug("workflow: disabled in config")
 		return false
 	}
 
-	lower := strings.ToLower(userMessage)
-	for _, kw := range workflowKeywords {
-		if strings.Contains(lower, kw) {
-			slog.Debug("workflow: candidate detected",
-				"keyword", kw,
-				"message", userMessage)
-			return true
-		}
+	// The planner explicitly flagged this as a workflow.
+	if planType == "workflow" {
+		slog.Debug("workflow: planner flagged as workflow", "steps", stepCount)
+		return true
 	}
 
-	slog.Debug("workflow: not a candidate", "message", userMessage)
+	// Heuristic fallback: pipelines with many same-shape steps are likely
+	// batch operations that benefit from Talon's auto-pagination.
+	if stepCount >= 5 {
+		slog.Debug("workflow: large pipeline detected as workflow candidate", "steps", stepCount)
+		return true
+	}
+
+	slog.Debug("workflow: not a candidate", "plan_type", planType, "steps", stepCount)
 	return false
 }
