@@ -1036,11 +1036,52 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// "which type of object?").
 		sess, _ := sessions.Get(sessionID)
 		convContext := buildPlannerConversationContext(sess)
+		// Planner instrumentation: invoked + request fire before the
+		// synchronous Plan() call; response fires after with a synthetic
+		// summary in raw_content_excerpt because the pipeline.Planner
+		// parses and discards the raw LLM response internally (capturing
+		// the raw bytes would require a planner-pkg refactor — out of
+		// scope here). One planner_step event per Step is emitted only on
+		// pipeline plans; direct plans have no steps to enumerate.
+		//
+		// Reason "agent_loop" marks the main per-turn planning call. The
+		// planner's other entry point — ClassifyConfirmation, used by
+		// pending-pipeline / pending-tool-call confirmation paths above —
+		// is intentionally not instrumented here: those calls are short
+		// classifications, not full plans, and would dilute the analytics
+		// signal if grouped under the same event_type.
+		emit.EmitPlannerInvoked(ctx, o.eventSink, "agent_loop")
+		emit.EmitPlannerRequest(ctx, o.eventSink, emit.PlannerRequestArgs{
+			ModelID:      "", // planner uses provider-default routing; not exposed by pipeline.Planner
+			MessageCount: 2,  // planner hardcodes system+user, see pipeline.Planner.Plan
+		})
+		plannerStart := time.Now()
 		planResult, err := o.planner.Plan(ctx, stripKnowledgeContext(content), capabilitiesToPlannerInfo(plannerCaps), convContext)
+		plannerLatency := time.Since(plannerStart).Milliseconds()
+		var plannerRaw string
 		if err != nil {
+			plannerRaw = "planner error: " + err.Error()
 			log.Warn("planner error, falling through to agent loop", "error", err)
 		} else {
+			plannerRaw = fmt.Sprintf("planner ok: type=%s steps=%d", planResult.Type, len(planResult.Steps))
 			log.Debug("planner result", "type", planResult.Type, "steps", len(planResult.Steps))
+		}
+		emit.EmitPlannerResponse(ctx, o.eventSink, emit.PlannerResponseArgs{
+			RawContent: plannerRaw,
+			LatencyMS:  plannerLatency,
+		})
+		if err == nil && planResult.Type == "pipeline" {
+			for i, step := range planResult.Steps {
+				note := ""
+				if step.Command != nil {
+					note = step.Command.Plugin + "." + step.Command.Action
+				}
+				emit.EmitPlannerStep(ctx, o.eventSink, emit.PlannerStepArgs{
+					StepIndex: i,
+					StepKind:  "tool",
+					Note:      note,
+				})
+			}
 		}
 		if err == nil && planResult.Type == "pipeline" && len(planResult.Steps) > 1 {
 			confResult := confirmationResult{RequiresConfirmation: true, ConfirmBeforeStep: 0}
@@ -1482,8 +1523,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Info("native tool calls received", "round", i+1, "count", len(calls))
 		} else {
 			calls = o.parser.Parse(resp.Content)
-			// Phase 4: emit tool_call_parse_failed when the LLM clearly
-			// attempted a structured tool call (a [tool_call] / <invoke> /
+			// Emit tool_call_parse_failed when the LLM clearly attempted a
+			// structured tool call (a [tool_call] / <invoke> /
 			// <function_calls> marker is present) but the parser produced
 			// no valid call. Detected post-Parse rather than instrumenting
 			// the parser to avoid an interface-signature ripple. raw_snippet
@@ -1491,7 +1532,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// emit helper); per-block error detail is not surfaced today
 			// because the default parser silently continues on each
 			// individual decode failure — capturing that would require a
-			// failures slice on the ToolCallParser interface, deferred.
+			// failures slice on the ToolCallParser interface.
 			o.emitParseFailedIfApplicable(ctx, resp.Content, calls)
 		}
 		if calls == nil {
@@ -1636,7 +1677,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			return result, nil
 		}
 
-		// The LLM narrated a tool call ("We need to call timly__list-items")
+		// The LLM narrated a tool call ("We need to call plugin__action")
 		// instead of using [tool_call] format. Retry with an explicit nudge.
 		if IsNarratedPlaceholder(calls) {
 			log.Debug("narrated tool call detected, retrying with nudge", "round", i+1)
@@ -2824,7 +2865,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 
 	// When RAG filtering is active, list plugins that have actions but none
 	// matched the current query. The LLM can use ask_knowledge to discover
-	// their actions on demand. Use alias names (e.g. "jira", "timly") when
+	// their actions on demand. Use alias names (e.g. "jira", "tickets") when
 	// available, since those are the names the LLM should use.
 	if len(discoverablePlugins) > 0 {
 		sb.WriteString("## Other available plugins\n")
@@ -3052,8 +3093,8 @@ func rejectUnknownArgs(call ToolCall, action *Action) error {
 }
 
 func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResult {
-	// Phase 3: emit tool_call_extracted at the very top for LLM-originated
-	// calls so the raw decoded view is captured before any validation,
+	// Emit tool_call_extracted at the very top for LLM-originated calls
+	// so the raw decoded view is captured before any validation,
 	// normalization, policy gating, or context-arg injection mutates it
 	// (raw-capture rule). Internal calls (preparers, guards, pipelines)
 	// are host-orchestrated, not part of the LLM reasoning trace, and are
@@ -3360,12 +3401,21 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 	if len(sess.Messages) < o.summarizeAfterMessages {
 		return
 	}
+	// This fires from a background goroutine started in Run with
+	// context.Background(), so actor.SessionID(ctx) would resolve to "" and
+	// session_events writes would fail validation. Wrap the session id back
+	// onto ctx here so the emit helpers can read it via the standard slot.
+	ctx = actor.WithSessionID(ctx, sessionID)
 	keep := o.maxMessagesAfterSummary
 	if keep > len(sess.Messages) {
 		keep = len(sess.Messages)
 	}
 	toSummarize := sess.Messages[:len(sess.Messages)-keep]
 	keepMessages := sess.Messages[len(sess.Messages)-keep:]
+	emit.EmitSummarizationTriggered(ctx, o.eventSink, emit.SummarizationTriggeredArgs{
+		MessageCount: len(sess.Messages),
+		Reason:       "threshold_reached",
+	})
 
 	var sysPrompt, userContent string
 	if sess.Summary != "" {
@@ -3399,9 +3449,13 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 			{Role: provider.RoleUser, Content: userContent},
 		},
 	}
+	summarizeStart := time.Now()
 	resp, err := o.llm.Complete(ctx, req)
 	if err != nil {
 		slog.Warn("session summarization failed", "error", err)
+		// No completed event on LLM failure: triggered-without-completed
+		// is the analytics signal for "summarization started but did not
+		// finish". Same pattern as other failure-mode events in this file.
 		return
 	}
 	newSummary := strings.TrimSpace(resp.Content)
@@ -3409,8 +3463,20 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 		return
 	}
 	if err := o.sessions.SetSummary(sessionID, newSummary, keepMessages); err != nil {
+		// Same "triggered without completed" failure signal as the LLM
+		// error path above. SessionStore.SetSummary only errors on
+		// "session not found", which is already excluded by the earlier
+		// Get() check; reaching this branch would require the session
+		// being deleted concurrently between Get and SetSummary. Treated
+		// as a defensive return for that race, no dedicated test.
 		slog.Warn("set session summary failed", "error", err)
+		return
 	}
+	emit.EmitSummarizationCompleted(ctx, o.eventSink, emit.SummarizationCompletedArgs{
+		Summary:      newSummary,
+		KeptMessages: len(keepMessages),
+		LatencyMS:    time.Since(summarizeStart).Milliseconds(),
+	})
 }
 
 // RunAction executes a single plugin action directly, bypassing the LLM loop.

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -294,8 +296,8 @@ func TestOrchestrator_TurnStartFiresOnce_AcrossMultiRoundAgentLoop(t *testing.T)
 func TestOrchestrator_EmitsUserMessage_EmptyContent(t *testing.T) {
 	// Empty user message (e.g. user sent only file attachments) is captured
 	// verbatim. The event still fires — content_length = 0 is the truthful
-	// representation of "user posted with no text". Phase 2 does not yet
-	// capture file metadata; that's intentional out-of-scope.
+	// representation of "user posted with no text". File metadata is
+	// intentionally out of scope here.
 	sink := &recordingEventSink{}
 	llm := &fakeLLM{responses: []string{"empty echo"}}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
@@ -328,9 +330,9 @@ func TestOrchestrator_EmitsUserMessage_EmptyContent(t *testing.T) {
 func TestOrchestrator_TurnStart_ProfileModelOverridesModelID(t *testing.T) {
 	// When a profile in ctx supplies a model, turn_start's ModelID must
 	// reflect that override (not the empty string the bare config would
-	// have produced). Phase 2 captures *intent* — what the orchestrator
+	// have produced). turn_start captures *intent* — what the orchestrator
 	// asked the provider for — not the resolved model the provider may
-	// substitute downstream (that lands in llm_response, Phase 1 territory).
+	// substitute downstream (that lands in llm_response).
 	sink := &recordingEventSink{}
 	llm := &fakeLLM{responses: []string{"ok"}}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
@@ -627,7 +629,7 @@ func findTurnStart(t *testing.T, evs []emit.Event) events.TurnStartPayload {
 }
 
 // -----------------------------------------------------------------------------
-// Phase 3 — tool dispatcher instrumentation tests
+// Tool dispatcher instrumentation tests
 // -----------------------------------------------------------------------------
 
 // nativeToolCallingLLM returns native ToolCalls on its first Complete call,
@@ -1100,7 +1102,7 @@ func TestOrchestrator_ExecuteCall_EmitsResultError_OnRestrictedPluginRefusal(t *
 }
 
 // -----------------------------------------------------------------------------
-// Phase 4 — text-parser instrumentation tests
+// Text-parser instrumentation tests
 // -----------------------------------------------------------------------------
 
 // findParseFailedPayloads collects all tool_call_parse_failed payloads.
@@ -1128,7 +1130,8 @@ func TestOrchestrator_ParseFailed_EmittedOnMalformedToolCallBody(t *testing.T) {
 	// empty-plugin placeholder. tool_call_parse_failed must fire once.
 	sink := &recordingEventSink{}
 	// Use DefaultParser so the real parser logic decides — fakeParser
-	// would bypass the marker-vs-empty-plugin signal that drives Phase 4.
+	// would bypass the marker-vs-empty-plugin signal that drives the
+	// parse_failed emission.
 	llm := &fakeLLM{responses: []string{
 		"[tool_call] this is not a valid tool call body [/tool_call]",
 		"fallback final answer",
@@ -1209,7 +1212,7 @@ func TestOrchestrator_ParseFailed_NotEmittedOnSuccessfulParse(t *testing.T) {
 	if pf := findParseFailedPayloads(t, sink.snapshot()); len(pf) != 0 {
 		t.Errorf("tool_call_parse_failed fired on successful parse (%d events); should not", len(pf))
 	}
-	// Sanity: Phase 3 events still fire for the successful path.
+	// Sanity: tool_call_extracted still fires for the successful path.
 	if len(findToolCallExtractedPayloads(t, sink.snapshot())) != 1 {
 		t.Errorf("expected one tool_call_extracted on successful parse")
 	}
@@ -1260,8 +1263,8 @@ func TestOrchestrator_ParseFailed_EmittedOnUnclosedToolCallMarker(t *testing.T) 
 	// parser's "no closing tag" branch (parser.go line 61-64) takes the
 	// rest-of-string as body, attempts Format A then Format B/C, and
 	// produces an empty-plugin placeholder via the sawBlock fallback.
-	// Phase 4 must catch this — without a closing marker, the response
-	// is incoherent and analytics needs to see the failure.
+	// The parse_failed event must catch this — without a closing marker,
+	// the response is incoherent and analytics needs to see the failure.
 	sink := &recordingEventSink{}
 	llm := &fakeLLM{responses: []string{
 		"[tool_call] this has no closing marker and is malformed",
@@ -1277,7 +1280,7 @@ func TestOrchestrator_ParseFailed_EmittedOnUnclosedToolCallMarker(t *testing.T) 
 }
 
 func TestOrchestrator_ParseFailed_NoEventSink_DoesNotPanic(t *testing.T) {
-	// NoOpSink default path coverage for the Phase 4 emit site.
+	// NoOpSink default path coverage for the parse_failed emit site.
 	registry := NewToolRegistry()
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
@@ -1293,8 +1296,7 @@ func TestOrchestrator_ParseFailed_NoEventSink_DoesNotPanic(t *testing.T) {
 }
 
 func TestOrchestrator_ExecuteCall_NoEventSink_DoesNotPanic(t *testing.T) {
-	// Mirrors the NoOpSink default-path coverage from Phase 2 — must also
-	// hold for the dispatcher path.
+	// NoOpSink default-path coverage for the dispatcher emit site.
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
 		Name: "gitlab", Actions: []Action{{Name: "analyze_code"}},
@@ -1311,4 +1313,295 @@ func TestOrchestrator_ExecuteCall_NoEventSink_DoesNotPanic(t *testing.T) {
 	_ = orch.executeCall(context.Background(), ToolCall{
 		ID: "c2", Plugin: "missing", Action: "anything", FromLLM: true,
 	})
+}
+
+// -----------------------------------------------------------------------------
+// Planner + summarization instrumentation tests
+// -----------------------------------------------------------------------------
+
+func findPayloadsByType(t *testing.T, evs []emit.Event, eventType string) []json.RawMessage {
+	t.Helper()
+	var out []json.RawMessage
+	for _, e := range evs {
+		if e.EventType == eventType {
+			out = append(out, e.Payload)
+		}
+	}
+	return out
+}
+
+// setupOrchestratorWithPlanner builds an orchestrator with PipelineEnabled
+// so the real *pipeline.Planner is constructed against the fake LLM. The
+// fake LLM must produce a parseable JSON plan as its first response.
+func setupOrchestratorWithPlanner(llm LLMClient, parser ToolCallParser, sink emit.Sink) (*Orchestrator, string) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "gitlab",
+		Actions: []Action{{Name: "analyze_code"}},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:       sink,
+		PipelineEnabled: true,
+	})
+	return orch, "sess"
+}
+
+func TestOrchestrator_Planner_EmitsInvokedRequestResponseOnDirectPlan(t *testing.T) {
+	sink := &recordingEventSink{}
+	// Round 1: planner LLM returns "direct" plan.
+	// Round 2: agent loop LLM returns final answer.
+	llm := &fakeLLM{responses: []string{
+		`{"type":"direct"}`,
+		"final answer",
+	}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithPlanner(llm, parser, sink)
+
+	if _, err := orch.Run(context.Background(), sessID, "hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	evs := sink.snapshot()
+	if len(findPayloadsByType(t, evs, events.TypePlannerInvoked)) != 1 {
+		t.Errorf("planner_invoked count != 1")
+	}
+	if len(findPayloadsByType(t, evs, events.TypePlannerRequest)) != 1 {
+		t.Errorf("planner_request count != 1")
+	}
+	if len(findPayloadsByType(t, evs, events.TypePlannerResponse)) != 1 {
+		t.Errorf("planner_response count != 1")
+	}
+	// Direct plan has no steps, no planner_step events.
+	if n := len(findPayloadsByType(t, evs, events.TypePlannerStep)); n != 0 {
+		t.Errorf("planner_step count = %d, want 0 on direct plan", n)
+	}
+
+	// planner_invoked payload: reason set.
+	var inv events.PlannerInvokedPayload
+	_ = json.Unmarshal(findPayloadsByType(t, evs, events.TypePlannerInvoked)[0], &inv)
+	if inv.Reason == "" {
+		t.Errorf("planner_invoked.Reason empty")
+	}
+
+	// planner_response payload: synthetic summary, latency >= 0.
+	var resp events.PlannerResponsePayload
+	_ = json.Unmarshal(findPayloadsByType(t, evs, events.TypePlannerResponse)[0], &resp)
+	if !strings.Contains(resp.RawContentExcerpt, "type=direct") {
+		t.Errorf("planner_response.RawContentExcerpt = %q, want contains type=direct", resp.RawContentExcerpt)
+	}
+	if resp.LatencyMS < 0 {
+		t.Errorf("planner_response.LatencyMS = %d, want >= 0", resp.LatencyMS)
+	}
+}
+
+func TestOrchestrator_Planner_EmitsStepEventsOnPipelinePlan(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{
+		// Pipeline plan with 2 steps. Single-step pipelines are special-cased,
+		// so use 2 to trigger the full pipeline path (and reach the planner
+		// branch we care about — single-step paths return early).
+		`{"type":"pipeline","steps":[
+			{"id":"s1","name":"step one","plugin":"gitlab","action":"analyze_code","args":{},"depends_on":[]},
+			{"id":"s2","name":"step two","plugin":"gitlab","action":"analyze_code","args":{},"depends_on":["s1"]}
+		]}`,
+		// In case pipeline confirmation needs an LLM round.
+		"continue",
+		"final",
+	}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithPlanner(llm, parser, sink)
+
+	// Plan-only path can pause for confirmation. We only need the planner
+	// events; tolerate any final state.
+	_, _ = orch.Run(context.Background(), sessID, "do two things")
+
+	steps := findPayloadsByType(t, sink.snapshot(), events.TypePlannerStep)
+	if len(steps) != 2 {
+		t.Fatalf("planner_step count = %d, want 2", len(steps))
+	}
+	for i, raw := range steps {
+		var p events.PlannerStepPayload
+		_ = json.Unmarshal(raw, &p)
+		if p.StepIndex != i {
+			t.Errorf("step[%d].StepIndex = %d, want %d", i, p.StepIndex, i)
+		}
+		if p.StepKind != "tool" {
+			t.Errorf("step[%d].StepKind = %q, want tool", i, p.StepKind)
+		}
+		if p.Note != "gitlab.analyze_code" {
+			t.Errorf("step[%d].Note = %q, want gitlab.analyze_code", i, p.Note)
+		}
+	}
+}
+
+func TestOrchestrator_Planner_EmitsResponseOnPlannerError(t *testing.T) {
+	// Planner LLM returns unparseable content; parsePlanResponse falls back
+	// to {Type: "direct"} but returns no error. To trigger an actual error
+	// we'd need the LLM Complete itself to fail — use an LLM that errors on
+	// the first call. The agent loop then runs against a fresh LLM call.
+	sink := &recordingEventSink{}
+	llm := &erroringPlannerLLM{plannerErr: errPlannerCallFailed}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithPlanner(llm, parser, sink)
+
+	_, _ = orch.Run(context.Background(), sessID, "hi")
+
+	evs := sink.snapshot()
+	// planner_invoked + planner_request + planner_response all fire even on error.
+	if len(findPayloadsByType(t, evs, events.TypePlannerInvoked)) != 1 {
+		t.Errorf("planner_invoked count != 1 on error path")
+	}
+	if len(findPayloadsByType(t, evs, events.TypePlannerResponse)) != 1 {
+		t.Errorf("planner_response count != 1 on error path")
+	}
+	var resp events.PlannerResponsePayload
+	_ = json.Unmarshal(findPayloadsByType(t, evs, events.TypePlannerResponse)[0], &resp)
+	if !strings.Contains(resp.RawContentExcerpt, "planner error:") {
+		t.Errorf("planner_response.RawContentExcerpt = %q, want contains 'planner error:'", resp.RawContentExcerpt)
+	}
+}
+
+var errPlannerCallFailed = errors.New("simulated planner LLM failure")
+
+// erroringPlannerLLM returns plannerErr on the first Complete (the planner's
+// own LLM call) and "fallback ok" on subsequent ones so the orchestrator's
+// agent loop can still terminate.
+type erroringPlannerLLM struct {
+	plannerErr error
+	calls      int
+}
+
+func (l *erroringPlannerLLM) Complete(_ context.Context, _ *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	l.calls++
+	if l.calls == 1 {
+		return nil, l.plannerErr
+	}
+	return &provider.CompletionResponse{Content: "fallback ok"}, nil
+}
+
+func TestOrchestrator_Summarization_EmitsTriggeredAndCompleted(t *testing.T) {
+	// Pre-populate the session with messages over the threshold, then call
+	// maybeSummarizeSession directly (avoid goroutine timing flakiness — the
+	// production caller fires it via `go ...` after Run, but the function
+	// itself is fully synchronous once invoked).
+	sink := &recordingEventSink{}
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	for i := 0; i < 10; i++ {
+		_ = sessions.AddMessage("sess", provider.Message{
+			Role: provider.RoleUser, Content: "msg " + strconv.Itoa(i),
+		})
+	}
+	llm := &fakeLLM{responses: []string{"summary of older turns"}}
+	orch := NewWithRules(llm, DefaultParser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:               sink,
+		SummarizeAfterMessages:  5,
+		MaxMessagesAfterSummary: 3,
+	})
+
+	orch.maybeSummarizeSession(context.Background(), "sess")
+
+	evs := sink.snapshot()
+	trig := findPayloadsByType(t, evs, events.TypeSummarizationTriggered)
+	comp := findPayloadsByType(t, evs, events.TypeSummarizationCompleted)
+	if len(trig) != 1 {
+		t.Fatalf("summarization_triggered count = %d, want 1", len(trig))
+	}
+	if len(comp) != 1 {
+		t.Fatalf("summarization_completed count = %d, want 1", len(comp))
+	}
+	var tp events.SummarizationTriggeredPayload
+	_ = json.Unmarshal(trig[0], &tp)
+	if tp.MessageCount != 10 {
+		t.Errorf("triggered.MessageCount = %d, want 10", tp.MessageCount)
+	}
+	if tp.Reason == "" {
+		t.Errorf("triggered.Reason empty")
+	}
+	var cp events.SummarizationCompletedPayload
+	_ = json.Unmarshal(comp[0], &cp)
+	if cp.SummaryExcerpt != "summary of older turns" {
+		t.Errorf("completed.SummaryExcerpt = %q", cp.SummaryExcerpt)
+	}
+	if cp.KeptMessages != 3 {
+		t.Errorf("completed.KeptMessages = %d, want 3", cp.KeptMessages)
+	}
+	if cp.LatencyMS < 0 {
+		t.Errorf("completed.LatencyMS = %d, want >= 0", cp.LatencyMS)
+	}
+}
+
+func TestOrchestrator_Summarization_NoCompletedOnLLMError(t *testing.T) {
+	// LLM errors on summarization → triggered fires, completed does not.
+	// Consumer-side analytics counts "triggered minus completed" as failure rate.
+	sink := &recordingEventSink{}
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	for i := 0; i < 10; i++ {
+		_ = sessions.AddMessage("sess", provider.Message{
+			Role: provider.RoleUser, Content: "msg",
+		})
+	}
+	llm := &erroringPlannerLLM{plannerErr: errPlannerCallFailed}
+	orch := NewWithRules(llm, DefaultParser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:               sink,
+		SummarizeAfterMessages:  5,
+		MaxMessagesAfterSummary: 3,
+	})
+	orch.maybeSummarizeSession(context.Background(), "sess")
+
+	evs := sink.snapshot()
+	if len(findPayloadsByType(t, evs, events.TypeSummarizationTriggered)) != 1 {
+		t.Errorf("triggered count != 1")
+	}
+	if n := len(findPayloadsByType(t, evs, events.TypeSummarizationCompleted)); n != 0 {
+		t.Errorf("completed count = %d, want 0 on LLM error", n)
+	}
+}
+
+func TestOrchestrator_Summarization_BelowThreshold_NoEvents(t *testing.T) {
+	sink := &recordingEventSink{}
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	// Only 2 messages; threshold is 5 → maybeSummarizeSession returns early.
+	for i := 0; i < 2; i++ {
+		_ = sessions.AddMessage("sess", provider.Message{Role: provider.RoleUser, Content: "m"})
+	}
+	orch := NewWithRules(&fakeLLM{}, DefaultParser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:               sink,
+		SummarizeAfterMessages:  5,
+		MaxMessagesAfterSummary: 3,
+	})
+	orch.maybeSummarizeSession(context.Background(), "sess")
+
+	if n := len(findPayloadsByType(t, sink.snapshot(), events.TypeSummarizationTriggered)); n != 0 {
+		t.Errorf("triggered fired below threshold (%d events)", n)
+	}
+}
+
+func TestOrchestrator_Planner_NoEventsWhenPlannerDisabled(t *testing.T) {
+	// PipelineEnabled defaults to false → planner is nil → no events.
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"plain answer"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+	if _, err := orch.Run(context.Background(), sessID, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range sink.snapshot() {
+		switch e.EventType {
+		case events.TypePlannerInvoked, events.TypePlannerRequest,
+			events.TypePlannerResponse, events.TypePlannerStep:
+			t.Errorf("planner event %q fired with no planner configured", e.EventType)
+		}
+	}
 }
