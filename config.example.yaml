@@ -239,6 +239,18 @@ state:
   #   max_messages_after_summary: 6  # keep this many messages after summarization
   #   summarize_prompt: "Summarize the following conversation in a short paragraph."  # any language
   #   summarize_update_prompt: "Update the given conversation summary with the following new exchange. Keep the result to a short paragraph."
+  # Per-session deep debug capture: raw LLM-endpoint request/response bodies
+  # captured only while a session has metadata[debug]=true (toggled via the
+  # set_debug_mode action). The table stays empty otherwise.
+  # debug:
+  #   retention_days: 30         # days to keep ai_debug_events rows (default 30)
+  #   retention_disabled: false  # set true to keep rows forever; overrides retention_days
+  # Structured session_events log: always-on per-turn analytics trail
+  # (turn_start, llm_response, tool_call_extracted, parse failures, ...).
+  # See internal/state/store/events for the full payload schema.
+  # session_events:
+  #   retention_days: 90         # days to keep session_events rows (default 90)
+  #   retention_disabled: false  # set true to keep rows forever; overrides retention_days
 
 # Scheduler: periodic jobs and user-triggered reminders.
 # The built-in scheduler tool lets the LLM create/list/delete jobs and set
