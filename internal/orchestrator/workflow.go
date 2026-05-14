@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"log/slog"
+
+	"github.com/opentalon/opentalon/internal/logger"
 )
 
 // WorkflowExecutor runs Talon workflow blocks. The Talon language runtime
@@ -63,10 +65,14 @@ func (o *Orchestrator) executeWorkflow(ctx context.Context, call ToolCall) ToolR
 		}
 	}
 
-	slog.Info("workflow: execute_workflow called",
+	log := logger.FromContext(ctx)
+	log.Info("workflow: execute_workflow called",
 		"call_id", call.ID,
-		"workflow_len", len(workflow),
-		"workflow_preview", truncate(workflow, 200))
+		"workflow_len", len(workflow))
+	// Log the full generated Talon code at Debug level so /debug shows it.
+	log.Debug("workflow: generated talon code",
+		"call_id", call.ID,
+		"code", workflow)
 
 	// TODO: route to the Talon runtime when available.
 	// For now, return an informative error so the LLM falls back to
@@ -78,13 +84,6 @@ func (o *Orchestrator) executeWorkflow(ctx context.Context, call ToolCall) ToolR
 		CallID: call.ID,
 		Error:  "Talon workflow runtime is not yet available. Please use individual tool calls instead (list-items, submit-workorder, etc.).",
 	}
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }
 
 // isWorkflowCandidate determines whether a planner result should be executed
