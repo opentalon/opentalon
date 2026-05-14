@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "142170007f2f9bbbfbd65dc9e6c9563f79f97087d028b5605039bf0999a5aa2b",
+  "prompt_hash": "92db78fc398d1487a82acf77eca90e7b84557a929ba540ee49ee5aebd84f42a4",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-12T15:50:20.5837451Z",
+  "recorded_at": "2026-05-14T09:14:39.381918Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,7 +19,7 @@
         ]
       },
       "response": {
-        "id": "gen-1778601020-VzU9e9lwlmAuYaZmJGbP",
+        "id": "gen-1778750079-yUpn9uRya3AFmDa1Z0ql",
         "model": "mistralai/ministral-8b-2512",
         "content": "[tool_call]\n{\"tool\": \"gitlab.analyze_code\", \"args\": {\"repo\": \"myrepo\"}}\n[/tool_call]",
         "usage": {
@@ -55,12 +55,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778601021-uLKlZXe1JdbkZ5t59Df4",
+        "id": "gen-1778750079-NHdvPAiotcZKUAKRO1CT",
         "model": "mistralai/ministral-8b-2512",
-        "content": "[tool_call]\n{\"tool\": \"jira.create_issue\", \"args\": {\"project_key\": \"YOUR_PROJECT_KEY\", \"issue_type\": \"Task\", \"summary\": \"Code review\", \"description\": \"Automated code review findings from myrepo.\"}}\n[/tool_call]",
+        "content": "[tool_call]\n{\"tool\": \"jira.create_issue\", \"args\": {\"project\": \"your_project_key\", \"summary\": \"Code review\", \"description\": \"Code analysis results for myrepo are attached.\"}}\n[/tool_call]",
         "usage": {
           "input_tokens": 1099,
-          "output_tokens": 63
+          "output_tokens": 52
         }
       }
     },
@@ -86,11 +86,11 @@
           },
           {
             "role": "assistant",
-            "content": "[tool_call] jira.create_issue(project_key=YOUR_PROJECT_KEY, issue_type=Task, summary=Code review, description=Automated code review findings from myrepo.)"
+            "content": "[tool_call] jira.create_issue(summary=Code review, description=Code analysis results for myrepo are attached., project=your_project_key)"
           },
           {
             "role": "user",
-            "content": "[plugin_output]\nerror: unknown argument(s) for jira.create_issue: description, issue_type, project_key, summary; allowed: (none)\n[/plugin_output]"
+            "content": "[plugin_output]\nerror: unknown argument(s) for jira.create_issue: description, project, summary; allowed: (none)\n[/plugin_output]"
           },
           {
             "role": "system",
@@ -99,12 +99,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778601022-1R5ajP2KilnaE6YBZ0Fg",
+        "id": "gen-1778750080-nDTQrtWSQ3lKltTlRNm3",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Could you clarify which Jira project this issue should belong to? If you provide the project key (e.g., `PROJ`), I’ll retry creating the issue.",
+        "content": "Could you clarify which Jira project this issue should belong to? I need the project key (e.g., `PROJ`) to create the issue.",
         "usage": {
-          "input_tokens": 1179,
-          "output_tokens": 35
+          "input_tokens": 1167,
+          "output_tokens": 32
         }
       }
     }

@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "142170007f2f9bbbfbd65dc9e6c9563f79f97087d028b5605039bf0999a5aa2b",
+  "prompt_hash": "92db78fc398d1487a82acf77eca90e7b84557a929ba540ee49ee5aebd84f42a4",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-05-12T15:50:27.07011092Z",
+  "recorded_at": "2026-05-14T09:14:44.952212Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1778601027-Th7UdnEF7JUgVPaP2AJ4",
+        "id": "gen-1778750085-YqLwGxKV6CtjtyJtO9Ll",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Hello! I’m **OpenTalon**, your AI orchestration assistant. I help you automate workflows, analyze data, create tasks, and integrate with tools like GitLab, Jira, and more—all while ensuring accuracy by fetching real-time information when needed.\n\nHow can I assist you today?",
+        "content": "Hello! I’m **OpenTalon**, your AI orchestration assistant from **opentalon.ai**. I’m here to help you with tasks, data retrieval, automation, and integrations—whether it’s searching for information, analyzing code, creating issues, or managing workflows across platforms like GitLab and Jira.\n\nHow can I assist you today?",
         "usage": {
           "input_tokens": 1043,
-          "output_tokens": 62
+          "output_tokens": 73
         }
       }
     }

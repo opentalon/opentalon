@@ -319,6 +319,7 @@ type OrchestratorConfig struct {
 	MaxConcurrentSessions int                          `yaml:"max_concurrent_sessions,omitempty"` // max sessions running in parallel (default 1 = sequential)
 	DebounceWindow        string                       `yaml:"debounce_window,omitempty"`         // Go duration (e.g. "800ms"); merges rapid messages into one LLM call; default "0" = disabled
 	Pipeline              PipelineOrchestratorConfig   `yaml:"pipeline,omitempty"`
+	Workflow              WorkflowConfig               `yaml:"workflow,omitempty"`        // Talon workflow execution for multi-step MCP chains
 	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`       // knowledge-augmented RAG configuration
 	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`      // subprocess (sub-agent) support
 	ShowToolCalls         string                       `yaml:"show_tool_calls,omitempty"` // "raw" = debug blocks, "friendly" = short labels, "" = hidden
@@ -332,6 +333,14 @@ type PipelineOrchestratorConfig struct {
 	PlanTimeout        string `yaml:"plan_timeout"`        // Go duration, default "15s"; max time for planner LLM call
 	ConfirmationPlugin string `yaml:"confirmation_plugin"` // plugin name for confirmation strategy (e.g. "planner")
 	ConfirmationAction string `yaml:"confirmation_action"` // action name (e.g. "check_confirmation")
+}
+
+// WorkflowConfig enables Talon workflow execution for multi-step MCP chains.
+// When enabled, the planner can generate Talon workflow blocks instead of
+// using the standard agent loop for batch operations and multi-tool chains.
+type WorkflowConfig struct {
+	Enabled bool   `yaml:"enabled"`           // default false; enable when talon-language runtime is available
+	Timeout string `yaml:"timeout,omitempty"` // Go duration for workflow execution; default "60s"
 }
 
 // SubprocessOrchestratorConfig enables subprocess (sub-agent) forking from the main agent loop.

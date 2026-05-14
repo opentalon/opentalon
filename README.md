@@ -637,6 +637,49 @@ orchestrator:
 - Different sessions debounce independently
 - **Confirmation signals** (any message with non-empty `confirmation` metadata) and typing indicators bypass debounce and execute immediately
 
+## Talon Workflows (experimental)
+
+For batch operations and multi-step tool chains, OpenTalon can use the [Talon language](https://github.com/opentalon/talon-language) instead of the standard agent loop. The LLM generates a Talon `workflow` block, and the runtime executes it deterministically — no narration, no pagination failures, no context loss.
+
+```yaml
+orchestrator:
+  workflow:
+    enabled: true        # default: false
+    timeout: "60s"       # max execution time (default: "60s")
+```
+
+**Why:** LLMs struggle with multi-round tool chains. "Delete all 200 Test items" requires listing → paginating → collecting IDs → submitting a workorder. The agent loop takes 5+ rounds and often fails. With Talon workflows, the LLM generates a single workflow block and the runtime handles it in one pass.
+
+**How it works:**
+
+1. The LLM sees an `execute_workflow` tool with Talon syntax documentation
+2. For batch operations, it generates a workflow block:
+
+```talon
+workflow "Delete all Test items" {
+  step "find" {
+    mcp "timly" "list-items" {
+      query "name:*Test*"
+      collect_all true
+    }
+  }
+  step "delete" depends_on "find" {
+    mcp "timly" "submit-workorder" {
+      default_tool_name "delete-item"
+      description "Bulk delete Test items"
+      tasks step("find").result.items.map(id)
+    }
+  }
+}
+```
+
+3. The Talon runtime compiles, validates, and executes the workflow
+4. `collect_all true` auto-paginates until all results are collected
+5. Step results are referenced with `step("name").result.field`
+6. The final result is returned to the LLM for summarization
+
+**Status:** Experimental. Requires the [Talon language runtime](https://github.com/opentalon/talon-language/issues/38). When the runtime is not available, the LLM falls back to individual tool calls.
+
 ### Debugging
 
 Set `LOG_LEVEL=debug` to see pipeline decisions, planner LLM calls, step execution, and retry attempts — all prefixed with `[pipeline]`.
