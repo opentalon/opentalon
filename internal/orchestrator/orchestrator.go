@@ -842,6 +842,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
 		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 		if decision == pipeline.Approved {
+			emit.EmitConfirmationResolved(ctx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: "approve"})
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
 			res, err := o.executePipeline(ctx, sessionID, p)
 			if err == nil && res != nil {
@@ -852,6 +853,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			return res, err
 		}
+		emit.EmitConfirmationResolved(ctx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: "reject"})
 		resp := "Pipeline cancelled."
 		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
 		log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
@@ -905,6 +907,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// Only record the user's approval in session — rejections are
 			// kept out so the LLM doesn't avoid re-calling the tool later.
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
+			emit.EmitConfirmationResolved(ctx, o.eventSink, emit.ConfirmationResolvedArgs{
+				Choice:     "approve",
+				ToolCallID: tc.ID,
+			})
 			log.Debug("tool call confirmed, executing", "plugin", tc.Plugin, "action", tc.Action)
 			result := o.executeCall(ctx, *tc)
 			// Record in session history.
@@ -928,6 +934,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// LLM summarizes the result for the user.
 			toolCallConfirmed = true
 		} else {
+			emit.EmitConfirmationResolved(ctx, o.eventSink, emit.ConfirmationResolvedArgs{
+				Choice:     "reject",
+				ToolCallID: tc.ID,
+			})
 			// Rollback session to before this Run — remove the user message
 			// and any tool calls/results that were added during the
 			// confirmation attempt. Without this, the LLM sees prior tool
@@ -1182,6 +1192,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
 				log.Debug("pipeline stored, awaiting confirmation for write steps",
 					"pipeline_id", p.ID, "session", sessionID, "write_steps", len(writeSteps))
+				emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
+					Prompt:  planText,
+					Choices: []string{"approve", "reject"},
+				})
 				return &RunResult{
 					Response: planText,
 					Metadata: map[string]string{
@@ -1206,6 +1220,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
+			emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
+				Prompt:  planText,
+				Choices: []string{"approve", "reject"},
+			})
 			return &RunResult{
 				Response: planText,
 				Metadata: map[string]string{
@@ -1542,6 +1560,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if hasHallucinatedResult(resp.Content) && stripRetries < 3 {
 				stripRetries++
 				log.Warn("hallucinated result detected, retrying", "round", i+1)
+				emit.EmitRetry(ctx, o.eventSink, emit.RetryArgs{
+					Phase:     "llm_call",
+					Attempt:   stripRetries,
+					LastError: "hallucinated tool result",
+				})
 				// Escape {{ to { { in the hallucinated content before sending it back —
 				// vLLM chat templates use Jinja2 which chokes on unescaped {{ in messages.
 				escaped := strings.ReplaceAll(resp.Content, "{{", "{ {")
@@ -1568,6 +1591,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					return result, nil
 				}
 				stripRetries++
+				emit.EmitRetry(ctx, o.eventSink, emit.RetryArgs{
+					Phase:     "llm_call",
+					Attempt:   stripRetries,
+					LastError: "empty or unparseable response",
+				})
 				retryHint := "[system] Your previous response was empty or contained only unparseable tool call blocks. Please respond to the user in natural language. If you need to call a tool, use the [tool_call] format shown in your instructions."
 				if resp.Content != "" {
 					transientMessages = []provider.Message{
@@ -1594,6 +1622,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("planner retry check", "expected_steps", len(steps), "tool_retries", toolRetries, "will_retry", len(steps) > 0 && toolRetries < 2)
 			if len(steps) > 0 && toolRetries < 2 {
 				toolRetries++
+				emit.EmitRetry(ctx, o.eventSink, emit.RetryArgs{
+					Phase:     "llm_call",
+					Attempt:   toolRetries,
+					LastError: "planner expected tool call but LLM returned plain text",
+				})
 				log.Warn("planner expected tool calls but LLM returned plain text, retrying",
 					"round", i+1, "retry", toolRetries, "expected_steps", len(steps))
 				nudge := buildToolCallNudge(steps)
@@ -1760,6 +1793,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					// for the next turn (approval or follow-up questions). On
 					// rejection, the rollback (msgCountAtStart) removes it.
 					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg})
+					emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
+						Prompt:     confirmMsg,
+						Choices:    []string{"approve", "reject"},
+						ToolCallID: calls[i].ID,
+					})
 					return &RunResult{
 						Response: confirmMsg,
 						Metadata: map[string]string{

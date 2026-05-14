@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
@@ -1603,5 +1604,342 @@ func TestOrchestrator_Planner_NoEventsWhenPlannerDisabled(t *testing.T) {
 			events.TypePlannerResponse, events.TypePlannerStep:
 			t.Errorf("planner event %q fired with no planner configured", e.EventType)
 		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Retry instrumentation tests
+// -----------------------------------------------------------------------------
+
+func findRetryPayloads(t *testing.T, evs []emit.Event) []events.RetryPayload {
+	t.Helper()
+	var out []events.RetryPayload
+	for _, e := range evs {
+		if e.EventType != events.TypeRetry {
+			continue
+		}
+		var p events.RetryPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("unmarshal retry: %v", err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func TestOrchestrator_Retry_EmitsOnHallucinatedResult(t *testing.T) {
+	sink := &recordingEventSink{}
+	// Round 1: response contains a fabricated template variable that
+	// hasHallucinatedResult matches. Round 2: plain answer to terminate.
+	llm := &fakeLLM{responses: []string{
+		"Result: {{plugin_output.data.count}} items found",
+		"Result: 5 items found",
+	}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+
+	if _, err := orch.Run(context.Background(), sessID, "count items"); err != nil {
+		t.Fatal(err)
+	}
+
+	retries := findRetryPayloads(t, sink.snapshot())
+	if len(retries) != 1 {
+		t.Fatalf("retry count = %d, want 1", len(retries))
+	}
+	got := retries[0]
+	if got.V != events.RetryVersion {
+		t.Errorf("Header.V = %d, want %d", got.V, events.RetryVersion)
+	}
+	if got.Phase != "llm_call" {
+		t.Errorf("Phase = %q, want llm_call", got.Phase)
+	}
+	if got.Attempt != 1 {
+		t.Errorf("Attempt = %d, want 1", got.Attempt)
+	}
+	if got.LastError != "hallucinated tool result" {
+		t.Errorf("LastError = %q", got.LastError)
+	}
+}
+
+func TestOrchestrator_Retry_EmitsOnEmptyResponse(t *testing.T) {
+	sink := &recordingEventSink{}
+	// Round 1: only an internal block, which StripInternalBlocks reduces to "".
+	// fakeParser returns nil so the empty-response retry path fires.
+	// Round 2: plain answer to terminate.
+	llm := &fakeLLM{responses: []string{
+		"[tool_call]unparseable garbage[/tool_call]",
+		"answer after retry",
+	}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+
+	if _, err := orch.Run(context.Background(), sessID, "ask"); err != nil {
+		t.Fatal(err)
+	}
+
+	retries := findRetryPayloads(t, sink.snapshot())
+	if len(retries) != 1 {
+		t.Fatalf("retry count = %d, want 1", len(retries))
+	}
+	got := retries[0]
+	if got.Phase != "llm_call" {
+		t.Errorf("Phase = %q, want llm_call", got.Phase)
+	}
+	if got.Attempt != 1 {
+		t.Errorf("Attempt = %d, want 1", got.Attempt)
+	}
+	if got.LastError != "empty or unparseable response" {
+		t.Errorf("LastError = %q", got.LastError)
+	}
+}
+
+func TestOrchestrator_Retry_EmitsOnPlannerExpectedTools(t *testing.T) {
+	sink := &recordingEventSink{}
+	// Three rounds of plain text — the agent loop retries twice (toolRetries
+	// caps at 2) then gives up and finalizes with the third response.
+	llm := &fakeLLM{responses: []string{"plain 1", "plain 2", "plain 3"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+
+	// Seed expected-tools directly on the ctx so the planner-informed retry
+	// branch fires without needing a planner setup. Use a sentinel step
+	// (no Command) so the retries-exhausted fallback skips server-side
+	// invocation and the loop finalizes with the third response.
+	ctx := withExpectedTools(context.Background(), []*pipeline.Step{{ID: "direct"}})
+
+	if _, err := orch.Run(ctx, sessID, "do it"); err != nil {
+		t.Fatal(err)
+	}
+
+	retries := findRetryPayloads(t, sink.snapshot())
+	if len(retries) != 2 {
+		t.Fatalf("retry count = %d, want 2", len(retries))
+	}
+	for i, got := range retries {
+		if got.Phase != "llm_call" {
+			t.Errorf("retry[%d].Phase = %q, want llm_call", i, got.Phase)
+		}
+		if got.Attempt != i+1 {
+			t.Errorf("retry[%d].Attempt = %d, want %d", i, got.Attempt, i+1)
+		}
+		if got.LastError != "planner expected tool call but LLM returned plain text" {
+			t.Errorf("retry[%d].LastError = %q", i, got.LastError)
+		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Confirmation instrumentation tests
+// -----------------------------------------------------------------------------
+
+func findConfirmationResolvedPayloads(t *testing.T, evs []emit.Event) []events.ConfirmationResolvedPayload {
+	t.Helper()
+	var out []events.ConfirmationResolvedPayload
+	for _, e := range evs {
+		if e.EventType != events.TypeConfirmationResolved {
+			continue
+		}
+		var p events.ConfirmationResolvedPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("unmarshal confirmation_resolved: %v", err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func findConfirmationRequestedPayloads(t *testing.T, evs []emit.Event) []events.ConfirmationRequestedPayload {
+	t.Helper()
+	var out []events.ConfirmationRequestedPayload
+	for _, e := range evs {
+		if e.EventType != events.TypeConfirmationRequested {
+			continue
+		}
+		var p events.ConfirmationRequestedPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("unmarshal confirmation_requested: %v", err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func TestOrchestrator_Confirmation_PipelineApproved_EmitsResolved(t *testing.T) {
+	sink := &recordingEventSink{}
+	// fakeLLM is only reached if the pending-pipeline path falls through to the
+	// agent loop after approval; the empty pipeline executes immediately so
+	// one fallback response is enough to terminate cleanly.
+	llm := &fakeLLM{responses: []string{"done"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+
+	orch.pendingMu.Lock()
+	orch.pendingPipelines[sessID] = pipeline.NewPipeline(nil, pipeline.PipelineConfig{})
+	orch.pendingMu.Unlock()
+
+	if _, err := orch.Run(context.Background(), sessID, "yes"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findConfirmationResolvedPayloads(t, sink.snapshot())
+	if len(got) != 1 {
+		t.Fatalf("confirmation_resolved count = %d, want 1", len(got))
+	}
+	if got[0].Choice != "approve" {
+		t.Errorf("Choice = %q, want approve", got[0].Choice)
+	}
+	if got[0].ToolCallID != "" {
+		t.Errorf("ToolCallID = %q, want empty for pipeline confirmation", got[0].ToolCallID)
+	}
+}
+
+func TestOrchestrator_Confirmation_PipelineRejected_EmitsResolved(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"never reached"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+
+	orch.pendingMu.Lock()
+	orch.pendingPipelines[sessID] = pipeline.NewPipeline(nil, pipeline.PipelineConfig{})
+	orch.pendingMu.Unlock()
+
+	if _, err := orch.Run(context.Background(), sessID, "no"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findConfirmationResolvedPayloads(t, sink.snapshot())
+	if len(got) != 1 {
+		t.Fatalf("confirmation_resolved count = %d, want 1", len(got))
+	}
+	if got[0].Choice != "reject" {
+		t.Errorf("Choice = %q, want reject", got[0].Choice)
+	}
+}
+
+func TestOrchestrator_Confirmation_ToolCallApproved_EmitsResolved(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"final summary"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+
+	pending := &ToolCall{
+		ID:     "pending-1",
+		Plugin: "gitlab",
+		Action: "analyze_code",
+		Args:   map[string]string{},
+	}
+	orch.pendingMu.Lock()
+	orch.pendingToolCalls[sessID] = pending
+	orch.pendingMu.Unlock()
+
+	if _, err := orch.Run(context.Background(), sessID, "yes"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findConfirmationResolvedPayloads(t, sink.snapshot())
+	if len(got) != 1 {
+		t.Fatalf("confirmation_resolved count = %d, want 1", len(got))
+	}
+	if got[0].Choice != "approve" {
+		t.Errorf("Choice = %q, want approve", got[0].Choice)
+	}
+	if got[0].ToolCallID != "pending-1" {
+		t.Errorf("ToolCallID = %q, want pending-1", got[0].ToolCallID)
+	}
+}
+
+func TestOrchestrator_Confirmation_ToolCallRejected_EmitsResolved(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"never reached"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+
+	pending := &ToolCall{
+		ID:     "pending-2",
+		Plugin: "gitlab",
+		Action: "analyze_code",
+		Args:   map[string]string{},
+	}
+	orch.pendingMu.Lock()
+	orch.pendingToolCalls[sessID] = pending
+	orch.pendingMu.Unlock()
+
+	if _, err := orch.Run(context.Background(), sessID, "no"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findConfirmationResolvedPayloads(t, sink.snapshot())
+	if len(got) != 1 {
+		t.Fatalf("confirmation_resolved count = %d, want 1", len(got))
+	}
+	if got[0].Choice != "reject" {
+		t.Errorf("Choice = %q, want reject", got[0].Choice)
+	}
+	if got[0].ToolCallID != "pending-2" {
+		t.Errorf("ToolCallID = %q, want pending-2", got[0].ToolCallID)
+	}
+}
+
+// confirmingExecutor stubs a confirmation-plugin call: returns JSON requiring
+// confirmation so the orchestrator pauses on the next tool call.
+type confirmingExecutor struct{}
+
+func (confirmingExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
+	return ToolResult{
+		CallID:  call.ID,
+		Content: `{"requires_confirmation":true,"confirm_before_step":0}`,
+	}
+}
+
+func TestOrchestrator_Confirmation_ToolCallRequiresConfirmation_EmitsRequested(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &nativeToolCallingLLM{
+		toolCalls: []provider.ToolCall{{
+			ID:        "tc-1",
+			Name:      "gitlab.analyze_code",
+			Arguments: map[string]string{},
+		}},
+		textAfter: "summary",
+	}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "gitlab",
+		Actions: []Action{{Name: "analyze_code"}},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name:    "conf",
+		Actions: []Action{{Name: "check"}},
+	}, confirmingExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:          sink,
+		ConfirmationPlugin: "conf",
+		ConfirmationAction: "check",
+	})
+
+	if _, err := orch.Run(context.Background(), "sess", "analyze it"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findConfirmationRequestedPayloads(t, sink.snapshot())
+	if len(got) != 1 {
+		t.Fatalf("confirmation_requested count = %d, want 1", len(got))
+	}
+	if got[0].V != events.ConfirmationRequestedVersion {
+		t.Errorf("Header.V = %d, want %d", got[0].V, events.ConfirmationRequestedVersion)
+	}
+	if got[0].ToolCallID != "tc-1" {
+		t.Errorf("ToolCallID = %q, want tc-1", got[0].ToolCallID)
+	}
+	if len(got[0].Choices) != 2 || got[0].Choices[0] != "approve" || got[0].Choices[1] != "reject" {
+		t.Errorf("Choices = %v, want [approve reject]", got[0].Choices)
+	}
+	if got[0].Prompt == "" {
+		t.Errorf("Prompt is empty")
 	}
 }
