@@ -3,13 +3,16 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"sync"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/provider"
+	"github.com/opentalon/opentalon/internal/state/store/events"
 )
 
 // Run with: go test -tags postgres -run TestPostgres ./internal/state/store/
@@ -131,5 +134,60 @@ func TestPostgres_NativeToolCallsRoundTrip(t *testing.T) {
 	}
 	if toolCalls.Valid {
 		t.Errorf("empty-slice tool_calls = %q on postgres, want NULL", toolCalls.String)
+	}
+}
+
+func TestPostgres_SessionEventStoreRoundTrip(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionEventStore(db)
+	ctx := context.Background()
+
+	payload, _ := json.Marshal(events.UserMessagePayload{
+		Header: events.Header{V: events.UserMessageVersion}, Content: "hi", ContentLength: 2,
+	})
+	for i := 0; i < 3; i++ {
+		if err := store.Insert(ctx, SessionEvent{
+			SessionID: "sess-pg",
+			EventType: events.TypeUserMessage,
+			Payload:   payload,
+		}); err != nil {
+			t.Fatalf("Insert[%d]: %v", i, err)
+		}
+	}
+	list, err := store.ListForSession(ctx, "sess-pg", 0, 0)
+	if err != nil {
+		t.Fatalf("ListForSession: %v", err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("len(list) = %d, want 3", len(list))
+	}
+	for i, ev := range list {
+		wantSeq := int64(i + 1)
+		if ev.Seq != wantSeq {
+			t.Errorf("list[%d].Seq = %d, want %d (monotonic per session)", i, ev.Seq, wantSeq)
+		}
+		if ev.EventType != events.TypeUserMessage {
+			t.Errorf("list[%d].EventType = %q, want %q", i, ev.EventType, events.TypeUserMessage)
+		}
+		if !json.Valid(ev.Payload) {
+			t.Errorf("list[%d].Payload is not valid JSON", i)
+		}
+	}
+
+	// Idempotent prompt snapshot upsert on Postgres uses ON CONFLICT DO NOTHING;
+	// repeated call with different content must keep the first.
+	const sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if err := store.UpsertPromptSnapshot(ctx, sha, events.PromptKindToolDescription, "first"); err != nil {
+		t.Fatalf("Upsert 1: %v", err)
+	}
+	if err := store.UpsertPromptSnapshot(ctx, sha, events.PromptKindToolDescription, "second"); err != nil {
+		t.Fatalf("Upsert 2: %v", err)
+	}
+	content, _, err := store.GetPromptSnapshot(ctx, sha)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if content != "first" {
+		t.Errorf("content = %q, want %q (idempotent ON CONFLICT DO NOTHING)", content, "first")
 	}
 }

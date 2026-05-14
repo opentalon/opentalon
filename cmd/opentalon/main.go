@@ -145,6 +145,9 @@ func main() {
 	var debugStore *store.DebugEventStore
 	var debugWriter *store.DebugEventWriter
 	var debugRetentionCancel context.CancelFunc
+	var sessionEventStore *store.SessionEventStore
+	var sessionEventWriter *store.SessionEventWriter
+	var sessionEventsRetentionCancel context.CancelFunc
 	if dataDir != "" || cfg.State.DB.Driver == "postgres" {
 		db, err := store.Open(cfg.State.DB, dataDir)
 		if err != nil {
@@ -180,6 +183,25 @@ func main() {
 			var retentionCtx context.Context
 			retentionCtx, debugRetentionCancel = context.WithCancel(context.Background())
 			go store.RunDebugRetention(retentionCtx, debugStore, retention)
+
+			// Structured session_events log: always-on (orchestrator emits
+			// every turn / tool call / failure mode), separate retention
+			// horizon from /debug because the analytics use case wants
+			// longer history than the raw-HTTP-replay use case.
+			sessionEventStore = store.NewSessionEventStore(db)
+			sessionEventWriter = store.NewSessionEventWriter(sessionEventStore)
+			sessionEventWriter.Start(context.Background())
+			var sessionEventsRetention time.Duration
+			if !cfg.State.SessionEvents.RetentionDisabled {
+				days := cfg.State.SessionEvents.RetentionDays
+				if days <= 0 {
+					days = 90
+				}
+				sessionEventsRetention = time.Duration(days) * 24 * time.Hour
+			}
+			var sessionEventsRetentionCtx context.Context
+			sessionEventsRetentionCtx, sessionEventsRetentionCancel = context.WithCancel(context.Background())
+			go store.RunSessionEventsRetention(sessionEventsRetentionCtx, sessionEventStore, sessionEventsRetention)
 			// Seed static group→plugin assignments from config (source="config"; does not overwrite whoami/admin).
 			seedGroupPlugins(context.Background(), groupPluginStore, cfg.Profiles.Groups)
 			// Seed group→plugin assignments from remote bootstrap response (source="bootstrap"; lower priority than "config", does not overwrite whoami/admin).
@@ -793,6 +815,13 @@ func main() {
 	}
 	if debugRetentionCancel != nil {
 		debugRetentionCancel()
+	}
+	// Same bounded-flush dance for the always-on structured event log.
+	if sessionEventWriter != nil {
+		sessionEventWriter.Stop(5 * time.Second)
+	}
+	if sessionEventsRetentionCancel != nil {
+		sessionEventsRetentionCancel()
 	}
 
 	// Stop health server first so K8s stops routing traffic during teardown.
