@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,8 +26,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 7 {
-		t.Errorf("schema_version = %d, want 7", v)
+	if v != 8 {
+		t.Errorf("schema_version = %d, want 8", v)
 	}
 
 	// Re-open: idempotent, no error
@@ -39,8 +40,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version (second open): %v", err)
 	}
-	if v != 7 {
-		t.Errorf("schema_version after re-open = %d, want 7", v)
+	if v != 8 {
+		t.Errorf("schema_version after re-open = %d, want 8", v)
 	}
 }
 
@@ -175,6 +176,165 @@ func TestSessionStore_SetSummaryRoundTrip(t *testing.T) {
 	}
 	if len(sess.Messages) != 2 {
 		t.Errorf("len(Messages) = %d, want 2", len(sess.Messages))
+	}
+}
+
+func TestSessionStore_NativeToolCallsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DBConfig{}, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	sessStore := NewSessionStore(db, 0, 0)
+	sessStore.Create("s1", "", "")
+
+	// Plain user turn — neither column should be populated.
+	if err := sessStore.AddMessage("s1", provider.Message{
+		Role: provider.RoleUser, Content: "find ticket 42",
+	}); err != nil {
+		t.Fatalf("AddMessage user: %v", err)
+	}
+
+	// Assistant turn with a native tool call.
+	assistantCalls := []provider.ToolCall{{
+		ID:        "call_abc123",
+		Name:      "tickets.show",
+		Arguments: map[string]string{"id": "42"},
+	}}
+	if err := sessStore.AddMessage("s1", provider.Message{
+		Role: provider.RoleAssistant, ToolCalls: assistantCalls,
+	}); err != nil {
+		t.Fatalf("AddMessage assistant tool call: %v", err)
+	}
+
+	// Tool reply referencing that call.
+	if err := sessStore.AddMessage("s1", provider.Message{
+		Role: provider.RoleTool, Content: `{"status":"open"}`, ToolCallID: "call_abc123",
+	}); err != nil {
+		t.Fatalf("AddMessage tool reply: %v", err)
+	}
+
+	sess, err := sessStore.Get("s1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(sess.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want 3", len(sess.Messages))
+	}
+	if got := sess.Messages[1].ToolCalls; len(got) != 1 || got[0].ID != "call_abc123" ||
+		got[0].Name != "tickets.show" || got[0].Arguments["id"] != "42" {
+		t.Errorf("assistant ToolCalls round-trip mismatch: %+v", got)
+	}
+	if sess.Messages[2].ToolCallID != "call_abc123" {
+		t.Errorf("tool reply ToolCallID = %q, want %q", sess.Messages[2].ToolCallID, "call_abc123")
+	}
+	if sess.Messages[2].Content != `{"status":"open"}` {
+		t.Errorf("tool reply Content = %q", sess.Messages[2].Content)
+	}
+
+	// Direct SQL check: the user turn must have NULL in both new columns
+	// (text-based path stays untouched, no "[]" sentinel).
+	var toolCalls, toolCallID sql.NullString
+	err = db.SQLDB().QueryRow(
+		db.Dialect().Rebind(`SELECT tool_calls, tool_call_id FROM messages WHERE session_id = ? AND seq = ?`),
+		"s1", 1,
+	).Scan(&toolCalls, &toolCallID)
+	if err != nil {
+		t.Fatalf("read user row: %v", err)
+	}
+	if toolCalls.Valid {
+		t.Errorf("user-turn tool_calls = %q, want NULL", toolCalls.String)
+	}
+	if toolCallID.Valid {
+		t.Errorf("user-turn tool_call_id = %q, want NULL", toolCallID.String)
+	}
+
+	// The assistant turn carries tool_calls but not tool_call_id.
+	err = db.SQLDB().QueryRow(
+		db.Dialect().Rebind(`SELECT tool_calls, tool_call_id FROM messages WHERE session_id = ? AND seq = ?`),
+		"s1", 2,
+	).Scan(&toolCalls, &toolCallID)
+	if err != nil {
+		t.Fatalf("read assistant row: %v", err)
+	}
+	if !toolCalls.Valid {
+		t.Error("assistant-turn tool_calls = NULL, want JSON")
+	}
+	if toolCallID.Valid {
+		t.Errorf("assistant-turn tool_call_id = %q, want NULL", toolCallID.String)
+	}
+}
+
+func TestSessionStore_EmptyToolCallsSlicePersistsAsNull(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DBConfig{}, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	sessStore := NewSessionStore(db, 0, 0)
+	sessStore.Create("s1", "", "")
+
+	// Explicit empty (not nil) slice — must still write NULL, not "[]",
+	// so consumers can filter for rows with structured tool data via IS NOT NULL.
+	if err := sessStore.AddMessage("s1", provider.Message{
+		Role: provider.RoleAssistant, Content: "no tools here", ToolCalls: []provider.ToolCall{},
+	}); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+
+	var toolCalls sql.NullString
+	err = db.SQLDB().QueryRow(
+		db.Dialect().Rebind(`SELECT tool_calls FROM messages WHERE session_id = ? AND seq = ?`),
+		"s1", 1,
+	).Scan(&toolCalls)
+	if err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if toolCalls.Valid {
+		t.Errorf("empty-slice tool_calls = %q, want NULL", toolCalls.String)
+	}
+}
+
+func TestSessionStore_SetSummaryPreservesToolCalls(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DBConfig{}, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	sessStore := NewSessionStore(db, 0, 0)
+	sessStore.Create("s1", "", "")
+
+	calls := []provider.ToolCall{{
+		ID: "call_x", Name: "items.list", Arguments: map[string]string{"q": "drone"},
+	}}
+	err = sessStore.SetSummary("s1", "summary", []provider.Message{
+		{Role: provider.RoleUser, Content: "find a drone"},
+		{Role: provider.RoleAssistant, ToolCalls: calls},
+		{Role: provider.RoleTool, Content: `{"items":[]}`, ToolCallID: "call_x"},
+	})
+	if err != nil {
+		t.Fatalf("SetSummary: %v", err)
+	}
+
+	sess, err := sessStore.Get("s1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(sess.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want 3", len(sess.Messages))
+	}
+	if got := sess.Messages[1].ToolCalls; len(got) != 1 || got[0].Name != "items.list" ||
+		got[0].Arguments["q"] != "drone" {
+		t.Errorf("ToolCalls after SetSummary mismatch: %+v", got)
+	}
+	if sess.Messages[2].ToolCallID != "call_x" {
+		t.Errorf("ToolCallID after SetSummary = %q", sess.Messages[2].ToolCallID)
 	}
 }
 
