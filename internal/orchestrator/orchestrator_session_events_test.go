@@ -1943,3 +1943,288 @@ func TestOrchestrator_Confirmation_ToolCallRequiresConfirmation_EmitsRequested(t
 		t.Errorf("Prompt is empty")
 	}
 }
+
+// -----------------------------------------------------------------------------
+// parent_id linkage tests — verify that producer-side event_id generation
+// and WithParent ctx wiring produces the expected event tree.
+// -----------------------------------------------------------------------------
+
+// findEventByType returns the first event of the given type, or nil.
+func findEventByType(evs []emit.Event, eventType string) *emit.Event {
+	for i := range evs {
+		if evs[i].EventType == eventType {
+			return &evs[i]
+		}
+	}
+	return nil
+}
+
+// findEventsByType returns all events of the given type.
+func findEventsByType(evs []emit.Event, eventType string) []emit.Event {
+	var out []emit.Event
+	for i := range evs {
+		if evs[i].EventType == eventType {
+			out = append(out, evs[i])
+		}
+	}
+	return out
+}
+
+func TestParentID_TurnStartIsRoot(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"hello back"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+	if _, err := orch.Run(context.Background(), sessID, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	ts := findEventByType(sink.snapshot(), events.TypeTurnStart)
+	if ts == nil {
+		t.Fatal("turn_start not emitted")
+	}
+	if ts.ID == "" {
+		t.Errorf("turn_start.ID empty — producer-side id generation broken")
+	}
+	if ts.ParentID != "" {
+		t.Errorf("turn_start.ParentID = %q, want empty (root of turn tree)", ts.ParentID)
+	}
+}
+
+func TestParentID_ToolCallResultParentsExtracted(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &nativeToolCallingLLM{
+		toolCalls: []provider.ToolCall{{
+			ID:        "call-1",
+			Name:      "gitlab.analyze_code",
+			Arguments: map[string]string{},
+		}},
+		textAfter: "done",
+	}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+	if _, err := orch.Run(context.Background(), sessID, "analyze"); err != nil {
+		t.Fatal(err)
+	}
+	evs := sink.snapshot()
+	extracted := findEventByType(evs, events.TypeToolCallExtracted)
+	result := findEventByType(evs, events.TypeToolCallResult)
+	if extracted == nil || result == nil {
+		t.Fatalf("missing events: extracted=%v result=%v", extracted != nil, result != nil)
+	}
+	if extracted.ID == "" {
+		t.Errorf("tool_call_extracted.ID empty")
+	}
+	if result.ParentID != extracted.ID {
+		t.Errorf("tool_call_result.ParentID = %q, want %q (extracted.ID)", result.ParentID, extracted.ID)
+	}
+}
+
+func TestParentID_PlannerRequestResponseStepParentsInvoked(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{
+		// Round 1: planner returns pipeline plan with 2 steps.
+		`{"type":"pipeline","steps":[
+			{"id":"s1","name":"one","plugin":"gitlab","action":"analyze_code","args":{},"depends_on":[]},
+			{"id":"s2","name":"two","plugin":"gitlab","action":"analyze_code","args":{},"depends_on":["s1"]}
+		]}`,
+		"continue",
+		"final",
+	}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithPlanner(llm, parser, sink)
+	_, _ = orch.Run(context.Background(), sessID, "two-step task")
+	evs := sink.snapshot()
+	invoked := findEventByType(evs, events.TypePlannerInvoked)
+	req := findEventByType(evs, events.TypePlannerRequest)
+	resp := findEventByType(evs, events.TypePlannerResponse)
+	steps := findEventsByType(evs, events.TypePlannerStep)
+	if invoked == nil || req == nil || resp == nil {
+		t.Fatalf("missing planner events: invoked=%v request=%v response=%v",
+			invoked != nil, req != nil, resp != nil)
+	}
+	if invoked.ID == "" {
+		t.Errorf("planner_invoked.ID empty")
+	}
+	if req.ParentID != invoked.ID {
+		t.Errorf("planner_request.ParentID = %q, want %q", req.ParentID, invoked.ID)
+	}
+	if resp.ParentID != invoked.ID {
+		t.Errorf("planner_response.ParentID = %q, want %q", resp.ParentID, invoked.ID)
+	}
+	for i, s := range steps {
+		if s.ParentID != invoked.ID {
+			t.Errorf("planner_step[%d].ParentID = %q, want %q", i, s.ParentID, invoked.ID)
+		}
+	}
+}
+
+func TestParentID_ConfirmationResolvedParentsRequested_ToolCall(t *testing.T) {
+	// Turn 1: native LLM emits a tool call, confirmation plugin says
+	// requires_confirmation → confirmation_requested fires, pending state
+	// stored. Turn 2: user replies "yes" → confirmation_resolved fires
+	// with parent_id = requested.ID.
+	sink := &recordingEventSink{}
+	llm := &nativeToolCallingLLM{
+		toolCalls: []provider.ToolCall{{
+			ID: "tc-7", Name: "gitlab.analyze_code", Arguments: map[string]string{},
+		}},
+		textAfter: "after-confirm-summary",
+	}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "gitlab",
+		Actions: []Action{{Name: "analyze_code"}},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name:    "conf",
+		Actions: []Action{{Name: "check"}},
+	}, confirmingExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:          sink,
+		ConfirmationPlugin: "conf",
+		ConfirmationAction: "check",
+	})
+
+	if _, err := orch.Run(context.Background(), "sess", "analyze"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := orch.Run(context.Background(), "sess", "yes"); err != nil {
+		t.Fatal(err)
+	}
+
+	evs := sink.snapshot()
+	req := findEventByType(evs, events.TypeConfirmationRequested)
+	resolved := findEventByType(evs, events.TypeConfirmationResolved)
+	if req == nil || resolved == nil {
+		t.Fatalf("missing events: requested=%v resolved=%v", req != nil, resolved != nil)
+	}
+	if req.ID == "" {
+		t.Errorf("confirmation_requested.ID empty")
+	}
+	if resolved.ParentID != req.ID {
+		t.Errorf("confirmation_resolved.ParentID = %q, want %q (requested.ID)", resolved.ParentID, req.ID)
+	}
+}
+
+func TestParentID_ConfirmationResolvedParentsRequested_Pipeline(t *testing.T) {
+	// Inject a pending pipeline + the matching confirmation_requested id
+	// directly so we don't have to run a full planner+confirmation turn
+	// first. The under-test linkage is the *resolved* side reading from
+	// pendingConfirmationIDs and stamping it as parent.
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"done"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+
+	const fakeReqID = "00000000000000000000000000000001"
+	orch.pendingMu.Lock()
+	orch.pendingPipelines[sessID] = pipeline.NewPipeline(nil, pipeline.PipelineConfig{})
+	orch.pendingConfirmationIDs[sessID] = fakeReqID
+	orch.pendingMu.Unlock()
+
+	if _, err := orch.Run(context.Background(), sessID, "yes"); err != nil {
+		t.Fatal(err)
+	}
+	resolved := findEventByType(sink.snapshot(), events.TypeConfirmationResolved)
+	if resolved == nil {
+		t.Fatal("confirmation_resolved not emitted")
+	}
+	if resolved.ParentID != fakeReqID {
+		t.Errorf("confirmation_resolved.ParentID = %q, want %q", resolved.ParentID, fakeReqID)
+	}
+}
+
+// emittingLLM mimics what the real provider does: emits an llm_response
+// event via the shared sink and threads the returned event id onto
+// CompletionResponse.EventID. The orchestrator then wraps ctx with that
+// id before dispatching tool calls, so tool_call_extracted should parent
+// to llm_response. This is the only fake LLM in the test suite that
+// closes the provider→orchestrator parent_id contract.
+type emittingLLM struct {
+	sink      emit.Sink
+	toolCalls []provider.ToolCall
+	textAfter string
+	calls     int
+}
+
+func (l *emittingLLM) Complete(ctx context.Context, _ *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	l.calls++
+	id := emit.EmitLLMResponse(ctx, l.sink, emit.LLMResponseArgs{
+		RawContent:   "synthetic",
+		FinishReason: "stop",
+	})
+	if l.calls == 1 {
+		return &provider.CompletionResponse{ToolCalls: l.toolCalls, EventID: id}, nil
+	}
+	return &provider.CompletionResponse{Content: l.textAfter, EventID: id}, nil
+}
+
+func (l *emittingLLM) SupportsFeature(f provider.Feature) bool {
+	return f == provider.FeatureTools
+}
+
+func TestParentID_ToolCallExtractedParentsLLMResponse(t *testing.T) {
+	// Cross-package linkage test: the LLM-equivalent (a fake that mirrors
+	// what the openai provider does) emits llm_response and surfaces its
+	// id on CompletionResponse.EventID. The orchestrator stamps that id
+	// as parent on ctx, so the subsequent tool_call_extracted event must
+	// link back to the llm_response it was derived from. This is the
+	// contract that would silently break if the provider stopped
+	// populating EventID or the orchestrator stopped reading it.
+	sink := &recordingEventSink{}
+	llm := &emittingLLM{
+		sink: sink,
+		toolCalls: []provider.ToolCall{{
+			ID:        "tc-9",
+			Name:      "gitlab.analyze_code",
+			Arguments: map[string]string{},
+		}},
+		textAfter: "done",
+	}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+	if _, err := orch.Run(context.Background(), sessID, "go"); err != nil {
+		t.Fatal(err)
+	}
+	evs := sink.snapshot()
+	llmResp := findEventByType(evs, events.TypeLLMResponse)
+	extracted := findEventByType(evs, events.TypeToolCallExtracted)
+	if llmResp == nil || extracted == nil {
+		t.Fatalf("missing events: llm_response=%v extracted=%v", llmResp != nil, extracted != nil)
+	}
+	if llmResp.ID == "" {
+		t.Fatal("llm_response.ID empty — emit framework regression")
+	}
+	if extracted.ParentID != llmResp.ID {
+		t.Errorf("tool_call_extracted.ParentID = %q, want %q (llm_response.ID)",
+			extracted.ParentID, llmResp.ID)
+	}
+}
+
+func TestParentID_EveryEventHasID(t *testing.T) {
+	// Smoke test: across a representative run with planner + tool calls,
+	// every emitted event has a non-empty ID. Catches future helpers that
+	// might forget to thread the send() return value through.
+	sink := &recordingEventSink{}
+	llm := &nativeToolCallingLLM{
+		toolCalls: []provider.ToolCall{{
+			ID: "x", Name: "gitlab.analyze_code", Arguments: map[string]string{},
+		}},
+		textAfter: "done",
+	}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+	if _, err := orch.Run(context.Background(), sessID, "go"); err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range sink.snapshot() {
+		if e.ID == "" {
+			t.Errorf("event[%d] type=%q has empty ID", i, e.EventType)
+		}
+	}
+}

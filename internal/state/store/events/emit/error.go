@@ -14,8 +14,8 @@ import (
 // where is a short, stable, grep-friendly location tag
 // ("orchestrator.turn", "planner.dispatch", …); message is the
 // sanitized error text.
-func EmitError(ctx context.Context, sink Sink, where, message string) {
-	send(ctx, sink, events.TypeError, events.ErrorPayload{
+func EmitError(ctx context.Context, sink Sink, where, message string) string {
+	return send(ctx, sink, events.TypeError, events.ErrorPayload{
 		Header:  events.Header{V: events.ErrorVersion},
 		Where:   where,
 		Message: events.SanitizeUTF8(message),

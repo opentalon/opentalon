@@ -892,6 +892,7 @@ type sessionSinkAdapter struct {
 
 func (s *sessionSinkAdapter) Emit(_ context.Context, e emit.Event) {
 	s.writer.Submit(store.SessionEvent{
+		ID:         e.ID,
 		SessionID:  e.SessionID,
 		EventType:  e.EventType,
 		ParentID:   e.ParentID,

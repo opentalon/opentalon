@@ -26,9 +26,11 @@ type ToolCallExtractedArgs struct {
 	Mode      ToolCallMode
 }
 
-// EmitToolCallExtracted writes one tool_call_extracted event.
-func EmitToolCallExtracted(ctx context.Context, sink Sink, args ToolCallExtractedArgs) {
-	send(ctx, sink, events.TypeToolCallExtracted, events.ToolCallExtractedPayload{
+// EmitToolCallExtracted writes one tool_call_extracted event. Returns the
+// generated event id so the dispatcher can stamp it as the parent of the
+// matching tool_call_result via WithParent.
+func EmitToolCallExtracted(ctx context.Context, sink Sink, args ToolCallExtractedArgs) string {
+	return send(ctx, sink, events.TypeToolCallExtracted, events.ToolCallExtractedPayload{
 		Header:    events.Header{V: events.ToolCallExtractedVersion},
 		CallID:    args.CallID,
 		Plugin:    args.Plugin,
@@ -50,10 +52,10 @@ type ToolCallResultArgs struct {
 }
 
 // EmitToolCallResult writes one tool_call_result event.
-func EmitToolCallResult(ctx context.Context, sink Sink, args ToolCallResultArgs) {
+func EmitToolCallResult(ctx context.Context, sink Sink, args ToolCallResultArgs) string {
 	sanitized := events.SanitizeUTF8(args.Response)
 	excerpt, truncated := events.Excerpt(sanitized)
-	send(ctx, sink, events.TypeToolCallResult, events.ToolCallResultPayload{
+	return send(ctx, sink, events.TypeToolCallResult, events.ToolCallResultPayload{
 		Header:            events.Header{V: events.ToolCallResultVersion},
 		CallID:            args.CallID,
 		Status:            args.Status,
@@ -77,10 +79,10 @@ type ToolCallParseFailedArgs struct {
 }
 
 // EmitToolCallParseFailed writes one tool_call_parse_failed event.
-func EmitToolCallParseFailed(ctx context.Context, sink Sink, args ToolCallParseFailedArgs) {
+func EmitToolCallParseFailed(ctx context.Context, sink Sink, args ToolCallParseFailedArgs) string {
 	sanitized := events.SanitizeUTF8(args.RawSnippet)
 	excerpt, _ := events.Excerpt(sanitized)
-	send(ctx, sink, events.TypeToolCallParseFailed, events.ToolCallParseFailedPayload{
+	return send(ctx, sink, events.TypeToolCallParseFailed, events.ToolCallParseFailedPayload{
 		Header:     events.Header{V: events.ToolCallParseFailedVersion},
 		RawSnippet: excerpt,
 		ParserUsed: args.ParserUsed,
@@ -99,8 +101,8 @@ type ToolCallArgsInvalidArgs struct {
 }
 
 // EmitToolCallArgsInvalid writes one tool_call_args_invalid event.
-func EmitToolCallArgsInvalid(ctx context.Context, sink Sink, args ToolCallArgsInvalidArgs) {
-	send(ctx, sink, events.TypeToolCallArgsInvalid, events.ToolCallArgsInvalidPayload{
+func EmitToolCallArgsInvalid(ctx context.Context, sink Sink, args ToolCallArgsInvalidArgs) string {
+	return send(ctx, sink, events.TypeToolCallArgsInvalid, events.ToolCallArgsInvalidPayload{
 		Header:          events.Header{V: events.ToolCallArgsInvalidVersion},
 		CallID:          args.CallID,
 		Plugin:          args.Plugin,
@@ -111,8 +113,8 @@ func EmitToolCallArgsInvalid(ctx context.Context, sink Sink, args ToolCallArgsIn
 
 // EmitToolCallNotFound writes one tool_call_not_found event when the
 // LLM names a plugin/action the dispatcher does not know about.
-func EmitToolCallNotFound(ctx context.Context, sink Sink, requestedName string) {
-	send(ctx, sink, events.TypeToolCallNotFound, events.ToolCallNotFoundPayload{
+func EmitToolCallNotFound(ctx context.Context, sink Sink, requestedName string) string {
+	return send(ctx, sink, events.TypeToolCallNotFound, events.ToolCallNotFoundPayload{
 		Header:        events.Header{V: events.ToolCallNotFoundVersion},
 		RequestedName: requestedName,
 	}, 0)

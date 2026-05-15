@@ -20,8 +20,10 @@ type TurnStartArgs struct {
 }
 
 // EmitTurnStart writes a turn_start event for the current session.
-func EmitTurnStart(ctx context.Context, sink Sink, args TurnStartArgs) {
-	send(ctx, sink, events.TypeTurnStart, events.TurnStartPayload{
+// Returns the generated event id so callers can chain it as the parent
+// of the rest of the turn via WithParent.
+func EmitTurnStart(ctx context.Context, sink Sink, args TurnStartArgs) string {
+	return send(ctx, sink, events.TypeTurnStart, events.TurnStartPayload{
 		Header:             events.Header{V: events.TurnStartVersion},
 		SystemPromptSHA256: args.SystemPromptSHA256,
 		ServerInstructions: args.ServerInstructions,
@@ -37,9 +39,9 @@ func EmitTurnStart(ctx context.Context, sink Sink, args TurnStartArgs) {
 // length of what's actually stored (post-sanitization) so the payload
 // stays internally consistent — analytics counting bytes never see a
 // length that disagrees with the content field.
-func EmitUserMessage(ctx context.Context, sink Sink, content string) {
+func EmitUserMessage(ctx context.Context, sink Sink, content string) string {
 	sanitized := events.SanitizeUTF8(content)
-	send(ctx, sink, events.TypeUserMessage, events.UserMessagePayload{
+	return send(ctx, sink, events.TypeUserMessage, events.UserMessagePayload{
 		Header:        events.Header{V: events.UserMessageVersion},
 		Content:       sanitized,
 		ContentLength: len(sanitized),

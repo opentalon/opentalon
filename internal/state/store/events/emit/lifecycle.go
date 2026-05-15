@@ -15,8 +15,8 @@ type SummarizationTriggeredArgs struct {
 }
 
 // EmitSummarizationTriggered writes one summarization_triggered event.
-func EmitSummarizationTriggered(ctx context.Context, sink Sink, args SummarizationTriggeredArgs) {
-	send(ctx, sink, events.TypeSummarizationTriggered, events.SummarizationTriggeredPayload{
+func EmitSummarizationTriggered(ctx context.Context, sink Sink, args SummarizationTriggeredArgs) string {
+	return send(ctx, sink, events.TypeSummarizationTriggered, events.SummarizationTriggeredPayload{
 		Header:       events.Header{V: events.SummarizationTriggeredVersion},
 		MessageCount: args.MessageCount,
 		Reason:       args.Reason,
@@ -33,10 +33,10 @@ type SummarizationCompletedArgs struct {
 }
 
 // EmitSummarizationCompleted writes one summarization_completed event.
-func EmitSummarizationCompleted(ctx context.Context, sink Sink, args SummarizationCompletedArgs) {
+func EmitSummarizationCompleted(ctx context.Context, sink Sink, args SummarizationCompletedArgs) string {
 	sanitized := events.SanitizeUTF8(args.Summary)
 	excerpt, truncated := events.Excerpt(sanitized)
-	send(ctx, sink, events.TypeSummarizationCompleted, events.SummarizationCompletedPayload{
+	return send(ctx, sink, events.TypeSummarizationCompleted, events.SummarizationCompletedPayload{
 		Header:           events.Header{V: events.SummarizationCompletedVersion},
 		SummaryExcerpt:   excerpt,
 		SummaryTruncated: truncated,
@@ -54,8 +54,8 @@ type ModelSwitchArgs struct {
 }
 
 // EmitModelSwitch writes one model_switch event.
-func EmitModelSwitch(ctx context.Context, sink Sink, args ModelSwitchArgs) {
-	send(ctx, sink, events.TypeModelSwitch, events.ModelSwitchPayload{
+func EmitModelSwitch(ctx context.Context, sink Sink, args ModelSwitchArgs) string {
+	return send(ctx, sink, events.TypeModelSwitch, events.ModelSwitchPayload{
 		Header: events.Header{V: events.ModelSwitchVersion},
 		From:   args.From,
 		To:     args.To,
@@ -73,8 +73,11 @@ type ConfirmationRequestedArgs struct {
 }
 
 // EmitConfirmationRequested writes one confirmation_requested event.
-func EmitConfirmationRequested(ctx context.Context, sink Sink, args ConfirmationRequestedArgs) {
-	send(ctx, sink, events.TypeConfirmationRequested, events.ConfirmationRequestedPayload{
+// Returns the event id so the caller can persist it alongside the
+// pending state and use it as parent_id on the matching resolved event
+// once the user replies in a later turn.
+func EmitConfirmationRequested(ctx context.Context, sink Sink, args ConfirmationRequestedArgs) string {
+	return send(ctx, sink, events.TypeConfirmationRequested, events.ConfirmationRequestedPayload{
 		Header:     events.Header{V: events.ConfirmationRequestedVersion},
 		Prompt:     events.SanitizeUTF8(args.Prompt),
 		Choices:    args.Choices,
@@ -89,8 +92,8 @@ type ConfirmationResolvedArgs struct {
 }
 
 // EmitConfirmationResolved writes one confirmation_resolved event.
-func EmitConfirmationResolved(ctx context.Context, sink Sink, args ConfirmationResolvedArgs) {
-	send(ctx, sink, events.TypeConfirmationResolved, events.ConfirmationResolvedPayload{
+func EmitConfirmationResolved(ctx context.Context, sink Sink, args ConfirmationResolvedArgs) string {
+	return send(ctx, sink, events.TypeConfirmationResolved, events.ConfirmationResolvedPayload{
 		Header:     events.Header{V: events.ConfirmationResolvedVersion},
 		Choice:     args.Choice,
 		ToolCallID: args.ToolCallID,
@@ -106,8 +109,8 @@ type RetryArgs struct {
 }
 
 // EmitRetry writes one retry event.
-func EmitRetry(ctx context.Context, sink Sink, args RetryArgs) {
-	send(ctx, sink, events.TypeRetry, events.RetryPayload{
+func EmitRetry(ctx context.Context, sink Sink, args RetryArgs) string {
+	return send(ctx, sink, events.TypeRetry, events.RetryPayload{
 		Header:    events.Header{V: events.RetryVersion},
 		Phase:     args.Phase,
 		Attempt:   args.Attempt,

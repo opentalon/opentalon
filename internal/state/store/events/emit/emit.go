@@ -40,6 +40,7 @@ package emit
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -53,7 +54,14 @@ import (
 // Producers don't build this directly — Emit<Type> helpers fill it from
 // ctx + a typed args struct. The adapter in cmd/opentalon converts to
 // store.SessionEvent before Submit.
+//
+// ID is generated producer-side by send() so the value is available to
+// callers (via the helper return value) before the row hits the store.
+// The store accepts a pre-populated ID and skips its own generation; the
+// duplicated generator there is the fallback for any caller that builds
+// SessionEvent directly without going through emit.
 type Event struct {
+	ID         string
 	SessionID  string
 	EventType  string
 	ParentID   string
@@ -113,22 +121,27 @@ func ParentID(ctx context.Context) string {
 // ----- internal helper shared by every Emit<Type> -----
 
 // send marshals payload, stamps the canonical fields from ctx, and
-// hands the resulting Event to sink.Emit. A nil sink and the NoOpSink
-// zero-value are silent no-ops, so callers don't need to nil-check at
-// every emission site. Short-circuiting NoOpSink BEFORE json.Marshal
-// is important: it's the default when the orchestrator runs without a
-// state DB, and the hot path emits multiple events per LLM turn — we
-// don't want to pay marshalling cost just to discard the bytes.
+// hands the resulting Event to sink.Emit. Returns the generated event
+// id so callers can chain it as parent on subsequent emits via
+// WithParent(ctx, id). Returns "" if the event was dropped (nil sink,
+// NoOpSink, marshal failure, or id generator failure).
+//
+// A nil sink and the NoOpSink zero-value are silent no-ops, so callers
+// don't need to nil-check at every emission site. Short-circuiting
+// NoOpSink BEFORE json.Marshal is important: it's the default when the
+// orchestrator runs without a state DB, and the hot path emits multiple
+// events per LLM turn — we don't want to pay marshalling cost just to
+// discard the bytes.
 //
 // durationMS is split out from payload because the row-level column is
 // what analytics queries index — payloads that carry a latency_ms field
 // of their own pass the same value here so the column stays in sync.
-func send(ctx context.Context, sink Sink, eventType string, payload any, durationMS int64) {
+func send(ctx context.Context, sink Sink, eventType string, payload any, durationMS int64) string {
 	if sink == nil {
-		return
+		return ""
 	}
 	if _, ok := sink.(NoOpSink); ok {
-		return
+		return ""
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -136,15 +149,36 @@ func send(ctx context.Context, sink Sink, eventType string, payload any, duratio
 			"event_type", eventType,
 			"error", err,
 		)
-		return
+		return ""
+	}
+	id, err := newEventID()
+	if err != nil {
+		slog.Warn("session event emit: id generation failed",
+			"event_type", eventType,
+			"error", err,
+		)
+		return ""
 	}
 	sink.Emit(ctx, Event{
+		ID:         id,
 		SessionID:  actor.SessionID(ctx),
 		EventType:  eventType,
 		ParentID:   ParentID(ctx),
 		DurationMS: durationMS,
 		Payload:    raw,
 	})
+	return id
+}
+
+// newEventID returns a 32-char hex id, matching the shape of the
+// fallback generator in store.session_events. Generating producer-side
+// lets callers thread the id as parent_id on subsequent emits.
+func newEventID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // sha256Hex returns the lowercase-hex SHA256 of s. Used by helpers whose

@@ -8,8 +8,11 @@ import (
 
 // EmitPlannerInvoked writes one planner_invoked event with a short
 // human-readable reason ("user_request", "retry", "summarization_gap", …).
-func EmitPlannerInvoked(ctx context.Context, sink Sink, reason string) {
-	send(ctx, sink, events.TypePlannerInvoked, events.PlannerInvokedPayload{
+// Returns the event id so the caller can parent the planner's internal
+// llm_request/response and the subsequent planner_request/response/step
+// events to this root via WithParent.
+func EmitPlannerInvoked(ctx context.Context, sink Sink, reason string) string {
+	return send(ctx, sink, events.TypePlannerInvoked, events.PlannerInvokedPayload{
 		Header: events.Header{V: events.PlannerInvokedVersion},
 		Reason: reason,
 	}, 0)
@@ -24,8 +27,8 @@ type PlannerRequestArgs struct {
 }
 
 // EmitPlannerRequest writes one planner_request event.
-func EmitPlannerRequest(ctx context.Context, sink Sink, args PlannerRequestArgs) {
-	send(ctx, sink, events.TypePlannerRequest, events.PlannerRequestPayload{
+func EmitPlannerRequest(ctx context.Context, sink Sink, args PlannerRequestArgs) string {
+	return send(ctx, sink, events.TypePlannerRequest, events.PlannerRequestPayload{
 		Header:       events.Header{V: events.PlannerRequestVersion},
 		ModelID:      args.ModelID,
 		MessageCount: args.MessageCount,
@@ -41,10 +44,10 @@ type PlannerResponseArgs struct {
 }
 
 // EmitPlannerResponse writes one planner_response event.
-func EmitPlannerResponse(ctx context.Context, sink Sink, args PlannerResponseArgs) {
+func EmitPlannerResponse(ctx context.Context, sink Sink, args PlannerResponseArgs) string {
 	sanitized := events.SanitizeUTF8(args.RawContent)
 	excerpt, truncated := events.Excerpt(sanitized)
-	send(ctx, sink, events.TypePlannerResponse, events.PlannerResponsePayload{
+	return send(ctx, sink, events.TypePlannerResponse, events.PlannerResponsePayload{
 		Header:              events.Header{V: events.PlannerResponseVersion},
 		RawContentExcerpt:   excerpt,
 		RawContentTruncated: truncated,
@@ -63,8 +66,8 @@ type PlannerStepArgs struct {
 }
 
 // EmitPlannerStep writes one planner_step event.
-func EmitPlannerStep(ctx context.Context, sink Sink, args PlannerStepArgs) {
-	send(ctx, sink, events.TypePlannerStep, events.PlannerStepPayload{
+func EmitPlannerStep(ctx context.Context, sink Sink, args PlannerStepArgs) string {
+	return send(ctx, sink, events.TypePlannerStep, events.PlannerStepPayload{
 		Header:    events.Header{V: events.PlannerStepVersion},
 		StepIndex: args.StepIndex,
 		StepKind:  args.StepKind,
@@ -82,8 +85,8 @@ type ToolRetrievalArgs struct {
 }
 
 // EmitToolRetrieval writes one tool_retrieval event.
-func EmitToolRetrieval(ctx context.Context, sink Sink, args ToolRetrievalArgs) {
-	send(ctx, sink, events.TypeToolRetrieval, events.ToolRetrievalPayload{
+func EmitToolRetrieval(ctx context.Context, sink Sink, args ToolRetrievalArgs) string {
+	return send(ctx, sink, events.TypeToolRetrieval, events.ToolRetrievalPayload{
 		Header: events.Header{V: events.ToolRetrievalVersion},
 		Query:  events.SanitizeUTF8(args.Query),
 		TopK:   args.TopK,

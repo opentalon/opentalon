@@ -211,9 +211,10 @@ type Orchestrator struct {
 	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
 	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
 	planner                 *pipeline.Planner             // nil = pipeline disabled
-	pendingMu               sync.Mutex                    // guards pendingPipelines and pendingToolCalls maps
-	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline (access via pendingMu)
-	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
+	pendingMu              sync.Mutex                    // guards pendingPipelines, pendingToolCalls, pendingConfirmationIDs
+	pendingPipelines       map[string]*pipeline.Pipeline // sessionID -> pending pipeline
+	pendingToolCalls       map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
+	pendingConfirmationIDs map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
 	pipelineConfig          pipeline.PipelineConfig
 	confirmationPlugin      string                 // optional; plugin for confirmation strategy
 	confirmationAction      string                 // optional; action name for confirmation check
@@ -344,6 +345,7 @@ func NewWithRules(
 		planner:                 planner,
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
 		pendingToolCalls:        make(map[string]*ToolCall),
+		pendingConfirmationIDs:  make(map[string]string),
 		pipelineConfig:          pipelineCfg,
 		confirmationPlugin:      opts.ConfirmationPlugin,
 		confirmationAction:      opts.ConfirmationAction,
@@ -822,11 +824,21 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	}
 	o.pendingMu.Lock()
 	pendingPipeline := o.pendingPipelines[sessionID]
+	pendingPipelineConfID := o.pendingConfirmationIDs[sessionID]
 	if pendingPipeline != nil {
 		delete(o.pendingPipelines, sessionID)
+		delete(o.pendingConfirmationIDs, sessionID)
 	}
 	o.pendingMu.Unlock()
 	if p := pendingPipeline; p != nil {
+		// Parent the resolved event onto the original confirmation_requested
+		// so analytics can pair the two across turns. Empty id (no sink at
+		// request time, or pre-instrumentation pending state) leaves the
+		// turn_start parent in place.
+		resolvedCtx := ctx
+		if pendingPipelineConfID != "" {
+			resolvedCtx = emit.WithParent(ctx, pendingPipelineConfID)
+		}
 		var decision pipeline.ConfirmationDecision
 		if o.planner != nil {
 			d, classErr := o.planner.ClassifyConfirmation(ctx, userMessage)
@@ -842,7 +854,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
 		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 		if decision == pipeline.Approved {
-			emit.EmitConfirmationResolved(ctx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: "approve"})
+			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: "approve"})
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
 			res, err := o.executePipeline(ctx, sessionID, p)
 			if err == nil && res != nil {
@@ -853,7 +865,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			return res, err
 		}
-		emit.EmitConfirmationResolved(ctx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: "reject"})
+		emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: "reject"})
 		resp := "Pipeline cancelled."
 		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
 		log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
@@ -871,18 +883,31 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// metadata (survives restarts and multi-instance deployments).
 	o.pendingMu.Lock()
 	pendingCall := o.pendingToolCalls[sessionID]
+	pendingCallConfID := o.pendingConfirmationIDs[sessionID]
 	if pendingCall != nil {
 		delete(o.pendingToolCalls, sessionID)
+		delete(o.pendingConfirmationIDs, sessionID)
 	}
 	o.pendingMu.Unlock()
 	if pendingCall == nil {
-		pendingCall = loadPendingToolCall(sessions, sessionID)
+		// Fallback: in-memory state lost (pod restart, failover). Recover
+		// the call AND the original confirmation_requested event id from
+		// session metadata so the resolved event still links to the
+		// request that started the pending state.
+		pendingCall, pendingCallConfID = loadPendingToolCall(sessions, sessionID)
 	}
 	if pendingCall != nil {
 		_ = sessions.SetMetadata(sessionID, "pending_tool_call", "")
 	}
 	toolCallConfirmed := false
 	if tc := pendingCall; tc != nil {
+		// Parent the resolved event onto the matching confirmation_requested
+		// (potentially from a prior turn or even a prior pod). Empty id is
+		// the legacy/pre-instrumentation path — leave the turn_start parent.
+		resolvedCtx := ctx
+		if pendingCallConfID != "" {
+			resolvedCtx = emit.WithParent(ctx, pendingCallConfID)
+		}
 		var decision pipeline.ConfirmationDecision
 		// Prefer explicit frontend signal (metadata["confirmation"]) over
 		// LLM-based or text-based classification — faster and deterministic.
@@ -907,7 +932,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// Only record the user's approval in session — rejections are
 			// kept out so the LLM doesn't avoid re-calling the tool later.
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
-			emit.EmitConfirmationResolved(ctx, o.eventSink, emit.ConfirmationResolvedArgs{
+			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{
 				Choice:     "approve",
 				ToolCallID: tc.ID,
 			})
@@ -934,7 +959,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// LLM summarizes the result for the user.
 			toolCallConfirmed = true
 		} else {
-			emit.EmitConfirmationResolved(ctx, o.eventSink, emit.ConfirmationResolvedArgs{
+			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{
 				Choice:     "reject",
 				ToolCallID: tc.ID,
 			})
@@ -1060,13 +1085,19 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// is intentionally not instrumented here: those calls are short
 		// classifications, not full plans, and would dilute the analytics
 		// signal if grouped under the same event_type.
-		emit.EmitPlannerInvoked(ctx, o.eventSink, "agent_loop")
-		emit.EmitPlannerRequest(ctx, o.eventSink, emit.PlannerRequestArgs{
+		plannerInvokedID := emit.EmitPlannerInvoked(ctx, o.eventSink, "agent_loop")
+		// Scope planner-internal emits — including the LLM call's
+		// llm_request/llm_response, which fire from the provider while
+		// Plan() runs — under planner_invoked as their parent. The outer
+		// ctx (rooted at turn_start) is untouched, so the agent loop
+		// below isn't pulled into the planner span.
+		plannerCtx := emit.WithParent(ctx, plannerInvokedID)
+		emit.EmitPlannerRequest(plannerCtx, o.eventSink, emit.PlannerRequestArgs{
 			ModelID:      "", // planner uses provider-default routing; not exposed by pipeline.Planner
 			MessageCount: 2,  // planner hardcodes system+user, see pipeline.Planner.Plan
 		})
 		plannerStart := time.Now()
-		planResult, err := o.planner.Plan(ctx, stripKnowledgeContext(content), capabilitiesToPlannerInfo(plannerCaps), convContext)
+		planResult, err := o.planner.Plan(plannerCtx, stripKnowledgeContext(content), capabilitiesToPlannerInfo(plannerCaps), convContext)
 		plannerLatency := time.Since(plannerStart).Milliseconds()
 		var plannerRaw string
 		if err != nil {
@@ -1076,7 +1107,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			plannerRaw = fmt.Sprintf("planner ok: type=%s steps=%d", planResult.Type, len(planResult.Steps))
 			log.Debug("planner result", "type", planResult.Type, "steps", len(planResult.Steps))
 		}
-		emit.EmitPlannerResponse(ctx, o.eventSink, emit.PlannerResponseArgs{
+		emit.EmitPlannerResponse(plannerCtx, o.eventSink, emit.PlannerResponseArgs{
 			RawContent: plannerRaw,
 			LatencyMS:  plannerLatency,
 		})
@@ -1086,7 +1117,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				if step.Command != nil {
 					note = step.Command.Plugin + "." + step.Command.Action
 				}
-				emit.EmitPlannerStep(ctx, o.eventSink, emit.PlannerStepArgs{
+				emit.EmitPlannerStep(plannerCtx, o.eventSink, emit.PlannerStepArgs{
 					StepIndex: i,
 					StepKind:  "tool",
 					Note:      note,
@@ -1179,9 +1210,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				}
 				p := pipeline.NewPipeline(writeSteps, o.pipelineConfig)
 				p.Context = readPipeline.Context
-				o.pendingMu.Lock()
-				o.pendingPipelines[sessionID] = p
-				o.pendingMu.Unlock()
 				// Narrate only the write steps for confirmation.
 				var planText string
 				if narrated, narrateErr := o.planner.NarratePlan(ctx, writeSteps, content); narrateErr != nil {
@@ -1192,10 +1220,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
 				log.Debug("pipeline stored, awaiting confirmation for write steps",
 					"pipeline_id", p.ID, "session", sessionID, "write_steps", len(writeSteps))
-				emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
+				confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
 					Prompt:  planText,
 					Choices: []string{"approve", "reject"},
 				})
+				o.pendingMu.Lock()
+				o.pendingPipelines[sessionID] = p
+				if confID != "" {
+					o.pendingConfirmationIDs[sessionID] = confID
+				}
+				o.pendingMu.Unlock()
 				return &RunResult{
 					Response: planText,
 					Metadata: map[string]string{
@@ -1208,9 +1242,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			// ConfirmBeforeStep == 0: confirm entire pipeline (original behavior).
 			p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
-			o.pendingMu.Lock()
-			o.pendingPipelines[sessionID] = p
-			o.pendingMu.Unlock()
 			var planText string
 			if narrated, narrateErr := o.planner.NarratePlan(ctx, planResult.Steps, content); narrateErr != nil {
 				log.Warn("plan narration failed, using fallback", "error", narrateErr)
@@ -1220,10 +1251,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
-			emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
+			confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
 				Prompt:  planText,
 				Choices: []string{"approve", "reject"},
 			})
+			o.pendingMu.Lock()
+			o.pendingPipelines[sessionID] = p
+			if confID != "" {
+				o.pendingConfirmationIDs[sessionID] = confID
+			}
+			o.pendingMu.Unlock()
 			return &RunResult{
 				Response: planText,
 				Metadata: map[string]string{
@@ -1390,7 +1427,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// confirmation) intentionally bypass this emission: the LLM is not
 	// driving those decisions, so there's no "turn" to start. They still
 	// emit user_message (above) because the user did send input.
-	emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, sysPromptWithHint, profileModel, cachedTools))
+	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, sysPromptWithHint, profileModel, cachedTools))
+	// Root every subsequent event in this turn under turn_start by
+	// stamping it as the default parent on ctx. Specific spans (planner,
+	// llm_response, tool_call_extracted) overwrite this slot with their
+	// own id before nested emits so the analytics tree has tight scopes
+	// — turn_start is the fallback root, not a flat list of children.
+	ctx = emit.WithParent(ctx, turnStartID)
 
 	var stripRetries int
 	var toolRetries int // retries when planner expected tools but LLM didn't call any
@@ -1514,6 +1557,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		llmDuration := time.Since(llmStart)
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
+		}
+		// Stamp the just-emitted llm_response as parent for the rest of
+		// this iteration: tool_call_extracted / tool_call_result / retry
+		// / confirmation events all form a tight subtree under the LLM
+		// response that produced them. The next iteration's llm_request
+		// inherits this parent, which produces a chain of rounds — each
+		// round is causally a continuation of the previous, so the chain
+		// is the correct semantic. resp.EventID is "" when no sink is
+		// configured or the response was a refusal; we leave ctx alone
+		// in that case so the existing turn_start parent stays.
+		if resp.EventID != "" {
+			ctx = emit.WithParent(ctx, resp.EventID)
 		}
 		log.Info("LLM response", "round", i+1, "duration", llmDuration.Round(time.Millisecond).String(), "input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens, "content", resp.Content)
 
@@ -1765,12 +1820,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				if confResult.RequiresConfirmation {
 					log.Info("tool call requires confirmation", "plugin", calls[i].Plugin, "action", calls[i].Action)
 					pending := calls[i]
-					o.pendingMu.Lock()
-					o.pendingToolCalls[sessionID] = &pending
-					o.pendingMu.Unlock()
-					// Also persist to session metadata so pending calls survive
-					// restarts and work across multiple instances.
-					savePendingToolCall(sessions, sessionID, &pending)
 					// Build a confirmation message describing what will be done.
 					// Prefer LLM narration to hide raw tool names from the user.
 					var confirmMsg string
@@ -1793,11 +1842,23 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					// for the next turn (approval or follow-up questions). On
 					// rejection, the rollback (msgCountAtStart) removes it.
 					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg})
-					emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
+					confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
 						Prompt:     confirmMsg,
 						Choices:    []string{"approve", "reject"},
 						ToolCallID: calls[i].ID,
 					})
+					o.pendingMu.Lock()
+					o.pendingToolCalls[sessionID] = &pending
+					if confID != "" {
+						o.pendingConfirmationIDs[sessionID] = confID
+					}
+					o.pendingMu.Unlock()
+					// Also persist to session metadata so pending calls survive
+					// restarts and work across multiple instances. The
+					// confirmation_requested event id is embedded in the
+					// serialized form so the parent_id linkage survives
+					// pod restarts and multi-instance failover.
+					savePendingToolCall(sessions, sessionID, &pending, confID)
 					return &RunResult{
 						Response: confirmMsg,
 						Metadata: map[string]string{
@@ -2068,6 +2129,10 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 		logger.FromContext(ctx).Debug("streaming unavailable, falling back to complete", "error", err)
 		return o.llm.Complete(ctx, req)
 	}
+	// Close is idempotent (see oaiResponseStream.closed guard); the
+	// explicit Close after the loop forces emitStreamEnd to fire BEFORE
+	// we read EventID below, so the deferred Close becomes a safety net
+	// rather than the actual emit trigger.
 	defer func() { _ = stream.Close() }()
 
 	var buf strings.Builder
@@ -2108,10 +2173,20 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 		}
 	}
 
+	// Fire the end-of-stream emit now so EventID is populated before we
+	// build the response. Any stream implementation that doesn't surface
+	// an event id (test fakes, future providers) simply returns "".
+	_ = stream.Close()
+	var eventID string
+	if exposer, ok := stream.(interface{ EventID() string }); ok {
+		eventID = exposer.EventID()
+	}
+
 	return &provider.CompletionResponse{
 		Content: buf.String(),
 		Model:   model,
 		Usage:   usage,
+		EventID: eventID,
 	}, nil
 }
 
@@ -3137,8 +3212,9 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	// (raw-capture rule). Internal calls (preparers, guards, pipelines)
 	// are host-orchestrated, not part of the LLM reasoning trace, and are
 	// not emitted. CallID joins the matching tool_call_result emitted
-	// further down; session_events.parent_id linkage is reserved for a
-	// follow-up that introduces producer-side event_id generation.
+	// further down; tool_call_extracted's event id is also stamped onto
+	// ctx via WithParent so the eventual tool_call_result and any
+	// refusal/not-found emits in between link back via parent_id.
 	//
 	// dispatchStart is initialized unconditionally so emitRefusalResult
 	// can compute a meaningful LatencyMS regardless of where the policy
@@ -3155,13 +3231,16 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		// frozen here BEFORE the context-arg injection below mutates
 		// call.Args. If this emit ever becomes async, the call.Args map
 		// must be copied first to preserve the raw-capture invariant.
-		emit.EmitToolCallExtracted(ctx, o.eventSink, emit.ToolCallExtractedArgs{
+		extractedID := emit.EmitToolCallExtracted(ctx, o.eventSink, emit.ToolCallExtractedArgs{
 			CallID:    call.ID,
 			Plugin:    call.Plugin,
 			Action:    call.Action,
 			Arguments: call.Args,
 			Mode:      mode,
 		})
+		if extractedID != "" {
+			ctx = emit.WithParent(ctx, extractedID)
+		}
 	}
 
 	if call.Plugin == "" {
@@ -3578,15 +3657,28 @@ func formatToolCallMessage(call ToolCall) string {
 
 // pendingToolCallMeta is the JSON-serializable form of a pending tool call
 // stored in session metadata so it survives restarts.
+//
+// ConfirmationRequestedID carries the session-event id of the
+// confirmation_requested event that started this pending state, so the
+// matching confirmation_resolved event can be parented back to it even
+// across pod restarts or multi-instance failover where the in-memory
+// pendingConfirmationIDs map is empty.
 type pendingToolCallMeta struct {
-	ID     string            `json:"id"`
-	Plugin string            `json:"plugin"`
-	Action string            `json:"action"`
-	Args   map[string]string `json:"args,omitempty"`
+	ID                      string            `json:"id"`
+	Plugin                  string            `json:"plugin"`
+	Action                  string            `json:"action"`
+	Args                    map[string]string `json:"args,omitempty"`
+	ConfirmationRequestedID string            `json:"confirmation_requested_id,omitempty"`
 }
 
-func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall) {
-	meta := pendingToolCallMeta{ID: tc.ID, Plugin: tc.Plugin, Action: tc.Action, Args: tc.Args}
+func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID string) {
+	meta := pendingToolCallMeta{
+		ID:                      tc.ID,
+		Plugin:                  tc.Plugin,
+		Action:                  tc.Action,
+		Args:                    tc.Args,
+		ConfirmationRequestedID: confirmationRequestedID,
+	}
 	data, err := json.Marshal(meta)
 	if err != nil {
 		return
@@ -3594,20 +3686,23 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 	_ = sessions.SetMetadata(sessionID, "pending_tool_call", string(data))
 }
 
-func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) *ToolCall {
+// loadPendingToolCall restores the pending tool call from session metadata.
+// Returns the ToolCall and the confirmation_requested event id (empty when
+// the persisted row predates the field or no event was captured).
+func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string) {
 	sess, err := sessions.Get(sessionID)
 	if err != nil || sess == nil {
-		return nil
+		return nil, ""
 	}
 	raw := sess.Metadata["pending_tool_call"]
 	if raw == "" {
-		return nil
+		return nil, ""
 	}
 	var meta pendingToolCallMeta
 	if json.Unmarshal([]byte(raw), &meta) != nil {
-		return nil
+		return nil, ""
 	}
-	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args}
+	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args}, meta.ConfirmationRequestedID
 }
 
 // toolCallSignature builds a deterministic string from a set of tool calls

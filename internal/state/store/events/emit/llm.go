@@ -18,8 +18,8 @@ type LLMRequestArgs struct {
 
 // EmitLLMRequest writes one llm_request event. Emit immediately before
 // the provider HTTP call so the row predates llm_response chronologically.
-func EmitLLMRequest(ctx context.Context, sink Sink, args LLMRequestArgs) {
-	send(ctx, sink, events.TypeLLMRequest, events.LLMRequestPayload{
+func EmitLLMRequest(ctx context.Context, sink Sink, args LLMRequestArgs) string {
+	return send(ctx, sink, events.TypeLLMRequest, events.LLMRequestPayload{
 		Header:       events.Header{V: events.LLMRequestVersion},
 		ModelID:      args.ModelID,
 		MessageCount: args.MessageCount,
@@ -49,10 +49,12 @@ type LLMResponseArgs struct {
 // EmitLLMResponse writes one llm_response event. The helper computes
 // raw_content_sha256 over the SANITIZED full content (not the excerpt)
 // so the digest matches what a re-played raw HTTP body would hash to.
-func EmitLLMResponse(ctx context.Context, sink Sink, args LLMResponseArgs) {
+// Returns the event id so the provider can surface it on CompletionResponse,
+// letting the orchestrator parent subsequent tool_call_extracted events.
+func EmitLLMResponse(ctx context.Context, sink Sink, args LLMResponseArgs) string {
 	sanitized := events.SanitizeUTF8(args.RawContent)
 	excerpt, truncated := events.Excerpt(sanitized)
-	send(ctx, sink, events.TypeLLMResponse, events.LLMResponsePayload{
+	return send(ctx, sink, events.TypeLLMResponse, events.LLMResponsePayload{
 		Header:              events.Header{V: events.LLMResponseVersion},
 		RawContentExcerpt:   excerpt,
 		RawContentTruncated: truncated,
@@ -77,10 +79,10 @@ type LLMErrorArgs struct {
 
 // EmitLLMError writes one llm_error event with an excerpted, UTF-8-clean
 // response body.
-func EmitLLMError(ctx context.Context, sink Sink, args LLMErrorArgs) {
+func EmitLLMError(ctx context.Context, sink Sink, args LLMErrorArgs) string {
 	sanitized := events.SanitizeUTF8(args.ResponseBodyText)
 	excerpt, truncated := events.Excerpt(sanitized)
-	send(ctx, sink, events.TypeLLMError, events.LLMErrorPayload{
+	return send(ctx, sink, events.TypeLLMError, events.LLMErrorPayload{
 		Header:                events.Header{V: events.LLMErrorVersion},
 		Phase:                 args.Phase,
 		StatusCode:            args.StatusCode,
@@ -98,8 +100,8 @@ type LLMRefusedArgs struct {
 }
 
 // EmitLLMRefused writes one llm_refused event.
-func EmitLLMRefused(ctx context.Context, sink Sink, args LLMRefusedArgs) {
-	send(ctx, sink, events.TypeLLMRefused, events.LLMRefusedPayload{
+func EmitLLMRefused(ctx context.Context, sink Sink, args LLMRefusedArgs) string {
+	return send(ctx, sink, events.TypeLLMRefused, events.LLMRefusedPayload{
 		Header:           events.Header{V: events.LLMRefusedVersion},
 		RefusalText:      events.SanitizeUTF8(args.RefusalText),
 		ContentSafetyHit: args.ContentSafetyHit,

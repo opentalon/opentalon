@@ -17,8 +17,8 @@ type ScoreComputedArgs struct {
 }
 
 // EmitScoreComputed writes one score_computed event.
-func EmitScoreComputed(ctx context.Context, sink Sink, args ScoreComputedArgs) {
-	send(ctx, sink, events.TypeScoreComputed, events.ScoreComputedPayload{
+func EmitScoreComputed(ctx context.Context, sink Sink, args ScoreComputedArgs) string {
+	return send(ctx, sink, events.TypeScoreComputed, events.ScoreComputedPayload{
 		Header:        events.Header{V: events.ScoreComputedVersion},
 		Score:         args.Score,
 		RubricVersion: args.RubricVersion,

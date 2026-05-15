@@ -257,6 +257,20 @@ type oaiResponseStream struct {
 	tokensIn     int
 	tokensOut    int
 	streamErr    error // non-nil → Close emits llm_error instead of llm_response/llm_refused
+
+	// lastEventID is the session-event id of the llm_response event emitted
+	// at end-of-stream; empty for refusal/error paths and when no sink is
+	// configured. Exposed via EventID() so the orchestrator can stamp
+	// subsequent tool_call_extracted events with the right parent.
+	lastEventID string
+}
+
+// EventID returns the session-event id of the llm_response event this
+// stream emitted at end-of-stream, or "" if no llm_response event was
+// produced (refusal, error, or no sink). The orchestrator uses this
+// after Close to parent subsequent tool_call_extracted events.
+func (s *oaiResponseStream) EventID() string {
+	return s.lastEventID
 }
 
 // streamAccumulator buffers the raw SSE wire bytes for end-of-stream debug
@@ -462,13 +476,18 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	// llm_refused so analytics keeps refusals distinct from successful
 	// generations — they have different remediation paths (prompt tuning
 	// vs model swap vs user education).
+	var eventID string
 	if finishReason == openAIFinishReasonContentFilter {
 		emit.EmitLLMRefused(ctx, p.eventSink, emit.LLMRefusedArgs{
 			RefusalText:      content,
 			ContentSafetyHit: openAIFinishReasonContentFilter,
 		})
+		// Refusal path: leave EventID empty so a downstream consumer can
+		// distinguish "no event captured" from "captured under llm_response".
+		// Refusals don't lead to tool dispatch, so a parent_id link from
+		// tool_call_extracted is not meaningful here anyway.
 	} else {
-		emit.EmitLLMResponse(ctx, p.eventSink, emit.LLMResponseArgs{
+		eventID = emit.EmitLLMResponse(ctx, p.eventSink, emit.LLMResponseArgs{
 			RawContent:         content,
 			NativeToolCallsRaw: nativeToolCallsRaw,
 			FinishReason:       finishReason,
@@ -488,6 +507,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 			InputTokens:  oaiResp.Usage.PromptTokens,
 			OutputTokens: oaiResp.Usage.CompletionTokens,
 		},
+		EventID: eventID,
 	}, nil
 }
 
@@ -748,7 +768,7 @@ func (s *oaiResponseStream) emitStreamEnd() {
 		})
 		return
 	}
-	emit.EmitLLMResponse(s.emitCtx, s.eventSink, emit.LLMResponseArgs{
+	s.lastEventID = emit.EmitLLMResponse(s.emitCtx, s.eventSink, emit.LLMResponseArgs{
 		RawContent:         content,
 		FinishReason:       s.finishReason,
 		TokensIn:           s.tokensIn,
