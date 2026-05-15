@@ -240,6 +240,9 @@ func (s *blockingSetSummaryStore) Get(id string) (*state.Session, error) { retur
 func (s *blockingSetSummaryStore) Create(id, entityID, groupID string) *state.Session {
 	return s.inner.Create(id, entityID, groupID)
 }
+func (s *blockingSetSummaryStore) ClearMessages(id string) error {
+	return s.inner.ClearMessages(id)
+}
 func (s *blockingSetSummaryStore) Delete(id string) error { return s.inner.Delete(id) }
 func (s *blockingSetSummaryStore) SetModel(id string, m provider.ModelRef) error {
 	return s.inner.SetModel(id, m)

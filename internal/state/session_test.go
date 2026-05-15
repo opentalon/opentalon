@@ -86,6 +86,48 @@ func TestSessionDelete(t *testing.T) {
 	}
 }
 
+func TestSessionClearMessagesPreservesIdentity(t *testing.T) {
+	store := NewSessionStore("")
+	sess := store.Create("sess1", "", "")
+	sess.Metadata["debug"] = "true"
+	_ = store.SetModel("sess1", "anthropic/claude-sonnet-4")
+	_ = store.AddMessage("sess1", provider.Message{Role: provider.RoleUser, Content: "Hello"})
+	_ = store.AddMessage("sess1", provider.Message{Role: provider.RoleAssistant, Content: "Hi"})
+	_ = store.SetSummary("sess1", "prior summary", []provider.Message{{Role: provider.RoleUser, Content: "kept"}})
+	createdAt := sess.CreatedAt
+
+	if err := store.ClearMessages("sess1"); err != nil {
+		t.Fatalf("ClearMessages: %v", err)
+	}
+
+	got, err := store.Get("sess1")
+	if err != nil {
+		t.Fatalf("session disappeared after clear: %v", err)
+	}
+	if len(got.Messages) != 0 {
+		t.Errorf("Messages len = %d, want 0", len(got.Messages))
+	}
+	if got.Summary != "" {
+		t.Errorf("Summary = %q, want empty", got.Summary)
+	}
+	if got.ActiveModel != "anthropic/claude-sonnet-4" {
+		t.Errorf("ActiveModel = %q, want preserved", got.ActiveModel)
+	}
+	if got.Metadata["debug"] != "true" {
+		t.Errorf("Metadata[debug] = %q, want preserved", got.Metadata["debug"])
+	}
+	if !got.CreatedAt.Equal(createdAt) {
+		t.Errorf("CreatedAt changed: was %v, now %v", createdAt, got.CreatedAt)
+	}
+}
+
+func TestSessionClearMessagesUnknownSessionIsNoOp(t *testing.T) {
+	store := NewSessionStore("")
+	if err := store.ClearMessages("ghost"); err != nil {
+		t.Errorf("ClearMessages on unknown id should be a no-op, got: %v", err)
+	}
+}
+
 func TestSessionList(t *testing.T) {
 	store := NewSessionStore("")
 	store.Create("a", "", "")

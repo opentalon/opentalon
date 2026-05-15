@@ -80,6 +80,16 @@ func (s *stubSessionStore) SetMetadata(id, key, value string) error {
 	return nil
 }
 
+func (s *stubSessionStore) ClearMessages(id string) error {
+	sess := s.sessions[id]
+	if sess == nil {
+		return &sessionNotFoundError{id}
+	}
+	sess.Messages = nil
+	sess.Summary = ""
+	return nil
+}
+
 func (s *stubSessionStore) Delete(id string) error {
 	delete(s.sessions, id)
 	return nil

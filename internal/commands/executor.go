@@ -475,11 +475,14 @@ func (e *Executor) clearSession(ctx context.Context, call orchestrator.ToolCall)
 	if sessionID == "" {
 		return orchestrator.ToolResult{CallID: call.ID, Error: "session_id not set (internal error)"}
 	}
-	// TODO: If the orchestrator maintains pending pipeline state per session, it should be cleared here (e.g. via a ClearSession hook).
-	if err := e.sessions.Delete(sessionID); err != nil {
-		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("delete session: %v", err)}
+	// Drop messages + summary in one transaction. The session row itself
+	// stays (entity_id, group_id, active_model, metadata preserved), and
+	// session_events is untouched — see SessionStoreInterface.ClearMessages.
+	// TODO: If the orchestrator maintains pending pipeline state per
+	// session, it should be cleared here too (e.g. via a ClearSession hook).
+	if err := e.sessions.ClearMessages(sessionID); err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("clear session: %v", err)}
 	}
-	e.sessions.Create(sessionID, "", "")
 
 	// Run configured on-clear plugin actions (e.g. weaviate refresh).
 	if e.runAction != nil {

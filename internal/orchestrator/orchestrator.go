@@ -179,7 +179,13 @@ type SessionStoreInterface interface {
 	SetModel(id string, model provider.ModelRef) error
 	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op
 	SetMetadata(id, key, value string) error                                 // upsert a single metadata key; empty value removes it
-	Delete(id string) error                                                  // remove session (e.g. for clear_session command)
+	// ClearMessages drops Messages and Summary; preserves EntityID, GroupID,
+	// ActiveModel, Metadata, and CreatedAt; bumps UpdatedAt. The audit log
+	// (session_events) is untouched. Missing id is a no-op — destructive
+	// operations on this interface are idempotent. Used by the clear_session
+	// command to reset LLM context without losing the session's identity.
+	ClearMessages(id string) error
+	Delete(id string) error // remove session entirely (admin / retention; missing id no-op)
 }
 
 // sessionMutex is a per-session lock with reference counting for cleanup.
