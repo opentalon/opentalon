@@ -245,10 +245,11 @@ type LogConfig struct {
 
 type PluginConfig struct {
 	Enabled     bool                   `yaml:"enabled"`
-	Insecure    *bool                  `yaml:"insecure"` // if true or omitted (default), preparer cannot run invoke; if false (trusted), can invoke
-	Plugin      string                 `yaml:"plugin"`   // path to binary or grpc://... (optional if github is set)
-	GitHub      string                 `yaml:"github"`   // e.g. "owner/repo" (bundler-style)
-	Ref         string                 `yaml:"ref"`      // branch, tag, or commit; resolved and pinned in plugins.lock
+	Cache       bool                   `yaml:"cache,omitempty"` // when true, reuse cached binary from plugins.lock (default false = always rebuild)
+	Insecure    *bool                  `yaml:"insecure"`        // if true or omitted (default), preparer cannot run invoke; if false (trusted), can invoke
+	Plugin      string                 `yaml:"plugin"`          // path to binary or grpc://... (optional if github is set)
+	GitHub      string                 `yaml:"github"`          // e.g. "owner/repo" (bundler-style)
+	Ref         string                 `yaml:"ref"`             // branch, tag, or commit; resolved and pinned in plugins.lock
 	Config      map[string]interface{} `yaml:"config,omitempty"`
 	DBAccess    bool                   `yaml:"db_access,omitempty"`    // opt-in: inject state-store credentials into plugin config
 	DialTimeout string                 `yaml:"dial_timeout,omitempty"` // e.g. "30s"; overrides the default 5s gRPC init timeout
@@ -274,9 +275,10 @@ type JobConfig struct {
 
 type ChannelConfig struct {
 	Enabled bool                   `yaml:"enabled"`
-	Plugin  string                 `yaml:"plugin"` // path to binary or grpc://... (optional if github is set)
-	GitHub  string                 `yaml:"github"` // e.g. "opentalon/slack-channel" (bundler-style)
-	Ref     string                 `yaml:"ref"`    // branch, tag, or commit; pinned in channels.lock
+	Cache   bool                   `yaml:"cache,omitempty"` // when true, reuse cached binary from channels.lock (default false = always rebuild)
+	Plugin  string                 `yaml:"plugin"`          // path to binary or grpc://... (optional if github is set)
+	GitHub  string                 `yaml:"github"`          // e.g. "opentalon/slack-channel" (bundler-style)
+	Ref     string                 `yaml:"ref"`             // branch, tag, or commit; pinned in channels.lock
 	Config  map[string]interface{} `yaml:"config"`
 }
 
@@ -406,6 +408,7 @@ type DBConfig struct {
 // SessionConfig limits session size and optional idle pruning.
 type SessionConfig struct {
 	MaxMessages             int    `yaml:"max_messages"`               // cap messages per session (0 = no cap)
+	ContextMessages         int    `yaml:"context_messages"`           // send only last N messages to LLM (0 = all; default 0)
 	MaxIdleDays             int    `yaml:"max_idle_days"`              // delete sessions not updated in N days (0 = don't prune)
 	SummarizeAfter          int    `yaml:"summarize_after_messages"`   // run summarization after N messages (0 = off)
 	MaxMessagesAfterSummary int    `yaml:"max_messages_after_summary"` // keep this many messages after summarization

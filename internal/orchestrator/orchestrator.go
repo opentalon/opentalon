@@ -139,6 +139,7 @@ type OrchestratorOpts struct {
 	PermissionPluginName    string
 	RuntimePromptPath       string                        // optional path to editable prompt file (e.g. data_dir/custom_prompt.txt); appended to system prompt
 	ContextArgProviders     map[string]ContextArgProvider // optional; if nil, default providers (e.g. session_id) are used
+	ContextMessages         int                           // send only last N messages to LLM (0 = all)
 	SummarizeAfterMessages  int                           // 0 = off
 	MaxMessagesAfterSummary int                           // keep this many messages after summarization
 	SummarizePrompt         string                        // empty = default English
@@ -206,6 +207,7 @@ type Orchestrator struct {
 	permissionPluginName    string                        // name of the permission plugin (skip permission check when executing it)
 	runtimePromptPath       string                        // optional; if set, buildSystemPrompt appends file contents
 	contextArgProviders     map[string]ContextArgProvider // name -> extract from context; used to inject args per action
+	contextMessages         int                           // send only last N messages to LLM (0 = all)
 	summarizeAfterMessages  int                           // 0 = off; after this many messages run summarization
 	maxMessagesAfterSummary int                           // keep this many messages after summarization
 	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
@@ -338,6 +340,7 @@ func NewWithRules(
 		permissionChecker:       opts.PermissionChecker,
 		permissionPluginName:    opts.PermissionPluginName,
 		runtimePromptPath:       opts.RuntimePromptPath,
+		contextMessages:         opts.ContextMessages,
 		summarizeAfterMessages:  opts.SummarizeAfterMessages,
 		maxMessagesAfterSummary: opts.MaxMessagesAfterSummary,
 		summarizePrompt:         opts.SummarizePrompt,
@@ -2704,6 +2707,13 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 			Content: "Previous conversation summary: " + sess.Summary,
 		})
 	}
+	// When context_messages is set, keep only the last N messages to avoid
+	// blowing the context window. This is a simple sliding window that
+	// preserves tool results (unlike LLM summarization which loses them).
+	convMessages := sess.Messages
+	if o.contextMessages > 0 && len(convMessages) > o.contextMessages {
+		convMessages = convMessages[len(convMessages)-o.contextMessages:]
+	}
 	// Strip [knowledge_context] from ALL user messages including the current turn.
 	// Server instructions are already in the system prompt via SystemPromptAddition,
 	// and the preparer's knowledge_context duplicates them. Stripping all turns
@@ -2712,7 +2722,7 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 	// Also sanitize poisoned assistant messages from session history: remove
 	// hallucinated template variables and narrated tool calls that were saved
 	// before detection was in place. These teach the LLM bad patterns.
-	messages = appendStrippingAllKC(messages, sanitizeHistory(sess.Messages))
+	messages = appendStrippingAllKC(messages, sanitizeHistory(convMessages))
 
 	// For weaker / OSS models that tend to ignore system-prompt formatting
 	// instructions, repeat the channel format hint as a trailing system
@@ -2721,7 +2731,7 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 	// round — the OUTPUT FORMAT section in the system prompt is sufficient
 	// there. Once tool results are present the model switches to answer
 	// mode and benefits from the nudge.
-	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(sess.Messages) {
+	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
 		messages = append(messages, provider.Message{
 			Role:    provider.RoleSystem,
 			Content: "[IMPORTANT — output format reminder] " + hint,
@@ -2731,7 +2741,7 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 	// Only inject the "don't repeat" reminder when there's actual prior
 	// conversation (at least one assistant reply). On the first turn there's
 	// nothing to repeat.
-	if len(sess.Messages) > 2 {
+	if len(convMessages) > 2 {
 		messages = append(messages, provider.Message{
 			Role:    provider.RoleSystem,
 			Content: "[IMPORTANT] Answer ONLY the user's last message above. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.",
@@ -2760,9 +2770,13 @@ func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.
 			Content: "Previous conversation summary: " + sess.Summary,
 		})
 	}
-	messages = appendStrippingAllKC(messages, sanitizeHistory(sess.Messages))
+	convMessages := sess.Messages
+	if o.contextMessages > 0 && len(convMessages) > o.contextMessages {
+		convMessages = convMessages[len(convMessages)-o.contextMessages:]
+	}
+	messages = appendStrippingAllKC(messages, sanitizeHistory(convMessages))
 
-	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(sess.Messages) {
+	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
 		messages = append(messages, provider.Message{
 			Role:    provider.RoleSystem,
 			Content: "[IMPORTANT — output format reminder] " + hint,
@@ -2775,7 +2789,7 @@ func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.
 	// Only inject the "don't repeat" reminder when there's actual prior
 	// conversation (at least one assistant reply). On the first turn there's
 	// nothing to repeat.
-	if len(sess.Messages) > 2 {
+	if len(convMessages) > 2 {
 		messages = append(messages, provider.Message{
 			Role:    provider.RoleSystem,
 			Content: "[IMPORTANT] Answer ONLY the user's last message above. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.",
