@@ -151,6 +151,51 @@ func TestEmitUserMessage_ContentLengthMatchesStoredContent(t *testing.T) {
 
 // ----- llm cluster (raw-capture invariants) -----
 
+// TestEmitLLMResponse_CostFieldsPassThrough verifies the cost fields on
+// LLMResponseArgs land on LLMResponsePayload unchanged. The helper does
+// no math of its own — pricing is the caller's responsibility (the
+// provider wrapper) so historical events stay frozen at their call-time
+// rates even after the model catalogue is reconfigured.
+func TestEmitLLMResponse_CostFieldsPassThrough(t *testing.T) {
+	sink := &fakeSink{}
+	EmitLLMResponse(context.Background(), sink, LLMResponseArgs{
+		RawContent: "ok",
+		TokensIn:   1000,
+		TokensOut:  500,
+		CostInput:  0.0025,
+		CostOutput: 0.005,
+	})
+
+	var p events.LLMResponsePayload
+	if err := json.Unmarshal(sink.snapshot()[0].Payload, &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if p.CostInput != 0.0025 {
+		t.Errorf("CostInput = %v, want 0.0025", p.CostInput)
+	}
+	if p.CostOutput != 0.005 {
+		t.Errorf("CostOutput = %v, want 0.005", p.CostOutput)
+	}
+}
+
+// TestEmitLLMResponse_ZeroCostOmitted verifies that a zero-cost emit (the
+// common case for unconfigured models) leaves the cost fields out of the
+// JSON entirely — so consumers can distinguish "unpriced" (absent) from
+// "priced at zero" (present and 0) without ambiguity.
+func TestEmitLLMResponse_ZeroCostOmitted(t *testing.T) {
+	sink := &fakeSink{}
+	EmitLLMResponse(context.Background(), sink, LLMResponseArgs{
+		RawContent: "ok",
+		TokensIn:   10,
+		TokensOut:  5,
+	})
+
+	raw := string(sink.snapshot()[0].Payload)
+	if strings.Contains(raw, `"cost_input"`) || strings.Contains(raw, `"cost_output"`) {
+		t.Errorf("zero cost must be omitted from payload, got: %s", raw)
+	}
+}
+
 func TestEmitLLMResponse_ExcerptAndSHA256(t *testing.T) {
 	sink := &fakeSink{}
 	long := strings.Repeat("A", events.ExcerptCap+128) // overshoot the cap

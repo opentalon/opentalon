@@ -178,6 +178,18 @@ const LLMRequestVersion = 1
 // directly into the parent payload: `{"native_tool_calls_raw":[{...}]}`
 // instead of an escaped-string form. This matters for psql inspection and
 // for the api-plugin which would otherwise need a double unmarshal.
+//
+// CostInput / CostOutput — cost of this call, computed by the provider
+// wrapper at call time from token counts and the per-million rates
+// configured on the matching ModelInfo. Frozen at call time so later
+// config changes (or model retirement) do not retroactively re-price
+// historical events. Fields are unitless floats; the currency is
+// whatever ModelInfo.Cost is denominated in — operators document the
+// convention at deployment level (matching the existing store.UsageRecord
+// {InputCost, OutputCost} convention in internal/state/store/usage.go).
+// Both fields use omitempty: a zero value means "model not in the
+// catalogue at emit time", not "free" — analytics should treat absent
+// fields as unpriced rather than summing them as zero-cost calls.
 type LLMResponsePayload struct {
 	Header
 	RawContentExcerpt   string          `json:"raw_content_excerpt"`
@@ -187,6 +199,8 @@ type LLMResponsePayload struct {
 	FinishReason        string          `json:"finish_reason,omitempty"`
 	TokensIn            int             `json:"tokens_in,omitempty"`
 	TokensOut           int             `json:"tokens_out,omitempty"`
+	CostInput           float64         `json:"cost_input,omitempty"`
+	CostOutput          float64         `json:"cost_output,omitempty"`
 	LatencyMS           int64           `json:"latency_ms,omitempty"`
 	ProviderResponseID  string          `json:"provider_response_id,omitempty"`
 }

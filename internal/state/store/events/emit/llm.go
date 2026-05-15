@@ -36,12 +36,23 @@ func EmitLLMRequest(ctx context.Context, sink Sink, args LLMRequestArgs) string 
 // UTF-8, computes the full-content SHA256, and stores the 4 KB excerpt
 // with a truncated flag. NativeToolCallsRaw is the provider's ToolCalls
 // JSON inlined as-is so consumers don't double-unmarshal.
+//
+// CostInput / CostOutput are the cost of this call, computed by the
+// caller (the provider wrapper) from token counts and the per-million
+// rates on the matching ModelInfo. Computing here rather than at read
+// time freezes pricing at call time so later config changes do not
+// retroactively re-price historical events. Currency is whatever
+// ModelInfo.Cost is denominated in — see LLMResponsePayload doc. Zero
+// values are passed through unchanged; the payload uses omitempty so
+// unpriced models simply leave the fields out.
 type LLMResponseArgs struct {
 	RawContent         string
 	NativeToolCallsRaw json.RawMessage
 	FinishReason       string
 	TokensIn           int
 	TokensOut          int
+	CostInput          float64
+	CostOutput         float64
 	LatencyMS          int64
 	ProviderResponseID string
 }
@@ -63,6 +74,8 @@ func EmitLLMResponse(ctx context.Context, sink Sink, args LLMResponseArgs) strin
 		FinishReason:        args.FinishReason,
 		TokensIn:            args.TokensIn,
 		TokensOut:           args.TokensOut,
+		CostInput:           args.CostInput,
+		CostOutput:          args.CostOutput,
 		LatencyMS:           args.LatencyMS,
 		ProviderResponseID:  args.ProviderResponseID,
 	}, args.LatencyMS)

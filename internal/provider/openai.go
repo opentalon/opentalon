@@ -113,6 +113,28 @@ func (p *OpenAIProvider) ID() string { return p.id }
 
 func (p *OpenAIProvider) Models() []ModelInfo { return p.models }
 
+// costForTokens computes input/output cost for tokensIn/tokensOut against
+// this provider's configured per-million-token rate for modelID. Returns
+// (0, 0) when modelID is not in p.models — emit helpers stamp
+// LLMResponsePayload with omitempty so a zero cost simply leaves the
+// fields out rather than recording a misleading "free call". Mirrors
+// the silent-zero behaviour of usageRecorderAdapter.RecordUsage in
+// cmd/opentalon/main.go so the two pricing paths stay consistent.
+//
+// Currency is unitless: ModelInfo.Cost values are stamped as-is, the
+// operator's deployment convention sets the unit. Centralising the math
+// here keeps the streaming and non-streaming emit sites from drifting.
+func (p *OpenAIProvider) costForTokens(modelID string, tokensIn, tokensOut int) (float64, float64) {
+	for _, m := range p.models {
+		if m.ID != modelID {
+			continue
+		}
+		return float64(tokensIn) * m.Cost.Input / 1_000_000,
+			float64(tokensOut) * m.Cost.Output / 1_000_000
+	}
+	return 0, 0
+}
+
 func (p *OpenAIProvider) SupportsFeature(f Feature) bool {
 	for _, m := range p.models {
 		if m.SupportsFeature(f) {
@@ -256,7 +278,13 @@ type oaiResponseStream struct {
 	finishReason string
 	tokensIn     int
 	tokensOut    int
-	streamErr    error // non-nil → Close emits llm_error instead of llm_response/llm_refused
+	// costFn computes (inputCost, outputCost) from final token counts at
+	// end-of-stream. Captured as a closure rather than a back-pointer to
+	// the provider so the stream stays decoupled from OpenAIProvider for
+	// targeted tests. nil when no pricing should be computed (test fakes
+	// that skip provider construction).
+	costFn    func(tokensIn, tokensOut int) (float64, float64)
+	streamErr error // non-nil → Close emits llm_error instead of llm_response/llm_refused
 
 	// lastEventID is the session-event id of the llm_response event emitted
 	// at end-of-stream; empty for refusal/error paths and when no sink is
@@ -487,12 +515,15 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 		// Refusals don't lead to tool dispatch, so a parent_id link from
 		// tool_call_extracted is not meaningful here anyway.
 	} else {
+		costIn, costOut := p.costForTokens(oaiReq.Model, oaiResp.Usage.PromptTokens, oaiResp.Usage.CompletionTokens)
 		eventID = emit.EmitLLMResponse(ctx, p.eventSink, emit.LLMResponseArgs{
 			RawContent:         content,
 			NativeToolCallsRaw: nativeToolCallsRaw,
 			FinishReason:       finishReason,
 			TokensIn:           oaiResp.Usage.PromptTokens,
 			TokensOut:          oaiResp.Usage.CompletionTokens,
+			CostInput:          costIn,
+			CostOutput:         costOut,
 			LatencyMS:          latencyMS,
 			ProviderResponseID: oaiResp.ID,
 		})
@@ -608,6 +639,9 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 		emitCtx:   ctx,
 		eventSink: p.eventSink,
 		startTime: start,
+		costFn: func(in, out int) (float64, float64) {
+			return p.costForTokens(oaiReq.Model, in, out)
+		},
 	}
 	// Wire end-of-stream capture only when this session opted in. Sessions
 	// without /debug get the lighter struct without the buffer.
@@ -768,11 +802,17 @@ func (s *oaiResponseStream) emitStreamEnd() {
 		})
 		return
 	}
+	var costIn, costOut float64
+	if s.costFn != nil {
+		costIn, costOut = s.costFn(s.tokensIn, s.tokensOut)
+	}
 	s.lastEventID = emit.EmitLLMResponse(s.emitCtx, s.eventSink, emit.LLMResponseArgs{
 		RawContent:         content,
 		FinishReason:       s.finishReason,
 		TokensIn:           s.tokensIn,
 		TokensOut:          s.tokensOut,
+		CostInput:          costIn,
+		CostOutput:         costOut,
 		LatencyMS:          latencyMS,
 		ProviderResponseID: s.responseID,
 	})
