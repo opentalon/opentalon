@@ -89,6 +89,13 @@ func (c *cachedSessionStore) SetSummary(id string, summary string, messages []pr
 	return nil
 }
 
+func (c *cachedSessionStore) ClearMessages(id string) error {
+	// Drop cache entry so the next Get reloads the cleared state from the
+	// inner store (messages emptied, summary cleared, identity preserved).
+	delete(c.cache, id)
+	return c.inner.ClearMessages(id)
+}
+
 func (c *cachedSessionStore) Delete(id string) error {
 	delete(c.cache, id)
 	return c.inner.Delete(id)

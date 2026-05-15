@@ -258,6 +258,35 @@ func (s *SessionStore) List() ([]string, error) {
 	return ids, rows.Err()
 }
 
+// ClearMessages drops the conversation history of a session — messages and
+// the derived summary — atomically. The session row itself stays (entity_id,
+// group_id, active_model, metadata, created_at all preserved), and the
+// session_events audit log is untouched. Used by the clear_session command
+// so /clear resets LLM context without orphaning the session's identity or
+// erasing telemetry.
+func (s *SessionStore) ClearMessages(id string) error {
+	ctx := context.Background()
+	d := s.db.Dialect()
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	tx, err := s.db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("clear messages begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		d.Rebind(`DELETE FROM messages WHERE session_id = ?`), id); err != nil {
+		return fmt.Errorf("clear messages delete: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		d.Rebind(`UPDATE sessions SET summary = '', updated_at = ? WHERE id = ?`),
+		now, id); err != nil {
+		return fmt.Errorf("clear messages update: %w", err)
+	}
+	return tx.Commit()
+}
+
 // Delete removes a session and its messages.
 func (s *SessionStore) Delete(id string) error {
 	d := s.db.Dialect()
