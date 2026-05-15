@@ -273,7 +273,7 @@ func main() {
 	for name, p := range cfg.Plugins {
 		path := p.Plugin
 		if p.GitHub != "" && p.Ref != "" {
-			resolvedPath, err := bundle.EnsurePlugin(ctx, dataDir, name, p.GitHub, p.Ref)
+			resolvedPath, err := bundle.EnsurePlugin(ctx, dataDir, name, p.GitHub, p.Ref, p.Cache)
 			if err != nil {
 				slog.Warn("bundle plugin failed", "plugin", name, "error", err)
 				continue
@@ -564,7 +564,8 @@ func main() {
 		PermissionChecker:       permChecker,
 		PermissionPluginName:    permPluginName,
 		RuntimePromptPath:       runtimePromptPath,
-		SummarizeAfterMessages:  defaultInt(cfg.State.Session.SummarizeAfter, 5),
+		ContextMessages:         cfg.State.Session.ContextMessages, // 0 = all messages; >0 = send only last N messages to LLM
+		SummarizeAfterMessages:  cfg.State.Session.SummarizeAfter,  // 0 (default) = off; set to e.g. 10 to enable LLM summarization
 		MaxMessagesAfterSummary: defaultInt(cfg.State.Session.MaxMessagesAfterSummary, 5),
 		SummarizePrompt:         cfg.State.Session.SummarizePrompt,
 		SummarizeUpdatePrompt:   cfg.State.Session.SummarizeUpdatePrompt,
@@ -768,7 +769,7 @@ func main() {
 	for name, ch := range cfg.Channels {
 		pathRef := ch.Plugin
 		if ch.GitHub != "" && ch.Ref != "" {
-			resolvedPath, err := bundle.EnsureChannel(ctx, dataDir, name, ch.GitHub, ch.Ref)
+			resolvedPath, err := bundle.EnsureChannel(ctx, dataDir, name, ch.GitHub, ch.Ref, ch.Cache)
 			if err != nil {
 				slog.Warn("bundle channel failed", "channel", name, "error", err)
 				continue

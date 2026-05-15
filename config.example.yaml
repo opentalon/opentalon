@@ -97,6 +97,7 @@ orchestrator:
 channels:
   console:
     enabled: true
+    # cache: false    # when true, reuse cached binary from channels.lock (default false = always rebuild)
     # Local binary (after running: make setup), or grpc://host:port for remote
     plugin: "./channels/console-channel/console"
     # Or use GitHub refs — core auto-fetches, builds, and pins in channels.lock:
@@ -146,6 +147,7 @@ plugins:
   # Slash commands: /install skill, /show config, /commands, /set prompt, /clear
   opentalon-commands:
     enabled: true
+    # cache: false    # when true, reuse cached binary from plugins.lock (default false = always rebuild)
     insecure: false   # required: allows preparer to return invoke for opentalon actions
     github: "opentalon/opentalon-commands"
     ref: "master"
@@ -234,8 +236,9 @@ state:
   # session limits and optional summarization
   # session:
   #   max_messages: 50           # cap messages per conversation (0 = no cap)
+  #   context_messages: 10       # send only last N messages to LLM (0 = all; default 0)
   #   max_idle_days: 30          # delete sessions not updated in N days (0 = don't prune)
-  #   summarize_after_messages: 10   # run LLM summarization after N messages (0 = off)
+  #   summarize_after_messages: 10   # run LLM summarization after N messages (0 = off; default off)
   #   max_messages_after_summary: 6  # keep this many messages after summarization
   #   summarize_prompt: "Summarize the following conversation in a short paragraph."  # any language
   #   summarize_update_prompt: "Update the given conversation summary with the following new exchange. Keep the result to a short paragraph."

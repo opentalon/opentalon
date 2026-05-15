@@ -389,7 +389,8 @@ func EnsureLuaPluginDir(ctx context.Context, stateDir, name, github, ref string)
 
 // EnsurePlugin ensures the plugin is present under stateDir/plugins/<name>/,
 // resolves ref to a commit, clones and builds if needed, updates plugins.lock, and returns the path to the binary.
-func EnsurePlugin(ctx context.Context, stateDir, name, github, ref string) (path string, err error) {
+// When cache is true the lock file is consulted and a matching entry is reused; when false the plugin is always rebuilt.
+func EnsurePlugin(ctx context.Context, stateDir, name, github, ref string, cache bool) (path string, err error) {
 	if github == "" || ref == "" {
 		return "", fmt.Errorf("github and ref are required")
 	}
@@ -399,14 +400,16 @@ func EnsurePlugin(ctx context.Context, stateDir, name, github, ref string) (path
 		return "", err
 	}
 
-	entry, locked := lock.Plugins[name]
-	if locked && entry.GitHub == github && entry.Ref == ref && entry.Resolved != "" && entry.Path != "" {
-		absPath := entry.Path
-		if !filepath.IsAbs(absPath) {
-			absPath = filepath.Join(stateDir, entry.Path)
-		}
-		if _, err := os.Stat(absPath); err == nil {
-			return absPath, nil
+	if cache {
+		entry, locked := lock.Plugins[name]
+		if locked && entry.GitHub == github && entry.Ref == ref && entry.Resolved != "" && entry.Path != "" {
+			absPath := entry.Path
+			if !filepath.IsAbs(absPath) {
+				absPath = filepath.Join(stateDir, entry.Path)
+			}
+			if _, err := os.Stat(absPath); err == nil {
+				return absPath, nil
+			}
 		}
 	}
 
@@ -444,7 +447,8 @@ func EnsurePlugin(ctx context.Context, stateDir, name, github, ref string) (path
 
 // EnsureChannel ensures the channel is present under stateDir/channels/<name>/,
 // resolves ref, clones and builds, updates channels.lock, and returns the path to the binary.
-func EnsureChannel(ctx context.Context, stateDir, name, github, ref string) (path string, err error) {
+// When cache is true the lock file is consulted and a matching entry is reused; when false the channel is always rebuilt.
+func EnsureChannel(ctx context.Context, stateDir, name, github, ref string, cache bool) (path string, err error) {
 	if github == "" || ref == "" {
 		return "", fmt.Errorf("github and ref are required")
 	}
@@ -454,14 +458,16 @@ func EnsureChannel(ctx context.Context, stateDir, name, github, ref string) (pat
 		return "", err
 	}
 
-	entry, locked := lock.Channels[name]
-	if locked && entry.GitHub == github && entry.Ref == ref && entry.Resolved != "" && entry.Path != "" {
-		absPath := entry.Path
-		if !filepath.IsAbs(absPath) {
-			absPath = filepath.Join(stateDir, entry.Path)
-		}
-		if _, err := os.Stat(absPath); err == nil {
-			return absPath, nil
+	if cache {
+		entry, locked := lock.Channels[name]
+		if locked && entry.GitHub == github && entry.Ref == ref && entry.Resolved != "" && entry.Path != "" {
+			absPath := entry.Path
+			if !filepath.IsAbs(absPath) {
+				absPath = filepath.Join(stateDir, entry.Path)
+			}
+			if _, err := os.Stat(absPath); err == nil {
+				return absPath, nil
+			}
 		}
 	}
 
