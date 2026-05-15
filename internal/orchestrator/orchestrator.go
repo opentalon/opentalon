@@ -211,10 +211,10 @@ type Orchestrator struct {
 	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
 	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
 	planner                 *pipeline.Planner             // nil = pipeline disabled
-	pendingMu              sync.Mutex                    // guards pendingPipelines, pendingToolCalls, pendingConfirmationIDs
-	pendingPipelines       map[string]*pipeline.Pipeline // sessionID -> pending pipeline
-	pendingToolCalls       map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
-	pendingConfirmationIDs map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
+	pendingMu               sync.Mutex                    // guards pendingPipelines, pendingToolCalls, pendingConfirmationIDs
+	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
+	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
+	pendingConfirmationIDs  map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
 	pipelineConfig          pipeline.PipelineConfig
 	confirmationPlugin      string                 // optional; plugin for confirmation strategy
 	confirmationAction      string                 // optional; action name for confirmation check
