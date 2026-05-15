@@ -1029,6 +1029,140 @@ func TestOpenAIStream_FinishReasonAndDeltaInSameChunk(t *testing.T) {
 	}
 }
 
+// ----- Cost computation -----
+
+// TestOpenAIComplete_EmitsCostFromModelConfig verifies the non-streaming
+// path computes per-call cost from the provider's per-million-token rates
+// and stamps it on the llm_response payload at call time. Frozen-pricing
+// is load-bearing: api-plugin /events/stats sums these fields directly so
+// later config changes must not retroactively re-price historical rows.
+func TestOpenAIComplete_EmitsCostFromModelConfig(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := oaiResponse{
+			ID:    "chatcmpl-cost",
+			Model: "gpt-4o",
+			Choices: []oaiChoice{{
+				Index:        0,
+				Message:      oaiMessage{Role: "assistant", Content: "ok"},
+				FinishReason: "stop",
+			}},
+			Usage: oaiUsage{PromptTokens: 1_000_000, CompletionTokens: 2_000_000},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	// 2.50 EUR / 1M input, 10.00 EUR / 1M output. Round numbers across a
+	// million-token call so the expectation reads as multiplied rates and
+	// any drift to "per-thousand" / "per-token" math is loud.
+	models := []ModelInfo{{ID: "gpt-4o", Cost: ModelCost{Input: 2.5, Output: 10}}}
+	sink := &recordingEventSink{}
+	p := NewOpenAIProvider("openai", server.URL, "test-key", models, WithOpenAISessionEventSink(sink))
+	_, err := p.Complete(context.Background(), &CompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []Message{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	got := sink.snapshot()
+	var resp events.LLMResponsePayload
+	if err := json.Unmarshal(got[1].Payload, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.CostInput != 2.5 {
+		t.Errorf("CostInput = %v, want 2.5 (1M tokens * 2.50/M)", resp.CostInput)
+	}
+	if resp.CostOutput != 20 {
+		t.Errorf("CostOutput = %v, want 20 (2M tokens * 10/M)", resp.CostOutput)
+	}
+}
+
+// TestOpenAIComplete_EmitsZeroCostForUnknownModel verifies that a model
+// missing from the provider's catalogue leaves both cost fields at zero.
+// omitempty then strips them from the JSON: consumers must treat absent
+// fields as unpriced rather than as a free call.
+func TestOpenAIComplete_EmitsZeroCostForUnknownModel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := oaiResponse{
+			ID:    "chatcmpl-uncatalogued",
+			Model: "unknown-model",
+			Choices: []oaiChoice{{
+				Index:        0,
+				Message:      oaiMessage{Role: "assistant", Content: "ok"},
+				FinishReason: "stop",
+			}},
+			Usage: oaiUsage{PromptTokens: 100, CompletionTokens: 50},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	sink := &recordingEventSink{}
+	// Provider built with a catalogue that does NOT contain "unknown-model".
+	models := []ModelInfo{{ID: "gpt-4o", Cost: ModelCost{Input: 2.5, Output: 10}}}
+	p := NewOpenAIProvider("openai", server.URL, "test-key", models, WithOpenAISessionEventSink(sink))
+	_, err := p.Complete(context.Background(), &CompletionRequest{
+		Model:    "unknown-model",
+		Messages: []Message{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	got := sink.snapshot()
+	if resp := got[1].Payload; !strings.Contains(string(resp), `"tokens_in":100`) {
+		t.Fatalf("sanity: tokens_in missing from payload %s", string(resp))
+	}
+	if strings.Contains(string(got[1].Payload), `"cost_input"`) || strings.Contains(string(got[1].Payload), `"cost_output"`) {
+		t.Errorf("unknown model must omit cost fields, got payload: %s", string(got[1].Payload))
+	}
+}
+
+// TestOpenAIStream_EmitsCostFromModelConfig is the streaming twin of
+// TestOpenAIComplete_EmitsCostFromModelConfig — verifies the closure
+// captured on the stream resolves pricing at end-of-stream and stamps
+// the same cost fields on the llm_response payload.
+func TestOpenAIStream_EmitsCostFromModelConfig(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(streamResponse([]string{"ok"}, "stop", true)))
+	}))
+	defer server.Close()
+
+	models := []ModelInfo{{ID: "gpt-4o", Cost: ModelCost{Input: 5, Output: 15}}}
+	sink := &recordingEventSink{}
+	p := NewOpenAIProvider("openai", server.URL, "test-key", models, WithOpenAISessionEventSink(sink))
+	stream, err := p.Stream(context.Background(), &CompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []Message{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	drainStream(t, stream)
+	if err := stream.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got := sink.snapshot()
+	var resp events.LLMResponsePayload
+	_ = json.Unmarshal(got[1].Payload, &resp)
+	// streamResponse seeds PromptTokens=12, CompletionTokens=9 (see helper)
+	// → 12 * 5/1M + 9 * 15/1M
+	wantIn := float64(resp.TokensIn) * 5 / 1_000_000
+	wantOut := float64(resp.TokensOut) * 15 / 1_000_000
+	if resp.CostInput != wantIn {
+		t.Errorf("CostInput = %v, want %v (TokensIn=%d * 5/M)", resp.CostInput, wantIn, resp.TokensIn)
+	}
+	if resp.CostOutput != wantOut {
+		t.Errorf("CostOutput = %v, want %v (TokensOut=%d * 15/M)", resp.CostOutput, wantOut, resp.TokensOut)
+	}
+}
+
 // ----- test helpers shared by the error-path tests above -----
 
 // roundTripperFunc adapts a closure into an http.RoundTripper so the
