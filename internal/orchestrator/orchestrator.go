@@ -153,7 +153,7 @@ type OrchestratorOpts struct {
 	GroupPluginLookup       GroupPluginLookup      // optional; when set, filters tool list by profile group
 	UsageRecorder           UsageRecorder          // optional; when set, records LLM usage after each run
 	PluginCallObserver      PluginCallObserver     // optional; when set, notified after each plugin/tool call
-	EventSink               emit.Sink              // optional; when set, structured session events are emitted; nil defaults to emit.NoOpSink
+	EventSink               emit.Sink              // optional; nil defaults to emit.NoOpSink (helpers run unconditionally, the no-op sink discards them)
 	PromptSnapshotStore     PromptSnapshotUpserter // optional; when set, system prompt + server instructions + tool descriptions are persisted by sha256 so turn_start hashes resolve to content
 	SyncActionsPlugin       string                 // optional; plugin name for action sync (e.g. "weaviate")
 	SyncActionsAction       string                 // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
