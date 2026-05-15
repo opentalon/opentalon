@@ -38,8 +38,8 @@ func pipelineArgsToWire(args map[string]any) map[string]string {
 
 // argToWireString formats a single typed value for the wire layer.
 //
-// The plain-decimal float rendering matters for IDs: a Timly item id like
-// 2_037_838 becomes float64 after JSON unmarshal, and fmt.Sprintf("%v", v)
+// The plain-decimal float rendering matters for IDs: a numeric record id
+// like 2_037_838 becomes float64 after JSON unmarshal, and fmt.Sprintf("%v", v)
 // (the previous behaviour) renders it as "2.037838e+06", which the
 // downstream MCP server then rejects as "type string did not match the
 // following type: integer". strconv.FormatFloat with 'f', -1 keeps the

@@ -287,8 +287,8 @@ func TestBuildPlannerPromptMCPDotActions(t *testing.T) {
 func TestBuildPlannerPrompt_ExcludesServerInstructions(t *testing.T) {
 	caps := []CapabilityInfo{
 		{
-			Name:                 "timly",
-			Description:          "Timly MCP",
+			Name:                 "inventory",
+			Description:          "Inventory MCP",
 			SystemPromptAddition: "## Counting records\nUse list-items with per_page:1 and read pagination.total.",
 			Actions: []ActionInfo{
 				{Name: "list-items", Description: "List items"},
@@ -304,7 +304,7 @@ func TestBuildPlannerPrompt_ExcludesServerInstructions(t *testing.T) {
 		t.Error("planner prompt must not include server instructions")
 	}
 	// Tool definitions must still be present.
-	if !containsStr(prompt, "plugin=timly | action=list-items") {
+	if !containsStr(prompt, "plugin=inventory | action=list-items") {
 		t.Error("planner prompt must include tool definitions")
 	}
 }

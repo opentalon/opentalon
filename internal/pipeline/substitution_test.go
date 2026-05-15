@@ -162,8 +162,8 @@ func TestResolveArgsInterpolation(t *testing.T) {
 }
 
 func TestResolveArgsLargeIntegerNoScientificNotation(t *testing.T) {
-	// Regression for the planner-emitted IDs: a Timly item id like 2_037_838
-	// becomes float64 after JSON unmarshal and would render as
+	// Regression for the planner-emitted IDs: a numeric record id like
+	// 2_037_838 becomes float64 after JSON unmarshal and would render as
 	// "2.037838e+06" with a default fmt.Sprintf("%v", v). That broke the
 	// downstream MCP server before the boundary stringification was fixed.
 	ctx := ctxWith("step1", map[string]any{

@@ -1479,8 +1479,8 @@ func TestUserOnlyActionHiddenFromSystemPrompt(t *testing.T) {
 func TestServerInstructionsBeforeToolsInSystemPrompt(t *testing.T) {
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
-		Name:                 "timly",
-		Description:          "Timly MCP",
+		Name:                 "inventory",
+		Description:          "Inventory MCP",
 		SystemPromptAddition: "## Counting records\nUse list-items with per_page:1.",
 		Actions: []Action{
 			{Name: "list-items", Description: "List items"},
@@ -1499,7 +1499,7 @@ func TestServerInstructionsBeforeToolsInSystemPrompt(t *testing.T) {
 	}
 	// Server instructions must appear BEFORE tool definitions.
 	instrIdx := strings.Index(prompt, "Counting records")
-	toolIdx := strings.Index(prompt, "timly.list-items")
+	toolIdx := strings.Index(prompt, "inventory.list-items")
 	if instrIdx >= toolIdx {
 		t.Errorf("server instructions (at %d) must appear before tools (at %d)", instrIdx, toolIdx)
 	}
@@ -2677,8 +2677,8 @@ func TestSyncActionsCarriesServerInstructions(t *testing.T) {
 		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
 	}})
 	_ = registry.Register(PluginCapability{
-		Name: "timly", Description: "Timly",
-		SystemPromptAddition: "Timly MCP server.\n\n## Org-units vs Containers\nA Place is a storage unit; an Org-unit is a structural unit.",
+		Name: "inventory", Description: "Inventory",
+		SystemPromptAddition: "Inventory MCP server.\n\n## Org-units vs Containers\nA Place is a storage unit; an Org-unit is a structural unit.",
 		Actions:              []Action{{Name: "list-items", Description: "List items"}},
 	}, &echoExecutor{})
 	// Plugin with no actions and no SystemPromptAddition: should be skipped entirely.
@@ -2702,10 +2702,10 @@ func TestSyncActionsCarriesServerInstructions(t *testing.T) {
 
 	orch.SyncActions(context.Background())
 
-	// timly (has actions) + prose-only (has SystemPromptAddition but no actions)
+	// inventory (has actions) + prose-only (has SystemPromptAddition but no actions)
 	// are synced; empty (neither) is skipped.
 	if len(syncCalls) != 2 {
-		t.Fatalf("expected 2 sync calls (timly + prose-only), got %d: %v", len(syncCalls), syncCalls)
+		t.Fatalf("expected 2 sync calls (inventory + prose-only), got %d: %v", len(syncCalls), syncCalls)
 	}
 
 	all := strings.Join(syncCalls, " ")
@@ -2717,7 +2717,7 @@ func TestSyncActionsCarriesServerInstructions(t *testing.T) {
 		t.Error("server_instructions should be present in sync payload for plugins with SystemPromptAddition")
 	}
 	if !strings.Contains(all, "Org-units vs Containers") {
-		t.Error("expected timly's SystemPromptAddition content in sync payload")
+		t.Error("expected inventory's SystemPromptAddition content in sync payload")
 	}
 	if strings.Contains(all, `"plugin_name":"empty"`) {
 		t.Error("empty plugin (no actions, no prose) should not be synced")
@@ -2774,7 +2774,7 @@ func TestSyncActionsCarriesKnowledgeArticles(t *testing.T) {
 		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
 	}})
 	_ = registry.Register(PluginCapability{
-		Name: "timly", Description: "Timly",
+		Name: "inventory", Description: "Inventory",
 		Actions: []Action{{Name: "list-items", Description: "List items"}},
 		KnowledgeArticles: []KnowledgeArticle{
 			{ID: "org-units-vs-containers", Title: "Org-units vs Containers (Places)", Content: "A Place is a storage unit; an Org-unit is a structural unit.", Tags: []string{"places"}},
@@ -2899,7 +2899,7 @@ func TestSyncActionsCarriesKeepPlugins(t *testing.T) {
 		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
 	}})
 	_ = registry.Register(PluginCapability{
-		Name: "timly", Description: "Timly",
+		Name: "inventory", Description: "Inventory",
 		Actions: []Action{{Name: "list-items", Description: "List items"}},
 	}, &echoExecutor{})
 	_ = registry.Register(PluginCapability{
@@ -2919,8 +2919,8 @@ func TestSyncActionsCarriesKeepPlugins(t *testing.T) {
 		t.Fatalf("expected 2 full-sync calls, got %d", len(fullSyncCalls))
 	}
 	for _, p := range fullSyncCalls {
-		if !strings.Contains(p, `"keep_plugins":["timly","gitlab"]`) &&
-			!strings.Contains(p, `"keep_plugins":["gitlab","timly"]`) {
+		if !strings.Contains(p, `"keep_plugins":["inventory","gitlab"]`) &&
+			!strings.Contains(p, `"keep_plugins":["gitlab","inventory"]`) {
 			t.Errorf("full-sync payload missing expected keep_plugins: %s", p)
 		}
 		if strings.Contains(p, `"weaviate"`) {
@@ -2929,7 +2929,7 @@ func TestSyncActionsCarriesKeepPlugins(t *testing.T) {
 	}
 
 	mode = "late"
-	orch.SyncPluginActions(context.Background(), "timly")
+	orch.SyncPluginActions(context.Background(), "inventory")
 	if len(lateLoadCalls) != 1 {
 		t.Fatalf("expected 1 late-load call, got %d", len(lateLoadCalls))
 	}
@@ -3252,14 +3252,14 @@ func TestBuildToolCallNudgeWithConcreteStep(t *testing.T) {
 			ID:   "1",
 			Name: "List person types",
 			Command: &pipeline.PluginCommand{
-				Plugin: "timly",
-				Action: "timly__list-person-types",
+				Plugin: "inventory",
+				Action: "inventory__list-person-types",
 				Args:   map[string]any{},
 			},
 		},
 	}
 	nudge := buildToolCallNudge(steps)
-	if !strings.Contains(nudge, `"tool": "timly.timly__list-person-types"`) {
+	if !strings.Contains(nudge, `"tool": "inventory.inventory__list-person-types"`) {
 		t.Errorf("nudge should contain concrete tool name, got: %s", nudge)
 	}
 	if !strings.Contains(nudge, "[tool_call]") {
@@ -3282,14 +3282,14 @@ func TestBuildToolCallNudgeWithArgs(t *testing.T) {
 			ID:   "1",
 			Name: "List items",
 			Command: &pipeline.PluginCommand{
-				Plugin: "timly",
-				Action: "timly__list-items",
+				Plugin: "inventory",
+				Action: "inventory__list-items",
 				Args:   map[string]any{"query": "status:active", "per_page": "1"},
 			},
 		},
 	}
 	nudge := buildToolCallNudge(steps)
-	if !strings.Contains(nudge, `"timly.timly__list-items"`) {
+	if !strings.Contains(nudge, `"inventory.inventory__list-items"`) {
 		t.Errorf("nudge should contain tool name, got: %s", nudge)
 	}
 	if !strings.Contains(nudge, `"query"`) {
@@ -3303,8 +3303,8 @@ func TestPlannerStepsToInvoke(t *testing.T) {
 			ID:   "1",
 			Name: "List person types",
 			Command: &pipeline.PluginCommand{
-				Plugin: "timly",
-				Action: "timly__list-person-types",
+				Plugin: "inventory",
+				Action: "inventory__list-person-types",
 				Args:   map[string]any{"per_page": "1"},
 			},
 		},
@@ -3313,7 +3313,7 @@ func TestPlannerStepsToInvoke(t *testing.T) {
 	if len(invoke) != 1 {
 		t.Fatalf("expected 1 invoke step, got %d", len(invoke))
 	}
-	if invoke[0].Plugin != "timly" || invoke[0].Action != "timly__list-person-types" {
+	if invoke[0].Plugin != "inventory" || invoke[0].Action != "inventory__list-person-types" {
 		t.Errorf("unexpected step: %+v", invoke[0])
 	}
 	if invoke[0].Args["per_page"] != "1" {
@@ -3377,7 +3377,7 @@ func TestServerSideFallbackOnRetryExhaustion(t *testing.T) {
 	// LLM responses:
 	//   [0] planner: returns a single-step pipeline → tool executed server-side
 	//   [1] round 1: LLM sees real tool results → summarises
-	planJSON := `{"type": "pipeline", "steps": [{"id": "1", "name": "List person types", "plugin": "timly", "action": "timly__list-person-types", "args": {}, "depends_on": []}]}`
+	planJSON := `{"type": "pipeline", "steps": [{"id": "1", "name": "List person types", "plugin": "inventory", "action": "inventory__list-person-types", "args": {}, "depends_on": []}]}`
 	llm := &fakeLLMWithFeatures{
 		fakeLLM: &fakeLLM{responses: []string{
 			planJSON, // [0] planner
@@ -3390,9 +3390,9 @@ func TestServerSideFallbackOnRetryExhaustion(t *testing.T) {
 
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
-		Name:        "timly",
-		Description: "Timly MCP",
-		Actions:     []Action{{Name: "timly__list-person-types", Description: "List person types"}},
+		Name:        "inventory",
+		Description: "Inventory MCP",
+		Actions:     []Action{{Name: "inventory__list-person-types", Description: "List person types"}},
 	}, &fixedResultExecutor{content: `{"person_types": [{"id":1},{"id":2},{"id":3}], "pagination": {"total": 3}}`})
 
 	memory := state.NewMemoryStore("")
@@ -3424,8 +3424,8 @@ func TestPlannerError_FallsThroughWithoutPanic(t *testing.T) {
 
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
-		Name:        "timly",
-		Description: "Timly",
+		Name:        "inventory",
+		Description: "Inventory",
 		Actions:     []Action{{Name: "create-item", Description: "Create item"}},
 	}, &echoExecutor{})
 
@@ -3464,8 +3464,8 @@ func TestPlannerError_RetryEnabledWithoutPanic(t *testing.T) {
 
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
-		Name:        "timly",
-		Description: "Timly",
+		Name:        "inventory",
+		Description: "Inventory",
 		Actions:     []Action{{Name: "create-item", Description: "Create item"}},
 	}, &echoExecutor{})
 
@@ -3487,19 +3487,19 @@ func TestPlannerError_RetryEnabledWithoutPanic(t *testing.T) {
 }
 
 func TestDeduplicateKnowledgeOutput(t *testing.T) {
-	knowledgeBlock := "[plugin_output]\n## Knowledge Articles\n\n### 1. timly MCP server instructions\nSource: mcp:timly\n## timly\nTimly MCP server. Read/write operations...\n\n## Available Tools\n\n### 1. timly.timly__list-items\nList items in your account.\n[/plugin_output]"
+	knowledgeBlock := "[plugin_output]\n## Knowledge Articles\n\n### 1. inventory MCP server instructions\nSource: mcp:inventory\n## inventory\nInventory MCP server. Read/write operations...\n\n## Available Tools\n\n### 1. inventory.inventory__list-items\nList items in your account.\n[/plugin_output]"
 
 	msgs := []provider.Message{
 		{Role: provider.RoleUser, Content: "how many items?"},
 		{Role: provider.RoleAssistant, Content: "[tool_call] weaviate.ask_knowledge(query=items)"},
 		{Role: provider.RoleUser, Content: knowledgeBlock},
-		{Role: provider.RoleAssistant, Content: "[tool_call] timly.timly__list-items"},
+		{Role: provider.RoleAssistant, Content: "[tool_call] inventory.inventory__list-items"},
 		{Role: provider.RoleUser, Content: "[plugin_output]\nItems: 370 total\n[/plugin_output]"},
 		{Role: provider.RoleAssistant, Content: "You have 370 items."},
 		{Role: provider.RoleUser, Content: "show me categories"},
 		{Role: provider.RoleAssistant, Content: "[tool_call] weaviate.ask_knowledge(query=categories)"},
 		{Role: provider.RoleUser, Content: knowledgeBlock}, // duplicate
-		{Role: provider.RoleAssistant, Content: "[tool_call] timly.timly__list-categories"},
+		{Role: provider.RoleAssistant, Content: "[tool_call] inventory.inventory__list-categories"},
 	}
 
 	var dst []provider.Message
@@ -3509,12 +3509,12 @@ func TestDeduplicateKnowledgeOutput(t *testing.T) {
 	if !strings.Contains(deduped[2].Content, "## Knowledge Articles") {
 		t.Error("first knowledge output should be preserved")
 	}
-	if !strings.Contains(deduped[2].Content, "timly MCP server") {
+	if !strings.Contains(deduped[2].Content, "inventory MCP server") {
 		t.Error("first knowledge output should contain full content")
 	}
 
 	// Second (duplicate) should be replaced with stub.
-	if strings.Contains(deduped[8].Content, "timly MCP server") {
+	if strings.Contains(deduped[8].Content, "inventory MCP server") {
 		t.Error("duplicate knowledge output should be replaced with stub")
 	}
 	if !strings.Contains(deduped[8].Content, "Same knowledge articles") {

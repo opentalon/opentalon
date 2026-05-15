@@ -35,6 +35,7 @@ import (
 	"github.com/opentalon/opentalon/internal/scheduler"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store"
+	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 	"github.com/opentalon/opentalon/internal/synclock"
 	"github.com/opentalon/opentalon/internal/version"
 	chanpkg "github.com/opentalon/opentalon/pkg/channel"
@@ -228,9 +229,20 @@ func main() {
 		}
 	}
 
-	// Build LLM provider and default model from config. The (sink,resolver)
-	// pair feeds per-session /debug capture; either nil disables capture.
-	prov, defaultModel, err := buildProvider(cfg, debugSink, debugResolver)
+	// Build the structured session-event sink. Unlike debugSink (opt-in
+	// via /debug), this one is always-on whenever the state store is
+	// available. Wired into the LLM provider via buildProvider; future
+	// PRs route it into the orchestrator subsystems too.
+	var sessionSink emit.Sink = emit.NoOpSink{}
+	if sessionEventWriter != nil {
+		sessionSink = &sessionSinkAdapter{writer: sessionEventWriter}
+	}
+
+	// Build LLM provider and default model from config. The debug sink
+	// + resolver pair feeds per-session /debug capture (either nil
+	// disables it); sessionSink captures the structured event stream
+	// for every LLM call.
+	prov, defaultModel, err := buildProvider(cfg, debugSink, debugResolver, sessionSink)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error building provider: %v\n", err)
 		os.Exit(1) //nolint:gocritic // matches the other main()-level fatal paths; the deferred db.Close is best-effort, the OS reclaims handles on exit
@@ -566,6 +578,8 @@ func main() {
 		GroupPluginLookup:       groupPluginStore,
 		UsageRecorder:           usageRecorder,
 		PluginCallObserver:      pluginObserver,
+		EventSink:               sessionSink,       // async-buffered via SessionEventWriter
+		PromptSnapshotStore:     sessionEventStore, // direct/sync store; intentionally not async-buffered so a consumer reading a turn_start event can resolve its sha256 references without racing the writer. nil when state DB is not configured
 		SyncActionsPlugin:       cfg.Orchestrator.Knowledge.SyncPlugin,
 		SyncActionsAction:       cfg.Orchestrator.Knowledge.SyncAction,
 		SyncGlossaryAction:      cfg.Orchestrator.Knowledge.SyncGlossaryAction,
@@ -867,6 +881,26 @@ func (s *providerDebugSink) Submit(_ context.Context, e provider.DebugEvent) {
 	})
 }
 
+// sessionSinkAdapter adapts the state-store async session-event writer
+// to the emit.Sink interface. Stays in main.go for the same dependency-
+// direction reason as providerDebugSink: the emit package cannot import
+// store without inviting an import cycle through provider, so this
+// composition layer is the natural home for the conversion.
+type sessionSinkAdapter struct {
+	writer *store.SessionEventWriter
+}
+
+func (s *sessionSinkAdapter) Emit(_ context.Context, e emit.Event) {
+	s.writer.Submit(store.SessionEvent{
+		ID:         e.ID,
+		SessionID:  e.SessionID,
+		EventType:  e.EventType,
+		ParentID:   e.ParentID,
+		DurationMS: e.DurationMS,
+		Payload:    e.Payload,
+	})
+}
+
 // seedGroupPlugins seeds the static group→plugin config baseline to the DB.
 // Rows with source="config" are inserted only when no row exists yet for that group+plugin pair.
 func seedGroupPlugins(ctx context.Context, gps *store.GroupPluginStore, groups map[string]config.GroupConfig) {
@@ -1143,7 +1177,7 @@ func runClean(configPath, category string) {
 }
 
 // buildProvider returns a provider and the default model ID from config.
-func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver) (provider.Provider, string, error) {
+func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver, eventSink emit.Sink) (provider.Provider, string, error) {
 	providerID := ""
 	modelID := ""
 
@@ -1213,6 +1247,7 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 		Models:       models,
 		DebugSink:    debugSink,
 		DebugResolve: debugResolve,
+		EventSink:    eventSink,
 	}
 	prov, err := provider.FromConfig(provCfg)
 	if err != nil {

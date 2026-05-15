@@ -296,8 +296,8 @@ func TestEvents_ExcerptCapAndUTF8(t *testing.T) {
 
 // TestLLMResponsePayload_NativeToolCallsRawInlinesAsJSON pins the wire
 // format: NativeToolCallsRaw must embed as inline JSON, not as an escaped
-// string. This is the contract the api-plugin (TIM-868x follow-up) and
-// psql inspection rely on.
+// string. This is the contract downstream consumers (api-plugin, psql
+// inspection) rely on.
 func TestLLMResponsePayload_NativeToolCallsRawInlinesAsJSON(t *testing.T) {
 	raw := json.RawMessage(`[{"id":"call_1","name":"tickets.show","arguments":{"id":"42"}}]`)
 	p := events.LLMResponsePayload{

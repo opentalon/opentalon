@@ -248,6 +248,14 @@ state:
   # Structured session_events log: always-on per-turn analytics trail
   # (turn_start, llm_response, tool_call_extracted, parse failures, ...).
   # See internal/state/store/events for the full payload schema.
+  #
+  # Current producer coverage: the OpenAI-compatible provider emits
+  # llm_request / llm_response / llm_refused / llm_error at the HTTP
+  # boundary. The Anthropic provider and the orchestrator-internal event
+  # types (turn_start, tool_call_*, planner_*, summarization_*, ...) are
+  # wired in subsequent phases; until then, sessions routed via Anthropic
+  # models or driven through those orchestrator surfaces will be absent
+  # from the corresponding event types.
   # session_events:
   #   retention_days: 90         # days to keep session_events rows (default 90)
   #   retention_disabled: false  # set true to keep rows forever; overrides retention_days

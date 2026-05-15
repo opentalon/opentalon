@@ -23,6 +23,8 @@ import (
 	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
+	"github.com/opentalon/opentalon/internal/state/store/events"
+	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 	pkgchannel "github.com/opentalon/opentalon/pkg/channel"
 )
 
@@ -104,6 +106,17 @@ type UsageRecorder interface {
 	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int)
 }
 
+// PromptSnapshotUpserter persists content-addressed prompt bodies so a
+// consumer reading a turn_start event can resolve its system_prompt_sha256,
+// server_instructions[].sha256, and available_tools[].desc_sha256 back to
+// the original text. SessionEventStore satisfies this interface in
+// production; tests may inject a fake. Implementations must be safe to
+// call concurrently and idempotent on conflicting sha256 (first insert
+// wins; later identical writes are no-ops).
+type PromptSnapshotUpserter interface {
+	UpsertPromptSnapshot(ctx context.Context, sha256, kind, content string) error
+}
+
 // PluginCallObserver is notified after each plugin/tool call executed by the orchestrator.
 type PluginCallObserver interface {
 	ObservePluginCall(plugin, action string, failed bool, inputTokens, outputTokens int)
@@ -133,20 +146,22 @@ type OrchestratorOpts struct {
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PlanTimeout             time.Duration                 // max time for planner LLM call; 0 = default 15s
 	PipelineConfig          pipeline.PipelineConfig
-	ConfirmationPlugin      string              // optional; plugin name for confirmation strategy (e.g. "planner")
-	ConfirmationAction      string              // optional; action name (e.g. "check_confirmation")
-	ContextWindow           int                 // model context window in tokens; 0 = no trimming
-	MaxConcurrentSessions   int                 // max sessions running in parallel; default 1 (sequential)
-	GroupPluginLookup       GroupPluginLookup   // optional; when set, filters tool list by profile group
-	UsageRecorder           UsageRecorder       // optional; when set, records LLM usage after each run
-	PluginCallObserver      PluginCallObserver  // optional; when set, notified after each plugin/tool call
-	SyncActionsPlugin       string              // optional; plugin name for action sync (e.g. "weaviate")
-	SyncActionsAction       string              // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
-	SyncGlossaryAction      string              // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
-	Knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
-	Subprocess              SubprocessConfig    // optional; subprocess (sub-agent) support
-	OnStreamChunk           StreamChunkCallback // optional; when set and LLM supports streaming, final answers are streamed
-	ShowToolCalls           string              // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	ConfirmationPlugin      string                 // optional; plugin name for confirmation strategy (e.g. "planner")
+	ConfirmationAction      string                 // optional; action name (e.g. "check_confirmation")
+	ContextWindow           int                    // model context window in tokens; 0 = no trimming
+	MaxConcurrentSessions   int                    // max sessions running in parallel; default 1 (sequential)
+	GroupPluginLookup       GroupPluginLookup      // optional; when set, filters tool list by profile group
+	UsageRecorder           UsageRecorder          // optional; when set, records LLM usage after each run
+	PluginCallObserver      PluginCallObserver     // optional; when set, notified after each plugin/tool call
+	EventSink               emit.Sink              // optional; nil defaults to emit.NoOpSink (helpers run unconditionally, the no-op sink discards them)
+	PromptSnapshotStore     PromptSnapshotUpserter // optional; when set, system prompt + server instructions + tool descriptions are persisted by sha256 so turn_start hashes resolve to content
+	SyncActionsPlugin       string                 // optional; plugin name for action sync (e.g. "weaviate")
+	SyncActionsAction       string                 // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
+	SyncGlossaryAction      string                 // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
+	Knowledge               KnowledgeConfig        // optional; knowledge directory ingestion
+	Subprocess              SubprocessConfig       // optional; subprocess (sub-agent) support
+	OnStreamChunk           StreamChunkCallback    // optional; when set and LLM supports streaming, final answers are streamed
+	ShowToolCalls           string                 // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -196,23 +211,26 @@ type Orchestrator struct {
 	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
 	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
 	planner                 *pipeline.Planner             // nil = pipeline disabled
-	pendingMu               sync.Mutex                    // guards pendingPipelines and pendingToolCalls maps
-	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline (access via pendingMu)
+	pendingMu               sync.Mutex                    // guards pendingPipelines, pendingToolCalls, pendingConfirmationIDs
+	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
 	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
+	pendingConfirmationIDs  map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
 	pipelineConfig          pipeline.PipelineConfig
-	confirmationPlugin      string              // optional; plugin for confirmation strategy
-	confirmationAction      string              // optional; action name for confirmation check
-	contextWindow           int                 // model context window in tokens; 0 = no trimming
-	groupPluginLookup       GroupPluginLookup   // optional; nil = no group-based filtering
-	usageRecorder           UsageRecorder       // optional; nil = no usage tracking
-	pluginCallObserver      PluginCallObserver  // optional; nil = no plugin call observation
-	syncActionsPlugin       string              // optional; plugin name for action sync
-	syncActionsAction       string              // optional; action name for action sync
-	syncGlossaryAction      string              // optional; action name for glossary sync (uses syncActionsPlugin)
-	knowledge               KnowledgeConfig     // optional; knowledge directory ingestion
-	subprocessConfig        SubprocessConfig    // optional; subprocess (sub-agent) support
-	onStreamChunk           StreamChunkCallback // optional; when set, final answers stream to caller
-	showToolCalls           string              // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	confirmationPlugin      string                 // optional; plugin for confirmation strategy
+	confirmationAction      string                 // optional; action name for confirmation check
+	contextWindow           int                    // model context window in tokens; 0 = no trimming
+	groupPluginLookup       GroupPluginLookup      // optional; nil = no group-based filtering
+	usageRecorder           UsageRecorder          // optional; nil = no usage tracking
+	pluginCallObserver      PluginCallObserver     // optional; nil = no plugin call observation
+	eventSink               emit.Sink              // structured session event sink; always non-nil (NoOpSink default)
+	snapshotStore           PromptSnapshotUpserter // optional; nil = turn_start hashes are emitted but content is not persisted
+	syncActionsPlugin       string                 // optional; plugin name for action sync
+	syncActionsAction       string                 // optional; action name for action sync
+	syncGlossaryAction      string                 // optional; action name for glossary sync (uses syncActionsPlugin)
+	knowledge               KnowledgeConfig        // optional; knowledge directory ingestion
+	subprocessConfig        SubprocessConfig       // optional; subprocess (sub-agent) support
+	onStreamChunk           StreamChunkCallback    // optional; when set, final answers stream to caller
+	showToolCalls           string                 // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 }
 
 // resolveAllowedPluginNames returns a JSON array of allowed plugin names for the
@@ -298,6 +316,11 @@ func NewWithRules(
 	// Always create a semaphore. cap=1 = sequential (default); cap=N = N parallel sessions.
 	semaphore := make(chan struct{}, maxConcurrent)
 
+	eventSink := opts.EventSink
+	if eventSink == nil {
+		eventSink = emit.NoOpSink{}
+	}
+
 	o := &Orchestrator{
 		sessionMuxes:            make(map[string]*sessionMutex),
 		semaphore:               semaphore,
@@ -322,6 +345,7 @@ func NewWithRules(
 		planner:                 planner,
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
 		pendingToolCalls:        make(map[string]*ToolCall),
+		pendingConfirmationIDs:  make(map[string]string),
 		pipelineConfig:          pipelineCfg,
 		confirmationPlugin:      opts.ConfirmationPlugin,
 		confirmationAction:      opts.ConfirmationAction,
@@ -329,6 +353,8 @@ func NewWithRules(
 		groupPluginLookup:       opts.GroupPluginLookup,
 		usageRecorder:           opts.UsageRecorder,
 		pluginCallObserver:      opts.PluginCallObserver,
+		eventSink:               eventSink,
+		snapshotStore:           opts.PromptSnapshotStore,
 		syncActionsPlugin:       opts.SyncActionsPlugin,
 		syncActionsAction:       opts.SyncActionsAction,
 		syncGlossaryAction:      opts.SyncGlossaryAction,
@@ -760,6 +786,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	traceID := logger.TraceIDFromSessionKey(sessionID)
 	ctx = logger.WithTraceID(ctx, traceID)
 
+	// Emit user_message exactly as the orchestrator received it, before any
+	// preparer mutates it. Fires on every Run — including paths that exit
+	// without reaching the agent loop (pending pipeline / tool-call
+	// confirmation), because the user did send a message regardless of how
+	// the orchestrator routes it.
+	emit.EmitUserMessage(ctx, o.eventSink, userMessage)
+
 	// Per-session deep debug: enabled by the set_debug_mode command, which
 	// stores debug=true in session metadata. With the flag set, the slog
 	// session-debug handler promotes all Debug records on this ctx to Info
@@ -791,11 +824,21 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	}
 	o.pendingMu.Lock()
 	pendingPipeline := o.pendingPipelines[sessionID]
+	pendingPipelineConfID := o.pendingConfirmationIDs[sessionID]
 	if pendingPipeline != nil {
 		delete(o.pendingPipelines, sessionID)
+		delete(o.pendingConfirmationIDs, sessionID)
 	}
 	o.pendingMu.Unlock()
 	if p := pendingPipeline; p != nil {
+		// Parent the resolved event onto the original confirmation_requested
+		// so analytics can pair the two across turns. Empty id (no sink at
+		// request time, or pre-instrumentation pending state) leaves the
+		// turn_start parent in place.
+		resolvedCtx := ctx
+		if pendingPipelineConfID != "" {
+			resolvedCtx = emit.WithParent(ctx, pendingPipelineConfID)
+		}
 		var decision pipeline.ConfirmationDecision
 		if o.planner != nil {
 			d, classErr := o.planner.ClassifyConfirmation(ctx, userMessage)
@@ -811,6 +854,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
 		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 		if decision == pipeline.Approved {
+			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: "approve"})
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
 			res, err := o.executePipeline(ctx, sessionID, p)
 			if err == nil && res != nil {
@@ -821,6 +865,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			return res, err
 		}
+		emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: "reject"})
 		resp := "Pipeline cancelled."
 		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
 		log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
@@ -838,18 +883,31 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// metadata (survives restarts and multi-instance deployments).
 	o.pendingMu.Lock()
 	pendingCall := o.pendingToolCalls[sessionID]
+	pendingCallConfID := o.pendingConfirmationIDs[sessionID]
 	if pendingCall != nil {
 		delete(o.pendingToolCalls, sessionID)
+		delete(o.pendingConfirmationIDs, sessionID)
 	}
 	o.pendingMu.Unlock()
 	if pendingCall == nil {
-		pendingCall = loadPendingToolCall(sessions, sessionID)
+		// Fallback: in-memory state lost (pod restart, failover). Recover
+		// the call AND the original confirmation_requested event id from
+		// session metadata so the resolved event still links to the
+		// request that started the pending state.
+		pendingCall, pendingCallConfID = loadPendingToolCall(sessions, sessionID)
 	}
 	if pendingCall != nil {
 		_ = sessions.SetMetadata(sessionID, "pending_tool_call", "")
 	}
 	toolCallConfirmed := false
 	if tc := pendingCall; tc != nil {
+		// Parent the resolved event onto the matching confirmation_requested
+		// (potentially from a prior turn or even a prior pod). Empty id is
+		// the legacy/pre-instrumentation path — leave the turn_start parent.
+		resolvedCtx := ctx
+		if pendingCallConfID != "" {
+			resolvedCtx = emit.WithParent(ctx, pendingCallConfID)
+		}
 		var decision pipeline.ConfirmationDecision
 		// Prefer explicit frontend signal (metadata["confirmation"]) over
 		// LLM-based or text-based classification — faster and deterministic.
@@ -874,6 +932,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// Only record the user's approval in session — rejections are
 			// kept out so the LLM doesn't avoid re-calling the tool later.
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
+			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{
+				Choice:     "approve",
+				ToolCallID: tc.ID,
+			})
 			log.Debug("tool call confirmed, executing", "plugin", tc.Plugin, "action", tc.Action)
 			result := o.executeCall(ctx, *tc)
 			// Record in session history.
@@ -897,6 +959,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// LLM summarizes the result for the user.
 			toolCallConfirmed = true
 		} else {
+			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{
+				Choice:     "reject",
+				ToolCallID: tc.ID,
+			})
 			// Rollback session to before this Run — remove the user message
 			// and any tool calls/results that were added during the
 			// confirmation attempt. Without this, the LLM sees prior tool
@@ -1005,11 +1071,58 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// "which type of object?").
 		sess, _ := sessions.Get(sessionID)
 		convContext := buildPlannerConversationContext(sess)
-		planResult, err := o.planner.Plan(ctx, stripKnowledgeContext(content), capabilitiesToPlannerInfo(plannerCaps), convContext)
+		// Planner instrumentation: invoked + request fire before the
+		// synchronous Plan() call; response fires after with a synthetic
+		// summary in raw_content_excerpt because the pipeline.Planner
+		// parses and discards the raw LLM response internally (capturing
+		// the raw bytes would require a planner-pkg refactor — out of
+		// scope here). One planner_step event per Step is emitted only on
+		// pipeline plans; direct plans have no steps to enumerate.
+		//
+		// Reason "agent_loop" marks the main per-turn planning call. The
+		// planner's other entry point — ClassifyConfirmation, used by
+		// pending-pipeline / pending-tool-call confirmation paths above —
+		// is intentionally not instrumented here: those calls are short
+		// classifications, not full plans, and would dilute the analytics
+		// signal if grouped under the same event_type.
+		plannerInvokedID := emit.EmitPlannerInvoked(ctx, o.eventSink, "agent_loop")
+		// Scope planner-internal emits — including the LLM call's
+		// llm_request/llm_response, which fire from the provider while
+		// Plan() runs — under planner_invoked as their parent. The outer
+		// ctx (rooted at turn_start) is untouched, so the agent loop
+		// below isn't pulled into the planner span.
+		plannerCtx := emit.WithParent(ctx, plannerInvokedID)
+		emit.EmitPlannerRequest(plannerCtx, o.eventSink, emit.PlannerRequestArgs{
+			ModelID:      "", // planner uses provider-default routing; not exposed by pipeline.Planner
+			MessageCount: 2,  // planner hardcodes system+user, see pipeline.Planner.Plan
+		})
+		plannerStart := time.Now()
+		planResult, err := o.planner.Plan(plannerCtx, stripKnowledgeContext(content), capabilitiesToPlannerInfo(plannerCaps), convContext)
+		plannerLatency := time.Since(plannerStart).Milliseconds()
+		var plannerRaw string
 		if err != nil {
+			plannerRaw = "planner error: " + err.Error()
 			log.Warn("planner error, falling through to agent loop", "error", err)
 		} else {
+			plannerRaw = fmt.Sprintf("planner ok: type=%s steps=%d", planResult.Type, len(planResult.Steps))
 			log.Debug("planner result", "type", planResult.Type, "steps", len(planResult.Steps))
+		}
+		emit.EmitPlannerResponse(plannerCtx, o.eventSink, emit.PlannerResponseArgs{
+			RawContent: plannerRaw,
+			LatencyMS:  plannerLatency,
+		})
+		if err == nil && planResult.Type == "pipeline" {
+			for i, step := range planResult.Steps {
+				note := ""
+				if step.Command != nil {
+					note = step.Command.Plugin + "." + step.Command.Action
+				}
+				emit.EmitPlannerStep(plannerCtx, o.eventSink, emit.PlannerStepArgs{
+					StepIndex: i,
+					StepKind:  "tool",
+					Note:      note,
+				})
+			}
 		}
 		if err == nil && planResult.Type == "pipeline" && len(planResult.Steps) > 1 {
 			confResult := confirmationResult{RequiresConfirmation: true, ConfirmBeforeStep: 0}
@@ -1097,9 +1210,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				}
 				p := pipeline.NewPipeline(writeSteps, o.pipelineConfig)
 				p.Context = readPipeline.Context
-				o.pendingMu.Lock()
-				o.pendingPipelines[sessionID] = p
-				o.pendingMu.Unlock()
 				// Narrate only the write steps for confirmation.
 				var planText string
 				if narrated, narrateErr := o.planner.NarratePlan(ctx, writeSteps, content); narrateErr != nil {
@@ -1110,6 +1220,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
 				log.Debug("pipeline stored, awaiting confirmation for write steps",
 					"pipeline_id", p.ID, "session", sessionID, "write_steps", len(writeSteps))
+				confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
+					Prompt:  planText,
+					Choices: []string{"approve", "reject"},
+				})
+				o.pendingMu.Lock()
+				o.pendingPipelines[sessionID] = p
+				if confID != "" {
+					o.pendingConfirmationIDs[sessionID] = confID
+				}
+				o.pendingMu.Unlock()
 				return &RunResult{
 					Response: planText,
 					Metadata: map[string]string{
@@ -1122,9 +1242,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			// ConfirmBeforeStep == 0: confirm entire pipeline (original behavior).
 			p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
-			o.pendingMu.Lock()
-			o.pendingPipelines[sessionID] = p
-			o.pendingMu.Unlock()
 			var planText string
 			if narrated, narrateErr := o.planner.NarratePlan(ctx, planResult.Steps, content); narrateErr != nil {
 				log.Warn("plan narration failed, using fallback", "error", narrateErr)
@@ -1134,6 +1251,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
+			confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
+				Prompt:  planText,
+				Choices: []string{"approve", "reject"},
+			})
+			o.pendingMu.Lock()
+			o.pendingPipelines[sessionID] = p
+			if confID != "" {
+				o.pendingConfirmationIDs[sessionID] = confID
+			}
+			o.pendingMu.Unlock()
 			return &RunResult{
 				Response: planText,
 				Metadata: map[string]string{
@@ -1284,6 +1411,30 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	sysPromptNoHint := o.buildSystemPrompt(withSkipFormatHint(ctx), content, true)
 	sysPromptWithHint := o.buildSystemPrompt(ctx, content, true)
 
+	// Emit turn_start once per Run — captures the static request shape
+	// (system prompt digest, tool catalogue, model intent) that all agent
+	// rounds in this turn share. prepareTurnStart also upserts the
+	// underlying prompt bodies into prompt_snapshots when a store is
+	// configured, so a consumer reading the event can resolve every
+	// sha256 reference to content. Per-round mutations (e.g.
+	// reasoning-effort downgrade on summary rounds) are NOT reflected
+	// here; they remain on the individual llm_request events. The hinted
+	// variant is canonical: the unhinted one only differs by suppressing
+	// the format directive on round 1, which doesn't change tool
+	// selection.
+	//
+	// Early-exit paths above (pending pipeline / pending tool-call
+	// confirmation) intentionally bypass this emission: the LLM is not
+	// driving those decisions, so there's no "turn" to start. They still
+	// emit user_message (above) because the user did send input.
+	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, sysPromptWithHint, profileModel, cachedTools))
+	// Root every subsequent event in this turn under turn_start by
+	// stamping it as the default parent on ctx. Specific spans (planner,
+	// llm_response, tool_call_extracted) overwrite this slot with their
+	// own id before nested emits so the analytics tree has tight scopes
+	// — turn_start is the fallback root, not a flat list of children.
+	ctx = emit.WithParent(ctx, turnStartID)
+
 	var stripRetries int
 	var toolRetries int // retries when planner expected tools but LLM didn't call any
 	var transientMessages []provider.Message
@@ -1407,6 +1558,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
+		// Stamp the just-emitted llm_response as parent for the rest of
+		// this iteration: tool_call_extracted / tool_call_result / retry
+		// / confirmation events all form a tight subtree under the LLM
+		// response that produced them. The next iteration's llm_request
+		// inherits this parent, which produces a chain of rounds — each
+		// round is causally a continuation of the previous, so the chain
+		// is the correct semantic. resp.EventID is "" when no sink is
+		// configured or the response was a refusal; we leave ctx alone
+		// in that case so the existing turn_start parent stays.
+		if resp.EventID != "" {
+			ctx = emit.WithParent(ctx, resp.EventID)
+		}
 		log.Info("LLM response", "round", i+1, "duration", llmDuration.Round(time.Millisecond).String(), "input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens, "content", resp.Content)
 
 		if modelUsed == "" {
@@ -1433,6 +1596,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Info("native tool calls received", "round", i+1, "count", len(calls))
 		} else {
 			calls = o.parser.Parse(resp.Content)
+			// Emit tool_call_parse_failed when the LLM clearly attempted a
+			// structured tool call (a [tool_call] / <invoke> /
+			// <function_calls> marker is present) but the parser produced
+			// no valid call. Detected post-Parse rather than instrumenting
+			// the parser to avoid an interface-signature ripple. raw_snippet
+			// is the full response content (excerpted + sanitized by the
+			// emit helper); per-block error detail is not surfaced today
+			// because the default parser silently continues on each
+			// individual decode failure — capturing that would require a
+			// failures slice on the ToolCallParser interface.
+			o.emitParseFailedIfApplicable(ctx, resp.Content, calls)
 		}
 		if calls == nil {
 			// Detect hallucinated results: the LLM fabricated a response with
@@ -1441,6 +1615,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if hasHallucinatedResult(resp.Content) && stripRetries < 3 {
 				stripRetries++
 				log.Warn("hallucinated result detected, retrying", "round", i+1)
+				emit.EmitRetry(ctx, o.eventSink, emit.RetryArgs{
+					Phase:     "llm_call",
+					Attempt:   stripRetries,
+					LastError: "hallucinated tool result",
+				})
 				// Escape {{ to { { in the hallucinated content before sending it back —
 				// vLLM chat templates use Jinja2 which chokes on unescaped {{ in messages.
 				escaped := strings.ReplaceAll(resp.Content, "{{", "{ {")
@@ -1467,6 +1646,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					return result, nil
 				}
 				stripRetries++
+				emit.EmitRetry(ctx, o.eventSink, emit.RetryArgs{
+					Phase:     "llm_call",
+					Attempt:   stripRetries,
+					LastError: "empty or unparseable response",
+				})
 				retryHint := "[system] Your previous response was empty or contained only unparseable tool call blocks. Please respond to the user in natural language. If you need to call a tool, use the [tool_call] format shown in your instructions."
 				if resp.Content != "" {
 					transientMessages = []provider.Message{
@@ -1493,6 +1677,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("planner retry check", "expected_steps", len(steps), "tool_retries", toolRetries, "will_retry", len(steps) > 0 && toolRetries < 2)
 			if len(steps) > 0 && toolRetries < 2 {
 				toolRetries++
+				emit.EmitRetry(ctx, o.eventSink, emit.RetryArgs{
+					Phase:     "llm_call",
+					Attempt:   toolRetries,
+					LastError: "planner expected tool call but LLM returned plain text",
+				})
 				log.Warn("planner expected tool calls but LLM returned plain text, retrying",
 					"round", i+1, "retry", toolRetries, "expected_steps", len(steps))
 				nudge := buildToolCallNudge(steps)
@@ -1576,7 +1765,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			return result, nil
 		}
 
-		// The LLM narrated a tool call ("We need to call timly__list-items")
+		// The LLM narrated a tool call ("We need to call plugin__action")
 		// instead of using [tool_call] format. Retry with an explicit nudge.
 		if IsNarratedPlaceholder(calls) {
 			log.Debug("narrated tool call detected, retrying with nudge", "round", i+1)
@@ -1631,12 +1820,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				if confResult.RequiresConfirmation {
 					log.Info("tool call requires confirmation", "plugin", calls[i].Plugin, "action", calls[i].Action)
 					pending := calls[i]
-					o.pendingMu.Lock()
-					o.pendingToolCalls[sessionID] = &pending
-					o.pendingMu.Unlock()
-					// Also persist to session metadata so pending calls survive
-					// restarts and work across multiple instances.
-					savePendingToolCall(sessions, sessionID, &pending)
 					// Build a confirmation message describing what will be done.
 					// Prefer LLM narration to hide raw tool names from the user.
 					var confirmMsg string
@@ -1659,6 +1842,23 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					// for the next turn (approval or follow-up questions). On
 					// rejection, the rollback (msgCountAtStart) removes it.
 					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg})
+					confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
+						Prompt:     confirmMsg,
+						Choices:    []string{"approve", "reject"},
+						ToolCallID: calls[i].ID,
+					})
+					o.pendingMu.Lock()
+					o.pendingToolCalls[sessionID] = &pending
+					if confID != "" {
+						o.pendingConfirmationIDs[sessionID] = confID
+					}
+					o.pendingMu.Unlock()
+					// Also persist to session metadata so pending calls survive
+					// restarts and work across multiple instances. The
+					// confirmation_requested event id is embedded in the
+					// serialized form so the parent_id linkage survives
+					// pod restarts and multi-instance failover.
+					savePendingToolCall(sessions, sessionID, &pending, confID)
 					return &RunResult{
 						Response: confirmMsg,
 						Metadata: map[string]string{
@@ -1807,6 +2007,85 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 	return tools
 }
 
+// prepareTurnStart assembles the turn_start event payload from the static
+// request shape held at agent-loop entry AND, when a PromptSnapshotStore
+// is configured, synchronously upserts the underlying prompt bodies into
+// prompt_snapshots BEFORE returning — so the emitted sha256 references
+// resolve to content the moment the event becomes visible.
+//
+// Doing both in one place keeps the invariant tight: every (sha256, body)
+// pair is durable in the store before the event referencing the sha256
+// is emitted to the (potentially async-buffered) sink. A consumer
+// reading the event can then look up the snapshot without racing the
+// write.
+//
+// server_instructions are gathered from every registered capability's
+// SystemPromptAddition — unfiltered by allowed_plugins on purpose: a
+// consumer correlating system_prompt_sha256 to its server_instructions
+// list should see the same set of additions that contributed to that
+// hash. available_tools mirrors the cachedTools list used by the agent
+// loop; when native tool calling is off the slice is empty (text-mode
+// tools are described inside the system prompt and are already covered
+// by system_prompt_sha256). Both slices are sorted by Name so consumers
+// see stable order across runs — ListCapabilities() and cachedTools
+// both depend on Go map iteration, which is not deterministic.
+//
+// snapshot upsert errors are logged and swallowed: a transient DB
+// failure must not break the turn. The resulting event still ships;
+// the consumer just sees a hash without a resolvable body until the
+// snapshot is re-upserted on the next identical turn.
+func (o *Orchestrator) prepareTurnStart(ctx context.Context, systemPrompt, modelID string, cachedTools []provider.ToolDefinition) emit.TurnStartArgs {
+	args := emit.TurnStartArgs{ModelID: modelID}
+	if systemPrompt != "" {
+		sum := sha256.Sum256([]byte(systemPrompt))
+		args.SystemPromptSHA256 = hex.EncodeToString(sum[:])
+		o.upsertSnapshot(ctx, args.SystemPromptSHA256, events.PromptKindSystemPrompt, systemPrompt)
+	}
+	for _, cap := range o.registry.ListCapabilities() {
+		if cap.SystemPromptAddition == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(cap.SystemPromptAddition))
+		sha := hex.EncodeToString(sum[:])
+		args.ServerInstructions = append(args.ServerInstructions, events.ServerInstructionRef{
+			Name:   cap.Name,
+			SHA256: sha,
+		})
+		o.upsertSnapshot(ctx, sha, events.PromptKindServerInstructions, cap.SystemPromptAddition)
+	}
+	sort.Slice(args.ServerInstructions, func(i, j int) bool {
+		return args.ServerInstructions[i].Name < args.ServerInstructions[j].Name
+	})
+	for _, td := range cachedTools {
+		sum := sha256.Sum256([]byte(td.Description))
+		sha := hex.EncodeToString(sum[:])
+		args.AvailableTools = append(args.AvailableTools, events.ToolRef{
+			Name:       td.Name,
+			DescSHA256: sha,
+		})
+		o.upsertSnapshot(ctx, sha, events.PromptKindToolDescription, td.Description)
+	}
+	sort.Slice(args.AvailableTools, func(i, j int) bool {
+		return args.AvailableTools[i].Name < args.AvailableTools[j].Name
+	})
+	return args
+}
+
+// upsertSnapshot writes a (sha256, kind, content) tuple to the configured
+// PromptSnapshotStore, swallowing nil-store and errors. Errors are
+// logged at warn level — the turn continues regardless because the
+// alternative (failing a user turn over an analytics snapshot write) is
+// worse than a dangling hash reference.
+func (o *Orchestrator) upsertSnapshot(ctx context.Context, sha256, kind, content string) {
+	if o.snapshotStore == nil {
+		return
+	}
+	if err := o.snapshotStore.UpsertPromptSnapshot(ctx, sha256, kind, content); err != nil {
+		slog.WarnContext(ctx, "prompt_snapshot upsert failed",
+			"sha256", sha256, "kind", kind, "error", err)
+	}
+}
+
 // retryToolCallsEnabled returns true if the model opts in to planner-informed
 // tool-call retries (for weak models that intermittently skip [tool_call] blocks).
 func (o *Orchestrator) retryToolCallsEnabled() bool {
@@ -1850,6 +2129,10 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 		logger.FromContext(ctx).Debug("streaming unavailable, falling back to complete", "error", err)
 		return o.llm.Complete(ctx, req)
 	}
+	// Close is idempotent (see oaiResponseStream.closed guard); the
+	// explicit Close after the loop forces emitStreamEnd to fire BEFORE
+	// we read EventID below, so the deferred Close becomes a safety net
+	// rather than the actual emit trigger.
 	defer func() { _ = stream.Close() }()
 
 	var buf strings.Builder
@@ -1890,10 +2173,20 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 		}
 	}
 
+	// Fire the end-of-stream emit now so EventID is populated before we
+	// build the response. Any stream implementation that doesn't surface
+	// an event id (test fakes, future providers) simply returns "".
+	_ = stream.Close()
+	var eventID string
+	if exposer, ok := stream.(interface{ EventID() string }); ok {
+		eventID = exposer.EventID()
+	}
+
 	return &provider.CompletionResponse{
 		Content: buf.String(),
 		Model:   model,
 		Usage:   usage,
+		EventID: eventID,
 	}, nil
 }
 
@@ -2685,7 +2978,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 
 	// When RAG filtering is active, list plugins that have actions but none
 	// matched the current query. The LLM can use ask_knowledge to discover
-	// their actions on demand. Use alias names (e.g. "jira", "timly") when
+	// their actions on demand. Use alias names (e.g. "jira", "tickets") when
 	// available, since those are the names the LLM should use.
 	if len(discoverablePlugins) > 0 {
 		sb.WriteString("## Other available plugins\n")
@@ -2913,7 +3206,45 @@ func rejectUnknownArgs(call ToolCall, action *Action) error {
 }
 
 func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResult {
+	// Emit tool_call_extracted at the very top for LLM-originated calls
+	// so the raw decoded view is captured before any validation,
+	// normalization, policy gating, or context-arg injection mutates it
+	// (raw-capture rule). Internal calls (preparers, guards, pipelines)
+	// are host-orchestrated, not part of the LLM reasoning trace, and are
+	// not emitted. CallID joins the matching tool_call_result emitted
+	// further down; tool_call_extracted's event id is also stamped onto
+	// ctx via WithParent so the eventual tool_call_result and any
+	// refusal/not-found emits in between link back via parent_id.
+	//
+	// dispatchStart is initialized unconditionally so emitRefusalResult
+	// can compute a meaningful LatencyMS regardless of where the policy
+	// gate fires. Even non-FromLLM calls pay one time.Now() — cheap and
+	// keeps the contract simple.
+	dispatchStart := time.Now()
+	if call.FromLLM {
+		mode := emit.ToolCallModeText
+		if o.supportsNativeTools() {
+			mode = emit.ToolCallModeNative
+		}
+		// Arguments captured as the raw map ref; send() in the emit
+		// package marshals payload synchronously, so the JSON snapshot is
+		// frozen here BEFORE the context-arg injection below mutates
+		// call.Args. If this emit ever becomes async, the call.Args map
+		// must be copied first to preserve the raw-capture invariant.
+		extractedID := emit.EmitToolCallExtracted(ctx, o.eventSink, emit.ToolCallExtractedArgs{
+			CallID:    call.ID,
+			Plugin:    call.Plugin,
+			Action:    call.Action,
+			Arguments: call.Args,
+			Mode:      mode,
+		})
+		if extractedID != "" {
+			ctx = emit.WithParent(ctx, extractedID)
+		}
+	}
+
 	if call.Plugin == "" {
+		o.emitToolCallNotFound(ctx, call)
 		return ToolResult{
 			CallID: call.ID,
 			Error:  `tool call format not recognized. You MUST use this exact format: [tool_call] {"tool": "plugin.action", "args": {"key": "value"}} [/tool_call]. Do NOT use XML or any other format. Retry the same action now using the correct format.`,
@@ -2921,6 +3252,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	}
 	exec, ok := o.registry.GetExecutor(call.Plugin)
 	if !ok {
+		o.emitToolCallNotFound(ctx, call)
 		return ToolResult{
 			CallID: call.ID,
 			Error:  fmt.Sprintf("plugin %q not found", call.Plugin),
@@ -2947,6 +3279,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 			}
 		}
 		if !resolved {
+			o.emitToolCallNotFound(ctx, call)
 			return ToolResult{
 				CallID: call.ID,
 				Error:  fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin),
@@ -2963,16 +3296,10 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		allowed, err := o.permissionChecker.Allowed(ctx, actorID, call.Plugin)
 		if err != nil {
 			slog.Warn("permission check failed", "actor", actorID, "plugin", call.Plugin, "error", err)
-			return ToolResult{
-				CallID: call.ID,
-				Error:  "permission denied",
-			}
+			return o.emitRefusalResult(ctx, call, "permission denied", dispatchStart)
 		}
 		if !allowed {
-			return ToolResult{
-				CallID: call.ID,
-				Error:  "permission denied",
-			}
+			return o.emitRefusalResult(ctx, call, "permission denied", dispatchStart)
 		}
 	}
 
@@ -3006,10 +3333,9 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 				"in_allowlist", allowed.m[capForCheck.Name],
 				"allowlist_keys", mapKeys(allowed.m),
 			)
-			return ToolResult{
-				CallID: call.ID,
-				Error:  fmt.Sprintf("plugin %q is not available for this profile", call.Plugin),
-			}
+			return o.emitRefusalResult(ctx, call,
+				fmt.Sprintf("plugin %q is not available for this profile", call.Plugin),
+				dispatchStart)
 		} else {
 			slog.Debug("tool call allowed",
 				"plugin", call.Plugin,
@@ -3022,10 +3348,9 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 
 	if call.FromLLM && action != nil && action.UserOnly {
 		slog.Warn("BLOCKED LLM attempt to invoke user_only action", "actor", actorID, "plugin", call.Plugin, "action", call.Action, "args", call.Args)
-		return ToolResult{
-			CallID: call.ID,
-			Error:  fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
-		}
+		return o.emitRefusalResult(ctx, call,
+			fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
+			dispatchStart)
 	}
 	// Reject unknown args from LLM-originated calls. Without this, stray keys
 	// (e.g. Haiku emitting `message=` at top level instead of inside `args`)
@@ -3035,9 +3360,22 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	// exempt — they construct calls programmatically and may legitimately use
 	// names outside the declared Parameters set. InjectContextArgs are not
 	// accepted from the LLM; the host injects them below.
+	// rejectUnknownArgs is pre-dispatch validation: emit
+	// tool_call_args_invalid (its own typed failure event) and return
+	// early. Unlike the policy refusals further up, no tool_call_result
+	// fires here — the dispatcher never ran, so there is no "result" to
+	// record. Consumer-side analytics count
+	//   extracted == not_found + args_invalid + result
+	// for orthogonality.
 	if call.FromLLM && action != nil && len(call.Args) > 0 {
 		if err := rejectUnknownArgs(call, action); err != nil {
 			slog.Warn("BLOCKED LLM call with unknown args", "plugin", call.Plugin, "action", call.Action, "error", err.Error())
+			emit.EmitToolCallArgsInvalid(ctx, o.eventSink, emit.ToolCallArgsInvalidArgs{
+				CallID:          call.ID,
+				Plugin:          call.Plugin,
+				Action:          call.Action,
+				ValidationError: err.Error(),
+			})
 			return ToolResult{CallID: call.ID, Error: err.Error()}
 		}
 	}
@@ -3066,7 +3404,86 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	result := o.guard.ExecuteWithTimeout(ctx, exec, call)
 	result = o.guard.ValidateResult(call, result)
 	result = o.guard.Sanitize(result)
+	if call.FromLLM {
+		status := "ok"
+		respBody := result.Content
+		if result.Error != "" {
+			status = "error"
+			respBody = result.Error
+		}
+		emit.EmitToolCallResult(ctx, o.eventSink, emit.ToolCallResultArgs{
+			CallID:    call.ID,
+			Status:    status,
+			Response:  respBody,
+			LatencyMS: time.Since(dispatchStart).Milliseconds(),
+		})
+	}
 	return result
+}
+
+// emitToolCallNotFound emits a tool_call_not_found event for an LLM-originated
+// call whose plugin or action could not be resolved. The requested-name format
+// matches the LLM's own "plugin.action" naming convention so analytics can
+// group mis-spellings without re-parsing.
+func (o *Orchestrator) emitToolCallNotFound(ctx context.Context, call ToolCall) {
+	if !call.FromLLM {
+		return
+	}
+	emit.EmitToolCallNotFound(ctx, o.eventSink, call.Plugin+"."+call.Action)
+}
+
+// emitParseFailedIfApplicable emits one tool_call_parse_failed event when
+// the response contains a structured tool-call marker but the parser
+// produced no valid call. Narrated-placeholder is excluded — that path
+// signals "LLM never tried the format", not a decode failure. An
+// empty-plugin placeholder in calls indicates "parser saw a block but
+// could not decode its body" (default parser's sawBlock fallback +
+// bare-JSON-without-tool-key fallback both produce this signal). Mixed
+// success (some valid calls + a discarded malformed block) does NOT
+// trigger this — len(calls) > 0 with no empty-plugin entry is treated as
+// success, accepting the v1 limitation noted at the call site.
+func (o *Orchestrator) emitParseFailedIfApplicable(ctx context.Context, response string, calls []ToolCall) {
+	if !containsToolCallMarker(response) {
+		return
+	}
+	if IsNarratedPlaceholder(calls) {
+		return
+	}
+	if calls != nil {
+		hasEmptyPlugin := false
+		for _, c := range calls {
+			if c.Plugin == "" {
+				hasEmptyPlugin = true
+				break
+			}
+		}
+		if !hasEmptyPlugin {
+			return
+		}
+	}
+	emit.EmitToolCallParseFailed(ctx, o.eventSink, emit.ToolCallParseFailedArgs{
+		RawSnippet: response,
+		ParserUsed: "default",
+		ParseError: "tool-call marker present but no valid tool call could be decoded",
+	})
+}
+
+// emitRefusalResult emits a tool_call_result with status="error" for policy
+// refusals (permission denied, restricted plugin, user-only action) and
+// returns the matching ToolResult. The call was extracted and identified
+// before the refusal, so tool_call_result — not tool_call_not_found — is
+// the right shape; the error message is captured verbatim in response_excerpt
+// for downstream attribution.
+func (o *Orchestrator) emitRefusalResult(ctx context.Context, call ToolCall, errMsg string, dispatchStart time.Time) ToolResult {
+	if call.FromLLM {
+		emit.EmitToolCallResult(ctx, o.eventSink, emit.ToolCallResultArgs{
+			CallID:    call.ID,
+			Status:    "error",
+			Response:  errMsg,
+			LatencyMS: time.Since(dispatchStart).Milliseconds(),
+		})
+	}
+	return ToolResult{CallID: call.ID, Error: errMsg}
 }
 
 func (o *Orchestrator) maybeRecordWorkflow(ctx context.Context, result *RunResult, userMessage string) {
@@ -3101,12 +3518,21 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 	if len(sess.Messages) < o.summarizeAfterMessages {
 		return
 	}
+	// This fires from a background goroutine started in Run with
+	// context.Background(), so actor.SessionID(ctx) would resolve to "" and
+	// session_events writes would fail validation. Wrap the session id back
+	// onto ctx here so the emit helpers can read it via the standard slot.
+	ctx = actor.WithSessionID(ctx, sessionID)
 	keep := o.maxMessagesAfterSummary
 	if keep > len(sess.Messages) {
 		keep = len(sess.Messages)
 	}
 	toSummarize := sess.Messages[:len(sess.Messages)-keep]
 	keepMessages := sess.Messages[len(sess.Messages)-keep:]
+	emit.EmitSummarizationTriggered(ctx, o.eventSink, emit.SummarizationTriggeredArgs{
+		MessageCount: len(sess.Messages),
+		Reason:       "threshold_reached",
+	})
 
 	var sysPrompt, userContent string
 	if sess.Summary != "" {
@@ -3140,9 +3566,13 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 			{Role: provider.RoleUser, Content: userContent},
 		},
 	}
+	summarizeStart := time.Now()
 	resp, err := o.llm.Complete(ctx, req)
 	if err != nil {
 		slog.Warn("session summarization failed", "error", err)
+		// No completed event on LLM failure: triggered-without-completed
+		// is the analytics signal for "summarization started but did not
+		// finish". Same pattern as other failure-mode events in this file.
 		return
 	}
 	newSummary := strings.TrimSpace(resp.Content)
@@ -3150,8 +3580,20 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 		return
 	}
 	if err := o.sessions.SetSummary(sessionID, newSummary, keepMessages); err != nil {
+		// Same "triggered without completed" failure signal as the LLM
+		// error path above. SessionStore.SetSummary only errors on
+		// "session not found", which is already excluded by the earlier
+		// Get() check; reaching this branch would require the session
+		// being deleted concurrently between Get and SetSummary. Treated
+		// as a defensive return for that race, no dedicated test.
 		slog.Warn("set session summary failed", "error", err)
+		return
 	}
+	emit.EmitSummarizationCompleted(ctx, o.eventSink, emit.SummarizationCompletedArgs{
+		Summary:      newSummary,
+		KeptMessages: len(keepMessages),
+		LatencyMS:    time.Since(summarizeStart).Milliseconds(),
+	})
 }
 
 // RunAction executes a single plugin action directly, bypassing the LLM loop.
@@ -3215,15 +3657,28 @@ func formatToolCallMessage(call ToolCall) string {
 
 // pendingToolCallMeta is the JSON-serializable form of a pending tool call
 // stored in session metadata so it survives restarts.
+//
+// ConfirmationRequestedID carries the session-event id of the
+// confirmation_requested event that started this pending state, so the
+// matching confirmation_resolved event can be parented back to it even
+// across pod restarts or multi-instance failover where the in-memory
+// pendingConfirmationIDs map is empty.
 type pendingToolCallMeta struct {
-	ID     string            `json:"id"`
-	Plugin string            `json:"plugin"`
-	Action string            `json:"action"`
-	Args   map[string]string `json:"args,omitempty"`
+	ID                      string            `json:"id"`
+	Plugin                  string            `json:"plugin"`
+	Action                  string            `json:"action"`
+	Args                    map[string]string `json:"args,omitempty"`
+	ConfirmationRequestedID string            `json:"confirmation_requested_id,omitempty"`
 }
 
-func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall) {
-	meta := pendingToolCallMeta{ID: tc.ID, Plugin: tc.Plugin, Action: tc.Action, Args: tc.Args}
+func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID string) {
+	meta := pendingToolCallMeta{
+		ID:                      tc.ID,
+		Plugin:                  tc.Plugin,
+		Action:                  tc.Action,
+		Args:                    tc.Args,
+		ConfirmationRequestedID: confirmationRequestedID,
+	}
 	data, err := json.Marshal(meta)
 	if err != nil {
 		return
@@ -3231,20 +3686,23 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 	_ = sessions.SetMetadata(sessionID, "pending_tool_call", string(data))
 }
 
-func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) *ToolCall {
+// loadPendingToolCall restores the pending tool call from session metadata.
+// Returns the ToolCall and the confirmation_requested event id (empty when
+// the persisted row predates the field or no event was captured).
+func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string) {
 	sess, err := sessions.Get(sessionID)
 	if err != nil || sess == nil {
-		return nil
+		return nil, ""
 	}
 	raw := sess.Metadata["pending_tool_call"]
 	if raw == "" {
-		return nil
+		return nil, ""
 	}
 	var meta pendingToolCallMeta
 	if json.Unmarshal([]byte(raw), &meta) != nil {
-		return nil
+		return nil, ""
 	}
-	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args}
+	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args}, meta.ConfirmationRequestedID
 }
 
 // toolCallSignature builds a deterministic string from a set of tool calls

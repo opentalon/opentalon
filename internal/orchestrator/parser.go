@@ -126,7 +126,7 @@ func (defaultParser) Parse(response string) []ToolCall {
 			return xmlCalls
 		}
 		// Fallback: detect narrated tool calls in plain text.
-		// Weak LLMs sometimes say "We need to call timly__list-items" instead
+		// Weak LLMs sometimes say "We need to call plugin__action" instead
 		// of using [tool_call] format. Flag this so the orchestrator can retry.
 		if hasNarratedToolCall(response) || hasNarratedIntent(response) {
 			return narratedToolCallPlaceholder
@@ -410,8 +410,8 @@ func parseXMLParameters(body string) map[string]string {
 }
 
 // narratedToolRe matches tool names in plain text narration from weak LLMs.
-// Captures patterns like "call timly.timly__list-items", "call the list-items tool",
-// or "use timly__list-container-types".  Allows optional articles (the/a) between
+// Captures patterns like "call plugin.plugin__list-items", "call the list-items tool",
+// or "use plugin__list-container-types".  Allows optional articles (the/a) between
 // the verb and the tool name.
 var narratedToolRe = regexp.MustCompile(`(?i)(?:call|use|invoke|execute|run|fetch|query|check|search|look\s*up|retrieve)\s+(?:the\s+|a\s+)?` + "`?" + `([a-zA-Z0-9_.-]+(?:\.[a-zA-Z0-9_.-]+|__[a-zA-Z0-9_-]+|[-][a-zA-Z0-9_-]+))` + "`?")
 
@@ -464,6 +464,20 @@ func containsInternalBlock(s string) bool {
 		}
 	}
 	return false
+}
+
+// containsToolCallMarker returns true if s carries any syntactic marker
+// the parser would treat as a structured tool-call attempt: the
+// orchestrator's own [tool_call] tag, Claude's <function_calls> XML, or a
+// bare <invoke ...> / <invoke> tag (the namespaced antml:* form is
+// caught by the same prefix scan in parseXMLFunctionCalls). Used to gate
+// tool_call_parse_failed emission so plain-text replies never trigger
+// the event.
+func containsToolCallMarker(s string) bool {
+	if containsInternalBlock(s) {
+		return true
+	}
+	return strings.Contains(s, "<invoke ") || strings.Contains(s, "<invoke>")
 }
 
 // internalBlockTags lists the open/close tag pairs for internal protocol

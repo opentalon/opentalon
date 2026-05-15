@@ -237,12 +237,12 @@ func TestExecutorSubstitutesStepReferences(t *testing.T) {
 	}
 
 	steps := []*Step{
-		{ID: "step1", Name: "Find container", Command: &PluginCommand{Plugin: "timly", Action: "list-containers", Args: map[string]any{"query": "name:Berlin"}}, MaxRetries: -1, State: StepPending},
-		{ID: "step2", Name: "Find item", Command: &PluginCommand{Plugin: "timly", Action: "list-items", Args: map[string]any{"query": "name:Tesla"}}, MaxRetries: -1, State: StepPending},
+		{ID: "step1", Name: "Find container", Command: &PluginCommand{Plugin: "inventory", Action: "list-containers", Args: map[string]any{"query": "name:Berlin"}}, MaxRetries: -1, State: StepPending},
+		{ID: "step2", Name: "Find item", Command: &PluginCommand{Plugin: "inventory", Action: "list-items", Args: map[string]any{"query": "name:Tesla"}}, MaxRetries: -1, State: StepPending},
 		{
 			ID: "step3", Name: "Schedule",
 			Command: &PluginCommand{
-				Plugin: "timly", Action: "schedule-item",
+				Plugin: "inventory", Action: "schedule-item",
 				Args: map[string]any{
 					"container_id": "{{step1.output.containers[0].id}}",
 					"item_id":      "{{step2.output.items[0].id}}",

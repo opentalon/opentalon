@@ -253,7 +253,7 @@ func formatResponseScriptPath(t *testing.T) string {
 func TestFormatResponseSlackToolDebug(t *testing.T) {
 	path := formatResponseScriptPath(t)
 
-	input := "[tool_call] timly.list-containers(page=1, per_page=1)\n[tool_result] {\"total\": 7}\n\n---\n\nYou have **7** containers."
+	input := "[tool_call] inventory.list-containers(page=1, per_page=1)\n[tool_result] {\"total\": 7}\n\n---\n\nYou have **7** containers."
 	result, err := RunFormat(path, input, "slack")
 	if err != nil {
 		t.Fatal(err)
@@ -262,7 +262,7 @@ func TestFormatResponseSlackToolDebug(t *testing.T) {
 	if !strings.Contains(result, "> :wrench:") {
 		t.Errorf("expected Slack wrench emoji in blockquote, got:\n%s", result)
 	}
-	if !strings.Contains(result, "`timly.list-containers(page=1, per_page=1)`") {
+	if !strings.Contains(result, "`inventory.list-containers(page=1, per_page=1)`") {
 		t.Errorf("expected tool call in code block, got:\n%s", result)
 	}
 	// Response should be Slack-formatted (bold: *text* not **text**)
@@ -291,7 +291,7 @@ func TestFormatResponseSlackToolDebugError(t *testing.T) {
 func TestFormatResponseMarkdownToolDebug(t *testing.T) {
 	path := formatResponseScriptPath(t)
 
-	input := "[tool_call] timly.list-containers(page=1)\n[tool_result] {\"total\": 7}\n\n---\n\nYou have **7** containers."
+	input := "[tool_call] inventory.list-containers(page=1)\n[tool_result] {\"total\": 7}\n\n---\n\nYou have **7** containers."
 	result, err := RunFormat(path, input, "markdown")
 	if err != nil {
 		t.Fatal(err)
@@ -308,7 +308,7 @@ func TestFormatResponseMarkdownToolDebug(t *testing.T) {
 func TestFormatResponseHTMLToolDebug(t *testing.T) {
 	path := formatResponseScriptPath(t)
 
-	input := "[tool_call] timly.list-containers(page=1)\n[tool_result] ok\n\n---\n\nDone."
+	input := "[tool_call] inventory.list-containers(page=1)\n[tool_result] ok\n\n---\n\nDone."
 	result, err := RunFormat(path, input, "html")
 	if err != nil {
 		t.Fatal(err)
@@ -316,7 +316,7 @@ func TestFormatResponseHTMLToolDebug(t *testing.T) {
 	if !strings.Contains(result, "<blockquote>") {
 		t.Errorf("expected HTML blockquote, got:\n%s", result)
 	}
-	if !strings.Contains(result, "<code>timly.list-containers(page=1)</code>") {
+	if !strings.Contains(result, "<code>inventory.list-containers(page=1)</code>") {
 		t.Errorf("expected HTML code tag, got:\n%s", result)
 	}
 }

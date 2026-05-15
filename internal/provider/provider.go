@@ -63,6 +63,14 @@ type CompletionResponse struct {
 	Content   string     `json:"content"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // native tool calls from LLM; nil = check Content for text-based calls
 	Usage     Usage      `json:"usage"`
+
+	// EventID is the session-event id of the llm_response event the
+	// provider emitted for this completion (empty when no event sink is
+	// configured, or when the response carried a refusal — see EmitLLMRefused).
+	// The orchestrator uses this as parent_id on subsequent
+	// tool_call_extracted events so the analytics graph links each tool
+	// dispatch back to the LLM round that produced it.
+	EventID string `json:"-"`
 }
 
 type StreamChunk struct {
