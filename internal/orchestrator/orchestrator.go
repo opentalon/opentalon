@@ -1583,6 +1583,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 		if modelUsed == "" {
 			modelUsed = resp.Model
+			// Stamp sessions.active_model with the model that produced the
+			// first response of this Run. Without this stamp the column is
+			// only ever written at Create (as ""), leaving downstream
+			// session-review tools to scrape model_id out of llm_request
+			// events. Fire-and-forget — a stale stamp is harmless and the
+			// active_model column is denormalised cache, not source of truth.
+			if resp.Model != "" {
+				_ = sessions.SetModel(sessionID, provider.ModelRef(resp.Model))
+			}
 		}
 		totalInputTokens += resp.Usage.InputTokens
 		totalOutputTokens += resp.Usage.OutputTokens
