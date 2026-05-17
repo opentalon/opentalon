@@ -2235,6 +2235,38 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if toolResult.Error != "" {
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
 			}
+
+			// Same-turn promotion completion for _meta.get_tool_details.
+			// The executor (system_tools.go) already persists a Tier-1
+			// KnownToolEntry so the NEXT turn's preparer puts the tool
+			// in the LLM's tools array. Without the rebuild below the
+			// promotion would not take effect IN THE CURRENT TURN for
+			// native-tools-mode providers — the per-Run cachedTools
+			// snapshot built before the loop would still drive every
+			// subsequent round's `req.Tools`, leaving the LLM with the
+			// same Tier-3-name-only entry it just looked up.
+			//
+			// Gated on:
+			//   * native-tools mode (text-mode LLMs read the description
+			//     directly out of tool_call_result; cachedTools is
+			//     irrelevant on that path)
+			//   * successful meta-tool result (failed lookups don't
+			//     promote anything)
+			//   * non-empty "name" arg (executor already rejects empty,
+			//     but we double-gate to keep the rebuild path tight)
+			//
+			// withPromotedTool is a no-op when no relevant-tools list is
+			// set (no preparer ran) — buildToolDefinitions already
+			// exposes every allowed tool in that mode.
+			if nativeMode && toolResult.Error == "" &&
+				call.Plugin == metaPluginName && call.Action == metaGetToolDetails {
+				if promoted := strings.TrimSpace(call.Args["name"]); promoted != "" {
+					ctx = withPromotedTool(ctx, promoted)
+					cachedTools = o.buildToolDefinitions(ctx)
+					log.Debug("cachedTools refreshed after _meta.get_tool_details promotion",
+						"tool", promoted, "tools_count", len(cachedTools))
+				}
+			}
 			// RFC #249 Phase 4 D5: update the consecutive-error counters,
 			// inject the "Tool X failed N times" nudge into the next LLM
 			// iteration when LoopCapPerTurn trips, and flip the Demoted
@@ -4160,6 +4192,39 @@ func relevantToolsFromContext(ctx context.Context) ([]string, bool) {
 		return nil, false
 	}
 	return r.tools, true
+}
+
+// withPromotedTool augments the relevant-tools list on ctx with toolName.
+// Idempotent: a name already in the list returns ctx unchanged. When no
+// relevant-tools list is set (no preparer ran for this turn), returns ctx
+// unchanged because buildToolDefinitions already exposes every tool in
+// that mode — there's nothing to promote.
+//
+// Used by the agent-loop's `_meta.get_tool_details` follow-through to put
+// the just-inspected tool into the SAME turn's tools array on the next
+// LLM round. Without it the promotion only takes effect next user turn
+// via the InjectionState LRU rank; the contract on get_tool_details's
+// description ("promotes the tool back to the LLM's tools array for the
+// rest of the session") needs the same-turn step too for native-tools
+// mode, where the cached tools array is what the LLM API gets verbatim
+// on every round.
+func withPromotedTool(ctx context.Context, toolName string) context.Context {
+	if toolName == "" {
+		return ctx
+	}
+	existing, ok := relevantToolsFromContext(ctx)
+	if !ok {
+		return ctx
+	}
+	for _, t := range existing {
+		if t == toolName {
+			return ctx
+		}
+	}
+	updated := make([]string, len(existing)+1)
+	copy(updated, existing)
+	updated[len(existing)] = toolName
+	return withRelevantTools(ctx, updated)
 }
 
 type searchQueryKey struct{}

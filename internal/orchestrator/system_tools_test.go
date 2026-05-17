@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -233,6 +234,111 @@ func TestPromotedToolsThisTurn_EmptyBeforeAnyPromotion(t *testing.T) {
 	}
 	if got := orch.promotedToolsThisTurn(context.Background(), ""); len(got) != 0 {
 		t.Errorf("promotedToolsThisTurn with empty sessionID = %v, want empty", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// withPromotedTool + same-turn cachedTools refresh
+// ---------------------------------------------------------------------------
+
+func TestWithPromotedTool_AppendsWhenRelevantToolsSet(t *testing.T) {
+	// The happy path: a preparer-provided relevant-tools list gets the
+	// promoted tool appended. The resulting ctx is what buildToolDefinitions
+	// reads to filter — putting the promoted tool here is what makes the
+	// next agent-loop round expose it with its full schema.
+	ctx := withRelevantTools(context.Background(), []string{"timly.list-items"})
+	got := withPromotedTool(ctx, "timly.show-item")
+
+	tools, ok := relevantToolsFromContext(got)
+	if !ok {
+		t.Fatal("relevant-tools list missing after withPromotedTool")
+	}
+	want := []string{"timly.list-items", "timly.show-item"}
+	if !reflect.DeepEqual(tools, want) {
+		t.Errorf("relevant tools = %v, want %v", tools, want)
+	}
+}
+
+func TestWithPromotedTool_DedupsExistingEntry(t *testing.T) {
+	// A second promotion of the same name in one turn must not double the
+	// entry. Native-tools-mode providers de-dupe `tools[]` themselves, but
+	// keeping the list canonical avoids the round-trip and any vendor-side
+	// surprises.
+	ctx := withRelevantTools(context.Background(), []string{"timly.list-items"})
+	got := withPromotedTool(ctx, "timly.list-items")
+
+	tools, _ := relevantToolsFromContext(got)
+	want := []string{"timly.list-items"}
+	if !reflect.DeepEqual(tools, want) {
+		t.Errorf("relevant tools = %v, want %v (dedup failed)", tools, want)
+	}
+}
+
+func TestWithPromotedTool_NoRelevantToolsSet_ReturnsCtxUnchanged(t *testing.T) {
+	// When no preparer ran (no relevant-tools list on ctx),
+	// buildToolDefinitions already exposes every allowed tool — there's
+	// nothing to promote. withPromotedTool must short-circuit and return
+	// the original ctx; otherwise we'd inadvertently SET the list to a
+	// non-nil singleton and flip the filter from "show all" to "show only
+	// this one tool".
+	ctx := context.Background()
+	got := withPromotedTool(ctx, "timly.show-item")
+
+	if _, ok := relevantToolsFromContext(got); ok {
+		t.Error("withPromotedTool must not seed a relevant-tools list when none was set")
+	}
+}
+
+func TestWithPromotedTool_EmptyName_ReturnsCtxUnchanged(t *testing.T) {
+	// Defense in depth: an empty toolName must not silently corrupt the
+	// list with a blank entry. Caller responsibility, but we double-gate
+	// at the helper since the agent-loop trigger already pulls call.Args
+	// dynamically.
+	ctx := withRelevantTools(context.Background(), []string{"timly.list-items"})
+	got := withPromotedTool(ctx, "")
+
+	tools, _ := relevantToolsFromContext(got)
+	if !reflect.DeepEqual(tools, []string{"timly.list-items"}) {
+		t.Errorf("empty-name promotion mutated the list: %v", tools)
+	}
+}
+
+func TestBuildToolDefinitions_AfterWithPromotedTool_IncludesPromotedToolFullSchema(t *testing.T) {
+	// Composition: relevant-tools filter narrows to [A], then a
+	// _meta.get_tool_details promotion adds [B]. The rebuild driven from
+	// the agent loop calls buildToolDefinitions with the post-promotion
+	// ctx; the resulting tools-array must contain BOTH A and B (with
+	// full schemas). This is the property the native-tools-mode LLM
+	// relies on to call the promoted tool in the SAME turn.
+	orch := newOrchForMetaTests(t, &fakeInjectionStateStore{}, true)
+
+	// The fixture registers tools-plugin with two actions: t1 and t2.
+	// Profile filter starts with only t1 visible.
+	ctx := withAllowedPlugins(context.Background(), cachedAllowedPlugins{
+		m:      map[string]bool{"tools-plugin": true},
+		strict: false,
+	})
+	ctx = withRelevantTools(ctx, []string{"tools-plugin.t1"})
+
+	before := orch.buildToolDefinitions(ctx)
+	if len(before) != 1 || before[0].Name != "tools-plugin.t1" {
+		t.Fatalf("pre-promotion tools = %+v, want exactly [tools-plugin.t1]", before)
+	}
+
+	ctx = withPromotedTool(ctx, "tools-plugin.t2")
+	after := orch.buildToolDefinitions(ctx)
+	names := make([]string, len(after))
+	for i, td := range after {
+		names[i] = td.Name
+	}
+	wantNames := map[string]bool{"tools-plugin.t1": true, "tools-plugin.t2": true}
+	if len(names) != 2 {
+		t.Fatalf("post-promotion tools = %v, want exactly 2 entries", names)
+	}
+	for _, n := range names {
+		if !wantNames[n] {
+			t.Errorf("unexpected tool %q in post-promotion array, wanted only %v", n, wantNames)
+		}
 	}
 }
 
