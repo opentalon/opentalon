@@ -93,6 +93,15 @@ orchestrator:
   #   plugin: weaviate                   # plugin for knowledge article ingestion
   #   action: ingest                     # action name for single-article ingestion
   #   dir: ./knowledge                   # optional: scan .md files at startup
+  # Preparer-phase behaviour (RFC #249). Phase 2 events fire regardless;
+  # the flags here gate the Phase 3+ decision logic. Each pillar can be
+  # rolled out independently for A/B comparison via the events log.
+  # preparer:
+  #   knowledge_dedup:
+  #     enabled: false                       # master switch; false = legacy per-turn re-inject + Phase 2 instrumentation only
+  #     reinject_score_threshold: 0.85       # current-turn score override against "already known"
+  #     reinject_top_k_force: 3              # always re-inject top-N candidates regardless of known state
+  #     cap_per_turn: 5                      # hard ceiling on delta knowledge articles injected per turn
 
 channels:
   console:

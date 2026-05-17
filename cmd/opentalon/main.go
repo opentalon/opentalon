@@ -41,6 +41,14 @@ import (
 	chanpkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
+// Compile-time assertion that the DB-backed SessionStore satisfies the
+// orchestrator's optional InjectionStateStore interface. Lives here
+// because neither the store package nor the orchestrator package can
+// reference the other without a cycle — main.go is the wiring point
+// where both are already imported, so it's the right place to pin the
+// contract. RFC #249 Phase 3.
+var _ orchestrator.InjectionStateStore = (*store.SessionStore)(nil)
+
 func main() {
 	fmt.Fprintln(os.Stderr, "OpenTalon starting...")
 	configPath := flag.String("config", "", "path to config file")
@@ -149,6 +157,12 @@ func main() {
 	var sessionEventStore *store.SessionEventStore
 	var sessionEventWriter *store.SessionEventWriter
 	var sessionEventsRetentionCancel context.CancelFunc
+	// injectionStateStore is the orchestrator-side handle for the
+	// RFC #249 Phase 3 dedup helpers — the DB-backed SessionStore
+	// satisfies it, the in-memory fallback does not. Stays nil when
+	// the state DB is unavailable; dedup decision logic short-circuits
+	// to instrumentation_only in that case.
+	var injectionStateStore orchestrator.InjectionStateStore
 	if dataDir != "" || cfg.State.DB.Driver == "postgres" {
 		db, err := store.Open(cfg.State.DB, dataDir)
 		if err != nil {
@@ -162,6 +176,7 @@ func main() {
 				slog.Warn("session prune failed", "error", err)
 			}
 			sessions = sessStore
+			injectionStateStore = sessStore
 			groupPluginStore = store.NewGroupPluginStore(db)
 			usageStore = store.NewUsageStore(db)
 			entityStore = store.NewEntityStore(db)
@@ -590,6 +605,17 @@ func main() {
 			Dir:    cfg.Orchestrator.Knowledge.Dir,
 		},
 		ShowToolCalls: cfg.Orchestrator.ShowToolCalls,
+		KnowledgeDedup: orchestrator.KnowledgeDedupConfig{
+			Enabled:                cfg.Orchestrator.Preparer.KnowledgeDedup.Enabled,
+			ReinjectScoreThreshold: cfg.Orchestrator.Preparer.KnowledgeDedup.ReinjectScoreThreshold,
+			ReinjectTopKForce:      cfg.Orchestrator.Preparer.KnowledgeDedup.ReinjectTopKForce,
+			CapPerTurn:             cfg.Orchestrator.Preparer.KnowledgeDedup.CapPerTurn,
+		},
+		// The DB-backed SessionStore satisfies InjectionStateStore via
+		// its GetInjectionState / UpdateInjectionState methods (Phase 3,
+		// migration 010). When state DB is not configured the variable
+		// stays nil and dedup short-circuits to instrumentation_only.
+		InjectionStateStore: injectionStateStore,
 		Subprocess: orchestrator.SubprocessConfig{
 			Enabled:       cfg.Orchestrator.Subprocess.Enabled,
 			MaxDepth:      cfg.Orchestrator.Subprocess.MaxDepth,

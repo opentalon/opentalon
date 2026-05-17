@@ -129,6 +129,34 @@ type KnowledgeConfig struct {
 	Dir    string // directory to scan for .md files
 }
 
+// KnowledgeDedupConfig is the runtime form of the RFC #249 Phase 3
+// knowledge-dedup flags. Zero values are normalized to the RFC defaults
+// inside NewWithRules so an OrchestratorOpts authored by a test (no
+// YAML in scope) gets sensible thresholds without having to repeat the
+// canonical numbers.
+//
+// When Enabled is false the dedup decision logic short-circuits to the
+// Phase-2 "instrumentation_only" mode and the InjectionStateStore is
+// not consulted — callers can leave that interface nil in that case.
+type KnowledgeDedupConfig struct {
+	Enabled                bool
+	ReinjectScoreThreshold float64 // overrides "already known" when current score > threshold; default 0.85
+	ReinjectTopKForce      int     // top-N candidates always inject regardless of known state; default 3
+	CapPerTurn             int     // hard ceiling on delta articles per turn; default 5
+}
+
+// InjectionStateStore is the optional store dependency the orchestrator
+// uses to read/write the per-session knowledge dedup bookkeeping. It is
+// only consulted when KnowledgeDedupConfig.Enabled is true.
+// SessionStore (state/store) satisfies this interface in production;
+// tests may inject a fake. The shape matches SessionStore's helpers
+// exactly so structural typing wires both ends without an explicit
+// adapter.
+type InjectionStateStore interface {
+	GetInjectionState(ctx context.Context, sessionID string) (state.InjectionState, error)
+	UpdateInjectionState(ctx context.Context, sessionID string, st state.InjectionState) error
+}
+
 // OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check, no summarization).
 type OrchestratorOpts struct {
 	CustomRules             []string
@@ -163,6 +191,8 @@ type OrchestratorOpts struct {
 	Subprocess              SubprocessConfig       // optional; subprocess (sub-agent) support
 	OnStreamChunk           StreamChunkCallback    // optional; when set and LLM supports streaming, final answers are streamed
 	ShowToolCalls           string                 // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	KnowledgeDedup          KnowledgeDedupConfig   // RFC #249 Phase 3 dedup flags; zero value disables (= instrumentation_only mode)
+	InjectionStateStore     InjectionStateStore    // optional; required only when KnowledgeDedup.Enabled is true
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -239,6 +269,8 @@ type Orchestrator struct {
 	subprocessConfig        SubprocessConfig       // optional; subprocess (sub-agent) support
 	onStreamChunk           StreamChunkCallback    // optional; when set, final answers stream to caller
 	showToolCalls           string                 // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	knowledgeDedup          KnowledgeDedupConfig   // RFC #249 Phase 3 dedup flags; Enabled=false skips dedup logic and InjectionStateStore reads
+	injectionStateStore     InjectionStateStore    // optional; nil = dedup decision logic short-circuits to instrumentation_only mode
 }
 
 // resolveAllowedPluginNames returns a JSON array of allowed plugin names for the
@@ -329,6 +361,21 @@ func NewWithRules(
 		eventSink = emit.NoOpSink{}
 	}
 
+	// Normalize KnowledgeDedup to RFC #249 defaults so callers that
+	// build OrchestratorOpts in code (mostly tests) don't have to
+	// repeat the canonical numbers. The Enabled flag stays false by
+	// default — that's the whole point of the master switch.
+	dedupCfg := opts.KnowledgeDedup
+	if dedupCfg.ReinjectScoreThreshold == 0 {
+		dedupCfg.ReinjectScoreThreshold = 0.85
+	}
+	if dedupCfg.ReinjectTopKForce == 0 {
+		dedupCfg.ReinjectTopKForce = 3
+	}
+	if dedupCfg.CapPerTurn == 0 {
+		dedupCfg.CapPerTurn = 5
+	}
+
 	o := &Orchestrator{
 		sessionMuxes:            make(map[string]*sessionMutex),
 		semaphore:               semaphore,
@@ -370,6 +417,8 @@ func NewWithRules(
 		knowledge:               opts.Knowledge,
 		onStreamChunk:           opts.OnStreamChunk,
 		showToolCalls:           opts.ShowToolCalls,
+		knowledgeDedup:          dedupCfg,
+		injectionStateStore:     opts.InjectionStateStore,
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)

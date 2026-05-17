@@ -324,6 +324,42 @@ type OrchestratorConfig struct {
 	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`       // knowledge-augmented RAG configuration
 	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`      // subprocess (sub-agent) support
 	ShowToolCalls         string                       `yaml:"show_tool_calls,omitempty"` // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	Preparer              PreparerOrchestratorConfig   `yaml:"preparer,omitempty"`        // RFC #249 preparer-phase behaviour (knowledge dedup, tool tiers, error handling)
+}
+
+// PreparerOrchestratorConfig groups the RFC #249 preparer-phase
+// behaviour flags. Each pillar (knowledge dedup, tool tiers, tool
+// error handling) is independently togglable so phases can be
+// A/B-tested in production without coupled rollout risk.
+//
+// Phase 3 wires KnowledgeDedup only; ToolTiers and ToolErrorHandling
+// land in Phase 4 and are intentionally absent from this struct until
+// then so the YAML surface stays in lock-step with what the orchestrator
+// actually reads.
+type PreparerOrchestratorConfig struct {
+	KnowledgeDedup KnowledgeDedupConfig `yaml:"knowledge_dedup,omitempty"`
+}
+
+// KnowledgeDedupConfig configures the per-session content_sha-keyed
+// knowledge dedup logic (RFC #249 Phase 3). When Enabled is false
+// (the safe default), the orchestrator falls through to the legacy
+// per-turn re-inject behaviour and only emits the Phase-2
+// instrumentation_only preparer_decision events.
+//
+// ReinjectScoreThreshold is the "bury defense" override: a knowledge
+// article already in known_knowledge is re-injected when the current
+// turn's score exceeds this value, on the theory that a strong current
+// match outweighs the cache-stable prefix concern. ReinjectTopKForce
+// is the floor: the top-N candidates of the current retrieval always
+// inject so the LLM never starves on truly relevant context. CapPerTurn
+// hard-bounds the delta size so a query that hits many candidates
+// can't tank the prompt budget — the dedup logic skips overflow
+// candidates with reason "cap_exceeded".
+type KnowledgeDedupConfig struct {
+	Enabled                bool    `yaml:"enabled"`                            // master switch; default false
+	ReinjectScoreThreshold float64 `yaml:"reinject_score_threshold,omitempty"` // default 0.85 when zero
+	ReinjectTopKForce      int     `yaml:"reinject_top_k_force,omitempty"`     // default 3 when zero
+	CapPerTurn             int     `yaml:"cap_per_turn,omitempty"`             // default 5 when zero
 }
 
 // PipelineOrchestratorConfig enables structured multi-step pipeline execution.

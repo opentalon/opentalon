@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/config"
+	"github.com/opentalon/opentalon/internal/state"
 )
 
 // freshSessionStore opens a temp-dir DB, creates a session, and returns
@@ -31,20 +32,20 @@ func freshSessionStore(t *testing.T) (*SessionStore, string) {
 func TestInjectionState_DefaultsToZeroValue(t *testing.T) {
 	s, id := freshSessionStore(t)
 	ctx := context.Background()
-	state, err := s.GetInjectionState(ctx, id)
+	got, err := s.GetInjectionState(ctx, id)
 	if err != nil {
 		t.Fatalf("GetInjectionState: %v", err)
 	}
-	if len(state.KnownKnowledge) != 0 || len(state.KnownTools) != 0 {
-		t.Errorf("fresh session must yield zero-valued state, got %+v", state)
+	if len(got.KnownKnowledge) != 0 || len(got.KnownTools) != 0 {
+		t.Errorf("fresh session must yield zero-valued state, got %+v", got)
 	}
 }
 
 func TestInjectionState_RoundTrip(t *testing.T) {
 	s, id := freshSessionStore(t)
 	ctx := context.Background()
-	want := InjectionState{
-		KnownKnowledge: []KnownKnowledgeEntry{
+	want := state.InjectionState{
+		KnownKnowledge: []state.KnownKnowledgeEntry{
 			{ArticleID: "kb_recurring-tickets", ContentSHA256: "9f3a", FirstInjectedTurn: 3},
 			{ArticleID: "kb_ticket-basics", ContentSHA256: "ab12", FirstInjectedTurn: 1},
 		},
@@ -67,11 +68,11 @@ func TestInjectionState_RoundTrip(t *testing.T) {
 func TestInjectionState_OverwritesPreviousState(t *testing.T) {
 	s, id := freshSessionStore(t)
 	ctx := context.Background()
-	first := InjectionState{KnownKnowledge: []KnownKnowledgeEntry{{ArticleID: "kb_a", ContentSHA256: "aaa"}}}
+	first := state.InjectionState{KnownKnowledge: []state.KnownKnowledgeEntry{{ArticleID: "kb_a", ContentSHA256: "aaa"}}}
 	if err := s.UpdateInjectionState(ctx, id, first); err != nil {
 		t.Fatalf("UpdateInjectionState first: %v", err)
 	}
-	second := InjectionState{KnownKnowledge: []KnownKnowledgeEntry{{ArticleID: "kb_b", ContentSHA256: "bbb"}}}
+	second := state.InjectionState{KnownKnowledge: []state.KnownKnowledgeEntry{{ArticleID: "kb_b", ContentSHA256: "bbb"}}}
 	if err := s.UpdateInjectionState(ctx, id, second); err != nil {
 		t.Fatalf("UpdateInjectionState second: %v", err)
 	}
@@ -91,8 +92,8 @@ func TestInjectionState_PreservesPhase4Fields(t *testing.T) {
 	// without a migration / data backfill.
 	s, id := freshSessionStore(t)
 	ctx := context.Background()
-	want := InjectionState{
-		KnownTools: []KnownToolEntry{
+	want := state.InjectionState{
+		KnownTools: []state.KnownToolEntry{
 			{ToolName: "timly__list-items", Tier: "tier1", LRURank: 5, Demoted: false},
 			{ToolName: "timly__broken-action", Tier: "tier3", LRURank: 2, Demoted: true},
 		},
@@ -138,7 +139,7 @@ func TestInjectionState_MissingSessionReturnsError(t *testing.T) {
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("error must signal not-found, got %v", err)
 	}
-	err = s.UpdateInjectionState(ctx, "does-not-exist", InjectionState{})
+	err = s.UpdateInjectionState(ctx, "does-not-exist", state.InjectionState{})
 	if err == nil {
 		t.Fatal("update on missing session must error")
 	}
@@ -155,12 +156,12 @@ func TestInjectionState_EmptyAndNilSlicesAreOmittedOnMarshal(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
 		name  string
-		state InjectionState
+		state state.InjectionState
 	}{
-		{"nil-slices", InjectionState{}},
-		{"empty-non-nil-slices", InjectionState{
-			KnownKnowledge: []KnownKnowledgeEntry{},
-			KnownTools:     []KnownToolEntry{},
+		{"nil-slices", state.InjectionState{}},
+		{"empty-non-nil-slices", state.InjectionState{
+			KnownKnowledge: []state.KnownKnowledgeEntry{},
+			KnownTools:     []state.KnownToolEntry{},
 		}},
 	}
 	d := s.db.Dialect()
@@ -189,15 +190,15 @@ func TestInjectionState_DefaultObjectUnmarshalsToNilSlices(t *testing.T) {
 	// without worrying about nil-vs-empty semantics.
 	s, id := freshSessionStore(t)
 	ctx := context.Background()
-	state, err := s.GetInjectionState(ctx, id)
+	got, err := s.GetInjectionState(ctx, id)
 	if err != nil {
 		t.Fatalf("GetInjectionState: %v", err)
 	}
-	if state.KnownKnowledge != nil {
-		t.Errorf("KnownKnowledge must be nil for a fresh row, got %#v", state.KnownKnowledge)
+	if got.KnownKnowledge != nil {
+		t.Errorf("KnownKnowledge must be nil for a fresh row, got %#v", got.KnownKnowledge)
 	}
-	if state.KnownTools != nil {
-		t.Errorf("KnownTools must be nil for a fresh row, got %#v", state.KnownTools)
+	if got.KnownTools != nil {
+		t.Errorf("KnownTools must be nil for a fresh row, got %#v", got.KnownTools)
 	}
 }
 
@@ -207,7 +208,7 @@ func TestInjectionState_RejectsEmptySessionID(t *testing.T) {
 	if _, err := s.GetInjectionState(ctx, ""); err == nil || !strings.Contains(err.Error(), "session_id required") {
 		t.Errorf("Get with empty session_id must error explicitly, got %v", err)
 	}
-	if err := s.UpdateInjectionState(ctx, "", InjectionState{}); err == nil || !strings.Contains(err.Error(), "session_id required") {
+	if err := s.UpdateInjectionState(ctx, "", state.InjectionState{}); err == nil || !strings.Contains(err.Error(), "session_id required") {
 		t.Errorf("Update with empty session_id must error explicitly, got %v", err)
 	}
 }
@@ -219,7 +220,7 @@ func TestInjectionState_EmptyStateMarshalsAsObject(t *testing.T) {
 	// migration 010 onward.
 	s, id := freshSessionStore(t)
 	ctx := context.Background()
-	if err := s.UpdateInjectionState(ctx, id, InjectionState{}); err != nil {
+	if err := s.UpdateInjectionState(ctx, id, state.InjectionState{}); err != nil {
 		t.Fatalf("UpdateInjectionState: %v", err)
 	}
 	d := s.db.Dialect()

@@ -5,43 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+
+	"github.com/opentalon/opentalon/internal/state"
 )
-
-// InjectionState is the per-session knowledge / tool dedup bookkeeping
-// persisted in sessions.injection_state (migration 010). Phase 3
-// populates KnownKnowledge; KnownTools is reserved for Phase 4 and
-// stays empty on the Phase-3 write path.
-//
-// The on-disk format mirrors the RFC #249 shape — JSON-encoded TEXT,
-// not JSONB, so SQLite and PostgreSQL share one code path. New rows
-// (created before this column existed) default to '{}' so the zero-
-// valued struct represents "first turn, nothing known yet".
-type InjectionState struct {
-	KnownKnowledge []KnownKnowledgeEntry `json:"known_knowledge,omitempty"`
-	KnownTools     []KnownToolEntry      `json:"known_tools,omitempty"`
-}
-
-// KnownKnowledgeEntry is one knowledge-article chunk the orchestrator
-// has already seen this session. ContentSHA256 is the dedup key —
-// different chunks of the same article have different SHAs, so chunk-
-// level disjoint information correctly triggers re-injection.
-// ArticleID is auxiliary: O(1) lookup for truncation/summarization
-// release-paths and human-meaningful event-log strings.
-type KnownKnowledgeEntry struct {
-	ArticleID         string `json:"article_id"`
-	ContentSHA256     string `json:"content_sha256"`
-	FirstInjectedTurn int    `json:"first_injected_turn,omitempty"`
-}
-
-// KnownToolEntry is the Phase-4 tool-tier bookkeeping shape. Phase 3
-// readers unmarshal existing entries to preserve forward-compatible
-// rows, but the Phase-3 writer never produces a non-empty slice.
-type KnownToolEntry struct {
-	ToolName string `json:"tool_name"`
-	Tier     string `json:"tier"`
-	LRURank  int    `json:"lru_rank"`
-	Demoted  bool   `json:"demoted"`
-}
 
 // GetInjectionState returns the deserialized dedup state for sessionID.
 // An empty / NULL / "{}" column yields a zero-valued state without
@@ -56,9 +22,9 @@ type KnownToolEntry struct {
 // Missing sessions return a `session %q not found` error, matching the
 // shape SessionStore.Get returns. The underlying sql.ErrNoRows is not
 // chained — consistent with the existing package-level convention.
-func (s *SessionStore) GetInjectionState(ctx context.Context, sessionID string) (InjectionState, error) {
+func (s *SessionStore) GetInjectionState(ctx context.Context, sessionID string) (state.InjectionState, error) {
 	if sessionID == "" {
-		return InjectionState{}, fmt.Errorf("get injection state: session_id required")
+		return state.InjectionState{}, fmt.Errorf("get injection state: session_id required")
 	}
 	d := s.db.Dialect()
 	var raw string
@@ -67,19 +33,19 @@ func (s *SessionStore) GetInjectionState(ctx context.Context, sessionID string) 
 		sessionID,
 	).Scan(&raw)
 	if err == sql.ErrNoRows {
-		return InjectionState{}, fmt.Errorf("session %q not found", sessionID)
+		return state.InjectionState{}, fmt.Errorf("session %q not found", sessionID)
 	}
 	if err != nil {
-		return InjectionState{}, fmt.Errorf("get injection state: %w", err)
+		return state.InjectionState{}, fmt.Errorf("get injection state: %w", err)
 	}
 	if raw == "" || raw == "{}" {
-		return InjectionState{}, nil
+		return state.InjectionState{}, nil
 	}
-	var state InjectionState
-	if err := json.Unmarshal([]byte(raw), &state); err != nil {
-		return InjectionState{}, fmt.Errorf("get injection state: parse: %w", err)
+	var out state.InjectionState
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return state.InjectionState{}, fmt.Errorf("get injection state: parse: %w", err)
 	}
-	return state, nil
+	return out, nil
 }
 
 // UpdateInjectionState overwrites the persisted state for sessionID.
@@ -91,11 +57,11 @@ func (s *SessionStore) GetInjectionState(ctx context.Context, sessionID string) 
 // updated_at is intentionally NOT bumped here: injection_state churns
 // on every preparer pass and bumping the session-level timestamp would
 // fight with the legitimate per-message touches in AddMessage.
-func (s *SessionStore) UpdateInjectionState(ctx context.Context, sessionID string, state InjectionState) error {
+func (s *SessionStore) UpdateInjectionState(ctx context.Context, sessionID string, st state.InjectionState) error {
 	if sessionID == "" {
 		return fmt.Errorf("update injection state: session_id required")
 	}
-	payload, err := json.Marshal(state)
+	payload, err := json.Marshal(st)
 	if err != nil {
 		return fmt.Errorf("update injection state: marshal: %w", err)
 	}
