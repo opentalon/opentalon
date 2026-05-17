@@ -119,16 +119,17 @@ func applyKnowledgeDedup(
 			injectReason = events.PreparerDecisionReasonTopKForce
 		}
 
-		if injectReason == "" {
+		switch {
+		case injectReason == "":
 			out.Skipped = append(out.Skipped, c)
 			out.SkippedReasons = append(out.SkippedReasons, events.PreparerDecisionReasonAlreadyKnown)
-		} else if injectCount >= cfg.CapPerTurn {
+		case injectCount >= cfg.CapPerTurn:
 			// The candidate WOULD have injected but the per-turn cap
 			// kicked in. Record under Skipped so the event consumer
 			// sees the budget-pressure signal.
 			out.Skipped = append(out.Skipped, c)
 			out.SkippedReasons = append(out.SkippedReasons, events.PreparerDecisionReasonCapExceeded)
-		} else {
+		default:
 			out.Injected = append(out.Injected, c)
 			out.InjectedReasons = append(out.InjectedReasons, injectReason)
 			injectCount++
