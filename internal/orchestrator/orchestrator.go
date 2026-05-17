@@ -4433,21 +4433,6 @@ func fnv64a(s string) uint64 {
 	return h
 }
 
-// stripKnowledgeContext removes [knowledge_context]...[/knowledge_context] blocks
-// from a message. Used to strip historical knowledge context and planner input.
-func stripKnowledgeContext(s string) string {
-	const open, close = "[knowledge_context]", "[/knowledge_context]"
-	start := strings.Index(s, open)
-	if start < 0 {
-		return s
-	}
-	end := strings.Index(s, close)
-	if end < 0 {
-		return s
-	}
-	return strings.TrimSpace(s[:start] + s[end+len(close):])
-}
-
 func capabilitiesToPlannerInfo(caps []PluginCapability) []pipeline.CapabilityInfo {
 	result := make([]pipeline.CapabilityInfo, len(caps))
 	for i, cap := range caps {
