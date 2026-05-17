@@ -61,7 +61,7 @@ func renderTier2Section(decision *toolTierDecision, registry *ToolRegistry) stri
 	descByFQN := actionDescriptionMap(registry, decision.Tier2)
 	var sb strings.Builder
 	sb.WriteString("## Available tools — summary tier\n")
-	sb.WriteString("These tools are likely relevant. Use them directly when appropriate; call `get_tool_details(name=\"…\")` for the full schema before invocation.\n")
+	sb.WriteString("These tools are likely relevant. Use them directly when appropriate; call `_meta.get_tool_details(name=\"plugin.action\")` for the full schema before invocation.\n")
 	for _, fqn := range decision.Tier2 {
 		summary := firstLine(descByFQN[fqn])
 		if summary == "" {
@@ -95,7 +95,7 @@ func renderTier3Section(decision *toolTierDecision) string {
 	plugins := sortedKeys(byPlugin)
 	var sb strings.Builder
 	sb.WriteString("## Other available tools (request details before use)\n")
-	sb.WriteString("These tools exist but their full schemas aren't loaded. Call `get_tool_details(name=\"plugin.action\")` to see parameters before invoking.\n")
+	sb.WriteString("These tools exist but their full schemas aren't loaded. Call `_meta.get_tool_details(name=\"plugin.action\")` to see parameters before invoking.\n")
 	for _, plugin := range plugins {
 		actions := byPlugin[plugin]
 		fmt.Fprintf(&sb, "- %s: %s\n", plugin, strings.Join(actions, ", "))

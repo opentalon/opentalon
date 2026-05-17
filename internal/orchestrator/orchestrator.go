@@ -491,6 +491,17 @@ func NewWithRules(
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
 
+	// Register the orchestrator-owned get_tool_details meta-tool when
+	// ToolTiersConfig.EnableGetToolDetails is set. AlwaysInclude on
+	// the registered action pins it into Tier 0 so the LLM always
+	// has a path back to full schemas for Tier-2/3 entries. The
+	// runtime normalization above also flips toolTiers.Enabled=true
+	// when this flag is on, so the rest of the tier pipeline (which
+	// the meta-tool depends on) is always coherent.
+	if o.toolTiers.EnableGetToolDetails {
+		o.registerGetToolDetailsTool()
+	}
+
 	// Register the built-in _subprocess plugin when enabled.
 	o.subprocessConfig = opts.Subprocess
 	if opts.Subprocess.Enabled {

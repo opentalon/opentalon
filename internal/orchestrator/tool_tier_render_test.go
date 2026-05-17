@@ -42,8 +42,8 @@ func TestRenderTier2Section_NameAndOneLinerPerEntry(t *testing.T) {
 	if strings.Contains(got, "second paragraph") {
 		t.Errorf("second paragraph must be stripped from Tier 2 summary, got: %q", got)
 	}
-	if !strings.Contains(got, "get_tool_details") {
-		t.Errorf("Tier 2 section must mention get_tool_details, got: %q", got)
+	if !strings.Contains(got, "_meta.get_tool_details") {
+		t.Errorf("Tier 2 section must mention _meta.get_tool_details, got: %q", got)
 	}
 }
 
