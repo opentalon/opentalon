@@ -181,7 +181,36 @@ func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name
 	if err := o.injectionStateStore.UpdateInjectionState(ctx, sessionID, updated); err != nil {
 		slog.WarnContext(ctx, "get_tool_details: write state failed, promotion will not survive turn",
 			"component", "orchestrator", "session", sessionID, "tool", name, "error", err)
+		// Skip the recent-promotions cache when the persist failed: the
+		// next preparer pass will read stale InjectionState that doesn't
+		// have this tool at LRURank=turn, so flagging the tool as
+		// "promoted via get_tool_details" in the event payload would
+		// be misleading provenance.
+		return
 	}
+	// Record the promotion in the per-session recents cache so the
+	// NEXT preparer pass can surface it via promoted_via_get_tool_details
+	// in preparer_decision. The InjectionState write above puts the
+	// tool into Tier 1 via LRU rank regardless; this cache is purely
+	// the provenance signal.
+	o.recordRecentPromotion(sessionID, name)
+}
+
+// recordRecentPromotion appends a tool name to the per-session
+// recents cache. Duplicate names within the same window are
+// deduplicated — if the LLM calls get_tool_details for the same
+// tool twice in one turn (unlikely but possible), the next preparer
+// surfaces it once.
+func (o *Orchestrator) recordRecentPromotion(sessionID, name string) {
+	o.recentToolPromotionsMu.Lock()
+	defer o.recentToolPromotionsMu.Unlock()
+	existing := o.recentToolPromotions[sessionID]
+	for _, n := range existing {
+		if n == name {
+			return
+		}
+	}
+	o.recentToolPromotions[sessionID] = append(existing, name)
 }
 
 // registerGetToolDetailsTool wires the meta-tool into the registry

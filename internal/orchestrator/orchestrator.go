@@ -286,6 +286,15 @@ type Orchestrator struct {
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
 	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
 	pendingConfirmationIDs  map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
+	// recentToolPromotions holds tool names the LLM pulled in via
+	// _meta.get_tool_details since the last preparer pass on each
+	// session. persistToolPromotion appends; promotedToolsThisTurn
+	// returns + clears. In-memory only — across orchestrator restart
+	// the LRU rank persisted to InjectionState still puts the tool
+	// in Tier 1, just without the promoted_via_get_tool_details
+	// provenance flag on the next preparer_decision.
+	recentToolPromotionsMu  sync.Mutex
+	recentToolPromotions    map[string][]string
 	pipelineConfig          pipeline.PipelineConfig
 	confirmationPlugin      string                  // optional; plugin for confirmation strategy
 	confirmationAction      string                  // optional; action name for confirmation check
@@ -469,6 +478,7 @@ func NewWithRules(
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
 		pendingToolCalls:        make(map[string]*ToolCall),
 		pendingConfirmationIDs:  make(map[string]string),
+		recentToolPromotions:    make(map[string][]string),
 		pipelineConfig:          pipelineCfg,
 		confirmationPlugin:      opts.ConfirmationPlugin,
 		confirmationAction:      opts.ConfirmationAction,

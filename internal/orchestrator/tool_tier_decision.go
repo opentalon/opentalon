@@ -549,11 +549,26 @@ func preparerActionSet(preparers, guards []ContentPreparerEntry) map[string]bool
 	return out
 }
 
-// promotedToolsThisTurn is the D4 hook for the get_tool_details
-// promotion path. Returns the set of tool fqns the LLM pulled into
-// Tier 1 via get_tool_details in the current user turn. D2 always
-// returns nil — the meta-tool isn't registered yet — but the tier
-// decision already honours the slice when D4 wires it.
-func (o *Orchestrator) promotedToolsThisTurn(_ context.Context, _ string) []string {
-	return nil
+// promotedToolsThisTurn returns the set of tool fqns the LLM pulled
+// into Tier 1 via _meta.get_tool_details since the prior preparer
+// pass on this session. Drained — once returned, the recents cache
+// is cleared for that session so the next preparer pass doesn't
+// see them again. (The InjectionState entry written by
+// persistToolPromotion separately keeps the tool in Tier 1 via LRU
+// rank, so dropping the recent-promotions signal here only loses
+// the provenance flag, not the placement.)
+//
+// In-memory only — across orchestrator restart the LRURank in
+// InjectionState still places the tool in Tier 1; the
+// promoted_via_get_tool_details event field would be empty for
+// one cycle then back to normal.
+func (o *Orchestrator) promotedToolsThisTurn(_ context.Context, sessionID string) []string {
+	if sessionID == "" {
+		return nil
+	}
+	o.recentToolPromotionsMu.Lock()
+	defer o.recentToolPromotionsMu.Unlock()
+	out := o.recentToolPromotions[sessionID]
+	delete(o.recentToolPromotions, sessionID)
+	return out
 }

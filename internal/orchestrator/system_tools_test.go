@@ -185,6 +185,55 @@ func TestGetToolDetails_PromotionPersistsTier1Entry(t *testing.T) {
 	if found.LRURank < 1 {
 		t.Errorf("LRURank = %d, want >= 1", found.LRURank)
 	}
+	// The promoted name must also land in the recent-promotions cache
+	// so the next preparer pass surfaces it via
+	// promoted_via_get_tool_details. promotedToolsThisTurn drains the
+	// cache on read, so a single call returns the slice and a second
+	// returns empty.
+	got := orch.promotedToolsThisTurn(ctx, "s1")
+	if len(got) != 1 || got[0] != "tools-plugin.t1" {
+		t.Errorf("promotedToolsThisTurn = %v, want [tools-plugin.t1] (the just-promoted tool)", got)
+	}
+	if again := orch.promotedToolsThisTurn(ctx, "s1"); len(again) != 0 {
+		t.Errorf("promotedToolsThisTurn drain failed: second call returned %v, want empty", again)
+	}
+}
+
+func TestGetToolDetails_PromotionRecentsCache_DedupsRepeatedPromotion(t *testing.T) {
+	// Two get_tool_details calls for the SAME tool in one turn must
+	// land in the recent-promotions cache only once. Drain returns
+	// a single entry, not duplicates.
+	store := &fakeInjectionStateStore{}
+	orch := newOrchForMetaTests(t, store, true)
+	exec, _ := orch.registry.GetExecutor(metaPluginName)
+	ctx := actor.WithSessionID(context.Background(), "s1")
+
+	for i := 0; i < 2; i++ {
+		res := exec.Execute(ctx, ToolCall{
+			ID:   "c-repeat",
+			Args: map[string]string{"name": "tools-plugin.t1"},
+		})
+		if res.Error != "" {
+			t.Fatalf("execute %d failed: %q", i, res.Error)
+		}
+	}
+	got := orch.promotedToolsThisTurn(ctx, "s1")
+	if len(got) != 1 || got[0] != "tools-plugin.t1" {
+		t.Errorf("promotedToolsThisTurn = %v, want exactly [tools-plugin.t1] (deduped)", got)
+	}
+}
+
+func TestPromotedToolsThisTurn_EmptyBeforeAnyPromotion(t *testing.T) {
+	// The pre-promotion path: promotedToolsThisTurn on a fresh session
+	// returns nil, not a partial state. Pins the contract that an
+	// empty / missing entry is a clean "no promotions yet" signal.
+	orch := newOrchForMetaTests(t, &fakeInjectionStateStore{}, true)
+	if got := orch.promotedToolsThisTurn(context.Background(), "fresh"); len(got) != 0 {
+		t.Errorf("promotedToolsThisTurn on fresh session = %v, want empty", got)
+	}
+	if got := orch.promotedToolsThisTurn(context.Background(), ""); len(got) != 0 {
+		t.Errorf("promotedToolsThisTurn with empty sessionID = %v, want empty", got)
+	}
 }
 
 func TestGetToolDetails_PromotionClearsDemotedFlag(t *testing.T) {
