@@ -78,6 +78,20 @@ func (e *getToolDetailsExecutor) Execute(ctx context.Context, call ToolCall) Too
 	if !ok {
 		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("plugin %q not found", plugin)}
 	}
+	// Profile-gate the INSPECTED plugin (not the _meta route-through, which
+	// pluginAllowed always passes). Without this, an LLM in a profile-
+	// restricted multi-tenant deployment could enumerate descriptions and
+	// parameter schemas of plugins the operator hid via WhoAmI.Plugins /
+	// AllowedGroups. Invocation is already blocked downstream by
+	// executeCall's own gate, so this is information-disclosure-only — but
+	// the disclosed surface IS what the operator's profile gate exists to
+	// hide. Mirror the "plugin not found" branch shape so denied and non-
+	// existent plugins are indistinguishable to the LLM. Denial happens
+	// before persistToolPromotion below, so the side-effect write does
+	// not fire on blocked requests.
+	if !e.orch.pluginAllowed(cap, e.orch.resolveAllowedPlugins(ctx)) {
+		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("plugin %q not found", plugin)}
+	}
 	var found *Action
 	for i := range cap.Actions {
 		if cap.Actions[i].Name == action {

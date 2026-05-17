@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/state"
 )
 
@@ -147,6 +148,39 @@ func TestGetToolDetails_UnknownActionReturnsError(t *testing.T) {
 	})
 	if !strings.Contains(res.Error, "action") {
 		t.Errorf("error must mention unknown action, got: %q", res.Error)
+	}
+}
+
+func TestGetToolDetails_ProfileRestrictedPluginReturnsNotFound(t *testing.T) {
+	// The inspected plugin runs through the profile gate; a plugin hidden
+	// by WhoAmI.Plugins must return the same "plugin not found" shape as
+	// a non-existent plugin so the LLM can't distinguish restricted-but-
+	// existing from missing. Promotion side-effect must also not fire on
+	// denial.
+	store := &fakeInjectionStateStore{}
+	orch := newOrchForMetaTests(t, store, true)
+	exec, _ := orch.registry.GetExecutor(metaPluginName)
+
+	// Strict mode: profile allowlist excludes the registered "tools-plugin".
+	p := &profile.Profile{EntityID: "u1", Plugins: []string{"something-else"}}
+	ctx := actor.WithSessionID(profile.WithProfile(context.Background(), p), "s1")
+
+	res := exec.Execute(ctx, ToolCall{
+		ID:   "c1",
+		Args: map[string]string{"name": "tools-plugin.t1"},
+	})
+
+	if res.Error == "" {
+		t.Fatalf("expected error, got content: %q", res.Content)
+	}
+	if !strings.Contains(res.Error, "plugin") || !strings.Contains(res.Error, "not found") {
+		t.Errorf("error must mimic 'plugin … not found' shape, got: %q", res.Error)
+	}
+	if strings.Contains(res.Error, "t1") {
+		t.Errorf("error must not leak the action name (would distinguish gated-but-existing from missing), got: %q", res.Error)
+	}
+	if store.updateCalls != 0 {
+		t.Errorf("denied call must not write to InjectionState, got %d UpdateInjectionState calls", store.updateCalls)
 	}
 }
 
