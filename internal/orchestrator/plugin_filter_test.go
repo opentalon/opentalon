@@ -256,6 +256,41 @@ func TestPluginAllowed_StrictMode_AliasInAllowlist(t *testing.T) {
 	}
 }
 
+// --- meta-plugin special-case ---
+
+func TestPluginAllowed_MetaPluginAlwaysAllowed(t *testing.T) {
+	// The orchestrator-owned `_meta` namespace must never be blocked by
+	// the profile / WhoAmI gate. The customer's WhoAmI response never
+	// lists `_meta` because it isn't a plugin they own — it's
+	// host-internal. Without this special-case the LLM sees the
+	// meta-tool in the prompt (AlwaysInclude=true pins it to Tier 0),
+	// tries to call it on the LLM-driven path, and the call gets
+	// refused with "plugin '_meta' is not available for this profile" —
+	// breaking the get_tool_details promotion contract for every
+	// non-permissive profile.
+	o := newFilterOrch(buildFilterRegistry(), nil)
+	metaCap := PluginCapability{Name: metaPluginName}
+
+	tests := []struct {
+		name    string
+		allowed cachedAllowedPlugins
+	}{
+		{"strict mode without _meta in allowlist",
+			cachedAllowedPlugins{m: map[string]bool{"timly": true}, strict: true}},
+		{"non-strict mode with AllowedGroups set",
+			cachedAllowedPlugins{m: map[string]bool{"timly": true}, strict: false}},
+		{"empty allowlist in strict mode",
+			cachedAllowedPlugins{m: map[string]bool{}, strict: true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if !o.pluginAllowed(metaCap, tc.allowed) {
+				t.Errorf("_meta must be allowed regardless of profile (%s)", tc.name)
+			}
+		})
+	}
+}
+
 // --- end-to-end: system prompt ---
 
 func TestSystemPrompt_StrictMode_OnlyListedPluginsVisible(t *testing.T) {

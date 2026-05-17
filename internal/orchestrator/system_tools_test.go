@@ -47,6 +47,9 @@ func TestRegisterGetToolDetails_RegistersMetaPluginWithAlwaysInclude(t *testing.
 	if !cap.Actions[0].AlwaysInclude {
 		t.Errorf("get_tool_details action must be AlwaysInclude=true so the tier decision pins it to Tier 0")
 	}
+	if !cap.Actions[0].ReadOnly {
+		t.Errorf("get_tool_details action must be ReadOnly=true — it's a pure schema-lookup tool, no user-confirmation gate makes sense")
+	}
 	if len(cap.Actions[0].Parameters) != 1 || !cap.Actions[0].Parameters[0].Required {
 		t.Errorf("get_tool_details must require a single 'name' parameter, got %+v", cap.Actions[0].Parameters)
 	}

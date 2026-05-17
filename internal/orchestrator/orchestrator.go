@@ -4355,6 +4355,17 @@ func (o *Orchestrator) resolveAllowedPlugins(ctx context.Context) cachedAllowedP
 // Non-strict mode (group DB lookup): only capabilities that have AllowedGroups set
 // are gated; capabilities without AllowedGroups remain publicly visible.
 func (o *Orchestrator) pluginAllowed(cap PluginCapability, allowed cachedAllowedPlugins) bool {
+	if cap.Name == metaPluginName {
+		// `_meta` is orchestrator-owned (host-internal namespace) — every
+		// profile that has the meta-tool registered (i.e. tool_tiers config
+		// enables get_tool_details) should be able to call it. The profile /
+		// WhoAmI plugin-list gate is for external plugins and a customer's
+		// WhoAmI response never lists `_meta` because it isn't a plugin the
+		// customer owns. Special-casing here so an LLM-driven
+		// `_meta.get_tool_details` call doesn't get refused for a profile
+		// that legitimately registered the meta-tool via config.
+		return true
+	}
 	if allowed.m == nil {
 		// No profile / no lookup configured — unrestricted.
 		return true

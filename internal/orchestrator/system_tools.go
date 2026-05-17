@@ -196,6 +196,14 @@ func (o *Orchestrator) registerGetToolDetailsTool() {
 			Name:          metaGetToolDetails,
 			Description:   "Returns the full description and parameter schema for any tool listed in the system prompt's summary or other-tools sections. Calling it also promotes the tool back to the LLM's tools array for the rest of the session.",
 			AlwaysInclude: true,
+			// Pure lookup: returns a description string, mutates no
+			// user-visible state. The state change (Tier-3 → Tier-1
+			// promotion of the inspected tool) is orchestrator-internal
+			// bookkeeping for the next turn, not an action the user
+			// would want to confirm. Skipping the confirmation gate
+			// here removes a noise prompt + planner-narration LLM call
+			// every time the LLM asks for tool details.
+			ReadOnly: true,
 			Parameters: []Parameter{{
 				Name:        "name",
 				Description: `Fully-qualified tool name, e.g. "plugin.action".`,
