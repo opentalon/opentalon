@@ -225,12 +225,11 @@ func applyDedupToContent(content string, injections []kcInjection) string {
 // enabled, a store is wired, and there are knowledge candidates to
 // decide on — see the preparer-loop callsite.
 func (o *Orchestrator) prepareDedupDecision(ctx context.Context, sessionID, content string, agg *preparerAggregate) string {
-	existing, err := o.injectionStateStore.GetInjectionState(ctx, sessionID)
-	if err != nil {
-		slog.WarnContext(ctx, "knowledge_dedup: read state failed, starting fresh",
-			"component", "orchestrator", "session", sessionID, "error", err)
-		existing = state.InjectionState{}
-	}
+	// Reconciliation step: load persisted state, scan the visible
+	// message stream, emit drift_detected when they disagree, and
+	// use the corrected state as the dedup input. RFC #249: the
+	// visible-message scan is authoritative.
+	existing := o.reconcileAndEmitDrift(ctx, sessionID)
 
 	turn := o.turnNumberForDedup(sessionID)
 	decision := applyKnowledgeDedup(agg.Knowledge, existing, o.knowledgeDedup, turn)

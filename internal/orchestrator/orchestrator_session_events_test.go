@@ -3033,6 +3033,93 @@ func TestOrchestrator_PreparerPhase_DedupStoreWriteFailureStillEmitsEvent(t *tes
 	}
 }
 
+func TestOrchestrator_PreparerPhase_DedupReconciliationEmitsDriftAndCorrectsState(t *testing.T) {
+	// Pre-load the dedup store with a SHA that the session's visible
+	// messages don't carry (the message was deleted between turns —
+	// summarization, retention, or external mutation). The next
+	// preparer pass must:
+	//   - detect the drift via lazy reconciliation
+	//   - emit drift_detected with kb_gone in missing_from_visible
+	//   - run applyKnowledgeDedup against the CORRECTED state, so the
+	//     new candidate kb_new is treated as "new" (an empty corrected
+	//     state means kb_new is unseen).
+	preparerJSON := `{
+		"send_to_llm": true,
+		"message": "user question",
+		"knowledge_candidates": [
+			{"article_id": "kb_new", "content": "fresh body", "content_sha256": "sha-new", "score": 0.9}
+		]
+	}`
+	sink := &recordingEventSink{}
+	dedupStore := &fakeInjectionStateStore{
+		store: map[string]state.InjectionState{
+			"s1": {KnownKnowledge: []state.KnownKnowledgeEntry{
+				{ArticleID: "kb_gone", ContentSHA256: "sha-gone", FirstInjectedTurn: 1},
+			}},
+		},
+	}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-plugin", Description: "RAG",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: preparerJSON})
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	orch := NewWithRules(&fakeLLM{responses: []string{"final"}},
+		&fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
+			EventSink:           sink,
+			ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+			KnowledgeDedup:      KnowledgeDedupConfig{Enabled: true},
+			InjectionStateStore: dedupStore,
+		})
+	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
+		t.Fatal(err)
+	}
+
+	// drift_detected must have fired with kb_gone missing and kb_new
+	// not yet visible (the preparer-loop runs reconciliation BEFORE
+	// the orchestrator splices the new KC block — so the snapshot the
+	// reconciler sees has no current-turn KC yet).
+	evs := sink.snapshot()
+	drift := findEventByType(evs, events.TypeDriftDetected)
+	if drift == nil {
+		t.Fatal("drift_detected event missing")
+	}
+	var dp events.DriftDetectedPayload
+	if err := json.Unmarshal(drift.Payload, &dp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(dp.MissingFromVisible) != 1 || dp.MissingFromVisible[0] != "sha-gone" {
+		t.Errorf("MissingFromVisible = %v, want [sha-gone]", dp.MissingFromVisible)
+	}
+
+	// preparer_decision must report kb_new as "new" (corrected state
+	// is empty, so the kb_new SHA isn't recognized as known) and
+	// kb_gone must NOT appear under SkippedKnown (the reconciliation
+	// already dropped it).
+	pd := findEventByType(evs, events.TypePreparerDecision)
+	if pd == nil {
+		t.Fatal("preparer_decision missing")
+	}
+	var pdPayload events.PreparerDecisionPayload
+	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pdPayload.Mode != events.PreparerDecisionModeFull {
+		t.Errorf("Mode = %q, want full", pdPayload.Mode)
+	}
+	if len(pdPayload.Knowledge.Injected) != 1 || pdPayload.Knowledge.Injected[0].Reason != events.PreparerDecisionReasonNew {
+		t.Errorf("kb_new must inject as new, got %+v", pdPayload.Knowledge.Injected)
+	}
+
+	// Persisted state after the turn should only carry kb_new (the
+	// reconciliation dropped kb_gone, the dedup added kb_new).
+	if len(dedupStore.lastWritten.KnownKnowledge) != 1 || dedupStore.lastWritten.KnownKnowledge[0].ContentSHA256 != "sha-new" {
+		t.Errorf("post-turn state must only carry kb_new, got %+v", dedupStore.lastWritten.KnownKnowledge)
+	}
+}
+
 func TestOrchestrator_PreparerPhase_DedupDisabledStaysInstrumentationOnly(t *testing.T) {
 	// Regression guard: even with an InjectionStateStore wired, if the
 	// master Enabled flag is false the orchestrator must keep emitting
