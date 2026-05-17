@@ -2111,6 +2111,61 @@ func TestOrchestrator_Confirmation_ReadOnlyAction_SkipsPrompt(t *testing.T) {
 	}
 }
 
+func TestOrchestrator_Confirmation_ReadOnlyAction_MatchesPrefixedManifestName(t *testing.T) {
+	// Regression: mcp-plugin stores each action's Name in the
+	// prefixed form "server__tool" (e.g. "timly__list-items"). The LLM
+	// emits the same name; parseToolName splits on `__` so the
+	// orchestrator-side ToolCall ends up with Plugin="timly",
+	// Action="list-items" (the unprefixed form). IsActionReadOnly's
+	// lookup must accept both shapes — without it the short-circuit
+	// would silently miss every mcp-sourced read-only tool.
+	sink := &recordingEventSink{}
+	llm := &nativeToolCallingLLM{
+		toolCalls: []provider.ToolCall{{
+			ID:        "tc-mcp",
+			Name:      "timly__list-items",
+			Arguments: map[string]string{},
+		}},
+		textAfter: "results above",
+	}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	// Capability registered exactly the way mcp-plugin emits it:
+	// Cap.Name = "mcp", Actions carry the server-prefixed action name.
+	// An alias "timly" -> "mcp" resolves the LLM's call name to the
+	// underlying capability.
+	_ = registry.Register(PluginCapability{
+		Name:    "mcp",
+		Actions: []Action{{Name: "timly__list-items", ReadOnly: true}},
+	}, &echoExecutor{})
+	if err := registry.RegisterAlias("timly", "mcp"); err != nil {
+		t.Fatalf("RegisterAlias: %v", err)
+	}
+	_ = registry.Register(PluginCapability{
+		Name:    "conf",
+		Actions: []Action{{Name: "check"}},
+	}, confirmingExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:          sink,
+		ConfirmationPlugin: "conf",
+		ConfirmationAction: "check",
+	})
+
+	if _, err := orch.Run(context.Background(), "sess", "list my items"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findConfirmationRequestedPayloads(t, sink.snapshot())
+	if len(got) != 0 {
+		t.Errorf("confirmation_requested count = %d, want 0 for mcp-style prefixed read-only action", len(got))
+	}
+}
+
 func TestOrchestrator_Confirmation_NonReadOnlyAction_StillPrompts(t *testing.T) {
 	// Sibling to the ReadOnly skip test: an action that is NOT declared
 	// read-only must still go through the confirmation gate, even if a
