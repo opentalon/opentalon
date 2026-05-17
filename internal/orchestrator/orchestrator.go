@@ -293,29 +293,29 @@ type Orchestrator struct {
 	// the LRU rank persisted to InjectionState still puts the tool
 	// in Tier 1, just without the promoted_via_get_tool_details
 	// provenance flag on the next preparer_decision.
-	recentToolPromotionsMu  sync.Mutex
-	recentToolPromotions    map[string][]string
-	pipelineConfig          pipeline.PipelineConfig
-	confirmationPlugin      string                  // optional; plugin for confirmation strategy
-	confirmationAction      string                  // optional; action name for confirmation check
-	contextWindow           int                     // model context window in tokens; 0 = no trimming
-	groupPluginLookup       GroupPluginLookup       // optional; nil = no group-based filtering
-	usageRecorder           UsageRecorder           // optional; nil = no usage tracking
-	pluginCallObserver      PluginCallObserver      // optional; nil = no plugin call observation
-	eventSink               emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
-	snapshotStore           PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
-	syncActionsPlugin       string                  // optional; plugin name for action sync
-	syncActionsAction       string                  // optional; action name for action sync
-	syncGlossaryAction      string                  // optional; action name for glossary sync (uses syncActionsPlugin)
-	knowledge               KnowledgeConfig         // optional; knowledge directory ingestion
-	subprocessConfig        SubprocessConfig        // optional; subprocess (sub-agent) support
-	onStreamChunk           StreamChunkCallback     // optional; when set, final answers stream to caller
-	showToolCalls           string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	knowledgeDedup          KnowledgeDedupConfig    // RFC #249 Phase 3 dedup flags; Enabled=false skips dedup logic and InjectionStateStore reads
-	injectionStateStore     InjectionStateStore     // optional; nil = dedup decision logic short-circuits to instrumentation_only mode
-	toolTiers               ToolTiersConfig         // RFC #249 Phase 4 tier-visibility flags; Enabled=false short-circuits to pre-Phase-4 single-tier behaviour
-	toolErrorHandling       ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; thresholds always carry RFC defaults after NewWithRules
-	toolErrorTracker        *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by toolTiers.Enabled
+	recentToolPromotionsMu sync.Mutex
+	recentToolPromotions   map[string][]string
+	pipelineConfig         pipeline.PipelineConfig
+	confirmationPlugin     string                  // optional; plugin for confirmation strategy
+	confirmationAction     string                  // optional; action name for confirmation check
+	contextWindow          int                     // model context window in tokens; 0 = no trimming
+	groupPluginLookup      GroupPluginLookup       // optional; nil = no group-based filtering
+	usageRecorder          UsageRecorder           // optional; nil = no usage tracking
+	pluginCallObserver     PluginCallObserver      // optional; nil = no plugin call observation
+	eventSink              emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
+	snapshotStore          PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
+	syncActionsPlugin      string                  // optional; plugin name for action sync
+	syncActionsAction      string                  // optional; action name for action sync
+	syncGlossaryAction     string                  // optional; action name for glossary sync (uses syncActionsPlugin)
+	knowledge              KnowledgeConfig         // optional; knowledge directory ingestion
+	subprocessConfig       SubprocessConfig        // optional; subprocess (sub-agent) support
+	onStreamChunk          StreamChunkCallback     // optional; when set, final answers stream to caller
+	showToolCalls          string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	knowledgeDedup         KnowledgeDedupConfig    // RFC #249 Phase 3 dedup flags; Enabled=false skips dedup logic and InjectionStateStore reads
+	injectionStateStore    InjectionStateStore     // optional; nil = dedup decision logic short-circuits to instrumentation_only mode
+	toolTiers              ToolTiersConfig         // RFC #249 Phase 4 tier-visibility flags; Enabled=false short-circuits to pre-Phase-4 single-tier behaviour
+	toolErrorHandling      ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; thresholds always carry RFC defaults after NewWithRules
+	toolErrorTracker       *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by toolTiers.Enabled
 	// legacyKnowledgeWarnings tracks the (sessionID, pluginName) pairs
 	// we've already deprecation-warned for, so a session that keeps
 	// using a legacy preparer doesn't spam the log every turn. Key is
