@@ -2686,3 +2686,79 @@ func TestOrchestrator_PreparerPhase_MultiPreparerAggregation(t *testing.T) {
 			pdPayload.Knowledge.InjectedBytes, len("AAA")+len("BBBB"))
 	}
 }
+
+func TestOrchestrator_MessagesTruncated_EmittedWhenSlidingWindowCuts(t *testing.T) {
+	// Sliding window: when sess.Messages exceeds ContextMessages, the
+	// orchestrator drops the oldest N entries and emits one
+	// messages_truncated event carrying the dropped index range and
+	// count. Phase 2 leaves the knowledge fields (released_knowledge_ids,
+	// remaining_known_knowledge_count) empty — Phase 3 wires them.
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"answer"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+
+	// Seed sess.Messages with 6 user/assistant pairs (12 messages) so the
+	// cutter has work to do. ContextMessages = 4 → expect 8 dropped.
+	for i := 0; i < 6; i++ {
+		_ = sessions.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "user-msg"})
+		_ = sessions.AddMessage("s1", provider.Message{Role: provider.RoleAssistant, Content: "asst-msg"})
+	}
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:       sink,
+		ContextMessages: 4,
+	})
+
+	if _, err := orch.Run(context.Background(), "s1", "next message"); err != nil {
+		t.Fatal(err)
+	}
+
+	mt := findEventByType(sink.snapshot(), events.TypeMessagesTruncated)
+	if mt == nil {
+		t.Fatal("messages_truncated event not emitted")
+	}
+	var p events.MessagesTruncatedPayload
+	if err := json.Unmarshal(mt.Payload, &p); err != nil {
+		t.Fatalf("unmarshal messages_truncated payload: %v", err)
+	}
+	// 12 seeded + 1 current-turn user message (added before buildMessages
+	// runs) = 13; ContextMessages = 4 → drop 9 oldest (indices 0..8).
+	if p.DroppedCount != 9 {
+		t.Errorf("DroppedCount = %d, want 9 (12 seeded + 1 current = 13, keep 4)", p.DroppedCount)
+	}
+	if len(p.DroppedSeqRange) != 2 || p.DroppedSeqRange[0] != 0 || p.DroppedSeqRange[1] != 8 {
+		t.Errorf("DroppedSeqRange = %v, want [0, 8]", p.DroppedSeqRange)
+	}
+}
+
+func TestOrchestrator_MessagesTruncated_NotEmittedWhenWithinWindow(t *testing.T) {
+	// Sliding window does not fire when len(messages) <= ContextMessages.
+	// No messages_truncated event must reach the sink in that case.
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"answer"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	// Only one prior exchange — well below the window.
+	_ = sessions.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "u"})
+	_ = sessions.AddMessage("s1", provider.Message{Role: provider.RoleAssistant, Content: "a"})
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:       sink,
+		ContextMessages: 10,
+	})
+	if _, err := orch.Run(context.Background(), "s1", "next"); err != nil {
+		t.Fatal(err)
+	}
+	if mt := findEventByType(sink.snapshot(), events.TypeMessagesTruncated); mt != nil {
+		t.Errorf("messages_truncated must not emit when within window; got payload: %s", mt.Payload)
+	}
+}

@@ -44,8 +44,12 @@ const (
 	// Preparer-phase retrieval + decision events (RFC #249).
 	// Emitted children of user_message: each RAG retrieval becomes one
 	// *_retrieval event, then preparer_decision is the composite outcome
-	// the orchestrator landed on. drift_detected and messages_truncated
-	// are sibling-to-turn_start events on the rare paths where they fire.
+	// the orchestrator landed on. drift_detected (Phase 3+) fires
+	// alongside the preparer pass; messages_truncated fires from
+	// buildMessages inside the agent loop and parents to turn_start
+	// (it can fire more than once per turn when the cutter applies on
+	// successive iterations as the conversation grows during tool
+	// rounds).
 	TypeKnowledgeRetrieval = "knowledge_retrieval"
 	TypeGlossaryRetrieval  = "glossary_retrieval"
 	TypeToolRetrieval      = "tool_retrieval"

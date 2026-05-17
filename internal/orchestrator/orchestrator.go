@@ -2820,6 +2820,31 @@ func hasToolResults(msgs []provider.Message) bool {
 	return false
 }
 
+// applySlidingWindow keeps only the last o.contextMessages entries
+// from msgs when configured. When the cut fires, it emits one
+// messages_truncated event with the dropped index range so analytics
+// can correlate context-window pressure across sessions. Returns the
+// (possibly shortened) slice; when contextMessages is zero or the
+// input fits, returns msgs unchanged with no event.
+//
+// Called from both buildMessages and buildMessagesWithPrompt inside
+// the agent loop, so a long tool-call session can produce multiple
+// messages_truncated events per turn — each one represents a
+// distinct cut that actually dropped something. Consumers that want
+// "the first cut per turn" should fold by turn_start parent.
+func (o *Orchestrator) applySlidingWindow(ctx context.Context, msgs []provider.Message) []provider.Message {
+	if o.contextMessages <= 0 || len(msgs) <= o.contextMessages {
+		return msgs
+	}
+	dropped := len(msgs) - o.contextMessages
+	emit.EmitMessagesTruncated(ctx, o.eventSink, emit.MessagesTruncatedArgs{
+		DroppedSeqFrom: 0,
+		DroppedSeqTo:   dropped - 1,
+		DroppedCount:   dropped,
+	})
+	return msgs[dropped:]
+}
+
 func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 
@@ -2844,13 +2869,11 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 			Content: "Previous conversation summary: " + sess.Summary,
 		})
 	}
-	// When context_messages is set, keep only the last N messages to avoid
-	// blowing the context window. This is a simple sliding window that
-	// preserves tool results (unlike LLM summarization which loses them).
-	convMessages := sess.Messages
-	if o.contextMessages > 0 && len(convMessages) > o.contextMessages {
-		convMessages = convMessages[len(convMessages)-o.contextMessages:]
-	}
+	// Apply the sliding-window cutter (config-driven via o.contextMessages)
+	// and emit messages_truncated when it fires. Both buildMessages and
+	// buildMessagesWithPrompt go through the same helper so analytics see
+	// exactly one event per cut regardless of which assembly path ran.
+	convMessages := o.applySlidingWindow(ctx, sess.Messages)
 	// Strip [knowledge_context] from HISTORICAL user messages only. The
 	// current turn's user message is preserved verbatim so preparer-injected
 	// RAG content actually reaches the LLM. Historical turns are still
@@ -2909,10 +2932,7 @@ func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.
 			Content: "Previous conversation summary: " + sess.Summary,
 		})
 	}
-	convMessages := sess.Messages
-	if o.contextMessages > 0 && len(convMessages) > o.contextMessages {
-		convMessages = convMessages[len(convMessages)-o.contextMessages:]
-	}
+	convMessages := o.applySlidingWindow(ctx, sess.Messages)
 	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
 
 	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
