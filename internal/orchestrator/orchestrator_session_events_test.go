@@ -2082,7 +2082,11 @@ func findEventsByType(evs []emit.Event, eventType string) []emit.Event {
 	return out
 }
 
-func TestParentID_TurnStartIsRoot(t *testing.T) {
+func TestParentID_TurnStartParentsUserMessage(t *testing.T) {
+	// Post-RFC-#249-Phase-2 tree: user_message is the root of every turn;
+	// turn_start (and the preparer-phase events emitted between them)
+	// hang off user_message. The old "turn_start is root" assertion was
+	// pre-RFC and is replaced here.
 	sink := &recordingEventSink{}
 	llm := &fakeLLM{responses: []string{"hello back"}}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
@@ -2090,15 +2094,23 @@ func TestParentID_TurnStartIsRoot(t *testing.T) {
 	if _, err := orch.Run(context.Background(), sessID, "hi"); err != nil {
 		t.Fatal(err)
 	}
-	ts := findEventByType(sink.snapshot(), events.TypeTurnStart)
+	snap := sink.snapshot()
+	um := findEventByType(snap, events.TypeUserMessage)
+	ts := findEventByType(snap, events.TypeTurnStart)
+	if um == nil {
+		t.Fatal("user_message not emitted")
+	}
 	if ts == nil {
 		t.Fatal("turn_start not emitted")
 	}
 	if ts.ID == "" {
 		t.Errorf("turn_start.ID empty — producer-side id generation broken")
 	}
-	if ts.ParentID != "" {
-		t.Errorf("turn_start.ParentID = %q, want empty (root of turn tree)", ts.ParentID)
+	if um.ParentID != "" {
+		t.Errorf("user_message.ParentID = %q, want empty (root of turn tree)", um.ParentID)
+	}
+	if ts.ParentID != um.ID {
+		t.Errorf("turn_start.ParentID = %q, want user_message.ID (%q)", ts.ParentID, um.ID)
 	}
 }
 
@@ -2338,5 +2350,339 @@ func TestParentID_EveryEventHasID(t *testing.T) {
 		if e.ID == "" {
 			t.Errorf("event[%d] type=%q has empty ID", i, e.EventType)
 		}
+	}
+}
+
+func TestOrchestrator_PreparerPhase_EmitsRetrievalAndDecision(t *testing.T) {
+	// RFC #249 Phase 2: a preparer that returns structured knowledge /
+	// glossary / tool candidates should trigger three retrieval events
+	// (one per non-empty corpus) plus a composite preparer_decision —
+	// all parented to user_message so the session timeline reads as a
+	// tree.
+	//
+	// Mode is instrumentation_only since Phase 2 has no dedup state;
+	// every candidate appears under Knowledge.Injected with that
+	// reason, and tool names land under Tools.Tier1New.
+
+	preparerJSON := `{
+		"send_to_llm": true,
+		"message": "do the thing",
+		"knowledge_candidates": [
+			{"article_id": "kb_a", "title": "A", "content": "body-a", "content_sha256": "sha-a", "score": 0.9, "source": "knowledge_base"},
+			{"article_id": "kb_b", "title": "B", "content": "body-bb", "content_sha256": "sha-b", "score": 0.6}
+		],
+		"glossary_candidates": [
+			{"term": "ticket", "content": "definition", "score": 0.71}
+		],
+		"tool_candidates": [
+			{"tool_name": "gitlab.analyze_code", "score": 0.88, "position_in_results": 0}
+		],
+		"retrieval_metrics": {
+			"knowledge": {"search_text_source": "enriched", "top_k": 5, "min_score": 0.45, "latency_ms": 142},
+			"glossary":  {"top_k": 3, "min_score": 0.50, "latency_ms": 38},
+			"tools":     {"top_k": 8, "min_score": 0.60, "latency_ms": 98}
+		}
+	}`
+
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"final answer"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-plugin", Description: "RAG preparer",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: preparerJSON})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:        sink,
+		ContentPreparers: []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+	})
+
+	if _, err := orch.Run(context.Background(), "s1", "do the thing"); err != nil {
+		t.Fatal(err)
+	}
+
+	evs := sink.snapshot()
+	userMsg := findEventByType(evs, events.TypeUserMessage)
+	if userMsg == nil || userMsg.ID == "" {
+		t.Fatal("user_message event missing or has empty ID")
+	}
+
+	// One event per corpus retrieved + one composite decision.
+	wantTypes := []string{
+		events.TypeKnowledgeRetrieval,
+		events.TypeGlossaryRetrieval,
+		events.TypeToolRetrieval,
+		events.TypePreparerDecision,
+	}
+	for _, wantType := range wantTypes {
+		e := findEventByType(evs, wantType)
+		if e == nil {
+			t.Errorf("missing event of type %q", wantType)
+			continue
+		}
+		if e.ParentID != userMsg.ID {
+			t.Errorf("%s.ParentID = %q, want user_message.ID (%q)", wantType, e.ParentID, userMsg.ID)
+		}
+	}
+
+	// Spot-check the knowledge_retrieval payload: hits + metrics from
+	// the plugin should round-trip into the event.
+	kr := findEventByType(evs, events.TypeKnowledgeRetrieval)
+	if kr == nil {
+		t.Fatal("knowledge_retrieval event missing")
+	}
+	var krPayload events.KnowledgeRetrievalPayload
+	if err := json.Unmarshal(kr.Payload, &krPayload); err != nil {
+		t.Fatalf("unmarshal knowledge_retrieval payload: %v", err)
+	}
+	if len(krPayload.Hits) != 2 || krPayload.Hits[0].ArticleID != "kb_a" {
+		t.Errorf("knowledge_retrieval hits mismatch: %+v", krPayload.Hits)
+	}
+	if krPayload.SearchTextSource != events.SearchTextSourceEnriched {
+		t.Errorf("knowledge_retrieval SearchTextSource = %q, want %q",
+			krPayload.SearchTextSource, events.SearchTextSourceEnriched)
+	}
+	if krPayload.TopK != 5 || krPayload.MinScore != 0.45 || krPayload.LatencyMS != 142 {
+		t.Errorf("knowledge_retrieval metrics mismatch: TopK=%d MinScore=%v LatencyMS=%d",
+			krPayload.TopK, krPayload.MinScore, krPayload.LatencyMS)
+	}
+
+	// Spot-check glossary + tool retrievals too: per-corpus metrics
+	// must round-trip independently. A regression where the wrong
+	// corpus's metrics get pasted into knowledge_retrieval shows up
+	// here.
+	gr := findEventByType(evs, events.TypeGlossaryRetrieval)
+	if gr == nil {
+		t.Fatal("glossary_retrieval event missing")
+	}
+	var grPayload events.GlossaryRetrievalPayload
+	if err := json.Unmarshal(gr.Payload, &grPayload); err != nil {
+		t.Fatalf("unmarshal glossary_retrieval payload: %v", err)
+	}
+	if len(grPayload.Hits) != 1 || grPayload.Hits[0].Term != "ticket" {
+		t.Errorf("glossary_retrieval hits mismatch: %+v", grPayload.Hits)
+	}
+	if grPayload.LatencyMS != 38 || grPayload.TopK != 3 {
+		t.Errorf("glossary_retrieval metrics mismatch: TopK=%d LatencyMS=%d", grPayload.TopK, grPayload.LatencyMS)
+	}
+
+	tr := findEventByType(evs, events.TypeToolRetrieval)
+	if tr == nil {
+		t.Fatal("tool_retrieval event missing")
+	}
+	var trPayload events.ToolRetrievalPayload
+	if err := json.Unmarshal(tr.Payload, &trPayload); err != nil {
+		t.Fatalf("unmarshal tool_retrieval payload: %v", err)
+	}
+	if len(trPayload.Hits) != 1 || trPayload.Hits[0].ToolName != "gitlab.analyze_code" {
+		t.Errorf("tool_retrieval hits mismatch: %+v", trPayload.Hits)
+	}
+	if trPayload.LatencyMS != 98 || trPayload.TopK != 8 {
+		t.Errorf("tool_retrieval metrics mismatch: TopK=%d LatencyMS=%d", trPayload.TopK, trPayload.LatencyMS)
+	}
+
+	// preparer_decision should carry mode=instrumentation_only with
+	// both knowledge and tools populated from the candidate slices.
+	pd := findEventByType(evs, events.TypePreparerDecision)
+	if pd == nil {
+		t.Fatal("preparer_decision event missing")
+	}
+	var pdPayload events.PreparerDecisionPayload
+	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
+		t.Fatalf("unmarshal preparer_decision payload: %v", err)
+	}
+	if pdPayload.Mode != events.PreparerDecisionModeInstrumentationOnly {
+		t.Errorf("preparer_decision Mode = %q, want %q",
+			pdPayload.Mode, events.PreparerDecisionModeInstrumentationOnly)
+	}
+	if len(pdPayload.Knowledge.CandidateIDs) != 2 {
+		t.Errorf("preparer_decision Knowledge.CandidateIDs len = %d, want 2", len(pdPayload.Knowledge.CandidateIDs))
+	}
+	if len(pdPayload.Knowledge.Injected) != 2 {
+		t.Errorf("preparer_decision Knowledge.Injected len = %d, want 2", len(pdPayload.Knowledge.Injected))
+	}
+	if pdPayload.Knowledge.InjectedBytes != len("body-a")+len("body-bb") {
+		t.Errorf("preparer_decision Knowledge.InjectedBytes = %d, want %d",
+			pdPayload.Knowledge.InjectedBytes, len("body-a")+len("body-bb"))
+	}
+	if len(pdPayload.Tools.Tier1New) != 1 || pdPayload.Tools.Tier1New[0] != "gitlab.analyze_code" {
+		t.Errorf("preparer_decision Tools.Tier1New = %v", pdPayload.Tools.Tier1New)
+	}
+}
+
+func TestOrchestrator_PreparerPhase_NoPreparerNoDecisionEvent(t *testing.T) {
+	// When the orchestrator has no preparers (or all are STT), the
+	// preparer_decision event should NOT fire — emitting an empty
+	// composite would just produce noise. user_message and turn_start
+	// still emit as normal.
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"hi"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+
+	if _, err := orch.Run(context.Background(), sessID, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range sink.snapshot() {
+		if e.EventType == events.TypePreparerDecision {
+			t.Errorf("preparer_decision should not emit when no preparers retrieve anything; got payload: %s", e.Payload)
+		}
+		if e.EventType == events.TypeKnowledgeRetrieval || e.EventType == events.TypeGlossaryRetrieval {
+			t.Errorf("%s should not emit without a preparer producing candidates", e.EventType)
+		}
+	}
+}
+
+func TestOrchestrator_PreparerPhase_LegacyPluginNoCandidates(t *testing.T) {
+	// A pre-RFC plugin returning only `message` + `relevant_tools`
+	// still gets a tool_retrieval event (synthesized from relevant_tools
+	// with score=0) plus a preparer_decision capturing the tool names
+	// under Tier1New. knowledge_retrieval / glossary_retrieval do NOT
+	// fire — there are no candidates and no metrics signaling those
+	// corpora ran.
+	preparerJSON := `{
+		"send_to_llm": true,
+		"message": "do the thing",
+		"relevant_tools": ["gitlab.analyze_code", "jira.create_issue"]
+	}`
+
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"final answer"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "legacy-plugin", Description: "Legacy",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: preparerJSON})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze"}},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name: "jira", Description: "Jira",
+		Actions: []Action{{Name: "create_issue", Description: "Create"}},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:        sink,
+		ContentPreparers: []ContentPreparerEntry{{Plugin: "legacy-plugin", Action: "prepare"}},
+	})
+
+	if _, err := orch.Run(context.Background(), "s1", "do the thing"); err != nil {
+		t.Fatal(err)
+	}
+
+	evs := sink.snapshot()
+	if findEventByType(evs, events.TypeKnowledgeRetrieval) != nil {
+		t.Error("knowledge_retrieval must not fire for legacy plugins without knowledge candidates")
+	}
+	if findEventByType(evs, events.TypeGlossaryRetrieval) != nil {
+		t.Error("glossary_retrieval must not fire for legacy plugins without glossary candidates")
+	}
+	tr := findEventByType(evs, events.TypeToolRetrieval)
+	if tr == nil {
+		t.Fatal("tool_retrieval should fire from legacy relevant_tools")
+	}
+	var trPayload events.ToolRetrievalPayload
+	if err := json.Unmarshal(tr.Payload, &trPayload); err != nil {
+		t.Fatalf("unmarshal tool_retrieval payload: %v", err)
+	}
+	if len(trPayload.Hits) != 2 {
+		t.Errorf("tool_retrieval hits len = %d, want 2 (from relevant_tools)", len(trPayload.Hits))
+	}
+	if trPayload.Hits[0].Score != 0 {
+		t.Errorf("tool_retrieval legacy synthesized hit must have score=0, got %v", trPayload.Hits[0].Score)
+	}
+
+	pd := findEventByType(evs, events.TypePreparerDecision)
+	if pd == nil {
+		t.Fatal("preparer_decision should still fire for legacy tool retrieval")
+	}
+	var pdPayload events.PreparerDecisionPayload
+	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
+		t.Fatalf("unmarshal preparer_decision payload: %v", err)
+	}
+	if len(pdPayload.Tools.Tier1New) != 2 {
+		t.Errorf("preparer_decision Tools.Tier1New len = %d, want 2", len(pdPayload.Tools.Tier1New))
+	}
+}
+
+func TestOrchestrator_PreparerPhase_MultiPreparerAggregation(t *testing.T) {
+	// When the orchestrator runs more than one preparer per turn, the
+	// composite preparer_decision must aggregate the candidate lists
+	// across all of them. Two preparers each returning one knowledge
+	// candidate should produce two CandidateIDs + two Injected entries
+	// with InjectedBytes summed.
+	prepA := `{"send_to_llm": true, "message": "x",
+	 "knowledge_candidates": [{"article_id": "kb_a", "content": "AAA", "score": 0.9}]}`
+	prepB := `{"send_to_llm": true, "message": "x",
+	 "knowledge_candidates": [{"article_id": "kb_b", "content": "BBBB", "score": 0.7}]}`
+
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"final"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-a", Description: "RAG A",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: prepA})
+	_ = registry.Register(PluginCapability{
+		Name: "rag-b", Description: "RAG B",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: prepB})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink: sink,
+		ContentPreparers: []ContentPreparerEntry{
+			{Plugin: "rag-a", Action: "prepare"},
+			{Plugin: "rag-b", Action: "prepare"},
+		},
+	})
+
+	if _, err := orch.Run(context.Background(), "s1", "do the thing"); err != nil {
+		t.Fatal(err)
+	}
+
+	evs := sink.snapshot()
+	// Two knowledge_retrieval events fire (one per preparer), each
+	// carrying that preparer's single hit. They must NOT be merged
+	// into a single event — per-preparer granularity is the audit
+	// trail.
+	var kCount int
+	for _, e := range evs {
+		if e.EventType == events.TypeKnowledgeRetrieval {
+			kCount++
+		}
+	}
+	if kCount != 2 {
+		t.Errorf("knowledge_retrieval event count = %d, want 2 (one per preparer)", kCount)
+	}
+
+	// preparer_decision fires exactly once with both candidates merged.
+	pd := findEventByType(evs, events.TypePreparerDecision)
+	if pd == nil {
+		t.Fatal("preparer_decision event missing")
+	}
+	var pdPayload events.PreparerDecisionPayload
+	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
+		t.Fatalf("unmarshal preparer_decision payload: %v", err)
+	}
+	if len(pdPayload.Knowledge.CandidateIDs) != 2 {
+		t.Errorf("CandidateIDs len = %d, want 2 (kb_a + kb_b across both preparers)",
+			len(pdPayload.Knowledge.CandidateIDs))
+	}
+	if pdPayload.Knowledge.InjectedBytes != len("AAA")+len("BBBB") {
+		t.Errorf("InjectedBytes = %d, want %d (sum across preparers)",
+			pdPayload.Knowledge.InjectedBytes, len("AAA")+len("BBBB"))
 	}
 }

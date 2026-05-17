@@ -894,7 +894,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// without reaching the agent loop (pending pipeline / tool-call
 	// confirmation), because the user did send a message regardless of how
 	// the orchestrator routes it.
-	emit.EmitUserMessage(ctx, o.eventSink, userMessage)
+	//
+	// Parent-chain: capture the returned event_id and wrap ctx so the
+	// preparer-phase events (knowledge_retrieval / glossary_retrieval /
+	// tool_retrieval / preparer_decision) and turn_start emitted later
+	// in this turn surface as children of user_message — matching the
+	// tree shape consumers (api-plugin aggregations, Timly review UI)
+	// rely on per RFC #249.
+	userMessageID := emit.EmitUserMessage(ctx, o.eventSink, userMessage)
+	ctx = emit.WithParent(ctx, userMessageID)
 
 	// Per-session deep debug: enabled by the set_debug_mode command, which
 	// stores debug=true in session metadata. With the flag set, the slog
@@ -1131,8 +1139,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				searchText = strings.Join(parts, " ") + " " + content
 			}
 		}
+		// Default search-text source for the *_retrieval events: when
+		// the orchestrator enriched the query (added recent
+		// conversation context), report "enriched"; otherwise
+		// "user_input". The plugin can override either via
+		// RetrievalMetrics.<corpus>.SearchTextSource.
+		searchSource := events.SearchTextSourceUserInput
+		if searchText != content {
+			searchSource = events.SearchTextSourceEnriched
+		}
 		var relevantTools []string
 		relevantToolsSet := false
+		var prepAgg preparerAggregate
 		for _, prep := range o.preparers {
 			if prep.STT {
 				continue
@@ -1151,7 +1169,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				relevantTools = outcome.RelevantTools
 				relevantToolsSet = true
 			}
+			// RFC #249 Phase 2 instrumentation: publish per-corpus
+			// retrieval events for this preparer, then accumulate the
+			// candidate slices for the composite preparer_decision
+			// emitted after the loop.
+			o.emitPreparerRetrievals(ctx, userMessage, searchSource, outcome.Response)
+			prepAgg.append(outcome.Response)
 		}
+		o.emitPreparerDecision(ctx, prepAgg)
 		// Store relevant tools in context so buildSystemPrompt and planner can filter.
 		if relevantToolsSet {
 			ctx = withRelevantTools(ctx, relevantTools)
