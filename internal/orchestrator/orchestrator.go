@@ -429,11 +429,90 @@ func (s *invokeStepsUnmarshal) UnmarshalJSON(data []byte) error {
 }
 
 // preparerResponse is the optional JSON shape from a content preparer (guard or invoke).
+//
+// Candidate fields (knowledge / glossary / tool) are RFC #249 additions
+// — preparers that retrieve from a RAG corpus may return the structured
+// candidate list alongside (or instead of) the legacy `message` /
+// `relevant_tools` fields so the orchestrator can apply per-session
+// dedup + tier-promotion logic in Phase 3+.
+//
+// In Phase 2 the candidate slices are deserialized for instrumentation
+// (knowledge_retrieval / glossary_retrieval / tool_retrieval events
+// carry the hits) but do not yet drive injection decisions — the
+// `message` body remains authoritative for what reaches the LLM.
+// Plugins returning only the legacy fields stay fully backwards-
+// compatible: the candidate slices unmarshal to nil and the
+// orchestrator falls through to the legacy path.
 type preparerResponse struct {
 	SendToLLM     *bool                `json:"send_to_llm"`
 	Message       string               `json:"message"`
 	Invoke        invokeStepsUnmarshal `json:"invoke"`
 	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional: filter system prompt to these tools (format: "plugin.action")
+
+	KnowledgeCandidates []KnowledgeCandidate `json:"knowledge_candidates,omitempty"`
+	GlossaryCandidates  []GlossaryCandidate  `json:"glossary_candidates,omitempty"`
+	ToolCandidates      []ToolCandidate      `json:"tool_candidates,omitempty"`
+
+	// RetrievalMetrics is an optional per-corpus timing / scoring
+	// summary the plugin can attach so the orchestrator's emit step
+	// has min_score / top_k / latency_ms to publish without inferring
+	// them. All fields are optional; missing values stay zero-valued
+	// in the corresponding *_retrieval events.
+	RetrievalMetrics *PreparerRetrievalMetrics `json:"retrieval_metrics,omitempty"`
+}
+
+// KnowledgeCandidate is one knowledge-base article returned by the
+// preparer's RAG search. Content carries the body the orchestrator
+// would inject into [knowledge_context]; ContentSHA256 is the dedup
+// key (Phase 3+).
+type KnowledgeCandidate struct {
+	ArticleID         string  `json:"article_id"`
+	Title             string  `json:"title,omitempty"`
+	Content           string  `json:"content"`
+	ContentSHA256     string  `json:"content_sha256,omitempty"`
+	Score             float64 `json:"score"`
+	Source            string  `json:"source,omitempty"`
+	PositionInResults int     `json:"position_in_results,omitempty"`
+}
+
+// GlossaryCandidate mirrors KnowledgeCandidate; the only difference is
+// the per-entry "term" instead of "title".
+type GlossaryCandidate struct {
+	Term              string  `json:"term"`
+	Content           string  `json:"content"`
+	ContentSHA256     string  `json:"content_sha256,omitempty"`
+	Score             float64 `json:"score"`
+	Source            string  `json:"source,omitempty"`
+	PositionInResults int     `json:"position_in_results,omitempty"`
+}
+
+// ToolCandidate is the RAG-retrieved tool entry with score so the
+// orchestrator (Phase 4) can apply the LRU + tier-promotion logic and
+// the *_retrieval event can publish ranked hits.
+type ToolCandidate struct {
+	ToolName          string  `json:"tool_name"`
+	Score             float64 `json:"score"`
+	PositionInResults int     `json:"position_in_results,omitempty"`
+}
+
+// PreparerRetrievalMetrics is a per-corpus optional summary returned
+// alongside the candidate slices. All three corpora share the same
+// shape; the plugin sets only the corpora it actually searched. Phase
+// 2 forwards these directly into the *_retrieval event payloads.
+type PreparerRetrievalMetrics struct {
+	Knowledge *PreparerCorpusMetrics `json:"knowledge,omitempty"`
+	Glossary  *PreparerCorpusMetrics `json:"glossary,omitempty"`
+	Tools     *PreparerCorpusMetrics `json:"tools,omitempty"`
+}
+
+// PreparerCorpusMetrics is the optional timing / scoring summary for
+// one RAG corpus. SearchTextSource carries the events.SearchTextSource*
+// constant value when the plugin distinguishes raw vs enriched query.
+type PreparerCorpusMetrics struct {
+	SearchTextSource string  `json:"search_text_source,omitempty"`
+	TopK             int     `json:"top_k,omitempty"`
+	MinScore         float64 `json:"min_score,omitempty"`
+	LatencyMS        int64   `json:"latency_ms,omitempty"`
 }
 
 func (o *Orchestrator) handlePreparerFailure(prep ContentPreparerEntry, details string) *RunResult {
