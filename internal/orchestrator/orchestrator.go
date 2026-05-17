@@ -1106,7 +1106,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			MessageCount: 2,  // planner hardcodes system+user, see pipeline.Planner.Plan
 		})
 		plannerStart := time.Now()
-		planResult, err := o.planner.Plan(plannerCtx, stripKnowledgeContext(content), capabilitiesToPlannerInfo(plannerCaps), convContext)
+		// Pass the raw content (including any [knowledge_context] block the
+		// preparer injected for the current turn) so the planner sees the
+		// retrieved knowledge alongside the user's request.
+		planResult, err := o.planner.Plan(plannerCtx, content, capabilitiesToPlannerInfo(plannerCaps), convContext)
 		plannerLatency := time.Since(plannerStart).Milliseconds()
 		var plannerRaw string
 		if err != nil {
@@ -2729,15 +2732,17 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 	if o.contextMessages > 0 && len(convMessages) > o.contextMessages {
 		convMessages = convMessages[len(convMessages)-o.contextMessages:]
 	}
-	// Strip [knowledge_context] from ALL user messages including the current turn.
-	// Server instructions are already in the system prompt via SystemPromptAddition,
-	// and the preparer's knowledge_context duplicates them. Stripping all turns
-	// prevents both per-turn duplication and redundancy with the system prompt.
+	// Strip [knowledge_context] from HISTORICAL user messages only. The
+	// current turn's user message is preserved verbatim so preparer-injected
+	// RAG content actually reaches the LLM. Historical turns are still
+	// stripped to avoid per-turn accumulation and redundancy with the
+	// system prompt (server-instruction articles are already filtered out
+	// plugin-side via filterOutMCPItems).
 	//
 	// Also sanitize poisoned assistant messages from session history: remove
 	// hallucinated template variables and narrated tool calls that were saved
 	// before detection was in place. These teach the LLM bad patterns.
-	messages = appendStrippingAllKC(messages, sanitizeHistory(convMessages))
+	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
 
 	// For weaker / OSS models that tend to ignore system-prompt formatting
 	// instructions, repeat the channel format hint as a trailing system
@@ -2789,7 +2794,7 @@ func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.
 	if o.contextMessages > 0 && len(convMessages) > o.contextMessages {
 		convMessages = convMessages[len(convMessages)-o.contextMessages:]
 	}
-	messages = appendStrippingAllKC(messages, sanitizeHistory(convMessages))
+	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
 
 	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
 		messages = append(messages, provider.Message{
@@ -4043,23 +4048,48 @@ func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.Completi
 }
 
 // capabilitiesToPlannerInfo converts orchestrator PluginCapability to pipeline CapabilityInfo.
-// appendStrippingAllKC appends session messages to dst, stripping
-// [knowledge_context] blocks from every user message. Server instructions
-// are already in the system prompt via SystemPromptAddition, so the
-// preparer-injected knowledge_context is redundant. Stripping all turns
-// prevents both historical accumulation and current-turn duplication.
+// appendStrippingHistoricalKC appends session messages to dst, stripping
+// [knowledge_context] blocks from historical user messages but preserving
+// the current turn's user message intact so preparer-injected RAG content
+// reaches the LLM. The current turn is identified as the last user message
+// in the slice.
+//
+// Historical strip is still applied because past-turn [knowledge_context]
+// blocks would otherwise accumulate across turns and bloat the context
+// window. Server-instruction articles never appear here in the first place
+// — the weaviate-plugin filters them out via filterOutMCPItems before
+// injection.
 //
 // Also deduplicates knowledge article plugin outputs: when ask_knowledge
 // returns the same MCP server instructions block repeatedly (~5KB each),
 // subsequent occurrences are replaced with a short stub to save context.
-func appendStrippingAllKC(dst []provider.Message, msgs []provider.Message) []provider.Message {
+// Dedup applies to all user messages including the current turn.
+func appendStrippingHistoricalKC(dst []provider.Message, msgs []provider.Message) []provider.Message {
 	seenKnowledge := make(map[uint64]bool)
 	seenToolResults := make(map[uint64]bool)
-	for _, m := range msgs {
+	// Identify the current-turn user message. Native-tools mode stores tool
+	// results as RoleTool, so the last RoleUser is always the real user
+	// question. Text-tools mode wraps tool results as RoleUser with a
+	// "[plugin_output]" prefix; skip those so we land on the actual user
+	// message that the preparer enriched with [knowledge_context].
+	lastUserIdx := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != provider.RoleUser {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(msgs[i].Content), "[plugin_output]") {
+			continue
+		}
+		lastUserIdx = i
+		break
+	}
+	for i, m := range msgs {
 		if m.Role == provider.RoleUser {
-			stripped := stripKnowledgeContext(m.Content)
-			if stripped != m.Content {
-				m = provider.Message{Role: m.Role, Content: stripped, Files: m.Files}
+			if i != lastUserIdx {
+				stripped := stripKnowledgeContext(m.Content)
+				if stripped != m.Content {
+					m = provider.Message{Role: m.Role, Content: stripped, Files: m.Files}
+				}
 			}
 			// Deduplicate knowledge article plugin outputs.
 			m = deduplicateKnowledgeOutput(m, seenKnowledge)
