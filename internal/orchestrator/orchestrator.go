@@ -618,33 +618,54 @@ func (o *Orchestrator) runSTTPreparer(ctx context.Context, prep ContentPreparerE
 	return result.Content, nil
 }
 
-// runSinglePreparer executes one content preparer. Returns (new content, blocked result, relevant tools, error).
-// relevantTools is non-nil only when the preparer explicitly returns a relevant_tools list.
-// runSinglePreparerWithSearch calls runSinglePreparer and injects a
-// `search_text` arg when the enriched search query differs from the content.
-// The preparer can use search_text for RAG lookup while returning the
-// original content for the LLM.
-func (o *Orchestrator) runSinglePreparerWithSearch(ctx context.Context, prep ContentPreparerEntry, content, searchText, callPrefix string, allowInvoke bool) (string, *RunResult, []string, error) {
+// preparerOutcome is the result of one preparer pass. Content / Blocked
+// / RelevantTools drive what the orchestrator does next; Response holds
+// the parsed plugin JSON so callers can read the RFC #249 candidate
+// fields and emit retrieval events without re-deserializing. For Lua
+// preparers (no plugin protocol) Response stays zero-valued — its
+// KnowledgeCandidates / GlossaryCandidates / ToolCandidates slices are
+// nil and downstream emit logic short-circuits accordingly.
+type preparerOutcome struct {
+	Content       string
+	Blocked       *RunResult
+	RelevantTools []string
+	Response      preparerResponse
+}
+
+// blockedPreparerOutcome is the shorthand for "this preparer's output
+// halted the run" — used by the early-exit paths in runSinglePreparer
+// so Content stays in sync with the input and RelevantTools / Response
+// stay zero-valued.
+func blockedPreparerOutcome(content string, blocked *RunResult) preparerOutcome {
+	return preparerOutcome{Content: content, Blocked: blocked}
+}
+
+// runSinglePreparerWithSearch calls runSinglePreparer with a
+// `search_text` arg derived from the enriched search query so the RAG
+// lookup matches conversation context while the main `text` arg stays
+// as the original user message.
+func (o *Orchestrator) runSinglePreparerWithSearch(ctx context.Context, prep ContentPreparerEntry, content, searchText, callPrefix string, allowInvoke bool) (preparerOutcome, error) {
 	ctx = withSearchQuery(ctx, searchText)
 	return o.runSinglePreparer(ctx, prep, content, callPrefix, allowInvoke)
 }
 
-func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPreparerEntry, content, callPrefix string, allowInvoke bool) (string, *RunResult, []string, error) {
+// runSinglePreparer executes one content preparer. Errors and "fail
+// open" preparer failures both return a non-blocked outcome with
+// Content == the input content; an explicit guard block returns
+// Blocked set; an `invoke` directive returns Content == "" and Blocked
+// holding the invoke result. The Response field carries the parsed
+// plugin JSON (RFC #249 candidate fields included) so callers can emit
+// retrieval events without re-parsing.
+func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPreparerEntry, content, callPrefix string, allowInvoke bool) (preparerOutcome, error) {
 	if strings.HasPrefix(prep.Plugin, "lua:") {
 		scriptName := strings.TrimPrefix(prep.Plugin, "lua:")
 		scriptPath := o.luaScriptPaths[scriptName]
 		if scriptPath == "" {
-			if blocked := o.handlePreparerFailure(prep, "Lua script path not found"); blocked != nil {
-				return content, blocked, nil, nil
-			}
-			return content, nil, nil, nil
+			return blockedPreparerOutcome(content, o.handlePreparerFailure(prep, "Lua script path not found")), nil
 		}
 		result, err := lua.RunPrepare(scriptPath, content)
 		if err != nil {
-			if blocked := o.handlePreparerFailure(prep, err.Error()); blocked != nil {
-				return content, blocked, nil, nil
-			}
-			return content, nil, nil, nil
+			return blockedPreparerOutcome(content, o.handlePreparerFailure(prep, err.Error())), nil
 		}
 		if !result.SendToLLM {
 			if allowInvoke && len(result.InvokeSteps) > 0 {
@@ -653,15 +674,15 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 					steps[i] = InvokeStep{Plugin: s.Plugin, Action: s.Action, Args: s.Args}
 				}
 				invokeResult, err := o.runInvokeSteps(ctx, steps)
-				return "", invokeResult, nil, err
+				return preparerOutcome{Blocked: invokeResult}, err
 			}
 			msg := result.Content
 			if msg == "" {
 				msg = "Request blocked by guard."
 			}
-			return "", &RunResult{Response: msg}, nil, nil
+			return preparerOutcome{Blocked: &RunResult{Response: msg}}, nil
 		}
-		return result.Content, nil, nil, nil
+		return preparerOutcome{Content: result.Content}, nil
 	}
 
 	argKey := prep.ArgKey
@@ -669,10 +690,7 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 		argKey = "text"
 	}
 	if !o.registry.HasAction(prep.Plugin, prep.Action) {
-		if blocked := o.handlePreparerFailure(prep, "action not found"); blocked != nil {
-			return content, blocked, nil, nil
-		}
-		return content, nil, nil, nil
+		return blockedPreparerOutcome(content, o.handlePreparerFailure(prep, "action not found")), nil
 	}
 	call := ToolCall{
 		ID:     fmt.Sprintf("%s-%s-%s", callPrefix, prep.Plugin, prep.Action),
@@ -691,20 +709,17 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 	}
 	toolResult := o.executeCall(ctx, call)
 	if toolResult.Error != "" {
-		if blocked := o.handlePreparerFailure(prep, toolResult.Error); blocked != nil {
-			return content, blocked, nil, nil
-		}
-		return content, nil, nil, nil
+		return blockedPreparerOutcome(content, o.handlePreparerFailure(prep, toolResult.Error)), nil
 	}
 	var pr preparerResponse
 	if err := json.Unmarshal([]byte(toolResult.Content), &pr); err == nil && pr.SendToLLM != nil && !*pr.SendToLLM {
 		if allowInvoke && len(pr.Invoke) > 0 {
 			if prep.Insecure {
 				slog.Warn("insecure preparer cannot run invoke, ignoring", "plugin", prep.Plugin, "action", prep.Action)
-				return content, nil, nil, nil
+				return preparerOutcome{Content: content, Response: pr}, nil
 			}
 			invokeResult, err := o.runInvokeSteps(ctx, pr.Invoke)
-			return "", invokeResult, nil, err
+			return preparerOutcome{Blocked: invokeResult, Response: pr}, err
 		}
 		msg := pr.Message
 		if msg == "" {
@@ -713,12 +728,12 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 		if msg == "" {
 			msg = "Request blocked by guard."
 		}
-		return "", &RunResult{Response: msg}, nil, nil
+		return preparerOutcome{Blocked: &RunResult{Response: msg}, Response: pr}, nil
 	}
 	if pr.Message != "" {
-		return pr.Message, nil, pr.RelevantTools, nil
+		return preparerOutcome{Content: pr.Message, RelevantTools: pr.RelevantTools, Response: pr}, nil
 	}
-	return toolResult.Content, nil, pr.RelevantTools, nil
+	return preparerOutcome{Content: toolResult.Content, RelevantTools: pr.RelevantTools, Response: pr}, nil
 }
 
 // applyShowToolCalls prepends tool call details to result.Response based on show_tool_calls mode.
@@ -1122,18 +1137,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if prep.STT {
 				continue
 			}
-			guardedContent, blocked, tools, err := o.runSinglePreparerWithSearch(ctx, prep, content, searchText, "preparer", true)
+			outcome, err := o.runSinglePreparerWithSearch(ctx, prep, content, searchText, "preparer", true)
 			if err != nil {
 				return nil, err
 			}
-			if blocked != nil {
-				return blocked, nil
+			if outcome.Blocked != nil {
+				return outcome.Blocked, nil
 			}
-			content = guardedContent
+			content = outcome.Content
 			// Last preparer that returns relevant_tools wins.
 			// Distinguish nil (no tools field) from [] (explicitly empty).
-			if tools != nil {
-				relevantTools = tools
+			if outcome.RelevantTools != nil {
+				relevantTools = outcome.RelevantTools
 				relevantToolsSet = true
 			}
 		}
@@ -2549,14 +2564,14 @@ func (o *Orchestrator) runGuardPlugins(ctx context.Context, messages []provider.
 	original := messages[lastIdx].Content
 	content := original
 	for _, g := range o.guards {
-		nextContent, blocked, _, err := o.runSinglePreparer(ctx, g, content, "guard", false)
+		outcome, err := o.runSinglePreparer(ctx, g, content, "guard", false)
 		if err != nil {
 			return nil, nil, err
 		}
-		if blocked != nil {
-			return nil, blocked, nil
+		if outcome.Blocked != nil {
+			return nil, outcome.Blocked, nil
 		}
-		content = nextContent
+		content = outcome.Content
 	}
 	if content == original {
 		return messages, nil, nil
