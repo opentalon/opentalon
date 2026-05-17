@@ -36,11 +36,23 @@ const (
 	TypeLLMResponse = "llm_response"
 
 	// Planner / orchestrator internals (debug-view or fold-default in UI).
-	TypePlannerInvoked         = "planner_invoked"
-	TypePlannerRequest         = "planner_request"
-	TypePlannerResponse        = "planner_response"
-	TypePlannerStep            = "planner_step"
-	TypeToolRetrieval          = "tool_retrieval"
+	TypePlannerInvoked  = "planner_invoked"
+	TypePlannerRequest  = "planner_request"
+	TypePlannerResponse = "planner_response"
+	TypePlannerStep     = "planner_step"
+
+	// Preparer-phase retrieval + decision events (RFC #249).
+	// Emitted children of user_message: each RAG retrieval becomes one
+	// *_retrieval event, then preparer_decision is the composite outcome
+	// the orchestrator landed on. drift_detected and messages_truncated
+	// are sibling-to-turn_start events on the rare paths where they fire.
+	TypeKnowledgeRetrieval = "knowledge_retrieval"
+	TypeGlossaryRetrieval  = "glossary_retrieval"
+	TypeToolRetrieval      = "tool_retrieval"
+	TypePreparerDecision   = "preparer_decision"
+	TypeDriftDetected      = "drift_detected"
+	TypeMessagesTruncated  = "messages_truncated"
+
 	TypeSummarizationTriggered = "summarization_triggered"
 	TypeSummarizationCompleted = "summarization_completed"
 	TypeModelSwitch            = "model_switch"
@@ -64,11 +76,53 @@ const (
 	TypeScoreComputed = "score_computed"
 )
 
-// PromptSnapshotKind values for prompt_snapshots.kind.
+// PromptSnapshotKind values for prompt_snapshots.kind. knowledge_article
+// is added by RFC #249: per-turn-injected knowledge bodies are stored
+// content-addressed alongside the existing system_prompt / tool_description
+// entries, so consumers resolve them through the same /prompt-snapshots
+// endpoint.
 const (
 	PromptKindSystemPrompt       = "system_prompt"
 	PromptKindServerInstructions = "server_instructions"
 	PromptKindToolDescription    = "tool_description"
+	PromptKindKnowledgeArticle   = "knowledge_article"
+)
+
+// PreparerDecisionMode values for PreparerDecisionPayload.Mode.
+//
+// instrumentation_only — Phase 2: events emit but dedup/tier logic is
+//
+//	disabled. All candidates pass through to the LLM unchanged; the event
+//	payload records what *would* be the decision had the dedup logic been
+//	active, with empty skipped_known / score_overrides_applied buckets.
+//
+// full — Phase 3+: dedup + tier logic active, payload reflects the
+//
+//	actual orchestrator decision for this turn.
+//
+// legacy_fallback — plugin returned only the legacy `message` field
+//
+//	(no structured candidates). The orchestrator forwards the plugin's
+//	injection verbatim; preparer_decision records the fall-through path
+//	for analytics. One deprecation warning per plugin per session is
+//	logged alongside.
+const (
+	PreparerDecisionModeInstrumentationOnly = "instrumentation_only"
+	PreparerDecisionModeFull                = "full"
+	PreparerDecisionModeLegacyFallback      = "legacy_fallback"
+)
+
+// KnowledgeRetrievalSearchTextSource values for the search_text_source
+// dimension on KnowledgeRetrievalPayload / GlossaryRetrievalPayload.
+//
+// user_input — raw user message bytes sent as the search query.
+// enriched — user message + recent conversation context concatenated
+//
+//	(see orchestrator's enriched-search-query path) so follow-ups like
+//	"both" or "yes" resolve to the right RAG hits.
+const (
+	SearchTextSourceUserInput = "user_input"
+	SearchTextSourceEnriched  = "enriched"
 )
 
 // ExcerptCap is the maximum byte length stored for raw LLM/tool-emitted
@@ -248,9 +302,12 @@ const PlannerStepVersion = 1
 // regression analysis can spot retrieval quality drift over time.
 type ToolRetrievalPayload struct {
 	Header
-	Query string             `json:"query"`
-	TopK  int                `json:"top_k"`
-	Hits  []ToolRetrievalHit `json:"hits"`
+	Query            string             `json:"query"`
+	SearchTextSource string             `json:"search_text_source,omitempty"`
+	TopK             int                `json:"top_k,omitempty"`
+	MinScore         float64            `json:"min_score,omitempty"`
+	LatencyMS        int64              `json:"latency_ms,omitempty"`
+	Hits             []ToolRetrievalHit `json:"hits"`
 }
 
 type ToolRetrievalHit struct {
@@ -258,7 +315,156 @@ type ToolRetrievalHit struct {
 	Score    float64 `json:"score"`
 }
 
-const ToolRetrievalVersion = 1
+// ToolRetrievalVersion bumped to 2 when the payload gained
+// search_text_source / min_score / latency_ms (RFC #249, Phase 2). No
+// v=1 rows exist in the wild — the type was declared in 009 but never
+// emitted before — so the bump is documentation hygiene rather than a
+// compatibility step.
+const ToolRetrievalVersion = 2
+
+// KnowledgeRetrievalPayload — Weaviate-backed knowledge-base RAG. Each
+// hit carries a content_sha256 so consumers can resolve the body via the
+// prompt_snapshots store (kind=knowledge_article). RFC #249.
+type KnowledgeRetrievalPayload struct {
+	Header
+	Query            string                  `json:"query"`
+	SearchTextSource string                  `json:"search_text_source,omitempty"`
+	TopK             int                     `json:"top_k,omitempty"`
+	MinScore         float64                 `json:"min_score,omitempty"`
+	LatencyMS        int64                   `json:"latency_ms,omitempty"`
+	Hits             []KnowledgeRetrievalHit `json:"hits"`
+}
+
+type KnowledgeRetrievalHit struct {
+	ArticleID     string  `json:"article_id"`
+	Title         string  `json:"title,omitempty"`
+	Score         float64 `json:"score"`
+	ContentSHA256 string  `json:"content_sha256,omitempty"`
+	Source        string  `json:"source,omitempty"` // "knowledge_base" | future per-tenant sources
+}
+
+const KnowledgeRetrievalVersion = 1
+
+// GlossaryRetrievalPayload — Weaviate-backed glossary RAG. Shape mirrors
+// KnowledgeRetrievalPayload; the only difference is per-hit "term"
+// instead of "title". RFC #249.
+type GlossaryRetrievalPayload struct {
+	Header
+	Query            string                 `json:"query"`
+	SearchTextSource string                 `json:"search_text_source,omitempty"`
+	TopK             int                    `json:"top_k,omitempty"`
+	MinScore         float64                `json:"min_score,omitempty"`
+	LatencyMS        int64                  `json:"latency_ms,omitempty"`
+	Hits             []GlossaryRetrievalHit `json:"hits"`
+}
+
+type GlossaryRetrievalHit struct {
+	Term          string  `json:"term"`
+	Score         float64 `json:"score"`
+	ContentSHA256 string  `json:"content_sha256,omitempty"`
+	Source        string  `json:"source,omitempty"`
+}
+
+const GlossaryRetrievalVersion = 1
+
+// PreparerDecisionPayload — composite outcome of the preparer phase. One
+// event per user turn, parented to the user_message. RFC #249.
+//
+// Mode is one of the PreparerDecisionMode* constants and discriminates
+// the meaning of the sub-blocks. In "instrumentation_only" mode all
+// candidates appear under Knowledge.Injected and Tools.Tier1New; the
+// skipped/evicted buckets are empty. In "full" mode the blocks reflect
+// the real dedup+tier decision.
+type PreparerDecisionPayload struct {
+	Header
+	Mode      string                         `json:"mode"`
+	Knowledge PreparerDecisionKnowledgeBlock `json:"knowledge"`
+	Tools     PreparerDecisionToolsBlock     `json:"tools"`
+}
+
+type PreparerDecisionKnowledgeBlock struct {
+	CandidateIDs          []string                        `json:"candidate_ids,omitempty"`
+	Injected              []PreparerDecisionInjectedItem  `json:"injected,omitempty"`
+	SkippedKnown          []PreparerDecisionSkippedItem   `json:"skipped_known,omitempty"`
+	SkippedBelowThreshold []string                        `json:"skipped_below_threshold,omitempty"`
+	ScoreOverridesApplied []PreparerDecisionScoreOverride `json:"score_overrides_applied,omitempty"`
+	InjectedBytes         int                             `json:"injected_bytes,omitempty"`
+}
+
+// PreparerDecisionInjectedItem records one injected knowledge article and
+// the reason it was selected. Reason values:
+//   - "new" — content_sha not yet known to the session
+//   - "score_override" — known but current score above reinject threshold
+//   - "top_k_force" — within the forced top-K of current-turn results
+//   - "instrumentation_only" — Phase 2: all candidates pass through
+type PreparerDecisionInjectedItem struct {
+	ArticleID     string `json:"article_id"`
+	ContentSHA256 string `json:"content_sha256,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+}
+
+// PreparerDecisionSkippedItem records one candidate skipped by dedup.
+// Reason today is just "content_sha_already_known"; extend the vocabulary
+// here when new skip paths are added (e.g. "demoted").
+type PreparerDecisionSkippedItem struct {
+	ArticleID string `json:"article_id"`
+	Reason    string `json:"reason"`
+}
+
+type PreparerDecisionScoreOverride struct {
+	ArticleID    string  `json:"article_id"`
+	CurrentScore float64 `json:"current_score"`
+	Threshold    float64 `json:"threshold"`
+}
+
+type PreparerDecisionToolsBlock struct {
+	Tier0Count                int      `json:"tier0_count,omitempty"`
+	Tier1New                  []string `json:"tier1_new,omitempty"`
+	Tier1Carried              []string `json:"tier1_carried,omitempty"`
+	Tier1EvictedToTier3       []string `json:"tier1_evicted_to_tier3,omitempty"`
+	Tier1DemotedSticky        []string `json:"tier1_demoted_sticky,omitempty"`
+	Tier1SizeAfter            int      `json:"tier1_size_after,omitempty"`
+	Tier1Cap                  int      `json:"tier1_cap,omitempty"`
+	Tier3TotalVisible         int      `json:"tier3_total_visible,omitempty"`
+	PromotedViaGetToolDetails []string `json:"promoted_via_get_tool_details,omitempty"`
+}
+
+const PreparerDecisionVersion = 1
+
+// DriftDetectedPayload — emitted at the start of a preparer pass when
+// the in-state known-knowledge set and the actual visible-message scan
+// disagree. State is then rewritten to match the scan, and
+// ReconciliationAction describes what changed. RFC #249.
+//
+// Not emitted in Phase 2 (the dedup state doesn't exist yet); the
+// payload struct is defined now so Phase 3 can wire it without a schema
+// change.
+type DriftDetectedPayload struct {
+	Header
+	StateBelievedKnown   []string `json:"state_believed_known,omitempty"`
+	ActuallyVisible      []string `json:"actually_visible,omitempty"`
+	MissingFromVisible   []string `json:"missing_from_visible,omitempty"`
+	ExtrasInVisible      []string `json:"extras_in_visible,omitempty"`
+	ReconciliationAction string   `json:"reconciliation_action,omitempty"`
+}
+
+const DriftDetectedVersion = 1
+
+// MessagesTruncatedPayload — emitted when the sliding-window cutter
+// drops messages from the assembled LLM input. DroppedSeqRange is
+// [from, to] inclusive, indexed into sess.Messages (position-based,
+// since the in-memory provider.Message slice does not carry a seq
+// column). Phase 3 will populate ReleasedKnowledgeIDs / Remaining* once
+// the dedup state exists; in Phase 2 they stay empty/zero.
+type MessagesTruncatedPayload struct {
+	Header
+	DroppedSeqRange              []int    `json:"dropped_seq_range,omitempty"` // [from, to] inclusive
+	DroppedCount                 int      `json:"dropped_count"`
+	ReleasedKnowledgeIDs         []string `json:"released_knowledge_ids,omitempty"`
+	RemainingKnownKnowledgeCount int      `json:"remaining_known_knowledge_count,omitempty"`
+}
+
+const MessagesTruncatedVersion = 1
 
 type SummarizationTriggeredPayload struct {
 	Header
