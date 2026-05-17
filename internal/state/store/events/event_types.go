@@ -89,7 +89,20 @@ const (
 	PromptKindSystemPrompt       = "system_prompt"
 	PromptKindServerInstructions = "server_instructions"
 	PromptKindToolDescription    = "tool_description"
-	PromptKindKnowledgeArticle   = "knowledge_article"
+	// PromptKindKnowledgeArticle is reserved for the content-addressed
+	// body of one [knowledge_context] block. The constant + payload
+	// kind value ship now so consumers can resolve the SHA carried in
+	// TurnStartPayload.InjectedKnowledge[].ContentSHA256 via the
+	// /prompt-snapshots endpoint once a producer exists. No orchestrator-
+	// side producer ships in RFC #249's initial scope — the bodies
+	// still live inline in the user message's [knowledge_context]
+	// envelope (parseable via internal/orchestrator's KC helpers), and
+	// reviewer-side rendering today resolves bodies that way. A
+	// snapshot-writer (orchestrator-side at dedup-injection time OR
+	// plugin-side at retrieval time) is tracked as a follow-up so
+	// existing call-sites don't pay a write per turn before consumers
+	// actually need it.
+	PromptKindKnowledgeArticle = "knowledge_article"
 )
 
 // PreparerDecisionMode values for PreparerDecisionPayload.Mode.
@@ -182,11 +195,22 @@ type Header struct {
 // TurnStartPayload — emitted once per orchestrator turn. References to
 // prompt content are by SHA256; bodies are persisted out-of-band in
 // prompt_snapshots so the same prompt costs one row across all sessions.
+//
+// RFC #249 Pillar C adds four references back into the preparer phase:
+// InjectedKnowledge / PreparerDecisionID / ToolTier1Count / ToolTier3Count.
+// These let consumers (review UIs, api-plugin aggregations) render the
+// turn's preparer outcome in-place without walking sibling events by
+// parent_id. All four are omitempty so pre-Phase-3 deployments and
+// no-preparer turns emit a payload byte-identical to the original shape.
 type TurnStartPayload struct {
 	Header
 	SystemPromptSHA256 string                 `json:"system_prompt_sha256,omitempty"`
 	ServerInstructions []ServerInstructionRef `json:"server_instructions,omitempty"`
 	AvailableTools     []ToolRef              `json:"available_tools,omitempty"`
+	InjectedKnowledge  []KnowledgeRef         `json:"injected_knowledge,omitempty"`
+	PreparerDecisionID string                 `json:"preparer_decision_id,omitempty"`
+	ToolTier1Count     int                    `json:"tool_tier1_count,omitempty"`
+	ToolTier3Count     int                    `json:"tool_tier3_count,omitempty"`
 	ModelID            string                 `json:"model_id"`
 	Temperature        *float64               `json:"temperature,omitempty"`
 	ReasoningEffort    string                 `json:"reasoning_effort,omitempty"`
@@ -200,6 +224,21 @@ type ServerInstructionRef struct {
 type ToolRef struct {
 	Name       string `json:"name"`
 	DescSHA256 string `json:"desc_sha256"`
+}
+
+// KnowledgeRef is the turn_start reference back to one knowledge article
+// injected into this turn's [knowledge_context] envelope. ContentSHA256
+// participates in the same content-addressed prompt_snapshots store as
+// SystemPromptSHA256 / DescSHA256 — once a producer writes a
+// PromptKindKnowledgeArticle snapshot, consumers can resolve the body
+// via /prompt-snapshots?sha=… without re-running RAG retrieval. Today
+// the snapshot writer for that kind is deferred (see the comment on
+// PromptKindKnowledgeArticle); the reference itself is durable
+// regardless, and the bodies remain readable inline in the user
+// message's [knowledge_context] block.
+type KnowledgeRef struct {
+	ArticleID     string `json:"article_id"`
+	ContentSHA256 string `json:"content_sha256"`
 }
 
 const TurnStartVersion = 1
@@ -524,6 +563,15 @@ type SummarizationCompletedPayload struct {
 	SummaryTruncated bool   `json:"summary_truncated,omitempty"`
 	KeptMessages     int    `json:"kept_messages"`
 	LatencyMS        int64  `json:"latency_ms,omitempty"`
+	// ReleasedKnowledgeIDs — article_ids whose [knowledge_context]
+	// blocks were inside the summarized-and-replaced range. The next
+	// preparer pass's reconciliation will drop them from
+	// known_knowledge anyway (visible-message scan is authoritative);
+	// the field exists so consumers correlating with InjectionState
+	// can render the release in-place without diffing two
+	// reconciliation snapshots. Empty when summarization replaced no
+	// messages carrying KC blocks.
+	ReleasedKnowledgeIDs []string `json:"released_knowledge_ids,omitempty"`
 }
 
 const SummarizationCompletedVersion = 1

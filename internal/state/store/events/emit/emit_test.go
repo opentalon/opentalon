@@ -126,6 +126,58 @@ func TestEmitTurnStart_PayloadShape(t *testing.T) {
 	}
 }
 
+func TestEmitTurnStart_PreparerRefsRoundTrip(t *testing.T) {
+	// RFC #249 Pillar C: turn_start carries back-references to the
+	// preparer phase (InjectedKnowledge, PreparerDecisionID, Tier1/Tier3
+	// counts). When populated they round-trip through the payload
+	// JSON; when zero they're omitted under `omitempty` so pre-Phase-3
+	// payloads stay byte-identical.
+	sink := &fakeSink{}
+	ctx := actor.WithSessionID(context.Background(), "s1")
+	EmitTurnStart(ctx, sink, TurnStartArgs{
+		ModelID:            "gpt-x",
+		PreparerDecisionID: "evt_pd_42",
+		InjectedKnowledge: []events.KnowledgeRef{
+			{ArticleID: "kb_a", ContentSHA256: "sha_a"},
+			{ArticleID: "kb_b", ContentSHA256: "sha_b"},
+		},
+		ToolTier1Count: 8,
+		ToolTier3Count: 47,
+	})
+
+	got := sink.snapshot()
+	if len(got) != 1 || got[0].EventType != events.TypeTurnStart {
+		t.Fatalf("unexpected events: %+v", got)
+	}
+	var p events.TurnStartPayload
+	if err := json.Unmarshal(got[0].Payload, &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if p.PreparerDecisionID != "evt_pd_42" {
+		t.Errorf("PreparerDecisionID = %q, want evt_pd_42", p.PreparerDecisionID)
+	}
+	if len(p.InjectedKnowledge) != 2 ||
+		p.InjectedKnowledge[0].ArticleID != "kb_a" || p.InjectedKnowledge[0].ContentSHA256 != "sha_a" ||
+		p.InjectedKnowledge[1].ArticleID != "kb_b" || p.InjectedKnowledge[1].ContentSHA256 != "sha_b" {
+		t.Errorf("InjectedKnowledge mismatch: %+v", p.InjectedKnowledge)
+	}
+	if p.ToolTier1Count != 8 || p.ToolTier3Count != 47 {
+		t.Errorf("tier counts = (%d, %d), want (8, 47)", p.ToolTier1Count, p.ToolTier3Count)
+	}
+
+	// Zero-value case: same helper with none of the Pillar-C fields set
+	// must omit them from the payload JSON (string match on the wire is
+	// the simplest regression guard).
+	sink2 := &fakeSink{}
+	EmitTurnStart(ctx, sink2, TurnStartArgs{ModelID: "gpt-x"})
+	wire := string(sink2.snapshot()[0].Payload)
+	for _, field := range []string{"preparer_decision_id", "injected_knowledge", "tool_tier1_count", "tool_tier3_count"} {
+		if strings.Contains(wire, field) {
+			t.Errorf("zero-value emit leaked %q in payload: %s", field, wire)
+		}
+	}
+}
+
 func TestEmitUserMessage_ContentLengthMatchesStoredContent(t *testing.T) {
 	// The contract: ContentLength matches the BYTES of the stored Content
 	// field (post-sanitization), not the input. ASCII inputs are

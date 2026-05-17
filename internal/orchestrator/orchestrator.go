@@ -1357,7 +1357,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if tierActive {
 			o.prepareToolTierDecision(ctx, sessionID, &prepAgg)
 		}
-		o.emitPreparerDecision(ctx, prepAgg)
+		decisionID := o.emitPreparerDecision(ctx, prepAgg)
+		if decisionID != "" {
+			refs, tier1Count, tier3Count := turnStartRefsFromAggregate(prepAgg)
+			ctx = withTurnStartContext(ctx, turnStartContext{
+				PreparerDecisionID: decisionID,
+				InjectedKnowledge:  refs,
+				Tier1Count:         tier1Count,
+				Tier3Count:         tier3Count,
+			})
+		}
 		if dedupActive {
 			o.persistDedupDecision(ctx, sessionID, &prepAgg)
 		}
@@ -2458,6 +2467,18 @@ func (o *Orchestrator) prepareTurnStart(ctx context.Context, systemPrompt, model
 	sort.Slice(args.AvailableTools, func(i, j int) bool {
 		return args.AvailableTools[i].Name < args.AvailableTools[j].Name
 	})
+	// RFC #249 Pillar C: quote the preparer-phase references back into
+	// turn_start so consumers can render the preparer outcome in-place
+	// without walking sibling events by parent_id. The ctx slot is
+	// populated by the preparer-loop after emitPreparerDecision; absent
+	// on early-exit paths (no preparer ran / no signal) — the zero
+	// values then leave the new fields omitted from the payload.
+	if tsc, ok := turnStartContextFromContext(ctx); ok {
+		args.PreparerDecisionID = tsc.PreparerDecisionID
+		args.InjectedKnowledge = tsc.InjectedKnowledge
+		args.ToolTier1Count = tsc.Tier1Count
+		args.ToolTier3Count = tsc.Tier3Count
+	}
 	return args
 }
 
@@ -3087,12 +3108,53 @@ func (o *Orchestrator) applySlidingWindow(ctx context.Context, msgs []provider.M
 		return msgs
 	}
 	dropped := len(msgs) - o.contextMessages
+	// RFC #249 Pillar C: scan the dropped slice for [knowledge_context]
+	// blocks so consumers can correlate the cut with InjectionState
+	// release without re-reconciling. Visible-message scan is the same
+	// data source the next preparer pass uses for lazy reconciliation,
+	// so the two numbers stay in lockstep without a DB read here.
+	released := releasedKnowledgeIDs(msgs[:dropped])
+	remaining := len(uniqueKnowledgeArticles(scanVisibleKnowledgeBlocks(msgs[dropped:])))
 	emit.EmitMessagesTruncated(ctx, o.eventSink, emit.MessagesTruncatedArgs{
-		DroppedSeqFrom: 0,
-		DroppedSeqTo:   dropped - 1,
-		DroppedCount:   dropped,
+		DroppedSeqFrom:               0,
+		DroppedSeqTo:                 dropped - 1,
+		DroppedCount:                 dropped,
+		ReleasedKnowledgeIDs:         released,
+		RemainingKnownKnowledgeCount: remaining,
 	})
 	return msgs[dropped:]
+}
+
+// releasedKnowledgeIDs returns the deduplicated article_ids whose
+// [knowledge_context] blocks live in the given message slice. Empty
+// when the slice carries no KC-bearing user messages or every block
+// is the legacy untagged shape (where ArticleID is unknown).
+// Used by both the sliding-window cutter and the summarization
+// trim — both replace the message slice with a stand-in, releasing
+// every KC reference inside the replaced range.
+func releasedKnowledgeIDs(messages []provider.Message) []string {
+	return uniqueKnowledgeArticles(scanVisibleKnowledgeBlocks(messages))
+}
+
+// uniqueKnowledgeArticles collapses a parsedKCBlock slice to its
+// distinct article_ids in first-seen order. Blocks without an
+// article_id (legacy untagged form) are skipped — they cannot be
+// correlated with InjectionState anyway. Returns nil when nothing
+// to report so the emitted payload omits the field cleanly.
+func uniqueKnowledgeArticles(blocks []parsedKCBlock) []string {
+	if len(blocks) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(blocks))
+	var out []string
+	for _, b := range blocks {
+		if b.ArticleID == "" || seen[b.ArticleID] {
+			continue
+		}
+		seen[b.ArticleID] = true
+		out = append(out, b.ArticleID)
+	}
+	return out
 }
 
 func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
@@ -4026,9 +4088,10 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 		return
 	}
 	emit.EmitSummarizationCompleted(ctx, o.eventSink, emit.SummarizationCompletedArgs{
-		Summary:      newSummary,
-		KeptMessages: len(keepMessages),
-		LatencyMS:    time.Since(summarizeStart).Milliseconds(),
+		Summary:              newSummary,
+		KeptMessages:         len(keepMessages),
+		LatencyMS:            time.Since(summarizeStart).Milliseconds(),
+		ReleasedKnowledgeIDs: releasedKnowledgeIDs(toSummarize),
 	})
 }
 
@@ -4166,6 +4229,36 @@ func formatToolResultMessage(result ToolResult) string {
 		return fmt.Sprintf("[tool_result] error: %s", result.Error)
 	}
 	return fmt.Sprintf("[tool_result] %s", result.Content)
+}
+
+// turnStartContextKey is the ctx slot the preparer phase fills in
+// after emitPreparerDecision so prepareTurnStart can quote the
+// decision back as TurnStartPayload.PreparerDecisionID +
+// InjectedKnowledge + tier1/tier3 counts (RFC #249 Pillar C). Set
+// inside the same Run call, before EmitTurnStart fires.
+type turnStartContextKey struct{}
+
+// turnStartContext carries the preparer-phase references the next
+// turn_start event quotes. PreparerDecisionID may be "" when no
+// preparer_decision event was emitted (no signal in the aggregate);
+// in that case InjectedKnowledge / Tier1Count / Tier3Count are also
+// zero values and the turn_start payload omits all four under
+// `omitempty`. See turnStartRefsFromAggregate for the per-mode
+// derivation.
+type turnStartContext struct {
+	PreparerDecisionID string
+	InjectedKnowledge  []events.KnowledgeRef
+	Tier1Count         int
+	Tier3Count         int
+}
+
+func withTurnStartContext(ctx context.Context, tsc turnStartContext) context.Context {
+	return context.WithValue(ctx, turnStartContextKey{}, tsc)
+}
+
+func turnStartContextFromContext(ctx context.Context) (turnStartContext, bool) {
+	v, ok := ctx.Value(turnStartContextKey{}).(turnStartContext)
+	return v, ok
 }
 
 // relevantToolsKey is the context key for tool filtering from preparer responses.

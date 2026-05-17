@@ -161,9 +161,13 @@ func (o *Orchestrator) emitPreparerRetrievals(ctx context.Context, query string,
 // In both modes Tools.Tier1New surfaces every ToolCandidate plus any
 // legacy relevant_tools fallback list so the event stays meaningful
 // while Phase 4's tier logic is off.
-func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAggregate) {
+//
+// Returns the emitted event id so the caller can chain it as
+// TurnStartPayload.PreparerDecisionID — empty when no event was
+// emitted (no signal in the aggregate).
+func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAggregate) string {
 	if o.eventSink == nil {
-		return
+		return ""
 	}
 	hasSignal := len(agg.Knowledge) > 0 ||
 		len(agg.Glossary) > 0 ||
@@ -177,7 +181,7 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 		// sessions with empty o.preparers, …). Legacy-fallback is
 		// counted as signal because the audit trail benefits from
 		// recording the fallback even if no candidates surfaced.
-		return
+		return ""
 	}
 
 	var knowledgeBlock events.PreparerDecisionKnowledgeBlock
@@ -215,11 +219,54 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 
 	toolsBlock := buildToolsBlock(agg)
 
-	emit.EmitPreparerDecision(ctx, o.eventSink, emit.PreparerDecisionArgs{
+	return emit.EmitPreparerDecision(ctx, o.eventSink, emit.PreparerDecisionArgs{
 		Mode:      mode,
 		Knowledge: knowledgeBlock,
 		Tools:     toolsBlock,
 	})
+}
+
+// turnStartRefsFromAggregate extracts the Pillar-C fields the
+// turn_start event references back from the preparer aggregate:
+// the injected-knowledge ref list and the tier1/tier3 counts. Each
+// is mode-aware:
+//
+//   - InjectedKnowledge in full mode = the dedup decision's Injected
+//     slice (the deduped set the LLM actually sees this turn).
+//   - InjectedKnowledge in instrumentation_only mode = every
+//     retrieved candidate (Phase 2 passes everything through).
+//   - InjectedKnowledge in legacy_fallback mode = empty — the plugin
+//     handed the orchestrator a pre-rendered block with no
+//     structured handle, so no ref list can be assembled without
+//     re-parsing.
+//
+// Tier counts mirror agg.ToolTier when Phase 4 ran (counts of the
+// Tier1 / Tier3 slices respectively); zero when it didn't. Zero
+// values are omitted from the emitted payload by `omitempty` so
+// pre-Phase-4 turns stay byte-identical to the original shape.
+func turnStartRefsFromAggregate(agg preparerAggregate) (refs []events.KnowledgeRef, tier1Count, tier3Count int) {
+	switch {
+	case agg.KnowledgeDedup != nil:
+		for _, c := range agg.KnowledgeDedup.Injected {
+			refs = append(refs, events.KnowledgeRef{
+				ArticleID:     c.ArticleID,
+				ContentSHA256: c.ContentSHA256,
+			})
+		}
+	case len(agg.LegacyKnowledgePlugins) == 0:
+		// instrumentation_only — emit every candidate as injected.
+		for _, c := range agg.Knowledge {
+			refs = append(refs, events.KnowledgeRef{
+				ArticleID:     c.ArticleID,
+				ContentSHA256: c.ContentSHA256,
+			})
+		}
+	}
+	if agg.ToolTier != nil {
+		tier1Count = len(agg.ToolTier.Tier1)
+		tier3Count = len(agg.ToolTier.Tier3)
+	}
+	return refs, tier1Count, tier3Count
 }
 
 // buildToolsBlock returns the preparer_decision.tools payload for the
