@@ -306,6 +306,7 @@ type Orchestrator struct {
 	injectionStateStore     InjectionStateStore     // optional; nil = dedup decision logic short-circuits to instrumentation_only mode
 	toolTiers               ToolTiersConfig         // RFC #249 Phase 4 tier-visibility flags; Enabled=false short-circuits to pre-Phase-4 single-tier behaviour
 	toolErrorHandling       ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; thresholds always carry RFC defaults after NewWithRules
+	toolErrorTracker        *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by toolTiers.Enabled
 	// legacyKnowledgeWarnings tracks the (sessionID, pluginName) pairs
 	// we've already deprecation-warned for, so a session that keeps
 	// using a legacy preparer doesn't spam the log every turn. Key is
@@ -487,6 +488,7 @@ func NewWithRules(
 		injectionStateStore:     opts.InjectionStateStore,
 		toolTiers:               tierCfg,
 		toolErrorHandling:       errCfg,
+		toolErrorTracker:        newToolErrorTracker(),
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
@@ -2212,6 +2214,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Info("plugin call", "plugin", call.Plugin, "action", call.Action, "duration", pluginDuration.Round(time.Millisecond).String(), "error", toolResult.Error != "")
 			if toolResult.Error != "" {
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
+			}
+			// RFC #249 Phase 4 D5: update the consecutive-error counters,
+			// inject the "Tool X failed N times" nudge into the next LLM
+			// iteration when LoopCapPerTurn trips, and flip the Demoted
+			// flag in known_tools when StickyDemotionThreshold trips
+			// (cleared again on the next successful invocation).
+			if warning := o.recordToolOutcome(ctx, sessionID, call, toolResult); warning != nil {
+				transientMessages = append(transientMessages, *warning)
 			}
 			if o.pluginCallObserver != nil {
 				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", perCallInput, perCallOutput)
