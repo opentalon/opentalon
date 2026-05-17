@@ -1321,9 +1321,25 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if dedupActive {
 			content = o.prepareDedupDecision(ctx, sessionID, content, &prepAgg)
 		}
+		// RFC #249 Phase 4 tier decision: same activation contract as
+		// dedup (skip on legacy_fallback so the LLM sees the plugin's
+		// raw injection; skip without a state store so LRU has nowhere
+		// to persist). When both dedup and tier run, prepareToolTier-
+		// Decision merges its KnownTools delta into the dedup
+		// decision's UpdatedState — the dedup persist then writes both
+		// in one round-trip.
+		tierActive := !legacyFallback &&
+			o.toolTiers.Enabled &&
+			o.injectionStateStore != nil
+		if tierActive {
+			o.prepareToolTierDecision(ctx, sessionID, &prepAgg)
+		}
 		o.emitPreparerDecision(ctx, prepAgg)
 		if dedupActive {
 			o.persistDedupDecision(ctx, sessionID, &prepAgg)
+		}
+		if tierActive {
+			o.persistToolTierDecision(ctx, sessionID, &prepAgg)
 		}
 		// Store relevant tools in context so buildSystemPrompt and planner can filter.
 		if relevantToolsSet {

@@ -40,6 +40,15 @@ type preparerAggregate struct {
 	// (config disabled, no store wired, or no knowledge candidates).
 	KnowledgeDedup *knowledgeDedupDecision
 
+	// ToolTier, when non-nil, drives the Phase-4 tier-aware Tools
+	// block of preparer_decision. Nil means tier logic didn't run
+	// (config disabled or no store wired) — emitPreparerDecision then
+	// falls back to the Phase-2 pass-through (every candidate name in
+	// tools.tier1_new). The decision also feeds the system-prompt
+	// renderer (D3) and persists KnownTools via the dedup persist when
+	// both ran in the same turn.
+	ToolTier *toolTierDecision
+
 	// LegacyKnowledgePlugins lists plugin names whose response carried
 	// a legacy [knowledge_context] injection (pr.Message contains the
 	// envelope) without the structured KnowledgeCandidates that Phase 3
@@ -204,15 +213,39 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 		}
 	}
 
-	toolsBlock := events.PreparerDecisionToolsBlock{
-		Tier1New: toolCandidateNames(agg.Tools, agg.LegacyRelevantTools),
-	}
+	toolsBlock := buildToolsBlock(agg)
 
 	emit.EmitPreparerDecision(ctx, o.eventSink, emit.PreparerDecisionArgs{
 		Mode:      mode,
 		Knowledge: knowledgeBlock,
 		Tools:     toolsBlock,
 	})
+}
+
+// buildToolsBlock returns the preparer_decision.tools payload for the
+// current aggregate. With ToolTier set (Phase 4 enabled + ran), each
+// tier bucket is reported separately + the LRU/eviction telemetry
+// + the get_tool_details promotion list. Without ToolTier (Phase 2 /
+// Phase 3 fall-through), every candidate appears in tier1_new — the
+// instrumentation_only behaviour Phase 2 introduced.
+func buildToolsBlock(agg preparerAggregate) events.PreparerDecisionToolsBlock {
+	if agg.ToolTier == nil {
+		return events.PreparerDecisionToolsBlock{
+			Tier1New: toolCandidateNames(agg.Tools, agg.LegacyRelevantTools),
+		}
+	}
+	d := agg.ToolTier
+	return events.PreparerDecisionToolsBlock{
+		Tier0Count:                len(d.Tier0),
+		Tier1New:                  d.Tier1New,
+		Tier1Carried:              d.Tier1Carried,
+		Tier1EvictedToTier3:       d.Tier1EvictedToTier3,
+		Tier1DemotedSticky:        d.Tier1DemotedSticky,
+		Tier1SizeAfter:            d.Tier1SizeAfter,
+		Tier1Cap:                  d.Tier1Cap,
+		Tier3TotalVisible:         len(d.Tier3),
+		PromotedViaGetToolDetails: d.PromotedViaGetToolDetails,
+	}
 }
 
 // dedupInjectedItems converts the dedup decision's parallel

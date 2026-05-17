@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -3246,5 +3247,297 @@ func TestOrchestrator_MessagesTruncated_NotEmittedWhenWithinWindow(t *testing.T)
 	}
 	if mt := findEventByType(sink.snapshot(), events.TypeMessagesTruncated); mt != nil {
 		t.Errorf("messages_truncated must not emit when within window; got payload: %s", mt.Payload)
+	}
+}
+
+// --- RFC #249 Phase 4 (tool tiers) integration tests ---
+
+// preparerJSONWithTools returns a fake preparer Capabilities body that
+// surfaces tool_candidates so the tier decision has something to rank.
+// The plugin name "rag-plugin" + action "prepare" is preparer-only;
+// the candidates name a SEPARATE registry plugin's actions ("tools-
+// plugin.t1" etc.) so they're profile-allowed, non-user-only, and
+// non-preparer when the tier decision runs.
+const preparerJSONForTierTests = `{
+		"send_to_llm": true,
+		"message": "user question",
+		"tool_candidates": [
+			{"tool_name": "tools-plugin.t1", "score": 0.95},
+			{"tool_name": "tools-plugin.t2", "score": 0.85},
+			{"tool_name": "tools-plugin.t3", "score": 0.75},
+			{"tool_name": "tools-plugin.t4", "score": 0.55}
+		]
+	}`
+
+// registerTierTestPlugins wires a preparer (rag-plugin.prepare) +
+// five callable tools (tools-plugin.t1..t5) into the registry. The
+// preparer JSON returns ranked candidates that name t1..t4 so a tier
+// decision can split them across Tier 1 / Tier 2 / Tier 3.
+func registerTierTestPlugins(t *testing.T, registry *ToolRegistry, prepJSON string) {
+	t.Helper()
+	if err := registry.Register(PluginCapability{
+		Name: "rag-plugin", Description: "RAG preparer",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: prepJSON}); err != nil {
+		t.Fatalf("register rag-plugin: %v", err)
+	}
+	if err := registry.Register(PluginCapability{
+		Name: "tools-plugin", Description: "Five business tools",
+		Actions: []Action{
+			{Name: "t1", Description: "Tool one"},
+			{Name: "t2", Description: "Tool two"},
+			{Name: "t3", Description: "Tool three"},
+			{Name: "t4", Description: "Tool four"},
+			{Name: "t5", Description: "Tool five"},
+		},
+	}, &fixedResultExecutor{content: "tool-result"}); err != nil {
+		t.Fatalf("register tools-plugin: %v", err)
+	}
+}
+
+func TestOrchestrator_PreparerPhase_ToolTiersEnabledEmitsTieredBlock(t *testing.T) {
+	// RFC #249 Phase 4: with tool_tiers.enabled + a wired
+	// InjectionStateStore, the preparer_decision event's Tools block
+	// reports Tier 0/1/2/3 splits AND the cap snapshot, instead of the
+	// Phase-2 pass-through (all candidates in tier1_new).
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"final"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	tierStore := &fakeInjectionStateStore{}
+
+	registry := NewToolRegistry()
+	registerTierTestPlugins(t, registry, preparerJSONForTierTests)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:           sink,
+		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: 2, Tier2Cap: 1},
+		InjectionStateStore: tierStore,
+	})
+
+	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
+		t.Fatal(err)
+	}
+
+	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
+	if pd == nil {
+		t.Fatal("preparer_decision event missing")
+	}
+	var pdPayload events.PreparerDecisionPayload
+	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	tb := pdPayload.Tools
+	// Tier1Cap=2 + Tier2Cap=1 + 4 candidates + 1 non-candidate (t5):
+	//   Tier 1 = [t1, t2]; Tier 2 = [t3]; Tier 3 = [t4, t5].
+	if tb.Tier1Cap != 2 {
+		t.Errorf("Tier1Cap snapshot = %d, want 2", tb.Tier1Cap)
+	}
+	if tb.Tier1SizeAfter != 2 {
+		t.Errorf("Tier1SizeAfter = %d, want 2", tb.Tier1SizeAfter)
+	}
+	wantT1New := []string{"tools-plugin.t1", "tools-plugin.t2"}
+	gotT1New := append([]string(nil), tb.Tier1New...)
+	sort.Strings(gotT1New)
+	sort.Strings(wantT1New)
+	if !reflect.DeepEqual(gotT1New, wantT1New) {
+		t.Errorf("Tier1New = %v, want %v", gotT1New, wantT1New)
+	}
+	if tb.Tier3TotalVisible != 2 {
+		t.Errorf("Tier3TotalVisible = %d, want 2 (t4 + t5)", tb.Tier3TotalVisible)
+	}
+	if tierStore.updateCalls != 1 {
+		t.Errorf("UpdateInjectionState calls = %d, want 1", tierStore.updateCalls)
+	}
+	if len(tierStore.lastWritten.KnownTools) == 0 {
+		t.Errorf("KnownTools must be persisted, got empty")
+	}
+}
+
+func TestOrchestrator_PreparerPhase_ToolTiersDisabledStaysPassThrough(t *testing.T) {
+	// Regression guard: with the master switch off (and even when a
+	// store is wired), preparer_decision must keep the Phase-2
+	// pass-through Tools block — every candidate in tier1_new, no
+	// tier1_cap snapshot, no store writes.
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"final"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	tierStore := &fakeInjectionStateStore{}
+
+	registry := NewToolRegistry()
+	registerTierTestPlugins(t, registry, preparerJSONForTierTests)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:           sink,
+		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+		ToolTiers:           ToolTiersConfig{Enabled: false},
+		InjectionStateStore: tierStore,
+	})
+
+	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
+		t.Fatal(err)
+	}
+
+	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
+	var pdPayload events.PreparerDecisionPayload
+	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pdPayload.Tools.Tier1Cap != 0 {
+		t.Errorf("Tier1Cap must stay zero when tier logic disabled, got %d", pdPayload.Tools.Tier1Cap)
+	}
+	if len(pdPayload.Tools.Tier1New) != 4 {
+		t.Errorf("pass-through Tier1New len = %d, want 4 (all candidates)", len(pdPayload.Tools.Tier1New))
+	}
+	if tierStore.updateCalls != 0 {
+		t.Errorf("disabled tier_tiers must not write state, got %d update calls", tierStore.updateCalls)
+	}
+}
+
+func TestOrchestrator_PreparerPhase_ToolTiersSecondTurnLRUCarriesOver(t *testing.T) {
+	// Two-turn LRU sanity: turn 1 establishes t1/t2 as Tier 1. Turn 2
+	// sees DIFFERENT candidates (t3/t4) and Tier1Cap=2 — but t1/t2's
+	// LRURank from turn 1 still falls below currentTurn=2, so t3/t4
+	// take Tier 1 and t1/t2 land in Tier1EvictedToTier3.
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"final-1", "final-2"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	tierStore := &fakeInjectionStateStore{}
+
+	registry := NewToolRegistry()
+	registerTierTestPlugins(t, registry, `{
+		"send_to_llm": true,
+		"message": "q",
+		"tool_candidates": [
+			{"tool_name": "tools-plugin.t1", "score": 0.9},
+			{"tool_name": "tools-plugin.t2", "score": 0.8}
+		]
+	}`)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:           sink,
+		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: 2, Tier2Cap: 1},
+		InjectionStateStore: tierStore,
+	})
+
+	// Turn 1: t1/t2 enter Tier 1.
+	if _, err := orch.Run(context.Background(), "s1", "first"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Swap the preparer to return t3/t4 instead.
+	t1Caps := registry.ListCapabilities()
+	for _, cap := range t1Caps {
+		if cap.Name == "rag-plugin" {
+			_, _ = registry.GetExecutor(cap.Name) // sanity: it's registered
+		}
+	}
+	registry2 := NewToolRegistry()
+	registerTierTestPlugins(t, registry2, `{
+		"send_to_llm": true,
+		"message": "q2",
+		"tool_candidates": [
+			{"tool_name": "tools-plugin.t3", "score": 0.9},
+			{"tool_name": "tools-plugin.t4", "score": 0.8}
+		]
+	}`)
+	// Re-create the orchestrator with the new registry but the SAME
+	// store (so turn 2 reads turn 1's KnownTools).
+	orch2 := NewWithRules(llm, parser, registry2, memory, sessions, OrchestratorOpts{
+		EventSink:           sink,
+		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: 2, Tier2Cap: 1},
+		InjectionStateStore: tierStore,
+	})
+	if _, err := orch2.Run(context.Background(), "s1", "second"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Find the LAST preparer_decision (turn 2's).
+	evs := sink.snapshot()
+	var turn2 *emit.Event
+	for i := range evs {
+		if evs[i].EventType == events.TypePreparerDecision {
+			ev := evs[i]
+			turn2 = &ev
+		}
+	}
+	if turn2 == nil {
+		t.Fatal("turn 2 preparer_decision missing")
+	}
+	var p events.PreparerDecisionPayload
+	if err := json.Unmarshal(turn2.Payload, &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	wantEvicted := []string{"tools-plugin.t1", "tools-plugin.t2"}
+	gotEvicted := append([]string(nil), p.Tools.Tier1EvictedToTier3...)
+	sort.Strings(gotEvicted)
+	sort.Strings(wantEvicted)
+	if !reflect.DeepEqual(gotEvicted, wantEvicted) {
+		t.Errorf("turn 2 Tier1EvictedToTier3 = %v, want %v", gotEvicted, wantEvicted)
+	}
+	gotT1New := append([]string(nil), p.Tools.Tier1New...)
+	sort.Strings(gotT1New)
+	wantT1New := []string{"tools-plugin.t3", "tools-plugin.t4"}
+	if !reflect.DeepEqual(gotT1New, wantT1New) {
+		t.Errorf("turn 2 Tier1New = %v, want %v", gotT1New, wantT1New)
+	}
+}
+
+func TestOrchestrator_PreparerPhase_ToolTiersWithDedupSingleStateWrite(t *testing.T) {
+	// When BOTH dedup and tier decisions run, the tier preparer merges
+	// its KnownTools delta into the dedup decision's UpdatedState so a
+	// single UpdateInjectionState call carries both — avoids one
+	// clobbering the other and keeps writes to one round-trip.
+	preparerJSON := `{
+		"send_to_llm": true,
+		"message": "q",
+		"knowledge_candidates": [
+			{"article_id": "kb_a", "content": "body", "content_sha256": "sha-a", "score": 0.9}
+		],
+		"tool_candidates": [
+			{"tool_name": "tools-plugin.t1", "score": 0.95}
+		]
+	}`
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"final"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	combinedStore := &fakeInjectionStateStore{}
+
+	registry := NewToolRegistry()
+	registerTierTestPlugins(t, registry, preparerJSON)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:           sink,
+		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+		KnowledgeDedup:      KnowledgeDedupConfig{Enabled: true},
+		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: 3, Tier2Cap: 2},
+		InjectionStateStore: combinedStore,
+	})
+	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
+		t.Fatal(err)
+	}
+
+	if combinedStore.updateCalls != 1 {
+		t.Errorf("UpdateInjectionState calls = %d, want 1 (dedup write carries tier delta)", combinedStore.updateCalls)
+	}
+	if len(combinedStore.lastWritten.KnownKnowledge) != 1 {
+		t.Errorf("KnownKnowledge persisted len = %d, want 1", len(combinedStore.lastWritten.KnownKnowledge))
+	}
+	if len(combinedStore.lastWritten.KnownTools) == 0 {
+		t.Errorf("KnownTools must also be persisted in the same write, got 0 entries")
 	}
 }
