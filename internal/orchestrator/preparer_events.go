@@ -243,6 +243,9 @@ func buildToolsBlock(agg preparerAggregate) events.PreparerDecisionToolsBlock {
 		Tier1DemotedSticky:        d.Tier1DemotedSticky,
 		Tier1SizeAfter:            d.Tier1SizeAfter,
 		Tier1Cap:                  d.Tier1Cap,
+		Tier2Tools:                d.Tier2,
+		Tier2SizeAfter:            len(d.Tier2),
+		Tier2Cap:                  d.Tier2Cap,
 		Tier3TotalVisible:         len(d.Tier3),
 		PromotedViaGetToolDetails: d.PromotedViaGetToolDetails,
 	}

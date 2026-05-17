@@ -462,6 +462,13 @@ type PreparerDecisionToolsBlock struct {
 	Tier1DemotedSticky        []string `json:"tier1_demoted_sticky,omitempty"`
 	Tier1SizeAfter            int      `json:"tier1_size_after,omitempty"`
 	Tier1Cap                  int      `json:"tier1_cap,omitempty"`
+	// Tier 2 is reseeded from RAG candidates every turn (no LRU
+	// carry / new distinction), so a single slice + size + cap is the
+	// full payload. Names emitted so consumers can verify the
+	// system-prompt render against what the orchestrator decided.
+	Tier2Tools                []string `json:"tier2_tools,omitempty"`
+	Tier2SizeAfter            int      `json:"tier2_size_after,omitempty"`
+	Tier2Cap                  int      `json:"tier2_cap,omitempty"`
 	Tier3TotalVisible         int      `json:"tier3_total_visible,omitempty"`
 	PromotedViaGetToolDetails []string `json:"promoted_via_get_tool_details,omitempty"`
 }

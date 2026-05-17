@@ -49,7 +49,8 @@ import (
 // is the semantically meaningful order — currently nowhere; Tier 1
 // and Tier 2 are sorted by name to keep the event payload diff-able
 // across turns). The event payload pulls Tier1New / Tier1Carried /
-// Tier1EvictedToTier3 / Tier1SizeAfter / Tier1Cap; the system-prompt
+// Tier1EvictedToTier3 / Tier1SizeAfter / Tier1Cap + Tier2 / Tier2Cap
+// (the latter for visibility into D3 promotion); the system-prompt
 // renderer (D3) pulls Tier 2 and Tier 3.
 type toolTierDecision struct {
 	// Tier0 is the always_include set ∩ available tools. Always present
@@ -88,6 +89,10 @@ type toolTierDecision struct {
 	// stays interpretable even if the operator flips the cap between
 	// turns.
 	Tier1Cap int
+	// Tier2Cap mirrors Tier1Cap for the Tier 2 bucket — emitted into the
+	// preparer_decision event so consumers can verify Tier 2 was sized
+	// as configured.
+	Tier2Cap int
 	// PromotedViaGetToolDetails is the D4 input slice — tools the LLM
 	// pulled into Tier 1 via the meta-tool this turn. Echoed into the
 	// event payload so consumers see the promotion provenance.
@@ -274,6 +279,7 @@ func applyToolTierDecision(
 		Tier1EvictedToTier3:       evicted,
 		Tier1SizeAfter:            len(tier1),
 		Tier1Cap:                  cfg.Tier1Cap,
+		Tier2Cap:                  cfg.Tier2Cap,
 		PromotedViaGetToolDetails: appendIfPresent(nil, promoted, availSet, tier0Set),
 		UpdatedState: state.InjectionState{
 			KnownKnowledge: append([]state.KnownKnowledgeEntry(nil), prior.KnownKnowledge...),

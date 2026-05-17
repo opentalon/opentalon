@@ -128,6 +128,9 @@ func TestApplyToolTierDecision_Tier2FromCandidatesAboveCap(t *testing.T) {
 	if !reflect.DeepEqual(got.Tier3, []string{"a.5"}) {
 		t.Errorf("Tier3 = %v, want [a.5]", got.Tier3)
 	}
+	if got.Tier2Cap != cfg.Tier2Cap {
+		t.Errorf("Tier2Cap snapshot = %d, want %d (cfg.Tier2Cap)", got.Tier2Cap, cfg.Tier2Cap)
+	}
 }
 
 func TestApplyToolTierDecision_PromotedJoinsTier1(t *testing.T) {
@@ -304,6 +307,8 @@ func TestBuildToolsBlock_FromTierDecision(t *testing.T) {
 		Tier1EvictedToTier3:       []string{"a.z"},
 		Tier1SizeAfter:            2,
 		Tier1Cap:                  10,
+		Tier2:                     []string{"a.t2a", "a.t2b"},
+		Tier2Cap:                  15,
 		Tier3:                     []string{"a.lots", "a.more"},
 		PromotedViaGetToolDetails: []string{"a.promo"},
 	}
@@ -315,6 +320,19 @@ func TestBuildToolsBlock_FromTierDecision(t *testing.T) {
 	}
 	if !reflect.DeepEqual(block.Tier1New, d.Tier1New) || !reflect.DeepEqual(block.Tier1Carried, d.Tier1Carried) {
 		t.Errorf("tier1 subset slices not threaded through: %+v", block)
+	}
+	// Tier 2 fields close the prior observability gap: without them,
+	// consumers had no way to tell from the event log whether Tier 2
+	// was being populated, even though Tier 2 actually drives the
+	// "name + 1-line summary" block in the rendered system prompt.
+	if !reflect.DeepEqual(block.Tier2Tools, []string{"a.t2a", "a.t2b"}) {
+		t.Errorf("Tier2Tools = %v, want [a.t2a a.t2b]", block.Tier2Tools)
+	}
+	if block.Tier2SizeAfter != 2 {
+		t.Errorf("Tier2SizeAfter = %d, want 2", block.Tier2SizeAfter)
+	}
+	if block.Tier2Cap != 15 {
+		t.Errorf("Tier2Cap = %d, want 15", block.Tier2Cap)
 	}
 	if block.Tier3TotalVisible != 2 {
 		t.Errorf("Tier3TotalVisible = %d, want 2", block.Tier3TotalVisible)
