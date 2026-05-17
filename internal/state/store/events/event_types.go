@@ -455,13 +455,13 @@ type PreparerDecisionScoreOverride struct {
 }
 
 type PreparerDecisionToolsBlock struct {
-	Tier0Count                int      `json:"tier0_count,omitempty"`
-	Tier1New                  []string `json:"tier1_new,omitempty"`
-	Tier1Carried              []string `json:"tier1_carried,omitempty"`
-	Tier1EvictedToTier3       []string `json:"tier1_evicted_to_tier3,omitempty"`
-	Tier1DemotedSticky        []string `json:"tier1_demoted_sticky,omitempty"`
-	Tier1SizeAfter            int      `json:"tier1_size_after,omitempty"`
-	Tier1Cap                  int      `json:"tier1_cap,omitempty"`
+	Tier0Count          int      `json:"tier0_count,omitempty"`
+	Tier1New            []string `json:"tier1_new,omitempty"`
+	Tier1Carried        []string `json:"tier1_carried,omitempty"`
+	Tier1EvictedToTier3 []string `json:"tier1_evicted_to_tier3,omitempty"`
+	Tier1DemotedSticky  []string `json:"tier1_demoted_sticky,omitempty"`
+	Tier1SizeAfter      int      `json:"tier1_size_after,omitempty"`
+	Tier1Cap            int      `json:"tier1_cap,omitempty"`
 	// Tier 2 is reseeded from RAG candidates every turn (no LRU
 	// carry / new distinction), so a single slice + size + cap is the
 	// full payload. Names emitted so consumers can verify the
