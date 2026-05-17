@@ -2687,6 +2687,405 @@ func TestOrchestrator_PreparerPhase_MultiPreparerAggregation(t *testing.T) {
 	}
 }
 
+func TestOrchestrator_PreparerPhase_DedupEnabledEmitsFullMode(t *testing.T) {
+	// RFC #249 Phase 3: with knowledge_dedup.enabled + a wired
+	// InjectionStateStore, the orchestrator runs the dedup decision
+	// over the candidate list, rewrites the user-turn content with
+	// an ID-tagged [knowledge_context] block, persists the updated
+	// state, and emits preparer_decision with mode=full.
+	preparerJSON := `{
+		"send_to_llm": true,
+		"message": "[knowledge_context]\nplugin-rendered body\n[/knowledge_context]\n\nuser question",
+		"knowledge_candidates": [
+			{"article_id": "kb_a", "content": "body-a", "content_sha256": "sha-a", "score": 0.9},
+			{"article_id": "kb_b", "content": "body-bb", "content_sha256": "sha-b", "score": 0.6}
+		]
+	}`
+
+	sink := &recordingEventSink{}
+	llm := &capturingLLM{responses: []string{"final answer"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	dedupStore := &fakeInjectionStateStore{}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-plugin", Description: "RAG preparer",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: preparerJSON})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:        sink,
+		ContentPreparers: []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+		KnowledgeDedup: KnowledgeDedupConfig{
+			Enabled:                true,
+			ReinjectScoreThreshold: 0.95,
+			ReinjectTopKForce:      3,
+			CapPerTurn:             5,
+		},
+		InjectionStateStore: dedupStore,
+	})
+
+	if _, err := orch.Run(context.Background(), "s1", "user question"); err != nil {
+		t.Fatal(err)
+	}
+
+	// preparer_decision must report mode=full with both candidates injected
+	// as "new" (first turn, empty state).
+	evs := sink.snapshot()
+	pd := findEventByType(evs, events.TypePreparerDecision)
+	if pd == nil {
+		t.Fatal("preparer_decision event missing")
+	}
+	var pdPayload events.PreparerDecisionPayload
+	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
+		t.Fatalf("unmarshal preparer_decision payload: %v", err)
+	}
+	if pdPayload.Mode != events.PreparerDecisionModeFull {
+		t.Errorf("Mode = %q, want %q", pdPayload.Mode, events.PreparerDecisionModeFull)
+	}
+	if len(pdPayload.Knowledge.Injected) != 2 {
+		t.Fatalf("Injected len = %d, want 2", len(pdPayload.Knowledge.Injected))
+	}
+	for _, item := range pdPayload.Knowledge.Injected {
+		if item.Reason != "new" {
+			t.Errorf("first-turn injected reason = %q, want %q", item.Reason, "new")
+		}
+	}
+
+	// The state store must have been written with both SHAs.
+	if dedupStore.updateCalls != 1 {
+		t.Errorf("UpdateInjectionState called %d times, want 1", dedupStore.updateCalls)
+	}
+	if len(dedupStore.lastWritten.KnownKnowledge) != 2 {
+		t.Errorf("persisted KnownKnowledge len = %d, want 2", len(dedupStore.lastWritten.KnownKnowledge))
+	}
+
+	// The LLM's user message must carry the rebuilt ID-tagged KC
+	// block (with id="kb_a") and the user's original text, NOT the
+	// plugin's pre-tagged "plugin-rendered body" string.
+	if len(llm.requests) == 0 {
+		t.Fatal("LLM was not called")
+	}
+	var lastUser provider.Message
+	for _, m := range llm.requests[0].Messages {
+		if m.Role == provider.RoleUser {
+			lastUser = m
+		}
+	}
+	if !strings.Contains(lastUser.Content, `[knowledge_context id="kb_a"`) {
+		t.Errorf("LLM user message missing ID-tagged KC block, got: %q", lastUser.Content)
+	}
+	if strings.Contains(lastUser.Content, "plugin-rendered body") {
+		t.Errorf("LLM user message must drop plugin's pre-tagged KC, got: %q", lastUser.Content)
+	}
+	if !strings.Contains(lastUser.Content, "user question") {
+		t.Errorf("LLM user message missing user text, got: %q", lastUser.Content)
+	}
+}
+
+func TestOrchestrator_PreparerPhase_DedupSecondTurnReusesKnownState(t *testing.T) {
+	// Two-turn test: turn 1 introduces two candidates, turn 2 returns
+	// the same candidates. With reinject_top_k_force=1 only kb_a (at
+	// index 0) re-injects via top_k_force; kb_b is skipped as
+	// content_sha_already_known.
+	preparerJSON := `{
+		"send_to_llm": true,
+		"message": "user question",
+		"knowledge_candidates": [
+			{"article_id": "kb_a", "content": "body-a", "content_sha256": "sha-a", "score": 0.7},
+			{"article_id": "kb_b", "content": "body-bb", "content_sha256": "sha-b", "score": 0.5}
+		]
+	}`
+
+	sink := &recordingEventSink{}
+	llm := &capturingLLM{responses: []string{"first", "second"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	dedupStore := &fakeInjectionStateStore{}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-plugin", Description: "RAG preparer",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: preparerJSON})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:        sink,
+		ContentPreparers: []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+		KnowledgeDedup: KnowledgeDedupConfig{
+			Enabled:                true,
+			ReinjectScoreThreshold: 0.95,
+			ReinjectTopKForce:      1,
+			CapPerTurn:             5,
+		},
+		InjectionStateStore: dedupStore,
+	})
+
+	// Turn 1: both candidates inject as "new".
+	if _, err := orch.Run(context.Background(), "s1", "first user question"); err != nil {
+		t.Fatal(err)
+	}
+	// Turn 2: same candidates, expect 1 injected (top_k_force) + 1 skipped (known).
+	if _, err := orch.Run(context.Background(), "s1", "second user question"); err != nil {
+		t.Fatal(err)
+	}
+
+	// LLM-content sanity check: the second-turn user message must
+	// carry kb_a's body but NOT kb_b's body (kb_b was skipped as
+	// already_known). The preparer replaces the user's literal input
+	// with its own `pr.Message`, then dedup prepends the rebuilt KC
+	// block — so the assertion targets the rendered KC content, not
+	// the user's typed text.
+	if len(llm.requests) < 2 {
+		t.Fatalf("expected 2 LLM calls, got %d", len(llm.requests))
+	}
+	turn2Msgs := llm.requests[1].Messages
+	var lastTurn2User string
+	for _, m := range turn2Msgs {
+		if m.Role == provider.RoleUser {
+			lastTurn2User = m.Content
+		}
+	}
+	if lastTurn2User == "" {
+		t.Fatalf("turn-2 user message missing from LLM request: %+v", turn2Msgs)
+	}
+	if !strings.Contains(lastTurn2User, "body-a") {
+		t.Errorf("turn-2 user message must carry kb_a's body, got: %q", lastTurn2User)
+	}
+	if strings.Contains(lastTurn2User, "body-bb") {
+		t.Errorf("turn-2 user message must NOT carry kb_b's body (already known), got: %q", lastTurn2User)
+	}
+	if !strings.Contains(lastTurn2User, `id="kb_a"`) {
+		t.Errorf("turn-2 KC block must be ID-tagged, got: %q", lastTurn2User)
+	}
+
+	// Find the SECOND preparer_decision event (turn 2's). The first one
+	// reports turn 1's "all new" decision.
+	evs := sink.snapshot()
+	var pds []emit.Event
+	for _, e := range evs {
+		if e.EventType == events.TypePreparerDecision {
+			pds = append(pds, e)
+		}
+	}
+	if len(pds) != 2 {
+		t.Fatalf("got %d preparer_decision events, want 2", len(pds))
+	}
+
+	var turn2 events.PreparerDecisionPayload
+	if err := json.Unmarshal(pds[1].Payload, &turn2); err != nil {
+		t.Fatalf("unmarshal turn-2 preparer_decision payload: %v", err)
+	}
+	if len(turn2.Knowledge.Injected) != 1 || turn2.Knowledge.Injected[0].ArticleID != "kb_a" {
+		t.Fatalf("turn 2 must inject only kb_a, got %+v", turn2.Knowledge.Injected)
+	}
+	if turn2.Knowledge.Injected[0].Reason != "top_k_force" {
+		t.Errorf("kb_a reason = %q, want top_k_force", turn2.Knowledge.Injected[0].Reason)
+	}
+	if len(turn2.Knowledge.SkippedKnown) != 1 || turn2.Knowledge.SkippedKnown[0].ArticleID != "kb_b" {
+		t.Fatalf("turn 2 must skip kb_b, got %+v", turn2.Knowledge.SkippedKnown)
+	}
+	if turn2.Knowledge.SkippedKnown[0].Reason != "content_sha_already_known" {
+		t.Errorf("kb_b skip reason = %q", turn2.Knowledge.SkippedKnown[0].Reason)
+	}
+
+	// The dedup store should still hold both SHAs after turn 2 (not
+	// duplicated despite being seen twice across turns).
+	if len(dedupStore.lastWritten.KnownKnowledge) != 2 {
+		t.Errorf("post-turn-2 KnownKnowledge len = %d, want 2", len(dedupStore.lastWritten.KnownKnowledge))
+	}
+}
+
+func TestOrchestrator_PreparerPhase_DedupEnabledWithNilStoreStaysInstrumentationOnly(t *testing.T) {
+	// Defensive guard: even with KnowledgeDedup.Enabled=true, the
+	// preparer-loop's `o.injectionStateStore != nil` precondition
+	// short-circuits when no store was wired. The path must stay on
+	// the Phase-2 instrumentation_only branch without panicking.
+	preparerJSON := `{
+		"send_to_llm": true,
+		"message": "x",
+		"knowledge_candidates": [
+			{"article_id": "kb_a", "content": "body", "content_sha256": "sha-a", "score": 0.9}
+		]
+	}`
+	sink := &recordingEventSink{}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-plugin", Description: "RAG",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: preparerJSON})
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	orch := NewWithRules(&fakeLLM{responses: []string{"final"}},
+		&fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
+			EventSink:        sink,
+			ContentPreparers: []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+			KnowledgeDedup:   KnowledgeDedupConfig{Enabled: true},
+			// InjectionStateStore intentionally nil.
+		})
+	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
+		t.Fatal(err)
+	}
+	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
+	if pd == nil {
+		t.Fatal("preparer_decision missing")
+	}
+	var pdPayload events.PreparerDecisionPayload
+	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pdPayload.Mode != events.PreparerDecisionModeInstrumentationOnly {
+		t.Errorf("enabled-flag + nil-store must stay in instrumentation_only, got %q", pdPayload.Mode)
+	}
+}
+
+func TestOrchestrator_PreparerPhase_DedupStoreReadFailureStartsFresh(t *testing.T) {
+	// RFC #249 robustness: a store-read failure must NOT abort the
+	// user turn. The dedup logic falls back to an empty existing
+	// state — every candidate appears as "new" — and the event still
+	// emits with mode=full.
+	preparerJSON := `{
+		"send_to_llm": true,
+		"message": "x",
+		"knowledge_candidates": [
+			{"article_id": "kb_a", "content": "body", "content_sha256": "sha-a", "score": 0.9}
+		]
+	}`
+	sink := &recordingEventSink{}
+	dedupStore := &fakeInjectionStateStore{failGetErr: errors.New("simulated read failure")}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-plugin", Description: "RAG",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: preparerJSON})
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	orch := NewWithRules(&fakeLLM{responses: []string{"final"}},
+		&fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
+			EventSink:           sink,
+			ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+			KnowledgeDedup:      KnowledgeDedupConfig{Enabled: true},
+			InjectionStateStore: dedupStore,
+		})
+	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
+		t.Fatalf("dedup must not abort run on read failure: %v", err)
+	}
+	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
+	if pd == nil {
+		t.Fatal("preparer_decision missing despite read failure")
+	}
+	var pdPayload events.PreparerDecisionPayload
+	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pdPayload.Mode != events.PreparerDecisionModeFull {
+		t.Errorf("mode = %q, want full (graceful-degradation still emits full)", pdPayload.Mode)
+	}
+	if len(pdPayload.Knowledge.Injected) != 1 || pdPayload.Knowledge.Injected[0].Reason != events.PreparerDecisionReasonNew {
+		t.Errorf("read-failure fallback must treat candidate as new, got %+v", pdPayload.Knowledge.Injected)
+	}
+}
+
+func TestOrchestrator_PreparerPhase_DedupStoreWriteFailureStillEmitsEvent(t *testing.T) {
+	// RFC #249 invariant: "Event emission precedes state writes." A
+	// write failure must not lose the event — the next preparer pass's
+	// reconciliation step will catch the drift later.
+	preparerJSON := `{
+		"send_to_llm": true,
+		"message": "x",
+		"knowledge_candidates": [
+			{"article_id": "kb_a", "content": "body", "content_sha256": "sha-a", "score": 0.9}
+		]
+	}`
+	sink := &recordingEventSink{}
+	dedupStore := &fakeInjectionStateStore{failUpdateErr: errors.New("simulated write failure")}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-plugin", Description: "RAG",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: preparerJSON})
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	orch := NewWithRules(&fakeLLM{responses: []string{"final"}},
+		&fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
+			EventSink:           sink,
+			ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+			KnowledgeDedup:      KnowledgeDedupConfig{Enabled: true},
+			InjectionStateStore: dedupStore,
+		})
+	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
+		t.Fatalf("dedup must not abort run on write failure: %v", err)
+	}
+	if dedupStore.updateCalls != 1 {
+		t.Errorf("UpdateInjectionState must still be attempted, got %d calls", dedupStore.updateCalls)
+	}
+	// Event must have emitted before the (failing) write — i.e. it
+	// exists despite the write returning an error.
+	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
+	if pd == nil {
+		t.Fatal("preparer_decision missing — emit must precede state write")
+	}
+}
+
+func TestOrchestrator_PreparerPhase_DedupDisabledStaysInstrumentationOnly(t *testing.T) {
+	// Regression guard: even with an InjectionStateStore wired, if the
+	// master Enabled flag is false the orchestrator must keep emitting
+	// mode=instrumentation_only and must NOT call the store.
+	preparerJSON := `{
+		"send_to_llm": true,
+		"message": "x",
+		"knowledge_candidates": [
+			{"article_id": "kb_a", "content": "body", "content_sha256": "sha-a", "score": 0.9}
+		]
+	}`
+
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{"final"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	dedupStore := &fakeInjectionStateStore{}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-plugin", Description: "RAG preparer",
+		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
+	}, &fixedResultExecutor{content: preparerJSON})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:           sink,
+		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+		KnowledgeDedup:      KnowledgeDedupConfig{Enabled: false}, // explicit off
+		InjectionStateStore: dedupStore,
+	})
+
+	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
+		t.Fatal(err)
+	}
+
+	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
+	if pd == nil {
+		t.Fatal("preparer_decision missing")
+	}
+	var pdPayload events.PreparerDecisionPayload
+	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pdPayload.Mode != events.PreparerDecisionModeInstrumentationOnly {
+		t.Errorf("Mode = %q, want %q", pdPayload.Mode, events.PreparerDecisionModeInstrumentationOnly)
+	}
+	if dedupStore.getCalls != 0 || dedupStore.updateCalls != 0 {
+		t.Errorf("disabled dedup must not touch the store, got get=%d update=%d",
+			dedupStore.getCalls, dedupStore.updateCalls)
+	}
+}
+
 func TestOrchestrator_MessagesTruncated_EmittedWhenSlidingWindowCuts(t *testing.T) {
 	// Sliding window: when sess.Messages exceeds ContextMessages, the
 	// orchestrator drops the oldest N entries and emits one

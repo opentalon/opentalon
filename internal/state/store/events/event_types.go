@@ -395,12 +395,44 @@ type PreparerDecisionKnowledgeBlock struct {
 	InjectedBytes         int                             `json:"injected_bytes,omitempty"`
 }
 
+// PreparerDecisionReason values for PreparerDecisionInjectedItem.Reason
+// and PreparerDecisionSkippedItem.Reason. The "injected" group lists
+// the reasons a candidate ended up in the LLM-visible KC block; the
+// "skipped" group lists why a candidate didn't make it. Define one
+// constant per wire-format string so producers / consumers / docs all
+// agree, mirroring the PreparerDecisionMode* constants above.
+const (
+	// PreparerDecisionReasonInstrumentationOnly is the catch-all reason
+	// used during Phase 2 (and any later turn where dedup decision logic
+	// is disabled): every candidate is reported as if newly injected.
+	PreparerDecisionReasonInstrumentationOnly = "instrumentation_only"
+
+	// PreparerDecisionReasonNew — content_sha not yet known to the session.
+	PreparerDecisionReasonNew = "new"
+
+	// PreparerDecisionReasonScoreOverride — known SHA, but the
+	// current-turn score exceeded reinject_score_threshold.
+	PreparerDecisionReasonScoreOverride = "score_override"
+
+	// PreparerDecisionReasonTopKForce — known SHA, but the candidate's
+	// rank in the current retrieval is within reinject_top_k_force.
+	PreparerDecisionReasonTopKForce = "top_k_force"
+
+	// PreparerDecisionReasonAlreadyKnown — content_sha already in
+	// known_knowledge and none of the override paths fired. The LLM
+	// already saw this body in an earlier turn.
+	PreparerDecisionReasonAlreadyKnown = "content_sha_already_known"
+
+	// PreparerDecisionReasonCapExceeded — candidate WOULD have injected
+	// but cap_per_turn was already hit. Signal of per-turn budget
+	// pressure rather than dedup state.
+	PreparerDecisionReasonCapExceeded = "cap_exceeded"
+)
+
 // PreparerDecisionInjectedItem records one injected knowledge article and
-// the reason it was selected. Reason values:
-//   - "new" — content_sha not yet known to the session
-//   - "score_override" — known but current score above reinject threshold
-//   - "top_k_force" — within the forced top-K of current-turn results
-//   - "instrumentation_only" — Phase 2: all candidates pass through
+// the reason it was selected. Reason is one of the
+// PreparerDecisionReason* constants above (the "injected" group plus
+// PreparerDecisionReasonInstrumentationOnly).
 type PreparerDecisionInjectedItem struct {
 	ArticleID     string `json:"article_id"`
 	ContentSHA256 string `json:"content_sha256,omitempty"`
@@ -408,8 +440,9 @@ type PreparerDecisionInjectedItem struct {
 }
 
 // PreparerDecisionSkippedItem records one candidate skipped by dedup.
-// Reason today is just "content_sha_already_known"; extend the vocabulary
-// here when new skip paths are added (e.g. "demoted").
+// Reason is one of the PreparerDecisionReason* constants in the
+// "skipped" group (AlreadyKnown / CapExceeded). Future skip paths
+// (e.g. "demoted") extend that group above.
 type PreparerDecisionSkippedItem struct {
 	ArticleID string `json:"article_id"`
 	Reason    string `json:"reason"`

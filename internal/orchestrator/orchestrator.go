@@ -1225,7 +1225,23 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			o.emitPreparerRetrievals(ctx, userMessage, searchSource, outcome.Response)
 			prepAgg.append(outcome.Response)
 		}
+		// RFC #249 Phase 3 dedup: when the operator has flipped the
+		// knowledge_dedup.enabled flag AND a store is wired up AND
+		// at least one preparer returned structured KnowledgeCandidates,
+		// run the dedup decision over the aggregate candidate list.
+		// The content rewrite happens before the event emits; state
+		// persist happens AFTER the emit so the event log is the
+		// durable record even on partial failure (RFC #249 cross-phase
+		// invariant). When any precondition is false the path falls
+		// through to Phase 2's mode = "instrumentation_only".
+		dedupActive := o.knowledgeDedup.Enabled && o.injectionStateStore != nil && len(prepAgg.Knowledge) > 0
+		if dedupActive {
+			content = o.prepareDedupDecision(ctx, sessionID, content, &prepAgg)
+		}
 		o.emitPreparerDecision(ctx, prepAgg)
+		if dedupActive {
+			o.persistDedupDecision(ctx, sessionID, &prepAgg)
+		}
 		// Store relevant tools in context so buildSystemPrompt and planner can filter.
 		if relevantToolsSet {
 			ctx = withRelevantTools(ctx, relevantTools)

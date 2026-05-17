@@ -32,6 +32,13 @@ type preparerAggregate struct {
 	// preparer_decision still surfaces them under tools.tier1_new so
 	// instrumentation does not blank out on legacy plugins.
 	LegacyRelevantTools []string
+
+	// KnowledgeDedup, when non-nil, switches emitPreparerDecision into
+	// the Phase-3 "full" mode: the injected/skipped/score-override
+	// buckets reflect the actual dedup outcome rather than the
+	// instrumentation_only pass-through. Nil means dedup didn't run
+	// (config disabled, no store wired, or no knowledge candidates).
+	KnowledgeDedup *knowledgeDedupDecision
 }
 
 // append pulls the candidate slices off one preparer's response into
@@ -102,12 +109,21 @@ func (o *Orchestrator) emitPreparerRetrievals(ctx context.Context, query string,
 }
 
 // emitPreparerDecision publishes the composite preparer-pass outcome
-// once per user turn. Phase 2 always emits with mode =
-// instrumentation_only: every candidate is reported under Knowledge.Injected
-// and every tool under Tools.Tier1New so consumers (api-plugin
-// aggregations, Timly review UI) can render a meaningful payload while
-// the actual dedup/tier logic is still off. Phase 3+ flips the mode
-// and starts populating the SkippedKnown / evicted buckets.
+// once per user turn. The shape of the Knowledge block depends on
+// whether agg.KnowledgeDedup is set:
+//
+//   - nil: Phase 2 / instrumentation_only mode. Every candidate is
+//     reported under Knowledge.Injected with reason
+//     "instrumentation_only"; the skipped / score-override buckets
+//     stay empty.
+//   - non-nil: Phase 3 / full mode. Injected / Skipped /
+//     ScoreOverridesApplied reflect the dedup decision exactly; the
+//     reason on each injected entry is "new" / "score_override" /
+//     "top_k_force"; cap-exceeded entries land in Skipped.
+//
+// In both modes Tools.Tier1New surfaces every ToolCandidate plus any
+// legacy relevant_tools fallback list so the event stays meaningful
+// while Phase 4's tier logic is off.
 func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAggregate) {
 	if o.eventSink == nil {
 		return
@@ -119,10 +135,23 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 		return
 	}
 
-	knowledgeBlock := events.PreparerDecisionKnowledgeBlock{
-		CandidateIDs:  knowledgeCandidateIDs(agg.Knowledge),
-		Injected:      knowledgeCandidatesToInjected(agg.Knowledge),
-		InjectedBytes: knowledgeInjectedBytes(agg.Knowledge),
+	var knowledgeBlock events.PreparerDecisionKnowledgeBlock
+	mode := events.PreparerDecisionModeInstrumentationOnly
+	if agg.KnowledgeDedup != nil {
+		mode = events.PreparerDecisionModeFull
+		knowledgeBlock = events.PreparerDecisionKnowledgeBlock{
+			CandidateIDs:          knowledgeCandidateIDs(agg.Knowledge),
+			Injected:              dedupInjectedItems(agg.KnowledgeDedup),
+			SkippedKnown:          dedupSkippedItems(agg.KnowledgeDedup),
+			ScoreOverridesApplied: agg.KnowledgeDedup.ScoreOverrides,
+			InjectedBytes:         agg.KnowledgeDedup.InjectedBytes(),
+		}
+	} else {
+		knowledgeBlock = events.PreparerDecisionKnowledgeBlock{
+			CandidateIDs:  knowledgeCandidateIDs(agg.Knowledge),
+			Injected:      knowledgeCandidatesToInjected(agg.Knowledge),
+			InjectedBytes: knowledgeInjectedBytes(agg.Knowledge),
+		}
 	}
 
 	toolsBlock := events.PreparerDecisionToolsBlock{
@@ -130,10 +159,43 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 	}
 
 	emit.EmitPreparerDecision(ctx, o.eventSink, emit.PreparerDecisionArgs{
-		Mode:      events.PreparerDecisionModeInstrumentationOnly,
+		Mode:      mode,
 		Knowledge: knowledgeBlock,
 		Tools:     toolsBlock,
 	})
+}
+
+// dedupInjectedItems converts the dedup decision's parallel
+// Injected/InjectedReasons slices into the event payload shape.
+func dedupInjectedItems(d *knowledgeDedupDecision) []events.PreparerDecisionInjectedItem {
+	if len(d.Injected) == 0 {
+		return nil
+	}
+	out := make([]events.PreparerDecisionInjectedItem, len(d.Injected))
+	for i, c := range d.Injected {
+		out[i] = events.PreparerDecisionInjectedItem{
+			ArticleID:     c.ArticleID,
+			ContentSHA256: c.ContentSHA256,
+			Reason:        d.InjectedReasons[i],
+		}
+	}
+	return out
+}
+
+// dedupSkippedItems converts the dedup decision's parallel
+// Skipped/SkippedReasons slices into the event payload shape.
+func dedupSkippedItems(d *knowledgeDedupDecision) []events.PreparerDecisionSkippedItem {
+	if len(d.Skipped) == 0 {
+		return nil
+	}
+	out := make([]events.PreparerDecisionSkippedItem, len(d.Skipped))
+	for i, c := range d.Skipped {
+		out[i] = events.PreparerDecisionSkippedItem{
+			ArticleID: c.ArticleID,
+			Reason:    d.SkippedReasons[i],
+		}
+	}
+	return out
 }
 
 // ----- Pure conversion helpers (no orchestrator state) -----
@@ -206,9 +268,10 @@ func knowledgeCandidatesToInjected(cands []KnowledgeCandidate) []events.Preparer
 			ArticleID:     c.ArticleID,
 			ContentSHA256: c.ContentSHA256,
 			// Phase 2 has no dedup state, so every candidate is reported
-			// as if newly injected. Phase 3+ will switch to "new" /
-			// "score_override" / "top_k_force" per the dedup decision.
-			Reason: "instrumentation_only",
+			// as if newly injected. Phase 3+ switches to "new" /
+			// "score_override" / "top_k_force" per the dedup decision
+			// (see dedupInjectedItems).
+			Reason: events.PreparerDecisionReasonInstrumentationOnly,
 		}
 	}
 	return out
