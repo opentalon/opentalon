@@ -39,17 +39,45 @@ type preparerAggregate struct {
 	// instrumentation_only pass-through. Nil means dedup didn't run
 	// (config disabled, no store wired, or no knowledge candidates).
 	KnowledgeDedup *knowledgeDedupDecision
+
+	// LegacyKnowledgePlugins lists plugin names whose response carried
+	// a legacy [knowledge_context] injection (pr.Message contains the
+	// envelope) without the structured KnowledgeCandidates that Phase 3
+	// dedup needs. When non-empty AND dedup is enabled, the orchestrator
+	// switches the whole turn to mode=legacy_fallback — dedup is
+	// skipped and the plugin's pr.Message passes through verbatim.
+	LegacyKnowledgePlugins []string
 }
 
 // append pulls the candidate slices off one preparer's response into
 // the aggregate. Safe to call with a zero-valued response (no-op).
-func (a *preparerAggregate) append(pr preparerResponse) {
+// pluginName identifies the source plugin so legacy-injection
+// fallback can name the affected plugin in the deprecation warning.
+func (a *preparerAggregate) append(pluginName string, pr preparerResponse) {
 	a.Knowledge = append(a.Knowledge, pr.KnowledgeCandidates...)
 	a.Glossary = append(a.Glossary, pr.GlossaryCandidates...)
 	a.Tools = append(a.Tools, pr.ToolCandidates...)
 	if len(pr.ToolCandidates) == 0 && len(pr.RelevantTools) > 0 {
 		a.LegacyRelevantTools = append(a.LegacyRelevantTools, pr.RelevantTools...)
 	}
+	if responseUsesLegacyKnowledgeInjection(pr) {
+		a.LegacyKnowledgePlugins = append(a.LegacyKnowledgePlugins, pluginName)
+	}
+}
+
+// responseUsesLegacyKnowledgeInjection returns true when the plugin
+// returned a [knowledge_context] block in pr.Message without the
+// structured KnowledgeCandidates slice that Phase 3 dedup needs.
+// Detection is content-based (parser recognizes both legacy bare
+// and tagged forms) so a plugin that started emitting tagged blocks
+// without populating candidates still triggers the fallback path —
+// dedup can only run when the per-candidate identity is in the
+// structured field.
+func responseUsesLegacyKnowledgeInjection(pr preparerResponse) bool {
+	if len(pr.KnowledgeCandidates) > 0 {
+		return false
+	}
+	return len(parseKnowledgeContextBlocks(pr.Message)) > 0
 }
 
 // emitPreparerRetrievals fires the per-corpus *_retrieval events for
@@ -128,16 +156,37 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 	if o.eventSink == nil {
 		return
 	}
-	if len(agg.Knowledge) == 0 && len(agg.Glossary) == 0 && len(agg.Tools) == 0 && len(agg.LegacyRelevantTools) == 0 {
-		// Nothing retrieved from any corpus → skip the event. Avoids
-		// noisy preparer_decision rows on turns where no preparer ran
-		// (toolCallSeeded path, sessions with empty o.preparers, …).
+	hasSignal := len(agg.Knowledge) > 0 ||
+		len(agg.Glossary) > 0 ||
+		len(agg.Tools) > 0 ||
+		len(agg.LegacyRelevantTools) > 0 ||
+		len(agg.LegacyKnowledgePlugins) > 0
+	if !hasSignal {
+		// Nothing retrieved from any corpus and no legacy-fallback
+		// trigger → skip the event. Avoids noisy preparer_decision
+		// rows on turns where no preparer ran (toolCallSeeded path,
+		// sessions with empty o.preparers, …). Legacy-fallback is
+		// counted as signal because the audit trail benefits from
+		// recording the fallback even if no candidates surfaced.
 		return
 	}
 
 	var knowledgeBlock events.PreparerDecisionKnowledgeBlock
-	mode := events.PreparerDecisionModeInstrumentationOnly
-	if agg.KnowledgeDedup != nil {
+	var mode string
+	switch {
+	case o.knowledgeDedup.Enabled && len(agg.LegacyKnowledgePlugins) > 0:
+		// A plugin still uses the legacy [knowledge_context]-in-Message
+		// shape, so dedup can't decide on a per-candidate basis. Report
+		// fallback mode; Injected/Skipped stay empty since dedup didn't
+		// run. CandidateIDs are surfaced for any non-legacy plugin that
+		// did return structured candidates — the consumer can still
+		// see what was retrieved even though the decision was forced
+		// to pass-through.
+		mode = events.PreparerDecisionModeLegacyFallback
+		knowledgeBlock = events.PreparerDecisionKnowledgeBlock{
+			CandidateIDs: knowledgeCandidateIDs(agg.Knowledge),
+		}
+	case agg.KnowledgeDedup != nil:
 		mode = events.PreparerDecisionModeFull
 		knowledgeBlock = events.PreparerDecisionKnowledgeBlock{
 			CandidateIDs:          knowledgeCandidateIDs(agg.Knowledge),
@@ -146,7 +195,8 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 			ScoreOverridesApplied: agg.KnowledgeDedup.ScoreOverrides,
 			InjectedBytes:         agg.KnowledgeDedup.InjectedBytes(),
 		}
-	} else {
+	default:
+		mode = events.PreparerDecisionModeInstrumentationOnly
 		knowledgeBlock = events.PreparerDecisionKnowledgeBlock{
 			CandidateIDs:  knowledgeCandidateIDs(agg.Knowledge),
 			Injected:      knowledgeCandidatesToInjected(agg.Knowledge),

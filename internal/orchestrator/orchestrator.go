@@ -271,6 +271,12 @@ type Orchestrator struct {
 	showToolCalls           string                 // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 	knowledgeDedup          KnowledgeDedupConfig   // RFC #249 Phase 3 dedup flags; Enabled=false skips dedup logic and InjectionStateStore reads
 	injectionStateStore     InjectionStateStore    // optional; nil = dedup decision logic short-circuits to instrumentation_only mode
+	// legacyKnowledgeWarnings tracks the (sessionID, pluginName) pairs
+	// we've already deprecation-warned for, so a session that keeps
+	// using a legacy preparer doesn't spam the log every turn. Key is
+	// "<sessionID>|<pluginName>"; value is unused. Zero value is
+	// usable directly, so no NewWithRules wiring is needed.
+	legacyKnowledgeWarnings sync.Map
 }
 
 // resolveAllowedPluginNames returns a JSON array of allowed plugin names for the
@@ -1223,18 +1229,33 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// candidate slices for the composite preparer_decision
 			// emitted after the loop.
 			o.emitPreparerRetrievals(ctx, userMessage, searchSource, outcome.Response)
-			prepAgg.append(outcome.Response)
+			prepAgg.append(prep.Plugin, outcome.Response)
 		}
-		// RFC #249 Phase 3 dedup: when the operator has flipped the
-		// knowledge_dedup.enabled flag AND a store is wired up AND
-		// at least one preparer returned structured KnowledgeCandidates,
-		// run the dedup decision over the aggregate candidate list.
-		// The content rewrite happens before the event emits; state
-		// persist happens AFTER the emit so the event log is the
-		// durable record even on partial failure (RFC #249 cross-phase
-		// invariant). When any precondition is false the path falls
-		// through to Phase 2's mode = "instrumentation_only".
-		dedupActive := o.knowledgeDedup.Enabled && o.injectionStateStore != nil && len(prepAgg.Knowledge) > 0
+		// RFC #249 Phase 3 dedup decision tree:
+		//   - Any preparer used the legacy [knowledge_context]-in-Message
+		//     shape AND dedup is enabled → mode=legacy_fallback. Skip
+		//     the dedup pass entirely (content stays as the legacy
+		//     plugin produced it), log one deprecation warning per
+		//     (plugin, session).
+		//   - Dedup enabled AND store wired AND structured candidates
+		//     present → run the full dedup decision; content rewrite
+		//     happens before the event emits, state persist happens
+		//     AFTER the emit so the event log is the durable record
+		//     even on partial failure (RFC #249 cross-phase invariant).
+		//   - Otherwise → Phase 2 mode = instrumentation_only.
+		// prepAgg.LegacyKnowledgePlugins is built by the sequential
+		// preparer loop above; no concurrent access. If that loop
+		// ever parallelizes, the append in preparerAggregate.append
+		// would race — keep the assumption documented here so the
+		// next refactor knows to guard the aggregate.
+		legacyFallback := o.knowledgeDedup.Enabled && len(prepAgg.LegacyKnowledgePlugins) > 0
+		if legacyFallback {
+			o.warnLegacyKnowledgePluginsOnce(ctx, sessionID, prepAgg.LegacyKnowledgePlugins)
+		}
+		dedupActive := !legacyFallback &&
+			o.knowledgeDedup.Enabled &&
+			o.injectionStateStore != nil &&
+			len(prepAgg.Knowledge) > 0
 		if dedupActive {
 			content = o.prepareDedupDecision(ctx, sessionID, content, &prepAgg)
 		}

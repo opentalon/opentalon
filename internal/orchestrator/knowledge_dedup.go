@@ -255,6 +255,32 @@ func (o *Orchestrator) persistDedupDecision(ctx context.Context, sessionID strin
 	}
 }
 
+// legacyWarningKeySeparator joins sessionID and pluginName into the
+// sync.Map key. Pulled into a constant so callers and tests share one
+// source of truth — drifting the delimiter would silently double-warn.
+const legacyWarningKeySeparator = "|"
+
+// warnLegacyKnowledgePluginsOnce logs a deprecation warning the first
+// time a (sessionID, pluginName) pair hits the legacy_fallback path.
+// Subsequent legacy detections for the same pair stay silent so a
+// session that keeps using a legacy preparer doesn't flood the log
+// with the same message every turn. The de-dup map is in-process,
+// not persisted — a process restart re-warns once per session, which
+// is acceptable for what is fundamentally observability data.
+func (o *Orchestrator) warnLegacyKnowledgePluginsOnce(ctx context.Context, sessionID string, plugins []string) {
+	for _, plugin := range plugins {
+		key := sessionID + legacyWarningKeySeparator + plugin
+		if _, alreadyWarned := o.legacyKnowledgeWarnings.LoadOrStore(key, struct{}{}); alreadyWarned {
+			continue
+		}
+		slog.WarnContext(ctx,
+			"knowledge_dedup: plugin returned legacy [knowledge_context] in pr.Message without structured knowledge_candidates — falling back to mode=legacy_fallback for this turn. Please migrate the plugin to return KnowledgeCandidates so dedup can run.",
+			"component", "orchestrator",
+			"session", sessionID,
+			"plugin", plugin)
+	}
+}
+
 // turnNumberForDedup returns a stable monotonically-increasing turn
 // counter for the session — used as KnownKnowledgeEntry.FirstInjectedTurn
 // so a downstream event consumer can tell "this article was first
