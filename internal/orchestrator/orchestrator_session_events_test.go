@@ -3494,6 +3494,104 @@ func TestOrchestrator_PreparerPhase_ToolTiersSecondTurnLRUCarriesOver(t *testing
 	}
 }
 
+func TestOrchestrator_PreparerPhase_ToolTiersSystemPromptHasTier2AndTier3Sections(t *testing.T) {
+	// RFC #249 Phase 4 D3: with tier decision active, the system
+	// prompt sent to the LLM must include "## Available tools —
+	// summary tier" (Tier 2 name + 1-liner) and "## Other available
+	// tools" (Tier 3 names-only grouped). Tier 0+1 stay in the per-
+	// plugin sections (the existing relevant_tools narrowing handles
+	// them, now driven by Tier 0+1 names from the decision).
+	sink := &recordingEventSink{}
+	llm := &capturingLLM{responses: []string{"answer"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	tierStore := &fakeInjectionStateStore{}
+
+	registry := NewToolRegistry()
+	registerTierTestPlugins(t, registry, preparerJSONForTierTests)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:           sink,
+		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: 2, Tier2Cap: 1},
+		InjectionStateStore: tierStore,
+	})
+	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(llm.requests) == 0 {
+		t.Fatal("LLM was not called")
+	}
+	var sysMsg string
+	for _, m := range llm.requests[0].Messages {
+		if m.Role == provider.RoleSystem {
+			sysMsg = m.Content
+		}
+	}
+	if sysMsg == "" {
+		t.Fatal("system message missing in LLM request")
+	}
+	if !strings.Contains(sysMsg, "## Available tools — summary tier") {
+		t.Errorf("system prompt missing Tier 2 header, got:\n%s", sysMsg)
+	}
+	if !strings.Contains(sysMsg, "## Other available tools (request details before use)") {
+		t.Errorf("system prompt missing Tier 3 header, got:\n%s", sysMsg)
+	}
+	// Tier 3 includes t4 (overflow of Tier 1+2 caps) and t5 (never a
+	// candidate). Both must appear under the tools-plugin group.
+	if !strings.Contains(sysMsg, "tools-plugin:") {
+		t.Errorf("Tier 3 plugin group header missing, got:\n%s", sysMsg)
+	}
+	if !strings.Contains(sysMsg, "t4") || !strings.Contains(sysMsg, "t5") {
+		t.Errorf("Tier 3 missing t4 / t5, got:\n%s", sysMsg)
+	}
+	// Tier 2 has exactly one entry (Tier2Cap=1): tools-plugin.t3.
+	if !strings.Contains(sysMsg, "tools-plugin.t3") {
+		t.Errorf("Tier 2 must list tools-plugin.t3, got:\n%s", sysMsg)
+	}
+}
+
+func TestOrchestrator_PreparerPhase_ToolTiersDisabledNoTierSectionsInPrompt(t *testing.T) {
+	// Regression guard: with tier_tiers.enabled=false, the system
+	// prompt must NOT contain the Phase-4 "Available tools — summary
+	// tier" or "Other available tools (request details before use)"
+	// sections. The pre-Phase-4 prompt structure is fully preserved.
+	sink := &recordingEventSink{}
+	llm := &capturingLLM{responses: []string{"answer"}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	registerTierTestPlugins(t, registry, preparerJSONForTierTests)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:        sink,
+		ContentPreparers: []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
+		ToolTiers:        ToolTiersConfig{Enabled: false},
+	})
+	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
+		t.Fatal(err)
+	}
+
+	var sysMsg string
+	for _, m := range llm.requests[0].Messages {
+		if m.Role == provider.RoleSystem {
+			sysMsg = m.Content
+		}
+	}
+	if strings.Contains(sysMsg, "## Available tools — summary tier") {
+		t.Errorf("Tier 2 section must NOT appear when tier logic off, got:\n%s", sysMsg)
+	}
+	if strings.Contains(sysMsg, "## Other available tools (request details before use)") {
+		t.Errorf("Tier 3 section must NOT appear when tier logic off, got:\n%s", sysMsg)
+	}
+}
+
 func TestOrchestrator_PreparerPhase_ToolTiersWithDedupSingleStateWrite(t *testing.T) {
 	// When BOTH dedup and tier decisions run, the tier preparer merges
 	// its KnownTools delta into the dedup decision's UpdatedState so a

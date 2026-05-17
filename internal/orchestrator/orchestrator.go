@@ -1341,6 +1341,19 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if tierActive {
 			o.persistToolTierDecision(ctx, sessionID, &prepAgg)
 		}
+		// RFC #249 Phase 4: when the tier decision ran, override the
+		// relevant_tools narrowing to Tier 0 + Tier 1 so buildToolDefinitions
+		// + the per-plugin loop in buildSystemPrompt only surface those.
+		// Tier 2 + Tier 3 are added as separate system-prompt sections
+		// (D3 renderers) so the LLM still sees them — at lower per-tool
+		// token cost. The full decision is stashed in ctx so
+		// buildSystemPrompt can pull the Tier 2/3 names without
+		// re-deriving them.
+		if tierActive && prepAgg.ToolTier != nil {
+			relevantTools = append(append([]string(nil), prepAgg.ToolTier.Tier0...), prepAgg.ToolTier.Tier1...)
+			relevantToolsSet = true
+			ctx = withToolTierDecision(ctx, prepAgg.ToolTier)
+		}
 		// Store relevant tools in context so buildSystemPrompt and planner can filter.
 		if relevantToolsSet {
 			ctx = withRelevantTools(ctx, relevantTools)
@@ -3313,11 +3326,21 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		sb.WriteString("\n")
 	}
 
-	// When RAG filtering is active, list plugins that have actions but none
-	// matched the current query. The LLM can use ask_knowledge to discover
-	// their actions on demand. Use alias names (e.g. "jira", "tickets") when
-	// available, since those are the names the LLM should use.
-	if len(discoverablePlugins) > 0 {
+	// RFC #249 Phase 4: when a tier decision is active, render Tier 2
+	// (name + 1-liner) and Tier 3 (names grouped by plugin) sections.
+	// These supersede the pre-Phase-4 discoverable-plugins block — Tier 3
+	// is the same idea but per-action rather than per-plugin, and the
+	// nudge points at get_tool_details (D4) instead of ask_knowledge.
+	tierDecision := toolTierDecisionFromContext(ctx)
+	if tierDecision != nil {
+		sb.WriteString(renderTier2Section(tierDecision, o.registry))
+		sb.WriteString(renderTier3Section(tierDecision))
+	} else if len(discoverablePlugins) > 0 {
+		// Pre-Phase-4 path: RAG filtering active but no tier decision.
+		// List plugins that have actions but none matched the current
+		// query so the LLM can fall back to ask_knowledge discovery.
+		// Use alias names when available since those are what the LLM
+		// should call.
 		sb.WriteString("## Other available plugins\n")
 		sb.WriteString("These plugins have tools but none matched your current request. Use weaviate.ask_knowledge to discover their actions.\n")
 		for _, name := range discoverablePlugins {
