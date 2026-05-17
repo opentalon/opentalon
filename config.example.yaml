@@ -102,6 +102,14 @@ orchestrator:
   #     reinject_score_threshold: 0.85       # current-turn score override against "already known"
   #     reinject_top_k_force: 3              # always re-inject top-N candidates regardless of known state
   #     cap_per_turn: 5                      # hard ceiling on delta knowledge articles injected per turn
+  #   tool_tiers:
+  #     enabled: false                       # master switch; false = pre-Phase-4 single-tier (all RAG-matched tools with full schemas)
+  #     tier1_cap: 10                        # max Tier-1 tools (full schemas in `tools`)
+  #     tier2_cap: 15                        # max Tier-2 tools (name + 1-line summary in system prompt)
+  #     enable_get_tool_details: false       # expose the get_tool_details meta-tool for LLM-driven Tier-3→Tier-1 promotion (implies enabled: true)
+  #   tool_error_handling:
+  #     loop_cap_per_turn: 2                 # consecutive identical-tool errors per turn before "tool X failed N times" system msg
+  #     sticky_demotion_threshold: 3         # consecutive session-level errors before known_tools demotion (self-healed on success)
 
 channels:
   console:

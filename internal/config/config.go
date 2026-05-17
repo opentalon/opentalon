@@ -331,13 +331,10 @@ type OrchestratorConfig struct {
 // behaviour flags. Each pillar (knowledge dedup, tool tiers, tool
 // error handling) is independently togglable so phases can be
 // A/B-tested in production without coupled rollout risk.
-//
-// Phase 3 wires KnowledgeDedup only; ToolTiers and ToolErrorHandling
-// land in Phase 4 and are intentionally absent from this struct until
-// then so the YAML surface stays in lock-step with what the orchestrator
-// actually reads.
 type PreparerOrchestratorConfig struct {
-	KnowledgeDedup KnowledgeDedupConfig `yaml:"knowledge_dedup,omitempty"`
+	KnowledgeDedup    KnowledgeDedupConfig    `yaml:"knowledge_dedup,omitempty"`
+	ToolTiers         ToolTiersConfig         `yaml:"tool_tiers,omitempty"`
+	ToolErrorHandling ToolErrorHandlingConfig `yaml:"tool_error_handling,omitempty"`
 }
 
 // KnowledgeDedupConfig configures the per-session content_sha-keyed
@@ -360,6 +357,41 @@ type KnowledgeDedupConfig struct {
 	ReinjectScoreThreshold float64 `yaml:"reinject_score_threshold,omitempty"` // default 0.85 when zero
 	ReinjectTopKForce      int     `yaml:"reinject_top_k_force,omitempty"`     // default 3 when zero
 	CapPerTurn             int     `yaml:"cap_per_turn,omitempty"`             // default 5 when zero
+}
+
+// ToolTiersConfig configures the per-turn three-tier tool visibility
+// model (RFC #249 Phase 4). Tier 0 holds always_include actions plus
+// the get_tool_details meta-tool with full schemas; Tier 1 holds the
+// RAG-top-K relevant tools (also with full schemas) capped at Tier1Cap
+// with LRU eviction; Tier 2 surfaces the next slice as name + one-line
+// summary in the system prompt; Tier 3 fans out the remaining tools as
+// names-only grouped by plugin. The get_tool_details meta-tool promotes
+// any Tier 2/3 tool back into Tier 1 on demand.
+//
+// EnableGetToolDetails toggles the meta-tool independently of the
+// master Enabled flag so a deployment can ship the tier rendering
+// without yet exposing the LLM-driven promotion path. Setting it true
+// implies Enabled=true at the orchestrator (see runtime normalization).
+type ToolTiersConfig struct {
+	Enabled              bool `yaml:"enabled"`                           // master switch; default false
+	Tier1Cap             int  `yaml:"tier1_cap,omitempty"`               // max Tier-1 tools with full schemas; default 10 when zero
+	Tier2Cap             int  `yaml:"tier2_cap,omitempty"`               // max Tier-2 tools surfaced as name + 1-line summary; default 15 when zero
+	EnableGetToolDetails bool `yaml:"enable_get_tool_details,omitempty"` // expose the get_tool_details meta-tool for Tier-3→Tier-1 promotion; default false
+}
+
+// ToolErrorHandlingConfig configures the runaway-tool-failure
+// protections from RFC #249 Phase 4. LoopCapPerTurn bounds how many
+// consecutive identical-tool errors the orchestrator tolerates in a
+// single turn before injecting a system message nudging the LLM toward
+// a different approach. StickyDemotionThreshold tracks consecutive
+// errors across the whole session and flips the tool's Demoted bit in
+// known_tools when the count crosses; a subsequent successful call
+// clears the flag (self-healing). Both fields default to the RFC
+// values via runtime normalization when zero so tests can leave the
+// struct empty.
+type ToolErrorHandlingConfig struct {
+	LoopCapPerTurn          int `yaml:"loop_cap_per_turn,omitempty"`         // consecutive identical-tool errors per turn before system-msg injection; default 2 when zero
+	StickyDemotionThreshold int `yaml:"sticky_demotion_threshold,omitempty"` // consecutive session-level errors before known_tools demotion; default 3 when zero
 }
 
 // PipelineOrchestratorConfig enables structured multi-step pipeline execution.

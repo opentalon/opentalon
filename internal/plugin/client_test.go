@@ -270,6 +270,31 @@ func TestUserOnlyMappedFromProto(t *testing.T) {
 	}
 }
 
+func TestAlwaysIncludeMappedFromProto(t *testing.T) {
+	// RFC #249 Phase 4: a plugin marks a capability as Tier-0-pinned by
+	// setting always_include=true on its Action manifest. The wire bit
+	// must reach orchestrator.Action.AlwaysInclude so the tier
+	// decision can honour it.
+	pb := &pluginpb.PluginCapabilities{
+		Name:        "myplugin",
+		Description: "Test plugin",
+		Actions: []*pluginpb.Action{
+			{Name: "regular_action", Description: "Regular", AlwaysInclude: false},
+			{Name: "pinned_action", Description: "Pinned", AlwaysInclude: true},
+		},
+	}
+	cap := toPluginCapability(pb)
+	if len(cap.Actions) != 2 {
+		t.Fatalf("expected 2 actions, got %d", len(cap.Actions))
+	}
+	if cap.Actions[0].AlwaysInclude {
+		t.Error("regular_action should have AlwaysInclude=false")
+	}
+	if !cap.Actions[1].AlwaysInclude {
+		t.Error("pinned_action should have AlwaysInclude=true")
+	}
+}
+
 // credHeaderCapturingPluginService records the credential headers from each Execute call.
 type credHeaderCapturingPluginService struct {
 	pluginpb.UnimplementedPluginServiceServer

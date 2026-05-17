@@ -616,6 +616,16 @@ func main() {
 		// migration 010). When state DB is not configured the variable
 		// stays nil and dedup short-circuits to instrumentation_only.
 		InjectionStateStore: injectionStateStore,
+		ToolTiers: orchestrator.ToolTiersConfig{
+			Enabled:              cfg.Orchestrator.Preparer.ToolTiers.Enabled,
+			Tier1Cap:             cfg.Orchestrator.Preparer.ToolTiers.Tier1Cap,
+			Tier2Cap:             cfg.Orchestrator.Preparer.ToolTiers.Tier2Cap,
+			EnableGetToolDetails: cfg.Orchestrator.Preparer.ToolTiers.EnableGetToolDetails,
+		},
+		ToolErrorHandling: orchestrator.ToolErrorHandlingConfig{
+			LoopCapPerTurn:          cfg.Orchestrator.Preparer.ToolErrorHandling.LoopCapPerTurn,
+			StickyDemotionThreshold: cfg.Orchestrator.Preparer.ToolErrorHandling.StickyDemotionThreshold,
+		},
 		Subprocess: orchestrator.SubprocessConfig{
 			Enabled:       cfg.Orchestrator.Subprocess.Enabled,
 			MaxDepth:      cfg.Orchestrator.Subprocess.MaxDepth,

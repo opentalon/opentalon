@@ -1042,3 +1042,84 @@ orchestrator:
 		t.Errorf("absent preparer block must parse to zero KnowledgeDedupConfig, got %+v", got)
 	}
 }
+
+func TestParsePreparerToolTiers(t *testing.T) {
+	// Same purpose as TestParsePreparerKnowledgeDedup but for the
+	// Phase-4 tier flags — verifies the operator-facing YAML keys
+	// match the Go struct tags, no more, no less. Default-normalization
+	// is exercised in internal/orchestrator/tool_tiers_config_test.go.
+	yaml := `
+orchestrator:
+  preparer:
+    tool_tiers:
+      enabled: true
+      tier1_cap: 12
+      tier2_cap: 18
+      enable_get_tool_details: true
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Orchestrator.Preparer.ToolTiers
+	if !got.Enabled {
+		t.Errorf("Enabled = false, want true")
+	}
+	if got.Tier1Cap != 12 {
+		t.Errorf("Tier1Cap = %d, want 12", got.Tier1Cap)
+	}
+	if got.Tier2Cap != 18 {
+		t.Errorf("Tier2Cap = %d, want 18", got.Tier2Cap)
+	}
+	if !got.EnableGetToolDetails {
+		t.Errorf("EnableGetToolDetails = false, want true")
+	}
+}
+
+func TestParsePreparerToolErrorHandling(t *testing.T) {
+	// Round-trips the Phase-4 tool-error YAML block. The orchestrator-
+	// side default-normalization is covered in
+	// internal/orchestrator/tool_tiers_config_test.go — here we only
+	// guard the YAML→struct mapping.
+	yaml := `
+orchestrator:
+  preparer:
+    tool_error_handling:
+      loop_cap_per_turn: 4
+      sticky_demotion_threshold: 6
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Orchestrator.Preparer.ToolErrorHandling
+	if got.LoopCapPerTurn != 4 {
+		t.Errorf("LoopCapPerTurn = %d, want 4", got.LoopCapPerTurn)
+	}
+	if got.StickyDemotionThreshold != 6 {
+		t.Errorf("StickyDemotionThreshold = %d, want 6", got.StickyDemotionThreshold)
+	}
+}
+
+func TestParsePreparerToolTiersAbsentLeavesZeroValues(t *testing.T) {
+	// Regression guard: an absent preparer.tool_tiers /
+	// preparer.tool_error_handling block must parse to zero values so
+	// the orchestrator's normalization step owns the RFC defaults
+	// uniformly across YAML-driven and test-authored opts.
+	yaml := `
+orchestrator:
+  rules: []
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tt := cfg.Orchestrator.Preparer.ToolTiers
+	if tt.Enabled || tt.Tier1Cap != 0 || tt.Tier2Cap != 0 || tt.EnableGetToolDetails {
+		t.Errorf("absent tool_tiers block must parse to zero ToolTiersConfig, got %+v", tt)
+	}
+	eh := cfg.Orchestrator.Preparer.ToolErrorHandling
+	if eh.LoopCapPerTurn != 0 || eh.StickyDemotionThreshold != 0 {
+		t.Errorf("absent tool_error_handling block must parse to zero ToolErrorHandlingConfig, got %+v", eh)
+	}
+}

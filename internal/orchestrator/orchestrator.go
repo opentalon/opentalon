@@ -157,6 +157,37 @@ type InjectionStateStore interface {
 	UpdateInjectionState(ctx context.Context, sessionID string, st state.InjectionState) error
 }
 
+// ToolTiersConfig is the runtime form of the RFC #249 Phase 4 tool-tier
+// visibility flags. Zero values are normalized to the RFC defaults in
+// NewWithRules, mirroring the KnowledgeDedupConfig precedent. Enabled
+// is the master switch — when false the orchestrator falls back to the
+// pre-Phase-4 behaviour (all RAG-matched tools land in `tools` with
+// full schemas) and the Tier-2/Tier-3 system-prompt sections are
+// suppressed.
+//
+// EnableGetToolDetails activates the meta-tool that lets the LLM
+// promote a Tier-2/Tier-3 tool back to Tier 1 on demand. Setting it
+// true with Enabled=false would expose a tool no one can use, so the
+// normalization step in NewWithRules upgrades Enabled to true in that
+// case (matching the operator-friendly intent of the YAML flag).
+type ToolTiersConfig struct {
+	Enabled              bool
+	Tier1Cap             int  // max Tier-1 tools (full schemas in `tools`); default 10
+	Tier2Cap             int  // max Tier-2 tools (name + 1-line summary in system prompt); default 15
+	EnableGetToolDetails bool // expose the LLM-driven promotion meta-tool; default false
+}
+
+// ToolErrorHandlingConfig is the runtime form of the RFC #249 Phase 4
+// tool-failure protections. Zero values normalize to the RFC defaults
+// in NewWithRules. LoopCapPerTurn governs the in-loop "Tool X failed N
+// times" system-message injection; StickyDemotionThreshold governs the
+// session-level demotion flag in known_tools. Successful invocations
+// reset both counters (self-healing).
+type ToolErrorHandlingConfig struct {
+	LoopCapPerTurn          int // consecutive identical-tool errors per turn before system-msg injection; default 2
+	StickyDemotionThreshold int // consecutive session-level errors before known_tools demotion; default 3
+}
+
 // OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check, no summarization).
 type OrchestratorOpts struct {
 	CustomRules             []string
@@ -175,24 +206,26 @@ type OrchestratorOpts struct {
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PlanTimeout             time.Duration                 // max time for planner LLM call; 0 = default 15s
 	PipelineConfig          pipeline.PipelineConfig
-	ConfirmationPlugin      string                 // optional; plugin name for confirmation strategy (e.g. "planner")
-	ConfirmationAction      string                 // optional; action name (e.g. "check_confirmation")
-	ContextWindow           int                    // model context window in tokens; 0 = no trimming
-	MaxConcurrentSessions   int                    // max sessions running in parallel; default 1 (sequential)
-	GroupPluginLookup       GroupPluginLookup      // optional; when set, filters tool list by profile group
-	UsageRecorder           UsageRecorder          // optional; when set, records LLM usage after each run
-	PluginCallObserver      PluginCallObserver     // optional; when set, notified after each plugin/tool call
-	EventSink               emit.Sink              // optional; nil defaults to emit.NoOpSink (helpers run unconditionally, the no-op sink discards them)
-	PromptSnapshotStore     PromptSnapshotUpserter // optional; when set, system prompt + server instructions + tool descriptions are persisted by sha256 so turn_start hashes resolve to content
-	SyncActionsPlugin       string                 // optional; plugin name for action sync (e.g. "weaviate")
-	SyncActionsAction       string                 // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
-	SyncGlossaryAction      string                 // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
-	Knowledge               KnowledgeConfig        // optional; knowledge directory ingestion
-	Subprocess              SubprocessConfig       // optional; subprocess (sub-agent) support
-	OnStreamChunk           StreamChunkCallback    // optional; when set and LLM supports streaming, final answers are streamed
-	ShowToolCalls           string                 // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	KnowledgeDedup          KnowledgeDedupConfig   // RFC #249 Phase 3 dedup flags; zero value disables (= instrumentation_only mode)
-	InjectionStateStore     InjectionStateStore    // optional; required only when KnowledgeDedup.Enabled is true
+	ConfirmationPlugin      string                  // optional; plugin name for confirmation strategy (e.g. "planner")
+	ConfirmationAction      string                  // optional; action name (e.g. "check_confirmation")
+	ContextWindow           int                     // model context window in tokens; 0 = no trimming
+	MaxConcurrentSessions   int                     // max sessions running in parallel; default 1 (sequential)
+	GroupPluginLookup       GroupPluginLookup       // optional; when set, filters tool list by profile group
+	UsageRecorder           UsageRecorder           // optional; when set, records LLM usage after each run
+	PluginCallObserver      PluginCallObserver      // optional; when set, notified after each plugin/tool call
+	EventSink               emit.Sink               // optional; nil defaults to emit.NoOpSink (helpers run unconditionally, the no-op sink discards them)
+	PromptSnapshotStore     PromptSnapshotUpserter  // optional; when set, system prompt + server instructions + tool descriptions are persisted by sha256 so turn_start hashes resolve to content
+	SyncActionsPlugin       string                  // optional; plugin name for action sync (e.g. "weaviate")
+	SyncActionsAction       string                  // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
+	SyncGlossaryAction      string                  // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
+	Knowledge               KnowledgeConfig         // optional; knowledge directory ingestion
+	Subprocess              SubprocessConfig        // optional; subprocess (sub-agent) support
+	OnStreamChunk           StreamChunkCallback     // optional; when set and LLM supports streaming, final answers are streamed
+	ShowToolCalls           string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	KnowledgeDedup          KnowledgeDedupConfig    // RFC #249 Phase 3 dedup flags; zero value disables (= instrumentation_only mode)
+	InjectionStateStore     InjectionStateStore     // optional; required only when KnowledgeDedup.Enabled is true
+	ToolTiers               ToolTiersConfig         // RFC #249 Phase 4 three-tier tool visibility flags; zero value disables (= pre-Phase-4 single-tier behaviour)
+	ToolErrorHandling       ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; zero value normalizes to RFC defaults
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -254,23 +287,25 @@ type Orchestrator struct {
 	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
 	pendingConfirmationIDs  map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
 	pipelineConfig          pipeline.PipelineConfig
-	confirmationPlugin      string                 // optional; plugin for confirmation strategy
-	confirmationAction      string                 // optional; action name for confirmation check
-	contextWindow           int                    // model context window in tokens; 0 = no trimming
-	groupPluginLookup       GroupPluginLookup      // optional; nil = no group-based filtering
-	usageRecorder           UsageRecorder          // optional; nil = no usage tracking
-	pluginCallObserver      PluginCallObserver     // optional; nil = no plugin call observation
-	eventSink               emit.Sink              // structured session event sink; always non-nil (NoOpSink default)
-	snapshotStore           PromptSnapshotUpserter // optional; nil = turn_start hashes are emitted but content is not persisted
-	syncActionsPlugin       string                 // optional; plugin name for action sync
-	syncActionsAction       string                 // optional; action name for action sync
-	syncGlossaryAction      string                 // optional; action name for glossary sync (uses syncActionsPlugin)
-	knowledge               KnowledgeConfig        // optional; knowledge directory ingestion
-	subprocessConfig        SubprocessConfig       // optional; subprocess (sub-agent) support
-	onStreamChunk           StreamChunkCallback    // optional; when set, final answers stream to caller
-	showToolCalls           string                 // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	knowledgeDedup          KnowledgeDedupConfig   // RFC #249 Phase 3 dedup flags; Enabled=false skips dedup logic and InjectionStateStore reads
-	injectionStateStore     InjectionStateStore    // optional; nil = dedup decision logic short-circuits to instrumentation_only mode
+	confirmationPlugin      string                  // optional; plugin for confirmation strategy
+	confirmationAction      string                  // optional; action name for confirmation check
+	contextWindow           int                     // model context window in tokens; 0 = no trimming
+	groupPluginLookup       GroupPluginLookup       // optional; nil = no group-based filtering
+	usageRecorder           UsageRecorder           // optional; nil = no usage tracking
+	pluginCallObserver      PluginCallObserver      // optional; nil = no plugin call observation
+	eventSink               emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
+	snapshotStore           PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
+	syncActionsPlugin       string                  // optional; plugin name for action sync
+	syncActionsAction       string                  // optional; action name for action sync
+	syncGlossaryAction      string                  // optional; action name for glossary sync (uses syncActionsPlugin)
+	knowledge               KnowledgeConfig         // optional; knowledge directory ingestion
+	subprocessConfig        SubprocessConfig        // optional; subprocess (sub-agent) support
+	onStreamChunk           StreamChunkCallback     // optional; when set, final answers stream to caller
+	showToolCalls           string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	knowledgeDedup          KnowledgeDedupConfig    // RFC #249 Phase 3 dedup flags; Enabled=false skips dedup logic and InjectionStateStore reads
+	injectionStateStore     InjectionStateStore     // optional; nil = dedup decision logic short-circuits to instrumentation_only mode
+	toolTiers               ToolTiersConfig         // RFC #249 Phase 4 tier-visibility flags; Enabled=false short-circuits to pre-Phase-4 single-tier behaviour
+	toolErrorHandling       ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; thresholds always carry RFC defaults after NewWithRules
 	// legacyKnowledgeWarnings tracks the (sessionID, pluginName) pairs
 	// we've already deprecation-warned for, so a session that keeps
 	// using a legacy preparer doesn't spam the log every turn. Key is
@@ -382,6 +417,31 @@ func NewWithRules(
 		dedupCfg.CapPerTurn = 5
 	}
 
+	// Normalize ToolTiers + ToolErrorHandling to RFC #249 Phase 4
+	// defaults, same precedent as KnowledgeDedup above. Enabled stays
+	// false by default. EnableGetToolDetails carries an extra rule:
+	// turning the meta-tool on with the master switch still off would
+	// register a Tier-0 tool no one can use, so we upgrade Enabled to
+	// true in that case — keeps the YAML surface obvious for operators
+	// who only set the meta-tool flag.
+	tierCfg := opts.ToolTiers
+	if tierCfg.Tier1Cap == 0 {
+		tierCfg.Tier1Cap = 10
+	}
+	if tierCfg.Tier2Cap == 0 {
+		tierCfg.Tier2Cap = 15
+	}
+	if tierCfg.EnableGetToolDetails {
+		tierCfg.Enabled = true
+	}
+	errCfg := opts.ToolErrorHandling
+	if errCfg.LoopCapPerTurn == 0 {
+		errCfg.LoopCapPerTurn = 2
+	}
+	if errCfg.StickyDemotionThreshold == 0 {
+		errCfg.StickyDemotionThreshold = 3
+	}
+
 	o := &Orchestrator{
 		sessionMuxes:            make(map[string]*sessionMutex),
 		semaphore:               semaphore,
@@ -425,6 +485,8 @@ func NewWithRules(
 		showToolCalls:           opts.ShowToolCalls,
 		knowledgeDedup:          dedupCfg,
 		injectionStateStore:     opts.InjectionStateStore,
+		toolTiers:               tierCfg,
+		toolErrorHandling:       errCfg,
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)

@@ -98,6 +98,13 @@ message Action {
   repeated Parameter parameters = 3;
   bool user_only = 4; // if true, hidden from LLM and blocked from LLM-sourced calls; only invocable directly by the user
   repeated string inject_context_args = 5; // context arg names (e.g. "actor_id") the host injects from request context before calling Execute
+  // RFC #249 Phase 4 tool-tier flag: if true, the orchestrator pins this
+  // action into Tier 0 (always present in the LLM's `tools` array, full
+  // schema). RAG-derived scores still feed into the per-turn ranking for
+  // event diagnostics, but never demote an always_include action below
+  // Tier 0. Use for capabilities a plugin considers non-negotiable for
+  // its domain (e.g. an emergency-stop or session-reset action).
+  bool always_include = 6;
 }
 
 message Parameter {
