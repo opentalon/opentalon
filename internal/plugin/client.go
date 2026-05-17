@@ -153,6 +153,7 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 			UserOnly:          a.UserOnly,
 			InjectContextArgs: a.InjectContextArgs,
 			AlwaysInclude:     a.AlwaysInclude,
+			ReadOnly:          a.ReadOnly,
 		}
 	}
 	glossary := make([]orchestrator.GlossaryEntry, len(pb.Glossary))

@@ -16,6 +16,12 @@ type Parameter struct {
 // array with its full schema regardless of RAG score, so a plugin can
 // guarantee critical capabilities (e.g. emergency-stop) are never demoted
 // to a name-only system-prompt entry.
+// ReadOnly is the per-call confirmation-gate hint: when true the
+// orchestrator skips the "I'm about to execute X" user prompt that
+// normally precedes a tool call, and the planner-narration LLM call
+// that builds that prompt. Set for actions that don't mutate user-
+// visible state (list/show/get/query). Default false — fail-safe to
+// "treat as potential write".
 type Action struct {
 	Name              string      `yaml:"name"`
 	Description       string      `yaml:"description"`
@@ -24,6 +30,7 @@ type Action struct {
 	AuditLog          bool        `yaml:"audit_log,omitempty"`      // if true, log invocation for audit
 	UserOnly          bool        `yaml:"user_only,omitempty"`      // if true, hidden from LLM and blocked from LLM-sourced calls
 	AlwaysInclude     bool        `yaml:"always_include,omitempty"` // RFC #249 Phase 4: pin to Tier 0 regardless of RAG score
+	ReadOnly          bool        `yaml:"read_only,omitempty"`      // if true, skip per-call user-confirmation gate (pure query)
 }
 
 type PluginCapability struct {

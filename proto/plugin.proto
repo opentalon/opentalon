@@ -105,6 +105,17 @@ message Action {
   // Tier 0. Use for capabilities a plugin considers non-negotiable for
   // its domain (e.g. an emergency-stop or session-reset action).
   bool always_include = 6;
+  // If true, the action is a pure query — it does not mutate any state
+  // the user cares about. The orchestrator's per-tool-call confirmation
+  // gate short-circuits when this is set: read_only=true actions execute
+  // without prompting the user "I'm about to execute X, proceed?",
+  // which would otherwise be noise and burn an LLM round-trip for a
+  // narration that the user never needed to see. Default false — every
+  // action is treated as a potential write until the plugin declares
+  // otherwise. Plugins that aggregate upstream tools (e.g. the
+  // mcp-plugin) typically propagate this from the upstream protocol's
+  // own read-only hint (MCP: `annotations.readOnlyHint`).
+  bool read_only = 7;
 }
 
 message Parameter {

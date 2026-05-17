@@ -2141,7 +2141,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// action needs confirmation, pause the agent loop and return a
 			// confirmation prompt to the user. The pending call is stored
 			// and executed on the next message if approved.
-			if o.confirmationPlugin != "" && o.confirmationAction != "" && !calls[i].ConfirmationBypass {
+			//
+			// Skip the entire gate for actions whose manifest declares
+			// `read_only = true`. Pure queries don't need user approval
+			// and asking would be noise — both to the user (a yes/no
+			// prompt for a list/show call) and to the LLM budget (a
+			// planner-narration round-trip per call). The flag originates
+			// from the plugin's manifest (for MCP-sourced tools, propagated
+			// from `annotations.readOnlyHint`).
+			if o.confirmationPlugin != "" && o.confirmationAction != "" &&
+				!calls[i].ConfirmationBypass &&
+				!o.registry.IsActionReadOnly(calls[i].Plugin, calls[i].Action) {
 				confResult := o.checkConfirmationPlugin(ctx, []*pipeline.Step{{
 					ID:      calls[i].ID,
 					Name:    calls[i].Action,

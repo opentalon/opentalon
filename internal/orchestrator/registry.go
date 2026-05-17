@@ -166,6 +166,30 @@ func (r *ToolRegistry) ListCapabilities() []PluginCapability {
 	return caps
 }
 
+// IsActionReadOnly reports whether the named action on the named plugin
+// is declared read-only in its capability manifest. Unknown plugin or
+// unknown action returns false — the confirmation gate then runs as
+// usual (fail-safe: an action the registry doesn't recognise is treated
+// as a potential write).
+//
+// Used by the per-call confirmation path in orchestrator.Run to skip
+// the "I'm about to execute X" prompt + planner-narration LLM round-
+// trip for pure-query actions. The metadata originates from the plugin
+// manifest (e.g. an MCP tool with `annotations.readOnlyHint = true`)
+// and flows through pluginpb.Action.ReadOnly into Action.ReadOnly.
+func (r *ToolRegistry) IsActionReadOnly(plugin, action string) bool {
+	cap, ok := r.GetCapability(plugin)
+	if !ok {
+		return false
+	}
+	for _, a := range cap.Actions {
+		if a.Name == action {
+			return a.ReadOnly
+		}
+	}
+	return false
+}
+
 func (r *ToolRegistry) HasAction(plugin, action string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

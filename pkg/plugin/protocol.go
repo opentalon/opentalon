@@ -82,6 +82,21 @@ type ActionMsg struct {
 	Parameters        []ParameterMsg `json:"parameters,omitempty"`
 	InjectContextArgs []string       `json:"inject_context_args,omitempty"` // context arg names (e.g. "actor_id") the host injects before calling Execute
 	UserOnly          bool           `json:"user_only,omitempty"`           // if true, hidden from LLM and only invocable directly by the user
+	// AlwaysInclude is the RFC #249 Phase 4 pin-to-Tier-0 flag — when true
+	// the host's tier decision keeps this action in the LLM's `tools`
+	// array (full schema) regardless of RAG score. The pkg/plugin SDK
+	// surfaces it here so external plugins built on this SDK can declare
+	// it; internal/orchestrator/system_tools registers in-process actions
+	// against orchestrator.Action directly and bypasses this struct.
+	AlwaysInclude bool `json:"always_include,omitempty"`
+	// ReadOnly is true for actions that do not mutate any user-visible
+	// state (queries, lookups). The host's confirmation gate skips the
+	// "I'm about to execute X" prompt for these actions, eliminating the
+	// per-call user friction and the planner-narration LLM call that
+	// would otherwise fire on every list/show invocation. Default false
+	// — every action is treated as a potential write until the plugin
+	// declares otherwise.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 // ParameterMsg describes one parameter of an action.

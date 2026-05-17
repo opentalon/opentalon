@@ -24,6 +24,8 @@ func capsToProto(c CapabilitiesMsg) *pluginpb.PluginCapabilities {
 			Parameters:        params,
 			UserOnly:          a.UserOnly,
 			InjectContextArgs: a.InjectContextArgs,
+			AlwaysInclude:     a.AlwaysInclude,
+			ReadOnly:          a.ReadOnly,
 		}
 	}
 	glossary := make([]*pluginpb.GlossaryEntry, len(c.Glossary))

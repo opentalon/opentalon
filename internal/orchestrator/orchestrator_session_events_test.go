@@ -2057,6 +2057,112 @@ func TestOrchestrator_Confirmation_ToolCallRequiresConfirmation_EmitsRequested(t
 	}
 }
 
+func TestOrchestrator_Confirmation_ReadOnlyAction_SkipsPrompt(t *testing.T) {
+	// A read-only action must never trigger the confirmation gate, even
+	// when the confirmation plugin is wired and would otherwise fail-safe
+	// to "require confirmation" (the local-dev signal that surfaced the
+	// noise originally). The action's manifest carries
+	// ReadOnly=true and the orchestrator short-circuits before
+	// checkConfirmationPlugin runs — so no confirmation_requested event
+	// reaches the sink, the tool executes inline, and the LLM's
+	// "textAfter" closes the turn normally.
+	sink := &recordingEventSink{}
+	llm := &nativeToolCallingLLM{
+		toolCalls: []provider.ToolCall{{
+			ID:        "tc-readonly",
+			Name:      "gitlab.list_issues",
+			Arguments: map[string]string{},
+		}},
+		textAfter: "here are your issues",
+	}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "gitlab",
+		Actions: []Action{{Name: "list_issues", ReadOnly: true}},
+	}, &echoExecutor{})
+	// A confirming executor backs the confirmation plugin — if the gate
+	// runs, it returns RequiresConfirmation=true and we'd see a
+	// confirmation_requested event in the sink. The point of this test
+	// is that this code path must not even be reached.
+	_ = registry.Register(PluginCapability{
+		Name:    "conf",
+		Actions: []Action{{Name: "check"}},
+	}, confirmingExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:          sink,
+		ConfirmationPlugin: "conf",
+		ConfirmationAction: "check",
+	})
+
+	if _, err := orch.Run(context.Background(), "sess", "list my issues"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findConfirmationRequestedPayloads(t, sink.snapshot())
+	if len(got) != 0 {
+		t.Errorf("confirmation_requested count = %d, want 0 for read_only action (got prompts: %v)",
+			len(got), got)
+	}
+}
+
+func TestOrchestrator_Confirmation_NonReadOnlyAction_StillPrompts(t *testing.T) {
+	// Sibling to the ReadOnly skip test: an action that is NOT declared
+	// read-only must still go through the confirmation gate, even if a
+	// sibling action on the same plugin is read-only. Locks in that the
+	// short-circuit is keyed strictly on the per-action flag and doesn't
+	// accidentally infect every call to the same plugin.
+	sink := &recordingEventSink{}
+	llm := &nativeToolCallingLLM{
+		toolCalls: []provider.ToolCall{{
+			ID:        "tc-write",
+			Name:      "gitlab.create_issue",
+			Arguments: map[string]string{},
+		}},
+		textAfter: "done",
+	}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab",
+		Actions: []Action{
+			{Name: "list_issues", ReadOnly: true},
+			{Name: "create_issue"}, // ReadOnly=false (default)
+		},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name:    "conf",
+		Actions: []Action{{Name: "check"}},
+	}, confirmingExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:          sink,
+		ConfirmationPlugin: "conf",
+		ConfirmationAction: "check",
+	})
+
+	if _, err := orch.Run(context.Background(), "sess", "create an issue"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findConfirmationRequestedPayloads(t, sink.snapshot())
+	if len(got) != 1 {
+		t.Fatalf("confirmation_requested count = %d, want 1 for non-read-only action", len(got))
+	}
+	if got[0].ToolCallID != "tc-write" {
+		t.Errorf("ToolCallID = %q, want tc-write", got[0].ToolCallID)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // parent_id linkage tests — verify that producer-side event_id generation
 // and WithParent ctx wiring produces the expected event tree.
