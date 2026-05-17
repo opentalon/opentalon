@@ -3503,7 +3503,7 @@ func TestDeduplicateKnowledgeOutput(t *testing.T) {
 	}
 
 	var dst []provider.Message
-	deduped := appendStrippingAllKC(dst, msgs)
+	deduped := appendStrippingHistoricalKC(dst, msgs)
 
 	// First knowledge output should be preserved.
 	if !strings.Contains(deduped[2].Content, "## Knowledge Articles") {
@@ -3524,5 +3524,101 @@ func TestDeduplicateKnowledgeOutput(t *testing.T) {
 	// Non-knowledge plugin outputs should be untouched.
 	if !strings.Contains(deduped[4].Content, "Items: 370 total") {
 		t.Error("non-knowledge plugin output should be preserved")
+	}
+}
+
+func TestAppendStrippingHistoricalKC_PreservesCurrentTurn(t *testing.T) {
+	const kcBlock = "[knowledge_context]\n## Article: Onboarding\nbody text here\n[/knowledge_context]\n"
+	historicalUser := kcBlock + "old question"
+	currentUser := kcBlock + "new question"
+
+	msgs := []provider.Message{
+		{Role: provider.RoleUser, Content: historicalUser},
+		{Role: provider.RoleAssistant, Content: "old answer"},
+		{Role: provider.RoleUser, Content: currentUser},
+	}
+
+	out := appendStrippingHistoricalKC(nil, msgs)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(out))
+	}
+
+	if strings.Contains(out[0].Content, "[knowledge_context]") {
+		t.Errorf("historical user message should have KC stripped, got: %q", out[0].Content)
+	}
+	if !strings.Contains(out[0].Content, "old question") {
+		t.Errorf("historical user message should preserve user text, got: %q", out[0].Content)
+	}
+
+	if out[1].Content != "old answer" {
+		t.Errorf("assistant message should be untouched, got: %q", out[1].Content)
+	}
+
+	if !strings.Contains(out[2].Content, "[knowledge_context]") {
+		t.Errorf("current-turn user message must keep its [knowledge_context] block, got: %q", out[2].Content)
+	}
+	if !strings.Contains(out[2].Content, "## Article: Onboarding") {
+		t.Errorf("current-turn user message must keep the KC body, got: %q", out[2].Content)
+	}
+	if !strings.Contains(out[2].Content, "new question") {
+		t.Errorf("current-turn user message must keep the user's actual question, got: %q", out[2].Content)
+	}
+}
+
+func TestAppendStrippingHistoricalKC_SingleUserTurnPreserved(t *testing.T) {
+	const kcBlock = "[knowledge_context]\nfirst-turn knowledge\n[/knowledge_context]\n"
+	msgs := []provider.Message{
+		{Role: provider.RoleSystem, Content: "system prompt"},
+		{Role: provider.RoleUser, Content: kcBlock + "hello"},
+	}
+
+	out := appendStrippingHistoricalKC(nil, msgs)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(out))
+	}
+	if !strings.Contains(out[1].Content, "[knowledge_context]") {
+		t.Errorf("single user turn is the current turn and must keep its KC, got: %q", out[1].Content)
+	}
+}
+
+func TestAppendStrippingHistoricalKC_TextToolsLoopPreservesUserTurn(t *testing.T) {
+	// Text-tools mode: tool results are stored as RoleUser wrapped in
+	// [plugin_output]. After at least one tool round, the slice looks like
+	// [user_with_KC, assistant_call, user_tool_result]. The "current turn"
+	// for KC-preservation is still the original user_with_KC at index 0,
+	// not the tool-result echo at index 2.
+	const kcBlock = "[knowledge_context]\n## Article: Inventory rules\n[/knowledge_context]\n"
+	msgs := []provider.Message{
+		{Role: provider.RoleUser, Content: kcBlock + "list my items"},
+		{Role: provider.RoleAssistant, Content: "[tool_call] inventory.list-items"},
+		{Role: provider.RoleUser, Content: "[plugin_output]\nItems: 42\n[/plugin_output]"},
+	}
+
+	out := appendStrippingHistoricalKC(nil, msgs)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(out))
+	}
+	if !strings.Contains(out[0].Content, "[knowledge_context]") {
+		t.Errorf("original user message must keep its KC even after a tool round, got: %q", out[0].Content)
+	}
+	if !strings.Contains(out[0].Content, "list my items") {
+		t.Errorf("original user message must keep its user text, got: %q", out[0].Content)
+	}
+	if !strings.Contains(out[2].Content, "[plugin_output]") {
+		t.Errorf("tool result envelope must be preserved, got: %q", out[2].Content)
+	}
+}
+
+func TestAppendStrippingHistoricalKC_NoUserMessages(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: provider.RoleSystem, Content: "system"},
+		{Role: provider.RoleAssistant, Content: "hi"},
+	}
+	out := appendStrippingHistoricalKC(nil, msgs)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(out))
+	}
+	if out[0].Content != "system" || out[1].Content != "hi" {
+		t.Errorf("non-user messages should pass through unchanged, got: %+v", out)
 	}
 }
