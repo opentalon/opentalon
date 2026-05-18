@@ -2348,13 +2348,7 @@ func (o *Orchestrator) supportsNativeTools() bool {
 // for native function calling. Only includes actions visible to the current profile.
 func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.ToolDefinition {
 	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
-	preparerAction := make(map[string]bool)
-	for _, prep := range o.preparers {
-		preparerAction[prep.Plugin+"."+prep.Action] = true
-	}
-	for _, g := range o.guards {
-		preparerAction[g.Plugin+"."+g.Action] = true
-	}
+	preparerAction := preparerActionSet(o.preparers, o.guards)
 
 	relevantToolSet := make(map[string]bool)
 	rtTools, relevantToolsActive := relevantToolsFromContext(ctx)
@@ -3361,13 +3355,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	}
 
 	// Don't list content-preparer or guard actions as tools; they run automatically before LLM calls.
-	preparerAction := make(map[string]bool)
-	for _, prep := range o.preparers {
-		preparerAction[prep.Plugin+"."+prep.Action] = true
-	}
-	for _, g := range o.guards {
-		preparerAction[g.Plugin+"."+g.Action] = true
-	}
+	preparerAction := preparerActionSet(o.preparers, o.guards)
 
 	// Resolve the set of plugins allowed for the current profile group (if any).
 	allowedPlugins := o.resolveAllowedPlugins(ctx)

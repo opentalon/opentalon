@@ -183,7 +183,7 @@ func applyToolTierDecision(
 		addToPool(name, currentTurn, true)
 	}
 	for _, kt := range prior.KnownTools {
-		if kt.Tier == "tier1" {
+		if kt.Tier == state.KnownToolTier1 {
 			addToPool(kt.ToolName, 0, false)
 		}
 	}
@@ -214,7 +214,7 @@ func applyToolTierDecision(
 	// Tier1EvictedToTier3: pool overflow that was tier="tier1" before.
 	var evicted []string
 	for _, p := range overflow {
-		if existing, ok := priorByName[p.Name]; ok && existing.Tier == "tier1" {
+		if existing, ok := priorByName[p.Name]; ok && existing.Tier == state.KnownToolTier1 {
 			evicted = append(evicted, p.Name)
 		}
 	}
@@ -224,7 +224,7 @@ func applyToolTierDecision(
 	// so payload buckets remain stable across turns).
 	var tier1New, tier1Carried []string
 	for _, name := range tier1 {
-		if existing, ok := priorByName[name]; ok && existing.Tier == "tier1" {
+		if existing, ok := priorByName[name]; ok && existing.Tier == state.KnownToolTier1 {
 			tier1Carried = append(tier1Carried, name)
 		} else {
 			tier1New = append(tier1New, name)
@@ -300,7 +300,7 @@ func buildUpdatedKnownTools(
 ) []state.KnownToolEntry {
 	entry := make(map[string]state.KnownToolEntry, len(pool)+len(tier0)+len(tier2))
 
-	upsertWithRank := func(name, tier string, rank int, demoted bool) {
+	upsertWithRank := func(name string, tier state.KnownToolTier, rank int, demoted bool) {
 		cur, ok := entry[name]
 		if !ok {
 			cur = priorByName[name]
@@ -319,20 +319,20 @@ func buildUpdatedKnownTools(
 	for _, name := range tier0 {
 		// Tier 0 is "always referenced" — bump to currentTurn so
 		// downstream LRU sees them as freshest.
-		upsertWithRank(name, "tier0", currentTurn, false)
+		upsertWithRank(name, state.KnownToolTier0, currentTurn, false)
 	}
 	tier1Set := stringSet(tier1)
 	for _, p := range pool {
-		t := "tier3"
+		t := state.KnownToolTier3
 		if tier1Set[p.Name] {
-			t = "tier1"
+			t = state.KnownToolTier1
 		}
 		upsertWithRank(p.Name, t, p.LRURank, p.Demoted)
 	}
 	for _, name := range tier2 {
 		// Tier 2 is also a "reference" per RFC ("RAG-match above
 		// threshold") so bump rank.
-		upsertWithRank(name, "tier2", currentTurn, false)
+		upsertWithRank(name, state.KnownToolTier2, currentTurn, false)
 	}
 	// Carry forward prior entries whose tool is still available but
 	// didn't land in any tier above (i.e. they're effectively Tier 3
@@ -345,7 +345,7 @@ func buildUpdatedKnownTools(
 		if !availSet[name] {
 			continue
 		}
-		kt.Tier = "tier3"
+		kt.Tier = state.KnownToolTier3
 		entry[name] = kt
 	}
 
@@ -484,24 +484,7 @@ func (o *Orchestrator) persistToolTierDecision(ctx context.Context, sessionID st
 // run pre-LLM-call to sanitise messages and never produce a
 // user-callable surface.
 func (o *Orchestrator) availableToolNames(ctx context.Context) []string {
-	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
-	preparerAction := preparerActionSet(o.preparers, o.guards)
-
-	var names []string
-	for _, cap := range o.registry.ListCapabilities() {
-		if !o.pluginAllowed(cap, allowedPlugins) {
-			continue
-		}
-		for _, action := range cap.Actions {
-			fqn := cap.Name + "." + action.Name
-			if preparerAction[fqn] || action.UserOnly {
-				continue
-			}
-			names = append(names, fqn)
-		}
-	}
-	sort.Strings(names)
-	return names
+	return o.listProfileToolNames(ctx, false)
 }
 
 // alwaysIncludeToolNames returns the subset of available tool names
@@ -509,6 +492,15 @@ func (o *Orchestrator) availableToolNames(ctx context.Context) []string {
 // The get_tool_details meta-tool (D4 registers it) lands here via the
 // same path.
 func (o *Orchestrator) alwaysIncludeToolNames(ctx context.Context) []string {
+	return o.listProfileToolNames(ctx, true)
+}
+
+// listProfileToolNames is the shared walk for availableToolNames and
+// alwaysIncludeToolNames. One pass over the registry honours the same
+// profile / preparer / user-only filter chain buildToolDefinitions and
+// buildSystemPrompt use; alwaysIncludeOnly narrows the result to the
+// Tier-0 pinned subset.
+func (o *Orchestrator) listProfileToolNames(ctx context.Context, alwaysIncludeOnly bool) []string {
 	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
 	preparerAction := preparerActionSet(o.preparers, o.guards)
 
@@ -518,7 +510,7 @@ func (o *Orchestrator) alwaysIncludeToolNames(ctx context.Context) []string {
 			continue
 		}
 		for _, action := range cap.Actions {
-			if !action.AlwaysInclude {
+			if alwaysIncludeOnly && !action.AlwaysInclude {
 				continue
 			}
 			fqn := cap.Name + "." + action.Name

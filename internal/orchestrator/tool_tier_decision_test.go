@@ -64,9 +64,9 @@ func TestApplyToolTierDecision_LRUEvictsOldestWhenCapExceeded(t *testing.T) {
 	// candidates push two newcomers in at rank=4. Cap=3 means the two
 	// lowest-rank Tier-1 entries (a.x rank=1, a.y rank=2) get evicted.
 	prior := state.InjectionState{KnownTools: []state.KnownToolEntry{
-		{ToolName: "a.x", Tier: "tier1", LRURank: 1},
-		{ToolName: "a.y", Tier: "tier1", LRURank: 2},
-		{ToolName: "a.z", Tier: "tier1", LRURank: 3},
+		{ToolName: "a.x", Tier: state.KnownToolTier1, LRURank: 1},
+		{ToolName: "a.y", Tier: state.KnownToolTier1, LRURank: 2},
+		{ToolName: "a.z", Tier: state.KnownToolTier1, LRURank: 3},
 	}}
 	candidates := []ToolCandidate{tc("a.new1", 0.9), tc("a.new2", 0.8)}
 	available := []string{"a.x", "a.y", "a.z", "a.new1", "a.new2"}
@@ -93,8 +93,8 @@ func TestApplyToolTierDecision_DemotedAreEvictionPreferred(t *testing.T) {
 	// a.demoted has rank=10 (highest) but Demoted=true, so it should
 	// lose Tier 1 to non-demoted tools even at lower rank.
 	prior := state.InjectionState{KnownTools: []state.KnownToolEntry{
-		{ToolName: "a.demoted", Tier: "tier1", LRURank: 10, Demoted: true},
-		{ToolName: "a.normal", Tier: "tier1", LRURank: 1},
+		{ToolName: "a.demoted", Tier: state.KnownToolTier1, LRURank: 10, Demoted: true},
+		{ToolName: "a.normal", Tier: state.KnownToolTier1, LRURank: 1},
 	}}
 	candidates := []ToolCandidate{tc("a.new1", 0.9), tc("a.new2", 0.8)}
 	available := []string{"a.demoted", "a.normal", "a.new1", "a.new2"}
@@ -137,7 +137,7 @@ func TestApplyToolTierDecision_PromotedJoinsTier1(t *testing.T) {
 	// promoted tools enter the Tier-1 pool at currentTurn rank — should
 	// land in Tier 1 ahead of older candidates.
 	prior := state.InjectionState{KnownTools: []state.KnownToolEntry{
-		{ToolName: "a.old", Tier: "tier1", LRURank: 1},
+		{ToolName: "a.old", Tier: state.KnownToolTier1, LRURank: 1},
 	}}
 	candidates := []ToolCandidate{tc("a.cand", 0.9)}
 	promoted := []string{"a.promo"}
@@ -177,7 +177,7 @@ func TestApplyToolTierDecision_UpdatedStatePreservesKnownKnowledge(t *testing.T)
 
 func TestApplyToolTierDecision_UpdatedStatePersistsDemotedFlag(t *testing.T) {
 	prior := state.InjectionState{KnownTools: []state.KnownToolEntry{
-		{ToolName: "a.x", Tier: "tier1", LRURank: 1, Demoted: true},
+		{ToolName: "a.x", Tier: state.KnownToolTier1, LRURank: 1, Demoted: true},
 	}}
 	candidates := []ToolCandidate{tc("a.x", 0.9)}
 	got := applyToolTierDecision(candidates, []string{"a.x"}, nil, nil, prior, defaultTierCfg(), 5)
@@ -199,8 +199,8 @@ func TestApplyToolTierDecision_UpdatedStateDropsRemovedTools(t *testing.T) {
 	// A tool that used to be in KnownTools but is no longer in
 	// availableTools (plugin removed, profile changed) should drop out.
 	prior := state.InjectionState{KnownTools: []state.KnownToolEntry{
-		{ToolName: "a.gone", Tier: "tier1", LRURank: 5},
-		{ToolName: "a.here", Tier: "tier3", LRURank: 3},
+		{ToolName: "a.gone", Tier: state.KnownToolTier1, LRURank: 5},
+		{ToolName: "a.here", Tier: state.KnownToolTier3, LRURank: 3},
 	}}
 	got := applyToolTierDecision(nil, []string{"a.here"}, nil, nil, prior, defaultTierCfg(), 6)
 	for _, kt := range got.UpdatedState.KnownTools {
@@ -228,7 +228,7 @@ func TestApplyToolTierDecision_AlwaysIncludeBeatsRAGScore(t *testing.T) {
 
 func TestApplyToolTierDecision_BumpsLRURankOnRAGMatch(t *testing.T) {
 	prior := state.InjectionState{KnownTools: []state.KnownToolEntry{
-		{ToolName: "a.x", Tier: "tier1", LRURank: 2},
+		{ToolName: "a.x", Tier: state.KnownToolTier1, LRURank: 2},
 	}}
 	candidates := []ToolCandidate{tc("a.x", 0.9)}
 	got := applyToolTierDecision(candidates, []string{"a.x"}, nil, nil, prior, defaultTierCfg(), 7)
@@ -253,7 +253,7 @@ func TestApplyToolTierDecision_LegacyEvictionOnlyWhenWasTier1(t *testing.T) {
 	// A pool overflow that was NOT tier="tier1" in prior state should
 	// not appear in Tier1EvictedToTier3 (it never lost Tier 1 status).
 	prior := state.InjectionState{KnownTools: []state.KnownToolEntry{
-		{ToolName: "a.was_t3", Tier: "tier3", LRURank: 1},
+		{ToolName: "a.was_t3", Tier: state.KnownToolTier3, LRURank: 1},
 	}}
 	// a.was_t3 is NOT a current candidate, NOT promoted, so it never
 	// even enters the pool. It belongs to Tier 3 directly.
@@ -272,7 +272,7 @@ func TestApplyToolTierDecision_Tier1NewIncludesPromotionsFromTier2(t *testing.T)
 	// known_tools) and is a top-ranked candidate this turn lands in
 	// Tier 1. It should appear as Tier1New, not Tier1Carried.
 	prior := state.InjectionState{KnownTools: []state.KnownToolEntry{
-		{ToolName: "a.moved_up", Tier: "tier2", LRURank: 1},
+		{ToolName: "a.moved_up", Tier: state.KnownToolTier2, LRURank: 1},
 	}}
 	candidates := []ToolCandidate{tc("a.moved_up", 0.99)}
 	got := applyToolTierDecision(candidates, []string{"a.moved_up"}, nil, nil, prior, defaultTierCfg(), 5)
@@ -349,7 +349,7 @@ func TestApplyToolTierDecision_PromotedAlreadyTier1StaysTier1Carried(t *testing.
 	// rather than Tier1New. Otherwise a re-promoted carry-over would
 	// look like a freshly-promoted tool in the event payload.
 	prior := state.InjectionState{KnownTools: []state.KnownToolEntry{
-		{ToolName: "a.kept", Tier: "tier1", LRURank: 3},
+		{ToolName: "a.kept", Tier: state.KnownToolTier1, LRURank: 3},
 	}}
 	promoted := []string{"a.kept"}
 	got := applyToolTierDecision(nil, []string{"a.kept"}, nil, promoted, prior, defaultTierCfg(), 7)
@@ -371,9 +371,9 @@ func TestApplyToolTierDecision_SortStableOnEqualRank(t *testing.T) {
 	// (alphabetical) so the event payload is reproducible across
 	// orchestrator restarts and the tier diff stays auditable.
 	prior := state.InjectionState{KnownTools: []state.KnownToolEntry{
-		{ToolName: "z.last", Tier: "tier1", LRURank: 5},
-		{ToolName: "a.first", Tier: "tier1", LRURank: 5},
-		{ToolName: "m.middle", Tier: "tier1", LRURank: 5},
+		{ToolName: "z.last", Tier: state.KnownToolTier1, LRURank: 5},
+		{ToolName: "a.first", Tier: state.KnownToolTier1, LRURank: 5},
+		{ToolName: "m.middle", Tier: state.KnownToolTier1, LRURank: 5},
 	}}
 	available := []string{"a.first", "m.middle", "z.last"}
 	got := applyToolTierDecision(nil, available, nil, nil, prior, defaultTierCfg(), 6)

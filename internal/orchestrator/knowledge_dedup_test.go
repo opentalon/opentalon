@@ -193,7 +193,7 @@ func TestApplyKnowledgeDedup_PreservesPhase4KnownTools(t *testing.T) {
 	// rewrites the state.
 	existing := state.InjectionState{
 		KnownTools: []state.KnownToolEntry{
-			{ToolName: "timly__keep", Tier: "tier1", LRURank: 4},
+			{ToolName: "timly__keep", Tier: state.KnownToolTier1, LRURank: 4},
 		},
 	}
 	candidates := []KnowledgeCandidate{

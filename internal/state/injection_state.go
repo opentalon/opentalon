@@ -30,8 +30,23 @@ type KnownKnowledgeEntry struct {
 // readers unmarshal existing entries to preserve forward-compatible
 // rows, but the Phase-3 writer never produces a non-empty slice.
 type KnownToolEntry struct {
-	ToolName string `json:"tool_name"`
-	Tier     string `json:"tier"`
-	LRURank  int    `json:"lru_rank"`
-	Demoted  bool   `json:"demoted"`
+	ToolName string        `json:"tool_name"`
+	Tier     KnownToolTier `json:"tier"`
+	LRURank  int           `json:"lru_rank"`
+	Demoted  bool          `json:"demoted"`
 }
+
+// KnownToolTier is the Phase-4 visibility bucket for a tool. Typed
+// string keeps the wire format identical to the previous raw-string
+// shape (encoding/json marshals named-string types as their underlying
+// value) while making the four valid bucket names visible at compile
+// time. A typo like `"teir1"` was previously a silent demotion to
+// Tier 3; with the constants it is a build error.
+type KnownToolTier string
+
+const (
+	KnownToolTier0 KnownToolTier = "tier0"
+	KnownToolTier1 KnownToolTier = "tier1"
+	KnownToolTier2 KnownToolTier = "tier2"
+	KnownToolTier3 KnownToolTier = "tier3"
+)

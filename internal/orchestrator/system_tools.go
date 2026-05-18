@@ -177,7 +177,7 @@ func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name
 		if updated.KnownTools[i].ToolName != name {
 			continue
 		}
-		updated.KnownTools[i].Tier = "tier1"
+		updated.KnownTools[i].Tier = state.KnownToolTier1
 		if turn > updated.KnownTools[i].LRURank {
 			updated.KnownTools[i].LRURank = turn
 		}
@@ -188,7 +188,7 @@ func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name
 	if !found {
 		updated.KnownTools = append(updated.KnownTools, state.KnownToolEntry{
 			ToolName: name,
-			Tier:     "tier1",
+			Tier:     state.KnownToolTier1,
 			LRURank:  turn,
 		})
 	}

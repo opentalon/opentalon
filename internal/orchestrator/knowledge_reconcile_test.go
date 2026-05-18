@@ -186,7 +186,7 @@ func TestReconcileInjectionState_PreservesPhase4KnownTools(t *testing.T) {
 			{ArticleID: "kb_drop", ContentSHA256: "drop", FirstInjectedTurn: 1},
 		},
 		KnownTools: []state.KnownToolEntry{
-			{ToolName: "timly__keep", Tier: "tier1", LRURank: 7},
+			{ToolName: "timly__keep", Tier: state.KnownToolTier1, LRURank: 7},
 		},
 	}
 	msgs := []provider.Message{} // empty → kb_drop is missing

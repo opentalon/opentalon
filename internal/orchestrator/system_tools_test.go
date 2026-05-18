@@ -214,8 +214,8 @@ func TestGetToolDetails_PromotionPersistsTier1Entry(t *testing.T) {
 	if found == nil {
 		t.Fatalf("promoted tool missing from KnownTools, got %+v", store.lastWritten.KnownTools)
 	}
-	if found.Tier != "tier1" {
-		t.Errorf("Tier = %q, want %q", found.Tier, "tier1")
+	if found.Tier != state.KnownToolTier1 {
+		t.Errorf("Tier = %q, want %q", found.Tier, state.KnownToolTier1)
 	}
 	if found.LRURank < 1 {
 		t.Errorf("LRURank = %d, want >= 1", found.LRURank)
@@ -384,7 +384,7 @@ func TestGetToolDetails_PromotionClearsDemotedFlag(t *testing.T) {
 	store := &fakeInjectionStateStore{
 		store: map[string]state.InjectionState{
 			"s1": {KnownTools: []state.KnownToolEntry{
-				{ToolName: "tools-plugin.t1", Tier: "tier3", LRURank: 1, Demoted: true},
+				{ToolName: "tools-plugin.t1", Tier: state.KnownToolTier3, LRURank: 1, Demoted: true},
 			}},
 		},
 	}
@@ -399,7 +399,7 @@ func TestGetToolDetails_PromotionClearsDemotedFlag(t *testing.T) {
 			if kt.Demoted {
 				t.Errorf("Demoted must clear on promotion, got Demoted=true")
 			}
-			if kt.Tier != "tier1" {
+			if kt.Tier != state.KnownToolTier1 {
 				t.Errorf("Tier must upgrade to tier1, got %q", kt.Tier)
 			}
 		}
@@ -459,7 +459,7 @@ func TestGetToolDetails_PromotionDoesNotRegressLRURank(t *testing.T) {
 	store := &fakeInjectionStateStore{
 		store: map[string]state.InjectionState{
 			"s1": {KnownTools: []state.KnownToolEntry{
-				{ToolName: "tools-plugin.t1", Tier: "tier1", LRURank: 99},
+				{ToolName: "tools-plugin.t1", Tier: state.KnownToolTier1, LRURank: 99},
 			}},
 		},
 	}

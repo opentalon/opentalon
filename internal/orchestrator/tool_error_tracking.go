@@ -201,7 +201,7 @@ func (o *Orchestrator) updateToolDemotion(ctx context.Context, sessionID, fqn st
 		// demotion to clear).
 		updated.KnownTools = append(updated.KnownTools, state.KnownToolEntry{
 			ToolName: fqn,
-			Tier:     "tier3",
+			Tier:     state.KnownToolTier3,
 			Demoted:  true,
 		})
 		changed = true

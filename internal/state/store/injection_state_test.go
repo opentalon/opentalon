@@ -94,8 +94,8 @@ func TestInjectionState_PreservesPhase4Fields(t *testing.T) {
 	ctx := context.Background()
 	want := state.InjectionState{
 		KnownTools: []state.KnownToolEntry{
-			{ToolName: "timly__list-items", Tier: "tier1", LRURank: 5, Demoted: false},
-			{ToolName: "timly__broken-action", Tier: "tier3", LRURank: 2, Demoted: true},
+			{ToolName: "timly__list-items", Tier: state.KnownToolTier1, LRURank: 5, Demoted: false},
+			{ToolName: "timly__broken-action", Tier: state.KnownToolTier3, LRURank: 2, Demoted: true},
 		},
 	}
 	if err := s.UpdateInjectionState(ctx, id, want); err != nil {
