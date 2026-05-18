@@ -1896,6 +1896,19 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		llmDuration := time.Since(llmStart)
 		if err != nil {
+			// Persist a synthetic assistant message so the AI-Sessions
+			// diagnostic page (Rails reads via api-plugin) surfaces the
+			// broken turn — without this row the conversation appears
+			// to simply end after the user's question with no
+			// acknowledgement. The live channel reply is handled
+			// separately by channel/handler.go's friendlyError() and
+			// dispatched via channel.Send, so live chat already shows
+			// a user-facing message; this row only patches the gap on
+			// the persisted-history side.
+			_ = sessions.AddMessage(sessionID, provider.Message{
+				Role:    provider.RoleAssistant,
+				Content: "[LLM error] The request could not be completed. Please try again.",
+			})
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
 		// Stamp the just-emitted llm_response as parent for the rest of
