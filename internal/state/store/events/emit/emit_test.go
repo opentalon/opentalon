@@ -305,6 +305,55 @@ func TestEmitToolCallExtractedThenResult_ParentLinkage(t *testing.T) {
 	}
 }
 
+// TestEmitToolCallResult_DualFieldCapture pins the contract that the
+// human-readable Response and the raw Structured payload are captured
+// as independent excerpt fields, not merged. A merge would couple the
+// audit log to nativeToolContent's wire formatting; this test fails the
+// build if that boundary erodes.
+//
+// Empty-Structured shape is also asserted: omitempty must drop the
+// JSON keys entirely so an event before this fix (or any future
+// non-structured-returning tool) stays byte-identical on the wire.
+func TestEmitToolCallResult_DualFieldCapture(t *testing.T) {
+	t.Run("both fields captured independently", func(t *testing.T) {
+		sink := &fakeSink{}
+		EmitToolCallResult(context.Background(), sink, ToolCallResultArgs{
+			CallID: "c1", Status: "ok",
+			Response:   `OK`,
+			Structured: `{"items":[{"id":42}]}`,
+		})
+
+		raw := sink.snapshot()[0].Payload
+		var p events.ToolCallResultPayload
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if p.ResponseExcerpt != `OK` {
+			t.Errorf("ResponseExcerpt = %q, want %q", p.ResponseExcerpt, `OK`)
+		}
+		if p.StructuredExcerpt != `{"items":[{"id":42}]}` {
+			t.Errorf("StructuredExcerpt = %q, want raw JSON passthrough", p.StructuredExcerpt)
+		}
+		if p.ResponseTruncated || p.StructuredTruncated {
+			t.Errorf("unexpected truncation flag: resp=%v struct=%v", p.ResponseTruncated, p.StructuredTruncated)
+		}
+	})
+
+	t.Run("omitempty drops structured fields when unset", func(t *testing.T) {
+		sink := &fakeSink{}
+		EmitToolCallResult(context.Background(), sink, ToolCallResultArgs{
+			CallID: "c1", Status: "ok", Response: `plain text`,
+		})
+		body := string(sink.snapshot()[0].Payload)
+		if strings.Contains(body, `"structured_excerpt"`) {
+			t.Errorf("structured_excerpt key present on wire when Structured is empty; payload = %s", body)
+		}
+		if strings.Contains(body, `"structured_truncated"`) {
+			t.Errorf("structured_truncated key present on wire when Structured is empty; payload = %s", body)
+		}
+	})
+}
+
 func TestEmitToolCallNotFound_Minimal(t *testing.T) {
 	sink := &fakeSink{}
 	EmitToolCallNotFound(context.Background(), sink, "nonexistent.action")
@@ -533,6 +582,19 @@ func TestEmit_SanitizesAllFreeTextFields(t *testing.T) {
 			},
 		},
 		{
+			"ToolCallResult.StructuredExcerpt",
+			func(c context.Context, s Sink) {
+				EmitToolCallResult(c, s, ToolCallResultArgs{CallID: "c", Structured: invalidUTF8Raw})
+			},
+			func(t *testing.T, p []byte) string {
+				var v events.ToolCallResultPayload
+				if err := json.Unmarshal(p, &v); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				return v.StructuredExcerpt
+			},
+		},
+		{
 			"ToolCallParseFailed.RawSnippet",
 			func(c context.Context, s Sink) {
 				EmitToolCallParseFailed(c, s, ToolCallParseFailedArgs{RawSnippet: invalidUTF8Raw})
@@ -674,6 +736,18 @@ func TestEmit_ExcerptAndTruncatedFlag_AllHelpers(t *testing.T) {
 				var v events.ToolCallResultPayload
 				_ = json.Unmarshal(p, &v)
 				return v.ResponseExcerpt, v.ResponseTruncated
+			},
+			true,
+		},
+		{
+			"ToolCallResult.Structured",
+			func(c context.Context, s Sink) {
+				EmitToolCallResult(c, s, ToolCallResultArgs{CallID: "c", Structured: long})
+			},
+			func(p []byte) (string, bool) {
+				var v events.ToolCallResultPayload
+				_ = json.Unmarshal(p, &v)
+				return v.StructuredExcerpt, v.StructuredTruncated
 			},
 			true,
 		},
