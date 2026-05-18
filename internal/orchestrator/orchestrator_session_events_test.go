@@ -663,6 +663,26 @@ func (e *errorExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
 	return ToolResult{CallID: call.ID, Error: e.msg}
 }
 
+// structuredExecutor returns a ToolResult with both Content and
+// StructuredContent populated — exercises the audit-log capture of the
+// structured half that nativeToolContent appends to the LLM-bound
+// message. The optional errMsg lets one stub cover the defensive
+// "error result that happens to carry structured data" case.
+type structuredExecutor struct {
+	content    string
+	structured string
+	errMsg     string
+}
+
+func (s *structuredExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
+	return ToolResult{
+		CallID:            call.ID,
+		Content:           s.content,
+		StructuredContent: s.structured,
+		Error:             s.errMsg,
+	}
+}
+
 // findToolCallEvents collects all events of the given type into typed payloads.
 func findToolCallExtractedPayloads(t *testing.T, evs []emit.Event) []events.ToolCallExtractedPayload {
 	t.Helper()
@@ -819,6 +839,98 @@ func TestOrchestrator_ExecuteCall_ResultStatus_ErrorOnDispatchError(t *testing.T
 	}
 	if results[0].ResponseExcerpt != "exec blew up" {
 		t.Errorf("ResponseExcerpt = %q, want %q", results[0].ResponseExcerpt, "exec blew up")
+	}
+}
+
+// TestOrchestrator_ExecuteCall_PassesStructuredContent pins the
+// dispatch-site contract: when a tool returns a ToolResult with both
+// Content and StructuredContent populated, the emitted
+// tool_call_result event captures BOTH halves as independent excerpt
+// fields. A future copy-paste regression that drops Structured from
+// the ToolCallResultArgs payload fails this test.
+func TestOrchestrator_ExecuteCall_PassesStructuredContent(t *testing.T) {
+	sink := &recordingEventSink{}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "structured",
+		Actions: []Action{{Name: "fetch"}},
+	}, &structuredExecutor{
+		content:    "human-readable summary",
+		structured: `{"items":[{"id":42}]}`,
+	})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, memory, sessions, OrchestratorOpts{EventSink: sink})
+
+	call := ToolCall{ID: "c1", Plugin: "structured", Action: "fetch", FromLLM: true}
+	res := orch.executeCall(context.Background(), call)
+	if res.Error != "" {
+		t.Fatalf("unexpected error result: %q", res.Error)
+	}
+
+	results := findToolCallResultPayloads(t, sink.snapshot())
+	if len(results) != 1 {
+		t.Fatalf("tool_call_result count = %d, want 1", len(results))
+	}
+	if results[0].Status != "ok" {
+		t.Errorf("Status = %q, want ok", results[0].Status)
+	}
+	if results[0].ResponseExcerpt != "human-readable summary" {
+		t.Errorf("ResponseExcerpt = %q, want %q", results[0].ResponseExcerpt, "human-readable summary")
+	}
+	if results[0].StructuredExcerpt != `{"items":[{"id":42}]}` {
+		t.Errorf("StructuredExcerpt = %q, want raw JSON passthrough", results[0].StructuredExcerpt)
+	}
+	if results[0].ResponseTruncated || results[0].StructuredTruncated {
+		t.Errorf("unexpected truncation: resp=%v struct=%v", results[0].ResponseTruncated, results[0].StructuredTruncated)
+	}
+}
+
+// TestOrchestrator_ExecuteCall_ErrorClearsStructured pins the
+// error-path invariant: when a tool returns an error, the
+// tool_call_result event records the error message in
+// ResponseExcerpt and DOES NOT carry over a structured payload —
+// even if the ToolResult happens to have one populated. A
+// status:"error" event with structured_excerpt set would mislead
+// operators reading the audit log.
+func TestOrchestrator_ExecuteCall_ErrorClearsStructured(t *testing.T) {
+	sink := &recordingEventSink{}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "structured",
+		Actions: []Action{{Name: "fetch"}},
+	}, &structuredExecutor{
+		content:    "should be ignored",
+		structured: `{"partial":true}`,
+		errMsg:     "downstream blew up",
+	})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, memory, sessions, OrchestratorOpts{EventSink: sink})
+
+	call := ToolCall{ID: "c1", Plugin: "structured", Action: "fetch", FromLLM: true}
+	if res := orch.executeCall(context.Background(), call); res.Error == "" {
+		t.Fatal("expected error result")
+	}
+
+	results := findToolCallResultPayloads(t, sink.snapshot())
+	if len(results) != 1 {
+		t.Fatalf("tool_call_result count = %d, want 1", len(results))
+	}
+	if results[0].Status != "error" {
+		t.Errorf("Status = %q, want error", results[0].Status)
+	}
+	if results[0].ResponseExcerpt != "downstream blew up" {
+		t.Errorf("ResponseExcerpt = %q, want error message", results[0].ResponseExcerpt)
+	}
+	if results[0].StructuredExcerpt != "" {
+		t.Errorf("StructuredExcerpt = %q on error path, want empty (partial structured data must not leak under status:error)", results[0].StructuredExcerpt)
 	}
 }
 

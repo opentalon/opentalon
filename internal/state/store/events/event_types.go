@@ -331,13 +331,28 @@ const ToolCallExtractedVersion = 1
 // errors out. Status mirrors plugin convention ("ok" / "error"). Parent
 // event_id of the corresponding tool_call_extracted is linked via the
 // session_events.parent_id column, not duplicated in payload.
+//
+// Content/StructuredContent split mirrors the ToolResult shape: a tool
+// may return a human-readable response (Content) and a structured JSON
+// payload that gets appended to the LLM-bound message via
+// nativeToolContent. Both halves are captured here as independent
+// excerpts so the audit log records the full picture, not just the
+// human-readable half. Each field gets its own truncation flag because
+// a 500-byte response with a 50 KB JSON tail is a realistic shape.
+//
+// StructuredExcerpt is forensic-only — when truncated it is cut at a
+// byte boundary and is therefore NOT guaranteed to be valid JSON.
+// Consumers must check structured_truncated before attempting to
+// parse, and treat the field as an opaque prefix when the flag is set.
 type ToolCallResultPayload struct {
 	Header
-	CallID            string `json:"call_id"`
-	Status            string `json:"status"`
-	ResponseExcerpt   string `json:"response_excerpt"`
-	ResponseTruncated bool   `json:"response_truncated,omitempty"`
-	LatencyMS         int64  `json:"latency_ms,omitempty"`
+	CallID              string `json:"call_id"`
+	Status              string `json:"status"`
+	ResponseExcerpt     string `json:"response_excerpt"`
+	ResponseTruncated   bool   `json:"response_truncated,omitempty"`
+	StructuredExcerpt   string `json:"structured_excerpt,omitempty"`
+	StructuredTruncated bool   `json:"structured_truncated,omitempty"`
+	LatencyMS           int64  `json:"latency_ms,omitempty"`
 }
 
 const ToolCallResultVersion = 1

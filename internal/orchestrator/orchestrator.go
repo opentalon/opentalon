@@ -3441,15 +3441,18 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	if call.FromLLM {
 		status := "ok"
 		respBody := result.Content
+		structBody := result.StructuredContent
 		if result.Error != "" {
 			status = "error"
 			respBody = result.Error
+			structBody = ""
 		}
 		emit.EmitToolCallResult(ctx, o.eventSink, emit.ToolCallResultArgs{
-			CallID:    call.ID,
-			Status:    status,
-			Response:  respBody,
-			LatencyMS: time.Since(dispatchStart).Milliseconds(),
+			CallID:     call.ID,
+			Status:     status,
+			Response:   respBody,
+			Structured: structBody,
+			LatencyMS:  time.Since(dispatchStart).Milliseconds(),
 		})
 	}
 	return result
