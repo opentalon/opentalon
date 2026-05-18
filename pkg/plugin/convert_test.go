@@ -112,6 +112,54 @@ func TestCapsToProto_UserOnly(t *testing.T) {
 	}
 }
 
+func TestCapsToProto_AlwaysInclude(t *testing.T) {
+	// Locks in the AlwaysInclude flow plugin SDK -> proto. Previously the
+	// flag existed in the proto + the host-side `orchestrator.Action`
+	// type, but `pkg/plugin.ActionMsg` and `capsToProto` did not surface
+	// it — so an external plugin built on this SDK had no way to declare
+	// AlwaysInclude=true. The host therefore could never pin a plugin-
+	// supplied action to Tier 0, regardless of what the plugin intended.
+	msg := CapabilitiesMsg{
+		Name:        "myplugin",
+		Description: "Test",
+		Actions: []ActionMsg{
+			{Name: "critical_action", Description: "Pinned", AlwaysInclude: true},
+			{Name: "regular_action", Description: "Normal"},
+		},
+	}
+	pb := capsToProto(msg)
+
+	if !pb.Actions[0].AlwaysInclude {
+		t.Error("critical_action should propagate AlwaysInclude=true to proto")
+	}
+	if pb.Actions[1].AlwaysInclude {
+		t.Error("regular_action should default to AlwaysInclude=false")
+	}
+}
+
+func TestCapsToProto_ReadOnly(t *testing.T) {
+	// Locks in the ReadOnly flow plugin SDK -> proto. The host short-
+	// circuits the confirmation gate when this is set: read_only actions
+	// execute without an "I'm about to execute X" prompt. Default is
+	// false so any action that doesn't opt in stays gated.
+	msg := CapabilitiesMsg{
+		Name:        "myplugin",
+		Description: "Test",
+		Actions: []ActionMsg{
+			{Name: "list_things", Description: "Pure query", ReadOnly: true},
+			{Name: "delete_thing", Description: "Mutation"},
+		},
+	}
+	pb := capsToProto(msg)
+
+	if !pb.Actions[0].ReadOnly {
+		t.Error("list_things should propagate ReadOnly=true to proto")
+	}
+	if pb.Actions[1].ReadOnly {
+		t.Error("delete_thing should default to ReadOnly=false")
+	}
+}
+
 func TestCapsToProto_Parameters(t *testing.T) {
 	msg := CapabilitiesMsg{
 		Name:        "myplugin",

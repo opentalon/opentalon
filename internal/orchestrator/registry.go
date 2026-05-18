@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -164,6 +165,49 @@ func (r *ToolRegistry) ListCapabilities() []PluginCapability {
 		}
 	}
 	return caps
+}
+
+// IsActionReadOnly reports whether the named action on the named plugin
+// is declared read-only in its capability manifest. Unknown plugin or
+// unknown action returns false — the confirmation gate then runs as
+// usual (fail-safe: an action the registry doesn't recognise is treated
+// as a potential write).
+//
+// Used by the per-call confirmation path in orchestrator.Run to skip
+// the "I'm about to execute X" prompt + planner-narration LLM round-
+// trip for pure-query actions. The metadata originates from the plugin
+// manifest (e.g. an MCP tool with `annotations.readOnlyHint = true`)
+// and flows through pluginpb.Action.ReadOnly into Action.ReadOnly.
+//
+// Action-name lookup mirrors the normalization that executeCall's
+// resolve loop applies later in the dispatch path: the LLM may emit
+// the bare action ("list-items") while the manifest carries the
+// mcp-plugin-style prefixed form ("timly__list-items"), and
+// hyphen/underscore variants are tolerated either way. Without this
+// matching the short-circuit would silently miss every mcp-plugin
+// tool — the data would flow through end-to-end but the gate would
+// still fire because the lookup couldn't see it.
+func (r *ToolRegistry) IsActionReadOnly(plugin, action string) bool {
+	cap, ok := r.GetCapability(plugin)
+	if !ok {
+		return false
+	}
+	candidates := []string{
+		action,
+		plugin + "__" + action,
+		strings.ReplaceAll(action, "_", "-"),
+		plugin + "__" + strings.ReplaceAll(action, "_", "-"),
+		strings.ReplaceAll(action, "-", "_"),
+		plugin + "__" + strings.ReplaceAll(action, "-", "_"),
+	}
+	for _, name := range candidates {
+		for _, a := range cap.Actions {
+			if a.Name == name {
+				return a.ReadOnly
+			}
+		}
+	}
+	return false
 }
 
 func (r *ToolRegistry) HasAction(plugin, action string) bool {

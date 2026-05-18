@@ -129,6 +129,65 @@ type KnowledgeConfig struct {
 	Dir    string // directory to scan for .md files
 }
 
+// KnowledgeDedupConfig is the runtime form of the RFC #249 Phase 3
+// knowledge-dedup flags. Zero values are normalized to the RFC defaults
+// inside NewWithRules so an OrchestratorOpts authored by a test (no
+// YAML in scope) gets sensible thresholds without having to repeat the
+// canonical numbers.
+//
+// When Enabled is false the dedup decision logic short-circuits to the
+// Phase-2 "instrumentation_only" mode and the InjectionStateStore is
+// not consulted — callers can leave that interface nil in that case.
+type KnowledgeDedupConfig struct {
+	Enabled                bool
+	ReinjectScoreThreshold float64 // overrides "already known" when current score > threshold; default 0.85
+	ReinjectTopKForce      int     // top-N candidates always inject regardless of known state; default 3
+	CapPerTurn             int     // hard ceiling on delta articles per turn; default 5
+}
+
+// InjectionStateStore is the optional store dependency the orchestrator
+// uses to read/write the per-session knowledge dedup bookkeeping. It is
+// only consulted when KnowledgeDedupConfig.Enabled is true.
+// SessionStore (state/store) satisfies this interface in production;
+// tests may inject a fake. The shape matches SessionStore's helpers
+// exactly so structural typing wires both ends without an explicit
+// adapter.
+type InjectionStateStore interface {
+	GetInjectionState(ctx context.Context, sessionID string) (state.InjectionState, error)
+	UpdateInjectionState(ctx context.Context, sessionID string, st state.InjectionState) error
+}
+
+// ToolTiersConfig is the runtime form of the RFC #249 Phase 4 tool-tier
+// visibility flags. Zero values are normalized to the RFC defaults in
+// NewWithRules, mirroring the KnowledgeDedupConfig precedent. Enabled
+// is the master switch — when false the orchestrator falls back to the
+// pre-Phase-4 behaviour (all RAG-matched tools land in `tools` with
+// full schemas) and the Tier-2/Tier-3 system-prompt sections are
+// suppressed.
+//
+// EnableGetToolDetails activates the meta-tool that lets the LLM
+// promote a Tier-2/Tier-3 tool back to Tier 1 on demand. Setting it
+// true with Enabled=false would expose a tool no one can use, so the
+// normalization step in NewWithRules upgrades Enabled to true in that
+// case (matching the operator-friendly intent of the YAML flag).
+type ToolTiersConfig struct {
+	Enabled              bool
+	Tier1Cap             int  // max Tier-1 tools (full schemas in `tools`); default 10
+	Tier2Cap             int  // max Tier-2 tools (name + 1-line summary in system prompt); default 15
+	EnableGetToolDetails bool // expose the LLM-driven promotion meta-tool; default false
+}
+
+// ToolErrorHandlingConfig is the runtime form of the RFC #249 Phase 4
+// tool-failure protections. Zero values normalize to the RFC defaults
+// in NewWithRules. LoopCapPerTurn governs the in-loop "Tool X failed N
+// times" system-message injection; StickyDemotionThreshold governs the
+// session-level demotion flag in known_tools. Successful invocations
+// reset both counters (self-healing).
+type ToolErrorHandlingConfig struct {
+	LoopCapPerTurn          int // consecutive identical-tool errors per turn before system-msg injection; default 2
+	StickyDemotionThreshold int // consecutive session-level errors before known_tools demotion; default 3
+}
+
 // OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check, no summarization).
 type OrchestratorOpts struct {
 	CustomRules             []string
@@ -147,22 +206,26 @@ type OrchestratorOpts struct {
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PlanTimeout             time.Duration                 // max time for planner LLM call; 0 = default 15s
 	PipelineConfig          pipeline.PipelineConfig
-	ConfirmationPlugin      string                 // optional; plugin name for confirmation strategy (e.g. "planner")
-	ConfirmationAction      string                 // optional; action name (e.g. "check_confirmation")
-	ContextWindow           int                    // model context window in tokens; 0 = no trimming
-	MaxConcurrentSessions   int                    // max sessions running in parallel; default 1 (sequential)
-	GroupPluginLookup       GroupPluginLookup      // optional; when set, filters tool list by profile group
-	UsageRecorder           UsageRecorder          // optional; when set, records LLM usage after each run
-	PluginCallObserver      PluginCallObserver     // optional; when set, notified after each plugin/tool call
-	EventSink               emit.Sink              // optional; nil defaults to emit.NoOpSink (helpers run unconditionally, the no-op sink discards them)
-	PromptSnapshotStore     PromptSnapshotUpserter // optional; when set, system prompt + server instructions + tool descriptions are persisted by sha256 so turn_start hashes resolve to content
-	SyncActionsPlugin       string                 // optional; plugin name for action sync (e.g. "weaviate")
-	SyncActionsAction       string                 // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
-	SyncGlossaryAction      string                 // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
-	Knowledge               KnowledgeConfig        // optional; knowledge directory ingestion
-	Subprocess              SubprocessConfig       // optional; subprocess (sub-agent) support
-	OnStreamChunk           StreamChunkCallback    // optional; when set and LLM supports streaming, final answers are streamed
-	ShowToolCalls           string                 // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	ConfirmationPlugin      string                  // optional; plugin name for confirmation strategy (e.g. "planner")
+	ConfirmationAction      string                  // optional; action name (e.g. "check_confirmation")
+	ContextWindow           int                     // model context window in tokens; 0 = no trimming
+	MaxConcurrentSessions   int                     // max sessions running in parallel; default 1 (sequential)
+	GroupPluginLookup       GroupPluginLookup       // optional; when set, filters tool list by profile group
+	UsageRecorder           UsageRecorder           // optional; when set, records LLM usage after each run
+	PluginCallObserver      PluginCallObserver      // optional; when set, notified after each plugin/tool call
+	EventSink               emit.Sink               // optional; nil defaults to emit.NoOpSink (helpers run unconditionally, the no-op sink discards them)
+	PromptSnapshotStore     PromptSnapshotUpserter  // optional; when set, system prompt + server instructions + tool descriptions are persisted by sha256 so turn_start hashes resolve to content
+	SyncActionsPlugin       string                  // optional; plugin name for action sync (e.g. "weaviate")
+	SyncActionsAction       string                  // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
+	SyncGlossaryAction      string                  // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
+	Knowledge               KnowledgeConfig         // optional; knowledge directory ingestion
+	Subprocess              SubprocessConfig        // optional; subprocess (sub-agent) support
+	OnStreamChunk           StreamChunkCallback     // optional; when set and LLM supports streaming, final answers are streamed
+	ShowToolCalls           string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	KnowledgeDedup          KnowledgeDedupConfig    // RFC #249 Phase 3 dedup flags; zero value disables (= instrumentation_only mode)
+	InjectionStateStore     InjectionStateStore     // optional; required only when KnowledgeDedup.Enabled is true
+	ToolTiers               ToolTiersConfig         // RFC #249 Phase 4 three-tier tool visibility flags; zero value disables (= pre-Phase-4 single-tier behaviour)
+	ToolErrorHandling       ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; zero value normalizes to RFC defaults
 }
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -223,22 +286,42 @@ type Orchestrator struct {
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
 	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
 	pendingConfirmationIDs  map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
-	pipelineConfig          pipeline.PipelineConfig
-	confirmationPlugin      string                 // optional; plugin for confirmation strategy
-	confirmationAction      string                 // optional; action name for confirmation check
-	contextWindow           int                    // model context window in tokens; 0 = no trimming
-	groupPluginLookup       GroupPluginLookup      // optional; nil = no group-based filtering
-	usageRecorder           UsageRecorder          // optional; nil = no usage tracking
-	pluginCallObserver      PluginCallObserver     // optional; nil = no plugin call observation
-	eventSink               emit.Sink              // structured session event sink; always non-nil (NoOpSink default)
-	snapshotStore           PromptSnapshotUpserter // optional; nil = turn_start hashes are emitted but content is not persisted
-	syncActionsPlugin       string                 // optional; plugin name for action sync
-	syncActionsAction       string                 // optional; action name for action sync
-	syncGlossaryAction      string                 // optional; action name for glossary sync (uses syncActionsPlugin)
-	knowledge               KnowledgeConfig        // optional; knowledge directory ingestion
-	subprocessConfig        SubprocessConfig       // optional; subprocess (sub-agent) support
-	onStreamChunk           StreamChunkCallback    // optional; when set, final answers stream to caller
-	showToolCalls           string                 // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	// recentToolPromotions holds tool names the LLM pulled in via
+	// _meta.get_tool_details since the last preparer pass on each
+	// session. persistToolPromotion appends; promotedToolsThisTurn
+	// returns + clears. In-memory only — across orchestrator restart
+	// the LRU rank persisted to InjectionState still puts the tool
+	// in Tier 1, just without the promoted_via_get_tool_details
+	// provenance flag on the next preparer_decision.
+	recentToolPromotionsMu sync.Mutex
+	recentToolPromotions   map[string][]string
+	pipelineConfig         pipeline.PipelineConfig
+	confirmationPlugin     string                  // optional; plugin for confirmation strategy
+	confirmationAction     string                  // optional; action name for confirmation check
+	contextWindow          int                     // model context window in tokens; 0 = no trimming
+	groupPluginLookup      GroupPluginLookup       // optional; nil = no group-based filtering
+	usageRecorder          UsageRecorder           // optional; nil = no usage tracking
+	pluginCallObserver     PluginCallObserver      // optional; nil = no plugin call observation
+	eventSink              emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
+	snapshotStore          PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
+	syncActionsPlugin      string                  // optional; plugin name for action sync
+	syncActionsAction      string                  // optional; action name for action sync
+	syncGlossaryAction     string                  // optional; action name for glossary sync (uses syncActionsPlugin)
+	knowledge              KnowledgeConfig         // optional; knowledge directory ingestion
+	subprocessConfig       SubprocessConfig        // optional; subprocess (sub-agent) support
+	onStreamChunk          StreamChunkCallback     // optional; when set, final answers stream to caller
+	showToolCalls          string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	knowledgeDedup         KnowledgeDedupConfig    // RFC #249 Phase 3 dedup flags; Enabled=false skips dedup logic and InjectionStateStore reads
+	injectionStateStore    InjectionStateStore     // optional; nil = dedup decision logic short-circuits to instrumentation_only mode
+	toolTiers              ToolTiersConfig         // RFC #249 Phase 4 tier-visibility flags; Enabled=false short-circuits to pre-Phase-4 single-tier behaviour
+	toolErrorHandling      ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; thresholds always carry RFC defaults after NewWithRules
+	toolErrorTracker       *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by toolTiers.Enabled
+	// legacyKnowledgeWarnings tracks the (sessionID, pluginName) pairs
+	// we've already deprecation-warned for, so a session that keeps
+	// using a legacy preparer doesn't spam the log every turn. Key is
+	// "<sessionID>|<pluginName>"; value is unused. Zero value is
+	// usable directly, so no NewWithRules wiring is needed.
+	legacyKnowledgeWarnings sync.Map
 }
 
 // resolveAllowedPluginNames returns a JSON array of allowed plugin names for the
@@ -329,6 +412,46 @@ func NewWithRules(
 		eventSink = emit.NoOpSink{}
 	}
 
+	// Normalize KnowledgeDedup to RFC #249 defaults so callers that
+	// build OrchestratorOpts in code (mostly tests) don't have to
+	// repeat the canonical numbers. The Enabled flag stays false by
+	// default — that's the whole point of the master switch.
+	dedupCfg := opts.KnowledgeDedup
+	if dedupCfg.ReinjectScoreThreshold == 0 {
+		dedupCfg.ReinjectScoreThreshold = 0.85
+	}
+	if dedupCfg.ReinjectTopKForce == 0 {
+		dedupCfg.ReinjectTopKForce = 3
+	}
+	if dedupCfg.CapPerTurn == 0 {
+		dedupCfg.CapPerTurn = 5
+	}
+
+	// Normalize ToolTiers + ToolErrorHandling to RFC #249 Phase 4
+	// defaults, same precedent as KnowledgeDedup above. Enabled stays
+	// false by default. EnableGetToolDetails carries an extra rule:
+	// turning the meta-tool on with the master switch still off would
+	// register a Tier-0 tool no one can use, so we upgrade Enabled to
+	// true in that case — keeps the YAML surface obvious for operators
+	// who only set the meta-tool flag.
+	tierCfg := opts.ToolTiers
+	if tierCfg.Tier1Cap == 0 {
+		tierCfg.Tier1Cap = 10
+	}
+	if tierCfg.Tier2Cap == 0 {
+		tierCfg.Tier2Cap = 15
+	}
+	if tierCfg.EnableGetToolDetails {
+		tierCfg.Enabled = true
+	}
+	errCfg := opts.ToolErrorHandling
+	if errCfg.LoopCapPerTurn == 0 {
+		errCfg.LoopCapPerTurn = 2
+	}
+	if errCfg.StickyDemotionThreshold == 0 {
+		errCfg.StickyDemotionThreshold = 3
+	}
+
 	o := &Orchestrator{
 		sessionMuxes:            make(map[string]*sessionMutex),
 		semaphore:               semaphore,
@@ -355,6 +478,7 @@ func NewWithRules(
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
 		pendingToolCalls:        make(map[string]*ToolCall),
 		pendingConfirmationIDs:  make(map[string]string),
+		recentToolPromotions:    make(map[string][]string),
 		pipelineConfig:          pipelineCfg,
 		confirmationPlugin:      opts.ConfirmationPlugin,
 		confirmationAction:      opts.ConfirmationAction,
@@ -370,9 +494,25 @@ func NewWithRules(
 		knowledge:               opts.Knowledge,
 		onStreamChunk:           opts.OnStreamChunk,
 		showToolCalls:           opts.ShowToolCalls,
+		knowledgeDedup:          dedupCfg,
+		injectionStateStore:     opts.InjectionStateStore,
+		toolTiers:               tierCfg,
+		toolErrorHandling:       errCfg,
+		toolErrorTracker:        newToolErrorTracker(),
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
+
+	// Register the orchestrator-owned get_tool_details meta-tool when
+	// ToolTiersConfig.EnableGetToolDetails is set. AlwaysInclude on
+	// the registered action pins it into Tier 0 so the LLM always
+	// has a path back to full schemas for Tier-2/3 entries. The
+	// runtime normalization above also flips toolTiers.Enabled=true
+	// when this flag is on, so the rest of the tier pipeline (which
+	// the meta-tool depends on) is always coherent.
+	if o.toolTiers.EnableGetToolDetails {
+		o.registerGetToolDetailsTool()
+	}
 
 	// Register the built-in _subprocess plugin when enabled.
 	o.subprocessConfig = opts.Subprocess
@@ -429,11 +569,90 @@ func (s *invokeStepsUnmarshal) UnmarshalJSON(data []byte) error {
 }
 
 // preparerResponse is the optional JSON shape from a content preparer (guard or invoke).
+//
+// Candidate fields (knowledge / glossary / tool) are RFC #249 additions
+// — preparers that retrieve from a RAG corpus may return the structured
+// candidate list alongside (or instead of) the legacy `message` /
+// `relevant_tools` fields so the orchestrator can apply per-session
+// dedup + tier-promotion logic in Phase 3+.
+//
+// In Phase 2 the candidate slices are deserialized for instrumentation
+// (knowledge_retrieval / glossary_retrieval / tool_retrieval events
+// carry the hits) but do not yet drive injection decisions — the
+// `message` body remains authoritative for what reaches the LLM.
+// Plugins returning only the legacy fields stay fully backwards-
+// compatible: the candidate slices unmarshal to nil and the
+// orchestrator falls through to the legacy path.
 type preparerResponse struct {
 	SendToLLM     *bool                `json:"send_to_llm"`
 	Message       string               `json:"message"`
 	Invoke        invokeStepsUnmarshal `json:"invoke"`
 	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional: filter system prompt to these tools (format: "plugin.action")
+
+	KnowledgeCandidates []KnowledgeCandidate `json:"knowledge_candidates,omitempty"`
+	GlossaryCandidates  []GlossaryCandidate  `json:"glossary_candidates,omitempty"`
+	ToolCandidates      []ToolCandidate      `json:"tool_candidates,omitempty"`
+
+	// RetrievalMetrics is an optional per-corpus timing / scoring
+	// summary the plugin can attach so the orchestrator's emit step
+	// has min_score / top_k / latency_ms to publish without inferring
+	// them. All fields are optional; missing values stay zero-valued
+	// in the corresponding *_retrieval events.
+	RetrievalMetrics *PreparerRetrievalMetrics `json:"retrieval_metrics,omitempty"`
+}
+
+// KnowledgeCandidate is one knowledge-base article returned by the
+// preparer's RAG search. Content carries the body the orchestrator
+// would inject into [knowledge_context]; ContentSHA256 is the dedup
+// key (Phase 3+).
+type KnowledgeCandidate struct {
+	ArticleID         string  `json:"article_id"`
+	Title             string  `json:"title,omitempty"`
+	Content           string  `json:"content"`
+	ContentSHA256     string  `json:"content_sha256,omitempty"`
+	Score             float64 `json:"score"`
+	Source            string  `json:"source,omitempty"`
+	PositionInResults int     `json:"position_in_results,omitempty"`
+}
+
+// GlossaryCandidate mirrors KnowledgeCandidate; the only difference is
+// the per-entry "term" instead of "title".
+type GlossaryCandidate struct {
+	Term              string  `json:"term"`
+	Content           string  `json:"content"`
+	ContentSHA256     string  `json:"content_sha256,omitempty"`
+	Score             float64 `json:"score"`
+	Source            string  `json:"source,omitempty"`
+	PositionInResults int     `json:"position_in_results,omitempty"`
+}
+
+// ToolCandidate is the RAG-retrieved tool entry with score so the
+// orchestrator (Phase 4) can apply the LRU + tier-promotion logic and
+// the *_retrieval event can publish ranked hits.
+type ToolCandidate struct {
+	ToolName          string  `json:"tool_name"`
+	Score             float64 `json:"score"`
+	PositionInResults int     `json:"position_in_results,omitempty"`
+}
+
+// PreparerRetrievalMetrics is a per-corpus optional summary returned
+// alongside the candidate slices. All three corpora share the same
+// shape; the plugin sets only the corpora it actually searched. Phase
+// 2 forwards these directly into the *_retrieval event payloads.
+type PreparerRetrievalMetrics struct {
+	Knowledge *PreparerCorpusMetrics `json:"knowledge,omitempty"`
+	Glossary  *PreparerCorpusMetrics `json:"glossary,omitempty"`
+	Tools     *PreparerCorpusMetrics `json:"tools,omitempty"`
+}
+
+// PreparerCorpusMetrics is the optional timing / scoring summary for
+// one RAG corpus. SearchTextSource carries the events.SearchTextSource*
+// constant value when the plugin distinguishes raw vs enriched query.
+type PreparerCorpusMetrics struct {
+	SearchTextSource string  `json:"search_text_source,omitempty"`
+	TopK             int     `json:"top_k,omitempty"`
+	MinScore         float64 `json:"min_score,omitempty"`
+	LatencyMS        int64   `json:"latency_ms,omitempty"`
 }
 
 func (o *Orchestrator) handlePreparerFailure(prep ContentPreparerEntry, details string) *RunResult {
@@ -539,33 +758,54 @@ func (o *Orchestrator) runSTTPreparer(ctx context.Context, prep ContentPreparerE
 	return result.Content, nil
 }
 
-// runSinglePreparer executes one content preparer. Returns (new content, blocked result, relevant tools, error).
-// relevantTools is non-nil only when the preparer explicitly returns a relevant_tools list.
-// runSinglePreparerWithSearch calls runSinglePreparer and injects a
-// `search_text` arg when the enriched search query differs from the content.
-// The preparer can use search_text for RAG lookup while returning the
-// original content for the LLM.
-func (o *Orchestrator) runSinglePreparerWithSearch(ctx context.Context, prep ContentPreparerEntry, content, searchText, callPrefix string, allowInvoke bool) (string, *RunResult, []string, error) {
+// preparerOutcome is the result of one preparer pass. Content / Blocked
+// / RelevantTools drive what the orchestrator does next; Response holds
+// the parsed plugin JSON so callers can read the RFC #249 candidate
+// fields and emit retrieval events without re-deserializing. For Lua
+// preparers (no plugin protocol) Response stays zero-valued — its
+// KnowledgeCandidates / GlossaryCandidates / ToolCandidates slices are
+// nil and downstream emit logic short-circuits accordingly.
+type preparerOutcome struct {
+	Content       string
+	Blocked       *RunResult
+	RelevantTools []string
+	Response      preparerResponse
+}
+
+// blockedPreparerOutcome is the shorthand for "this preparer's output
+// halted the run" — used by the early-exit paths in runSinglePreparer
+// so Content stays in sync with the input and RelevantTools / Response
+// stay zero-valued.
+func blockedPreparerOutcome(content string, blocked *RunResult) preparerOutcome {
+	return preparerOutcome{Content: content, Blocked: blocked}
+}
+
+// runSinglePreparerWithSearch calls runSinglePreparer with a
+// `search_text` arg derived from the enriched search query so the RAG
+// lookup matches conversation context while the main `text` arg stays
+// as the original user message.
+func (o *Orchestrator) runSinglePreparerWithSearch(ctx context.Context, prep ContentPreparerEntry, content, searchText, callPrefix string, allowInvoke bool) (preparerOutcome, error) {
 	ctx = withSearchQuery(ctx, searchText)
 	return o.runSinglePreparer(ctx, prep, content, callPrefix, allowInvoke)
 }
 
-func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPreparerEntry, content, callPrefix string, allowInvoke bool) (string, *RunResult, []string, error) {
+// runSinglePreparer executes one content preparer. Errors and "fail
+// open" preparer failures both return a non-blocked outcome with
+// Content == the input content; an explicit guard block returns
+// Blocked set; an `invoke` directive returns Content == "" and Blocked
+// holding the invoke result. The Response field carries the parsed
+// plugin JSON (RFC #249 candidate fields included) so callers can emit
+// retrieval events without re-parsing.
+func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPreparerEntry, content, callPrefix string, allowInvoke bool) (preparerOutcome, error) {
 	if strings.HasPrefix(prep.Plugin, "lua:") {
 		scriptName := strings.TrimPrefix(prep.Plugin, "lua:")
 		scriptPath := o.luaScriptPaths[scriptName]
 		if scriptPath == "" {
-			if blocked := o.handlePreparerFailure(prep, "Lua script path not found"); blocked != nil {
-				return content, blocked, nil, nil
-			}
-			return content, nil, nil, nil
+			return blockedPreparerOutcome(content, o.handlePreparerFailure(prep, "Lua script path not found")), nil
 		}
 		result, err := lua.RunPrepare(scriptPath, content)
 		if err != nil {
-			if blocked := o.handlePreparerFailure(prep, err.Error()); blocked != nil {
-				return content, blocked, nil, nil
-			}
-			return content, nil, nil, nil
+			return blockedPreparerOutcome(content, o.handlePreparerFailure(prep, err.Error())), nil
 		}
 		if !result.SendToLLM {
 			if allowInvoke && len(result.InvokeSteps) > 0 {
@@ -574,15 +814,15 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 					steps[i] = InvokeStep{Plugin: s.Plugin, Action: s.Action, Args: s.Args}
 				}
 				invokeResult, err := o.runInvokeSteps(ctx, steps)
-				return "", invokeResult, nil, err
+				return preparerOutcome{Blocked: invokeResult}, err
 			}
 			msg := result.Content
 			if msg == "" {
 				msg = "Request blocked by guard."
 			}
-			return "", &RunResult{Response: msg}, nil, nil
+			return preparerOutcome{Blocked: &RunResult{Response: msg}}, nil
 		}
-		return result.Content, nil, nil, nil
+		return preparerOutcome{Content: result.Content}, nil
 	}
 
 	argKey := prep.ArgKey
@@ -590,10 +830,7 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 		argKey = "text"
 	}
 	if !o.registry.HasAction(prep.Plugin, prep.Action) {
-		if blocked := o.handlePreparerFailure(prep, "action not found"); blocked != nil {
-			return content, blocked, nil, nil
-		}
-		return content, nil, nil, nil
+		return blockedPreparerOutcome(content, o.handlePreparerFailure(prep, "action not found")), nil
 	}
 	call := ToolCall{
 		ID:     fmt.Sprintf("%s-%s-%s", callPrefix, prep.Plugin, prep.Action),
@@ -612,20 +849,17 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 	}
 	toolResult := o.executeCall(ctx, call)
 	if toolResult.Error != "" {
-		if blocked := o.handlePreparerFailure(prep, toolResult.Error); blocked != nil {
-			return content, blocked, nil, nil
-		}
-		return content, nil, nil, nil
+		return blockedPreparerOutcome(content, o.handlePreparerFailure(prep, toolResult.Error)), nil
 	}
 	var pr preparerResponse
 	if err := json.Unmarshal([]byte(toolResult.Content), &pr); err == nil && pr.SendToLLM != nil && !*pr.SendToLLM {
 		if allowInvoke && len(pr.Invoke) > 0 {
 			if prep.Insecure {
 				slog.Warn("insecure preparer cannot run invoke, ignoring", "plugin", prep.Plugin, "action", prep.Action)
-				return content, nil, nil, nil
+				return preparerOutcome{Content: content, Response: pr}, nil
 			}
 			invokeResult, err := o.runInvokeSteps(ctx, pr.Invoke)
-			return "", invokeResult, nil, err
+			return preparerOutcome{Blocked: invokeResult, Response: pr}, err
 		}
 		msg := pr.Message
 		if msg == "" {
@@ -634,12 +868,12 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 		if msg == "" {
 			msg = "Request blocked by guard."
 		}
-		return "", &RunResult{Response: msg}, nil, nil
+		return preparerOutcome{Blocked: &RunResult{Response: msg}, Response: pr}, nil
 	}
 	if pr.Message != "" {
-		return pr.Message, nil, pr.RelevantTools, nil
+		return preparerOutcome{Content: pr.Message, RelevantTools: pr.RelevantTools, Response: pr}, nil
 	}
-	return toolResult.Content, nil, pr.RelevantTools, nil
+	return preparerOutcome{Content: toolResult.Content, RelevantTools: pr.RelevantTools, Response: pr}, nil
 }
 
 // applyShowToolCalls prepends tool call details to result.Response based on show_tool_calls mode.
@@ -800,7 +1034,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// without reaching the agent loop (pending pipeline / tool-call
 	// confirmation), because the user did send a message regardless of how
 	// the orchestrator routes it.
-	emit.EmitUserMessage(ctx, o.eventSink, userMessage)
+	//
+	// Parent-chain: capture the returned event_id and wrap ctx so the
+	// preparer-phase events (knowledge_retrieval / glossary_retrieval /
+	// tool_retrieval / preparer_decision) and turn_start emitted later
+	// in this turn surface as children of user_message — matching the
+	// tree shape consumers (api-plugin aggregations, Timly review UI)
+	// rely on per RFC #249.
+	userMessageID := emit.EmitUserMessage(ctx, o.eventSink, userMessage)
+	ctx = emit.WithParent(ctx, userMessageID)
 
 	// Per-session deep debug: enabled by the set_debug_mode command, which
 	// stores debug=true in session metadata. With the flag set, the slog
@@ -1037,26 +1279,112 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				searchText = strings.Join(parts, " ") + " " + content
 			}
 		}
+		// Default search-text source for the *_retrieval events: when
+		// the orchestrator enriched the query (added recent
+		// conversation context), report "enriched"; otherwise
+		// "user_input". The plugin can override either via
+		// RetrievalMetrics.<corpus>.SearchTextSource.
+		searchSource := events.SearchTextSourceUserInput
+		if searchText != content {
+			searchSource = events.SearchTextSourceEnriched
+		}
 		var relevantTools []string
 		relevantToolsSet := false
+		var prepAgg preparerAggregate
 		for _, prep := range o.preparers {
 			if prep.STT {
 				continue
 			}
-			guardedContent, blocked, tools, err := o.runSinglePreparerWithSearch(ctx, prep, content, searchText, "preparer", true)
+			outcome, err := o.runSinglePreparerWithSearch(ctx, prep, content, searchText, "preparer", true)
 			if err != nil {
 				return nil, err
 			}
-			if blocked != nil {
-				return blocked, nil
+			if outcome.Blocked != nil {
+				return outcome.Blocked, nil
 			}
-			content = guardedContent
+			content = outcome.Content
 			// Last preparer that returns relevant_tools wins.
 			// Distinguish nil (no tools field) from [] (explicitly empty).
-			if tools != nil {
-				relevantTools = tools
+			if outcome.RelevantTools != nil {
+				relevantTools = outcome.RelevantTools
 				relevantToolsSet = true
 			}
+			// RFC #249 Phase 2 instrumentation: publish per-corpus
+			// retrieval events for this preparer, then accumulate the
+			// candidate slices for the composite preparer_decision
+			// emitted after the loop.
+			o.emitPreparerRetrievals(ctx, userMessage, searchSource, outcome.Response)
+			prepAgg.append(prep.Plugin, outcome.Response)
+		}
+		// RFC #249 Phase 3 dedup decision tree:
+		//   - Any preparer used the legacy [knowledge_context]-in-Message
+		//     shape AND dedup is enabled → mode=legacy_fallback. Skip
+		//     the dedup pass entirely (content stays as the legacy
+		//     plugin produced it), log one deprecation warning per
+		//     (plugin, session).
+		//   - Dedup enabled AND store wired AND structured candidates
+		//     present → run the full dedup decision; content rewrite
+		//     happens before the event emits, state persist happens
+		//     AFTER the emit so the event log is the durable record
+		//     even on partial failure (RFC #249 cross-phase invariant).
+		//   - Otherwise → Phase 2 mode = instrumentation_only.
+		// prepAgg.LegacyKnowledgePlugins is built by the sequential
+		// preparer loop above; no concurrent access. If that loop
+		// ever parallelizes, the append in preparerAggregate.append
+		// would race — keep the assumption documented here so the
+		// next refactor knows to guard the aggregate.
+		legacyFallback := o.knowledgeDedup.Enabled && len(prepAgg.LegacyKnowledgePlugins) > 0
+		if legacyFallback {
+			o.warnLegacyKnowledgePluginsOnce(ctx, sessionID, prepAgg.LegacyKnowledgePlugins)
+		}
+		dedupActive := !legacyFallback &&
+			o.knowledgeDedup.Enabled &&
+			o.injectionStateStore != nil &&
+			len(prepAgg.Knowledge) > 0
+		if dedupActive {
+			content = o.prepareDedupDecision(ctx, sessionID, content, &prepAgg)
+		}
+		// RFC #249 Phase 4 tier decision: same activation contract as
+		// dedup (skip on legacy_fallback so the LLM sees the plugin's
+		// raw injection; skip without a state store so LRU has nowhere
+		// to persist). When both dedup and tier run, prepareToolTier-
+		// Decision merges its KnownTools delta into the dedup
+		// decision's UpdatedState — the dedup persist then writes both
+		// in one round-trip.
+		tierActive := !legacyFallback &&
+			o.toolTiers.Enabled &&
+			o.injectionStateStore != nil
+		if tierActive {
+			o.prepareToolTierDecision(ctx, sessionID, &prepAgg)
+		}
+		decisionID := o.emitPreparerDecision(ctx, prepAgg)
+		if decisionID != "" {
+			refs, tier1Count, tier3Count := turnStartRefsFromAggregate(prepAgg)
+			ctx = withTurnStartContext(ctx, turnStartContext{
+				PreparerDecisionID: decisionID,
+				InjectedKnowledge:  refs,
+				Tier1Count:         tier1Count,
+				Tier3Count:         tier3Count,
+			})
+		}
+		if dedupActive {
+			o.persistDedupDecision(ctx, sessionID, &prepAgg)
+		}
+		if tierActive {
+			o.persistToolTierDecision(ctx, sessionID, &prepAgg)
+		}
+		// RFC #249 Phase 4: when the tier decision ran, override the
+		// relevant_tools narrowing to Tier 0 + Tier 1 so buildToolDefinitions
+		// + the per-plugin loop in buildSystemPrompt only surface those.
+		// Tier 2 + Tier 3 are added as separate system-prompt sections
+		// (D3 renderers) so the LLM still sees them — at lower per-tool
+		// token cost. The full decision is stashed in ctx so
+		// buildSystemPrompt can pull the Tier 2/3 names without
+		// re-deriving them.
+		if tierActive && prepAgg.ToolTier != nil {
+			relevantTools = append(append([]string(nil), prepAgg.ToolTier.Tier0...), prepAgg.ToolTier.Tier1...)
+			relevantToolsSet = true
+			ctx = withToolTierDecision(ctx, prepAgg.ToolTier)
 		}
 		// Store relevant tools in context so buildSystemPrompt and planner can filter.
 		if relevantToolsSet {
@@ -1832,7 +2160,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// action needs confirmation, pause the agent loop and return a
 			// confirmation prompt to the user. The pending call is stored
 			// and executed on the next message if approved.
-			if o.confirmationPlugin != "" && o.confirmationAction != "" && !calls[i].ConfirmationBypass {
+			//
+			// Skip the entire gate for actions whose manifest declares
+			// `read_only = true`. Pure queries don't need user approval
+			// and asking would be noise — both to the user (a yes/no
+			// prompt for a list/show call) and to the LLM budget (a
+			// planner-narration round-trip per call). The flag originates
+			// from the plugin's manifest (for MCP-sourced tools, propagated
+			// from `annotations.readOnlyHint`).
+			if o.confirmationPlugin != "" && o.confirmationAction != "" &&
+				!calls[i].ConfirmationBypass &&
+				!o.registry.IsActionReadOnly(calls[i].Plugin, calls[i].Action) {
 				confResult := o.checkConfirmationPlugin(ctx, []*pipeline.Step{{
 					ID:      calls[i].ID,
 					Name:    calls[i].Action,
@@ -1906,6 +2244,46 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if toolResult.Error != "" {
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
 			}
+
+			// Same-turn promotion completion for _meta.get_tool_details.
+			// The executor (system_tools.go) already persists a Tier-1
+			// KnownToolEntry so the NEXT turn's preparer puts the tool
+			// in the LLM's tools array. Without the rebuild below the
+			// promotion would not take effect IN THE CURRENT TURN for
+			// native-tools-mode providers — the per-Run cachedTools
+			// snapshot built before the loop would still drive every
+			// subsequent round's `req.Tools`, leaving the LLM with the
+			// same Tier-3-name-only entry it just looked up.
+			//
+			// Gated on:
+			//   * native-tools mode (text-mode LLMs read the description
+			//     directly out of tool_call_result; cachedTools is
+			//     irrelevant on that path)
+			//   * successful meta-tool result (failed lookups don't
+			//     promote anything)
+			//   * non-empty "name" arg (executor already rejects empty,
+			//     but we double-gate to keep the rebuild path tight)
+			//
+			// withPromotedTool is a no-op when no relevant-tools list is
+			// set (no preparer ran) — buildToolDefinitions already
+			// exposes every allowed tool in that mode.
+			if nativeMode && toolResult.Error == "" &&
+				call.Plugin == metaPluginName && call.Action == metaGetToolDetails {
+				if promoted := strings.TrimSpace(call.Args["name"]); promoted != "" {
+					ctx = withPromotedTool(ctx, promoted)
+					cachedTools = o.buildToolDefinitions(ctx)
+					log.Debug("cachedTools refreshed after _meta.get_tool_details promotion",
+						"tool", promoted, "tools_count", len(cachedTools))
+				}
+			}
+			// RFC #249 Phase 4 D5: update the consecutive-error counters,
+			// inject the "Tool X failed N times" nudge into the next LLM
+			// iteration when LoopCapPerTurn trips, and flip the Demoted
+			// flag in known_tools when StickyDemotionThreshold trips
+			// (cleared again on the next successful invocation).
+			if warning := o.recordToolOutcome(ctx, sessionID, call, toolResult); warning != nil {
+				transientMessages = append(transientMessages, *warning)
+			}
 			if o.pluginCallObserver != nil {
 				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", perCallInput, perCallOutput)
 			}
@@ -1970,13 +2348,7 @@ func (o *Orchestrator) supportsNativeTools() bool {
 // for native function calling. Only includes actions visible to the current profile.
 func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.ToolDefinition {
 	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
-	preparerAction := make(map[string]bool)
-	for _, prep := range o.preparers {
-		preparerAction[prep.Plugin+"."+prep.Action] = true
-	}
-	for _, g := range o.guards {
-		preparerAction[g.Plugin+"."+g.Action] = true
-	}
+	preparerAction := preparerActionSet(o.preparers, o.guards)
 
 	relevantToolSet := make(map[string]bool)
 	rtTools, relevantToolsActive := relevantToolsFromContext(ctx)
@@ -2089,6 +2461,18 @@ func (o *Orchestrator) prepareTurnStart(ctx context.Context, systemPrompt, model
 	sort.Slice(args.AvailableTools, func(i, j int) bool {
 		return args.AvailableTools[i].Name < args.AvailableTools[j].Name
 	})
+	// RFC #249 Pillar C: quote the preparer-phase references back into
+	// turn_start so consumers can render the preparer outcome in-place
+	// without walking sibling events by parent_id. The ctx slot is
+	// populated by the preparer-loop after emitPreparerDecision; absent
+	// on early-exit paths (no preparer ran / no signal) — the zero
+	// values then leave the new fields omitted from the payload.
+	if tsc, ok := turnStartContextFromContext(ctx); ok {
+		args.PreparerDecisionID = tsc.PreparerDecisionID
+		args.InjectedKnowledge = tsc.InjectedKnowledge
+		args.ToolTier1Count = tsc.Tier1Count
+		args.ToolTier3Count = tsc.Tier3Count
+	}
 	return args
 }
 
@@ -2470,14 +2854,14 @@ func (o *Orchestrator) runGuardPlugins(ctx context.Context, messages []provider.
 	original := messages[lastIdx].Content
 	content := original
 	for _, g := range o.guards {
-		nextContent, blocked, _, err := o.runSinglePreparer(ctx, g, content, "guard", false)
+		outcome, err := o.runSinglePreparer(ctx, g, content, "guard", false)
 		if err != nil {
 			return nil, nil, err
 		}
-		if blocked != nil {
-			return nil, blocked, nil
+		if outcome.Blocked != nil {
+			return nil, outcome.Blocked, nil
 		}
-		content = nextContent
+		content = outcome.Content
 	}
 	if content == original {
 		return messages, nil, nil
@@ -2701,6 +3085,72 @@ func hasToolResults(msgs []provider.Message) bool {
 	return false
 }
 
+// applySlidingWindow keeps only the last o.contextMessages entries
+// from msgs when configured. When the cut fires, it emits one
+// messages_truncated event with the dropped index range so analytics
+// can correlate context-window pressure across sessions. Returns the
+// (possibly shortened) slice; when contextMessages is zero or the
+// input fits, returns msgs unchanged with no event.
+//
+// Called from both buildMessages and buildMessagesWithPrompt inside
+// the agent loop, so a long tool-call session can produce multiple
+// messages_truncated events per turn — each one represents a
+// distinct cut that actually dropped something. Consumers that want
+// "the first cut per turn" should fold by turn_start parent.
+func (o *Orchestrator) applySlidingWindow(ctx context.Context, msgs []provider.Message) []provider.Message {
+	if o.contextMessages <= 0 || len(msgs) <= o.contextMessages {
+		return msgs
+	}
+	dropped := len(msgs) - o.contextMessages
+	// RFC #249 Pillar C: scan the dropped slice for [knowledge_context]
+	// blocks so consumers can correlate the cut with InjectionState
+	// release without re-reconciling. Visible-message scan is the same
+	// data source the next preparer pass uses for lazy reconciliation,
+	// so the two numbers stay in lockstep without a DB read here.
+	released := releasedKnowledgeIDs(msgs[:dropped])
+	remaining := len(uniqueKnowledgeArticles(scanVisibleKnowledgeBlocks(msgs[dropped:])))
+	emit.EmitMessagesTruncated(ctx, o.eventSink, emit.MessagesTruncatedArgs{
+		DroppedSeqFrom:               0,
+		DroppedSeqTo:                 dropped - 1,
+		DroppedCount:                 dropped,
+		ReleasedKnowledgeIDs:         released,
+		RemainingKnownKnowledgeCount: remaining,
+	})
+	return msgs[dropped:]
+}
+
+// releasedKnowledgeIDs returns the deduplicated article_ids whose
+// [knowledge_context] blocks live in the given message slice. Empty
+// when the slice carries no KC-bearing user messages or every block
+// is the legacy untagged shape (where ArticleID is unknown).
+// Used by both the sliding-window cutter and the summarization
+// trim — both replace the message slice with a stand-in, releasing
+// every KC reference inside the replaced range.
+func releasedKnowledgeIDs(messages []provider.Message) []string {
+	return uniqueKnowledgeArticles(scanVisibleKnowledgeBlocks(messages))
+}
+
+// uniqueKnowledgeArticles collapses a parsedKCBlock slice to its
+// distinct article_ids in first-seen order. Blocks without an
+// article_id (legacy untagged form) are skipped — they cannot be
+// correlated with InjectionState anyway. Returns nil when nothing
+// to report so the emitted payload omits the field cleanly.
+func uniqueKnowledgeArticles(blocks []parsedKCBlock) []string {
+	if len(blocks) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(blocks))
+	var out []string
+	for _, b := range blocks {
+		if b.ArticleID == "" || seen[b.ArticleID] {
+			continue
+		}
+		seen[b.ArticleID] = true
+		out = append(out, b.ArticleID)
+	}
+	return out
+}
+
 func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 
@@ -2725,13 +3175,11 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 			Content: "Previous conversation summary: " + sess.Summary,
 		})
 	}
-	// When context_messages is set, keep only the last N messages to avoid
-	// blowing the context window. This is a simple sliding window that
-	// preserves tool results (unlike LLM summarization which loses them).
-	convMessages := sess.Messages
-	if o.contextMessages > 0 && len(convMessages) > o.contextMessages {
-		convMessages = convMessages[len(convMessages)-o.contextMessages:]
-	}
+	// Apply the sliding-window cutter (config-driven via o.contextMessages)
+	// and emit messages_truncated when it fires. Both buildMessages and
+	// buildMessagesWithPrompt go through the same helper so analytics see
+	// exactly one event per cut regardless of which assembly path ran.
+	convMessages := o.applySlidingWindow(ctx, sess.Messages)
 	// Strip [knowledge_context] from HISTORICAL user messages only. The
 	// current turn's user message is preserved verbatim so preparer-injected
 	// RAG content actually reaches the LLM. Historical turns are still
@@ -2790,10 +3238,7 @@ func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.
 			Content: "Previous conversation summary: " + sess.Summary,
 		})
 	}
-	convMessages := sess.Messages
-	if o.contextMessages > 0 && len(convMessages) > o.contextMessages {
-		convMessages = convMessages[len(convMessages)-o.contextMessages:]
-	}
+	convMessages := o.applySlidingWindow(ctx, sess.Messages)
 	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
 
 	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
@@ -2910,13 +3355,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	}
 
 	// Don't list content-preparer or guard actions as tools; they run automatically before LLM calls.
-	preparerAction := make(map[string]bool)
-	for _, prep := range o.preparers {
-		preparerAction[prep.Plugin+"."+prep.Action] = true
-	}
-	for _, g := range o.guards {
-		preparerAction[g.Plugin+"."+g.Action] = true
-	}
+	preparerAction := preparerActionSet(o.preparers, o.guards)
 
 	// Resolve the set of plugins allowed for the current profile group (if any).
 	allowedPlugins := o.resolveAllowedPlugins(ctx)
@@ -3010,11 +3449,21 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		sb.WriteString("\n")
 	}
 
-	// When RAG filtering is active, list plugins that have actions but none
-	// matched the current query. The LLM can use ask_knowledge to discover
-	// their actions on demand. Use alias names (e.g. "jira", "tickets") when
-	// available, since those are the names the LLM should use.
-	if len(discoverablePlugins) > 0 {
+	// RFC #249 Phase 4: when a tier decision is active, render Tier 2
+	// (name + 1-liner) and Tier 3 (names grouped by plugin) sections.
+	// These supersede the pre-Phase-4 discoverable-plugins block — Tier 3
+	// is the same idea but per-action rather than per-plugin, and the
+	// nudge points at get_tool_details (D4) instead of ask_knowledge.
+	tierDecision := toolTierDecisionFromContext(ctx)
+	if tierDecision != nil {
+		sb.WriteString(renderTier2Section(tierDecision, o.registry))
+		sb.WriteString(renderTier3Section(tierDecision))
+	} else if len(discoverablePlugins) > 0 {
+		// Pre-Phase-4 path: RAG filtering active but no tier decision.
+		// List plugins that have actions but none matched the current
+		// query so the LLM can fall back to ask_knowledge discovery.
+		// Use alias names when available since those are what the LLM
+		// should call.
 		sb.WriteString("## Other available plugins\n")
 		sb.WriteString("These plugins have tools but none matched your current request. Use weaviate.ask_knowledge to discover their actions.\n")
 		for _, name := range discoverablePlugins {
@@ -3627,9 +4076,10 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 		return
 	}
 	emit.EmitSummarizationCompleted(ctx, o.eventSink, emit.SummarizationCompletedArgs{
-		Summary:      newSummary,
-		KeptMessages: len(keepMessages),
-		LatencyMS:    time.Since(summarizeStart).Milliseconds(),
+		Summary:              newSummary,
+		KeptMessages:         len(keepMessages),
+		LatencyMS:            time.Since(summarizeStart).Milliseconds(),
+		ReleasedKnowledgeIDs: releasedKnowledgeIDs(toSummarize),
 	})
 }
 
@@ -3769,6 +4219,36 @@ func formatToolResultMessage(result ToolResult) string {
 	return fmt.Sprintf("[tool_result] %s", result.Content)
 }
 
+// turnStartContextKey is the ctx slot the preparer phase fills in
+// after emitPreparerDecision so prepareTurnStart can quote the
+// decision back as TurnStartPayload.PreparerDecisionID +
+// InjectedKnowledge + tier1/tier3 counts (RFC #249 Pillar C). Set
+// inside the same Run call, before EmitTurnStart fires.
+type turnStartContextKey struct{}
+
+// turnStartContext carries the preparer-phase references the next
+// turn_start event quotes. PreparerDecisionID may be "" when no
+// preparer_decision event was emitted (no signal in the aggregate);
+// in that case InjectedKnowledge / Tier1Count / Tier3Count are also
+// zero values and the turn_start payload omits all four under
+// `omitempty`. See turnStartRefsFromAggregate for the per-mode
+// derivation.
+type turnStartContext struct {
+	PreparerDecisionID string
+	InjectedKnowledge  []events.KnowledgeRef
+	Tier1Count         int
+	Tier3Count         int
+}
+
+func withTurnStartContext(ctx context.Context, tsc turnStartContext) context.Context {
+	return context.WithValue(ctx, turnStartContextKey{}, tsc)
+}
+
+func turnStartContextFromContext(ctx context.Context) (turnStartContext, bool) {
+	v, ok := ctx.Value(turnStartContextKey{}).(turnStartContext)
+	return v, ok
+}
+
 // relevantToolsKey is the context key for tool filtering from preparer responses.
 type relevantToolsKey struct{}
 
@@ -3793,6 +4273,39 @@ func relevantToolsFromContext(ctx context.Context) ([]string, bool) {
 		return nil, false
 	}
 	return r.tools, true
+}
+
+// withPromotedTool augments the relevant-tools list on ctx with toolName.
+// Idempotent: a name already in the list returns ctx unchanged. When no
+// relevant-tools list is set (no preparer ran for this turn), returns ctx
+// unchanged because buildToolDefinitions already exposes every tool in
+// that mode — there's nothing to promote.
+//
+// Used by the agent-loop's `_meta.get_tool_details` follow-through to put
+// the just-inspected tool into the SAME turn's tools array on the next
+// LLM round. Without it the promotion only takes effect next user turn
+// via the InjectionState LRU rank; the contract on get_tool_details's
+// description ("promotes the tool back to the LLM's tools array for the
+// rest of the session") needs the same-turn step too for native-tools
+// mode, where the cached tools array is what the LLM API gets verbatim
+// on every round.
+func withPromotedTool(ctx context.Context, toolName string) context.Context {
+	if toolName == "" {
+		return ctx
+	}
+	existing, ok := relevantToolsFromContext(ctx)
+	if !ok {
+		return ctx
+	}
+	for _, t := range existing {
+		if t == toolName {
+			return ctx
+		}
+	}
+	updated := make([]string, len(existing)+1)
+	copy(updated, existing)
+	updated[len(existing)] = toolName
+	return withRelevantTools(ctx, updated)
 }
 
 type searchQueryKey struct{}
@@ -3998,6 +4511,17 @@ func (o *Orchestrator) resolveAllowedPlugins(ctx context.Context) cachedAllowedP
 // Non-strict mode (group DB lookup): only capabilities that have AllowedGroups set
 // are gated; capabilities without AllowedGroups remain publicly visible.
 func (o *Orchestrator) pluginAllowed(cap PluginCapability, allowed cachedAllowedPlugins) bool {
+	if cap.Name == metaPluginName {
+		// `_meta` is orchestrator-owned (host-internal namespace) — every
+		// profile that has the meta-tool registered (i.e. tool_tiers config
+		// enables get_tool_details) should be able to call it. The profile /
+		// WhoAmI plugin-list gate is for external plugins and a customer's
+		// WhoAmI response never lists `_meta` because it isn't a plugin the
+		// customer owns. Special-casing here so an LLM-driven
+		// `_meta.get_tool_details` call doesn't get refused for a profile
+		// that legitimately registered the meta-tool via config.
+		return true
+	}
 	if allowed.m == nil {
 		// No profile / no lookup configured — unrestricted.
 		return true
@@ -4243,21 +4767,6 @@ func fnv64a(s string) uint64 {
 		h *= prime64
 	}
 	return h
-}
-
-// stripKnowledgeContext removes [knowledge_context]...[/knowledge_context] blocks
-// from a message. Used to strip historical knowledge context and planner input.
-func stripKnowledgeContext(s string) string {
-	const open, close = "[knowledge_context]", "[/knowledge_context]"
-	start := strings.Index(s, open)
-	if start < 0 {
-		return s
-	}
-	end := strings.Index(s, close)
-	if end < 0 {
-		return s
-	}
-	return strings.TrimSpace(s[:start] + s[end+len(close):])
 }
 
 func capabilitiesToPlannerInfo(caps []PluginCapability) []pipeline.CapabilityInfo {

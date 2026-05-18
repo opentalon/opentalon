@@ -74,22 +74,3 @@ func EmitPlannerStep(ctx context.Context, sink Sink, args PlannerStepArgs) strin
 		Note:      args.Note,
 	}, 0)
 }
-
-// ToolRetrievalArgs carries one Weaviate (or other RAG backend) tool-
-// retrieval result set. Hits are stored in returned-rank order so a
-// consumer can compute position-based metrics without re-sorting.
-type ToolRetrievalArgs struct {
-	Query string
-	TopK  int
-	Hits  []events.ToolRetrievalHit
-}
-
-// EmitToolRetrieval writes one tool_retrieval event.
-func EmitToolRetrieval(ctx context.Context, sink Sink, args ToolRetrievalArgs) string {
-	return send(ctx, sink, events.TypeToolRetrieval, events.ToolRetrievalPayload{
-		Header: events.Header{V: events.ToolRetrievalVersion},
-		Query:  events.SanitizeUTF8(args.Query),
-		TopK:   args.TopK,
-		Hits:   args.Hits,
-	}, 0)
-}

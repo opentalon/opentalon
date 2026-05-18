@@ -11,13 +11,26 @@ type Parameter struct {
 // before calling the executor. The orchestrator resolves them via ContextArgProviders.
 // AuditLog, when true, causes the orchestrator to log each invocation (actor, plugin, action, args) for audit; no plugin or action names are hardcoded in the core.
 // UserOnly, when true, hides the action from the LLM system prompt and blocks it from being called via LLM-generated tool calls; it can only be invoked directly by the user (e.g. via RunAction).
+// AlwaysInclude is the RFC #249 Phase 4 pin-to-Tier-0 flag: when true the
+// orchestrator's tier decision keeps this action in the LLM's `tools`
+// array with its full schema regardless of RAG score, so a plugin can
+// guarantee critical capabilities (e.g. emergency-stop) are never demoted
+// to a name-only system-prompt entry.
+// ReadOnly is the per-call confirmation-gate hint: when true the
+// orchestrator skips the "I'm about to execute X" user prompt that
+// normally precedes a tool call, and the planner-narration LLM call
+// that builds that prompt. Set for actions that don't mutate user-
+// visible state (list/show/get/query). Default false — fail-safe to
+// "treat as potential write".
 type Action struct {
 	Name              string      `yaml:"name"`
 	Description       string      `yaml:"description"`
 	Parameters        []Parameter `yaml:"parameters,omitempty"`
 	InjectContextArgs []string    `yaml:"inject_context_args,omitempty"`
-	AuditLog          bool        `yaml:"audit_log,omitempty"` // if true, log invocation for audit
-	UserOnly          bool        `yaml:"user_only,omitempty"` // if true, hidden from LLM and blocked from LLM-sourced calls
+	AuditLog          bool        `yaml:"audit_log,omitempty"`      // if true, log invocation for audit
+	UserOnly          bool        `yaml:"user_only,omitempty"`      // if true, hidden from LLM and blocked from LLM-sourced calls
+	AlwaysInclude     bool        `yaml:"always_include,omitempty"` // RFC #249 Phase 4: pin to Tier 0 regardless of RAG score
+	ReadOnly          bool        `yaml:"read_only,omitempty"`      // if true, skip per-call user-confirmation gate (pure query)
 }
 
 type PluginCapability struct {

@@ -527,8 +527,26 @@ type Action struct {
 	Parameters        []*Parameter           `protobuf:"bytes,3,rep,name=parameters,proto3" json:"parameters,omitempty"`
 	UserOnly          bool                   `protobuf:"varint,4,opt,name=user_only,json=userOnly,proto3" json:"user_only,omitempty"`                             // if true, hidden from LLM and blocked from LLM-sourced calls; only invocable directly by the user
 	InjectContextArgs []string               `protobuf:"bytes,5,rep,name=inject_context_args,json=injectContextArgs,proto3" json:"inject_context_args,omitempty"` // context arg names (e.g. "actor_id") the host injects from request context before calling Execute
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// RFC #249 Phase 4 tool-tier flag: if true, the orchestrator pins this
+	// action into Tier 0 (always present in the LLM's `tools` array, full
+	// schema). RAG-derived scores still feed into the per-turn ranking for
+	// event diagnostics, but never demote an always_include action below
+	// Tier 0. Use for capabilities a plugin considers non-negotiable for
+	// its domain (e.g. an emergency-stop or session-reset action).
+	AlwaysInclude bool `protobuf:"varint,6,opt,name=always_include,json=alwaysInclude,proto3" json:"always_include,omitempty"`
+	// If true, the action is a pure query — it does not mutate any state
+	// the user cares about. The orchestrator's per-tool-call confirmation
+	// gate short-circuits when this is set: read_only=true actions execute
+	// without prompting the user "I'm about to execute X, proceed?",
+	// which would otherwise be noise and burn an LLM round-trip for a
+	// narration that the user never needed to see. Default false — every
+	// action is treated as a potential write until the plugin declares
+	// otherwise. Plugins that aggregate upstream tools (e.g. the
+	// mcp-plugin) typically propagate this from the upstream protocol's
+	// own read-only hint (MCP: `annotations.readOnlyHint`).
+	ReadOnly      bool `protobuf:"varint,7,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Action) Reset() {
@@ -594,6 +612,20 @@ func (x *Action) GetInjectContextArgs() []string {
 		return x.InjectContextArgs
 	}
 	return nil
+}
+
+func (x *Action) GetAlwaysInclude() bool {
+	if x != nil {
+		return x.AlwaysInclude
+	}
+	return false
+}
+
+func (x *Action) GetReadOnly() bool {
+	if x != nil {
+		return x.ReadOnly
+	}
+	return false
 }
 
 type Parameter struct {
@@ -711,7 +743,7 @@ const file_plugin_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x18\n" +
 	"\acontent\x18\x03 \x01(\tR\acontent\x12\x12\n" +
-	"\x04tags\x18\x04 \x03(\tR\x04tags\"\xcb\x01\n" +
+	"\x04tags\x18\x04 \x03(\tR\x04tags\"\x8f\x02\n" +
 	"\x06Action\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12>\n" +
@@ -719,7 +751,9 @@ const file_plugin_proto_rawDesc = "" +
 	"parameters\x18\x03 \x03(\v2\x1e.opentalon.plugin.v1.ParameterR\n" +
 	"parameters\x12\x1b\n" +
 	"\tuser_only\x18\x04 \x01(\bR\buserOnly\x12.\n" +
-	"\x13inject_context_args\x18\x05 \x03(\tR\x11injectContextArgs\"q\n" +
+	"\x13inject_context_args\x18\x05 \x03(\tR\x11injectContextArgs\x12%\n" +
+	"\x0ealways_include\x18\x06 \x01(\bR\ralwaysInclude\x12\x1b\n" +
+	"\tread_only\x18\a \x01(\bR\breadOnly\"q\n" +
 	"\tParameter\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x12\n" +

@@ -36,11 +36,27 @@ const (
 	TypeLLMResponse = "llm_response"
 
 	// Planner / orchestrator internals (debug-view or fold-default in UI).
-	TypePlannerInvoked         = "planner_invoked"
-	TypePlannerRequest         = "planner_request"
-	TypePlannerResponse        = "planner_response"
-	TypePlannerStep            = "planner_step"
-	TypeToolRetrieval          = "tool_retrieval"
+	TypePlannerInvoked  = "planner_invoked"
+	TypePlannerRequest  = "planner_request"
+	TypePlannerResponse = "planner_response"
+	TypePlannerStep     = "planner_step"
+
+	// Preparer-phase retrieval + decision events (RFC #249).
+	// Emitted children of user_message: each RAG retrieval becomes one
+	// *_retrieval event, then preparer_decision is the composite outcome
+	// the orchestrator landed on. drift_detected (Phase 3+) fires
+	// alongside the preparer pass; messages_truncated fires from
+	// buildMessages inside the agent loop and parents to turn_start
+	// (it can fire more than once per turn when the cutter applies on
+	// successive iterations as the conversation grows during tool
+	// rounds).
+	TypeKnowledgeRetrieval = "knowledge_retrieval"
+	TypeGlossaryRetrieval  = "glossary_retrieval"
+	TypeToolRetrieval      = "tool_retrieval"
+	TypePreparerDecision   = "preparer_decision"
+	TypeDriftDetected      = "drift_detected"
+	TypeMessagesTruncated  = "messages_truncated"
+
 	TypeSummarizationTriggered = "summarization_triggered"
 	TypeSummarizationCompleted = "summarization_completed"
 	TypeModelSwitch            = "model_switch"
@@ -64,11 +80,66 @@ const (
 	TypeScoreComputed = "score_computed"
 )
 
-// PromptSnapshotKind values for prompt_snapshots.kind.
+// PromptSnapshotKind values for prompt_snapshots.kind. knowledge_article
+// is added by RFC #249: per-turn-injected knowledge bodies are stored
+// content-addressed alongside the existing system_prompt / tool_description
+// entries, so consumers resolve them through the same /prompt-snapshots
+// endpoint.
 const (
 	PromptKindSystemPrompt       = "system_prompt"
 	PromptKindServerInstructions = "server_instructions"
 	PromptKindToolDescription    = "tool_description"
+	// PromptKindKnowledgeArticle is reserved for the content-addressed
+	// body of one [knowledge_context] block. The constant + payload
+	// kind value ship now so consumers can resolve the SHA carried in
+	// TurnStartPayload.InjectedKnowledge[].ContentSHA256 via the
+	// /prompt-snapshots endpoint once a producer exists. No orchestrator-
+	// side producer ships in RFC #249's initial scope — the bodies
+	// still live inline in the user message's [knowledge_context]
+	// envelope (parseable via internal/orchestrator's KC helpers), and
+	// reviewer-side rendering today resolves bodies that way. A
+	// snapshot-writer (orchestrator-side at dedup-injection time OR
+	// plugin-side at retrieval time) is tracked as a follow-up so
+	// existing call-sites don't pay a write per turn before consumers
+	// actually need it.
+	PromptKindKnowledgeArticle = "knowledge_article"
+)
+
+// PreparerDecisionMode values for PreparerDecisionPayload.Mode.
+//
+// instrumentation_only — Phase 2: events emit but dedup/tier logic is
+//
+//	disabled. All candidates pass through to the LLM unchanged; the event
+//	payload records what *would* be the decision had the dedup logic been
+//	active, with empty skipped_known / score_overrides_applied buckets.
+//
+// full — Phase 3+: dedup + tier logic active, payload reflects the
+//
+//	actual orchestrator decision for this turn.
+//
+// legacy_fallback — plugin returned only the legacy `message` field
+//
+//	(no structured candidates). The orchestrator forwards the plugin's
+//	injection verbatim; preparer_decision records the fall-through path
+//	for analytics. One deprecation warning per plugin per session is
+//	logged alongside.
+const (
+	PreparerDecisionModeInstrumentationOnly = "instrumentation_only"
+	PreparerDecisionModeFull                = "full"
+	PreparerDecisionModeLegacyFallback      = "legacy_fallback"
+)
+
+// KnowledgeRetrievalSearchTextSource values for the search_text_source
+// dimension on KnowledgeRetrievalPayload / GlossaryRetrievalPayload.
+//
+// user_input — raw user message bytes sent as the search query.
+// enriched — user message + recent conversation context concatenated
+//
+//	(see orchestrator's enriched-search-query path) so follow-ups like
+//	"both" or "yes" resolve to the right RAG hits.
+const (
+	SearchTextSourceUserInput = "user_input"
+	SearchTextSourceEnriched  = "enriched"
 )
 
 // ExcerptCap is the maximum byte length stored for raw LLM/tool-emitted
@@ -124,11 +195,22 @@ type Header struct {
 // TurnStartPayload — emitted once per orchestrator turn. References to
 // prompt content are by SHA256; bodies are persisted out-of-band in
 // prompt_snapshots so the same prompt costs one row across all sessions.
+//
+// RFC #249 Pillar C adds four references back into the preparer phase:
+// InjectedKnowledge / PreparerDecisionID / ToolTier1Count / ToolTier3Count.
+// These let consumers (review UIs, api-plugin aggregations) render the
+// turn's preparer outcome in-place without walking sibling events by
+// parent_id. All four are omitempty so pre-Phase-3 deployments and
+// no-preparer turns emit a payload byte-identical to the original shape.
 type TurnStartPayload struct {
 	Header
 	SystemPromptSHA256 string                 `json:"system_prompt_sha256,omitempty"`
 	ServerInstructions []ServerInstructionRef `json:"server_instructions,omitempty"`
 	AvailableTools     []ToolRef              `json:"available_tools,omitempty"`
+	InjectedKnowledge  []KnowledgeRef         `json:"injected_knowledge,omitempty"`
+	PreparerDecisionID string                 `json:"preparer_decision_id,omitempty"`
+	ToolTier1Count     int                    `json:"tool_tier1_count,omitempty"`
+	ToolTier3Count     int                    `json:"tool_tier3_count,omitempty"`
 	ModelID            string                 `json:"model_id"`
 	Temperature        *float64               `json:"temperature,omitempty"`
 	ReasoningEffort    string                 `json:"reasoning_effort,omitempty"`
@@ -142,6 +224,21 @@ type ServerInstructionRef struct {
 type ToolRef struct {
 	Name       string `json:"name"`
 	DescSHA256 string `json:"desc_sha256"`
+}
+
+// KnowledgeRef is the turn_start reference back to one knowledge article
+// injected into this turn's [knowledge_context] envelope. ContentSHA256
+// participates in the same content-addressed prompt_snapshots store as
+// SystemPromptSHA256 / DescSHA256 — once a producer writes a
+// PromptKindKnowledgeArticle snapshot, consumers can resolve the body
+// via /prompt-snapshots?sha=… without re-running RAG retrieval. Today
+// the snapshot writer for that kind is deferred (see the comment on
+// PromptKindKnowledgeArticle); the reference itself is durable
+// regardless, and the bodies remain readable inline in the user
+// message's [knowledge_context] block.
+type KnowledgeRef struct {
+	ArticleID     string `json:"article_id"`
+	ContentSHA256 string `json:"content_sha256"`
 }
 
 const TurnStartVersion = 1
@@ -248,9 +345,12 @@ const PlannerStepVersion = 1
 // regression analysis can spot retrieval quality drift over time.
 type ToolRetrievalPayload struct {
 	Header
-	Query string             `json:"query"`
-	TopK  int                `json:"top_k"`
-	Hits  []ToolRetrievalHit `json:"hits"`
+	Query            string             `json:"query"`
+	SearchTextSource string             `json:"search_text_source,omitempty"`
+	TopK             int                `json:"top_k,omitempty"`
+	MinScore         float64            `json:"min_score,omitempty"`
+	LatencyMS        int64              `json:"latency_ms,omitempty"`
+	Hits             []ToolRetrievalHit `json:"hits"`
 }
 
 type ToolRetrievalHit struct {
@@ -258,7 +358,196 @@ type ToolRetrievalHit struct {
 	Score    float64 `json:"score"`
 }
 
-const ToolRetrievalVersion = 1
+// ToolRetrievalVersion bumped to 2 when the payload gained
+// search_text_source / min_score / latency_ms (RFC #249, Phase 2). No
+// v=1 rows exist in the wild — the type was declared in 009 but never
+// emitted before — so the bump is documentation hygiene rather than a
+// compatibility step.
+const ToolRetrievalVersion = 2
+
+// KnowledgeRetrievalPayload — Weaviate-backed knowledge-base RAG. Each
+// hit carries a content_sha256 so consumers can resolve the body via the
+// prompt_snapshots store (kind=knowledge_article). RFC #249.
+type KnowledgeRetrievalPayload struct {
+	Header
+	Query            string                  `json:"query"`
+	SearchTextSource string                  `json:"search_text_source,omitempty"`
+	TopK             int                     `json:"top_k,omitempty"`
+	MinScore         float64                 `json:"min_score,omitempty"`
+	LatencyMS        int64                   `json:"latency_ms,omitempty"`
+	Hits             []KnowledgeRetrievalHit `json:"hits"`
+}
+
+type KnowledgeRetrievalHit struct {
+	ArticleID     string  `json:"article_id"`
+	Title         string  `json:"title,omitempty"`
+	Score         float64 `json:"score"`
+	ContentSHA256 string  `json:"content_sha256,omitempty"`
+	Source        string  `json:"source,omitempty"` // "knowledge_base" | future per-tenant sources
+}
+
+const KnowledgeRetrievalVersion = 1
+
+// GlossaryRetrievalPayload — Weaviate-backed glossary RAG. Shape mirrors
+// KnowledgeRetrievalPayload; the only difference is per-hit "term"
+// instead of "title". RFC #249.
+type GlossaryRetrievalPayload struct {
+	Header
+	Query            string                 `json:"query"`
+	SearchTextSource string                 `json:"search_text_source,omitempty"`
+	TopK             int                    `json:"top_k,omitempty"`
+	MinScore         float64                `json:"min_score,omitempty"`
+	LatencyMS        int64                  `json:"latency_ms,omitempty"`
+	Hits             []GlossaryRetrievalHit `json:"hits"`
+}
+
+type GlossaryRetrievalHit struct {
+	Term          string  `json:"term"`
+	Score         float64 `json:"score"`
+	ContentSHA256 string  `json:"content_sha256,omitempty"`
+	Source        string  `json:"source,omitempty"`
+}
+
+const GlossaryRetrievalVersion = 1
+
+// PreparerDecisionPayload — composite outcome of the preparer phase. One
+// event per user turn, parented to the user_message. RFC #249.
+//
+// Mode is one of the PreparerDecisionMode* constants and discriminates
+// the meaning of the sub-blocks. In "instrumentation_only" mode all
+// candidates appear under Knowledge.Injected and Tools.Tier1New; the
+// skipped/evicted buckets are empty. In "full" mode the blocks reflect
+// the real dedup+tier decision.
+type PreparerDecisionPayload struct {
+	Header
+	Mode      string                         `json:"mode"`
+	Knowledge PreparerDecisionKnowledgeBlock `json:"knowledge"`
+	Tools     PreparerDecisionToolsBlock     `json:"tools"`
+}
+
+type PreparerDecisionKnowledgeBlock struct {
+	CandidateIDs          []string                        `json:"candidate_ids,omitempty"`
+	Injected              []PreparerDecisionInjectedItem  `json:"injected,omitempty"`
+	SkippedKnown          []PreparerDecisionSkippedItem   `json:"skipped_known,omitempty"`
+	SkippedBelowThreshold []string                        `json:"skipped_below_threshold,omitempty"`
+	ScoreOverridesApplied []PreparerDecisionScoreOverride `json:"score_overrides_applied,omitempty"`
+	InjectedBytes         int                             `json:"injected_bytes,omitempty"`
+}
+
+// PreparerDecisionReason values for PreparerDecisionInjectedItem.Reason
+// and PreparerDecisionSkippedItem.Reason. The "injected" group lists
+// the reasons a candidate ended up in the LLM-visible KC block; the
+// "skipped" group lists why a candidate didn't make it. Define one
+// constant per wire-format string so producers / consumers / docs all
+// agree, mirroring the PreparerDecisionMode* constants above.
+const (
+	// PreparerDecisionReasonInstrumentationOnly is the catch-all reason
+	// used during Phase 2 (and any later turn where dedup decision logic
+	// is disabled): every candidate is reported as if newly injected.
+	PreparerDecisionReasonInstrumentationOnly = "instrumentation_only"
+
+	// PreparerDecisionReasonNew — content_sha not yet known to the session.
+	PreparerDecisionReasonNew = "new"
+
+	// PreparerDecisionReasonScoreOverride — known SHA, but the
+	// current-turn score exceeded reinject_score_threshold.
+	PreparerDecisionReasonScoreOverride = "score_override"
+
+	// PreparerDecisionReasonTopKForce — known SHA, but the candidate's
+	// rank in the current retrieval is within reinject_top_k_force.
+	PreparerDecisionReasonTopKForce = "top_k_force"
+
+	// PreparerDecisionReasonAlreadyKnown — content_sha already in
+	// known_knowledge and none of the override paths fired. The LLM
+	// already saw this body in an earlier turn.
+	PreparerDecisionReasonAlreadyKnown = "content_sha_already_known"
+
+	// PreparerDecisionReasonCapExceeded — candidate WOULD have injected
+	// but cap_per_turn was already hit. Signal of per-turn budget
+	// pressure rather than dedup state.
+	PreparerDecisionReasonCapExceeded = "cap_exceeded"
+)
+
+// PreparerDecisionInjectedItem records one injected knowledge article and
+// the reason it was selected. Reason is one of the
+// PreparerDecisionReason* constants above (the "injected" group plus
+// PreparerDecisionReasonInstrumentationOnly).
+type PreparerDecisionInjectedItem struct {
+	ArticleID     string `json:"article_id"`
+	ContentSHA256 string `json:"content_sha256,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+}
+
+// PreparerDecisionSkippedItem records one candidate skipped by dedup.
+// Reason is one of the PreparerDecisionReason* constants in the
+// "skipped" group (AlreadyKnown / CapExceeded). Future skip paths
+// (e.g. "demoted") extend that group above.
+type PreparerDecisionSkippedItem struct {
+	ArticleID string `json:"article_id"`
+	Reason    string `json:"reason"`
+}
+
+type PreparerDecisionScoreOverride struct {
+	ArticleID    string  `json:"article_id"`
+	CurrentScore float64 `json:"current_score"`
+	Threshold    float64 `json:"threshold"`
+}
+
+type PreparerDecisionToolsBlock struct {
+	Tier0Count          int      `json:"tier0_count,omitempty"`
+	Tier1New            []string `json:"tier1_new,omitempty"`
+	Tier1Carried        []string `json:"tier1_carried,omitempty"`
+	Tier1EvictedToTier3 []string `json:"tier1_evicted_to_tier3,omitempty"`
+	Tier1DemotedSticky  []string `json:"tier1_demoted_sticky,omitempty"`
+	Tier1SizeAfter      int      `json:"tier1_size_after,omitempty"`
+	Tier1Cap            int      `json:"tier1_cap,omitempty"`
+	// Tier 2 is reseeded from RAG candidates every turn (no LRU
+	// carry / new distinction), so a single slice + size + cap is the
+	// full payload. Names emitted so consumers can verify the
+	// system-prompt render against what the orchestrator decided.
+	Tier2Tools                []string `json:"tier2_tools,omitempty"`
+	Tier2SizeAfter            int      `json:"tier2_size_after,omitempty"`
+	Tier2Cap                  int      `json:"tier2_cap,omitempty"`
+	Tier3TotalVisible         int      `json:"tier3_total_visible,omitempty"`
+	PromotedViaGetToolDetails []string `json:"promoted_via_get_tool_details,omitempty"`
+}
+
+const PreparerDecisionVersion = 1
+
+// DriftDetectedPayload — emitted at the start of a preparer pass when
+// the in-state known-knowledge set and the actual visible-message scan
+// disagree. State is then rewritten to match the scan, and
+// ReconciliationAction describes what changed. RFC #249.
+//
+// Not emitted in Phase 2 (the dedup state doesn't exist yet); the
+// payload struct is defined now so Phase 3 can wire it without a schema
+// change.
+type DriftDetectedPayload struct {
+	Header
+	StateBelievedKnown   []string `json:"state_believed_known,omitempty"`
+	ActuallyVisible      []string `json:"actually_visible,omitempty"`
+	MissingFromVisible   []string `json:"missing_from_visible,omitempty"`
+	ExtrasInVisible      []string `json:"extras_in_visible,omitempty"`
+	ReconciliationAction string   `json:"reconciliation_action,omitempty"`
+}
+
+const DriftDetectedVersion = 1
+
+// MessagesTruncatedPayload — emitted when the sliding-window cutter
+// drops messages from the assembled LLM input. DroppedSeqRange is
+// [from, to] inclusive, indexed into sess.Messages (position-based,
+// since the in-memory provider.Message slice does not carry a seq
+// column). Phase 3 will populate ReleasedKnowledgeIDs / Remaining* once
+// the dedup state exists; in Phase 2 they stay empty/zero.
+type MessagesTruncatedPayload struct {
+	Header
+	DroppedSeqRange              []int    `json:"dropped_seq_range,omitempty"` // [from, to] inclusive
+	DroppedCount                 int      `json:"dropped_count"`
+	ReleasedKnowledgeIDs         []string `json:"released_knowledge_ids,omitempty"`
+	RemainingKnownKnowledgeCount int      `json:"remaining_known_knowledge_count,omitempty"`
+}
+
+const MessagesTruncatedVersion = 1
 
 type SummarizationTriggeredPayload struct {
 	Header
@@ -274,6 +563,15 @@ type SummarizationCompletedPayload struct {
 	SummaryTruncated bool   `json:"summary_truncated,omitempty"`
 	KeptMessages     int    `json:"kept_messages"`
 	LatencyMS        int64  `json:"latency_ms,omitempty"`
+	// ReleasedKnowledgeIDs — article_ids whose [knowledge_context]
+	// blocks were inside the summarized-and-replaced range. The next
+	// preparer pass's reconciliation will drop them from
+	// known_knowledge anyway (visible-message scan is authoritative);
+	// the field exists so consumers correlating with InjectionState
+	// can render the release in-place without diffing two
+	// reconciliation snapshots. Empty when summarization replaced no
+	// messages carrying KC blocks.
+	ReleasedKnowledgeIDs []string `json:"released_knowledge_ids,omitempty"`
 }
 
 const SummarizationCompletedVersion = 1

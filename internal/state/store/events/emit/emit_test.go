@@ -126,6 +126,58 @@ func TestEmitTurnStart_PayloadShape(t *testing.T) {
 	}
 }
 
+func TestEmitTurnStart_PreparerRefsRoundTrip(t *testing.T) {
+	// RFC #249 Pillar C: turn_start carries back-references to the
+	// preparer phase (InjectedKnowledge, PreparerDecisionID, Tier1/Tier3
+	// counts). When populated they round-trip through the payload
+	// JSON; when zero they're omitted under `omitempty` so pre-Phase-3
+	// payloads stay byte-identical.
+	sink := &fakeSink{}
+	ctx := actor.WithSessionID(context.Background(), "s1")
+	EmitTurnStart(ctx, sink, TurnStartArgs{
+		ModelID:            "gpt-x",
+		PreparerDecisionID: "evt_pd_42",
+		InjectedKnowledge: []events.KnowledgeRef{
+			{ArticleID: "kb_a", ContentSHA256: "sha_a"},
+			{ArticleID: "kb_b", ContentSHA256: "sha_b"},
+		},
+		ToolTier1Count: 8,
+		ToolTier3Count: 47,
+	})
+
+	got := sink.snapshot()
+	if len(got) != 1 || got[0].EventType != events.TypeTurnStart {
+		t.Fatalf("unexpected events: %+v", got)
+	}
+	var p events.TurnStartPayload
+	if err := json.Unmarshal(got[0].Payload, &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if p.PreparerDecisionID != "evt_pd_42" {
+		t.Errorf("PreparerDecisionID = %q, want evt_pd_42", p.PreparerDecisionID)
+	}
+	if len(p.InjectedKnowledge) != 2 ||
+		p.InjectedKnowledge[0].ArticleID != "kb_a" || p.InjectedKnowledge[0].ContentSHA256 != "sha_a" ||
+		p.InjectedKnowledge[1].ArticleID != "kb_b" || p.InjectedKnowledge[1].ContentSHA256 != "sha_b" {
+		t.Errorf("InjectedKnowledge mismatch: %+v", p.InjectedKnowledge)
+	}
+	if p.ToolTier1Count != 8 || p.ToolTier3Count != 47 {
+		t.Errorf("tier counts = (%d, %d), want (8, 47)", p.ToolTier1Count, p.ToolTier3Count)
+	}
+
+	// Zero-value case: same helper with none of the Pillar-C fields set
+	// must omit them from the payload JSON (string match on the wire is
+	// the simplest regression guard).
+	sink2 := &fakeSink{}
+	EmitTurnStart(ctx, sink2, TurnStartArgs{ModelID: "gpt-x"})
+	wire := string(sink2.snapshot()[0].Payload)
+	for _, field := range []string{"preparer_decision_id", "injected_knowledge", "tool_tier1_count", "tool_tier3_count"} {
+		if strings.Contains(wire, field) {
+			t.Errorf("zero-value emit leaked %q in payload: %s", field, wire)
+		}
+	}
+}
+
 func TestEmitUserMessage_ContentLengthMatchesStoredContent(t *testing.T) {
 	// The contract: ContentLength matches the BYTES of the stored Content
 	// field (post-sanitization), not the input. ASCII inputs are
@@ -364,6 +416,98 @@ func TestEmitToolCallNotFound_Minimal(t *testing.T) {
 	}
 }
 
+// ----- preparer cluster (composite payload shape) -----
+
+// TestEmitPreparerDecision_NestedBlocksRoundTrip verifies the Knowledge
+// and Tools sub-blocks of PreparerDecisionPayload serialize with their
+// nested-struct shape intact. The cohort tests above cover the Header.V
+// stamp and the Mode discriminator; this one pins the wire shape of the
+// inner blocks so consumers (api-plugin aggregations, review UI) can
+// rely on a stable JSON layout.
+func TestEmitPreparerDecision_NestedBlocksRoundTrip(t *testing.T) {
+	sink := &fakeSink{}
+	EmitPreparerDecision(context.Background(), sink, PreparerDecisionArgs{
+		Mode: events.PreparerDecisionModeFull,
+		Knowledge: events.PreparerDecisionKnowledgeBlock{
+			CandidateIDs: []string{"kb_a", "kb_b", "kb_c"},
+			Injected: []events.PreparerDecisionInjectedItem{
+				{ArticleID: "kb_a", ContentSHA256: "sha-a", Reason: "new"},
+			},
+			SkippedKnown: []events.PreparerDecisionSkippedItem{
+				{ArticleID: "kb_b", Reason: "content_sha_already_known"},
+			},
+			ScoreOverridesApplied: []events.PreparerDecisionScoreOverride{
+				{ArticleID: "kb_c", CurrentScore: 0.92, Threshold: 0.85},
+			},
+			InjectedBytes: 1024,
+		},
+		Tools: events.PreparerDecisionToolsBlock{
+			Tier0Count:                2,
+			Tier1New:                  []string{"timly__list-items"},
+			Tier1Carried:              []string{"timly__show-item"},
+			Tier1SizeAfter:            8,
+			Tier1Cap:                  10,
+			Tier3TotalVisible:         47,
+			PromotedViaGetToolDetails: []string{"timly__schedule-item"},
+		},
+	})
+
+	var p events.PreparerDecisionPayload
+	if err := json.Unmarshal(sink.snapshot()[0].Payload, &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if p.Mode != events.PreparerDecisionModeFull {
+		t.Errorf("Mode = %q, want %q", p.Mode, events.PreparerDecisionModeFull)
+	}
+	if len(p.Knowledge.CandidateIDs) != 3 || p.Knowledge.CandidateIDs[0] != "kb_a" {
+		t.Errorf("Knowledge.CandidateIDs = %v", p.Knowledge.CandidateIDs)
+	}
+	if len(p.Knowledge.Injected) != 1 || p.Knowledge.Injected[0].Reason != "new" {
+		t.Errorf("Knowledge.Injected = %+v", p.Knowledge.Injected)
+	}
+	if len(p.Knowledge.SkippedKnown) != 1 || p.Knowledge.SkippedKnown[0].Reason != "content_sha_already_known" {
+		t.Errorf("Knowledge.SkippedKnown = %+v", p.Knowledge.SkippedKnown)
+	}
+	if len(p.Knowledge.ScoreOverridesApplied) != 1 || p.Knowledge.ScoreOverridesApplied[0].CurrentScore != 0.92 {
+		t.Errorf("Knowledge.ScoreOverridesApplied = %+v", p.Knowledge.ScoreOverridesApplied)
+	}
+	if p.Knowledge.InjectedBytes != 1024 {
+		t.Errorf("Knowledge.InjectedBytes = %d", p.Knowledge.InjectedBytes)
+	}
+	if p.Tools.Tier1Cap != 10 || p.Tools.Tier1SizeAfter != 8 || p.Tools.Tier3TotalVisible != 47 {
+		t.Errorf("Tools tier counts = %+v", p.Tools)
+	}
+	if len(p.Tools.PromotedViaGetToolDetails) != 1 || p.Tools.PromotedViaGetToolDetails[0] != "timly__schedule-item" {
+		t.Errorf("Tools.PromotedViaGetToolDetails = %v", p.Tools.PromotedViaGetToolDetails)
+	}
+}
+
+// TestEmitPreparerDecision_ModeAlwaysSerializes verifies the Mode field
+// is never omitted (no omitempty) even when set to the zero value — Mode
+// is a discriminator and consumers must always see it.
+func TestEmitPreparerDecision_ModeAlwaysSerializes(t *testing.T) {
+	sink := &fakeSink{}
+	EmitPreparerDecision(context.Background(), sink, PreparerDecisionArgs{}) // empty Mode
+	raw := string(sink.snapshot()[0].Payload)
+	if !strings.Contains(raw, `"mode":""`) {
+		t.Errorf("zero-value Mode must serialize as empty string, got: %s", raw)
+	}
+}
+
+// TestEmitMessagesTruncated_NoOpRange verifies that a zero-DroppedCount
+// emission produces no dropped_seq_range field (avoiding noise in event
+// payloads when the cutter ran but dropped nothing). The helper still
+// emits the event so callers can rely on emission unconditional on
+// outcome — that's a producer-side decision, not enforced here.
+func TestEmitMessagesTruncated_NoOpRange(t *testing.T) {
+	sink := &fakeSink{}
+	EmitMessagesTruncated(context.Background(), sink, MessagesTruncatedArgs{DroppedCount: 0})
+	raw := string(sink.snapshot()[0].Payload)
+	if strings.Contains(raw, "dropped_seq_range") {
+		t.Errorf("dropped_seq_range must be absent when DroppedCount=0, got: %s", raw)
+	}
+}
+
 // ----- header.V coverage for every helper -----
 
 // Asserts the Header.V stamp for every Emit<Type> is the matching
@@ -389,6 +533,13 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 		{"PlannerResponse", func(c context.Context, s Sink) { EmitPlannerResponse(c, s, PlannerResponseArgs{}) }, events.TypePlannerResponse, events.PlannerResponseVersion},
 		{"PlannerStep", func(c context.Context, s Sink) { EmitPlannerStep(c, s, PlannerStepArgs{}) }, events.TypePlannerStep, events.PlannerStepVersion},
 		{"ToolRetrieval", func(c context.Context, s Sink) { EmitToolRetrieval(c, s, ToolRetrievalArgs{}) }, events.TypeToolRetrieval, events.ToolRetrievalVersion},
+		{"KnowledgeRetrieval", func(c context.Context, s Sink) { EmitKnowledgeRetrieval(c, s, KnowledgeRetrievalArgs{}) }, events.TypeKnowledgeRetrieval, events.KnowledgeRetrievalVersion},
+		{"GlossaryRetrieval", func(c context.Context, s Sink) { EmitGlossaryRetrieval(c, s, GlossaryRetrievalArgs{}) }, events.TypeGlossaryRetrieval, events.GlossaryRetrievalVersion},
+		{"PreparerDecision", func(c context.Context, s Sink) {
+			EmitPreparerDecision(c, s, PreparerDecisionArgs{Mode: events.PreparerDecisionModeInstrumentationOnly})
+		}, events.TypePreparerDecision, events.PreparerDecisionVersion},
+		{"DriftDetected", func(c context.Context, s Sink) { EmitDriftDetected(c, s, DriftDetectedArgs{}) }, events.TypeDriftDetected, events.DriftDetectedVersion},
+		{"MessagesTruncated", func(c context.Context, s Sink) { EmitMessagesTruncated(c, s, MessagesTruncatedArgs{}) }, events.TypeMessagesTruncated, events.MessagesTruncatedVersion},
 		{"SummarizationTriggered", func(c context.Context, s Sink) { EmitSummarizationTriggered(c, s, SummarizationTriggeredArgs{}) }, events.TypeSummarizationTriggered, events.SummarizationTriggeredVersion},
 		{"SummarizationCompleted", func(c context.Context, s Sink) { EmitSummarizationCompleted(c, s, SummarizationCompletedArgs{}) }, events.TypeSummarizationCompleted, events.SummarizationCompletedVersion},
 		{"ModelSwitch", func(c context.Context, s Sink) { EmitModelSwitch(c, s, ModelSwitchArgs{}) }, events.TypeModelSwitch, events.ModelSwitchVersion},
@@ -406,10 +557,10 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 		{"Error", func(c context.Context, s Sink) { EmitError(c, s, "where", "msg") }, events.TypeError, events.ErrorVersion},
 	}
 
-	// All 24 event types must be exercised — keep this in lockstep with
+	// All 29 event types must be exercised — keep this in lockstep with
 	// the constants in event_types.go. If you add a new event type and
 	// this count drops below it, add a row above.
-	const wantCases = 24
+	const wantCases = 29
 	if len(cases) != wantCases {
 		t.Fatalf("len(cases) = %d, want %d — keep TestAllEmitHelpers in sync with event_types.go", len(cases), wantCases)
 	}
@@ -631,6 +782,85 @@ func TestEmit_SanitizesAllFreeTextFields(t *testing.T) {
 					t.Fatalf("unmarshal: %v", err)
 				}
 				return v.Query
+			},
+		},
+		{
+			"KnowledgeRetrieval.Query",
+			func(c context.Context, s Sink) {
+				EmitKnowledgeRetrieval(c, s, KnowledgeRetrievalArgs{Query: invalidUTF8Raw})
+			},
+			func(t *testing.T, p []byte) string {
+				var v events.KnowledgeRetrievalPayload
+				if err := json.Unmarshal(p, &v); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				return v.Query
+			},
+		},
+		{
+			"GlossaryRetrieval.Query",
+			func(c context.Context, s Sink) {
+				EmitGlossaryRetrieval(c, s, GlossaryRetrievalArgs{Query: invalidUTF8Raw})
+			},
+			func(t *testing.T, p []byte) string {
+				var v events.GlossaryRetrievalPayload
+				if err := json.Unmarshal(p, &v); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				return v.Query
+			},
+		},
+		{
+			"DriftDetected.ReconciliationAction",
+			func(c context.Context, s Sink) {
+				EmitDriftDetected(c, s, DriftDetectedArgs{ReconciliationAction: invalidUTF8Raw})
+			},
+			func(t *testing.T, p []byte) string {
+				var v events.DriftDetectedPayload
+				if err := json.Unmarshal(p, &v); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				return v.ReconciliationAction
+			},
+		},
+		{
+			"KnowledgeRetrieval.Hits[].Title",
+			func(c context.Context, s Sink) {
+				EmitKnowledgeRetrieval(c, s, KnowledgeRetrievalArgs{
+					Query: "q",
+					Hits: []events.KnowledgeRetrievalHit{
+						{ArticleID: "kb_a", Title: invalidUTF8Raw},
+					},
+				})
+			},
+			func(t *testing.T, p []byte) string {
+				var v events.KnowledgeRetrievalPayload
+				if err := json.Unmarshal(p, &v); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if len(v.Hits) == 0 {
+					t.Fatalf("Hits is empty after emit; want 1 hit")
+				}
+				return v.Hits[0].Title
+			},
+		},
+		{
+			"GlossaryRetrieval.Hits[].Term",
+			func(c context.Context, s Sink) {
+				EmitGlossaryRetrieval(c, s, GlossaryRetrievalArgs{
+					Query: "q",
+					Hits:  []events.GlossaryRetrievalHit{{Term: invalidUTF8Raw}},
+				})
+			},
+			func(t *testing.T, p []byte) string {
+				var v events.GlossaryRetrievalPayload
+				if err := json.Unmarshal(p, &v); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if len(v.Hits) == 0 {
+					t.Fatalf("Hits is empty after emit; want 1 hit")
+				}
+				return v.Hits[0].Term
 			},
 		},
 		{
@@ -869,6 +1099,42 @@ func TestEmit_RowDurationMirrorsPayloadLatency(t *testing.T) {
 				return v.LatencyMS
 			},
 		},
+		{
+			"ToolRetrieval",
+			func(c context.Context, s Sink) {
+				EmitToolRetrieval(c, s, ToolRetrievalArgs{Query: "q", LatencyMS: 98})
+			},
+			98,
+			func(p []byte) int64 {
+				var v events.ToolRetrievalPayload
+				_ = json.Unmarshal(p, &v)
+				return v.LatencyMS
+			},
+		},
+		{
+			"KnowledgeRetrieval",
+			func(c context.Context, s Sink) {
+				EmitKnowledgeRetrieval(c, s, KnowledgeRetrievalArgs{Query: "q", LatencyMS: 142})
+			},
+			142,
+			func(p []byte) int64 {
+				var v events.KnowledgeRetrievalPayload
+				_ = json.Unmarshal(p, &v)
+				return v.LatencyMS
+			},
+		},
+		{
+			"GlossaryRetrieval",
+			func(c context.Context, s Sink) {
+				EmitGlossaryRetrieval(c, s, GlossaryRetrievalArgs{Query: "q", LatencyMS: 53})
+			},
+			53,
+			func(p []byte) int64 {
+				var v events.GlossaryRetrievalPayload
+				_ = json.Unmarshal(p, &v)
+				return v.LatencyMS
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -978,6 +1244,86 @@ func TestAllEmitHelpers_PopulateDistinctiveField(t *testing.T) {
 				_ = json.Unmarshal(p, &v)
 				if v.TopK != 9 {
 					t.Errorf("TopK = %d", v.TopK)
+				}
+			},
+		},
+		{
+			"KnowledgeRetrieval.Hits_ArticleID",
+			func(c context.Context, s Sink) {
+				EmitKnowledgeRetrieval(c, s, KnowledgeRetrievalArgs{
+					Query: "q",
+					Hits: []events.KnowledgeRetrievalHit{
+						{ArticleID: "kb_recurring", Score: 0.91},
+					},
+				})
+			},
+			func(t *testing.T, p []byte) {
+				var v events.KnowledgeRetrievalPayload
+				_ = json.Unmarshal(p, &v)
+				if len(v.Hits) != 1 || v.Hits[0].ArticleID != "kb_recurring" {
+					t.Errorf("Hits[0].ArticleID mismatch: %+v", v.Hits)
+				}
+			},
+		},
+		{
+			"GlossaryRetrieval.Hits_Term",
+			func(c context.Context, s Sink) {
+				EmitGlossaryRetrieval(c, s, GlossaryRetrievalArgs{
+					Query: "q",
+					Hits:  []events.GlossaryRetrievalHit{{Term: "ticket", Score: 0.71}},
+				})
+			},
+			func(t *testing.T, p []byte) {
+				var v events.GlossaryRetrievalPayload
+				_ = json.Unmarshal(p, &v)
+				if len(v.Hits) != 1 || v.Hits[0].Term != "ticket" {
+					t.Errorf("Hits[0].Term mismatch: %+v", v.Hits)
+				}
+			},
+		},
+		{
+			"PreparerDecision.Mode",
+			func(c context.Context, s Sink) {
+				EmitPreparerDecision(c, s, PreparerDecisionArgs{
+					Mode: events.PreparerDecisionModeInstrumentationOnly,
+				})
+			},
+			func(t *testing.T, p []byte) {
+				var v events.PreparerDecisionPayload
+				_ = json.Unmarshal(p, &v)
+				if v.Mode != events.PreparerDecisionModeInstrumentationOnly {
+					t.Errorf("Mode = %q, want %q", v.Mode, events.PreparerDecisionModeInstrumentationOnly)
+				}
+			},
+		},
+		{
+			"DriftDetected.ReconciliationAction",
+			func(c context.Context, s Sink) {
+				EmitDriftDetected(c, s, DriftDetectedArgs{ReconciliationAction: "removed_x_from_state"})
+			},
+			func(t *testing.T, p []byte) {
+				var v events.DriftDetectedPayload
+				_ = json.Unmarshal(p, &v)
+				if v.ReconciliationAction != "removed_x_from_state" {
+					t.Errorf("ReconciliationAction = %q", v.ReconciliationAction)
+				}
+			},
+		},
+		{
+			"MessagesTruncated.DroppedCount",
+			func(c context.Context, s Sink) {
+				EmitMessagesTruncated(c, s, MessagesTruncatedArgs{
+					DroppedSeqFrom: 12, DroppedSeqTo: 18, DroppedCount: 7,
+				})
+			},
+			func(t *testing.T, p []byte) {
+				var v events.MessagesTruncatedPayload
+				_ = json.Unmarshal(p, &v)
+				if v.DroppedCount != 7 {
+					t.Errorf("DroppedCount = %d", v.DroppedCount)
+				}
+				if len(v.DroppedSeqRange) != 2 || v.DroppedSeqRange[0] != 12 || v.DroppedSeqRange[1] != 18 {
+					t.Errorf("DroppedSeqRange = %v, want [12, 18]", v.DroppedSeqRange)
 				}
 			},
 		},

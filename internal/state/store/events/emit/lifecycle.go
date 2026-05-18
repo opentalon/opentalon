@@ -25,11 +25,16 @@ func EmitSummarizationTriggered(ctx context.Context, sink Sink, args Summarizati
 
 // SummarizationCompletedArgs is the post-summarization snapshot. Summary
 // is sanitized + excerpted; KeptMessages is the count of original
-// messages that survived past the summary boundary.
+// messages that survived past the summary boundary. ReleasedKnowledgeIDs
+// (RFC #249 Pillar C) lists the article_ids whose [knowledge_context]
+// blocks were inside the summarized-away range — the caller computes
+// them by scanning the soon-to-be-replaced message slice; empty when
+// summarization touched no KC-bearing messages.
 type SummarizationCompletedArgs struct {
-	Summary      string
-	KeptMessages int
-	LatencyMS    int64
+	Summary              string
+	KeptMessages         int
+	LatencyMS            int64
+	ReleasedKnowledgeIDs []string
 }
 
 // EmitSummarizationCompleted writes one summarization_completed event.
@@ -37,11 +42,12 @@ func EmitSummarizationCompleted(ctx context.Context, sink Sink, args Summarizati
 	sanitized := events.SanitizeUTF8(args.Summary)
 	excerpt, truncated := events.Excerpt(sanitized)
 	return send(ctx, sink, events.TypeSummarizationCompleted, events.SummarizationCompletedPayload{
-		Header:           events.Header{V: events.SummarizationCompletedVersion},
-		SummaryExcerpt:   excerpt,
-		SummaryTruncated: truncated,
-		KeptMessages:     args.KeptMessages,
-		LatencyMS:        args.LatencyMS,
+		Header:               events.Header{V: events.SummarizationCompletedVersion},
+		SummaryExcerpt:       excerpt,
+		SummaryTruncated:     truncated,
+		KeptMessages:         args.KeptMessages,
+		LatencyMS:            args.LatencyMS,
+		ReleasedKnowledgeIDs: args.ReleasedKnowledgeIDs,
 	}, args.LatencyMS)
 }
 

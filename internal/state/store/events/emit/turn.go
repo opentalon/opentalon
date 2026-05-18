@@ -10,10 +10,20 @@ import (
 // are referenced by SHA256 — callers are responsible for upserting the
 // underlying content into prompt_snapshots before (or alongside) the
 // turn_start emission so a consumer can resolve the digest.
+//
+// RFC #249 Pillar C: InjectedKnowledge / PreparerDecisionID /
+// ToolTier1Count / ToolTier3Count cross-reference the preparer phase
+// emitted just before turn_start. Callers populate them from the
+// preparer aggregate stashed on ctx; pre-preparer-phase code paths
+// leave them zero/nil and the JSON payload omits them.
 type TurnStartArgs struct {
 	SystemPromptSHA256 string
 	ServerInstructions []events.ServerInstructionRef
 	AvailableTools     []events.ToolRef
+	InjectedKnowledge  []events.KnowledgeRef
+	PreparerDecisionID string
+	ToolTier1Count     int
+	ToolTier3Count     int
 	ModelID            string
 	Temperature        *float64
 	ReasoningEffort    string
@@ -28,6 +38,10 @@ func EmitTurnStart(ctx context.Context, sink Sink, args TurnStartArgs) string {
 		SystemPromptSHA256: args.SystemPromptSHA256,
 		ServerInstructions: args.ServerInstructions,
 		AvailableTools:     args.AvailableTools,
+		InjectedKnowledge:  args.InjectedKnowledge,
+		PreparerDecisionID: args.PreparerDecisionID,
+		ToolTier1Count:     args.ToolTier1Count,
+		ToolTier3Count:     args.ToolTier3Count,
 		ModelID:            args.ModelID,
 		Temperature:        args.Temperature,
 		ReasoningEffort:    args.ReasoningEffort,

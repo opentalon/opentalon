@@ -1,0 +1,11 @@
+-- Per-session injection state for the preparer-phase refactor (RFC #249).
+-- Holds the set of knowledge articles already injected and the tool-tier
+-- bookkeeping (Phase 3/4). Phase 2 ships the column so the schema is in
+-- place before any reader/writer is wired; the body stays at '{}' until
+-- Phase 3 enables the dedup logic that populates it.
+--
+-- TEXT (not JSONB) for SQLite/PostgreSQL portability — matches the
+-- convention established by 007/008/009. The column is JSON-shaped at
+-- the application layer; consumers parse it with the InjectionState Go
+-- struct in package state/store.
+ALTER TABLE sessions ADD COLUMN injection_state TEXT NOT NULL DEFAULT '{}';
