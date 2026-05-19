@@ -599,6 +599,34 @@ type preparerResponse struct {
 	// them. All fields are optional; missing values stay zero-valued
 	// in the corresponding *_retrieval events.
 	RetrievalMetrics *PreparerRetrievalMetrics `json:"retrieval_metrics,omitempty"`
+
+	// TranslatorEvents is an optional slice of translator invocations the
+	// plugin made during this preparer call. One entry per actual
+	// translator call (per-corpus, per-callsite); empty / nil when the
+	// plugin's translator is disabled or the input was already in the
+	// target language. The orchestrator emits one `translation` session
+	// event per entry, parented to the surrounding user_message. See
+	// opentalon/opentalon#256.
+	TranslatorEvents []PreparerTranslatorEvent `json:"translator_events,omitempty"`
+}
+
+// PreparerTranslatorEvent is one translator invocation captured by the
+// plugin and bubbled up to the orchestrator for emit. Field names mirror
+// emit.TranslationArgs so the orchestrator wiring is a 1:1 copy. Callsite
+// and Outcome are the wire-stable vocabularies declared in
+// events/event_types.go (TranslationCallsite* / TranslationOutcome*); the
+// orchestrator does not validate them — anything the plugin sends lands
+// in the audit row as-is so analytics can spot a misconfigured plugin
+// rather than have the row silently dropped.
+type PreparerTranslatorEvent struct {
+	Callsite             string  `json:"callsite"`
+	Outcome              string  `json:"outcome"`
+	SourceLangDetected   string  `json:"source_lang_detected,omitempty"`
+	SourceLangConfidence float64 `json:"source_lang_confidence,omitempty"`
+	TargetLang           string  `json:"target_lang"`
+	InputText            string  `json:"input_text,omitempty"`
+	OutputText           string  `json:"output_text,omitempty"`
+	DurationMS           int64   `json:"duration_ms,omitempty"`
 }
 
 // KnowledgeCandidate is one knowledge-base article returned by the
@@ -1313,6 +1341,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// retrieval events for this preparer, then accumulate the
 			// candidate slices for the composite preparer_decision
 			// emitted after the loop.
+			//
+			// #256: emit translation events BEFORE the retrieval events
+			// so the per-session timeline reads in causal order (translate
+			// query → retrieve from each corpus). Plugin sends a slice
+			// because one preparer call can produce 1..N translator
+			// invocations (one per callsite — prepare_knowledge /
+			// prepare_actions / prepare_glossary / search).
+			o.emitPreparerTranslations(ctx, outcome.Response)
 			o.emitPreparerRetrievals(ctx, userMessage, searchSource, outcome.Response)
 			prepAgg.append(prep.Plugin, outcome.Response)
 		}

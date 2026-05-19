@@ -56,6 +56,13 @@ const (
 	TypePreparerDecision   = "preparer_decision"
 	TypeDriftDetected      = "drift_detected"
 	TypeMessagesTruncated  = "messages_truncated"
+	// Pre-retrieval translation step. One event per actual translator
+	// invocation inside a plugin's prepare/search path; multiple
+	// callsites in one turn (prepare_knowledge / prepare_actions /
+	// prepare_glossary) emit multiple events parented to the user_message.
+	// Disabled / target-language input produces no event — the row's
+	// presence already means "translator ran".
+	TypeTranslation = "translation"
 
 	TypeSummarizationTriggered = "summarization_triggered"
 	TypeSummarizationCompleted = "summarization_completed"
@@ -409,6 +416,60 @@ type GlossaryRetrievalHit struct {
 }
 
 const GlossaryRetrievalVersion = 1
+
+// TranslationPayload — preparer-phase pre-processing event. Records one
+// translator invocation in enough detail that the per-session diagnostic
+// page can render the cross-lingual normalisation step alongside the
+// retrieval events it precedes. See opentalon/opentalon#256.
+//
+// Callsite mirrors the Prometheus counter's label vocabulary so per-event
+// analytics joins cleanly against the aggregate dashboard. Outcome is one
+// of "translated" | "skipped_target_lang" | "failed"; the row's presence
+// already means "the translator ran", so "skipped_disabled" is not
+// emitted.
+//
+// Input/OutputExcerpt are produced via Excerpt() — 4 KB cap, Truncated
+// flag set when either was clipped. Same raw-capture rule as
+// LLMRequestPayload.RawPromptExcerpt: bytes are stored as captured,
+// SanitizeUTF8 only on UTF-8-invalid input.
+type TranslationPayload struct {
+	Header
+	Callsite             string  `json:"callsite"`
+	Outcome              string  `json:"outcome"`
+	SourceLangDetected   string  `json:"source_lang_detected,omitempty"`
+	SourceLangConfidence float64 `json:"source_lang_confidence,omitempty"`
+	TargetLang           string  `json:"target_lang"`
+	InputExcerpt         string  `json:"input_excerpt,omitempty"`
+	OutputExcerpt        string  `json:"output_excerpt,omitempty"`
+	DurationMS           int64   `json:"duration_ms,omitempty"`
+	Truncated            bool    `json:"truncated,omitempty"`
+}
+
+// TranslationOutcome values for TranslationPayload.Outcome. The set is
+// closed; new outcomes bump TranslationVersion. Mirror the Prom counter's
+// `result` label vocabulary minus `skipped_disabled` (no call → no event).
+const (
+	TranslationOutcomeTranslated       = "translated"
+	TranslationOutcomeSkippedTargetLang = "skipped_target_lang"
+	TranslationOutcomeFailed           = "failed"
+)
+
+// TranslationCallsite values for TranslationPayload.Callsite. Mirror the
+// Prom counter's `callsite` label so the per-event audit and the
+// aggregate dashboard share one disambiguator. The set documents what
+// today's weaviate-plugin emits; the orchestrator does not validate, so
+// new callsites or out-of-tree plugins can pass any string and the audit
+// row carries it verbatim.
+const (
+	TranslationCallsiteSearch             = "search"
+	TranslationCallsiteHybridSearch       = "hybrid_search"
+	TranslationCallsitePrepare            = "prepare"
+	TranslationCallsiteAskKnowledge       = "ask_knowledge"
+	TranslationCallsiteSearchInstructions = "search_instructions"
+	TranslationCallsiteDebugPrepare       = "debug_prepare"
+)
+
+const TranslationVersion = 1
 
 // PreparerDecisionPayload — composite outcome of the preparer phase. One
 // event per user turn, parented to the user_message. RFC #249.
