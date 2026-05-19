@@ -451,9 +451,9 @@ type TranslationPayload struct {
 // closed; new outcomes bump TranslationVersion. Mirror the Prom counter's
 // `result` label vocabulary minus `skipped_disabled` (no call → no event).
 const (
-	TranslationOutcomeTranslated       = "translated"
+	TranslationOutcomeTranslated        = "translated"
 	TranslationOutcomeSkippedTargetLang = "skipped_target_lang"
-	TranslationOutcomeFailed           = "failed"
+	TranslationOutcomeFailed            = "failed"
 )
 
 // TranslationCallsite values for TranslationPayload.Callsite. Mirror the
