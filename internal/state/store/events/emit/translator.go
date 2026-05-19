@@ -17,10 +17,11 @@ import (
 // TranslationOutcome* / TranslationCallsite* constants in that file.
 
 // TranslationArgs is the shape the orchestrator passes after unpacking
-// one TranslatorMetadata entry from a plugin's prepare/search response.
-// Field names mirror events.TranslationPayload exactly so the orchestrator
-// wiring stays a 1:1 struct copy with no rename layer; the helper handles
-// Excerpt + SanitizeUTF8 so callers can pass raw plugin bytes through.
+// one entry from a plugin's prepare-response `translator_events` slice
+// (orchestrator.PreparerTranslatorEvent). Field names mirror
+// events.TranslationPayload except for the InputText / OutputText pair,
+// which the helper itself runs through Excerpt + SanitizeUTF8 to produce
+// the InputExcerpt / OutputExcerpt fields that land in the payload.
 type TranslationArgs struct {
 	Callsite             string
 	Outcome              string

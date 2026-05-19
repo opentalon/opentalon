@@ -602,10 +602,12 @@ type preparerResponse struct {
 
 	// TranslatorEvents is an optional slice of translator invocations the
 	// plugin made during this preparer call. One entry per actual
-	// translator call (per-corpus, per-callsite); empty / nil when the
-	// plugin's translator is disabled or the input was already in the
-	// target language. The orchestrator emits one `translation` session
-	// event per entry, parented to the surrounding user_message. See
+	// translator call (per-corpus, per-callsite). Empty / nil when the
+	// plugin's translator is disabled (or absent) or the input was empty
+	// — `skipped_target_lang` IS emitted, since the row's presence
+	// records that the translator ran and decided to short-circuit. The
+	// orchestrator emits one `translation` session event per entry,
+	// parented to the surrounding user_message. See
 	// opentalon/opentalon#256.
 	TranslatorEvents []PreparerTranslatorEvent `json:"translator_events,omitempty"`
 }

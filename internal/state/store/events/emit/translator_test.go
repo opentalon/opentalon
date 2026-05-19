@@ -126,6 +126,44 @@ func TestEmitTranslation_FailedOutcomeZeroConfidence(t *testing.T) {
 	}
 }
 
+// TestEmitTranslation_FailedAfterSuccessfulDetect covers the failure mode
+// the weaviate-plugin actually emits in production: /detect succeeded
+// (lang + confidence populated), then /translate failed (network /5xx /
+// parse-err). The audit row must preserve the detect output so operators
+// can see what the detector saw even when the downstream call failed —
+// "translator detected German, then died" is materially different from
+// "translator died before knowing the language".
+func TestEmitTranslation_FailedAfterSuccessfulDetect(t *testing.T) {
+	sink := &fakeSink{}
+	EmitTranslation(context.Background(), sink, TranslationArgs{
+		Callsite:             events.TranslationCallsitePrepare,
+		Outcome:              events.TranslationOutcomeFailed,
+		SourceLangDetected:   "de",
+		SourceLangConfidence: 0.91,
+		TargetLang:           "en",
+		InputText:            "Wieviele Items habe ich",
+		OutputText:           "",
+		DurationMS:           2500,
+	})
+
+	var p events.TranslationPayload
+	if err := json.Unmarshal(sink.events[0].Payload, &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if p.Outcome != events.TranslationOutcomeFailed {
+		t.Errorf("Outcome = %q, want failed", p.Outcome)
+	}
+	if p.SourceLangDetected != "de" {
+		t.Errorf("SourceLangDetected = %q, want detect output preserved through failed translate", p.SourceLangDetected)
+	}
+	if p.SourceLangConfidence != 0.91 {
+		t.Errorf("SourceLangConfidence = %v, want detect confidence preserved", p.SourceLangConfidence)
+	}
+	if p.OutputExcerpt != "" {
+		t.Errorf("OutputExcerpt = %q, want empty for failed outcome", p.OutputExcerpt)
+	}
+}
+
 // TestEmitTranslation_ExcerptCap exercises the 4 KB clip: an 8 KB input
 // must be clipped, and Truncated must be set. The helper also clips the
 // output side, so we exercise both in one assertion.

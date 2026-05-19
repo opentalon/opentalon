@@ -57,11 +57,13 @@ const (
 	TypeDriftDetected      = "drift_detected"
 	TypeMessagesTruncated  = "messages_truncated"
 	// Pre-retrieval translation step. One event per actual translator
-	// invocation inside a plugin's prepare/search path; multiple
-	// callsites in one turn (prepare_knowledge / prepare_actions /
-	// prepare_glossary) emit multiple events parented to the user_message.
-	// Disabled / target-language input produces no event — the row's
-	// presence already means "translator ran".
+	// invocation inside a plugin's prepare/search path; the
+	// TranslationCallsite* constants enumerate the per-call disambiguator
+	// used in practice. A plugin that translates once per preparer call
+	// (today's weaviate-plugin) emits one event; a plugin that translates
+	// per-corpus emits multiple, all parented to the user_message.
+	// Translator-disabled and empty-input paths produce no event — the
+	// row's presence already means "the translator ran".
 	TypeTranslation = "translation"
 
 	TypeSummarizationTriggered = "summarization_triggered"
