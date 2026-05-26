@@ -64,6 +64,15 @@ func (s *stubSessionStore) SetSummary(id string, summary string, messages []prov
 	return nil
 }
 
+func (s *stubSessionStore) SetTitle(id, title string) error {
+	sess := s.sessions[id]
+	if sess == nil {
+		return nil
+	}
+	sess.Title = title
+	return nil
+}
+
 func (s *stubSessionStore) SetMetadata(id, key, value string) error {
 	sess := s.sessions[id]
 	if sess == nil {

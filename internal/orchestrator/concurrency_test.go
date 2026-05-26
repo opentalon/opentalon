@@ -255,6 +255,9 @@ func (s *blockingSetSummaryStore) AddMessage(id string, msg provider.Message) er
 func (s *blockingSetSummaryStore) SetMetadata(id, key, value string) error {
 	return s.inner.SetMetadata(id, key, value)
 }
+func (s *blockingSetSummaryStore) SetTitle(id, title string) error {
+	return s.inner.SetTitle(id, title)
+}
 func (s *blockingSetSummaryStore) SetSummary(id, summary string, msgs []provider.Message) error {
 	s.writeStart()
 	// Signal the test that we're inside SetSummary, then block until released.

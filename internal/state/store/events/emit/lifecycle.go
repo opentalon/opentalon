@@ -51,6 +51,45 @@ func EmitSummarizationCompleted(ctx context.Context, sink Sink, args Summarizati
 	}, args.LatencyMS)
 }
 
+// SessionTitleInvokedArgs records the entry to the title-generation
+// goroutine. MessageCount is the assistant-message count at trigger.
+type SessionTitleInvokedArgs struct {
+	MessageCount int
+}
+
+// EmitSessionTitleInvoked writes one session_title_invoked event and
+// returns its event_id so the caller can wrap ctx with emit.WithParent
+// to scope the inner LLM call's emits under this parent.
+func EmitSessionTitleInvoked(ctx context.Context, sink Sink, args SessionTitleInvokedArgs) string {
+	return send(ctx, sink, events.TypeSessionTitleInvoked, events.SessionTitleInvokedPayload{
+		Header:       events.Header{V: events.SessionTitleInvokedVersion},
+		MessageCount: args.MessageCount,
+	}, 0)
+}
+
+// SessionTitleGeneratedArgs is the result of the background title-
+// generation pass. Title is the final string the orchestrator persisted
+// on the session row (already trimmed / length-capped). ModelID is the
+// model that produced it. The token / cost figures are not duplicated
+// here — they live on the nested llm_response event the provider auto-
+// emits under the same parent (session_title_invoked) as part of the
+// LLM call.
+type SessionTitleGeneratedArgs struct {
+	Title     string
+	ModelID   string
+	LatencyMS int64
+}
+
+// EmitSessionTitleGenerated writes one session_title_generated event.
+func EmitSessionTitleGenerated(ctx context.Context, sink Sink, args SessionTitleGeneratedArgs) string {
+	return send(ctx, sink, events.TypeSessionTitleGenerated, events.SessionTitleGeneratedPayload{
+		Header:    events.Header{V: events.SessionTitleGeneratedVersion},
+		Title:     events.SanitizeUTF8(args.Title),
+		ModelID:   args.ModelID,
+		LatencyMS: args.LatencyMS,
+	}, args.LatencyMS)
+}
+
 // ModelSwitchArgs captures a runtime model swap inside a turn (e.g.
 // fallback after refusal, escalation for hard requests).
 type ModelSwitchArgs struct {

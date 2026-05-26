@@ -68,6 +68,8 @@ const (
 
 	TypeSummarizationTriggered = "summarization_triggered"
 	TypeSummarizationCompleted = "summarization_completed"
+	TypeSessionTitleInvoked    = "session_title_invoked"
+	TypeSessionTitleGenerated  = "session_title_generated"
 	TypeModelSwitch            = "model_switch"
 	TypeConfirmationRequested  = "confirmation_requested"
 	TypeConfirmationResolved   = "confirmation_resolved"
@@ -638,6 +640,39 @@ type SummarizationCompletedPayload struct {
 }
 
 const SummarizationCompletedVersion = 1
+
+// SessionTitleInvokedPayload — sentinel that anchors the parent scope for
+// the inner LLM call's llm_request / llm_response events. Mirrors the
+// planner_invoked / summarization_triggered role: emitted at the very
+// start of the maybeGenerateTitle goroutine, its event_id is then wrapped
+// onto the goroutine's ctx via emit.WithParent so the provider's auto-
+// emit lands under the title span instead of with parent_id = NULL.
+// MessageCount is the assistant-turn count at trigger time — meaningful
+// only as "1" today (titles fire once after the first turn), but kept
+// for parity with summarization's analogous field and for a future
+// re-titling pass that might fire later in a session.
+type SessionTitleInvokedPayload struct {
+	Header
+	MessageCount int `json:"message_count,omitempty"`
+}
+
+const SessionTitleInvokedVersion = 1
+
+// SessionTitleGeneratedPayload — one event per session, emitted after the
+// background title-generation LLM call completes. Parented to the matching
+// session_title_invoked sentinel (the maybeGenerateTitle entry point) so
+// the nested llm_request / llm_response events the provider emits land
+// under the same parent and the call's token + cost data is reachable via
+// session_events without duplicating it here. Title is the final stored
+// string (already trimmed / length-capped by the orchestrator).
+type SessionTitleGeneratedPayload struct {
+	Header
+	Title     string `json:"title"`
+	ModelID   string `json:"model_id"`
+	LatencyMS int64  `json:"latency_ms,omitempty"`
+}
+
+const SessionTitleGeneratedVersion = 1
 
 type ModelSwitchPayload struct {
 	Header

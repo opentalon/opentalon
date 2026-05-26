@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/logger"
@@ -203,6 +204,8 @@ type OrchestratorOpts struct {
 	MaxMessagesAfterSummary int                           // keep this many messages after summarization
 	SummarizePrompt         string                        // empty = default English
 	SummarizeUpdatePrompt   string                        // empty = default English
+	SessionTitlePrompt      string                        // system prompt for the background title-generation pass (maybeGenerateTitle); empty = default in internal/prompts
+	SessionTitlesEnabled    bool                          // master switch for first-turn title generation; default false so tests that don't allocate the extra LLM response don't deadlock on a shared fake. Production (main.go) sets true.
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PlanTimeout             time.Duration                 // max time for planner LLM call; 0 = default 15s
 	PipelineConfig          pipeline.PipelineConfig
@@ -226,7 +229,17 @@ type OrchestratorOpts struct {
 	InjectionStateStore     InjectionStateStore     // optional; required only when KnowledgeDedup.Enabled is true
 	ToolTiers               ToolTiersConfig         // RFC #249 Phase 4 three-tier tool visibility flags; zero value disables (= pre-Phase-4 single-tier behaviour)
 	ToolErrorHandling       ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; zero value normalizes to RFC defaults
+	ChannelSender           ChannelSender           // optional; when set, maybeGenerateTitle pushes the generated title to the originating channel as a session.title frame
 }
+
+// ChannelSender pushes an OutboundMessage onto the channel that owns the
+// given session. The orchestrator uses it for server-initiated frames
+// that aren't tied to a Run() response — currently only the session-
+// title broadcast emitted by maybeGenerateTitle once the background
+// title-generation call completes. Optional: nil = no live-push, the
+// title still persists on the session row and clients can pick it up on
+// the next list query.
+type ChannelSender func(ctx context.Context, sessionID string, msg pkgchannel.OutboundMessage) error
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
 type MemoryStoreInterface interface {
@@ -241,6 +254,7 @@ type SessionStoreInterface interface {
 	AddMessage(id string, msg provider.Message) error
 	SetModel(id string, model provider.ModelRef) error
 	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op
+	SetTitle(id, title string) error                                         // upsert the short LLM-generated session label; missing id is a no-op
 	SetMetadata(id, key, value string) error                                 // upsert a single metadata key; empty value removes it
 	// ClearMessages drops Messages and Summary; preserves EntityID, GroupID,
 	// ActiveModel, Metadata, and CreatedAt; bumps UpdatedAt. The audit log
@@ -281,6 +295,8 @@ type Orchestrator struct {
 	maxMessagesAfterSummary int                           // keep this many messages after summarization
 	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
 	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
+	sessionTitlePrompt      string                        // system prompt for the title-generation pass; defaulted to prompts.SessionTitle in NewWithRules
+	sessionTitlesEnabled    bool                          // master switch; when false maybeGenerateTitle returns immediately and the Run-defer spawn is a cheap no-op
 	planner                 *pipeline.Planner             // nil = pipeline disabled
 	pendingMu               sync.Mutex                    // guards pendingPipelines, pendingToolCalls, pendingConfirmationIDs
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
@@ -316,6 +332,17 @@ type Orchestrator struct {
 	toolTiers              ToolTiersConfig         // RFC #249 Phase 4 tier-visibility flags; Enabled=false short-circuits to pre-Phase-4 single-tier behaviour
 	toolErrorHandling      ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; thresholds always carry RFC defaults after NewWithRules
 	toolErrorTracker       *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by toolTiers.Enabled
+	channelSender          ChannelSender           // optional; nil = title generation persists silently, no live push to clients
+	// titleMuxes serializes per-session title-generation goroutines
+	// without blocking the foreground Run path. Summarization shares the
+	// sessionMux because it triggers after many turns and tolerates one
+	// turn of latency on the next user message; title generation runs on
+	// every first turn and the user is most likely to follow up quickly,
+	// so the title goroutine must NOT hold sessionMux. The dedicated map
+	// keeps the no-duplicate-LLM-call guarantee (two channels racing on
+	// the same session both see Title=="" and would both call the LLM).
+	titleMuxMu sync.Mutex
+	titleMuxes map[string]*sessionMutex
 	// legacyKnowledgeWarnings tracks the (sessionID, pluginName) pairs
 	// we've already deprecation-warned for, so a session that keeps
 	// using a legacy preparer doesn't spam the log every turn. Key is
@@ -383,6 +410,9 @@ func NewWithRules(
 	}
 	if opts.SummarizeUpdatePrompt == "" {
 		opts.SummarizeUpdatePrompt = prompts.SummarizeUpdate
+	}
+	if opts.SessionTitlePrompt == "" {
+		opts.SessionTitlePrompt = prompts.SessionTitle
 	}
 	var planner *pipeline.Planner
 	if opts.PipelineEnabled {
@@ -474,6 +504,8 @@ func NewWithRules(
 		maxMessagesAfterSummary: opts.MaxMessagesAfterSummary,
 		summarizePrompt:         opts.SummarizePrompt,
 		summarizeUpdatePrompt:   opts.SummarizeUpdatePrompt,
+		sessionTitlePrompt:      opts.SessionTitlePrompt,
+		sessionTitlesEnabled:    opts.SessionTitlesEnabled,
 		planner:                 planner,
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
 		pendingToolCalls:        make(map[string]*ToolCall),
@@ -499,6 +531,8 @@ func NewWithRules(
 		toolTiers:               tierCfg,
 		toolErrorHandling:       errCfg,
 		toolErrorTracker:        newToolErrorTracker(),
+		channelSender:           opts.ChannelSender,
+		titleMuxes:              make(map[string]*sessionMutex),
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
@@ -998,6 +1032,36 @@ func (o *Orchestrator) formatResponse(ctx context.Context, result *RunResult) er
 		}
 	}
 	return nil
+}
+
+// acquireTitleLock returns the per-session title-generation mutex,
+// locked. Disjoint from acquireSessionLock — see the titleMuxes comment
+// on Orchestrator for the parallel-execution requirement.
+func (o *Orchestrator) acquireTitleLock(sessionID string) *sessionMutex {
+	o.titleMuxMu.Lock()
+	tm, ok := o.titleMuxes[sessionID]
+	if !ok {
+		tm = &sessionMutex{}
+		o.titleMuxes[sessionID] = tm
+	}
+	tm.refCount++
+	o.titleMuxMu.Unlock()
+
+	tm.mu.Lock()
+	return tm
+}
+
+// releaseTitleLock unlocks tm and reaps the map entry when no other
+// goroutine still references it. Mirrors releaseSessionLock.
+func (o *Orchestrator) releaseTitleLock(sessionID string, tm *sessionMutex) {
+	o.titleMuxMu.Lock()
+	tm.refCount--
+	if tm.refCount == 0 {
+		delete(o.titleMuxes, sessionID)
+	}
+	o.titleMuxMu.Unlock()
+
+	tm.mu.Unlock()
 }
 
 // acquireSessionLock returns the per-session mutex for sessionID, locked.
@@ -1745,6 +1809,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	}
 	// Run summarization asynchronously so it doesn't block the user's request.
 	go o.maybeSummarizeSession(context.Background(), sessionID)
+	// Title generation also runs in the background, but spawns on Run
+	// return instead of here: it uses its own titleMux (not sessionMux),
+	// so it can't ride summarization's "wait for sessionMux release"
+	// trick to see the assistant message. Deferring the launch to after
+	// Run completes guarantees the goroutine reads session state with
+	// the just-finished turn's assistant message already committed. Self-
+	// gates on `Title=="" AND >=1 assistant message` so the cost on
+	// every subsequent Run is one Get() against the inner store.
+	defer func() { go o.maybeGenerateTitle(context.Background(), sessionID) }()
 
 	result := &RunResult{}
 
@@ -4026,6 +4099,165 @@ func (o *Orchestrator) maybeRecordWorkflow(ctx context.Context, result *RunResul
 	_, _ = o.memory.AddScoped(ctx, actorID, sb.String(), "workflow")
 }
 
+// maxSessionTitleChars caps the persisted title length. Generous so a
+// model that overshoots the prompt's 3-6 word ask still produces something
+// usable instead of being rejected; tight enough that misbehaving models
+// (multi-paragraph reasoning rambles, refused-with-explanation outputs)
+// don't drag KB-scale strings into the sessions row.
+const maxSessionTitleChars = 120
+
+// maybeGenerateTitle runs the background title-generation pass for a
+// session. Self-gating: no-op when the session already has a title, when
+// the session has no assistant message yet, when no LLM is wired, or when
+// the session has been deleted between Run spawning this goroutine and
+// it running. Spawned from Run via a deferred goroutine launch so the
+// first assistant message is durably stored by the time the goroutine
+// reads session state.
+//
+// Concurrency: uses the dedicated titleMux, NOT sessionMux. Title
+// generation must run in parallel with the next user turn — see the
+// titleMuxes comment on Orchestrator for the trade-off vs.
+// summarization, which deliberately shares sessionMux.
+//
+// Parent-id wiring: emits session_title_invoked first, then wraps ctx so
+// the provider's auto-emitted llm_request / llm_response (and the final
+// session_title_generated) all land under that parent. Mirrors the
+// planner_invoked span and the (now-fixed) summarization_triggered span.
+//
+// Cost attribution: no profile_usage row is written here. Title
+// generation is system overhead alongside summarization; per-customer
+// cost remains visible via the nested llm_response in session_events.
+func (o *Orchestrator) maybeGenerateTitle(ctx context.Context, sessionID string) {
+	if !o.sessionTitlesEnabled || o.llm == nil {
+		return
+	}
+	tm := o.acquireTitleLock(sessionID)
+	defer o.releaseTitleLock(sessionID, tm)
+
+	sess, err := o.sessions.Get(sessionID)
+	if err != nil {
+		return
+	}
+	if sess.Title != "" {
+		return
+	}
+	// Walk for the first assistant + first user message in one pass so we
+	// gate on "completed turn" and have the user content the title should
+	// describe without a second scan. Reads sess.Messages without holding
+	// sessionMux — safe because SessionStore.Get returns a snapshot copy
+	// and AddMessage commits under sessionMux, so we observe either the
+	// pre-Run-N+1 snapshot or the fully-committed Run-N+1 snapshot, never
+	// a half-written slice. Refactors that switch Get to return a slice
+	// header by reference must add titleMux ↔ sessionMux coordination.
+	var firstUser string
+	hasAssistant := false
+	for _, m := range sess.Messages {
+		if firstUser == "" && m.Role == provider.RoleUser {
+			firstUser = m.Content
+		}
+		if m.Role == provider.RoleAssistant {
+			hasAssistant = true
+		}
+		if firstUser != "" && hasAssistant {
+			break
+		}
+	}
+	if !hasAssistant || firstUser == "" {
+		return
+	}
+
+	ctx = actor.WithSessionID(ctx, sessionID)
+	invokedID := emit.EmitSessionTitleInvoked(ctx, o.eventSink, emit.SessionTitleInvokedArgs{
+		MessageCount: 1,
+	})
+	titleCtx := emit.WithParent(ctx, invokedID)
+
+	req := &provider.CompletionRequest{
+		Model: "",
+		Messages: []provider.Message{
+			{Role: provider.RoleSystem, Content: o.sessionTitlePrompt},
+			{Role: provider.RoleUser, Content: firstUser},
+		},
+	}
+	start := time.Now()
+	resp, err := o.llm.Complete(titleCtx, req)
+	if err != nil {
+		slog.Warn("session title generation failed", "session_id", sessionID, "error", err)
+		return
+	}
+	title := normalizeSessionTitle(resp.Content)
+	if title == "" {
+		return
+	}
+	if err := o.sessions.SetTitle(sessionID, title); err != nil {
+		slog.Warn("set session title failed", "session_id", sessionID, "error", err)
+		return
+	}
+	modelID := ""
+	if resp.Model != "" {
+		modelID = string(resp.Model)
+	}
+	emit.EmitSessionTitleGenerated(titleCtx, o.eventSink, emit.SessionTitleGeneratedArgs{
+		Title:     title,
+		ModelID:   modelID,
+		LatencyMS: time.Since(start).Milliseconds(),
+	})
+
+	if o.channelSender != nil {
+		// ConversationID intentionally left empty: the ChannelSender
+		// adapter is the only layer that knows how to split sessionID
+		// back into its (entityID,) channelID, conversationID parts.
+		// Pre-filling it here with the packed sessionID would defeat
+		// that lookup and the websocket channel's per-conn router
+		// would silently drop the frame.
+		pushErr := o.channelSender(ctx, sessionID, pkgchannel.OutboundMessage{
+			Metadata: map[string]string{
+				"type":  "session.title",
+				"title": title,
+			},
+		})
+		if pushErr != nil {
+			// Persistence already succeeded — the title will surface on the
+			// next list query even if the live push fails. Warn so flaky
+			// channels are visible without retrying (the next Run's title
+			// check short-circuits, so no duplicate LLM cost).
+			slog.Warn("session title channel push failed", "session_id", sessionID, "error", pushErr)
+		}
+	}
+}
+
+// normalizeSessionTitle trims whitespace, strips quote-wrapping the model
+// sometimes adds despite the prompt, drops trailing punctuation, and
+// length-caps. Empty result means "drop this title" (caller skips
+// persistence). Cap is byte-based so a UTF-8 chunk at the boundary still
+// stays valid — we cut at a rune boundary before applying the cap.
+func normalizeSessionTitle(raw string) string {
+	s := strings.TrimSpace(raw)
+	// Strip a single layer of matching quotes (straight or smart).
+	for _, pair := range [][2]string{{`"`, `"`}, {`'`, `'`}, {"“", "”"}, {"‘", "’"}} {
+		if strings.HasPrefix(s, pair[0]) && strings.HasSuffix(s, pair[1]) && len(s) > len(pair[0])+len(pair[1]) {
+			s = strings.TrimSpace(s[len(pair[0]) : len(s)-len(pair[1])])
+			break
+		}
+	}
+	s = strings.TrimRight(s, ".!?,;:")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if len(s) <= maxSessionTitleChars {
+		return s
+	}
+	cut := maxSessionTitleChars
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	if cut == 0 {
+		return ""
+	}
+	return strings.TrimSpace(s[:cut])
+}
+
 // maybeSummarizeSession runs summarization when the session has enough messages and config is set.
 // It acquires the per-session lock so it cannot race with a concurrent Run() on the same session.
 func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID string) {
@@ -4053,10 +4285,19 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 	}
 	toSummarize := sess.Messages[:len(sess.Messages)-keep]
 	keepMessages := sess.Messages[len(sess.Messages)-keep:]
-	emit.EmitSummarizationTriggered(ctx, o.eventSink, emit.SummarizationTriggeredArgs{
+	summTriggeredID := emit.EmitSummarizationTriggered(ctx, o.eventSink, emit.SummarizationTriggeredArgs{
 		MessageCount: len(sess.Messages),
 		Reason:       "threshold_reached",
 	})
+	// Scope the provider's auto-emitted llm_request / llm_response under
+	// summarization_triggered so summarization's nested LLM call is
+	// reachable from the trigger event the same way the planner span
+	// nests its own LLM events under planner_invoked (see the planner
+	// instrumentation above). Without this scope, the inner llm_response
+	// would land with parent_id = NULL and an analytics consumer would
+	// have to join by time-window to attribute the cost back to the
+	// summarization run.
+	summCtx := emit.WithParent(ctx, summTriggeredID)
 
 	var sysPrompt, userContent string
 	if sess.Summary != "" {
@@ -4091,7 +4332,7 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 		},
 	}
 	summarizeStart := time.Now()
-	resp, err := o.llm.Complete(ctx, req)
+	resp, err := o.llm.Complete(summCtx, req)
 	if err != nil {
 		slog.Warn("session summarization failed", "error", err)
 		// No completed event on LLM failure: triggered-without-completed
@@ -4113,7 +4354,7 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 		slog.Warn("set session summary failed", "error", err)
 		return
 	}
-	emit.EmitSummarizationCompleted(ctx, o.eventSink, emit.SummarizationCompletedArgs{
+	emit.EmitSummarizationCompleted(summCtx, o.eventSink, emit.SummarizationCompletedArgs{
 		Summary:              newSummary,
 		KeptMessages:         len(keepMessages),
 		LatencyMS:            time.Since(summarizeStart).Milliseconds(),

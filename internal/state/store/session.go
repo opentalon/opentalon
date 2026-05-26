@@ -41,11 +41,11 @@ func NewSessionStore(db *DB, maxMessages, maxIdleDays int) *SessionStore {
 // Get loads a session by id. Messages are loaded from the messages table.
 func (s *SessionStore) Get(id string) (*state.Session, error) {
 	d := s.db.Dialect()
-	var summary, activeModel, metadataJSON, createdAt, updatedAt string
+	var summary, title, activeModel, metadataJSON, createdAt, updatedAt string
 	err := s.db.SQLDB().QueryRow(
-		d.Rebind(`SELECT COALESCE(summary,''), active_model, metadata, created_at, updated_at FROM sessions WHERE id = ?`),
+		d.Rebind(`SELECT COALESCE(summary,''), COALESCE(title,''), active_model, metadata, created_at, updated_at FROM sessions WHERE id = ?`),
 		id,
-	).Scan(&summary, &activeModel, &metadataJSON, &createdAt, &updatedAt)
+	).Scan(&summary, &title, &activeModel, &metadataJSON, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("session %q not found", id)
 	}
@@ -65,6 +65,7 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 		ID:          id,
 		Messages:    messages,
 		Summary:     summary,
+		Title:       title,
 		ActiveModel: provider.ModelRef(activeModel),
 		Metadata:    metadata,
 		CreatedAt:   ca,
@@ -199,6 +200,20 @@ func (s *SessionStore) SetMetadata(id, key, value string) error {
 	return tx.Commit()
 }
 
+// SetTitle persists the short LLM-generated label for the session. Called
+// once per session by Orchestrator.maybeGenerateTitle after the first
+// assistant turn. Missing id is a no-op (race against Delete).
+func (s *SessionStore) SetTitle(id, title string) error {
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.SQLDB().Exec(
+		s.db.Dialect().Rebind(`UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?`),
+		title, updatedAt, id)
+	if err != nil {
+		return fmt.Errorf("set title: %w", err)
+	}
+	return nil
+}
+
 // SetSummary updates the session summary and replaces messages with the given slice.
 func (s *SessionStore) SetSummary(id string, summary string, messages []provider.Message) error {
 	ctx := context.Background()
@@ -260,10 +275,12 @@ func (s *SessionStore) List() ([]string, error) {
 
 // ClearMessages drops the conversation history of a session — messages and
 // the derived summary — atomically. The session row itself stays (entity_id,
-// group_id, active_model, metadata, created_at all preserved), and the
-// session_events audit log is untouched. Used by the clear_session command
-// so /clear resets LLM context without orphaning the session's identity or
-// erasing telemetry.
+// group_id, active_model, metadata, title, created_at all preserved), and
+// the session_events audit log is untouched. Used by the clear_session
+// command so /clear resets LLM context without orphaning the session's
+// identity or erasing telemetry. Title is preserved on purpose (same as
+// the in-memory variant): it labels the session in the picker dropdown,
+// not the transcript that just got wiped.
 func (s *SessionStore) ClearMessages(id string) error {
 	ctx := context.Background()
 	d := s.db.Dialect()
