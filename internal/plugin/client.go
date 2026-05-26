@@ -3,7 +3,9 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/profile"
@@ -116,7 +118,7 @@ func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall)
 		Id:                call.ID,
 		Plugin:            call.Plugin,
 		Action:            call.Action,
-		Args:              call.Args,
+		Args:              ensureValidUTF8Map(call.Args),
 		CredentialHeaders: credHeaders,
 	})
 	if err != nil {
@@ -133,6 +135,21 @@ func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall)
 // Close terminates the gRPC connection.
 func (c *Client) Close() error {
 	return c.conn.Close()
+}
+
+// ensureValidUTF8Map replaces invalid UTF-8 sequences in map values with U+FFFD.
+// gRPC proto3 marshaling rejects string fields with invalid UTF-8, and user
+// input (e.g. the `text` arg sent to preparers) can carry bad bytes.
+func ensureValidUTF8Map(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	for k, v := range m {
+		if !utf8.ValidString(v) {
+			m[k] = strings.ToValidUTF8(v, "�")
+		}
+	}
+	return m
 }
 
 func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapability {

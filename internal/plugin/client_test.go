@@ -135,6 +135,33 @@ func TestClientExecute(t *testing.T) {
 	}
 }
 
+// TestClientExecuteSanitizesInvalidUTF8Args verifies that arg values containing
+// invalid UTF-8 bytes are sanitized before being sent over gRPC. Proto3 string
+// fields reject invalid UTF-8, so without sanitization the call would fail
+// with "grpc: error while marshaling: string field contains invalid UTF-8".
+func TestClientExecuteSanitizesInvalidUTF8Args(t *testing.T) {
+	client := newTestPluginClient(t)
+	defer func() { _ = client.Close() }()
+
+	// 0xff is never valid in UTF-8.
+	result := client.Execute(context.Background(), orchestrator.ToolCall{
+		ID:     "u8",
+		Plugin: "echo",
+		Action: "say",
+		Args:   map[string]string{"text": "hello\xffworld"},
+	})
+
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Content, "hello") || !strings.Contains(result.Content, "world") {
+		t.Errorf("content = %q, want it to contain both 'hello' and 'world'", result.Content)
+	}
+	if strings.ContainsRune(result.Content, 0xff) {
+		t.Errorf("content = %q, raw 0xff byte should have been replaced", result.Content)
+	}
+}
+
 func TestClientExecuteError(t *testing.T) {
 	client := newTestPluginClient(t)
 	defer func() { _ = client.Close() }()
