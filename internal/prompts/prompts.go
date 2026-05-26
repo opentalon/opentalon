@@ -74,6 +74,14 @@ var summarizeUpdateRaw string
 
 var SummarizeUpdate = strings.TrimRight(summarizeUpdateRaw, "\n")
 
+//go:embed orchestrator_session_title.txt
+var sessionTitleRaw string
+
+// SessionTitle is the system prompt the title-generation pass sends to the
+// LLM. Output contract: a short title (3–6 words), no quotes, in the
+// user's language. Trailing newline trimmed so callers don't have to.
+var SessionTitle = strings.TrimRight(sessionTitleRaw, "\n")
+
 //go:embed subprocess_preamble.txt
 var SubprocessPreamble string
 

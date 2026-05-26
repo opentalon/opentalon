@@ -15,6 +15,7 @@ type Session struct {
 	ID          string             `yaml:"id"`
 	Messages    []provider.Message `yaml:"messages"`
 	Summary     string             `yaml:"summary,omitempty"` // compressed history when summarization is used
+	Title       string             `yaml:"title,omitempty"`   // short LLM-generated label; empty until maybeGenerateTitle has run
 	ActiveModel provider.ModelRef  `yaml:"active_model,omitempty"`
 	Metadata    map[string]string  `yaml:"metadata,omitempty"`
 	CreatedAt   time.Time          `yaml:"created_at"`
@@ -107,6 +108,23 @@ func (s *SessionStore) SetMetadata(id, key, value string) error {
 	} else {
 		sess.Metadata[key] = value
 	}
+	sess.UpdatedAt = time.Now()
+	return nil
+}
+
+// SetTitle persists the short LLM-generated label for the session. Called
+// once per session by Orchestrator.maybeGenerateTitle after the first
+// assistant turn. No-op when the session is unknown so callers don't have
+// to special-case races against Delete().
+func (s *SessionStore) SetTitle(id, title string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[id]
+	if !ok {
+		return nil
+	}
+	sess.Title = title
 	sess.UpdatedAt = time.Now()
 	return nil
 }

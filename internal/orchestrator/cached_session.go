@@ -80,6 +80,16 @@ func (c *cachedSessionStore) SetMetadata(id, key, value string) error {
 	return nil
 }
 
+func (c *cachedSessionStore) SetTitle(id, title string) error {
+	if err := c.inner.SetTitle(id, title); err != nil {
+		return err
+	}
+	if s, ok := c.cache[id]; ok {
+		s.Title = title
+	}
+	return nil
+}
+
 func (c *cachedSessionStore) SetSummary(id string, summary string, messages []provider.Message) error {
 	if err := c.inner.SetSummary(id, summary, messages); err != nil {
 		return err

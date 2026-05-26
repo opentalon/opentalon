@@ -571,6 +571,14 @@ func main() {
 		pluginObserver = metricsCollector
 	}
 
+	// channelNotifier carries a late-bound *channel.Registry pointer; both
+	// the scheduler (job notifications) and the orchestrator (server-
+	// initiated session.title frames) take method values whose receiver
+	// captures this struct, so the registry can be wired in later without
+	// rebuilding either consumer. Created here to break the
+	// orch ← ChannelSender ← notifier ← reg ← handler ← orch cycle.
+	notifier := &channelNotifier{reg: nil}
+
 	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, orchestrator.OrchestratorOpts{
 		CustomRules:             cfg.Orchestrator.Rules,
 		ContentPreparers:        contentPreparers,
@@ -626,6 +634,8 @@ func main() {
 			LoopCapPerTurn:          cfg.Orchestrator.Preparer.ToolErrorHandling.LoopCapPerTurn,
 			StickyDemotionThreshold: cfg.Orchestrator.Preparer.ToolErrorHandling.StickyDemotionThreshold,
 		},
+		ChannelSender:        notifier.SendToSession,
+		SessionTitlesEnabled: true,
 		Subprocess: orchestrator.SubprocessConfig{
 			Enabled:       cfg.Orchestrator.Subprocess.Enabled,
 			MaxDepth:      cfg.Orchestrator.Subprocess.MaxDepth,
@@ -732,7 +742,9 @@ func main() {
 
 	// Scheduler: wired after orchestrator so it can route job actions through orch.
 	// Personal reminders bypass the approver policy via AddPersonalJob.
-	notifier := &channelNotifier{reg: nil} // reg populated below after it's built
+	// Reuses the channelNotifier built above the orchestrator (shared
+	// late-bound *channel.Registry pointer); the title-push path and the
+	// scheduler's job-result path therefore go through the same adapter.
 	sched := scheduler.NewWithPolicy(orch, notifier, dataDir, cfg.Scheduler.Approvers, cfg.Scheduler.MaxJobsPerUser)
 	staticJobs := make([]scheduler.Job, 0, len(cfg.Scheduler.Jobs))
 	for _, jc := range cfg.Scheduler.Jobs {
@@ -1038,6 +1050,61 @@ func (n *channelNotifier) Notify(ctx context.Context, channelID, conversationID,
 		ConversationID: conversationID,
 		Content:        content,
 	})
+}
+
+// SendToSession satisfies orchestrator.ChannelSender. The orchestrator
+// only knows a session key; the inverse split lives here at the
+// integration boundary so the orchestrator stays free of channel-
+// topology knowledge. Used by maybeGenerateTitle to broadcast the live
+// session.title frame; same late-bound reg pointer as Notify.
+//
+// Key shape: pkg.SessionKey emits "<channelID>:<conversationID>" (or
+// "...:threadID" when set), but the handler in internal/channel
+// prepends "<entityID>:" once a profile is resolved (see handler.go:
+// `sessionKey = p.EntityID + ":" + sessionKey`). The shipped channels
+// (websocket, console) never set threadID, so in practice keys are
+// 2-part (anonymous) or 3-part (profile-resolved) and the right-most
+// two segments are always channelID + conversationID. Split-from-right
+// covers both without an entityID lookup; if a future channel ever
+// sets threadID alongside a profile prefix, the registry-match
+// fallback below catches it.
+func (n *channelNotifier) SendToSession(ctx context.Context, sessionID string, msg chanpkg.OutboundMessage) error {
+	if n.reg == nil {
+		return fmt.Errorf("channel registry not yet initialized")
+	}
+	parts := strings.Split(sessionID, ":")
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid session key %q", sessionID)
+	}
+	channelID := parts[len(parts)-2]
+	conversationID := parts[len(parts)-1]
+	// Fallback: when from-right-2 doesn't name a registered channel
+	// (would happen if a thread-capable channel ever ships a non-empty
+	// threadID with a profile prefix), scan registered channels and
+	// match by `:<channelID>:` substring so we send to the right one
+	// instead of a fake channel named after the conversationID.
+	if _, ok := n.reg.Get(channelID); !ok {
+		for _, ch := range n.reg.List() {
+			needle := ":" + ch.ID() + ":"
+			if idx := strings.Index(sessionID, needle); idx >= 0 {
+				channelID = ch.ID()
+				rest := sessionID[idx+len(needle):]
+				if i := strings.Index(rest, ":"); i >= 0 {
+					conversationID = rest[:i]
+					if msg.ThreadID == "" {
+						msg.ThreadID = rest[i+1:]
+					}
+				} else {
+					conversationID = rest
+				}
+				break
+			}
+		}
+	}
+	if msg.ConversationID == "" {
+		msg.ConversationID = conversationID
+	}
+	return n.reg.Send(ctx, channelID, msg)
 }
 
 // channelRunner adapts the orchestrator to channel.Runner.

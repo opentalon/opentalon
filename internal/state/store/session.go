@@ -41,11 +41,11 @@ func NewSessionStore(db *DB, maxMessages, maxIdleDays int) *SessionStore {
 // Get loads a session by id. Messages are loaded from the messages table.
 func (s *SessionStore) Get(id string) (*state.Session, error) {
 	d := s.db.Dialect()
-	var summary, activeModel, metadataJSON, createdAt, updatedAt string
+	var summary, title, activeModel, metadataJSON, createdAt, updatedAt string
 	err := s.db.SQLDB().QueryRow(
-		d.Rebind(`SELECT COALESCE(summary,''), active_model, metadata, created_at, updated_at FROM sessions WHERE id = ?`),
+		d.Rebind(`SELECT COALESCE(summary,''), COALESCE(title,''), active_model, metadata, created_at, updated_at FROM sessions WHERE id = ?`),
 		id,
-	).Scan(&summary, &activeModel, &metadataJSON, &createdAt, &updatedAt)
+	).Scan(&summary, &title, &activeModel, &metadataJSON, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("session %q not found", id)
 	}
@@ -65,6 +65,7 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 		ID:          id,
 		Messages:    messages,
 		Summary:     summary,
+		Title:       title,
 		ActiveModel: provider.ModelRef(activeModel),
 		Metadata:    metadata,
 		CreatedAt:   ca,
@@ -197,6 +198,20 @@ func (s *SessionStore) SetMetadata(id, key, value string) error {
 		return fmt.Errorf("set metadata update: %w", err)
 	}
 	return tx.Commit()
+}
+
+// SetTitle persists the short LLM-generated label for the session. Called
+// once per session by Orchestrator.maybeGenerateTitle after the first
+// assistant turn. Missing id is a no-op (race against Delete).
+func (s *SessionStore) SetTitle(id, title string) error {
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.SQLDB().Exec(
+		s.db.Dialect().Rebind(`UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?`),
+		title, updatedAt, id)
+	if err != nil {
+		return fmt.Errorf("set title: %w", err)
+	}
+	return nil
 }
 
 // SetSummary updates the session summary and replaces messages with the given slice.
