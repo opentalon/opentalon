@@ -146,9 +146,11 @@ func (s *SessionStore) SetSummary(id string, summary string, messages []provider
 
 // ClearMessages drops the conversation history of a session — messages and
 // the derived summary — while leaving the session row intact (ID, identity
-// fields, ActiveModel, Metadata, CreatedAt). Used by the clear_session
+// fields, ActiveModel, Metadata, Title, CreatedAt). Used by the clear_session
 // command to reset the LLM context without losing entity/group association
-// or audit events. No-op if the session is not present.
+// or audit events. Title is preserved intentionally: it labels the session
+// in the picker dropdown (identity-shaped, like ID/Metadata), not the
+// transcript that just got wiped. No-op if the session is not present.
 func (s *SessionStore) ClearMessages(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

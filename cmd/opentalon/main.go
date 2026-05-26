@@ -592,6 +592,7 @@ func main() {
 		MaxMessagesAfterSummary: defaultInt(cfg.State.Session.MaxMessagesAfterSummary, 5),
 		SummarizePrompt:         cfg.State.Session.SummarizePrompt,
 		SummarizeUpdatePrompt:   cfg.State.Session.SummarizeUpdatePrompt,
+		SessionTitlePrompt:      cfg.State.Session.SessionTitlePrompt,
 		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
 		PlanTimeout:             planTimeout,
 		PipelineConfig:          pipelineCfg,

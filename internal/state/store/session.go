@@ -275,10 +275,12 @@ func (s *SessionStore) List() ([]string, error) {
 
 // ClearMessages drops the conversation history of a session — messages and
 // the derived summary — atomically. The session row itself stays (entity_id,
-// group_id, active_model, metadata, created_at all preserved), and the
-// session_events audit log is untouched. Used by the clear_session command
-// so /clear resets LLM context without orphaning the session's identity or
-// erasing telemetry.
+// group_id, active_model, metadata, title, created_at all preserved), and
+// the session_events audit log is untouched. Used by the clear_session
+// command so /clear resets LLM context without orphaning the session's
+// identity or erasing telemetry. Title is preserved on purpose (same as
+// the in-memory variant): it labels the session in the picker dropdown,
+// not the transcript that just got wiped.
 func (s *SessionStore) ClearMessages(id string) error {
 	ctx := context.Background()
 	d := s.db.Dialect()

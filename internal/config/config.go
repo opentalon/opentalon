@@ -482,6 +482,7 @@ type SessionConfig struct {
 	MaxMessagesAfterSummary int    `yaml:"max_messages_after_summary"` // keep this many messages after summarization
 	SummarizePrompt         string `yaml:"summarize_prompt"`           // system prompt for initial summarization (any language); empty = default English
 	SummarizeUpdatePrompt   string `yaml:"summarize_update_prompt"`    // system prompt for updating existing summary (any language); empty = default English
+	SessionTitlePrompt      string `yaml:"session_title_prompt"`       // system prompt for the background title-generation pass (any language); empty = default in internal/prompts/orchestrator_session_title.txt
 }
 
 type ModelsConfig struct {

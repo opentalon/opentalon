@@ -4143,7 +4143,12 @@ func (o *Orchestrator) maybeGenerateTitle(ctx context.Context, sessionID string)
 	}
 	// Walk for the first assistant + first user message in one pass so we
 	// gate on "completed turn" and have the user content the title should
-	// describe without a second scan.
+	// describe without a second scan. Reads sess.Messages without holding
+	// sessionMux — safe because SessionStore.Get returns a snapshot copy
+	// and AddMessage commits under sessionMux, so we observe either the
+	// pre-Run-N+1 snapshot or the fully-committed Run-N+1 snapshot, never
+	// a half-written slice. Refactors that switch Get to return a slice
+	// header by reference must add titleMux ↔ sessionMux coordination.
 	var firstUser string
 	hasAssistant := false
 	for _, m := range sess.Messages {
