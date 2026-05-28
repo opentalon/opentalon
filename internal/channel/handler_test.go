@@ -3,11 +3,13 @@ package channel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/state"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
@@ -38,20 +40,27 @@ func (e *echoRunner) Run(_ context.Context, _ string, content string, _ ...pkg.F
 	return "echo: " + content, "", nil, nil
 }
 
-func newTestHandler(verifier ProfileVerifier, checker LimitChecker) pkg.MessageHandler {
-	ensureSession := func(_, _, _ string) {}
-	noAction := func(_ context.Context, _, _ string, _ map[string]string) (string, error) {
-		return "", errors.New("no actions")
-	}
-	hasAction := func(_, _ string) bool { return false }
-	return NewMessageHandler(HandlerConfig{
-		EnsureSession: ensureSession,
+// baseHandlerConfig returns the shared no-op session/action stubs every
+// handler test needs. Individual tests override fields they care about
+// (ResumeSession/CreateSession for routing tests, Verifier/LimitChecker
+// for auth tests) and re-pass the config to NewMessageHandler.
+func baseHandlerConfig() HandlerConfig {
+	return HandlerConfig{
+		ResumeSession: func(_ string) error { return nil },
+		CreateSession: func(_, _, _ string) {},
 		Runner:        &echoRunner{},
-		RunAction:     noAction,
-		HasAction:     hasAction,
-		Verifier:      verifier,
-		LimitChecker:  checker,
-	})
+		RunAction: func(_ context.Context, _, _ string, _ map[string]string) (string, error) {
+			return "", errors.New("no actions")
+		},
+		HasAction: func(_, _ string) bool { return false },
+	}
+}
+
+func newTestHandler(verifier ProfileVerifier, checker LimitChecker) pkg.MessageHandler {
+	cfg := baseHandlerConfig()
+	cfg.Verifier = verifier
+	cfg.LimitChecker = checker
+	return NewMessageHandler(cfg)
 }
 
 func callHandler(h pkg.MessageHandler, meta map[string]string) pkg.OutboundMessage {
@@ -159,4 +168,182 @@ func TestHandler_NilLimitChecker_WithLimit(t *testing.T) {
 	if out.Content != "echo: hello" {
 		t.Errorf("Content = %q, want passthrough when limitChecker is nil", out.Content)
 	}
+}
+
+// instrumented session pair: records every Resume/Create call so a test can
+// assert which branch the handler took for a given resume_intent value.
+type sessionRecorder struct {
+	resumes     []string
+	resumeError map[string]error
+	creates     []string
+}
+
+func (r *sessionRecorder) resumeFunc() pkg.ResumeSessionFunc {
+	return func(key string) error {
+		r.resumes = append(r.resumes, key)
+		if err, ok := r.resumeError[key]; ok {
+			return err
+		}
+		return nil
+	}
+}
+
+func (r *sessionRecorder) createFunc() pkg.CreateSessionFunc {
+	return func(key, _, _ string) {
+		r.creates = append(r.creates, key)
+	}
+}
+
+func newRecordingHandler(rec *sessionRecorder) pkg.MessageHandler {
+	cfg := baseHandlerConfig()
+	cfg.ResumeSession = rec.resumeFunc()
+	cfg.CreateSession = rec.createFunc()
+	return NewMessageHandler(cfg)
+}
+
+func TestHandler_ResumeIntentTrue_CallsResumeNotCreate(t *testing.T) {
+	// Client-supplied conv-id must take the strict-resume path. Auto-create
+	// would let the UI keep its history while talking to a fresh empty
+	// server session — the original silent-drift bug.
+	rec := &sessionRecorder{}
+	h := newRecordingHandler(rec)
+	msg := pkg.InboundMessage{
+		ChannelID:      "websocket",
+		ConversationID: "abc",
+		Content:        "hi",
+		Metadata:       map[string]string{pkg.ResumeIntentMetadataKey: "true"},
+	}
+	_, _ = h(context.Background(), "websocket:abc", msg)
+	if len(rec.resumes) != 1 || rec.resumes[0] != "websocket:abc" {
+		t.Errorf("expected one Resume for websocket:abc, got %v", rec.resumes)
+	}
+	if len(rec.creates) != 0 {
+		t.Errorf("Create must not be called on resume_intent=true (creates=%v)", rec.creates)
+	}
+}
+
+func TestHandler_ResumeIntentMissing_CallsCreateNotResume(t *testing.T) {
+	// Channel-minted conv-id (no resume_intent) must take the idempotent
+	// create path. Resume on a fresh id would always error and emit a
+	// false-positive session_expired.
+	rec := &sessionRecorder{}
+	h := newRecordingHandler(rec)
+	msg := pkg.InboundMessage{
+		ChannelID:      "websocket",
+		ConversationID: "new",
+		Content:        "hi",
+		// No resume_intent key at all.
+	}
+	_, _ = h(context.Background(), "websocket:new", msg)
+	if len(rec.creates) != 1 || rec.creates[0] != "websocket:new" {
+		t.Errorf("expected one Create for websocket:new, got %v", rec.creates)
+	}
+	if len(rec.resumes) != 0 {
+		t.Errorf("Resume must not be called when resume_intent is absent (resumes=%v)", rec.resumes)
+	}
+}
+
+func TestHandler_ResumeIntentTrue_ResumeFails_NotFound_EmitsSessionExpired(t *testing.T) {
+	// The whole point of the refactor: stale conv-id must surface as a
+	// typed error frame so the client can clear its storage and reconnect
+	// fresh. error_code is the contract — UI translates it. The recorder
+	// returns a wrapped state.ErrSessionNotFound so the handler discriminates
+	// this case from an infrastructure failure.
+	rec := &sessionRecorder{
+		resumeError: map[string]error{
+			"websocket:gone": fmt.Errorf("session %q: %w", "websocket:gone", state.ErrSessionNotFound),
+		},
+	}
+	h := newRecordingHandler(rec)
+	msg := pkg.InboundMessage{
+		ChannelID:      "websocket",
+		ConversationID: "gone",
+		Content:        "are you there?",
+		Metadata:       map[string]string{pkg.ResumeIntentMetadataKey: "true"},
+	}
+	out, _ := h(context.Background(), "websocket:gone", msg)
+	if got := out.Metadata["error_code"]; got != "session_expired" {
+		t.Errorf("error_code = %q, want session_expired", got)
+	}
+	if got := out.Metadata["type"]; got != "error" {
+		t.Errorf("type = %q, want error", got)
+	}
+	if len(rec.creates) != 0 {
+		t.Errorf("Create must not be called after Resume failure (creates=%v)", rec.creates)
+	}
+}
+
+func TestHandler_ResumeIntentTrue_ResumeFails_InfraError_EmitsInternalError(t *testing.T) {
+	// A transient infrastructure failure (dropped DB connection, context
+	// cancellation, etc.) must NOT masquerade as session_expired — telling
+	// the user "start a new chat" would cost them a valid conversation_id
+	// on every brief DB hiccup. The contract: only errors.Is(err,
+	// state.ErrSessionNotFound) maps to session_expired; everything else
+	// maps to internal_error so the client can retry without resetting.
+	rec := &sessionRecorder{
+		resumeError: map[string]error{"websocket:live": errors.New("database connection lost")},
+	}
+	h := newRecordingHandler(rec)
+	msg := pkg.InboundMessage{
+		ChannelID:      "websocket",
+		ConversationID: "live",
+		Content:        "ping",
+		Metadata:       map[string]string{pkg.ResumeIntentMetadataKey: "true"},
+	}
+	out, _ := h(context.Background(), "websocket:live", msg)
+	if got := out.Metadata["error_code"]; got != "internal_error" {
+		t.Errorf("error_code = %q, want internal_error (not session_expired)", got)
+	}
+	if got := out.Metadata["type"]; got != "error" {
+		t.Errorf("type = %q, want error", got)
+	}
+	if strings.Contains(out.Content, "no longer available") || strings.Contains(out.Content, "start a new chat") {
+		t.Errorf("Content = %q must not say session is gone on infra failure", out.Content)
+	}
+	if len(rec.creates) != 0 {
+		t.Errorf("Create must not be called after Resume failure (creates=%v)", rec.creates)
+	}
+}
+
+func TestHandler_NewMessageHandler_PanicsOnNilResumeSession(t *testing.T) {
+	// Boot-time misconfiguration must surface immediately at construction,
+	// not as a nil-deref under the first inbound message. The strict-session
+	// contract requires both callbacks; making one optional was the legacy
+	// "right default for console" wart that hid silent failures.
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil ResumeSession, got nothing")
+		}
+	}()
+	NewMessageHandler(HandlerConfig{
+		ResumeSession: nil,
+		CreateSession: func(_, _, _ string) {},
+		Runner:        &echoRunner{},
+	})
+}
+
+func TestHandler_NewMessageHandler_PanicsOnNilCreateSession(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil CreateSession, got nothing")
+		}
+	}()
+	NewMessageHandler(HandlerConfig{
+		ResumeSession: func(_ string) error { return nil },
+		CreateSession: nil,
+		Runner:        &echoRunner{},
+	})
+}
+
+func TestHandler_NewMessageHandler_PanicsOnNilRunner(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil Runner, got nothing")
+		}
+	}()
+	NewMessageHandler(HandlerConfig{
+		ResumeSession: func(_ string) error { return nil },
+		CreateSession: func(_, _, _ string) {},
+		Runner:        nil,
+	})
 }

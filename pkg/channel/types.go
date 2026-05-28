@@ -177,9 +177,42 @@ type HasActionFunc func(plugin, action string) bool
 // before it is sent to the Runner. Channels register their preparer via RegisterContentPreparer in init().
 type ContentPreparer func(ctx context.Context, content string, runAction RunActionFunc, hasAction HasActionFunc) string
 
-// EnsureSessionFunc is called to ensure a session exists for the given key before running.
-// entityID and groupID are stored alongside the session for ownership queries.
-type EnsureSessionFunc func(sessionKey, entityID, groupID string)
+// ResumeSessionFunc validates that a session exists for sessionKey. It returns
+// nil when the session is present in the store. The handler distinguishes two
+// failure modes via errors.Is against state.ErrSessionNotFound: a wrapped
+// ErrSessionNotFound means the row is genuinely absent (expired, pruned,
+// never existed) and surfaces as error_code=session_expired so the UI drops
+// its stale conversation_id and reconnects fresh; any other error is treated
+// as an infrastructure failure (e.g. dropped DB connection) and surfaces as
+// error_code=internal_error so a valid conversation_id is preserved across
+// a retry. Implementations MUST preserve this distinction — collapsing both
+// onto a generic error reintroduces the silent-drift bug this contract
+// exists to prevent. Named Resume rather than Load to avoid colliding with
+// SessionStore.Load (the yaml-from-disk method on the in-memory store).
+type ResumeSessionFunc func(sessionKey string) error
+
+// CreateSessionFunc registers (or returns) a session row for sessionKey,
+// entityID, groupID. Idempotent: an existing session is returned untouched,
+// never wiped. The handler calls Create on messages NOT flagged with
+// resume_intent — i.e. the channel did not have a client-supplied id and
+// just minted one for this connection. Splitting Resume/Create replaces the
+// previous EnsureSessionFunc which conflated the two paths and silently
+// auto-created on any cache miss.
+type CreateSessionFunc func(sessionKey, entityID, groupID string)
+
+// ResumeIntentMetadataKey is the InboundMessage metadata key channels set
+// to "true" when the conversation_id on the message came from the client
+// (resume) rather than being server-minted on this connection (fresh).
+// Handlers route Resume vs Create based on this flag.
+//
+// Trust boundary: this key is client-trustable because session_key is
+// always entity-scoped at handler.go (sessionKey = p.EntityID + ":" + key)
+// before either Resume or Create is invoked. A malicious client cannot
+// resume a session belonging to another entity by forging this metadata —
+// any guessed conversation_id is prefixed with the verified profile's
+// EntityID, so cross-tenant lookup is structurally unreachable. Removing
+// or reshaping that prefix in handler.go would re-open this surface.
+const ResumeIntentMetadataKey = "resume_intent"
 
 // MessageHandler is called when an inbound message arrives. The implementation
 // feeds the message to the orchestrator and returns the response.

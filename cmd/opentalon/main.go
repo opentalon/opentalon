@@ -774,14 +774,26 @@ func main() {
 		slog.Warn("register reminder tool failed", "error", err)
 	}
 
-	ensureSession := func(sessionKey, entityID, groupID string) {
-		if _, err := sessions.Get(sessionKey); err != nil {
-			sessions.Create(sessionKey, entityID, groupID)
-		}
+	// Strict resume: surface "not found" up to the handler so it can emit
+	// session_expired to the client rather than silently auto-creating
+	// (the pre-refactor footgun that let UI and server drift apart). The
+	// underlying SessionStore.Get already wraps state.ErrSessionNotFound on
+	// genuine misses and a distinct infra error otherwise; the handler
+	// discriminates via errors.Is.
+	resumeSession := func(sessionKey string) error {
+		_, err := sessions.Get(sessionKey)
+		return err
+	}
+	// Fresh mint: delegates to the underlying store, which is idempotent
+	// in both the DB-backed (INSERT-on-conflict returns existing row) and
+	// the in-memory variant (Create returns existing pointer when present).
+	createSession := func(sessionKey, entityID, groupID string) {
+		sessions.Create(sessionKey, entityID, groupID)
 	}
 	runner := &channelRunner{orch: orch}
 	handler := channel.NewMessageHandler(channel.HandlerConfig{
-		EnsureSession: ensureSession,
+		ResumeSession: resumeSession,
+		CreateSession: createSession,
 		Runner:        runner,
 		RunAction:     orch.RunAction,
 		HasAction:     toolRegistry.HasAction,

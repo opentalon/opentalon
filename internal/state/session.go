@@ -1,6 +1,7 @@
 package state
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,14 @@ import (
 	"github.com/opentalon/opentalon/internal/provider"
 	"gopkg.in/yaml.v3"
 )
+
+// ErrSessionNotFound is the canonical sentinel returned by both the in-memory
+// and DB-backed SessionStore.Get when the requested id is absent. Callers must
+// use errors.Is to distinguish a genuine miss from an infrastructure failure
+// (e.g. dropped DB connection): only the former should surface to the user as
+// "session expired"; the latter is a transient internal error and must not
+// cause the client to discard a valid conversation_id.
+var ErrSessionNotFound = errors.New("session not found")
 
 type Session struct {
 	ID          string             `yaml:"id"`
@@ -35,9 +44,19 @@ func NewSessionStore(dir string) *SessionStore {
 	}
 }
 
+// Create returns the session for id, minting a fresh empty record if absent.
+// Idempotent on existing ids so a "fresh-intent" call from a reconnecting
+// channel can never wipe a live session's messages — matches the DB-backed
+// store's on-conflict behaviour (see store/session.go Create) and removes
+// a silent-data-loss footgun that surfaced when channels routed a stale
+// conversation_id into the create path instead of the load path.
 func (s *SessionStore) Create(id, _, _ string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if existing, ok := s.sessions[id]; ok {
+		return existing
+	}
 
 	now := time.Now()
 	sess := &Session{
@@ -57,7 +76,7 @@ func (s *SessionStore) Get(id string) (*Session, error) {
 
 	sess, ok := s.sessions[id]
 	if !ok {
-		return nil, fmt.Errorf("session %q not found", id)
+		return nil, fmt.Errorf("session %q: %w", id, ErrSessionNotFound)
 	}
 	return sess, nil
 }
