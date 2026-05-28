@@ -588,6 +588,10 @@ orchestrator:
     step_timeout: "60s"    # per-step timeout as Go duration (default "60s")
 ```
 
+## Talon workflows & EITL rules
+
+Deterministic multi-step execution and Expert-in-the-Loop rule evaluation are provided by the [talon-plugin](https://github.com/opentalon/talon-plugin) — installed like any other OpenTalon plugin, no orchestrator config knob required. It uses the [`talon-language` Go SDK](https://github.com/opentalon/talon-language/tree/master/pkg/talon) to compile and execute Talon source, and routes each MCP call inside a workflow back through the host orchestrator via the existing `plugin_exec` Redis channel — so every step picks up the same policy, observability, and credential injection as a normal tool call.
+
 ## Concurrency
 
 By default, OpenTalon processes one session at a time (`max_concurrent_sessions: 1`). This matches the original sequential behaviour and is the safe default for most deployments. Enable concurrent session processing by raising the limit:
