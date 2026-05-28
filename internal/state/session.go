@@ -35,9 +35,19 @@ func NewSessionStore(dir string) *SessionStore {
 	}
 }
 
+// Create returns the session for id, minting a fresh empty record if absent.
+// Idempotent on existing ids so a "fresh-intent" call from a reconnecting
+// channel can never wipe a live session's messages — matches the DB-backed
+// store's on-conflict behaviour (see store/session.go Create) and removes
+// a silent-data-loss footgun that surfaced when channels routed a stale
+// conversation_id into the create path instead of the load path.
 func (s *SessionStore) Create(id, _, _ string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if existing, ok := s.sessions[id]; ok {
+		return existing
+	}
 
 	now := time.Now()
 	sess := &Session{

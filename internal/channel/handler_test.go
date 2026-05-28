@@ -39,13 +39,15 @@ func (e *echoRunner) Run(_ context.Context, _ string, content string, _ ...pkg.F
 }
 
 func newTestHandler(verifier ProfileVerifier, checker LimitChecker) pkg.MessageHandler {
-	ensureSession := func(_, _, _ string) {}
+	loadSession := func(_ string) error { return nil }
+	createSession := func(_, _, _ string) {}
 	noAction := func(_ context.Context, _, _ string, _ map[string]string) (string, error) {
 		return "", errors.New("no actions")
 	}
 	hasAction := func(_, _ string) bool { return false }
 	return NewMessageHandler(HandlerConfig{
-		EnsureSession: ensureSession,
+		LoadSession:   loadSession,
+		CreateSession: createSession,
 		Runner:        &echoRunner{},
 		RunAction:     noAction,
 		HasAction:     hasAction,
@@ -158,5 +160,113 @@ func TestHandler_NilLimitChecker_WithLimit(t *testing.T) {
 	out := callHandler(h, map[string]string{"profile_token": "tok"})
 	if out.Content != "echo: hello" {
 		t.Errorf("Content = %q, want passthrough when limitChecker is nil", out.Content)
+	}
+}
+
+// instrumented session pair: records every Load/Create call so a test can
+// assert which branch the handler took for a given resume_intent value.
+type sessionRecorder struct {
+	loads        []string
+	loadErrors   map[string]error
+	creates      []string
+	createCalled bool
+}
+
+func (r *sessionRecorder) loadFunc() pkg.LoadSessionFunc {
+	return func(key string) error {
+		r.loads = append(r.loads, key)
+		if err, ok := r.loadErrors[key]; ok {
+			return err
+		}
+		return nil
+	}
+}
+
+func (r *sessionRecorder) createFunc() pkg.CreateSessionFunc {
+	return func(key, _, _ string) {
+		r.creates = append(r.creates, key)
+		r.createCalled = true
+	}
+}
+
+func newRecordingHandler(rec *sessionRecorder) pkg.MessageHandler {
+	noAction := func(_ context.Context, _, _ string, _ map[string]string) (string, error) {
+		return "", errors.New("no actions")
+	}
+	hasAction := func(_, _ string) bool { return false }
+	return NewMessageHandler(HandlerConfig{
+		LoadSession:   rec.loadFunc(),
+		CreateSession: rec.createFunc(),
+		Runner:        &echoRunner{},
+		RunAction:     noAction,
+		HasAction:     hasAction,
+	})
+}
+
+func TestHandler_ResumeIntentTrue_CallsLoadNotCreate(t *testing.T) {
+	// Client-supplied conv-id must take the strict-load path. Auto-create
+	// would let the UI keep its history while talking to a fresh empty
+	// server session — the original silent-drift bug.
+	rec := &sessionRecorder{}
+	h := newRecordingHandler(rec)
+	msg := pkg.InboundMessage{
+		ChannelID:      "websocket",
+		ConversationID: "abc",
+		Content:        "hi",
+		Metadata:       map[string]string{pkg.ResumeIntentMetadataKey: "true"},
+	}
+	_, _ = h(context.Background(), "websocket:abc", msg)
+	if len(rec.loads) != 1 || rec.loads[0] != "websocket:abc" {
+		t.Errorf("expected one Load for websocket:abc, got %v", rec.loads)
+	}
+	if rec.createCalled {
+		t.Errorf("Create must not be called on resume_intent=true (creates=%v)", rec.creates)
+	}
+}
+
+func TestHandler_ResumeIntentMissing_CallsCreateNotLoad(t *testing.T) {
+	// Channel-minted conv-id (no resume_intent) must take the idempotent
+	// create path. Load on a fresh id would always error and emit a
+	// false-positive session_expired.
+	rec := &sessionRecorder{}
+	h := newRecordingHandler(rec)
+	msg := pkg.InboundMessage{
+		ChannelID:      "websocket",
+		ConversationID: "new",
+		Content:        "hi",
+		// No resume_intent key at all.
+	}
+	_, _ = h(context.Background(), "websocket:new", msg)
+	if len(rec.creates) != 1 || rec.creates[0] != "websocket:new" {
+		t.Errorf("expected one Create for websocket:new, got %v", rec.creates)
+	}
+	if len(rec.loads) != 0 {
+		t.Errorf("Load must not be called when resume_intent is absent (loads=%v)", rec.loads)
+	}
+}
+
+func TestHandler_ResumeIntentTrue_LoadFails_EmitsSessionExpired(t *testing.T) {
+	// The whole point of the refactor: stale conv-id must surface as a
+	// typed error frame so the client can clear its storage and reconnect
+	// fresh. error_code is the contract — UI translates it.
+	rec := &sessionRecorder{
+		loadErrors: map[string]error{"websocket:gone": errors.New("session \"websocket:gone\" not found")},
+	}
+	h := newRecordingHandler(rec)
+	msg := pkg.InboundMessage{
+		ChannelID:      "websocket",
+		ConversationID: "gone",
+		Content:        "are you there?",
+		Metadata:       map[string]string{pkg.ResumeIntentMetadataKey: "true"},
+	}
+	out, _ := h(context.Background(), "websocket:gone", msg)
+	if got := out.Metadata["error_code"]; got != "session_expired" {
+		t.Errorf("error_code = %q, want session_expired", got)
+	}
+	if got := out.Metadata["type"]; got != "error" {
+		t.Errorf("type = %q, want error", got)
+	}
+	if rec.createCalled {
+		t.Errorf("Create must not be called after Load failure (creates=%v)", rec.creates)
 	}
 }

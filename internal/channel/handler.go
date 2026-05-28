@@ -24,7 +24,17 @@ type LimitChecker interface {
 
 // HandlerConfig holds the dependencies for NewMessageHandler.
 type HandlerConfig struct {
-	EnsureSession pkg.EnsureSessionFunc
+	// LoadSession is the strict-resume path: error if the session is not in
+	// the store. Called when the inbound message carries
+	// pkg.ResumeIntentMetadataKey="true" (i.e. the channel got a
+	// conversation_id from the client). nil disables resume validation,
+	// which is the right default for channels that cannot distinguish
+	// resume vs fresh (e.g. console).
+	LoadSession pkg.LoadSessionFunc
+	// CreateSession is the fresh-mint path: idempotent registration of a
+	// new session for the given key/entity/group. Called when the inbound
+	// message does NOT carry resume_intent=true (channel-minted id).
+	CreateSession pkg.CreateSessionFunc
 	Runner        pkg.Runner
 	RunAction     pkg.RunActionFunc
 	HasAction     pkg.HasActionFunc
@@ -92,7 +102,24 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			ctx = actor.WithConfirmationDecision(ctx, cd)
 		}
 
-		cfg.EnsureSession(sessionKey, entityID, groupID)
+		// Route by resume intent: client-supplied conv-id → strict Load
+		// (error frame if the session is gone); channel-minted conv-id →
+		// idempotent Create. This replaces the legacy EnsureSession
+		// closure that silently auto-created on any cache miss and let
+		// the UI drift against a brand-new server-side session.
+		if msg.Metadata[pkg.ResumeIntentMetadataKey] == "true" {
+			if cfg.LoadSession != nil {
+				if err := cfg.LoadSession(sessionKey); err != nil {
+					slog.Info("session resume rejected — not found",
+						"session_key", sessionKey, "channel", msg.ChannelID, "error", err)
+					return errorResponse(msg, "This conversation is no longer available. Please start a new chat.", map[string]string{
+						"type": "error", "error_code": "session_expired",
+					}), nil
+				}
+			}
+		} else if cfg.CreateSession != nil {
+			cfg.CreateSession(sessionKey, entityID, groupID)
+		}
 		content := msg.Content
 		if prep := pkg.GetContentPreparer(msg.ChannelID); prep != nil {
 			content = prep(ctx, content, cfg.RunAction, cfg.HasAction)

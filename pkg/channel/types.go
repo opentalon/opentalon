@@ -177,9 +177,30 @@ type HasActionFunc func(plugin, action string) bool
 // before it is sent to the Runner. Channels register their preparer via RegisterContentPreparer in init().
 type ContentPreparer func(ctx context.Context, content string, runAction RunActionFunc, hasAction HasActionFunc) string
 
-// EnsureSessionFunc is called to ensure a session exists for the given key before running.
-// entityID and groupID are stored alongside the session for ownership queries.
-type EnsureSessionFunc func(sessionKey, entityID, groupID string)
+// LoadSessionFunc validates that a session exists for sessionKey. It returns
+// nil when the session is present in the store and an error when it is not
+// (expired, pruned, never existed). The handler calls Load on inbound messages
+// flagged with metadata "resume_intent=true" — i.e. the channel passed a
+// client-supplied conversation_id. A failure must propagate as a typed error
+// frame to the client (error_code=session_expired) so the UI can drop its
+// stale conversation_id and reconnect fresh instead of silently drifting
+// against a server that quietly minted a different session.
+type LoadSessionFunc func(sessionKey string) error
+
+// CreateSessionFunc registers (or returns) a session row for sessionKey,
+// entityID, groupID. Idempotent: an existing session is returned untouched,
+// never wiped. The handler calls Create on messages NOT flagged with
+// resume_intent — i.e. the channel did not have a client-supplied id and
+// just minted one for this connection. Splitting Load/Create replaces the
+// previous EnsureSessionFunc which conflated the two paths and silently
+// auto-created on any cache miss.
+type CreateSessionFunc func(sessionKey, entityID, groupID string)
+
+// ResumeIntentMetadataKey is the InboundMessage metadata key channels set
+// to "true" when the conversation_id on the message came from the client
+// (resume) rather than being server-minted on this connection (fresh).
+// Handlers route Load vs Create based on this flag.
+const ResumeIntentMetadataKey = "resume_intent"
 
 // MessageHandler is called when an inbound message arrives. The implementation
 // feeds the message to the orchestrator and returns the response.

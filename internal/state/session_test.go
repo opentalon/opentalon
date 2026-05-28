@@ -21,6 +21,24 @@ func TestSessionCreate(t *testing.T) {
 	}
 }
 
+func TestSessionCreateIdempotent(t *testing.T) {
+	// A second Create with the same id must return the existing session, not
+	// overwrite it. Channels with stale conversation_ids must never silently
+	// wipe live message history.
+	store := NewSessionStore("")
+	first := store.Create("sess1", "", "")
+	_ = store.AddMessage("sess1", provider.Message{Role: provider.RoleUser, Content: "alive"})
+
+	again := store.Create("sess1", "", "")
+	if again != first {
+		t.Errorf("Create returned a different pointer on second call; expected idempotent reuse")
+	}
+	got, _ := store.Get("sess1")
+	if len(got.Messages) != 1 || got.Messages[0].Content != "alive" {
+		t.Errorf("messages were wiped by second Create: got %#v", got.Messages)
+	}
+}
+
 func TestSessionGetNotFound(t *testing.T) {
 	store := NewSessionStore("")
 	_, err := store.Get("nonexistent")
