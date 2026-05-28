@@ -21,8 +21,8 @@ type streamHandler struct {
 	body func(ctx context.Context, req Request, host HostCaller) Response
 }
 
-func (h *streamHandler) Capabilities() CapabilitiesMsg                  { return h.caps }
-func (h *streamHandler) Execute(_ Request) Response                     { return Response{Error: "unary not supported"} }
+func (h *streamHandler) Capabilities() CapabilitiesMsg { return h.caps }
+func (h *streamHandler) Execute(_ Request) Response    { return Response{Error: "unary not supported"} }
 func (h *streamHandler) ExecuteWithCallbacks(ctx context.Context, req Request, host HostCaller) Response {
 	return h.body(ctx, req, host)
 }
@@ -31,10 +31,10 @@ func (h *streamHandler) ExecuteWithCallbacks(ctx context.Context, req Request, h
 // the SDK's stream loop without spinning up a real gRPC server.
 type fakeStream struct {
 	pluginpb.PluginService_ExecuteBidiServer
-	ctx     context.Context
-	in      chan *pluginpb.HostMessage
-	outCh   chan *pluginpb.PluginMessage
-	closed  atomic.Bool
+	ctx    context.Context
+	in     chan *pluginpb.HostMessage
+	outCh  chan *pluginpb.PluginMessage
+	closed atomic.Bool
 }
 
 func newFakeStream() *fakeStream {
