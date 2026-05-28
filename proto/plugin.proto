@@ -11,6 +11,67 @@ service PluginService {
   rpc Init(PluginInitRequest) returns (google.protobuf.Empty);
   rpc Execute(ToolCallRequest) returns (ToolResultResponse);
   rpc Capabilities(google.protobuf.Empty) returns (PluginCapabilities);
+
+  // ExecuteBidi is the bidirectional-streaming variant of Execute. The
+  // host opens the stream and sends a single HostMessage{call} to start
+  // the action; the plugin may then send zero or more
+  // PluginMessage{callback_request} messages mid-execution to invoke
+  // other tools/actions through the host's orchestrator (= the expert
+  // system: same policy, observability, credential injection, and
+  // usage tracking as an LLM-initiated call). The host replies to each
+  // callback with HostMessage{callback_response}. The plugin ends the
+  // stream by sending PluginMessage{result}.
+  //
+  // Only plugins that declare PluginCapabilities.supports_callbacks =
+  // true may receive ExecuteBidi traffic; the host calls Execute (unary)
+  // for everyone else, so existing plugins keep working unchanged.
+  rpc ExecuteBidi(stream HostMessage) returns (stream PluginMessage);
+}
+
+// HostMessage is one frame on the host → plugin direction of an
+// ExecuteBidi stream. The first frame is always {call}; subsequent
+// frames are {callback_response}, each correlated by id to a prior
+// PluginMessage{callback_request}.
+message HostMessage {
+  oneof payload {
+    ToolCallRequest call = 1;
+    CallbackResponse callback_response = 2;
+  }
+}
+
+// PluginMessage is one frame on the plugin → host direction of an
+// ExecuteBidi stream. Frames are zero or more {callback_request}
+// (each requesting a host-side RunAction) followed by exactly one
+// terminal {result}; sending {result} closes the plugin's send half.
+message PluginMessage {
+  oneof payload {
+    CallbackRequest callback_request = 1;
+    ToolResultResponse result = 2;
+  }
+}
+
+// CallbackRequest asks the host to invoke another tool/action via its
+// normal executeCall path. The host's profile/actor context for the
+// dispatched call is inherited from the surrounding ToolCallRequest's
+// context — no identity fields needed on the wire, because the host
+// already knows who is talking to this plugin process.
+message CallbackRequest {
+  // id correlates with the CallbackResponse the host returns. Plugins
+  // may have multiple callbacks outstanding (host responses are not
+  // guaranteed to arrive in request order); the id keeps them matched.
+  string id = 1;
+  string plugin = 2;
+  string action = 3;
+  map<string, string> args = 4;
+}
+
+// CallbackResponse is the host's reply to one CallbackRequest. id
+// matches the request's id. Either content or error is set.
+message CallbackResponse {
+  string id = 1;
+  string content = 2;
+  string error = 3;
+  string structured_content = 4;
 }
 
 message PluginInitRequest {
@@ -72,6 +133,15 @@ message PluginCapabilities {
   // the relevant section into [knowledge_context], instead of having the
   // whole prose go into every system prompt via system_prompt_addition.
   repeated KnowledgeArticle knowledge_articles = 6;
+
+  // SupportsCallbacks declares that this plugin needs the host to
+  // dispatch its actions over ExecuteBidi (bidirectional streaming)
+  // rather than the unary Execute, so it can fire CallbackRequest
+  // messages mid-execution to invoke other tools/actions through the
+  // host's orchestrator. Plugins that don't need that capability leave
+  // this false (the default) and continue to receive unary Execute
+  // traffic — no behaviour change for existing plugins.
+  bool supports_callbacks = 7;
 }
 
 message GlossaryEntry {

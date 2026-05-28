@@ -53,6 +53,14 @@ type CapabilitiesMsg struct {
 	SystemPromptAddition string                `json:"system_prompt_addition,omitempty"`
 	Glossary             []GlossaryEntryMsg    `json:"glossary,omitempty"`
 	KnowledgeArticles    []KnowledgeArticleMsg `json:"knowledge_articles,omitempty"`
+
+	// SupportsCallbacks declares the plugin needs the host to dispatch
+	// its actions over ExecuteBidi (bidirectional streaming) so it can
+	// fire CallbackRequest messages mid-execution and invoke other
+	// tools/actions through the host's orchestrator. Plugins that
+	// don't need that capability leave this false (default) and keep
+	// receiving unary Execute traffic.
+	SupportsCallbacks bool `json:"supports_callbacks,omitempty"`
 }
 
 // GlossaryEntryMsg is a single term/definition pair provided by a plugin.
