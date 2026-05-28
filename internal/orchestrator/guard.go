@@ -146,3 +146,41 @@ func (g *Guard) ExecuteWithDeadline(ctx context.Context, exec PluginExecutor, ca
 		}
 	}
 }
+
+// bidiTimeout is the default wall-clock cap for a single ExecuteBidi
+// call. Set much higher than g.Timeout because bidi callers (e.g. a
+// Talon workflow) can legitimately run many MCP round-trips inside
+// one call; the guard.Timeout protecting host integrity for unary
+// runs would cut these off prematurely. Each inner CallbackRequest
+// gets its own deadline via the host's RunAction → executeCall path,
+// so the host is still protected against any one stuck callback.
+const bidiTimeout = 30 * time.Minute
+
+// ExecuteBidiWithTimeout runs a bidirectional-streaming plugin call
+// with the default bidi timeout (30m). Inner callbacks each pick up
+// their own normal guard.Timeout via the host's executeCall path.
+func (g *Guard) ExecuteBidiWithTimeout(ctx context.Context, exec BidiExecutor, call ToolCall, cb CallbackHandler) ToolResult {
+	return g.ExecuteBidiWithDeadline(ctx, exec, call, cb, bidiTimeout)
+}
+
+// ExecuteBidiWithDeadline is the deadline-explicit variant of
+// ExecuteBidiWithTimeout.
+func (g *Guard) ExecuteBidiWithDeadline(ctx context.Context, exec BidiExecutor, call ToolCall, cb CallbackHandler, timeout time.Duration) ToolResult {
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	done := make(chan ToolResult, 1)
+	go func() {
+		done <- exec.ExecuteBidi(callCtx, call, cb)
+	}()
+
+	select {
+	case result := <-done:
+		return result
+	case <-callCtx.Done():
+		return ToolResult{
+			CallID: call.ID,
+			Error:  fmt.Sprintf("plugin %q bidi timed out after %s", call.Plugin, timeout),
+		}
+	}
+}

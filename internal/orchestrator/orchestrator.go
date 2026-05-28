@@ -3995,7 +3995,25 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		}
 	}
 
-	result := o.guard.ExecuteWithTimeout(ctx, exec, call)
+	// Pick bidi when the plugin declared SupportsCallbacks AND the
+	// underlying executor implements BidiExecutor (today: the gRPC
+	// Client at internal/plugin.Client). Otherwise fall back to the
+	// existing unary path — every existing plugin keeps working.
+	var result ToolResult
+	if cap, hasCap := o.registry.GetCapability(call.Plugin); hasCap && cap.SupportsCallbacks {
+		if bidi, isBidi := exec.(BidiExecutor); isBidi {
+			result = o.guard.ExecuteBidiWithTimeout(ctx, bidi, call, o)
+		} else {
+			// Capability says one thing, transport another. Surface
+			// loudly so the operator notices; fall back to unary so
+			// the call still completes (without callbacks).
+			slog.Warn("plugin declares supports_callbacks but executor lacks BidiExecutor; falling back to unary",
+				"plugin", call.Plugin)
+			result = o.guard.ExecuteWithTimeout(ctx, exec, call)
+		}
+	} else {
+		result = o.guard.ExecuteWithTimeout(ctx, exec, call)
+	}
 	result = o.guard.ValidateResult(call, result)
 	result = o.guard.Sanitize(result)
 	if call.FromLLM {

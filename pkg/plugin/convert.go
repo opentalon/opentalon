@@ -54,6 +54,7 @@ func capsToProto(c CapabilitiesMsg) *pluginpb.PluginCapabilities {
 		SystemPromptAddition: c.SystemPromptAddition,
 		Glossary:             glossary,
 		KnowledgeArticles:    knowledge,
+		SupportsCallbacks:    c.SupportsCallbacks,
 	}
 }
 

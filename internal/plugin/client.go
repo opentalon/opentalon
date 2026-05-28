@@ -132,6 +132,87 @@ func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall)
 	}
 }
 
+// ExecuteBidi sends a tool call to the plugin over the bidirectional
+// streaming RPC, dispatches any inbound CallbackRequest frames via
+// cb.RunAction, and returns the plugin's final ToolResultResponse.
+// Implements orchestrator.BidiExecutor. The orchestrator picks this
+// path when the plugin's PluginCapability.SupportsCallbacks is true.
+func (c *Client) ExecuteBidi(ctx context.Context, call orchestrator.ToolCall, cb orchestrator.CallbackHandler) orchestrator.ToolResult {
+	var credHeaders map[string]*pluginpb.CredentialHeader
+	if p := profile.FromContext(ctx); p != nil && len(p.Credentials) > 0 {
+		credHeaders = make(map[string]*pluginpb.CredentialHeader, len(p.Credentials))
+		for k, v := range p.Credentials {
+			credHeaders[k] = &pluginpb.CredentialHeader{Header: v.Header, Value: v.Value}
+		}
+	}
+
+	stream, err := c.client.ExecuteBidi(ctx)
+	if err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc bidi open: %v", err)}
+	}
+
+	if err := stream.Send(&pluginpb.HostMessage{
+		Payload: &pluginpb.HostMessage_Call{
+			Call: &pluginpb.ToolCallRequest{
+				Id:                call.ID,
+				Plugin:            call.Plugin,
+				Action:            call.Action,
+				Args:              ensureValidUTF8Map(call.Args),
+				CredentialHeaders: credHeaders,
+			},
+		},
+	}); err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc bidi send call: %v", err)}
+	}
+
+	for {
+		pm, err := stream.Recv()
+		if err != nil {
+			return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc bidi recv: %v", err)}
+		}
+		switch payload := pm.GetPayload().(type) {
+		case *pluginpb.PluginMessage_Result:
+			r := payload.Result
+			return orchestrator.ToolResult{
+				CallID:            r.GetCallId(),
+				Content:           r.GetContent(),
+				StructuredContent: r.GetStructuredContent(),
+				Error:             r.GetError(),
+			}
+		case *pluginpb.PluginMessage_CallbackRequest:
+			// Run the callback on a fresh goroutine so a slow upstream
+			// action doesn't stall the receive loop (the plugin may
+			// fire multiple callbacks in parallel; today the SDK
+			// serialises them, but the wire protocol allows parallel).
+			go c.handleCallback(ctx, stream, payload.CallbackRequest, cb)
+		default:
+			return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc bidi: unknown payload %T", payload)}
+		}
+	}
+}
+
+// handleCallback runs one CallbackRequest against the host's
+// CallbackHandler and writes the matching CallbackResponse onto the
+// stream. Errors from RunAction are surfaced via CallbackResponse.Error
+// so the plugin can decide how to react (retry, abort, ignore).
+func (c *Client) handleCallback(ctx context.Context, stream pluginpb.PluginService_ExecuteBidiClient, req *pluginpb.CallbackRequest, cb orchestrator.CallbackHandler) {
+	content, err := cb.RunAction(ctx, req.GetPlugin(), req.GetAction(), req.GetArgs())
+	resp := &pluginpb.CallbackResponse{Id: req.GetId()}
+	if err != nil {
+		resp.Error = err.Error()
+	} else {
+		resp.Content = content
+	}
+	if sendErr := stream.Send(&pluginpb.HostMessage{
+		Payload: &pluginpb.HostMessage_CallbackResponse{CallbackResponse: resp},
+	}); sendErr != nil {
+		// The stream's gone; nothing to do here. The plugin will see
+		// its Recv fail too and abort the action — that becomes a
+		// grpc bidi recv error in the ExecuteBidi loop above.
+		_ = sendErr
+	}
+}
+
 // Close terminates the gRPC connection.
 func (c *Client) Close() error {
 	return c.conn.Close()
@@ -199,5 +280,6 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 		SystemPromptAddition: pb.SystemPromptAddition,
 		Glossary:             glossary,
 		KnowledgeArticles:    knowledge,
+		SupportsCallbacks:    pb.SupportsCallbacks,
 	}
 }

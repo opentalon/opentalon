@@ -11,6 +11,25 @@ type PluginExecutor interface {
 	Execute(ctx context.Context, call ToolCall) ToolResult
 }
 
+// BidiExecutor is the optional interface a PluginExecutor may
+// additionally implement to support plugin → host callbacks during a
+// single action's execution. The orchestrator picks ExecuteBidi over
+// Execute when the underlying plugin's PluginCapability has
+// SupportsCallbacks set; the gRPC client (internal/plugin.Client)
+// implements both.
+type BidiExecutor interface {
+	PluginExecutor
+	ExecuteBidi(ctx context.Context, call ToolCall, cb CallbackHandler) ToolResult
+}
+
+// CallbackHandler is the host-side bridge a BidiExecutor uses to
+// dispatch the plugin's outbound CallbackRequest frames back into
+// the orchestrator's tool dispatch path. The orchestrator itself
+// implements it via a thin wrapper over RunAction.
+type CallbackHandler interface {
+	RunAction(ctx context.Context, plugin, action string, args map[string]string) (string, error)
+}
+
 type ToolRegistry struct {
 	mu        sync.RWMutex
 	plugins   map[string]PluginCapability
