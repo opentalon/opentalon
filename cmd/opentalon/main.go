@@ -776,8 +776,11 @@ func main() {
 
 	// Strict resume: surface "not found" up to the handler so it can emit
 	// session_expired to the client rather than silently auto-creating
-	// (the pre-refactor footgun that let UI and server drift apart).
-	loadSession := func(sessionKey string) error {
+	// (the pre-refactor footgun that let UI and server drift apart). The
+	// underlying SessionStore.Get already wraps state.ErrSessionNotFound on
+	// genuine misses and a distinct infra error otherwise; the handler
+	// discriminates via errors.Is.
+	resumeSession := func(sessionKey string) error {
 		_, err := sessions.Get(sessionKey)
 		return err
 	}
@@ -789,7 +792,7 @@ func main() {
 	}
 	runner := &channelRunner{orch: orch}
 	handler := channel.NewMessageHandler(channel.HandlerConfig{
-		LoadSession:   loadSession,
+		ResumeSession: resumeSession,
 		CreateSession: createSession,
 		Runner:        runner,
 		RunAction:     orch.RunAction,

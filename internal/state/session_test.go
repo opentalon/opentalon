@@ -1,6 +1,7 @@
 package state
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/provider"
@@ -43,7 +44,13 @@ func TestSessionGetNotFound(t *testing.T) {
 	store := NewSessionStore("")
 	_, err := store.Get("nonexistent")
 	if err == nil {
-		t.Error("expected error for nonexistent session")
+		t.Fatal("expected error for nonexistent session")
+	}
+	// The handler's session_expired vs internal_error branch hinges on
+	// errors.Is(err, ErrSessionNotFound). Verify the contract holds for
+	// the in-memory store; the DB-backed store has its own coverage.
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("err = %v, want errors.Is(err, ErrSessionNotFound)", err)
 	}
 }
 

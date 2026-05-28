@@ -1,6 +1,7 @@
 package state
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,14 @@ import (
 	"github.com/opentalon/opentalon/internal/provider"
 	"gopkg.in/yaml.v3"
 )
+
+// ErrSessionNotFound is the canonical sentinel returned by both the in-memory
+// and DB-backed SessionStore.Get when the requested id is absent. Callers must
+// use errors.Is to distinguish a genuine miss from an infrastructure failure
+// (e.g. dropped DB connection): only the former should surface to the user as
+// "session expired"; the latter is a transient internal error and must not
+// cause the client to discard a valid conversation_id.
+var ErrSessionNotFound = errors.New("session not found")
 
 type Session struct {
 	ID          string             `yaml:"id"`
@@ -67,7 +76,7 @@ func (s *SessionStore) Get(id string) (*Session, error) {
 
 	sess, ok := s.sessions[id]
 	if !ok {
-		return nil, fmt.Errorf("session %q not found", id)
+		return nil, fmt.Errorf("session %q: %w", id, ErrSessionNotFound)
 	}
 	return sess, nil
 }

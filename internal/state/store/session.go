@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -39,6 +40,10 @@ func NewSessionStore(db *DB, maxMessages, maxIdleDays int) *SessionStore {
 }
 
 // Get loads a session by id. Messages are loaded from the messages table.
+// Returns a wrapped state.ErrSessionNotFound when the row is genuinely absent
+// (sql.ErrNoRows), and a wrapped infrastructure error otherwise — preserving
+// that distinction is what lets the channel handler decide between "tell the
+// user their conversation expired" and "tell the user to retry".
 func (s *SessionStore) Get(id string) (*state.Session, error) {
 	d := s.db.Dialect()
 	var summary, title, activeModel, metadataJSON, createdAt, updatedAt string
@@ -47,7 +52,10 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 		id,
 	).Scan(&summary, &title, &activeModel, &metadataJSON, &createdAt, &updatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("session %q not found", id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("session %q: %w", id, state.ErrSessionNotFound)
+		}
+		return nil, fmt.Errorf("session %q load: %w", id, err)
 	}
 
 	messages, err := s.loadMessages(id)

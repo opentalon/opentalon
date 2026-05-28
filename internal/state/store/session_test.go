@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/provider"
+	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store/events"
 )
 
@@ -117,6 +119,26 @@ func TestSessionStore_ClearMessagesPreservesIdentityAndEvents(t *testing.T) {
 	if len(eventsAfter) != len(eventsBefore) {
 		t.Errorf("session_events len = %d after clear, want %d (audit trail must survive)",
 			len(eventsAfter), len(eventsBefore))
+	}
+}
+
+// TestSessionStore_GetMissingReturnsErrSessionNotFound pins the contract the
+// channel handler's session_expired vs internal_error split depends on: an
+// absent row must surface as a wrapped state.ErrSessionNotFound so the
+// handler can route it to error_code=session_expired. Anything else (e.g.
+// dropped DB connection — not exercised here as it needs fault injection)
+// must NOT match, so it falls through to internal_error and the client
+// keeps its conversation_id across a retry.
+func TestSessionStore_GetMissingReturnsErrSessionNotFound(t *testing.T) {
+	db := openTestDB(t)
+	store := NewSessionStore(db, 0, 0)
+
+	_, err := store.Get("nope")
+	if err == nil {
+		t.Fatal("expected error for nonexistent session")
+	}
+	if !errors.Is(err, state.ErrSessionNotFound) {
+		t.Errorf("err = %v, want errors.Is(err, state.ErrSessionNotFound)", err)
 	}
 }
 

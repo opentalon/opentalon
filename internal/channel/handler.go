@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/logger"
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/state"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
@@ -24,16 +26,15 @@ type LimitChecker interface {
 
 // HandlerConfig holds the dependencies for NewMessageHandler.
 type HandlerConfig struct {
-	// LoadSession is the strict-resume path: error if the session is not in
-	// the store. Called when the inbound message carries
+	// ResumeSession is the strict-resume path: error if the session is not
+	// in the store. Called when the inbound message carries
 	// pkg.ResumeIntentMetadataKey="true" (i.e. the channel got a
-	// conversation_id from the client). nil disables resume validation,
-	// which is the right default for channels that cannot distinguish
-	// resume vs fresh (e.g. console).
-	LoadSession pkg.LoadSessionFunc
+	// conversation_id from the client). Required — see NewMessageHandler.
+	ResumeSession pkg.ResumeSessionFunc
 	// CreateSession is the fresh-mint path: idempotent registration of a
 	// new session for the given key/entity/group. Called when the inbound
 	// message does NOT carry resume_intent=true (channel-minted id).
+	// Required — see NewMessageHandler.
 	CreateSession pkg.CreateSessionFunc
 	Runner        pkg.Runner
 	RunAction     pkg.RunActionFunc
@@ -45,7 +46,21 @@ type HandlerConfig struct {
 // NewMessageHandler returns a MessageHandler that: ensures session, verifies profile token (if
 // Verifier is non-nil), runs channel-specific content preparer (if registered), then runs the
 // message through the Runner and returns the response.
+//
+// Panics at construction if ResumeSession, CreateSession, or Runner is nil:
+// these are required for the strict-session contract and a missing one is a
+// boot-time misconfiguration that must surface immediately rather than as a
+// nil-deref under load. Verifier and LimitChecker remain optional.
 func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
+	if cfg.ResumeSession == nil {
+		panic("channel.NewMessageHandler: ResumeSession is required")
+	}
+	if cfg.CreateSession == nil {
+		panic("channel.NewMessageHandler: CreateSession is required")
+	}
+	if cfg.Runner == nil {
+		panic("channel.NewMessageHandler: Runner is required")
+	}
 	return func(ctx context.Context, sessionKey string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		var entityID, groupID string
 
@@ -53,16 +68,12 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		if cfg.Verifier != nil {
 			token := msg.Metadata["profile_token"]
 			if token == "" {
-				return errorResponse(msg, "profile token required", map[string]string{
-					"type": "error", "error_code": "token_required",
-				}), nil
+				return errorFrame(msg, "profile token required", "token_required"), nil
 			}
 			p, err := cfg.Verifier.Verify(ctx, token, msg.ChannelID)
 			if err != nil {
 				slog.Warn("profile verification failed", "error", err, "channel", msg.ChannelID)
-				return errorResponse(msg, "authentication failed", map[string]string{
-					"type": "error", "error_code": "auth_failed",
-				}), nil
+				return errorFrame(msg, "authentication failed", "auth_failed"), nil
 			}
 			p.ChannelID = msg.ChannelID
 			ctx = profile.WithProfile(ctx, p)
@@ -75,9 +86,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 					slog.Warn("limit check failed", "error", lerr, "entity", p.EntityID)
 				} else if used >= p.Limit {
 					slog.Info("token limit exceeded", "entity", p.EntityID, "used", used, "limit", p.Limit, "window", p.LimitWindow)
-					return errorResponse(msg, "token limit reached, please try again later", map[string]string{
-						"type": "error", "error_code": "token_limit_exceeded",
-					}), nil
+					return errorFrame(msg, "token limit reached, please try again later", "token_limit_exceeded"), nil
 				}
 			}
 
@@ -102,22 +111,30 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			ctx = actor.WithConfirmationDecision(ctx, cd)
 		}
 
-		// Route by resume intent: client-supplied conv-id → strict Load
+		// Route by resume intent: client-supplied conv-id → strict Resume
 		// (error frame if the session is gone); channel-minted conv-id →
 		// idempotent Create. This replaces the legacy EnsureSession
 		// closure that silently auto-created on any cache miss and let
 		// the UI drift against a brand-new server-side session.
 		if msg.Metadata[pkg.ResumeIntentMetadataKey] == "true" {
-			if cfg.LoadSession != nil {
-				if err := cfg.LoadSession(sessionKey); err != nil {
+			if err := cfg.ResumeSession(sessionKey); err != nil {
+				// Only "row genuinely absent" maps to session_expired —
+				// the client-side recovery contract assumes the session
+				// is gone and clears its stored conversation_id. A DB
+				// hiccup must not look the same: surface as a retryable
+				// internal_error so a valid conversation_id is preserved.
+				if errors.Is(err, state.ErrSessionNotFound) {
 					slog.Info("session resume rejected — not found",
-						"session_key", sessionKey, "channel", msg.ChannelID, "error", err)
-					return errorResponse(msg, "This conversation is no longer available. Please start a new chat.", map[string]string{
-						"type": "error", "error_code": "session_expired",
-					}), nil
+						"session", sessionKey, "channel", msg.ChannelID,
+						"entity_id", entityID, "group_id", groupID)
+					return errorFrame(msg, "This conversation is no longer available. Please start a new chat.", "session_expired"), nil
 				}
+				slog.Warn("session resume failed — infrastructure error",
+					"session", sessionKey, "channel", msg.ChannelID,
+					"entity_id", entityID, "group_id", groupID, "error", err)
+				return errorFrame(msg, "Something went wrong loading your conversation. Please try again.", "internal_error"), nil
 			}
-		} else if cfg.CreateSession != nil {
+		} else {
 			cfg.CreateSession(sessionKey, entityID, groupID)
 		}
 		content := msg.Content
@@ -128,9 +145,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		if err != nil {
 			logger.FromContext(ctx).Error("handler run failed", "error", err)
 			errText, errCode := friendlyError(err)
-			return errorResponse(msg, errText, map[string]string{
-				"type": "error", "error_code": errCode,
-			}), nil
+			return errorFrame(msg, errText, errCode), nil
 		}
 		outContent := response
 		if outContent == "" {
@@ -153,6 +168,17 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			Metadata:       outMeta,
 		}, nil
 	}
+}
+
+// errorFrame builds a typed error response with the {type:error, error_code:<code>}
+// metadata contract the channel-side recovery code (UI handleMessage, console
+// printer, etc.) keys off. Every error_code is stable and may be referenced
+// by frontends for translated copy — adding one is an API change, not just
+// a log message tweak.
+func errorFrame(msg pkg.InboundMessage, text, errorCode string) pkg.OutboundMessage {
+	return errorResponse(msg, text, map[string]string{
+		"type": "error", "error_code": errorCode,
+	})
 }
 
 func errorResponse(msg pkg.InboundMessage, text string, meta ...map[string]string) pkg.OutboundMessage {
