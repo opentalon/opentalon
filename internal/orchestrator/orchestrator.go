@@ -338,6 +338,65 @@ func resolveAllowedPluginNames(ctx context.Context, o *Orchestrator) string {
 	return string(b)
 }
 
+// availableToolsSet returns the set of fully-qualified tool names
+// ("<plugin>.<action>") this session can call right now. Applies the same
+// visibility rules as the system-prompt assembler — profile-level plugin
+// allowance, preparer/guard-action exclusion, UserOnly exclusion — but NOT
+// the preparer's RAG result (this set is the INPUT to the preparer, not its
+// output).
+//
+// Single computation point feeds:
+//   - resolveAvailableToolFQNs (JSON-array form for the `allowed_tools`
+//     ContextArgProvider; preparer plugins use it to constrain RAG
+//     retrieval to the session's actual tool surface)
+//   - _meta.get_tool_details action-level visibility gate (rejects
+//     description lookups for actions the session cannot invoke, so the
+//     meta-tool cannot be used to enumerate tool schemas the
+//     manifest-filtering layer is hiding)
+//
+// Both consumers MUST share the set so the "what is this session allowed
+// to see" answer is identical across the RAG-retrieval and direct-lookup
+// vectors. Drift between the two would create exactly the
+// defense-in-depth gap the palette exists to close.
+func availableToolsSet(ctx context.Context, o *Orchestrator) map[string]struct{} {
+	allowedPlugins := o.resolveAllowedPlugins(ctx)
+	preparerAction := preparerActionSet(o.preparers, o.guards)
+
+	set := make(map[string]struct{})
+	for _, cap := range o.registry.ListCapabilities() {
+		if !o.pluginAllowed(cap, allowedPlugins) {
+			continue
+		}
+		for _, action := range cap.Actions {
+			fqn := cap.Name + "." + action.Name
+			if preparerAction[fqn] || action.UserOnly {
+				continue
+			}
+			set[fqn] = struct{}{}
+		}
+	}
+	return set
+}
+
+// resolveAvailableToolFQNs returns the sorted JSON array of FQNs from
+// availableToolsSet, or "" when empty. Returns "" (not "[]") so the host's
+// executeCall path omits the arg entirely instead of injecting an empty
+// array — the latter would force plugins to special-case empty ==
+// unrestricted vs empty == "no tools". Mirrors resolveAllowedPluginNames.
+func resolveAvailableToolFQNs(ctx context.Context, o *Orchestrator) string {
+	set := availableToolsSet(ctx, o)
+	if len(set) == 0 {
+		return ""
+	}
+	fqns := make([]string, 0, len(set))
+	for fqn := range set {
+		fqns = append(fqns, fqn)
+	}
+	sort.Strings(fqns)
+	b, _ := json.Marshal(fqns)
+	return string(b)
+}
+
 // defaultContextArgProviders returns built-in providers only for opaque identifiers (e.g. session_id).
 // No session messages, conversation text, or other sensitive content is exposed to plugins via this mechanism.
 func defaultContextArgProviders(o *Orchestrator, custom map[string]ContextArgProvider) map[string]ContextArgProvider {
@@ -345,6 +404,9 @@ func defaultContextArgProviders(o *Orchestrator, custom map[string]ContextArgPro
 		"session_id": func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
 		"allowed_plugins": func(ctx context.Context, _ string) string {
 			return resolveAllowedPluginNames(ctx, o)
+		},
+		"allowed_tools": func(ctx context.Context, _ string) string {
+			return resolveAvailableToolFQNs(ctx, o)
 		},
 	}
 	if len(custom) == 0 {
@@ -868,12 +930,16 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 		Action: prep.Action,
 		Args:   map[string]string{argKey: content},
 	}
-	// Inject allowed_plugins for preparers so RAG plugins can filter by profile.
-	if allowed := resolveAllowedPluginNames(ctx, o); allowed != "" {
-		call.Args["allowed_plugins"] = allowed
-	}
-	// Inject enriched search query so RAG preparers can use it for semantic
-	// search while the main text arg stays as the original user message.
+	// Context-arg injection (allowed_plugins, allowed_tools, session_id, …)
+	// runs through executeCall via the action's declared InjectContextArgs.
+	// Single code path with LLM-driven calls — see ContextArgProvider and
+	// defaultContextArgProviders. Preparer plugins that need a context arg
+	// must declare it in their ActionMsg.InjectContextArgs.
+	//
+	// search_text stays inline because its injection is content-aware
+	// (skipped when the enriched query equals the raw content) — a stateless
+	// ContextArgProvider cannot express that conditional, so the inline path
+	// is intentional rather than legacy.
 	if sq := SearchQueryFromContext(ctx); sq != "" && sq != content {
 		call.Args["search_text"] = sq
 	}
