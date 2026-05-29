@@ -1,62 +1,46 @@
 # OpenTalon
 
-**An open-source alternative to OpenClaw, built from scratch in Go.**
+**Open-source enterprise AI orchestration — built in Go to solve real enterprise problems, not toy demos.**
 
 [![CI](https://github.com/opentalon/opentalon/actions/workflows/ci.yml/badge.svg)](https://github.com/opentalon/opentalon/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8.svg)](https://go.dev)
 
+> 📚 **Looking for setup, deployment, scheduler, extensibility, or other detailed guides?** See the [**`docs/`**](docs/) directory.
+
 ---
+
+## The big ideas behind OpenTalon
+
+OpenTalon exists to solve **enterprise** issues — the gap between a chatbot demo and an AI system a real organization can actually depend on. Two essays lay out the thinking:
+
+- 📘 **[Enterprise AI Orchestration](https://opakalex.github.io/posts/enterprise-ai-orchestration/)** — why one big LLM call is not an enterprise architecture, and how multi-provider routing, deterministic preprocessing, plugin isolation, and policy enforcement combine into a system that holds up in production.
+- 📘 **[Expert-in-the-Loop (EITL)](https://opakalex.github.io/posts/expert-in-the-loop/)** — moving past "human-in-the-loop" rubber-stamping toward workflows where domain experts encode rules, gates, and review steps the system enforces deterministically — implemented in OpenTalon via [Talon workflows & EITL rules](#talon-workflows--eitl-rules).
+
+Everything below is in service of those two ideas.
 
 ## What is OpenTalon?
 
-OpenTalon is an open-source platform built from the ground up in Go as a robust alternative to OpenClaw. It is designed for individuals, teams, and large organizations that need a reliable, secure, and extensible solution — without the compromises that come with legacy codebases.
+OpenTalon is an open-source platform built from the ground up in Go for **enterprises that need AI in production**: predictable behaviour, auditable boundaries, deterministic business rules, multi-provider economics, and expert-defined guardrails. It is designed for teams and large organizations that need a reliable, secure, and extensible solution — without the compromises that come with bolted-on prompt scripts or legacy codebases.
 
-## Why OpenTalon?
+## Why OpenTalon? (the enterprise problems it solves)
 
-Existing solutions often suffer from:
+Most "AI integrations" inside large organizations hit the same walls:
 
-- **Poor maintainability** — tangled codebases that become harder to change over time
-- **Low code quality** — inconsistent patterns, lack of tests, and technical debt that compounds
-- **Repeatable bugs** — the same classes of issues resurfacing release after release
-- **Hard to extend** — adding features means forking or fighting the architecture
-- **No smart model routing** — you either pick one model and overpay, or manually juggle providers yourself
-- **Every rule burns LLM tokens** — business vocabulary, compliance checks, and formatting rules all get stuffed into the prompt, inflating cost and latency on every single request
 - **No separation of business logic from AI** — company-specific transformations (terminology, routing, validation) are tangled into prompts instead of handled by deterministic, testable code
+- **Every rule burns LLM tokens** — business vocabulary, compliance checks, and formatting rules all get stuffed into the prompt, inflating cost and latency on every single request
+- **No smart model routing** — you either pick one model and overpay, or manually juggle providers yourself
+- **No expert-in-the-loop story** — domain experts have no way to encode rules, gates, or review steps that the system actually enforces (see the [EITL essay](https://opakalex.github.io/posts/expert-in-the-loop/))
+- **Weak isolation between integrations** — one buggy or compromised tool can poison the LLM's context and pivot into others
+- **Poor maintainability, repeatable bugs, hard to extend** — tangled codebases, inconsistent patterns, and architectures that fight you when you try to add features
 
-OpenTalon is engineered for long-term quality from day one. Every architectural decision is made with maintainability, security, and stability in mind — so the project stays healthy as it grows.
-
-### First working example: console + hello-world plugin
-
-Run OpenTalon in the terminal with the **console channel** and the **hello-world plugin**. When you type a message containing "hello", the plugin runs first (concatenates " world" and adds a random prompt fragment), then the LLM replies.
-
-```bash
-git clone https://github.com/opentalon/opentalon.git && cd opentalon
-cp config.example.yaml config.yaml
-export DEEPSEEK_API_KEY="your-key"   # or any OpenAI-compatible API key
-make build setup                     # build core + clone & build plugin and channel
-./opentalon -config config.yaml
-```
-
-Type a message and press Enter. Try `hello` — you get "hello world" plus a random question sent to the LLM; try something else — you get a guard message and no LLM call. Ctrl+C or Ctrl+D to exit. See [hello-world plugin](https://github.com/opentalon/hellow-world-plugin) and [docs/configuration.md](docs/configuration.md).
-
-### Slash commands
-
-With the **[opentalon-commands](https://github.com/opentalon/opentalon-commands)** plugin (included in `config.example.yaml`), you can run built-in commands by typing a message that starts with `/`:
-
-| Command | Description |
-|--------|-------------|
-| `/install skill <url> [ref]` | Install a skill from a GitHub URL; available immediately, no restart |
-| `/show config` | Show current config (secrets redacted) |
-| `/commands` or `/help` | List available slash commands |
-| `/set prompt <text>` | Set the editable runtime prompt (applies to the next message) |
-| `/clear` or `/new` | Clear the current conversation session |
-
-The plugin runs as the first **content preparer**: when your message starts with `/`, it parses the command and the core runs the built-in **opentalon** executor (install skill, show config, etc.) without calling the LLM. Enable it in config with `github: "opentalon/opentalon-commands"` and `ref: "master"`; see [config.example.yaml](config.example.yaml) and the [plugin README](https://github.com/opentalon/opentalon-commands#readme).
+OpenTalon is engineered for long-term quality from day one. Every architectural decision is made with **enterprise** maintainability, security, and stability in mind.
 
 ## Core Principles
 
-### Security First
+Two principles drive the architecture. Everything else — extensibility, the scheduler, smart routing, persistence — is implementation in service of these.
+
+### 1. Security & isolation first
 
 Security is not an afterthought. OpenTalon is secure by default with a minimal attack surface. Plugins run as **separate OS processes** communicating over gRPC, so a compromised or misbehaving plugin can never access the core's memory or escalate privileges. Secrets are handled properly, inputs are validated at every boundary, and dependencies are kept lean and audited. No shortcuts.
 
@@ -76,7 +60,25 @@ graph LR
 - **The LLM orchestrates everything** — it decides which plugin to call, in what order, and routes results between them
 - **Plugins only see what the core sends** — conversation context and the specific task, nothing more
 
-#### How isolation is enforced
+> **Deep dive:** see [Security & Guardrails](#security--guardrails) below for the full guard pipeline, isolation enforcement, content preparers, prompt-injection defence, and LLM safety rules.
+
+### 2. Deterministic business logic — without burning LLM tokens
+
+Enterprise rules belong in code, not prompts. Hooks let organizations enforce their own vocabulary, business rules, and compliance requirements **before** the message ever reaches the main LLM — using **Lua** for simple zero-overhead rules or **Go / any language** via gRPC for complex logic.
+
+- **Vocabulary enforcement** — rewrite non-standard terms into company-approved language. Lua replacement table (zero LLM cost) or a Go plugin loading terminology from a database.
+- **Business rule classification** — route, prioritize, or reject requests using deterministic rules. No tokens burned.
+- **Compliance checks** — detect PII, credentials, or policy violations. Lua for pattern matching, Go for compliance API integration.
+- **Context enrichment** — inject company metadata (project codes, team names, priority levels) so the main LLM has the right context without figuring it out.
+- **Business transformation** — convert LLM output into structured actions (Jira tickets, calendar events, CRM updates) using a gRPC plugin in any language.
+
+For ambiguous cases, Lua hooks can call a small/cheap LLM (`ctx.llm()`) for lightweight AI. The main (expensive) LLM only sees clean, pre-processed input.
+
+## Security & Guardrails
+
+Security is the leading principle, so it gets its own section. Four layers of defence sit between an incoming message and the main LLM — and between any plugin response and the LLM that consumes it.
+
+### How isolation is enforced
 
 Every plugin response passes through a **guard pipeline** before reaching the LLM:
 
@@ -105,11 +107,11 @@ flowchart TD
 | Plugin runs forever or consumes all resources | Per-call timeout (configurable) + OS-level resource limits |
 | LLM autonomously installs or modifies skills/plugins | `user_only` actions are hidden from the LLM system prompt and blocked if invoked via an LLM-generated tool call |
 
-**Guard of LLM models:** A plugin can host its **own LLM** (e.g. a small local model or a dedicated API). Used as a content preparer, such a plugin can implement a **guard of LLM models**—for example, classify or validate the request and block or redirect before the main orchestrator LLM is invoked, or enforce which models or providers are allowed. The core only sees the plugin’s result (e.g. transformed message or “do not send to LLM”); the plugin’s internal use of an LLM stays out of the main token path.
+**Guard of LLM models:** A plugin can host its **own LLM** (e.g. a small local model or a dedicated API). Used as a content preparer, such a plugin can implement a **guard of LLM models** — for example, classify or validate the request and block or redirect before the main orchestrator LLM is invoked, or enforce which models or providers are allowed. The core only sees the plugin's result (e.g. transformed message or "do not send to LLM"); the plugin's internal use of an LLM stays out of the main token path.
 
-#### Content Preparers
+### Content preparers
 
-**Content preparers** are plugin actions that run before the first LLM call. They receive the user’s message and can transform it, enrich it, or block it entirely by returning `send_to_llm: false`.
+**Content preparers** are plugin actions that run before the first LLM call. They receive the user's message and can transform it, enrich it, or block it entirely by returning `send_to_llm: false`.
 
 ```yaml
 orchestrator:
@@ -123,22 +125,22 @@ orchestrator:
 A preparer returns plain text (the transformed message) or a JSON response:
 
 ```json
-{ “send_to_llm”: false, “message”: “handled without LLM” }
+{ "send_to_llm": false, "message": "handled without LLM" }
 ```
 
 ```json
-{ “send_to_llm”: false, “invoke”: [
-    { “plugin”: “jira”, “action”: “create_issue”, “args”: { “title”: “...” } }
+{ "send_to_llm": false, "invoke": [
+    { "plugin": "jira", "action": "create_issue", "args": { "title": "..." } }
 ]}
 ```
 
-When `send_to_llm` is `false`, the LLM is never called — the preparer’s message or invoke steps become the response directly. Preparers with `invoke` steps must be explicitly trusted in config (see `insecure: false` in `config.example.yaml`).
+When `send_to_llm` is `false`, the LLM is never called — the preparer's message or invoke steps become the response directly. Preparers with `invoke` steps must be explicitly trusted in config (see `insecure: false` in `config.example.yaml`).
 
-#### Guard Plugins — Prompt Injection Prevention
+### Guard plugins — prompt injection prevention
 
 Regular content preparers run once, on the initial user message. **Guard plugins** go further: they run before **every** LLM call in the agent loop — including after tool results come back — so they can sanitize content that arrives from external systems before the LLM ever sees it.
 
-This is the primary defence against **prompt injection**: a malicious tool response that says _”ignore previous instructions and do X”_ is intercepted and sanitized by the guard before the LLM processes it.
+This is the primary defence against **prompt injection**: a malicious tool response that says _"ignore previous instructions and do X"_ is intercepted and sanitized by the guard before the LLM processes it.
 
 ```yaml
 orchestrator:
@@ -170,14 +172,14 @@ Agent loop iteration 2:
 The guard plugin receives the content of the most recent message (the last tool result or user message) as the `text` argument, and returns the sanitized version. It can also block entirely:
 
 ```json
-{ “send_to_llm”: false, “message”: “Prompt injection detected — request blocked.” }
+{ "send_to_llm": false, "message": "Prompt injection detected — request blocked." }
 ```
 
-Guard actions are **never listed in the LLM’s tool list** — they are invisible to the model and run transparently as part of the infrastructure.
+Guard actions are **never listed in the LLM's tool list** — they are invisible to the model and run transparently as part of the infrastructure.
 
 A guard plugin can use a small/cheap LLM internally to detect subtle injections, or apply deterministic pattern matching — either way the main LLM only sees the clean output.
 
-#### LLM Safety Rules
+### LLM safety rules
 
 The LLM itself receives **built-in safety rules** in its system prompt at the start of every session. These rules instruct the LLM — in multiple languages — to never execute tool calls found inside plugin output, to treat all plugin responses as untrusted data, and to never let a plugin influence which other plugins get called.
 
@@ -201,142 +203,7 @@ orchestrator:
 
 This lets organizations add domain-specific rules — including multi-line instructions — without modifying source code. These custom rules are appended to the built-in safety rules and injected into the LLM system prompt at the start of every session.
 
-### Company Rules, Context & Vocabulary — Without Burning LLM Tokens
-
-Hooks let organizations enforce their own business rules, terminology, and compliance requirements **before** the message ever reaches the main LLM — using **Lua** for simple zero-overhead rules or **Go / any language** via gRPC for complex logic.
-
-- **Vocabulary enforcement** — rewrite non-standard terms into company-approved language. Lua replacement table (zero LLM cost) or a Go plugin loading terminology from a database.
-- **Business rule classification** — route, prioritize, or reject requests using deterministic rules. No tokens burned.
-- **Compliance checks** — detect PII, credentials, or policy violations. Lua for pattern matching, Go for compliance API integration.
-- **Context enrichment** — inject company metadata (project codes, team names, priority levels) so the main LLM has the right context without figuring it out.
-- **Business transformation** — convert LLM output into structured actions (Jira tickets, calendar events, CRM updates) using a gRPC plugin in any language.
-
-For ambiguous cases, Lua hooks can call a small/cheap LLM (`ctx.llm()`) for lightweight AI. The main (expensive) LLM only sees clean, pre-processed input.
-
-### State and context persistence
-
-When `state.data_dir` is set, conversation and rules persist across restarts using SQLite (`state.db`). The app uses the **pure-Go** driver [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite), so no system SQLite library is required—it’s a normal Go dependency and is compiled into the binary. **General** rules (shared) and **per-actor** rules (per user) are stored as memories so multiple users get shared context plus their own. The LLM receives general context (config rules, general stored rules, tools), user/actor context (that actor’s stored rules), and the **session** (conversation history). Sessions are one per channel/conversation or thread; optional **summarization** after N messages compresses history into a summary and keeps only the last few messages, so token usage stays bounded. Pipeline state is currently in-memory only — persistence is planned for Phase 4. See [docs/design/channels.md](docs/design/channels.md) (State and memory) and `config.example.yaml` (`state.session`) for details.
-
-```
-User message ──▶ Pre-hooks (Lua / Go / small LLM) ──▶ Planner ──▶ Main LLM ──▶ Post-hooks (Lua / Go) ──▶ Response
-                  │  zero tokens for rules                │            │              │
-                  │  cheap tokens for small LLM           │            │              │  enforce vocabulary
-                  │  full power via gRPC plugins           │            │              │  compliance, transform
-                                                          │            │
-                                                   multi-step?         │
-                                                    ├─ yes ──▶ Pipeline Executor ──▶ Results
-                                                    └─ no  ──▶ Agent Loop ─────────┘
-```
-
-### Stability
-
-Thorough testing at every level — unit, integration, and end-to-end. Pull requests can only be merged with a fully green test suite, no exceptions — not even for project owners :) Zero tolerance for repeatable bugs. Predictable behavior under load, graceful degradation, and clear error reporting.
-
-### Customizability
-
-Everything in OpenTalon is extensible and **language-agnostic**. Tool plugins, channel adapters, and processing hooks can all be written in Go, Python, Rust, or any language that speaks gRPC. For simple rules, an embedded Lua VM provides hot-reloadable scripts with zero deployment overhead. Companies can enforce their own **business rules, vocabulary, and compliance policies** using deterministic logic — without burning LLM tokens. See [Extensibility](#extensibility) below.
-
-### Maintainability
-
-Clean architecture, idiomatic Go, and high code quality standards enforced by linters, formatters, and code review. The codebase is designed to be readable and approachable for new contributors.
-
-### Multi-Platform Deployment
-
-First-class support for running anywhere:
-
-- **Local** — single binary, no external dependencies required to get started
-- **VPS** — lightweight deployment with systemd or supervisor
-- **Docker** — official container images
-- **Kubernetes** — Helm charts for production-grade deployments
-
-## Extensibility
-
-OpenTalon is fully extensible. **Everything** is language-agnostic — plugins, channels, and hooks can be written in Go, Python, Rust, TypeScript, or any language that speaks gRPC. For lightweight scripting, an embedded Lua VM provides hot-reloadable hooks with zero deployment overhead.
-
-```mermaid
-flowchart TD
-    subgraph external ["External (any language: Go, Python, Rust, etc.)"]
-        ToolA["Tool Plugin"]
-        ToolB["Tool Plugin"]
-        ChA["Channel Plugin"]
-        ChB["Channel Plugin"]
-    end
-
-    subgraph core [OpenTalon Core]
-        PreHooks["Pre-hooks (Lua / gRPC)"]
-        ChannelReg[Channel Registry]
-        Orch[LLM Orchestrator]
-        ToolReg[Tool Registry]
-        PostHooks["Post-hooks (Lua / gRPC)"]
-    end
-
-    ChA <-->|"gRPC / HTTP / WS"| ChannelReg
-    ChB <-->|"gRPC / HTTP / WS"| ChannelReg
-    ChannelReg --> PreHooks
-    PreHooks --> Orch
-    Orch --> ToolReg
-    ToolReg <-->|gRPC| ToolA
-    ToolReg <-->|gRPC| ToolB
-    Orch --> PostHooks
-    PostHooks --> ChannelReg
-```
-
-There are **three extension categories**, all language-agnostic:
-
-| Category | Purpose | Interface | Examples |
-|---|---|---|---|
-| **Tool plugins** | Capabilities the LLM invokes | gRPC (`PluginService`) | GitLab, Jira, code search, CI/CD |
-| **Channel plugins** | I/O adapters for messaging platforms | gRPC / HTTP / WebSocket (`ChannelService`) | Slack, Teams, Telegram, WhatsApp, Discord |
-| **Hooks** | Pre/post processing pipeline | Lua (embedded) or gRPC | Vocabulary enforcement, compliance, classification |
-
-### Tool Plugins (gRPC — any language)
-
-For standalone capabilities the LLM calls: integrations, actions, data retrieval.
-
-- **Language-agnostic** — write in Go, Python, Rust, or any language that speaks gRPC (Go is the primary SDK)
-- Each plugin is a **separate binary** communicating over **gRPC via a local socket**
-- **Process isolation** — a crashing plugin cannot take down the core
-- **Security boundary** — strict protobuf contracts; plugins cannot access other plugins, the registry, or core internals
-- **Discovery and lifecycle** — registered via config or auto-discovered from a directory, health-checked, and restarted on failure
-- Same proven pattern behind **Terraform**, **Vault**, and **Nomad**
-- **`user_only` actions** — set `user_only: true` on any action in `Capabilities()` to hide it from the LLM and allow it only via direct user invocation (e.g. slash commands). The core enforces this: LLM-generated calls to `user_only` actions are rejected. Built-in example: `/install skill` is `user_only` so only the user can install skills, not the LLM.
-
-### Channel Plugins (gRPC / HTTP / WS — any language)
-
-I/O adapters for messaging platforms. Written in any language, deployed as separate binaries/services.
-
-- **Platform-agnostic** — the core defines a generic `ChannelService` contract. Implementations for Slack, Teams, Telegram, WhatsApp, Discord, Jira, Matrix, etc. live in separate repositories
-- **Five connection modes** — auto-detected from the `plugin` URI scheme:
-
-| Format | Mode | Best for |
-|---|---|---|
-| `./path/to/binary` | **Binary** | Local dev, simple deployments |
-| `grpc://host:port` | **Remote gRPC** | Kubernetes, cloud-native |
-| `docker://image:tag` | **Docker** | Self-hosted with isolation |
-| `https://endpoint/path` | **Webhook** | Serverless (Lambda, Cloud Functions) |
-| `wss://host/path` | **WebSocket** | Real-time, lightweight |
-
-### Hooks: Lua Scripting + gRPC
-
-Pre/post processing hooks run **before and after** the main LLM. Two options:
-
-- **Lua scripts** (embedded) — hot-reloadable, sandboxed, zero deployment overhead. Ideal for simple rules, filters, and quick customizations. Can call a small/local LLM via `ctx.llm()` for lightweight AI tasks. See [Lua scripts](docs/lua-scripts.md) for a full hello-world example. Inspired by **Nginx/OpenResty**, **Kong**, and **Redis**.
-- **gRPC hook plugins** (any language) — for complex business logic that needs databases, APIs, or custom libraries. Same process isolation and language flexibility as tool plugins.
-
-### Extension Points
-
-All three categories share the same set of extension points:
-
-- [Tool actions](#tool-plugins-grpc--any-language) (LLM-callable capabilities)
-- [Request/response hooks](#hooks-lua-scripting--grpc) (pre/post processing)
-- [Auth profile rotation](#multi-provider-support)
-- [Storage backends](docs/design/state.md)
-- [Notification channels](#channel-plugins-grpc--http--ws--any-language)
-- [Scheduled tasks](#scheduler)
-- [Pipeline execution](#pipeline-execution) (multi-step orchestration)
-- Custom API endpoints (inbound via [channels](#channel-plugins-grpc--http--ws--any-language), outbound via [tool plugins](#tool-plugins-grpc--any-language))
-
-### MCP (Model Context Protocol) Support
+## MCP (Model Context Protocol) Support
 
 OpenTalon supports the **Model Context Protocol (MCP)**, allowing it to connect to any MCP-compatible tool server alongside its native gRPC plugins.
 
@@ -362,82 +229,6 @@ plugins:
 ```
 
 Each tool exposed by the MCP servers is automatically registered in OpenTalon's tool registry and becomes callable by the LLM. All security guards (response sanitization, size limits, timeouts, namespace isolation) apply to MCP tool results exactly as they do to native gRPC plugins.
-
-### Developer Experience
-
-- **Example: [Hello World plugin](https://github.com/opentalon/hellow-world-plugin)** — build your first tool plugin (hello→world + optional prompt fragment), then run OpenTalon with DeepSeek or any provider.
-- **gRPC Plugin SDK** — scaffolding CLI, example plugins, and integration test helpers. Works for tool plugins, channel plugins, and gRPC hooks.
-- **Lua scripts** — [Lua scripts guide](docs/lua-scripts.md) with a hello-world example; API reference, example scripts, and a REPL for interactive testing
-
-> For the full architecture, see [docs/design/plugins.md](docs/design/plugins.md) and [docs/design/channels.md](docs/design/channels.md). For real-world workflow examples, see [examples/](examples/).
-
-Channel configuration example — all five modes side by side:
-
-```yaml
-channels:
-  my-slack:
-    enabled: true
-    plugin: "./plugins/opentalon-slack"                       # binary
-    config:
-      app_token: "${SLACK_APP_TOKEN}"
-      bot_token: "${SLACK_BOT_TOKEN}"
-  my-telegram:
-    enabled: true
-    plugin: "grpc://telegram-bot.internal:9001"               # remote gRPC
-    config:
-      bot_token: "${TELEGRAM_BOT_TOKEN}"
-  my-teams:
-    enabled: true
-    plugin: "docker://ghcr.io/opentalon/plugin-teams:latest"  # docker
-    config:
-      tenant_id: "${TEAMS_TENANT_ID}"
-  my-whatsapp:
-    enabled: true
-    plugin: "https://us-central1-proj.cloudfunctions.net/wa"  # webhook
-    config:
-      verify_token: "${WA_VERIFY_TOKEN}"
-  my-custom:
-    enabled: true
-    plugin: "wss://custom-bridge.example.com/channel"         # websocket
-    config:
-      api_key: "${CUSTOM_API_KEY}"
-```
-
-The `config` block is **opaque to the core** — forwarded to the plugin without interpretation. Each plugin interprets its own config however it needs.
-
-### Built-in YAML Channels (no plugin binary needed)
-
-For simple integrations like Telegram's HTTP long-polling API, you can define the channel entirely in YAML — no Go/gRPC plugin required. Configure the polling endpoint, response mapping, and reply endpoint in config, and OpenTalon handles the poll loop, cursor tracking, and message dispatch.
-
-```yaml
-# channels/telegram-channel/channel.yaml
-id: telegram
-name: Telegram
-
-inbound:
-  polling:
-    method: GET
-    url: "https://api.telegram.org/bot{{env.TELEGRAM_BOT_TOKEN}}/getUpdates?timeout=30&offset={{self.poll_offset}}"
-    interval: 1s
-    result_path: result        # where the update array lives in the JSON response
-    cursor_field: update_id    # tracked automatically; next poll uses max(update_id)+1
-
-  event_path: "message"        # extract the message object from each update
-  mapping:
-    conversation_id: "chat.id"
-    sender_id: "from.id"
-    content: "text"
-
-outbound:
-  send:
-    method: POST
-    url: "https://api.telegram.org/bot{{env.TELEGRAM_BOT_TOKEN}}/sendMessage"
-    headers:
-      Content-Type: application/json
-    body: '{"chat_id":"{{msg.conversation_id}}","text":"{{msg.content}}"}'
-```
-
-YAML channels support filtering (`process_when`, `skip`), content transforms (regex replace, trim), deduplication, and response chunking — all declarative, no code.
 
 ## Smart Model Routing
 
@@ -474,328 +265,75 @@ OpenTalon supports multiple AI providers out of the box, with a unified configur
 - **Auth profile rotation** — multiple API keys or OAuth tokens per provider, with automatic round-robin and cooldown on rate limits
 - **Two-stage failover** — first rotate credentials within a provider, then fall back to the next model in the chain. Exponential backoff on failures.
 
-> **Getting started?** See the [Configuration Guide](docs/configuration.md) for step-by-step setup instructions. For the full architecture, see [docs/design/providers.md](docs/design/providers.md).
-
-## Scheduler
-
-OpenTalon includes a built-in scheduler for periodic background jobs. Jobs can be defined statically in `config.yaml` or **created dynamically through conversation** — the LLM proposes a schedule, the user confirms, and the job is persisted.
-
-```mermaid
-flowchart LR
-    Scheduler["Scheduler (tick)"] --> Runner["Execute plugin action"]
-    Runner --> Result["Result"]
-    Result --> Notify["Notify channel (Slack, Teams, …)"]
-    
-    User["User via chat"] -->|"create / list / delete"| LLM
-    LLM -->|"scheduler tool"| Scheduler
-    Config["config.yaml"] -->|"static jobs"| Scheduler
-```
-
-### Example: Monitor GitHub and notify Slack
-
-```yaml
-scheduler:
-  approvers: ["ops@company.com"]
-  max_jobs_per_user: 5
-  jobs:
-    - name: github-status
-      interval: 10m
-      action: github.check_status
-      args:
-        org: "opentalon"
-      notify_channel: slack-ops
-    - name: deploy-digest
-      interval: 24h
-      action: github.deployment_summary
-      args:
-        repo: "opentalon/opentalon"
-      notify_channel: slack-engineering
-```
-
-Every 10 minutes, the `github` plugin checks the organization's status and posts results to the `slack-ops` channel. A daily deployment digest goes to `slack-engineering`.
-
-### Dynamic jobs via conversation
-
-Users can also create jobs by talking to the LLM:
-
-> **User:** _"Watch the opentalon/opentalon repo for failed CI runs and let me know in #builds"_
->
-> **LLM:** _"I'll create a job that checks CI status every 20 minutes and notifies #builds. Should I go ahead?"_
->
-> **User:** _"Yes, but check every 15m"_
->
-> **LLM:** _"Done — created job `ci-watch-opentalon` running every 15m, notifying #builds."_
-
-### Governance
-
-- **Config-defined jobs are immutable** — users cannot modify or remove them through conversation
-- **Approvers** — when configured, only designated users can create, update, or delete dynamic jobs
-- **Per-user limits** — `max_jobs_per_user` prevents any single user from creating excessive jobs
-- **Full CRUD** — list, pause, resume, update, and delete jobs through the LLM or directly via the scheduler API
-
-## Pipeline Execution
-
-When a user request involves multiple steps (e.g. "check the bug in AppSignal, create a Jira ticket, and open a merge request"), OpenTalon's pipeline planner decomposes it into a structured plan, asks for confirmation, and executes each step with built-in retry and error reporting.
-
-```mermaid
-flowchart LR
-    User["User Message"] --> Planner["Planner (LLM)"]
-    Planner -->|"multi-step"| Plan["Plan + Confirm"]
-    Plan -->|"approved"| Executor["Pipeline Executor"]
-    Executor --> Results["Results"]
-    Planner -->|"single-step"| AgentLoop["Agent Loop"]
-    AgentLoop --> Results
-```
-
-### How it works
-
-1. **Planner** — a separate LLM call decomposes the user prompt into a DAG of steps with dependencies. If the prompt is a simple single-step request, the normal agent loop handles it (safe degradation).
-2. **Confirmation** — the plan is presented to the user via their channel (Slack, console, etc.). The user approves (`y`/`yes`) or rejects. Nothing executes without explicit approval.
-3. **Executor** — walks the step DAG in dependency order. Each step calls a plugin action via gRPC. Per-step retry with exponential backoff, per-step timeout, and fail-fast or continue-on-error behavior.
-4. **Results** — on completion (or failure), the user sees what succeeded, what failed, and how many retries were attempted. All tool calls and results are recorded in the session history.
-
-### Example conversation
-
-> **User:** _"Check bug #4521 in AppSignal, then create a Jira ticket and open a GitLab MR with the fix"_
->
-> **OpenTalon:**
-> ```
-> I've created a plan with the following steps:
->
-> 1. Check bug in AppSignal
->    Action: appsignal.get_error (error_id=4521)
-> 2. Create Jira bug ticket
->    Action: jira.create_issue
->    Depends on: 1
-> 3. Create MR with fix
->    Action: gitlab.create_mr
->    Depends on: 1, 2
->
-> Proceed? (y)es / (n)o
-> ```
->
-> **User:** _"y"_
->
-> **OpenTalon:** _"Pipeline complete — 3/3 steps succeeded."_
-
-### Configuration
-
-```yaml
-orchestrator:
-  pipeline:
-    enabled: true          # default false
-    max_step_retries: 3    # retries per step before giving up (default 3)
-    step_timeout: "60s"    # per-step timeout as Go duration (default "60s")
-```
+> **Getting started?** See the [Configuration Guide](docs/configuration.md). For the full architecture, see [docs/design/providers.md](docs/design/providers.md).
 
 ## Talon workflows & EITL rules
 
-Deterministic multi-step execution and Expert-in-the-Loop rule evaluation are provided by the [talon-plugin](https://github.com/opentalon/talon-plugin) — installed like any other OpenTalon plugin, no orchestrator config knob required. It uses the [`talon-language` Go SDK](https://github.com/opentalon/talon-language/tree/master/pkg/talon) to compile and execute Talon source, and routes each MCP call inside a workflow back through the host orchestrator via the existing `plugin_exec` Redis channel — so every step picks up the same policy, observability, and credential injection as a normal tool call.
+> Conceptual background: [**Expert-in-the-Loop**](https://opakalex.github.io/posts/expert-in-the-loop/) — why enterprise AI needs domain experts encoding deterministic rules and gates, not just humans rubber-stamping LLM output.
 
-## Concurrency
+"Human-in-the-loop" usually means a human clicks **approve** on whatever the LLM produces. That works for demos. It breaks at enterprise scale, because:
 
-By default, OpenTalon processes one session at a time (`max_concurrent_sessions: 1`). This matches the original sequential behaviour and is the safe default for most deployments. Enable concurrent session processing by raising the limit:
+- Humans don't review every call — they rubber-stamp the easy cases and miss the dangerous ones
+- The rules a domain expert actually cares about (approval thresholds, region restrictions, customer tier policies, compliance flags) live in their head, not in code
+- The LLM gets blamed when really the system never gave the expert a way to *encode* those rules
 
-```yaml
-orchestrator:
-  max_concurrent_sessions: 5   # up to 5 sessions run in parallel (default: 1)
+**Expert-in-the-Loop (EITL)** flips the relationship. Domain experts write the rules once, in a deterministic language; the system enforces them every time without asking a human to babysit.
+
+### How OpenTalon implements EITL
+
+The [**talon-plugin**](https://github.com/opentalon/talon-plugin) installs like any other OpenTalon plugin — no special orchestrator config knob. It uses the [`talon-language` Go SDK](https://github.com/opentalon/talon-language/tree/master/pkg/talon) to compile and execute **Talon source**: a small, expert-readable language for describing multi-step workflows, approval gates, conditional branches, and rule-driven escalation.
+
+Inside a Talon workflow, every MCP/tool call is routed **back through the host orchestrator** via the `plugin_exec` Redis channel — so each step picks up the same policy, observability, credential injection, and security guards as a normal tool call. Workflows are not a backdoor around OpenTalon's controls; they are a deterministic *driver* sitting on top of them.
+
+```mermaid
+flowchart LR
+    Expert["Domain expert"] -->|"writes rules"| TalonSrc["Talon source (VCS)"]
+    LLM["LLM proposes action"] --> Workflow["Talon workflow"]
+    TalonSrc --> Workflow
+    Workflow -->|"approve"| Exec["Execute via orchestrator"]
+    Workflow -->|"block / escalate"| Human["Human review"]
+    Exec --> Guards["Same security guards as any tool call"]
 ```
 
-**How it works:**
+### What this looks like in practice
 
-- **Different sessions run in parallel** — up to the configured limit. Session A no longer waits for Session B to finish.
-- **Same session is always serialized** — a second message to the same session waits for the first to complete, regardless of the limit. This preserves conversation ordering.
-- **Backpressure is built-in** — when the limit is reached, new requests wait until a slot is free (or their context is cancelled).
+- **Approval gates** — "any refund above €5,000 routes to a regional manager; under €5,000 auto-approves with audit trail"
+- **Compliance rules** — "if customer is in the EU and the action involves PII, require GDPR review step"
+- **Multi-step orchestration** — "open AppSignal incident, file Jira, draft MR, post status to #ops — but stop and alert if any step touches production data without an active change window"
+- **Tier-based routing** — "enterprise tier customers go to senior agents; SMB tier handled by the agent loop with policy guardrails"
 
-```
-max_concurrent_sessions: 3
+The expert writes those rules in Talon. The LLM proposes actions. The Talon workflow decides what runs, what blocks, and what needs human review — deterministically, the same way every time, auditable line by line.
 
-Session A ──────────────────► reply A   ┐
-Session B ──────────────────► reply B   ├─ run in parallel
-Session C ──────────────────► reply C   ┘
-Session D ···················► (waits for A, B, or C to finish)
+### Why this is enterprise-grade
 
-Same session:
-Session A msg1 ──────────────► reply 1
-Session A msg2 ···············► (waits for msg1 to finish) ──► reply 2
-```
+- **Deterministic** — same input → same outcome. No prompt drift, no model upgrade surprises.
+- **Auditable** — every rule is a piece of source code, in version control, reviewable in PRs.
+- **Owned by domain experts** — the people who know the policy can read and write it, without going through engineering for every change.
+- **Compatible with the rest of OpenTalon** — Talon steps still go through guards, isolation, sanitization, and `user_only` enforcement.
 
-Set `max_concurrent_sessions` to match your LLM provider's rate limits and expected load. A value of `1` (default) gives the original sequential behaviour with no behaviour change needed for existing deployments.
+See the [talon-plugin repo](https://github.com/opentalon/talon-plugin) and [talon-language](https://github.com/opentalon/talon-language) for the language reference and examples.
 
-## Message Debouncing
+## Documentation
 
-When a user sends multiple messages rapidly (e.g. "yes", "also add barcode 123", "set price to 50"), each message normally triggers a separate LLM call. With large context windows (~98k tokens), this wastes tokens and produces disjointed responses.
+Most operational details live in [`docs/`](docs/). Highlights:
 
-Enable debouncing to merge rapid messages into a single LLM call:
-
-```yaml
-orchestrator:
-  debounce_window: "800ms"   # collect messages for 800ms, then send as one (default: "0" = disabled)
-```
-
-**How it works:**
-
-- When a message arrives, the debouncer waits for the configured window (e.g. 800ms)
-- If more messages arrive within the window, the timer resets
-- When the timer fires, all buffered messages are merged (content joined with newlines) and processed as one request
-- Different sessions debounce independently
-- **Confirmation signals** (any message with non-empty `confirmation` metadata) and typing indicators bypass debounce and execute immediately
-
-### Debugging
-
-Set `LOG_LEVEL=debug` to see pipeline decisions, planner LLM calls, step execution, and retry attempts — all prefixed with `[pipeline]`.
-
-When debug is enabled, each conversation also writes to its own log file under `{data_dir}/logs/` (default `~/.opentalon/logs/`). Files are named by timestamp and the first message, e.g. `20260318_093609_wazzup.log`, so you can quickly find and read logs for a specific chat. Non-ASCII first messages (emoji, cyrillic) use a short hash instead. Override the directory with `log.dir`:
-
-```yaml
-log:
-  file: ~/.opentalon/opentalon.log   # global log file (all sessions)
-  dir: ~/.opentalon/logs             # per-session log directory (optional, defaults to {data_dir}/logs)
-```
-
-Log files older than 7 days are cleaned up automatically on startup.
-
-### Current limitations (Phase 1)
-
-- **In-memory only** — pipeline state is not persisted; a process restart loses pending/running pipelines (persistence planned for Phase 4)
-- **No step output templating** — template references like `{{steps.1.output.id}}` are passed literally to plugins (planned for Phase 3)
-- **Sequential execution only** — steps with independent dependencies run one at a time (parallel execution planned for Phase 3)
-- **LLM quality dependent** — weaker models may return single-step plans for multi-step requests, causing fallback to the agent loop (expected safe degradation)
-- **No recovery advisor** — failed steps are retried as-is without LLM-assisted diagnosis (planned for Phase 2)
-
-> For the full roadmap (recovery advisor, replan, parallel execution, persistence), see [docs/design/pipeline.md](docs/design/pipeline.md).
-
-## Health Probes
-
-OpenTalon includes a built-in gRPC health server for Kubernetes liveness and readiness probes, using the standard [gRPC Health Checking Protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md).
-
-```yaml
-health:
-  addr: ":8086"   # default; always enabled
-```
-
-| Probe | gRPC Service | Behaviour |
-|-------|-------------|-----------|
-| **Liveness** | `""` (empty) | Always `SERVING` while the process runs |
-| **Readiness** | `"opentalon"` | `SERVING` only after all plugins and channels are loaded |
-
-The readiness probe transitions automatically when late-loaded plugins come online via the retry loop. On shutdown, the health server stops first so Kubernetes stops routing traffic before plugins and channels tear down.
-
-**Kubernetes manifest example:**
-
-```yaml
-livenessProbe:
-  grpc:
-    port: 8086
-  periodSeconds: 10
-
-readinessProbe:
-  grpc:
-    port: 8086
-    service: "opentalon"
-  initialDelaySeconds: 10  # seconds after startup probe passes
-  periodSeconds: 5
-
-startupProbe:
-  grpc:
-    port: 8086
-    service: "opentalon"
-  failureThreshold: 30
-  periodSeconds: 5
-```
-
-**Verify manually with grpcurl:**
-
-```bash
-grpcurl -plaintext localhost:8086 grpc.health.v1.Health/Check
-```
-
-> If you use the [OpenTalon Kubernetes Operator](https://github.com/opentalon/k8s-operator), health probes are configured automatically — see `spec.observability.health`.
-
-## Build locally with plugins
-
-**Prerequisites:** Go 1.24+, git.
-
-### Quick start (recommended)
-
-```bash
-git clone https://github.com/opentalon/opentalon.git
-cd opentalon
-cp config.example.yaml config.yaml
-# Set your API key (DeepSeek, OpenAI, or any compatible provider):
-export DEEPSEEK_API_KEY="your-key"
-
-make build setup   # build core binary + clone & build hello-world plugin and console channel
-./opentalon -config config.yaml
-```
-
-`make setup` clones [opentalon/console-channel](https://github.com/opentalon/console-channel) into `channels/` and [opentalon/hellow-world-plugin](https://github.com/opentalon/hellow-world-plugin) into `plugins/`, then builds both. The binaries land at `channels/console-channel/console` and `plugins/hellow-world-plugin/hello-world-plugin` — matching the paths in `config.example.yaml`.
-
-Other useful Make targets:
-
-| Target | What it does |
+| Topic | Doc |
 |---|---|
-| `make build` | Build the core binary |
-| `make setup` | Clone and build the hello-world plugin and console channel |
-| `make plugin` | Clone and build only the hello-world plugin |
-| `make channel` | Clone and build only the console channel |
-| `make run` | Build + setup + start OpenTalon |
-| `make test` | Run tests with race detector |
-| `make lint` | Run golangci-lint |
-| `make all` | deps + build + test + lint |
-| `make clean` | Remove built binaries |
-| `make test-structural` | Structural integration tests (requires `ANTHROPIC_API_KEY`) |
-| `make eval` | YAML-driven eval with baseline tracking (requires `ANTHROPIC_API_KEY`) |
-| `make vcr-record-all` | Re-record VCR cassettes (requires API keys) |
-
-### Alternative: GitHub auto-fetch (bundler)
-
-Instead of building locally, you can let OpenTalon fetch and build plugins/channels on first run. In `config.yaml`, replace `plugin:` with `github:` and `ref:`:
-
-```yaml
-channels:
-  console:
-    enabled: true
-    github: "opentalon/console-channel"
-    ref: "master"
-    config: {}
-
-plugins:
-  hello-world:
-    enabled: true
-    github: "opentalon/hellow-world-plugin"
-    ref: "master"
-    config: {}
-```
-
-The first run resolves the refs, clones and builds, and writes `channels.lock` and `plugins.lock` under `state.data_dir` (default `~/.opentalon`). Later runs reuse the locked versions until you change `ref` or delete the lock entries.
-
-### Reusable skills from OpenClaw
-
-You can add **request packages** — skill-style API calls with no compiled plugin. The core runs HTTP requests from templates (`{{env.VAR}}`, `{{args.param}}`), with optional guardrails (`required_env`). This is a good fit for OpenClaw/ClawHub-style skills: each skill is a directory with a `SKILL.md` (and optionally `request.yaml`), and OpenTalon can **download skills by name** so you only specify the skill name in config.
-
-**Download skills by name** — set a default repo and list the skill names you want. The core clones the repo once (or one repo per skill if you override), parses each skill’s `SKILL.md`, and registers them as tools. No build step.
-
-```yaml
-request_packages:
-  default_skill_github: openclaw/skills    # one repo, many skill subdirs
-  default_skill_ref: main
-  skills:
-    - jira-create-issue
-    - slack-send
-```
-
-For a skill from a different repo, use the object form:
-
-```yaml
-request_packages:
-  skills:
-    - name: my-custom-skill
-      github: myorg/my-skills
-      ref: v1
-```
-
-Downloaded skills are stored under `state.data_dir` and pinned in `skills.lock` (same idea as `plugins.lock`). You can also use a **local directory** of skills with `skills_path`, or define **inline** request packages in config — see `config.example.yaml` for the full `request_packages` options.
+| Configuration reference | [docs/configuration.md](docs/configuration.md) |
+| Extensibility — plugins, channels, hooks | [docs/extensibility.md](docs/extensibility.md) |
+| Slash commands | [docs/slash-commands.md](docs/slash-commands.md) |
+| Scheduler — periodic background jobs | [docs/scheduler.md](docs/scheduler.md) |
+| State & context persistence | [docs/state.md](docs/state.md) |
+| Concurrency — session parallelism | [docs/concurrency.md](docs/concurrency.md) |
+| Lua scripts | [docs/lua-scripts.md](docs/lua-scripts.md) |
+| Workflows | [docs/workflows.md](docs/workflows.md) |
+| Profiles & multi-tenancy | [docs/profiles.md](docs/profiles.md) |
+| Kubernetes deployment & health probes | [docs/deployment-guide-k8s.md](docs/deployment-guide-k8s.md) |
+| Cluster mode | [docs/cluster.md](docs/cluster.md) |
+| Prometheus metrics | [docs/prometheus-metrics.md](docs/prometheus-metrics.md) |
+| WebSocket integration | [docs/websocket-integration.md](docs/websocket-integration.md), [docs/websocket-messages.md](docs/websocket-messages.md) |
+| VCR cassettes (for contributors) | [docs/vcr-cassettes.md](docs/vcr-cassettes.md) |
+| Architecture & design notes | [docs/design/](docs/design/) |
 
 ## Contributing
 
@@ -810,29 +348,6 @@ We welcome contributions of all kinds — bug reports, feature requests, documen
 ### System prompt convention
 
 All LLM system prompt text lives in `internal/prompts/*.txt` and is loaded via `//go:embed`. Never write a system prompt as a plain Go string literal — add a `.txt` file and export it through `internal/prompts/prompts.go`. This keeps prompts diffable and hashable for VCR cassette staleness checks.
-
-### VCR cassettes
-
-Integration tests replay pre-recorded LLM interactions stored as JSON cassettes in `internal/orchestrator/testdata/vcr/`. The CI `test-vcr` job runs these on every PR and push to `master` — no API keys required for replay.
-
-Each cassette embeds a `prompt_hash` computed from `internal/prompts/`. If you edit any prompt file, the hash changes and the CI job fails with:
-
-```
-vcr: cassette … is stale
-  stored:  <old hash>
-  current: <new hash>
-Re-record with: make vcr-record-all
-```
-
-To fix it, re-record with real API keys and commit the updated cassettes:
-
-```bash
-ANTHROPIC_API_KEY=<key> OPENROUTER_API_KEY=<key> make vcr-record-all
-git add internal/orchestrator/testdata/vcr/
-git commit -m "chore: re-record VCR cassettes"
-```
-
-`ANTHROPIC_API_KEY` records the Anthropic/Haiku scenarios; `OPENROUTER_API_KEY` records the OpenRouter/Ministral scenarios. Each is optional — omitting one skips that provider's cassettes.
 
 ### Structural integration tests
 
@@ -854,6 +369,8 @@ ANTHROPIC_API_KEY=<key> make eval
 ```
 
 Pass rate is checked against a baseline stored in `.eval-baselines/<git-tag>.json`. On the first run for a given tag the baseline is saved; subsequent runs fail if pass rate regresses. The eval runs on minor/major releases only (patch releases skip it).
+
+> Re-recording VCR cassettes after prompt or scenario changes is documented in [docs/vcr-cassettes.md](docs/vcr-cassettes.md).
 
 All contributions are subject to the [Apache 2.0 License](LICENSE).
 
