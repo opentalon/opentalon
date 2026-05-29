@@ -338,7 +338,7 @@ func resolveAllowedPluginNames(ctx context.Context, o *Orchestrator) string {
 	return string(b)
 }
 
-// availableToolsSet returns the set of fully-qualified tool names
+// allowedToolsSet returns the set of fully-qualified tool names
 // ("<plugin>.<action>") this session can call right now. Applies the same
 // visibility rules as the system-prompt assembler — profile-level plugin
 // allowance, preparer/guard-action exclusion, UserOnly exclusion — but NOT
@@ -346,7 +346,7 @@ func resolveAllowedPluginNames(ctx context.Context, o *Orchestrator) string {
 // output).
 //
 // Single computation point feeds:
-//   - resolveAvailableToolFQNs (JSON-array form for the `allowed_tools`
+//   - resolveAllowedToolFQNs (JSON-array form for the `allowed_tools`
 //     ContextArgProvider; preparer plugins use it to constrain RAG
 //     retrieval to the session's actual tool surface)
 //   - _meta.get_tool_details action-level visibility gate (rejects
@@ -358,7 +358,7 @@ func resolveAllowedPluginNames(ctx context.Context, o *Orchestrator) string {
 // to see" answer is identical across the RAG-retrieval and direct-lookup
 // vectors. Drift between the two would create exactly the
 // defense-in-depth gap the palette exists to close.
-func availableToolsSet(ctx context.Context, o *Orchestrator) map[string]struct{} {
+func allowedToolsSet(ctx context.Context, o *Orchestrator) map[string]struct{} {
 	allowedPlugins := o.resolveAllowedPlugins(ctx)
 	preparerAction := preparerActionSet(o.preparers, o.guards)
 
@@ -378,15 +378,34 @@ func availableToolsSet(ctx context.Context, o *Orchestrator) map[string]struct{}
 	return set
 }
 
-// resolveAvailableToolFQNs returns the sorted JSON array of FQNs from
-// availableToolsSet, or "" when empty. Returns "" (not "[]") so the host's
-// executeCall path omits the arg entirely instead of injecting an empty
-// array — the latter would force plugins to special-case empty ==
-// unrestricted vs empty == "no tools". Mirrors resolveAllowedPluginNames.
-func resolveAvailableToolFQNs(ctx context.Context, o *Orchestrator) string {
-	set := availableToolsSet(ctx, o)
+// resolveAllowedToolFQNs returns the sorted JSON array of FQNs from
+// allowedToolsSet. The empty-set case distinguishes "no profile in scope
+// → no palette to enforce" from "profile in scope, but the effective
+// palette is empty → session can call zero tools":
+//
+//   - no profile (resolveAllowedPlugins returns {m: nil}) → returns ""
+//     so the host's executeCall omits the arg entirely. Plugins receive
+//     no allowed_tools value and apply no per-session filter (fail-open
+//     because there is genuinely no palette to compare against).
+//
+//   - profile in scope, set empty → returns "[]" so the arg is delivered
+//     as a non-nil empty JSON array. Plugins interpret this as the strict
+//     "zero tools allowed" branch and drop every retrieved action. This
+//     is the fail-closed path for restricted sessions; without it, a
+//     locked-down profile would silently degrade to "no filter".
+//
+//   - set non-empty → JSON-marshalled sorted array.
+//
+// Mirrors resolveAllowedPluginNames's contract for the "absent arg" axis
+// but adds the third state because the palette has a meaningful
+// "explicitly empty" semantic that allowed_plugins does not.
+func resolveAllowedToolFQNs(ctx context.Context, o *Orchestrator) string {
+	set := allowedToolsSet(ctx, o)
 	if len(set) == 0 {
-		return ""
+		if o.resolveAllowedPlugins(ctx).m == nil {
+			return ""
+		}
+		return "[]"
 	}
 	fqns := make([]string, 0, len(set))
 	for fqn := range set {
@@ -397,8 +416,10 @@ func resolveAvailableToolFQNs(ctx context.Context, o *Orchestrator) string {
 	return string(b)
 }
 
-// defaultContextArgProviders returns built-in providers only for opaque identifiers (e.g. session_id).
-// No session messages, conversation text, or other sensitive content is exposed to plugins via this mechanism.
+// defaultContextArgProviders returns built-in providers for orchestrator-managed
+// arguments: opaque identifiers (session_id) and per-session allowlists derived
+// from the profile (allowed_plugins, allowed_tools). No session messages,
+// conversation text, or other sensitive user content is exposed via this mechanism.
 func defaultContextArgProviders(o *Orchestrator, custom map[string]ContextArgProvider) map[string]ContextArgProvider {
 	builtin := map[string]ContextArgProvider{
 		"session_id": func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
@@ -406,7 +427,7 @@ func defaultContextArgProviders(o *Orchestrator, custom map[string]ContextArgPro
 			return resolveAllowedPluginNames(ctx, o)
 		},
 		"allowed_tools": func(ctx context.Context, _ string) string {
-			return resolveAvailableToolFQNs(ctx, o)
+			return resolveAllowedToolFQNs(ctx, o)
 		},
 	}
 	if len(custom) == 0 {

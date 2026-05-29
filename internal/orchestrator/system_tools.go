@@ -115,11 +115,11 @@ func (e *getToolDetailsExecutor) Execute(ctx context.Context, call ToolCall) Too
 	// non-existent action; no existence oracle for filtered tools.
 	//
 	// Same palette computation as the `allowed_tools` ContextArgProvider
-	// feeds — availableToolsSet is the single source of truth for "what
-	// this session can see" across both the RAG-retrieval vector (preparer
+	// feeds — allowedToolsSet is the single source of truth for "what this
+	// session can see" across both the RAG-retrieval vector (preparer
 	// plugins consume the JSON form) and the direct-lookup vector here.
-	available := availableToolsSet(ctx, e.orch)
-	if _, visible := available[name]; !visible {
+	allowed := allowedToolsSet(ctx, e.orch)
+	if _, visible := allowed[name]; !visible {
 		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("action %q not found in plugin %q", action, plugin)}
 	}
 

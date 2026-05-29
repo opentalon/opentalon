@@ -242,7 +242,7 @@ func TestGetToolDetails_FilteredByUserOnlyActionReturnsNotFound(t *testing.T) {
 // TestGetToolDetails_FilteredByPreparerActionReturnsNotFound pins the
 // same gate on a second exclusion axis: preparer/guard actions live in
 // cap.Actions for invocation, but the LLM should never inspect them
-// (they're internal control-plane tools). availableToolsSet excludes
+// (they're internal control-plane tools). allowedToolsSet excludes
 // them on the preparerAction axis; the gate must reject lookups too.
 func TestGetToolDetails_FilteredByPreparerActionReturnsNotFound(t *testing.T) {
 	registry := NewToolRegistry()
@@ -287,7 +287,7 @@ func TestGetToolDetails_FilteredByPreparerActionReturnsNotFound(t *testing.T) {
 	}
 }
 
-// TestAvailableToolsSet_ConsistentWithFQNs pins the invariant that both
+// TestAllowedToolsSet_ConsistentWithFQNs pins the invariant that both
 // consumers of the per-session palette — the JSON-array form for the
 // allowed_tools ContextArgProvider (RAG plugins consume it via gRPC) and
 // the map form for the get_tool_details action-level gate — see the
@@ -295,7 +295,7 @@ func TestGetToolDetails_FilteredByPreparerActionReturnsNotFound(t *testing.T) {
 // defense-in-depth gap the palette exists to close: a tool visible at
 // one consumer and not the other would still leak via the visible
 // vector.
-func TestAvailableToolsSet_ConsistentWithFQNs(t *testing.T) {
+func TestAllowedToolsSet_ConsistentWithFQNs(t *testing.T) {
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
 		Name: "gitlab", Description: "GitLab",
@@ -321,8 +321,8 @@ func TestAvailableToolsSet_ConsistentWithFQNs(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	set := availableToolsSet(ctx, orch)
-	jsonStr := resolveAvailableToolFQNs(ctx, orch)
+	set := allowedToolsSet(ctx, orch)
+	jsonStr := resolveAllowedToolFQNs(ctx, orch)
 
 	// The JSON form omits the field when empty; non-empty sets must round-trip
 	// to the same membership as the map.
