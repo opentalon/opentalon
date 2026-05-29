@@ -63,6 +63,7 @@ type YAMLChannel struct {
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	jwtValidator *JWTValidator
+	enrichCache  EnrichCache // nil until SetEnrichCache is called; absence disables caching for inbound.enrich
 }
 
 // NewYAMLChannel creates a new YAMLChannel from a parsed spec. instanceID is
@@ -94,6 +95,14 @@ func (ch *YAMLChannel) ID() string {
 // of the same channel adapter share a Kind.
 func (ch *YAMLChannel) Kind() string {
 	return ch.spec.ID
+}
+
+// SetEnrichCache attaches the cache used for inbound.enrich lookups. Manager
+// calls this once before Start using the process-wide cache (Redis-backed
+// when available, in-memory fallback otherwise). Channels without an
+// inbound.enrich block ignore the cache entirely.
+func (ch *YAMLChannel) SetEnrichCache(c EnrichCache) {
+	ch.enrichCache = c
 }
 
 // Capabilities returns what this channel supports.

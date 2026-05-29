@@ -70,10 +70,53 @@ type InboundSpec struct {
 	AlwaysProcessWhen *FieldMatch         `yaml:"always_process_when"`
 	ProcessWhen       []ProcessRule       `yaml:"process_when"`
 	Skip              []SkipRule          `yaml:"skip"`
-	Mapping           MappingSpec         `yaml:"mapping"`
-	Media             []MediaRule         `yaml:"media"` // detect non-text messages, resolve files or inject descriptions
-	Transforms        []Transform         `yaml:"transforms"`
-	Dedup             DedupSpec           `yaml:"dedup"`
+	// Enrich runs per-message HTTP lookups before extractMessage. Results
+	// are exposed in the template context under {{enrich.<step>.<field>}}
+	// and can be referenced from mapping.metadata. Used to attach data the
+	// inbound frame doesn't carry (e.g. Slack user email via users.info).
+	// Cache lookups are namespaced per channel instance; failures abort the
+	// message with a user-visible error frame (fail-closed). See yaml_enrich.go.
+	Enrich     map[string]EnrichSpec `yaml:"enrich"`
+	Mapping    MappingSpec           `yaml:"mapping"`
+	Media      []MediaRule           `yaml:"media"` // detect non-text messages, resolve files or inject descriptions
+	Transforms []Transform           `yaml:"transforms"`
+	Dedup      DedupSpec             `yaml:"dedup"`
+}
+
+// EnrichSpec configures one inbound-enrichment HTTP call. The call runs
+// before extractMessage on every event that passes skip/process rules.
+// Template values support {{event.*}}, {{self.*}}, {{config.*}}, {{env.*}}.
+//
+// When Cache.Key is set, a cache lookup is performed first; on miss the HTTP
+// call runs and the extracted fields are written back. Cache is namespaced
+// per channel instance to keep two bots' lookups isolated.
+//
+// Failure behaviour is fail-closed: any error (HTTP non-2xx, JSON parse,
+// missing required field) marks the message for a user-facing error frame
+// in the handler rather than passing through with empty enrichment data.
+type EnrichSpec struct {
+	Method  string            `yaml:"method"`  // HTTP method (default POST)
+	URL     string            `yaml:"url"`     // endpoint (supports templates)
+	Headers map[string]string `yaml:"headers"` // values support templates
+	Body    string            `yaml:"body"`    // request body (supports templates)
+	// Extract maps the output key (referenced as {{enrich.<step>.<key>}}) to
+	// a dotted path into the JSON response (e.g. "user.profile.email").
+	// Every key listed is required: a missing or empty value triggers
+	// fail-closed.
+	Extract map[string]string `yaml:"extract"`
+	Cache   EnrichCacheSpec   `yaml:"cache"`
+}
+
+// EnrichCacheSpec opts a step into caching. Without it, every message
+// triggers a live HTTP call — fine for low-volume channels, expensive
+// otherwise.
+type EnrichCacheSpec struct {
+	// Key is a template that produces a stable per-subject identifier
+	// (e.g. "{{event.user}}" for Slack so all messages from the same
+	// user share an entry). Empty disables caching for this step.
+	Key string `yaml:"key"`
+	// TTL is how long a cached entry stays valid. Default 1h.
+	TTL time.Duration `yaml:"ttl"`
 }
 
 // MediaRule describes how to handle a non-text message type (e.g. photo, voice, sticker).

@@ -222,7 +222,36 @@ func (ch *YAMLChannel) processInboundFrame(frame map[string]interface{}) {
 
 	// Extract fields via mapping
 	eventCtx := flattenToStringMap(event)
-	msg := ch.extractMessage(event, eventCtx)
+
+	// Inbound enrichment runs before extractMessage so the metadata
+	// mapping can reference enriched fields (e.g. {{enrich.user.email}}).
+	// Failures are fail-closed: we still build a stub message but tag it
+	// with __enrich_failed metadata so handler.go can convert the failure
+	// into a user-visible error frame instead of silently passing through
+	// with empty enrichment data.
+	enrichContexts := ch.buildContexts()
+	enrichContexts["event"] = eventCtx
+	var enrichErr error
+	var enrichErrStep string
+	if len(ch.spec.Inbound.Enrich) > 0 {
+		if _, err := ch.runEnrich(ch.ctx, enrichContexts); err != nil {
+			enrichErr = err
+			// Best-effort extract: the wrapped sentinel always has the
+			// step name in its message, but the public surface is just
+			// the metadata key so we record whatever we know.
+			enrichErrStep = enrichStepFromErr(err)
+			slog.WarnContext(ch.ctx, "yaml-channel enrichment failed",
+				"channel", ch.instanceID, "step", enrichErrStep, "error", err)
+		}
+	}
+	msg := ch.extractMessage(event, eventCtx, enrichContexts)
+	if enrichErr != nil {
+		if msg.Metadata == nil {
+			msg.Metadata = make(map[string]string, 2)
+		}
+		msg.Metadata[enrichmentFailedKey] = enrichErr.Error()
+		msg.Metadata[enrichmentFailedStepKey] = enrichErrStep
+	}
 
 	// Resolve media: detect non-text messages, download files or inject descriptions
 	if len(ch.spec.Inbound.Media) > 0 {
@@ -357,7 +386,12 @@ func (ch *YAMLChannel) shouldSkip(event map[string]interface{}) bool {
 }
 
 // extractMessage builds an InboundMessage from the event using the mapping spec.
-func (ch *YAMLChannel) extractMessage(event map[string]interface{}, eventCtx map[string]string) pkg.InboundMessage {
+// extraContexts is optional: callers that ran inbound.enrich pass the
+// per-message contexts snapshot (already containing self/config/env and any
+// "enrich.<step>" namespaces) so metadata templates can reference enrichment
+// output without re-running the lookup or losing the per-message scope.
+// Pass nil for paths that have no enrichment.
+func (ch *YAMLChannel) extractMessage(event map[string]interface{}, eventCtx map[string]string, extraContexts ...map[string]map[string]string) pkg.InboundMessage {
 	msg := pkg.InboundMessage{
 		ChannelID:      ch.instanceID, // per-instance: distinct for each entry under `channels:`
 		Kind:           ch.spec.ID,    // channel TYPE: shared by all instances of this adapter
@@ -371,12 +405,15 @@ func (ch *YAMLChannel) extractMessage(event map[string]interface{}, eventCtx map
 	if len(ch.spec.Inbound.Mapping.Metadata) > 0 {
 		msg.Metadata = make(map[string]string, len(ch.spec.Inbound.Mapping.Metadata))
 		var contexts map[string]map[string]string
+		if len(extraContexts) > 0 && extraContexts[0] != nil {
+			contexts = extraContexts[0]
+		}
 		for metaKey, spec := range ch.spec.Inbound.Mapping.Metadata {
 			// Values containing {{namespace.key}} are template-expanded
-			// against channel state (self.*, config.*, env.*) so a channel
-			// can surface its own identity (e.g. {{self.bot_user_id}}) into
-			// per-message metadata. Plain strings preserve the original
-			// behavior of naming an event field to pluck.
+			// against channel state (self.*, config.*, env.*, enrich.*)
+			// so a channel can surface its own identity or per-message
+			// enrichment data into metadata. Plain strings preserve the
+			// original behavior of naming an event field to pluck.
 			if strings.Contains(spec, "{{") {
 				if contexts == nil {
 					contexts = ch.buildContexts()
