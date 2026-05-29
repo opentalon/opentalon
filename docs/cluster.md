@@ -4,6 +4,89 @@ When running multiple OpenTalon pods (e.g. in Kubernetes with `replicas: 2+`), e
 
 Setting `cluster.enabled: true` activates Redis-backed message deduplication. When a message arrives, each pod races to acquire a Redis lock (`SET NX EX`) keyed to the message's channel, conversation, and timestamp. Only the pod that wins the lock processes the message; the others silently skip it. If Redis is unreachable the lock attempt is logged as a warning and the message is processed anyway (fail-open), so a Redis outage never silences the bot.
 
+## Deployment scenarios
+
+Pick the scenario that matches your scale and availability needs. All four are first-class — OpenTalon ships with sensible defaults for the single-pod case, and the multi-pod modes are config-only changes.
+
+| Scenario | Pods | State store | Redis | When to choose |
+|---|---|---|---|---|
+| **A. Single instance** | 1 | SQLite (file) | none | Dev, single-team deploys, single-region low-traffic |
+| **B. Multi-pod, shared state** | 2+ | Postgres | Standalone (dedup only) | Production HA, rolling upgrades, basic horizontal scaling |
+| **C. Multi-pod, HA Redis** | 2+ | Postgres | Sentinel | Regulated / SLA-bound environments where dedup must survive a Redis node loss |
+| **D. Autoscaled** | 2+ (HPA) | Postgres | Standalone or Sentinel | Bursty workloads (campaign-driven spikes, batch ingestion); pods are stateless, all state in shared stores |
+
+### A. Single instance (default)
+
+No Redis, no Postgres — SQLite under `state.data_dir`. Fastest to stand up; not safe to run more than one pod against the same data directory.
+
+```yaml
+cluster:
+  enabled: false   # default
+state:
+  data_dir: ~/.opentalon
+```
+
+### B. Multi-pod, shared state
+
+Run 2+ pods behind the same channel registrations. Postgres provides shared sessions/memory; Redis provides per-message dedup so only one pod responds.
+
+```yaml
+redis:
+  redis_url: "${REDIS_URL}"
+cluster:
+  enabled: true
+  dedup_ttl: "5m"
+state:
+  db:
+    driver: postgres
+    dsn: "${DATABASE_URL}"
+```
+
+This is the recommended baseline for production. Rolling upgrades work cleanly: a new pod can take over conversations a draining pod started, because the conversation lives in Postgres, not on disk.
+
+### C. Multi-pod, HA Redis (Sentinel)
+
+For environments where a single Redis instance is unacceptable risk, point cluster mode at a Sentinel cluster. The dedup lock remains correct across Redis failovers.
+
+```yaml
+redis:
+  master_name: "mymaster"
+  sentinels:
+    - "sentinel1:26379"
+    - "sentinel2:26379"
+    - "sentinel3:26379"
+  password: "${REDIS_PASSWORD}"
+cluster:
+  enabled: true
+  dedup_ttl: "5m"
+state:
+  db:
+    driver: postgres
+    dsn: "${DATABASE_URL}"
+```
+
+Combine with Postgres read replicas / managed HA Postgres for end-to-end HA.
+
+### D. Autoscaled (HPA)
+
+Same config as scenario B or C; the difference is at the Kubernetes layer. Because all session/memory state lives in Postgres and dedup is centralized in Redis, pods are effectively stateless and can be added or removed freely under load.
+
+```yaml
+# k8s HPA snippet
+spec:
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+```
+
+Tune `dedup_ttl` to be comfortably longer than your slowest expected message round-trip — if a pod is killed mid-processing, the lock must outlast its replacement picking up the work, or the message would be re-processed.
+
 ## Configuration
 
 Redis connection details live in the top-level `redis:` block (shared with other Redis-backed subsystems such as `plugin_exec`):

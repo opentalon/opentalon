@@ -12,12 +12,13 @@
 
 ## The big ideas behind OpenTalon
 
-OpenTalon exists to solve **enterprise** issues — the gap between a chatbot demo and an AI system a real organization can actually depend on. Two essays lay out the thinking:
+OpenTalon exists to solve **enterprise** issues — the gap between a chatbot demo and an AI system a real organization can actually depend on. Three ideas drive the design:
 
 - 📘 **[Enterprise AI Orchestration](https://opakalex.github.io/posts/enterprise-ai-orchestration/)** — why one big LLM call is not an enterprise architecture, and how multi-provider routing, deterministic preprocessing, plugin isolation, and policy enforcement combine into a system that holds up in production.
 - 📘 **[Expert-in-the-Loop (EITL)](https://opakalex.github.io/posts/expert-in-the-loop/)** — moving past "human-in-the-loop" rubber-stamping toward workflows where domain experts encode rules, gates, and review steps the system enforces deterministically — implemented in OpenTalon via [Talon workflows & EITL rules](#talon-workflows--eitl-rules).
+- 🛠️ **LLMs write code, the runtime keeps it safe** — adopting the same insight behind Cloudflare's [Code Mode for MCP](https://blog.cloudflare.com/code-mode/) (LLMs are dramatically better at writing programs than at orchestrating long chains of tool calls). OpenTalon lets the LLM emit **Talon scenarios** in a deliberately restricted DSL instead of raw tool calls. The grammar physically cannot express unsafe operations, so the sandbox is structural — not a policy you hope the model follows. See [Why LLMs write Talon scenarios, not raw tool calls](#why-llms-write-talon-scenarios-not-raw-tool-calls).
 
-Everything below is in service of those two ideas.
+Everything below is in service of these three ideas.
 
 ## What is OpenTalon?
 
@@ -152,7 +153,7 @@ OpenTalon supports multiple AI providers out of the box, with a unified configur
 
 ### Why LLMs write Talon scenarios, not raw tool calls
 
-The other half of the idea: **LLMs are at their best when they write code.** They are markedly weaker when forced to orchestrate long chains of individual tool calls — drift accumulates, prompt-injection surface explodes, and you can't audit what the model "decided" to do. Cloudflare made the same bet for general agent code execution (V8 isolates / sandboxed JS for LLM-generated code): let the model produce a program, then run it in a confined runtime.
+The other half of the idea: **LLMs are at their best when they write code.** They are markedly weaker when forced to orchestrate long chains of individual tool calls — drift accumulates, prompt-injection surface explodes, and you can't audit what the model "decided" to do. Cloudflare's [**Code Mode for MCP**](https://blog.cloudflare.com/code-mode/) makes exactly this bet: instead of having the model issue tool calls one at a time, expose the MCP surface as a typed API and let the model write a small program against it, executed inside a sandboxed V8 isolate.
 
 OpenTalon applies the same bet with **Talon**:
 
