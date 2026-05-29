@@ -2637,27 +2637,20 @@ func TestPreparerInjectsAllowedTools(t *testing.T) {
 	}
 }
 
-// TestPreparerInjectsAllowedTools_emptyVsAbsentSemantics is the round-trip
-// counterpart of TestResolveAllowedToolFQNs_filtering's empty-set subtests:
-// it proves that resolveAllowedToolFQNs's two empty-set return values
-// ("" vs "[]") survive the executeCall context-arg injection path with
-// their plugin-facing semantics intact.
+// TestPreparerInjectsAllowedTools_emptyPaletteIsAlwaysExplicit is the
+// round-trip counterpart of TestResolveAllowedToolFQNs_filtering's
+// empty-set subtest: every empty-set path delivers the arg to the
+// preparer as "[]", never absent. Plugins fail-closed-by-default rely
+// on this — a buggy or older orchestrator that omits the arg would
+// otherwise still hit the fail-closed branch on the plugin side, but
+// operators would lose the "yes the palette ran and it was empty"
+// diagnostic signal that an explicit "[]" carries on the wire.
 //
-//   - profile in scope but empty effective palette → arg present with "[]"
-//     (plugin reads it as the strict zero-tools branch, fails closed)
-//   - no profile in scope → arg absent from call.Args entirely (plugin
-//     reads no value, no per-session filter applied)
-//
-// Without this pin a later change that returns "" for both cases would
-// silently degrade restricted sessions to "no filter" — the
-// defense-in-depth gap this PR closes.
-func TestPreparerInjectsAllowedTools_emptyVsAbsentSemantics(t *testing.T) {
-	// Both subtests use a registry whose ONLY action is the preparer
-	// itself, so the palette is structurally empty regardless of profile
-	// state. That isolates the empty-set arg-injection branches the
-	// resolveAllowedToolFQNs helper produces:
-	//   - profile in scope, empty effective set → arg present as "[]"
-	//   - no profile in scope (set also empty) → arg omitted entirely
+// Both subtests use a registry whose only action is the preparer
+// itself, so the palette is structurally empty regardless of profile
+// state — isolates the empty-set arg-injection path from the
+// non-empty happy path covered by TestPreparerInjectsAllowedTools.
+func TestPreparerInjectsAllowedTools_emptyPaletteIsAlwaysExplicit(t *testing.T) {
 	newOrch := func() (*Orchestrator, *map[string]string, *bool) {
 		var capturedArgs map[string]string
 		called := false
@@ -2684,11 +2677,22 @@ func TestPreparerInjectsAllowedTools_emptyVsAbsentSemantics(t *testing.T) {
 		return orch, &capturedArgs, &called
 	}
 
-	t.Run("profile in scope, empty effective palette → arg present as \"[]\"", func(t *testing.T) {
+	assertPresentEmpty := func(t *testing.T, capturedArgs map[string]string) {
+		t.Helper()
+		raw, ok := capturedArgs["allowed_tools"]
+		if !ok {
+			t.Fatalf("allowed_tools arg missing — expected present-as-\"[]\", got args=%v", capturedArgs)
+		}
+		if raw != "[]" {
+			t.Errorf("expected allowed_tools=\"[]\" (explicit empty), got %q", raw)
+		}
+	}
+
+	t.Run("profile in scope, every plugin filtered → arg present as \"[]\"", func(t *testing.T) {
 		orch, capturedArgs, called := newOrch()
 		ctx := profile.WithProfile(context.Background(), &profile.Profile{
 			EntityID: "u", Group: "g",
-			Plugins: []string{"nonexistent-plugin"}, // strict mode, palette empty
+			Plugins: []string{"nonexistent-plugin"},
 		})
 		if _, err := orch.Run(ctx, "s1", "test"); err != nil {
 			t.Fatal(err)
@@ -2696,30 +2700,22 @@ func TestPreparerInjectsAllowedTools_emptyVsAbsentSemantics(t *testing.T) {
 		if !*called {
 			t.Fatal("preparer was not called")
 		}
-		raw, ok := (*capturedArgs)["allowed_tools"]
-		if !ok {
-			t.Fatalf("allowed_tools arg missing — expected present-but-\"[]\" for restricted session, got args=%v", *capturedArgs)
-		}
-		if raw != "[]" {
-			t.Errorf("expected allowed_tools=\"[]\" for fail-closed restricted session, got %q", raw)
-		}
+		assertPresentEmpty(t, *capturedArgs)
 	})
 
-	t.Run("no profile in scope → arg absent from call.Args", func(t *testing.T) {
+	t.Run("no profile in scope, preparer-only registry → arg present as \"[]\"", func(t *testing.T) {
 		orch, capturedArgs, called := newOrch()
-		// context.Background() carries no profile → resolveAllowedPlugins.m == nil.
-		// Combined with the preparer-only registry the effective set is empty,
-		// so resolveAllowedToolFQNs returns "" and executeCall must omit the
-		// arg entirely. Plugins then treat it as "no palette known, no filter".
+		// context.Background() carries no profile → all plugins allowed, but
+		// every registered action IS the preparer itself, filtered out by
+		// preparerActionSet. Empty set, arg still emitted as "[]" — the wire
+		// stays predictable across profile states.
 		if _, err := orch.Run(context.Background(), "s1", "test"); err != nil {
 			t.Fatal(err)
 		}
 		if !*called {
 			t.Fatal("preparer was not called")
 		}
-		if v, present := (*capturedArgs)["allowed_tools"]; present {
-			t.Errorf("expected allowed_tools to be omitted for no-profile context (plugin would apply no filter), got present=%q", v)
-		}
+		assertPresentEmpty(t, *capturedArgs)
 	})
 }
 
@@ -2767,39 +2763,32 @@ func TestResolveAllowedToolFQNs_filtering(t *testing.T) {
 		}
 	})
 
-	t.Run("profile in scope but empty effective set returns \"[]\"", func(t *testing.T) {
-		// Distinguishes "fail-closed restricted session" (this case) from "no
-		// palette to enforce" (no profile, covered below). Returning "[]" here
-		// makes the plugin's strict zero-tools branch reachable — without it
-		// a locked-down profile would silently fall back to no filter.
+	t.Run("empty effective set returns \"[]\" (always; both profile-in-scope and no-profile cases)", func(t *testing.T) {
+		// resolveAllowedToolFQNs always emits JSON so the plugin sees a
+		// definitive palette on every call. Both empty-set paths — strict
+		// profile with no matching plugins, AND no-profile-context with a
+		// registry that contains only preparer-internal actions — collapse
+		// to the same wire value, because the plugin's fail-closed default
+		// makes the distinction meaningless on the consumer side.
+
+		// Path 1: profile in scope, every registered plugin filtered out.
 		ctx := profile.WithProfile(context.Background(), &profile.Profile{
 			EntityID: "u", Group: "g",
 			Plugins: []string{"nonexistent-plugin"},
 		})
-		raw := resolveAllowedToolFQNs(ctx, orch)
-		if raw != "[]" {
-			t.Errorf("expected \"[]\" for profile-in-scope empty palette, got %q", raw)
+		if raw := resolveAllowedToolFQNs(ctx, orch); raw != "[]" {
+			t.Errorf("profile-in-scope empty palette: expected \"[]\", got %q", raw)
 		}
-	})
 
-	t.Run("no profile in scope returns empty string so host omits the arg", func(t *testing.T) {
-		// The other empty-set axis: when no profile is loaded at all, there's
-		// no palette concept to enforce. Returning "" makes executeCall omit
-		// the arg entirely so plugins treat it as no-filter (fail-open). This
-		// is the bare context.Background() path — no allowedPlugins, but the
-		// registry still has the preparer action which gets filtered out by
-		// the preparerAction set; once we strip every plugin's actions the
-		// set is empty under the "no profile" precondition.
+		// Path 2: no profile, registry contains only preparer-internal actions.
 		registry := NewToolRegistry()
 		_ = registry.Register(PluginCapability{
 			Name: "rag", Description: "RAG", Actions: []Action{{Name: "prepare"}},
 		}, &echoExecutor{})
 		preparers := []ContentPreparerEntry{{Plugin: "rag", Action: "prepare"}}
 		emptyOrch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{ContentPreparers: preparers})
-
-		raw := resolveAllowedToolFQNs(context.Background(), emptyOrch)
-		if raw != "" {
-			t.Errorf("expected \"\" so host omits the arg for no-profile + empty set, got %q", raw)
+		if raw := resolveAllowedToolFQNs(context.Background(), emptyOrch); raw != "[]" {
+			t.Errorf("no-profile preparer-only registry: expected \"[]\", got %q", raw)
 		}
 	})
 

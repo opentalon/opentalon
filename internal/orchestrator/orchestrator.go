@@ -379,34 +379,25 @@ func allowedToolsSet(ctx context.Context, o *Orchestrator) map[string]struct{} {
 }
 
 // resolveAllowedToolFQNs returns the sorted JSON array of FQNs from
-// allowedToolsSet. The empty-set case distinguishes "no profile in scope
-// → no palette to enforce" from "profile in scope, but the effective
-// palette is empty → session can call zero tools":
+// allowedToolsSet. Always returns a JSON value — even "[]" for the empty
+// case — so the arg is always injected into the preparer call.
 //
-//   - no profile (resolveAllowedPlugins returns {m: nil}) → returns ""
-//     so the host's executeCall omits the arg entirely. Plugins receive
-//     no allowed_tools value and apply no per-session filter (fail-open
-//     because there is genuinely no palette to compare against).
+// The plugin contract is fail-closed when the arg is absent (deploy
+// drift, missing provider, config mistake). Sending "" here would let
+// executeCall omit the arg and silently drop the plugin into its
+// strict-zero branch even for unrestricted sessions; that's safe but
+// diagnostically opaque (operators can't tell "orchestrator forgot to
+// wire allowed_tools" apart from "session has no tools"). Always
+// emitting a JSON value keeps the wire predictable and lets the plugin
+// reason purely from the array content.
 //
-//   - profile in scope, set empty → returns "[]" so the arg is delivered
-//     as a non-nil empty JSON array. Plugins interpret this as the strict
-//     "zero tools allowed" branch and drop every retrieved action. This
-//     is the fail-closed path for restricted sessions; without it, a
-//     locked-down profile would silently degrade to "no filter".
-//
-//   - set non-empty → JSON-marshalled sorted array.
-//
-// Mirrors resolveAllowedPluginNames's contract for the "absent arg" axis
-// but adds the third state because the palette has a meaningful
-// "explicitly empty" semantic that allowed_plugins does not.
+// Unlike resolveAllowedPluginNames (which returns "" when there is no
+// profile to express, because plugins consuming allowed_plugins
+// canonically use it as an optional GraphQL WHERE filter), allowed_tools
+// is the post-retrieval chokepoint — the host's responsibility is to
+// SAY what the session may see, and "[]" is a legitimate answer.
 func resolveAllowedToolFQNs(ctx context.Context, o *Orchestrator) string {
 	set := allowedToolsSet(ctx, o)
-	if len(set) == 0 {
-		if o.resolveAllowedPlugins(ctx).m == nil {
-			return ""
-		}
-		return "[]"
-	}
 	fqns := make([]string, 0, len(set))
 	for fqn := range set {
 		fqns = append(fqns, fqn)
