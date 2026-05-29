@@ -827,6 +827,12 @@ func main() {
 		slog.Info("cluster deduplication enabled", "ttl", dedupTTL, "sentinel", len(cfg.Redis.Sentinels) > 0)
 	}
 	channelManager = channel.NewManager(reg, toolRegistry)
+	// Wire the inbound-enrichment cache. Redis-backed when the deployment
+	// already runs Redis (cache is shared across pods, survives restarts);
+	// in-memory fallback otherwise so single-pod and dev setups keep
+	// working without Redis. Channels without an inbound.enrich block
+	// ignore the cache entirely.
+	channelManager.SetEnrichCache(channel.NewEnrichCache(sharedRedis))
 	channelEntries := make([]channel.ChannelEntry, 0, len(cfg.Channels))
 	for name, ch := range cfg.Channels {
 		pathRef := ch.Plugin

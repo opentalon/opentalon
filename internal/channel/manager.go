@@ -29,6 +29,7 @@ type Manager struct {
 	connector     *Connector
 	registry      *Registry
 	toolRegistry  *orchestrator.ToolRegistry
+	enrichCache   EnrichCache // shared by every YAML channel for inbound.enrich; nil disables caching
 }
 
 // NewManager creates a channel manager.
@@ -39,6 +40,16 @@ func NewManager(registry *Registry, toolRegistry *orchestrator.ToolRegistry) *Ma
 		registry:     registry,
 		toolRegistry: toolRegistry,
 	}
+}
+
+// SetEnrichCache wires the cache used by every YAML channel for inbound.enrich
+// lookups. Call once at startup before LoadAll. Pass a Redis-backed cache when
+// the deployment has Redis configured (so cache state survives pod restarts and
+// is shared across pods) or the in-memory fallback for single-pod setups. Nil
+// or unset disables caching: every message triggers a live enrichment HTTP call,
+// which is fine for low-volume channels and tests.
+func (m *Manager) SetEnrichCache(c EnrichCache) {
+	m.enrichCache = c
 }
 
 // LoadAll connects all enabled channels and registers them.
@@ -92,6 +103,11 @@ func (m *Manager) Load(ctx context.Context, entry ChannelEntry) error {
 	// already received its instanceID at construction in the connector.
 	if pc, ok := ch.(*PluginClient); ok {
 		pc.SetInstanceID(entry.Name)
+	}
+	// YAML channels share the manager's enrich cache. Skipped for gRPC
+	// plugins — their enrichment runs in the plugin process if at all.
+	if yc, ok := ch.(*YAMLChannel); ok && m.enrichCache != nil {
+		yc.SetEnrichCache(m.enrichCache)
 	}
 
 	// If channel supports configuration, pass the config map

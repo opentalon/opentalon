@@ -64,6 +64,19 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	return func(ctx context.Context, sessionKey string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		var entityID, groupID string
 
+		// Inbound enrichment is fail-closed: if the channel adapter
+		// couldn't fetch the data the WhoAmI server (or LLM) is going
+		// to need, refuse the request rather than serve a half-known
+		// identity. The metadata flags are stamped by yaml_ws.go after
+		// runEnrich returns an error. Checked first so we don't bother
+		// the verifier with a message we already know we're rejecting.
+		if reason := msg.Metadata[enrichmentFailedKey]; reason != "" {
+			step := msg.Metadata[enrichmentFailedStepKey]
+			slog.Warn("inbound enrichment failed; rejecting message",
+				"channel", msg.ChannelID, "step", step, "reason", reason)
+			return errorFrame(msg, "We couldn't verify your account info right now. Please try again in a moment.", "enrichment_failed"), nil
+		}
+
 		// Profile verification: required when verifier is configured.
 		if cfg.Verifier != nil {
 			token := msg.Metadata["profile_token"]
@@ -232,6 +245,10 @@ func safeMetadata(m map[string]string) map[string]string {
 		out[k] = v
 	}
 	delete(out, "profile_token")
+	// Internal flags used to communicate inbound-enrichment failure between
+	// yaml_ws.go and the handler. Never echo them back to channel adapters.
+	delete(out, enrichmentFailedKey)
+	delete(out, enrichmentFailedStepKey)
 	return out
 }
 

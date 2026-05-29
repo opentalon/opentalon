@@ -107,6 +107,34 @@ func TestHandler_VerifierSuccess(t *testing.T) {
 	}
 }
 
+// TestHandler_EnrichmentFailedRejects asserts the fail-closed contract:
+// when yaml_ws.go marks a message with __enrich_failed metadata, the
+// handler short-circuits before even consulting the verifier and returns
+// a typed error frame the channel can render to the user.
+func TestHandler_EnrichmentFailedRejects(t *testing.T) {
+	// Verifier is wired but should never be called: enrich failure runs
+	// before profile verification.
+	h := newTestHandler(&stubVerifier{p: &profile.Profile{EntityID: "u1"}}, nil)
+	out := callHandler(h, map[string]string{
+		"profile_token":         "tok",
+		enrichmentFailedKey:     "step \"user\": upstream status 500",
+		enrichmentFailedStepKey: "user",
+	})
+	if !strings.Contains(out.Content, "verify your account info") {
+		t.Errorf("Content = %q, want user-visible enrichment-failed message", out.Content)
+	}
+	if got := out.Metadata["error_code"]; got != "enrichment_failed" {
+		t.Errorf("error_code = %q, want enrichment_failed", got)
+	}
+	// Internal flags must not leak back to the channel.
+	if _, ok := out.Metadata[enrichmentFailedKey]; ok {
+		t.Errorf("internal enrich-failed key leaked to outbound metadata")
+	}
+	if _, ok := out.Metadata[enrichmentFailedStepKey]; ok {
+		t.Errorf("internal enrich-failed-step key leaked to outbound metadata")
+	}
+}
+
 func TestHandler_LimitExceeded(t *testing.T) {
 	p := &profile.Profile{EntityID: "u1", Limit: 1000, LimitWindow: time.Hour}
 	checker := &stubLimitChecker{total: 1000} // at the limit

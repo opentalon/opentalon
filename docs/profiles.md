@@ -143,6 +143,36 @@ WhoAmI then receives `X-Channel-ID: <bot user id>` on every call and can branch 
 
 Metadata mapping values that contain `{{namespace.key}}` are template-expanded against channel state (`self.*`, `config.*`, `env.*`). Plain strings preserve the original behavior of naming an event field to pluck. Configured `metadata_headers` whose target header collides with `token_header`, `channel_type_header`, or any `extra_headers` entry are dropped at startup with a warning.
 
+### Per-message enrichment from the channel
+
+`metadata_headers` can also forward data the channel adapter looks up at
+message time via the `inbound.enrich` block in its `channel.yaml`. Example:
+the slack-channel calls Slack's `users.info` for every inbound message and
+extracts the sender's email and display name; opentalon then forwards them
+to WhoAmI as headers:
+
+```yaml
+profiles:
+  who_am_i:
+    metadata_headers:
+      channel_id: X-Channel-Id     # which bot
+      user_email: X-User-Email     # corp email of the human who sent the message
+      user_name:  X-User-Name      # display name (handy for audit logs)
+```
+
+Behaviour properties opentalon enforces:
+- Enrichment runs **before** WhoAmI: by the time the verifier is consulted,
+  `msg.Metadata["user_email"]` is populated (or the message has been
+  rejected with `error_code=enrichment_failed`).
+- Enrichment is **fail-closed**: any failure (HTTP non-2xx, JSON parse
+  error, missing required field) aborts the message with a user-visible
+  error frame rather than letting WhoAmI see a half-known identity.
+- Cache lookups are **namespaced per channel instance** so an admin bot
+  and a customer bot of the same kind never share enriched results even
+  when the same Slack user messages both — preserving the multi-tenancy
+  invariant. The cache uses Redis when configured (cluster-mode setups),
+  in-memory otherwise.
+
 > **TLS in production:** the shared secret prevents forged requests, but without TLS it is visible in transit and replayable. Use `https://` when the WhoAmI server is reachable from outside the cluster. Within a Kubernetes cluster (pod-to-pod over the cluster network), `http://` is acceptable — the network is already isolated and the secret never leaves the cluster.
 
 ## Dynamic plugin assignments
