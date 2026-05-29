@@ -2,6 +2,36 @@
 
 OpenTalon's profile system turns a single server instance into a secure multi-tenant service. Each client or team gets its own isolated identity — separate conversation history, memories, and plugin access — enforced at the server level with no cooperation needed from channel plugins beyond forwarding a bearer token.
 
+## The enterprise pattern: one orchestrator, many departments, one auth
+
+OpenTalon is designed to be deployed **once per organization**, not once per team. A single OpenTalon instance can serve:
+
+- **Multiple departments** — sales, support, engineering, ops, HR — each with their own conversation history, memory, and policy scope
+- **Multiple channels per department** — Slack for engineering, Teams for sales, Telegram for ops, a web widget for customer support — all backed by the same orchestrator core, same model routing, same security guards
+- **Same auth & permissions for everyone** — your existing identity provider (the WhoAmI server) is the single source of truth for who is allowed to do what. The Slack user, the Teams user, and the API caller are all resolved to the same `entity_id` and `group`, with the same plugin access rules applied uniformly
+- **Same operational surface** — one binary to deploy, one config to manage, one set of metrics to monitor, one upgrade path
+
+For enterprises this means:
+
+- **No "Slack bot vs Teams bot vs internal tool" sprawl** — they are the same brain wearing different uniforms
+- **Compliance and audit travel with the user, not the channel** — a finance person blocked from the Jira plugin is blocked everywhere they appear, automatically
+- **Department-specific customization without forking** — different `group` values get different tool sets, different `model` choices, different rules; same codebase
+- **Onboarding a new department is config, not engineering** — add the department to your auth provider, optionally map a new `group` in WhoAmI, point them at any channel
+
+```mermaid
+flowchart LR
+    SalesSlack[Sales / Slack] --> Core
+    SupportTeams[Support / Teams] --> Core
+    EngSlack[Engineering / Slack] --> Core
+    OpsTG[Ops / Telegram] --> Core
+    Web[Customer support / Web] --> Core
+    Core[OpenTalon Core] --> WhoAmI[WhoAmI auth server]
+    WhoAmI -->|"entity_id + group + plugins"| Core
+    Core --> Tools[Per-group tool surface]
+```
+
+Everything below describes the mechanism that makes this work.
+
 ## How it works
 
 1. The channel plugin attaches a **profile token** to every inbound message (`Metadata["profile_token"]`).

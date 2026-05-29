@@ -1087,3 +1087,51 @@ kubectl delete secret opentalon-secrets -n opentalon
 kubectl delete pvc opentalon-data -n opentalon
 kubectl delete namespace opentalon
 ```
+
+## Health probes
+
+OpenTalon includes a built-in gRPC health server for Kubernetes liveness and readiness probes, using the standard [gRPC Health Checking Protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md).
+
+```yaml
+health:
+  addr: ":8086"   # default; always enabled
+```
+
+| Probe | gRPC Service | Behaviour |
+|-------|-------------|-----------|
+| **Liveness** | `""` (empty) | Always `SERVING` while the process runs |
+| **Readiness** | `"opentalon"` | `SERVING` only after all plugins and channels are loaded |
+
+The readiness probe transitions automatically when late-loaded plugins come online via the retry loop. On shutdown, the health server stops first so Kubernetes stops routing traffic before plugins and channels tear down.
+
+**Kubernetes manifest example:**
+
+```yaml
+livenessProbe:
+  grpc:
+    port: 8086
+  periodSeconds: 10
+
+readinessProbe:
+  grpc:
+    port: 8086
+    service: "opentalon"
+  initialDelaySeconds: 10  # seconds after startup probe passes
+  periodSeconds: 5
+
+startupProbe:
+  grpc:
+    port: 8086
+    service: "opentalon"
+  failureThreshold: 30
+  periodSeconds: 5
+```
+
+**Verify manually with grpcurl:**
+
+```bash
+grpcurl -plaintext localhost:8086 grpc.health.v1.Health/Check
+```
+
+> If you use the [OpenTalon Kubernetes Operator](https://github.com/opentalon/k8s-operator), health probes are configured automatically — see `spec.observability.health`.
+
