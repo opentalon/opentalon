@@ -336,8 +336,11 @@ func TestExtractMessage(t *testing.T) {
 				},
 			},
 		},
-		selfVars: make(map[string]string),
-		config:   make(map[string]string),
+		// Single-instance: instanceID equals the spec kind. Multi-instance
+		// configs would assign distinct instance IDs; see TestExtractMessage_MultiInstance.
+		instanceID: "test",
+		selfVars:   make(map[string]string),
+		config:     make(map[string]string),
 	}
 
 	event := map[string]interface{}{
@@ -352,6 +355,9 @@ func TestExtractMessage(t *testing.T) {
 
 	if msg.ChannelID != "test" {
 		t.Errorf("ChannelID = %q, want %q", msg.ChannelID, "test")
+	}
+	if msg.Kind != "test" {
+		t.Errorf("Kind = %q, want %q (kind comes from spec.ID)", msg.Kind, "test")
 	}
 	if msg.ConversationID != "C123" {
 		t.Errorf("ConversationID = %q, want %q", msg.ConversationID, "C123")
@@ -368,6 +374,57 @@ func TestExtractMessage(t *testing.T) {
 	}
 	if msg.Metadata["ts"] != "1234567890.123456" {
 		t.Errorf("Metadata[ts] = %q, want %q", msg.Metadata["ts"], "1234567890.123456")
+	}
+}
+
+// TestExtractMessage_MultiInstance asserts that two YAMLChannel instances
+// sharing the same spec (kind="slack") but configured with distinct instance
+// IDs produce inbound messages whose ChannelID differs while Kind matches —
+// the invariant the dedup/session/actor scoping relies on for safe co-tenancy
+// of multiple Slack bots in one opentalon process.
+func TestExtractMessage_MultiInstance(t *testing.T) {
+	spec := &YAMLChannelSpec{
+		ID: "slack",
+		Inbound: InboundSpec{
+			Mapping: MappingSpec{
+				ConversationID: MappingField{Field: "channel"},
+				SenderID:       MappingField{Field: "user"},
+				Content:        MappingField{Field: "text"},
+			},
+		},
+	}
+	event := map[string]interface{}{"channel": "C1", "user": "U1", "text": "hi"}
+
+	admin := NewYAMLChannel(spec, ".", "slack-admin")
+	customer := NewYAMLChannel(spec, ".", "slack-customer")
+
+	mAdmin := admin.extractMessage(event, flattenToStringMap(event))
+	mCustomer := customer.extractMessage(event, flattenToStringMap(event))
+
+	if mAdmin.ChannelID == mCustomer.ChannelID {
+		t.Fatalf("two instances of kind=slack produced same ChannelID %q — sessions/dedup would collide", mAdmin.ChannelID)
+	}
+	if mAdmin.Kind != "slack" || mCustomer.Kind != "slack" {
+		t.Errorf("Kind = (%q, %q), want both slack", mAdmin.Kind, mCustomer.Kind)
+	}
+	if mAdmin.ChannelID != "slack-admin" {
+		t.Errorf("admin ChannelID = %q, want slack-admin", mAdmin.ChannelID)
+	}
+	if mCustomer.ChannelID != "slack-customer" {
+		t.Errorf("customer ChannelID = %q, want slack-customer", mCustomer.ChannelID)
+	}
+}
+
+// TestYAMLChannel_DefaultInstanceID asserts the single-instance compat path:
+// passing instanceID="" to NewYAMLChannel falls back to spec.ID so existing
+// configs that did not declare a distinct instance name continue to work.
+func TestYAMLChannel_DefaultInstanceID(t *testing.T) {
+	ch := NewYAMLChannel(&YAMLChannelSpec{ID: "slack"}, ".", "")
+	if got := ch.ID(); got != "slack" {
+		t.Errorf("ID() = %q, want slack (default to spec.ID when instanceID empty)", got)
+	}
+	if got := ch.Kind(); got != "slack" {
+		t.Errorf("Kind() = %q, want slack", got)
 	}
 }
 

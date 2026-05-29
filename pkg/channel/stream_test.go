@@ -14,6 +14,7 @@ type fakeChannel struct {
 }
 
 func (f *fakeChannel) ID() string                                         { return f.caps.ID }
+func (f *fakeChannel) Kind() string                                       { return f.caps.ID }
 func (f *fakeChannel) Capabilities() Capabilities                         { return f.caps }
 func (f *fakeChannel) Start(context.Context, chan<- InboundMessage) error { return nil }
 func (f *fakeChannel) Stop() error                                        { return nil }

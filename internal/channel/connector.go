@@ -72,7 +72,10 @@ func (c *Connector) connectYAML(ctx context.Context, entry ChannelEntry) (pkg.Ch
 		return nil, fmt.Errorf("channel %q: %w", entry.Name, err)
 	}
 	specDir := specDirFromPath(entry.Plugin)
-	ch := NewYAMLChannel(spec, specDir)
+	// entry.Name is the per-instance identifier (config-map key under
+	// `channels:` in config.yaml). Two entries that share spec.ID must
+	// have distinct entry.Name so session/dedup/actor keys do not collide.
+	ch := NewYAMLChannel(spec, specDir, entry.Name)
 	return ch, nil
 }
 

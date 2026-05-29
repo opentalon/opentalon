@@ -51,6 +51,7 @@ func LoadYAMLChannelSpec(path string) (*YAMLChannelSpec, error) {
 type YAMLChannel struct {
 	spec         *YAMLChannelSpec
 	specDir      string // directory containing the spec file (for resolving tools_file)
+	instanceID   string // per-instance identifier (config map key under `channels:`); defaults to spec.ID when set empty by caller
 	config       map[string]string
 	selfVars     map[string]string
 	selfMu       sync.RWMutex // protects selfVars (written by reRunInit, read by buildContexts)
@@ -64,19 +65,34 @@ type YAMLChannel struct {
 	jwtValidator *JWTValidator
 }
 
-// NewYAMLChannel creates a new YAMLChannel from a parsed spec.
-func NewYAMLChannel(spec *YAMLChannelSpec, specDir string) *YAMLChannel {
+// NewYAMLChannel creates a new YAMLChannel from a parsed spec. instanceID is
+// the per-instance identifier (the config-map key under `channels:`) used as
+// the message's ChannelID for session/dedup/actor scoping. Pass an empty
+// string to default to spec.ID (single-instance behavior).
+func NewYAMLChannel(spec *YAMLChannelSpec, specDir, instanceID string) *YAMLChannel {
+	if instanceID == "" {
+		instanceID = spec.ID
+	}
 	return &YAMLChannel{
-		spec:     spec,
-		specDir:  specDir,
-		config:   make(map[string]string),
-		selfVars: make(map[string]string),
-		client:   &http.Client{Timeout: 30 * time.Second},
+		spec:       spec,
+		specDir:    specDir,
+		instanceID: instanceID,
+		config:     make(map[string]string),
+		selfVars:   make(map[string]string),
+		client:     &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
-// ID returns the channel identifier from the spec.
+// ID returns the per-instance identifier — distinct for every entry under
+// `channels:` in config.yaml, even when several entries share spec.ID
+// (e.g. two Slack bots in one process).
 func (ch *YAMLChannel) ID() string {
+	return ch.instanceID
+}
+
+// Kind returns the channel TYPE from the spec (e.g. "slack"). All instances
+// of the same channel adapter share a Kind.
+func (ch *YAMLChannel) Kind() string {
 	return ch.spec.ID
 }
 
@@ -102,10 +118,16 @@ func (ch *YAMLChannel) Configure(cfg map[string]interface{}) error {
 		ch.config[k] = fmt.Sprintf("%v", v)
 	}
 
-	// Validate required env vars
+	// required_env in channel.yaml is treated as a soft hint after the
+	// multi-instance refactor: credentials should now be supplied per
+	// instance via the `config:` block in opentalon's config.yaml (which
+	// itself supports ${ENV_VAR} expansion). We warn-and-continue rather
+	// than fail when an env var is missing — the absence may simply mean
+	// the spec is out of date relative to a config-driven adapter.
 	for _, name := range ch.spec.RequiredEnv {
 		if os.Getenv(name) == "" {
-			return fmt.Errorf("channel %s: required env var %s is not set", ch.spec.ID, name)
+			slog.Warn("channel required_env var unset; expect credentials via channels.<name>.config in config.yaml",
+				"channel", ch.instanceID, "kind", ch.spec.ID, "env", name)
 		}
 	}
 

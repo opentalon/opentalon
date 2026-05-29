@@ -70,9 +70,15 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			if token == "" {
 				return errorFrame(msg, "profile token required", "token_required"), nil
 			}
-			p, err := cfg.Verifier.Verify(ctx, token, msg.ChannelID, msg.Metadata)
+			// channelType passes the channel KIND (e.g. "slack"), not the
+			// instance id. Different bot instances of the same kind should
+			// reach WhoAmI as channel_type=slack; the instance is forwarded
+			// separately via metadata_headers (e.g. msg.Metadata["channel_id"]
+			// → X-Channel-Id) so WhoAmI can grant different permissions per
+			// bot while still keying type-shaped behaviour on the kind.
+			p, err := cfg.Verifier.Verify(ctx, token, kindOf(msg), msg.Metadata)
 			if err != nil {
-				slog.Warn("profile verification failed", "error", err, "channel", msg.ChannelID)
+				slog.Warn("profile verification failed", "error", err, "channel", msg.ChannelID, "kind", msg.Kind)
 				return errorFrame(msg, "authentication failed", "auth_failed"), nil
 			}
 			p.ChannelID = msg.ChannelID
@@ -138,7 +144,10 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			cfg.CreateSession(sessionKey, entityID, groupID)
 		}
 		content := msg.Content
-		if prep := pkg.GetContentPreparer(msg.ChannelID); prep != nil {
+		// Content preparers register by channel KIND ("slack", "console")
+		// not by instance. Two Slack bots in one process share the same
+		// preparer; only their session/dedup/actor scopes are isolated.
+		if prep := pkg.GetContentPreparer(kindOf(msg)); prep != nil {
 			content = prep(ctx, content, cfg.RunAction, cfg.HasAction)
 		}
 		response, inputForDisplay, resultMeta, err := cfg.Runner.Run(ctx, sessionKey, content, msg.Files...)
@@ -151,7 +160,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		if outContent == "" {
 			outContent = "(No response)"
 		}
-		if msg.ChannelID == "console" && inputForDisplay != "" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		if kindOf(msg) == "console" && inputForDisplay != "" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 			outContent = "Input to LLM:\n" + inputForDisplay + "\n\n---\n\nResponse:\n" + response
 		}
 		outMeta := safeMetadata(msg.Metadata)
@@ -168,6 +177,20 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			Metadata:       outMeta,
 		}, nil
 	}
+}
+
+// kindOf returns the channel TYPE for a message. Prefers msg.Kind (set by
+// channel adapters once they declare a kind distinct from instance id) and
+// falls back to msg.ChannelID for older channels that haven't been updated
+// yet — where there is only ever one instance, ChannelID still holds the
+// kind by convention. Callers that need to distinguish instance from kind
+// (preparers, console-debug check, WhoAmI channel_type) should route through
+// this helper rather than reading msg.Kind directly.
+func kindOf(msg pkg.InboundMessage) string {
+	if msg.Kind != "" {
+		return msg.Kind
+	}
+	return msg.ChannelID
 }
 
 // errorFrame builds a typed error response with the {type:error, error_code:<code>}

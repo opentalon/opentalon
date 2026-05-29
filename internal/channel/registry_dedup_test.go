@@ -41,6 +41,7 @@ type stubChannel struct {
 }
 
 func (c *stubChannel) ID() string                                          { return c.id }
+func (c *stubChannel) Kind() string                                        { return c.id }
 func (c *stubChannel) Capabilities() pkg.Capabilities                      { return pkg.Capabilities{} }
 func (c *stubChannel) Stop() error                                         { return nil }
 func (c *stubChannel) Send(_ context.Context, _ pkg.OutboundMessage) error { return nil }
