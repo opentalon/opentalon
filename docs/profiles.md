@@ -68,6 +68,7 @@ profiles:
     plugins_field: plugins        # JSON key for plugin list; default "plugins"
     model_field: model            # JSON key for model override; default "model"
     extra_headers: {}             # static headers added to every WhoAmI call (see below)
+    metadata_headers: {}          # forward per-message metadata as headers (see below)
 ```
 
 ### Using platform user IDs as the token
@@ -112,6 +113,35 @@ inbound:
 ```
 
 `extra_headers` values support `${ENV_VAR}` expansion. The headers are added to every WhoAmI call alongside the main token header.
+
+### Distinguishing multiple bots of the same channel type
+
+If you run more than one bot on the same channel (e.g. an admin Slack bot and a customer Slack bot that share an opentalon deployment), the WhoAmI server needs to know which bot a request came from so it can return different groups, plugins, or limits. The token alone is the end-user's platform ID — it's the same regardless of which bot the user is talking to.
+
+Use `metadata_headers` to forward per-bot identity into WhoAmI:
+
+```yaml
+profiles:
+  who_am_i:
+    url: "https://auth.example.com/whoami"
+    metadata_headers:
+      channel_id: X-Channel-ID    # forward msg.Metadata["channel_id"] as X-Channel-ID
+```
+
+Each channel adapter declares what fills `channel_id`. For Slack, the bot's user ID is the natural identifier:
+
+```yaml
+# slack-channel/channel.yaml
+inbound:
+  mapping:
+    metadata:
+      profile_token: "user"
+      channel_id: "{{self.bot_user_id}}"   # template expands from channel state
+```
+
+WhoAmI then receives `X-Channel-ID: <bot user id>` on every call and can branch on it. The verifier cache key includes every `metadata_headers` value, so two bots that share a user token never collide on a cached profile.
+
+Metadata mapping values that contain `{{namespace.key}}` are template-expanded against channel state (`self.*`, `config.*`, `env.*`). Plain strings preserve the original behavior of naming an event field to pluck. Configured `metadata_headers` whose target header collides with `token_header`, `channel_type_header`, or any `extra_headers` entry are dropped at startup with a warning.
 
 > **TLS in production:** the shared secret prevents forged requests, but without TLS it is visible in transit and replayable. Use `https://` when the WhoAmI server is reachable from outside the cluster. Within a Kubernetes cluster (pod-to-pod over the cluster network), `http://` is acceptable — the network is already isolated and the secret never leaves the cluster.
 

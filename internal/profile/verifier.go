@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -49,6 +50,31 @@ type VerifierConfig struct {
 	LanguageField     string            // optional JSON field for user language; default "language"
 	BudgetTokensField string            // optional JSON field for reasoning budget tokens; default "budget_tokens"
 	ExtraHeaders      map[string]string // static headers sent on every WhoAmI call; ${ENV_VAR} expanded once at construction
+	// MetadataHeaders maps an inbound metadata key to an outbound HTTP header
+	// name. For each entry, Verify reads metadata[key] from its caller and
+	// sends the value under the named header. The values are also folded into
+	// the cache key so distinct identities (e.g. two Slack bots sharing a user
+	// token) never collide on a cached Profile.
+	MetadataHeaders map[string]string
+}
+
+// orderedMetadataHeaders returns the MetadataHeaders entries sorted by
+// metadata key so callers iterate in a stable order — required for the cache
+// key to be deterministic regardless of map iteration order.
+func (c *VerifierConfig) orderedMetadataHeaders() []struct{ Key, Header string } {
+	if len(c.MetadataHeaders) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(c.MetadataHeaders))
+	for k := range c.MetadataHeaders {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]struct{ Key, Header string }, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, struct{ Key, Header string }{Key: k, Header: c.MetadataHeaders[k]})
+	}
+	return out
 }
 
 func (c *VerifierConfig) setDefaults() {
@@ -121,6 +147,38 @@ func (c *VerifierConfig) setDefaults() {
 			expanded[k] = val
 		}
 		c.ExtraHeaders = expanded
+	}
+	// Drop MetadataHeaders entries whose target header collides with TokenHeader
+	// or ChannelTypeHeader, or with any ExtraHeaders entry — silently letting
+	// these through would overwrite auth, channel-type, or static headers on
+	// every request. Canonical header keys are compared.
+	if len(c.MetadataHeaders) > 0 {
+		canonicalToken := textproto.CanonicalMIMEHeaderKey(c.TokenHeader)
+		var canonicalChannel string
+		if c.ChannelTypeHeader != "" {
+			canonicalChannel = textproto.CanonicalMIMEHeaderKey(c.ChannelTypeHeader)
+		}
+		reserved := map[string]string{canonicalToken: "token_header"}
+		if canonicalChannel != "" {
+			reserved[canonicalChannel] = "channel_type_header"
+		}
+		for k := range c.ExtraHeaders {
+			reserved[textproto.CanonicalMIMEHeaderKey(k)] = "extra_headers"
+		}
+		filtered := make(map[string]string, len(c.MetadataHeaders))
+		for metaKey, header := range c.MetadataHeaders {
+			if header == "" {
+				slog.Warn("whoami metadata_header has empty target header; ignoring", "metadata_key", metaKey)
+				continue
+			}
+			canonical := textproto.CanonicalMIMEHeaderKey(header)
+			if collides, ok := reserved[canonical]; ok {
+				slog.Warn("whoami metadata_header collides with reserved header; ignoring", "metadata_key", metaKey, "header", header, "collides_with", collides)
+				continue
+			}
+			filtered[metaKey] = header
+		}
+		c.MetadataHeaders = filtered
 	}
 }
 
@@ -197,12 +255,35 @@ func (v *Verifier) cleanupLoop() {
 	}
 }
 
+// cacheKey hashes the inputs that uniquely identify a WhoAmI request: the
+// bearer token, the channel type, and every metadata value that is configured
+// to be forwarded as a header. Folding metadata values in is what keeps two
+// bots that share a user token from colliding on a single cached Profile.
+func (v *Verifier) cacheKey(token, channelType string, metadata map[string]string) [32]byte {
+	h := sha256.New()
+	h.Write([]byte(token))
+	h.Write([]byte{0})
+	h.Write([]byte(channelType))
+	for _, mh := range v.cfg.orderedMetadataHeaders() {
+		h.Write([]byte{0})
+		h.Write([]byte(mh.Key))
+		h.Write([]byte{'='})
+		h.Write([]byte(metadata[mh.Key]))
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
 // Verify returns the Profile for token, using the cache when valid.
 // channelType is the originating channel ID (e.g. "slack", "telegram") and is
 // forwarded to the WhoAmI server if ChannelTypeHeader is configured.
+// metadata is the inbound-message metadata map; values for keys configured in
+// MetadataHeaders are forwarded as HTTP headers and folded into the cache key
+// so distinct identities (e.g. two Slack bots) never share cached profiles.
 // Returns ErrAuthFailed if the server rejects the token or returns incomplete data.
-func (v *Verifier) Verify(ctx context.Context, token, channelType string) (*Profile, error) {
-	key := sha256.Sum256([]byte(token + "\x00" + channelType))
+func (v *Verifier) Verify(ctx context.Context, token, channelType string, metadata map[string]string) (*Profile, error) {
+	key := v.cacheKey(token, channelType, metadata)
 
 	v.mu.Lock()
 	if e, ok := v.cache[key]; ok && time.Now().Before(e.expiresAt) {
@@ -211,7 +292,7 @@ func (v *Verifier) Verify(ctx context.Context, token, channelType string) (*Prof
 	}
 	v.mu.Unlock()
 
-	p, err := v.callServer(ctx, token, channelType)
+	p, err := v.callServer(ctx, token, channelType, metadata)
 	if err != nil {
 		var rejected rejectedError
 		if errors.As(err, &rejected) {
@@ -266,7 +347,7 @@ func (v *Verifier) evictLocked() {
 	}
 }
 
-func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*Profile, error) {
+func (v *Verifier) callServer(ctx context.Context, token, channelType string, metadata map[string]string) (*Profile, error) {
 	req, err := http.NewRequestWithContext(ctx, v.cfg.Method, v.cfg.URL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: build request: %v", ErrAuthFailed, err)
@@ -277,6 +358,11 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string) (*
 	}
 	for k, val := range v.cfg.ExtraHeaders {
 		req.Header.Set(k, val)
+	}
+	for _, mh := range v.cfg.orderedMetadataHeaders() {
+		if val := metadata[mh.Key]; val != "" {
+			req.Header.Set(mh.Header, val)
+		}
 	}
 
 	// Log the outgoing request for debugging (token value is redacted).

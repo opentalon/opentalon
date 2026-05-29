@@ -16,7 +16,7 @@ import (
 
 // ProfileVerifier is the subset of profile.Verifier used by the handler.
 type ProfileVerifier interface {
-	Verify(ctx context.Context, token, channelType string) (*profile.Profile, error)
+	Verify(ctx context.Context, token, channelType string, metadata map[string]string) (*profile.Profile, error)
 }
 
 // LimitChecker checks how many tokens an entity has consumed within a rolling window.
@@ -70,7 +70,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			if token == "" {
 				return errorFrame(msg, "profile token required", "token_required"), nil
 			}
-			p, err := cfg.Verifier.Verify(ctx, token, msg.ChannelID)
+			p, err := cfg.Verifier.Verify(ctx, token, msg.ChannelID, msg.Metadata)
 			if err != nil {
 				slog.Warn("profile verification failed", "error", err, "channel", msg.ChannelID)
 				return errorFrame(msg, "authentication failed", "auth_failed"), nil
