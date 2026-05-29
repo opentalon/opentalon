@@ -26,6 +26,7 @@ import (
 	"github.com/opentalon/opentalon/internal/state/store/events"
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 	pkgchannel "github.com/opentalon/opentalon/pkg/channel"
+	"github.com/opentalon/opentalon/pkg/plugin/contextargs"
 )
 
 const maxAgentLoopIterations = 20
@@ -271,6 +272,14 @@ type Orchestrator struct {
 	preparers               []ContentPreparerEntry
 	formatters              []ResponseFormatterEntry      // run after final response; text-in/text-out
 	guards                  []ContentPreparerEntry        // subset of preparers with Guard:true; run before every LLM call
+	// preparerActions is the immutable "plugin.action" set of all
+	// preparers + guards, computed once in NewWithRules from the
+	// preparers/guards slices above (both append-once at construction).
+	// Reads happen on every Run (system prompt assembly, native tool
+	// definitions, palette computation) and every _meta.get_tool_details
+	// call — rebuilding the map per read is wasted work that scales
+	// linearly with the LLM's appetite for meta-tool lookups.
+	preparerActions         map[string]bool
 	luaScriptPaths          map[string]string             // optional; plugin name -> path to .lua script (for "lua:name" preparers)
 	permissionChecker       PermissionChecker             // optional; when set, executeCall checks permission before running
 	permissionPluginName    string                        // name of the permission plugin (skip permission check when executing it)
@@ -360,7 +369,7 @@ func resolveAllowedPluginNames(ctx context.Context, o *Orchestrator) string {
 // defense-in-depth gap the palette exists to close.
 func allowedToolsSet(ctx context.Context, o *Orchestrator) map[string]struct{} {
 	allowedPlugins := o.resolveAllowedPlugins(ctx)
-	preparerAction := preparerActionSet(o.preparers, o.guards)
+	preparerAction := o.preparerActions
 
 	set := make(map[string]struct{})
 	for _, cap := range o.registry.ListCapabilities() {
@@ -413,11 +422,11 @@ func resolveAllowedToolFQNs(ctx context.Context, o *Orchestrator) string {
 // conversation text, or other sensitive user content is exposed via this mechanism.
 func defaultContextArgProviders(o *Orchestrator, custom map[string]ContextArgProvider) map[string]ContextArgProvider {
 	builtin := map[string]ContextArgProvider{
-		"session_id": func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
-		"allowed_plugins": func(ctx context.Context, _ string) string {
+		contextargs.SessionID: func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
+		contextargs.AllowedPlugins: func(ctx context.Context, _ string) string {
 			return resolveAllowedPluginNames(ctx, o)
 		},
-		"allowed_tools": func(ctx context.Context, _ string) string {
+		contextargs.AllowedTools: func(ctx context.Context, _ string) string {
 			return resolveAllowedToolFQNs(ctx, o)
 		},
 	}
@@ -539,6 +548,7 @@ func NewWithRules(
 		preparers:               preparers,
 		formatters:              opts.ResponseFormatters,
 		guards:                  guards,
+		preparerActions:         preparerActionSet(preparers, guards),
 		luaScriptPaths:          opts.LuaScriptPaths,
 		permissionChecker:       opts.PermissionChecker,
 		permissionPluginName:    opts.PermissionPluginName,
@@ -2464,7 +2474,7 @@ func (o *Orchestrator) supportsNativeTools() bool {
 // for native function calling. Only includes actions visible to the current profile.
 func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.ToolDefinition {
 	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
-	preparerAction := preparerActionSet(o.preparers, o.guards)
+	preparerAction := o.preparerActions
 
 	relevantToolSet := make(map[string]bool)
 	rtTools, relevantToolsActive := relevantToolsFromContext(ctx)
@@ -3471,7 +3481,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	}
 
 	// Don't list content-preparer or guard actions as tools; they run automatically before LLM calls.
-	preparerAction := preparerActionSet(o.preparers, o.guards)
+	preparerAction := o.preparerActions
 
 	// Resolve the set of plugins allowed for the current profile group (if any).
 	allowedPlugins := o.resolveAllowedPlugins(ctx)
