@@ -279,6 +279,19 @@ OpenTalon supports multiple AI providers out of the box, with a unified configur
 
 **Expert-in-the-Loop (EITL)** flips the relationship. Domain experts write the rules once, in a deterministic language; the system enforces them every time without asking a human to babysit.
 
+### Why LLMs write Talon scenarios, not raw tool calls
+
+The other half of the idea: **LLMs are at their best when they write code.** They are markedly weaker when forced to orchestrate long chains of individual tool calls — drift accumulates, prompt-injection surface explodes, and you can't audit what the model "decided" to do. Cloudflare made the same bet for general agent code execution (V8 isolates / sandboxed JS for LLM-generated code): let the model produce a program, then run it in a confined runtime.
+
+OpenTalon applies the same bet with **Talon**:
+
+- Instead of emitting a sequence of tool calls, the LLM writes a **Talon scenario** — a small program in a domain-specific language that the orchestrator compiles and executes.
+- Talon is **deliberately restricted**. No general I/O, no arbitrary process execution, no shell, no `eval`. The only actions available inside Talon are the ones the host orchestrator explicitly exposed — so the same `user_only`, sanitization, namespace, and isolation guarantees that protect individual tool calls also protect Talon programs by construction.
+- This shifts the safety boundary from *"can we trust the LLM to behave?"* to *"can the language even express the unsafe thing?"* — and the answer is no, because the grammar doesn't include it.
+- Experts and the LLM speak the **same restricted language**, against the same surface. Experts define policy in Talon; the LLM proposes scenarios in Talon; the runtime is the only thing that decides what runs.
+
+The LLM gets to use what it's actually good at (writing code). The enterprise gets a sandbox that physically cannot execute the dangerous thing.
+
 ### How OpenTalon implements EITL
 
 The [**talon-plugin**](https://github.com/opentalon/talon-plugin) installs like any other OpenTalon plugin — no special orchestrator config knob. It uses the [`talon-language` Go SDK](https://github.com/opentalon/talon-language/tree/master/pkg/talon) to compile and execute **Talon source**: a small, expert-readable language for describing multi-step workflows, approval gates, conditional branches, and rule-driven escalation.
