@@ -259,19 +259,19 @@ type sessionMutex struct {
 }
 
 type Orchestrator struct {
-	sessionMuxMu            sync.Mutex               // guards sessionMuxes map
-	sessionMuxes            map[string]*sessionMutex // per-session serialization
-	semaphore               chan struct{}            // nil = unlimited; cap = MaxConcurrentSessions
-	llm                     LLMClient
-	parser                  ToolCallParser
-	registry                *ToolRegistry
-	memory                  MemoryStoreInterface
-	sessions                SessionStoreInterface
-	guard                   *Guard
-	rules                   *RulesConfig
-	preparers               []ContentPreparerEntry
-	formatters              []ResponseFormatterEntry      // run after final response; text-in/text-out
-	guards                  []ContentPreparerEntry        // subset of preparers with Guard:true; run before every LLM call
+	sessionMuxMu sync.Mutex               // guards sessionMuxes map
+	sessionMuxes map[string]*sessionMutex // per-session serialization
+	semaphore    chan struct{}            // nil = unlimited; cap = MaxConcurrentSessions
+	llm          LLMClient
+	parser       ToolCallParser
+	registry     *ToolRegistry
+	memory       MemoryStoreInterface
+	sessions     SessionStoreInterface
+	guard        *Guard
+	rules        *RulesConfig
+	preparers    []ContentPreparerEntry
+	formatters   []ResponseFormatterEntry // run after final response; text-in/text-out
+	guards       []ContentPreparerEntry   // subset of preparers with Guard:true; run before every LLM call
 	// preparerActions is the immutable "plugin.action" set of all
 	// preparers + guards, computed once in NewWithRules from the
 	// preparers/guards slices above (both append-once at construction).
