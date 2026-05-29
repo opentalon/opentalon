@@ -25,8 +25,15 @@ const (
 )
 
 type ConfigureRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Config        *structpb.Struct       `protobuf:"bytes,1,opt,name=config,proto3" json:"config,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Config *structpb.Struct       `protobuf:"bytes,1,opt,name=config,proto3" json:"config,omitempty"`
+	// instance_id is the opentalon-assigned per-channel-entry identifier (the
+	// key under `channels:` in config.yaml). Channel plugins that emit
+	// InboundMessage.channel_id should use this value instead of their static
+	// spec id when multiple instances of the same kind are configured. Empty
+	// when opentalon is older than this field or when the channel is not
+	// instance-aware; plugins may fall back to their spec id in that case.
+	InstanceId    string `protobuf:"bytes,2,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -66,6 +73,13 @@ func (x *ConfigureRequest) GetConfig() *structpb.Struct {
 		return x.Config
 	}
 	return nil
+}
+
+func (x *ConfigureRequest) GetInstanceId() string {
+	if x != nil {
+		return x.InstanceId
+	}
+	return ""
 }
 
 type ConfigureResponse struct {
@@ -361,7 +375,12 @@ func (*SendResponse) Descriptor() ([]byte, []int) {
 }
 
 type InboundMessage struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// channel_id is the per-instance identifier opentalon assigns to a channel
+	// entry (the key under `channels:` in config.yaml). Used for session keys,
+	// dedup, and actor scoping — distinct instances of the same kind must not
+	// share these. Channel plugins may emit either this field or rely on
+	// opentalon stamping it host-side; see kind below.
 	ChannelId      string                 `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	ConversationId string                 `protobuf:"bytes,2,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
 	ThreadId       string                 `protobuf:"bytes,3,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
@@ -371,8 +390,16 @@ type InboundMessage struct {
 	Files          []*FileAttachment      `protobuf:"bytes,7,rep,name=files,proto3" json:"files,omitempty"`
 	Metadata       map[string]string      `protobuf:"bytes,8,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Timestamp      *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// kind is the channel TYPE (e.g. "slack", "telegram", "console"). Used for
+	// type-based routing: content preparer registration, WhoAmI channel_type
+	// header, channel-format-specific code paths. Distinct from channel_id so
+	// two Slack bot instances share kind="slack" while having distinct
+	// channel_ids. Plugins SHOULD set this to their spec id; if empty,
+	// opentalon falls back to channel_id for backwards-compat with older
+	// plugin builds.
+	Kind          string `protobuf:"bytes,10,opt,name=kind,proto3" json:"kind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *InboundMessage) Reset() {
@@ -466,6 +493,13 @@ func (x *InboundMessage) GetTimestamp() *timestamppb.Timestamp {
 		return x.Timestamp
 	}
 	return nil
+}
+
+func (x *InboundMessage) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
 }
 
 type OutboundMessage struct {
@@ -724,9 +758,11 @@ var File_channel_proto protoreflect.FileDescriptor
 
 const file_channel_proto_rawDesc = "" +
 	"\n" +
-	"\rchannel.proto\x12\x14opentalon.channel.v1\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"C\n" +
+	"\rchannel.proto\x12\x14opentalon.channel.v1\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"d\n" +
 	"\x10ConfigureRequest\x12/\n" +
-	"\x06config\x18\x01 \x01(\v2\x17.google.protobuf.StructR\x06config\"\x13\n" +
+	"\x06config\x18\x01 \x01(\v2\x17.google.protobuf.StructR\x06config\x12\x1f\n" +
+	"\vinstance_id\x18\x02 \x01(\tR\n" +
+	"instanceId\"\x13\n" +
 	"\x11ConfigureResponse\"K\n" +
 	"\rToolsResponse\x12:\n" +
 	"\x05tools\x18\x01 \x03(\v2$.opentalon.channel.v1.ToolDefinitionR\x05tools\"\xbc\x03\n" +
@@ -751,7 +787,7 @@ const file_channel_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1a\n" +
 	"\brequired\x18\x03 \x01(\bR\brequired\"\x0e\n" +
-	"\fSendResponse\"\xd0\x03\n" +
+	"\fSendResponse\"\xe4\x03\n" +
 	"\x0eInboundMessage\x12\x1d\n" +
 	"\n" +
 	"channel_id\x18\x01 \x01(\tR\tchannelId\x12'\n" +
@@ -763,7 +799,9 @@ const file_channel_proto_rawDesc = "" +
 	"\acontent\x18\x06 \x01(\tR\acontent\x12:\n" +
 	"\x05files\x18\a \x03(\v2$.opentalon.channel.v1.FileAttachmentR\x05files\x12N\n" +
 	"\bmetadata\x18\b \x03(\v22.opentalon.channel.v1.InboundMessage.MetadataEntryR\bmetadata\x128\n" +
-	"\ttimestamp\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x1a;\n" +
+	"\ttimestamp\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12\x12\n" +
+	"\x04kind\x18\n" +
+	" \x01(\tR\x04kind\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xbb\x02\n" +

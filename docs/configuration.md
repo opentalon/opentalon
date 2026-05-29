@@ -299,6 +299,45 @@ channels:
 - The first run resolves `ref` to a commit, clones into `<state_dir>/plugins/<name>/` or `<state_dir>/channels/<name>/`, runs `go build`, and writes **`plugins.lock`** or **`channels.lock`** under the state dir with the resolved commit and binary path.
 - Later runs reuse the locked version until you change `ref` or delete the lock entry. Requires `git` and `go` on the host.
 
+### Multiple instances of the same channel
+
+The map key under `channels:` is the **per-instance identifier**: it scopes
+sessions, dedup, and actor IDs. The channel adapter declares a separate
+**kind** (its `spec.id`, e.g. `slack`) which drives type-based routing
+(content preparers, the WhoAmI `channel_type` header). The two are
+deliberately distinct so a single opentalon process can host more than one
+instance of the same kind — e.g. an admin Slack bot alongside a customer
+one — with their messages isolated from each other.
+
+```yaml
+channels:
+  slack-admin:
+    enabled: true
+    github: "opentalon/slack-channel"
+    ref: "master"
+    config:
+      app_token: ${SLACK_APP_TOKEN_ADMIN}
+      bot_token: ${SLACK_BOT_TOKEN_ADMIN}
+  slack-customer:
+    enabled: true
+    github: "opentalon/slack-channel"
+    ref: "master"
+    config:
+      app_token: ${SLACK_APP_TOKEN_CUSTOMER}
+      bot_token: ${SLACK_BOT_TOKEN_CUSTOMER}
+```
+
+Inbound messages from `slack-admin` carry `ChannelID="slack-admin"` and
+`Kind="slack"`; from `slack-customer` they carry `ChannelID="slack-customer"`
+and `Kind="slack"`. Pair with `profiles.who_am_i.metadata_headers` (see
+`docs/profiles.md`) to let the WhoAmI server grant different groups or
+limits per bot — the channel writes its own bot user ID into
+`msg.Metadata["channel_id"]` and opentalon forwards it as a configured HTTP
+header.
+
+Credentials live inside the per-instance `config:` block; `${ENV_VAR}`
+expansion runs against the host environment so secrets stay out of YAML.
+
 ## Full Example
 
 ```yaml

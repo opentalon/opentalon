@@ -359,7 +359,8 @@ func (ch *YAMLChannel) shouldSkip(event map[string]interface{}) bool {
 // extractMessage builds an InboundMessage from the event using the mapping spec.
 func (ch *YAMLChannel) extractMessage(event map[string]interface{}, eventCtx map[string]string) pkg.InboundMessage {
 	msg := pkg.InboundMessage{
-		ChannelID:      ch.spec.ID,
+		ChannelID:      ch.instanceID, // per-instance: distinct for each entry under `channels:`
+		Kind:           ch.spec.ID,    // channel TYPE: shared by all instances of this adapter
 		ConversationID: ch.getMappedField(event, ch.spec.Inbound.Mapping.ConversationID),
 		SenderID:       ch.getMappedField(event, ch.spec.Inbound.Mapping.SenderID),
 		Content:        ch.getMappedField(event, ch.spec.Inbound.Mapping.Content),

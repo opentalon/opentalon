@@ -84,6 +84,16 @@ func (m *Manager) Load(ctx context.Context, entry ChannelEntry) error {
 		return err
 	}
 
+	// gRPC plugins do not know their instance id from the channel.yaml
+	// alone — opentalon is the only place that knows the config-map key.
+	// Stamp it on the client before Configure so the value flows to the
+	// plugin in the same call and is available for receiveLoop's
+	// host-side ChannelID override on inbound messages. YAMLChannel
+	// already received its instanceID at construction in the connector.
+	if pc, ok := ch.(*PluginClient); ok {
+		pc.SetInstanceID(entry.Name)
+	}
+
 	// If channel supports configuration, pass the config map
 	if cc, ok := ch.(pkg.ConfigurableChannel); ok && len(entry.Config) > 0 {
 		if err := cc.Configure(entry.Config); err != nil {

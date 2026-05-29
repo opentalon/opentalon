@@ -27,6 +27,7 @@ func capabilitiesToProto(c Capabilities) *channelpb.ChannelCapabilities {
 func inboundToProto(m InboundMessage) *channelpb.InboundMessage {
 	pb := &channelpb.InboundMessage{
 		ChannelId:      m.ChannelID,
+		Kind:           m.Kind,
 		ConversationId: m.ConversationID,
 		ThreadId:       m.ThreadID,
 		SenderId:       m.SenderID,

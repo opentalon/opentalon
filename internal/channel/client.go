@@ -19,9 +19,10 @@ import (
 // PluginClient connects to a channel plugin over gRPC
 // and implements the pkg.Channel interface.
 type PluginClient struct {
-	conn   *grpc.ClientConn
-	client channelpb.ChannelServiceClient
-	caps   pkg.Capabilities
+	conn       *grpc.ClientConn
+	client     channelpb.ChannelServiceClient
+	caps       pkg.Capabilities
+	instanceID string // per-instance identifier assigned by opentalon (config-map key)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -72,19 +73,43 @@ func (c *PluginClient) fetchCapabilities(ctx context.Context) error {
 	return nil
 }
 
-// ID returns the channel's unique identifier.
-func (c *PluginClient) ID() string { return c.caps.ID }
+// ID returns the per-instance identifier. Defaults to the plugin's
+// capability ID (its kind) for single-instance setups where opentalon never
+// called SetInstanceID; multi-instance configurations override this via
+// SetInstanceID before Start.
+func (c *PluginClient) ID() string {
+	if c.instanceID != "" {
+		return c.instanceID
+	}
+	return c.caps.ID
+}
+
+// Kind returns the channel TYPE as reported by the plugin in its
+// Capabilities response (e.g. "slack"). Shared by all instances of the
+// same plugin.
+func (c *PluginClient) Kind() string { return c.caps.ID }
+
+// SetInstanceID assigns the per-instance identifier opentalon uses for
+// session/dedup/actor scoping. Manager calls this once before Start when
+// the channel entry's config-map key differs from the plugin's spec id.
+func (c *PluginClient) SetInstanceID(id string) { c.instanceID = id }
 
 // Capabilities returns the channel's declared capabilities.
 func (c *PluginClient) Capabilities() pkg.Capabilities { return c.caps }
 
-// Configure sends channel-specific config to the plugin before start.
+// Configure sends channel-specific config to the plugin before start. The
+// instance ID is forwarded too — plugins that emit InboundMessage.channel_id
+// should use this value rather than their static spec id so two installations
+// of the same plugin keep distinct identities across the wire.
 func (c *PluginClient) Configure(config map[string]interface{}) error {
 	s, err := structpb.NewStruct(config)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	_, err = c.client.Configure(context.Background(), &channelpb.ConfigureRequest{Config: s})
+	_, err = c.client.Configure(context.Background(), &channelpb.ConfigureRequest{
+		Config:     s,
+		InstanceId: c.instanceID,
+	})
 	if err != nil {
 		return fmt.Errorf("configure: %w", err)
 	}
@@ -122,8 +147,17 @@ func (c *PluginClient) receiveLoop(stream channelpb.ChannelService_StartClient, 
 		if err != nil {
 			return
 		}
+		converted := inboundFromProto(msg)
+		// Host-side instance stamp: opentalon assigned this client's
+		// instance id at construction; trust it over whatever the
+		// plugin chose to put in channel_id. A misconfigured or older
+		// plugin can therefore never make two instances of itself
+		// collide on session/dedup/actor keys.
+		if c.instanceID != "" {
+			converted.ChannelID = c.instanceID
+		}
 		select {
-		case inbox <- inboundFromProto(msg):
+		case inbox <- converted:
 		case <-c.ctx.Done():
 			return
 		}
@@ -171,8 +205,19 @@ func inboundFromProto(pb *channelpb.InboundMessage) pkg.InboundMessage {
 	if pb == nil {
 		return pkg.InboundMessage{}
 	}
+	// Kind: prefer the explicit field; older plugins set channel_id with
+	// their spec id (which was the kind in the single-instance world), so
+	// fall back to it. ChannelID stamping happens in receiveLoop after
+	// this call so the host-known instance id always wins; we keep the
+	// pb.ChannelId fallback here for stand-alone inboundFromProto callers
+	// (tests, replay).
+	kind := pb.Kind
+	if kind == "" {
+		kind = pb.ChannelId
+	}
 	m := pkg.InboundMessage{
 		ChannelID:      pb.ChannelId,
+		Kind:           kind,
 		ConversationID: pb.ConversationId,
 		ThreadID:       pb.ThreadId,
 		SenderID:       pb.SenderId,

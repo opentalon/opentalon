@@ -28,6 +28,7 @@ func newMockChannel(id string) *mockChannel {
 }
 
 func (m *mockChannel) ID() string                     { return m.id }
+func (m *mockChannel) Kind() string                   { return m.id }
 func (m *mockChannel) Capabilities() pkg.Capabilities { return m.caps }
 
 func (m *mockChannel) Start(_ context.Context, inbox chan<- pkg.InboundMessage) error {
@@ -155,6 +156,37 @@ func TestRegistryDuplicateRegister(t *testing.T) {
 	ch2 := newMockChannel("slack")
 	if err := reg.Register(ch2); err == nil {
 		t.Fatal("expected error for duplicate registration")
+	}
+}
+
+// TestRegistryMultiInstanceSameKind asserts the load-bearing multi-instance
+// invariant: two channels with the same Kind() but distinct ID() values can
+// register together without collision, and lookups resolve to the correct
+// instance. Without this property, two Slack bots in one opentalon process
+// would either fail to start (collision) or interleave sessions and dedup
+// state (silent corruption).
+func TestRegistryMultiInstanceSameKind(t *testing.T) {
+	reg := NewRegistry(echoHandler)
+	defer reg.StopAll()
+
+	admin := newMockChannel("slack-admin")
+	customer := newMockChannel("slack-customer")
+	// Both report kind="slack" via the mock's Kind() method, but distinct IDs.
+	if err := reg.Register(admin); err != nil {
+		t.Fatalf("Register admin: %v", err)
+	}
+	if err := reg.Register(customer); err != nil {
+		t.Fatalf("Register customer: %v", err)
+	}
+
+	if len(reg.List()) != 2 {
+		t.Fatalf("List len = %d, want 2", len(reg.List()))
+	}
+	if got, ok := reg.Get("slack-admin"); !ok || got.ID() != "slack-admin" {
+		t.Errorf("Get(slack-admin) failed or returned wrong instance: %v ok=%v", got, ok)
+	}
+	if got, ok := reg.Get("slack-customer"); !ok || got.ID() != "slack-customer" {
+		t.Errorf("Get(slack-customer) failed or returned wrong instance: %v ok=%v", got, ok)
 	}
 }
 

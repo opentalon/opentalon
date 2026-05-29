@@ -18,6 +18,13 @@ service ChannelService {
 
 message ConfigureRequest {
   google.protobuf.Struct config = 1;
+  // instance_id is the opentalon-assigned per-channel-entry identifier (the
+  // key under `channels:` in config.yaml). Channel plugins that emit
+  // InboundMessage.channel_id should use this value instead of their static
+  // spec id when multiple instances of the same kind are configured. Empty
+  // when opentalon is older than this field or when the channel is not
+  // instance-aware; plugins may fall back to their spec id in that case.
+  string instance_id = 2;
 }
 
 message ConfigureResponse {}
@@ -48,6 +55,11 @@ message ToolParam {
 message SendResponse {}
 
 message InboundMessage {
+  // channel_id is the per-instance identifier opentalon assigns to a channel
+  // entry (the key under `channels:` in config.yaml). Used for session keys,
+  // dedup, and actor scoping — distinct instances of the same kind must not
+  // share these. Channel plugins may emit either this field or rely on
+  // opentalon stamping it host-side; see kind below.
   string channel_id = 1;
   string conversation_id = 2;
   string thread_id = 3;
@@ -57,6 +69,14 @@ message InboundMessage {
   repeated FileAttachment files = 7;
   map<string, string> metadata = 8;
   google.protobuf.Timestamp timestamp = 9;
+  // kind is the channel TYPE (e.g. "slack", "telegram", "console"). Used for
+  // type-based routing: content preparer registration, WhoAmI channel_type
+  // header, channel-format-specific code paths. Distinct from channel_id so
+  // two Slack bot instances share kind="slack" while having distinct
+  // channel_ids. Plugins SHOULD set this to their spec id; if empty,
+  // opentalon falls back to channel_id for backwards-compat with older
+  // plugin builds.
+  string kind = 10;
 }
 
 message OutboundMessage {

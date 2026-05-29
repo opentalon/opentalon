@@ -7,8 +7,18 @@ import (
 )
 
 // InboundMessage is a message from a channel (user → core).
+//
+// ChannelID and Kind are deliberately separate so a single opentalon process
+// can host multiple instances of the same channel type (e.g. an admin Slack
+// bot and a customer Slack bot). ChannelID is the per-instance identifier
+// assigned by the host (config-map key under `channels:`); two bots of the
+// same kind have distinct ChannelIDs and therefore distinct session keys,
+// dedup keys, and actor scopes. Kind is the channel TYPE (`"slack"`,
+// `"telegram"`, `"console"`) and drives type-based routing such as content
+// preparer registration and the WhoAmI channel_type header.
 type InboundMessage struct {
 	ChannelID      string            `yaml:"channel_id" json:"channel_id"`
+	Kind           string            `yaml:"kind,omitempty" json:"kind,omitempty"`
 	ConversationID string            `yaml:"conversation_id" json:"conversation_id"`
 	ThreadID       string            `yaml:"thread_id" json:"thread_id"`
 	SenderID       string            `yaml:"sender_id" json:"sender_id"`
@@ -88,11 +98,31 @@ func CapabilitiesFromContext(ctx context.Context) Capabilities {
 // serialises internally). ID, Capabilities, and Stop are called from a single
 // goroutine and have no concurrency requirement.
 type Channel interface {
+	// ID returns the per-instance identifier (the config-map key under
+	// `channels:`). Two instances of the same channel kind must return
+	// different IDs so session keys, dedup keys, and actor scopes do not
+	// collide.
 	ID() string
+	// Kind returns the channel TYPE (e.g. "slack", "telegram", "console")
+	// used for type-based routing. Multiple instances share a Kind.
+	// Implementations that predate this method can fall back to ID() at
+	// the call site; opentalon does this via KindOf below.
+	Kind() string
 	Capabilities() Capabilities
 	Start(ctx context.Context, inbox chan<- InboundMessage) error
 	Send(ctx context.Context, msg OutboundMessage) error
 	Stop() error
+}
+
+// KindOf returns ch.Kind() if non-empty, otherwise ch.ID(). The fallback
+// exists for older channel implementations that have not yet been updated to
+// distinguish kind from instance — for them, ID() still carries the kind
+// because there is only one instance.
+func KindOf(ch Channel) string {
+	if k := ch.Kind(); k != "" {
+		return k
+	}
+	return ch.ID()
 }
 
 // ConfigurableChannel is an optional interface that channels can implement

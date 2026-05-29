@@ -97,7 +97,7 @@ func TestPollingLoop(t *testing.T) {
 		},
 	}
 
-	ch := NewYAMLChannel(spec, ".")
+	ch := NewYAMLChannel(spec, ".", "")
 	inbox := make(chan pkg.InboundMessage, 10)
 
 	ctx, cancel := context.WithCancel(context.Background())
