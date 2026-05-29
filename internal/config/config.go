@@ -115,6 +115,14 @@ type WhoAmIConfig struct {
 	CredentialsField  string            `yaml:"credentials_field"`       // optional JSON field for per-MCP-server tokens map; default "credentials"
 	LanguageField     string            `yaml:"language_field"`          // optional JSON field for user language; default "language"
 	ExtraHeaders      map[string]string `yaml:"extra_headers,omitempty"` // static headers added to every WhoAmI call; values support ${ENV_VAR}
+	// MetadataHeaders maps an inbound message metadata key to an outbound HTTP
+	// header name. For each entry, the verifier reads msg.Metadata[key] and
+	// sends its value under the configured header on every WhoAmI request.
+	// Example: {"channel_id": "X-Channel-ID"} forwards the per-bot identifier a
+	// channel adapter writes into msg.Metadata["channel_id"]. Values are part
+	// of the verifier cache key, so two different bot identities never share a
+	// cached profile even when the bearer token matches.
+	MetadataHeaders map[string]string `yaml:"metadata_headers,omitempty"`
 }
 
 // GroupConfig is a static baseline of plugin IDs for a group.

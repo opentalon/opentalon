@@ -369,8 +369,21 @@ func (ch *YAMLChannel) extractMessage(event map[string]interface{}, eventCtx map
 
 	if len(ch.spec.Inbound.Mapping.Metadata) > 0 {
 		msg.Metadata = make(map[string]string, len(ch.spec.Inbound.Mapping.Metadata))
-		for metaKey, eventField := range ch.spec.Inbound.Mapping.Metadata {
-			msg.Metadata[metaKey] = getStringField(event, eventField)
+		var contexts map[string]map[string]string
+		for metaKey, spec := range ch.spec.Inbound.Mapping.Metadata {
+			// Values containing {{namespace.key}} are template-expanded
+			// against channel state (self.*, config.*, env.*) so a channel
+			// can surface its own identity (e.g. {{self.bot_user_id}}) into
+			// per-message metadata. Plain strings preserve the original
+			// behavior of naming an event field to pluck.
+			if strings.Contains(spec, "{{") {
+				if contexts == nil {
+					contexts = ch.buildContexts()
+				}
+				msg.Metadata[metaKey] = substituteTemplate(spec, contexts)
+				continue
+			}
+			msg.Metadata[metaKey] = getStringField(event, spec)
 		}
 	}
 

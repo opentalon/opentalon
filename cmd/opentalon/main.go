@@ -549,6 +549,7 @@ func main() {
 			LimitTimeField:    cfg.Profiles.WhoAmI.LimitTimeField,
 			LanguageField:     cfg.Profiles.WhoAmI.LanguageField,
 			ExtraHeaders:      cfg.Profiles.WhoAmI.ExtraHeaders,
+			MetadataHeaders:   cfg.Profiles.WhoAmI.MetadataHeaders,
 		}
 		if d, err := time.ParseDuration(cfg.Profiles.WhoAmI.Timeout); err == nil {
 			vcfg.Timeout = d

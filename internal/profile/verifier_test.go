@@ -28,7 +28,7 @@ func TestVerifier_Success(t *testing.T) {
 	saver := &stubGroupSaver{saved: savedGroups}
 
 	v := NewVerifier(VerifierConfig{URL: srv.URL, CacheTTL: 100 * time.Millisecond}, saver, nil)
-	p, err := v.Verify(context.Background(), "tok1", "")
+	p, err := v.Verify(context.Background(), "tok1", "", nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestVerifier_CacheHit(t *testing.T) {
 
 	v := NewVerifier(VerifierConfig{URL: srv.URL, CacheTTL: 10 * time.Second}, nil, nil)
 	for i := 0; i < 3; i++ {
-		if _, err := v.Verify(context.Background(), "tok", ""); err != nil {
+		if _, err := v.Verify(context.Background(), "tok", "", nil); err != nil {
 			t.Fatalf("Verify %d: %v", i, err)
 		}
 	}
@@ -73,7 +73,7 @@ func TestVerifier_AuthFailed_NonOK(t *testing.T) {
 	defer srv.Close()
 
 	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
-	_, err := v.Verify(context.Background(), "bad-token", "")
+	_, err := v.Verify(context.Background(), "bad-token", "", nil)
 	if !errors.Is(err, ErrAuthFailed) {
 		t.Fatalf("expected ErrAuthFailed, got %v", err)
 	}
@@ -86,7 +86,7 @@ func TestVerifier_AuthFailed_MissingEntityID(t *testing.T) {
 	defer srv.Close()
 
 	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
-	_, err := v.Verify(context.Background(), "tok", "")
+	_, err := v.Verify(context.Background(), "tok", "", nil)
 	if !errors.Is(err, ErrAuthFailed) {
 		t.Fatalf("expected ErrAuthFailed, got %v", err)
 	}
@@ -119,7 +119,7 @@ func TestVerifier_ExtraHeaders(t *testing.T) {
 			"X-Security-Token": "${TEST_WHOAMI_SECRET}",
 		},
 	}, nil, nil)
-	p, err := v.Verify(context.Background(), "U123", "")
+	p, err := v.Verify(context.Background(), "U123", "", nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestVerifier_ExtraHeaders_WrongSecret(t *testing.T) {
 		TokenPrefix:  "",
 		ExtraHeaders: map[string]string{"X-Security-Token": "${TEST_WHOAMI_SECRET}"},
 	}, nil, nil)
-	_, err := v.Verify(context.Background(), "U123", "")
+	_, err := v.Verify(context.Background(), "U123", "", nil)
 	if !errors.Is(err, ErrAuthFailed) {
 		t.Fatalf("expected ErrAuthFailed, got %v", err)
 	}
@@ -173,7 +173,7 @@ func TestVerifier_ExtraHeaders_ExpandedAtConstruction(t *testing.T) {
 	defer v.Close()
 
 	// First call — env var is "initial-value" at construction time.
-	if _, err := v.Verify(context.Background(), "tok1", ""); err != nil {
+	if _, err := v.Verify(context.Background(), "tok1", "", nil); err != nil {
 		t.Fatalf("first Verify: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestVerifier_ExtraHeaders_ExpandedAtConstruction(t *testing.T) {
 	t.Setenv("TEST_WHOAMI_HEADER", "changed-value")
 
 	// Second call with a different token (bypasses cache) — header must still be "initial-value".
-	if _, err := v.Verify(context.Background(), "tok2", ""); err != nil {
+	if _, err := v.Verify(context.Background(), "tok2", "", nil); err != nil {
 		t.Fatalf("second Verify: %v", err)
 	}
 
@@ -213,7 +213,7 @@ func TestVerifier_ExtraHeaders_UnsetVar(t *testing.T) {
 	}, nil, nil)
 	defer v.Close()
 
-	if _, err := v.Verify(context.Background(), "tok", ""); err != nil {
+	if _, err := v.Verify(context.Background(), "tok", "", nil); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 
@@ -243,7 +243,7 @@ func TestVerifier_ExtraHeaders_CollisionWithTokenHeader(t *testing.T) {
 	}, nil, nil)
 	defer v.Close()
 
-	if _, err := v.Verify(context.Background(), "real-token", ""); err != nil {
+	if _, err := v.Verify(context.Background(), "real-token", "", nil); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 
@@ -269,7 +269,7 @@ func TestVerifier_ChannelTypeHeader(t *testing.T) {
 	}, nil, nil)
 	defer v.Close()
 
-	if _, err := v.Verify(context.Background(), "tok", "slack"); err != nil {
+	if _, err := v.Verify(context.Background(), "tok", "slack", nil); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 
@@ -291,7 +291,7 @@ func TestVerifier_ChannelTypeHeader_NotSentWhenUnconfigured(t *testing.T) {
 	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
 	defer v.Close()
 
-	if _, err := v.Verify(context.Background(), "tok", "slack"); err != nil {
+	if _, err := v.Verify(context.Background(), "tok", "slack", nil); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 
@@ -316,7 +316,7 @@ func TestVerifier_LimitFields(t *testing.T) {
 	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
 	defer v.Close()
 
-	p, err := v.Verify(context.Background(), "tok", "")
+	p, err := v.Verify(context.Background(), "tok", "", nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestVerifier_LimitFields_Missing(t *testing.T) {
 	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
 	defer v.Close()
 
-	p, err := v.Verify(context.Background(), "tok", "")
+	p, err := v.Verify(context.Background(), "tok", "", nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestVerifier_ChannelTypeResponse(t *testing.T) {
 	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
 	defer v.Close()
 
-	p, err := v.Verify(context.Background(), "tok", "")
+	p, err := v.Verify(context.Background(), "tok", "", nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestVerifier_CredentialHeaders(t *testing.T) {
 	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
 	defer v.Close()
 
-	p, err := v.Verify(context.Background(), "tok", "")
+	p, err := v.Verify(context.Background(), "tok", "", nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestVerifier_CredentialHeaders_Missing(t *testing.T) {
 	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
 	defer v.Close()
 
-	p, err := v.Verify(context.Background(), "tok", "")
+	p, err := v.Verify(context.Background(), "tok", "", nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestVerifier_CredentialHeaders_CustomField(t *testing.T) {
 	v := NewVerifier(VerifierConfig{URL: srv.URL, CredentialsField: "tokens"}, nil, nil)
 	defer v.Close()
 
-	p, err := v.Verify(context.Background(), "tok", "")
+	p, err := v.Verify(context.Background(), "tok", "", nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestVerifier_CredentialHeaders_Malformed(t *testing.T) {
 			v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
 			defer v.Close()
 
-			p, err := v.Verify(context.Background(), "tok", "")
+			p, err := v.Verify(context.Background(), "tok", "", nil)
 			if err != nil {
 				t.Fatalf("Verify: %v", err)
 			}
@@ -512,7 +512,7 @@ func TestVerifier_Language(t *testing.T) {
 	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
 	defer v.Close()
 
-	p, err := v.Verify(context.Background(), "tok", "")
+	p, err := v.Verify(context.Background(), "tok", "", nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestVerifier_Language_Missing(t *testing.T) {
 	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
 	defer v.Close()
 
-	p, err := v.Verify(context.Background(), "tok", "")
+	p, err := v.Verify(context.Background(), "tok", "", nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -559,12 +559,106 @@ func TestVerifier_Language_CustomField(t *testing.T) {
 	v := NewVerifier(VerifierConfig{URL: srv.URL, LanguageField: "locale"}, nil, nil)
 	defer v.Close()
 
-	p, err := v.Verify(context.Background(), "tok", "")
+	p, err := v.Verify(context.Background(), "tok", "", nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 	if p.Language != "English" {
 		t.Errorf("Language = %q, want English", p.Language)
+	}
+}
+
+// TestVerifier_MetadataHeaders_Forwarded verifies that values from the
+// inbound metadata map configured under MetadataHeaders are sent as outbound
+// HTTP headers on every WhoAmI request.
+func TestVerifier_MetadataHeaders_Forwarded(t *testing.T) {
+	gotChannelID := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotChannelID <- r.Header.Get("X-Channel-ID")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"entity_id": "u1", "group": "g1"})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{
+		URL:             srv.URL,
+		MetadataHeaders: map[string]string{"channel_id": "X-Channel-ID"},
+	}, nil, nil)
+	defer v.Close()
+
+	if _, err := v.Verify(context.Background(), "tok", "", map[string]string{"channel_id": "UBOTA"}); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if got := <-gotChannelID; got != "UBOTA" {
+		t.Errorf("X-Channel-ID = %q, want UBOTA", got)
+	}
+}
+
+// TestVerifier_MetadataHeaders_CacheKeyIsolation is the load-bearing test for
+// the two-bots-one-token use case: the same bearer token must not return a
+// cached profile when the configured metadata-header value differs, otherwise
+// an admin bot and a customer bot would share permissions.
+func TestVerifier_MetadataHeaders_CacheKeyIsolation(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		entity := "user-" + r.Header.Get("X-Channel-ID")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"entity_id": entity, "group": "g1"})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{
+		URL:             srv.URL,
+		CacheTTL:        10 * time.Second,
+		MetadataHeaders: map[string]string{"channel_id": "X-Channel-ID"},
+	}, nil, nil)
+	defer v.Close()
+
+	pA, err := v.Verify(context.Background(), "shared-token", "slack", map[string]string{"channel_id": "BOT_A"})
+	if err != nil {
+		t.Fatalf("Verify A: %v", err)
+	}
+	pB, err := v.Verify(context.Background(), "shared-token", "slack", map[string]string{"channel_id": "BOT_B"})
+	if err != nil {
+		t.Fatalf("Verify B: %v", err)
+	}
+	if pA.EntityID == pB.EntityID {
+		t.Fatalf("cache collision across bots: both resolved to %q", pA.EntityID)
+	}
+	if calls != 2 {
+		t.Errorf("server calls = %d, want 2 (different bots must miss cache)", calls)
+	}
+
+	// Same bot twice should hit cache.
+	if _, err := v.Verify(context.Background(), "shared-token", "slack", map[string]string{"channel_id": "BOT_A"}); err != nil {
+		t.Fatalf("Verify A repeat: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("server calls after repeat = %d, want still 2 (same bot must hit cache)", calls)
+	}
+}
+
+// TestVerifier_MetadataHeaders_CollisionDropped verifies that a metadata
+// header configured to collide with the token header is dropped at construction
+// rather than allowed to silently overwrite the auth header at request time.
+func TestVerifier_MetadataHeaders_CollisionDropped(t *testing.T) {
+	gotAuth := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth <- r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"entity_id": "u1", "group": "g1"})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{
+		URL:             srv.URL,
+		MetadataHeaders: map[string]string{"hijack": "authorization"}, // canonicalizes to Authorization
+	}, nil, nil)
+	defer v.Close()
+
+	if _, err := v.Verify(context.Background(), "real-token", "", map[string]string{"hijack": "ATTACKER"}); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if got := <-gotAuth; got != "Bearer real-token" {
+		t.Errorf("Authorization = %q, want unchanged Bearer real-token (collision should have been dropped)", got)
 	}
 }
 

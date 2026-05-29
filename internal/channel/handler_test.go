@@ -19,7 +19,7 @@ type stubVerifier struct {
 	err error
 }
 
-func (s *stubVerifier) Verify(_ context.Context, _, _ string) (*profile.Profile, error) {
+func (s *stubVerifier) Verify(_ context.Context, _, _ string, _ map[string]string) (*profile.Profile, error) {
 	return s.p, s.err
 }
 

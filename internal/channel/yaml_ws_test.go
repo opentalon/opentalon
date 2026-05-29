@@ -370,3 +370,44 @@ func TestExtractMessage(t *testing.T) {
 		t.Errorf("Metadata[ts] = %q, want %q", msg.Metadata["ts"], "1234567890.123456")
 	}
 }
+
+// TestExtractMessage_MetadataTemplate verifies that a metadata mapping value
+// containing {{namespace.key}} is template-expanded against channel state
+// instead of being looked up as an event field. This is how a channel adapter
+// surfaces its own identity (e.g. {{self.bot_user_id}}) into per-message
+// metadata, which the verifier then forwards to WhoAmI.
+func TestExtractMessage_MetadataTemplate(t *testing.T) {
+	ch := &YAMLChannel{
+		spec: &YAMLChannelSpec{
+			ID: "slack",
+			Inbound: InboundSpec{
+				Mapping: MappingSpec{
+					ConversationID: MappingField{Field: "channel"},
+					SenderID:       MappingField{Field: "user"},
+					Content:        MappingField{Field: "text"},
+					Metadata: map[string]string{
+						"ts":         "ts",
+						"channel_id": "{{self.bot_user_id}}",
+					},
+				},
+			},
+		},
+		selfVars: map[string]string{"bot_user_id": "UBOTA"},
+		config:   make(map[string]string),
+	}
+
+	event := map[string]interface{}{
+		"channel": "C123",
+		"user":    "U456",
+		"text":    "hi",
+		"ts":      "1234.5678",
+	}
+	msg := ch.extractMessage(event, flattenToStringMap(event))
+
+	if got := msg.Metadata["channel_id"]; got != "UBOTA" {
+		t.Errorf("Metadata[channel_id] = %q, want UBOTA (template should expand from self)", got)
+	}
+	if got := msg.Metadata["ts"]; got != "1234.5678" {
+		t.Errorf("Metadata[ts] = %q, want 1234.5678 (plain field name should still be looked up in event)", got)
+	}
+}
