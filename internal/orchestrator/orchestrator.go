@@ -27,6 +27,7 @@ import (
 	"github.com/opentalon/opentalon/internal/state/store/events"
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 	pkgchannel "github.com/opentalon/opentalon/pkg/channel"
+	"github.com/opentalon/opentalon/pkg/plugin/contextargs"
 )
 
 const maxAgentLoopIterations = 20
@@ -272,19 +273,27 @@ type sessionMutex struct {
 }
 
 type Orchestrator struct {
-	sessionMuxMu            sync.Mutex               // guards sessionMuxes map
-	sessionMuxes            map[string]*sessionMutex // per-session serialization
-	semaphore               chan struct{}            // nil = unlimited; cap = MaxConcurrentSessions
-	llm                     LLMClient
-	parser                  ToolCallParser
-	registry                *ToolRegistry
-	memory                  MemoryStoreInterface
-	sessions                SessionStoreInterface
-	guard                   *Guard
-	rules                   *RulesConfig
-	preparers               []ContentPreparerEntry
-	formatters              []ResponseFormatterEntry      // run after final response; text-in/text-out
-	guards                  []ContentPreparerEntry        // subset of preparers with Guard:true; run before every LLM call
+	sessionMuxMu sync.Mutex               // guards sessionMuxes map
+	sessionMuxes map[string]*sessionMutex // per-session serialization
+	semaphore    chan struct{}            // nil = unlimited; cap = MaxConcurrentSessions
+	llm          LLMClient
+	parser       ToolCallParser
+	registry     *ToolRegistry
+	memory       MemoryStoreInterface
+	sessions     SessionStoreInterface
+	guard        *Guard
+	rules        *RulesConfig
+	preparers    []ContentPreparerEntry
+	formatters   []ResponseFormatterEntry // run after final response; text-in/text-out
+	guards       []ContentPreparerEntry   // subset of preparers with Guard:true; run before every LLM call
+	// preparerActions is the immutable "plugin.action" set of all
+	// preparers + guards, computed once in NewWithRules from the
+	// preparers/guards slices above (both append-once at construction).
+	// Reads happen on every Run (system prompt assembly, native tool
+	// definitions, palette computation) and every _meta.get_tool_details
+	// call — rebuilding the map per read is wasted work that scales
+	// linearly with the LLM's appetite for meta-tool lookups.
+	preparerActions         map[string]bool
 	luaScriptPaths          map[string]string             // optional; plugin name -> path to .lua script (for "lua:name" preparers)
 	permissionChecker       PermissionChecker             // optional; when set, executeCall checks permission before running
 	permissionPluginName    string                        // name of the permission plugin (skip permission check when executing it)
@@ -365,13 +374,87 @@ func resolveAllowedPluginNames(ctx context.Context, o *Orchestrator) string {
 	return string(b)
 }
 
-// defaultContextArgProviders returns built-in providers only for opaque identifiers (e.g. session_id).
-// No session messages, conversation text, or other sensitive content is exposed to plugins via this mechanism.
+// allowedToolsSet returns the set of fully-qualified tool names
+// ("<plugin>.<action>") this session can call right now. Applies the same
+// visibility rules as the system-prompt assembler — profile-level plugin
+// allowance, preparer/guard-action exclusion, UserOnly exclusion — but NOT
+// the preparer's RAG result (this set is the INPUT to the preparer, not its
+// output).
+//
+// Single computation point feeds:
+//   - resolveAllowedToolFQNs (JSON-array form for the `allowed_tools`
+//     ContextArgProvider; preparer plugins use it to constrain RAG
+//     retrieval to the session's actual tool surface)
+//   - _meta.get_tool_details action-level visibility gate (rejects
+//     description lookups for actions the session cannot invoke, so the
+//     meta-tool cannot be used to enumerate tool schemas the
+//     manifest-filtering layer is hiding)
+//
+// Both consumers MUST share the set so the "what is this session allowed
+// to see" answer is identical across the RAG-retrieval and direct-lookup
+// vectors. Drift between the two would create exactly the
+// defense-in-depth gap the palette exists to close.
+func allowedToolsSet(ctx context.Context, o *Orchestrator) map[string]struct{} {
+	allowedPlugins := o.resolveAllowedPlugins(ctx)
+	preparerAction := o.preparerActions
+
+	set := make(map[string]struct{})
+	for _, cap := range o.registry.ListCapabilities() {
+		if !o.pluginAllowed(cap, allowedPlugins) {
+			continue
+		}
+		for _, action := range cap.Actions {
+			fqn := cap.Name + "." + action.Name
+			if preparerAction[fqn] || action.UserOnly {
+				continue
+			}
+			set[fqn] = struct{}{}
+		}
+	}
+	return set
+}
+
+// resolveAllowedToolFQNs returns the sorted JSON array of FQNs from
+// allowedToolsSet. Always returns a JSON value — even "[]" for the empty
+// case — so the arg is always injected into the preparer call.
+//
+// The plugin contract is fail-closed when the arg is absent (deploy
+// drift, missing provider, config mistake). Sending "" here would let
+// executeCall omit the arg and silently drop the plugin into its
+// strict-zero branch even for unrestricted sessions; that's safe but
+// diagnostically opaque (operators can't tell "orchestrator forgot to
+// wire allowed_tools" apart from "session has no tools"). Always
+// emitting a JSON value keeps the wire predictable and lets the plugin
+// reason purely from the array content.
+//
+// Unlike resolveAllowedPluginNames (which returns "" when there is no
+// profile to express, because plugins consuming allowed_plugins
+// canonically use it as an optional GraphQL WHERE filter), allowed_tools
+// is the post-retrieval chokepoint — the host's responsibility is to
+// SAY what the session may see, and "[]" is a legitimate answer.
+func resolveAllowedToolFQNs(ctx context.Context, o *Orchestrator) string {
+	set := allowedToolsSet(ctx, o)
+	fqns := make([]string, 0, len(set))
+	for fqn := range set {
+		fqns = append(fqns, fqn)
+	}
+	sort.Strings(fqns)
+	b, _ := json.Marshal(fqns)
+	return string(b)
+}
+
+// defaultContextArgProviders returns built-in providers for orchestrator-managed
+// arguments: opaque identifiers (session_id) and per-session allowlists derived
+// from the profile (allowed_plugins, allowed_tools). No session messages,
+// conversation text, or other sensitive user content is exposed via this mechanism.
 func defaultContextArgProviders(o *Orchestrator, custom map[string]ContextArgProvider) map[string]ContextArgProvider {
 	builtin := map[string]ContextArgProvider{
-		"session_id": func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
-		"allowed_plugins": func(ctx context.Context, _ string) string {
+		contextargs.SessionID: func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
+		contextargs.AllowedPlugins: func(ctx context.Context, _ string) string {
 			return resolveAllowedPluginNames(ctx, o)
+		},
+		contextargs.AllowedTools: func(ctx context.Context, _ string) string {
+			return resolveAllowedToolFQNs(ctx, o)
 		},
 	}
 	if len(custom) == 0 {
@@ -495,6 +578,7 @@ func NewWithRules(
 		preparers:               preparers,
 		formatters:              opts.ResponseFormatters,
 		guards:                  guards,
+		preparerActions:         preparerActionSet(preparers, guards),
 		luaScriptPaths:          opts.LuaScriptPaths,
 		permissionChecker:       opts.PermissionChecker,
 		permissionPluginName:    opts.PermissionPluginName,
@@ -902,12 +986,16 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 		Action: prep.Action,
 		Args:   map[string]string{argKey: content},
 	}
-	// Inject allowed_plugins for preparers so RAG plugins can filter by profile.
-	if allowed := resolveAllowedPluginNames(ctx, o); allowed != "" {
-		call.Args["allowed_plugins"] = allowed
-	}
-	// Inject enriched search query so RAG preparers can use it for semantic
-	// search while the main text arg stays as the original user message.
+	// Context-arg injection (allowed_plugins, allowed_tools, session_id, …)
+	// runs through executeCall via the action's declared InjectContextArgs.
+	// Single code path with LLM-driven calls — see ContextArgProvider and
+	// defaultContextArgProviders. Preparer plugins that need a context arg
+	// must declare it in their ActionMsg.InjectContextArgs.
+	//
+	// search_text stays inline because its injection is content-aware
+	// (skipped when the enriched query equals the raw content) — a stateless
+	// ContextArgProvider cannot express that conditional, so the inline path
+	// is intentional rather than legacy.
 	if sq := SearchQueryFromContext(ctx); sq != "" && sq != content {
 		call.Args["search_text"] = sq
 	}
@@ -2459,7 +2547,7 @@ func (o *Orchestrator) supportsNativeTools() bool {
 // for native function calling. Only includes actions visible to the current profile.
 func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.ToolDefinition {
 	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
-	preparerAction := preparerActionSet(o.preparers, o.guards)
+	preparerAction := o.preparerActions
 
 	relevantToolSet := make(map[string]bool)
 	rtTools, relevantToolsActive := relevantToolsFromContext(ctx)
@@ -3466,7 +3554,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	}
 
 	// Don't list content-preparer or guard actions as tools; they run automatically before LLM calls.
-	preparerAction := preparerActionSet(o.preparers, o.guards)
+	preparerAction := o.preparerActions
 
 	// Resolve the set of plugins allowed for the current profile group (if any).
 	allowedPlugins := o.resolveAllowedPlugins(ctx)

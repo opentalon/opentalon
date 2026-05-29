@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -181,6 +182,167 @@ func TestGetToolDetails_ProfileRestrictedPluginReturnsNotFound(t *testing.T) {
 	}
 	if store.updateCalls != 0 {
 		t.Errorf("denied call must not write to InjectionState, got %d UpdateInjectionState calls", store.updateCalls)
+	}
+}
+
+// TestGetToolDetails_FilteredByUserOnlyActionReturnsNotFound pins the
+// action-level palette gate: cap.Actions may legitimately contain an
+// action that the per-session palette excludes (UserOnly here, the
+// canonical "registry has it but the LLM should never see it" case;
+// in production this also catches actions hidden by an upstream
+// manifest-filter that surfaced them to a different auth path). Without
+// the gate, get_tool_details would return the full description +
+// parameter schema for a tool the LLM cannot invoke — information
+// disclosure around the per-session palette.
+//
+// Error shape MUST match the "action … not found" branch so a denied
+// lookup is indistinguishable from a non-existent action: no existence
+// oracle for palette-filtered tools. Side-effect (Tier-1 promotion)
+// MUST NOT fire for denied lookups, otherwise the next turn's preparer
+// would see a phantom promotion for a tool that was never visible.
+func TestGetToolDetails_FilteredByUserOnlyActionReturnsNotFound(t *testing.T) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "tools-plugin", Description: "tools",
+		Actions: []Action{
+			{Name: "public-tool", Description: "Public tool the LLM may see."},
+			{Name: "user-only-tool", Description: "Sensitive; UserOnly excludes from LLM palette.", UserOnly: true},
+		},
+	}, &fixedResultExecutor{content: "result"})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	store := &fakeInjectionStateStore{}
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
+		ToolTiers:           ToolTiersConfig{Enabled: true, EnableGetToolDetails: true},
+		InjectionStateStore: store,
+	})
+	exec, _ := orch.registry.GetExecutor(metaPluginName)
+	ctx := actor.WithSessionID(context.Background(), "s1")
+
+	res := exec.Execute(ctx, ToolCall{
+		ID:   "c1",
+		Args: map[string]string{"name": "tools-plugin.user-only-tool"},
+	})
+
+	if res.Error == "" {
+		t.Fatalf("expected not-found error for UserOnly action, got content: %q", res.Content)
+	}
+	if !strings.Contains(res.Error, "user-only-tool") || !strings.Contains(res.Error, "not found") {
+		t.Errorf("error must mimic 'action … not found' shape so denied ≠ existence oracle, got: %q", res.Error)
+	}
+	if strings.Contains(res.Error, "Sensitive") || strings.Contains(res.Error, "UserOnly") {
+		t.Errorf("error must not leak the filtered action's description or its filter reason, got: %q", res.Error)
+	}
+	if store.updateCalls != 0 {
+		t.Errorf("denied call must not promote a palette-filtered tool, got %d UpdateInjectionState calls", store.updateCalls)
+	}
+}
+
+// TestGetToolDetails_FilteredByPreparerActionReturnsNotFound pins the
+// same gate on a second exclusion axis: preparer/guard actions live in
+// cap.Actions for invocation, but the LLM should never inspect them
+// (they're internal control-plane tools). allowedToolsSet excludes
+// them on the preparerAction axis; the gate must reject lookups too.
+func TestGetToolDetails_FilteredByPreparerActionReturnsNotFound(t *testing.T) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag", Description: "RAG preparer",
+		Actions: []Action{
+			{Name: "prepare", Description: "Preparer-internal; LLM should not inspect."},
+			{Name: "ask", Description: "LLM-callable knowledge lookup."},
+		},
+	}, &fixedResultExecutor{content: "result"})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	store := &fakeInjectionStateStore{}
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
+		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag", Action: "prepare"}},
+		ToolTiers:           ToolTiersConfig{Enabled: true, EnableGetToolDetails: true},
+		InjectionStateStore: store,
+	})
+	exec, _ := orch.registry.GetExecutor(metaPluginName)
+	ctx := actor.WithSessionID(context.Background(), "s1")
+
+	denied := exec.Execute(ctx, ToolCall{
+		ID:   "c1",
+		Args: map[string]string{"name": "rag.prepare"},
+	})
+	if denied.Error == "" || !strings.Contains(denied.Error, "not found") {
+		t.Fatalf("preparer action lookup must be gated, got error=%q content=%q", denied.Error, denied.Content)
+	}
+
+	// Regression guard on the same plugin: a non-preparer action must still
+	// resolve, proving the gate's granularity is action-level, not plugin-level.
+	allowed := exec.Execute(ctx, ToolCall{
+		ID:   "c2",
+		Args: map[string]string{"name": "rag.ask"},
+	})
+	if allowed.Error != "" {
+		t.Fatalf("non-preparer action on the same plugin must resolve, got error=%q", allowed.Error)
+	}
+	if !strings.Contains(allowed.Content, "rag.ask") {
+		t.Errorf("description rendering for allowed action regressed: %q", allowed.Content)
+	}
+}
+
+// TestAllowedToolsSet_ConsistentWithFQNs pins the invariant that both
+// consumers of the per-session palette — the JSON-array form for the
+// allowed_tools ContextArgProvider (RAG plugins consume it via gRPC) and
+// the map form for the get_tool_details action-level gate — see the
+// same set. Drift between the two would create exactly the
+// defense-in-depth gap the palette exists to close: a tool visible at
+// one consumer and not the other would still leak via the visible
+// vector.
+func TestAllowedToolsSet_ConsistentWithFQNs(t *testing.T) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{
+			{Name: "analyze_code", Description: "Analyze code"},
+			{Name: "internal_panel", Description: "Internal panel", UserOnly: true},
+		},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name: "jira", Description: "Jira",
+		Actions: []Action{{Name: "create_issue", Description: "Create issue"}},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name: "rag", Description: "RAG",
+		Actions: []Action{{Name: "prepare", Description: "Preparer"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	preparers := []ContentPreparerEntry{{Plugin: "rag", Action: "prepare"}}
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
+		ContentPreparers: preparers,
+	})
+
+	ctx := context.Background()
+	set := allowedToolsSet(ctx, orch)
+	jsonStr := resolveAllowedToolFQNs(ctx, orch)
+
+	// The JSON form omits the field when empty; non-empty sets must round-trip
+	// to the same membership as the map.
+	if len(set) == 0 {
+		t.Fatal("test fixture must produce a non-empty palette")
+	}
+	if jsonStr == "" {
+		t.Fatalf("JSON form must be non-empty when set is non-empty (set=%v)", set)
+	}
+	var fqns []string
+	if err := json.Unmarshal([]byte(jsonStr), &fqns); err != nil {
+		t.Fatalf("JSON form not valid: %v", err)
+	}
+	if len(fqns) != len(set) {
+		t.Fatalf("set size %d != JSON array length %d (set=%v, json=%v)", len(set), len(fqns), set, fqns)
+	}
+	for _, fqn := range fqns {
+		if _, ok := set[fqn]; !ok {
+			t.Errorf("JSON contains %q which is not in set (drift: %v vs %v)", fqn, fqns, set)
+		}
 	}
 }
 

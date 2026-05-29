@@ -103,6 +103,26 @@ func (e *getToolDetailsExecutor) Execute(ctx context.Context, call ToolCall) Too
 		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("action %q not found in plugin %q", action, plugin)}
 	}
 
+	// Action-level visibility gate. The plugin gate above is too coarse:
+	// cap.Actions may contain an action that the session's tools/list filter
+	// hides (e.g. an MCP backend whose manifest filter excludes admin tools
+	// per auth path, leaving them in the OpenTalon registry only because a
+	// downstream plugin instance with broader auth surfaced them on a sync).
+	// Without this gate, the LLM could fetch the full description + parameter
+	// schema of a tool it can never invoke — information disclosure around the
+	// per-session palette. Returns the same "action not found" shape as the
+	// missing-action branch so a denied lookup is indistinguishable from a
+	// non-existent action; no existence oracle for filtered tools.
+	//
+	// Same palette computation as the `allowed_tools` ContextArgProvider
+	// feeds — allowedToolsSet is the single source of truth for "what this
+	// session can see" across both the RAG-retrieval vector (preparer
+	// plugins consume the JSON form) and the direct-lookup vector here.
+	allowed := allowedToolsSet(ctx, e.orch)
+	if _, visible := allowed[name]; !visible {
+		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("action %q not found in plugin %q", action, plugin)}
+	}
+
 	if sessionID := actor.SessionID(ctx); sessionID != "" && e.orch.injectionStateStore != nil {
 		e.orch.persistToolPromotion(ctx, sessionID, name)
 	}

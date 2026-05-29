@@ -502,7 +502,7 @@ func (o *Orchestrator) alwaysIncludeToolNames(ctx context.Context) []string {
 // Tier-0 pinned subset.
 func (o *Orchestrator) listProfileToolNames(ctx context.Context, alwaysIncludeOnly bool) []string {
 	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
-	preparerAction := preparerActionSet(o.preparers, o.guards)
+	preparerAction := o.preparerActions
 
 	var names []string
 	for _, cap := range o.registry.ListCapabilities() {

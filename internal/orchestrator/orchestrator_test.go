@@ -2504,17 +2504,22 @@ func TestPreparerEmptyRelevantToolsShowsNone(t *testing.T) {
 	}
 }
 
+// TestPreparerInjectsAllowedPlugins exercises the consolidated context-arg
+// injection path: when a preparer action declares allowed_plugins via
+// InjectContextArgs and a strict profile is present, the registered
+// ContextArgProvider populates the value before Execute runs. Replaces the
+// older inline-injection path in runPreparer.
 func TestPreparerInjectsAllowedPlugins(t *testing.T) {
-	// When a profile with strict plugins is present, the preparer should receive
-	// allowed_plugins in its args.
 	var capturedArgs map[string]string
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
 		Name: "rag-preparer", Description: "RAG",
-		Actions: []Action{{Name: "prepare", Description: "RAG prepare", Parameters: []Parameter{
-			{Name: "text", Description: "text"},
-			{Name: "allowed_plugins", Description: "allowed plugins"},
-		}}},
+		Actions: []Action{{
+			Name:              "prepare",
+			Description:       "RAG prepare",
+			Parameters:        []Parameter{{Name: "text", Description: "text"}},
+			InjectContextArgs: []string{"allowed_plugins"},
+		}},
 	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
 		capturedArgs = call.Args
 		return ToolResult{CallID: call.ID, Content: `{"send_to_llm": true, "message": "ok"}`}
@@ -2531,7 +2536,6 @@ func TestPreparerInjectsAllowedPlugins(t *testing.T) {
 	preparers := []ContentPreparerEntry{{Plugin: "rag-preparer", Action: "prepare"}}
 	orch := NewWithRules(&fakeLLM{responses: []string{"reply"}}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
 
-	// Set up a strict profile with allowed plugins.
 	ctx := profile.WithProfile(context.Background(), &profile.Profile{
 		EntityID: "user1",
 		Group:    "team1",
@@ -2547,9 +2551,8 @@ func TestPreparerInjectsAllowedPlugins(t *testing.T) {
 	}
 	ap, ok := capturedArgs["allowed_plugins"]
 	if !ok || ap == "" {
-		t.Fatal("allowed_plugins not injected into preparer args")
+		t.Fatal("allowed_plugins not injected into preparer args via ContextArgProvider")
 	}
-	// Should be a JSON array containing the allowed plugins.
 	var plugins []string
 	if err := json.Unmarshal([]byte(ap), &plugins); err != nil {
 		t.Fatalf("allowed_plugins is not valid JSON: %v", err)
@@ -2557,6 +2560,261 @@ func TestPreparerInjectsAllowedPlugins(t *testing.T) {
 	if len(plugins) != 2 {
 		t.Errorf("expected 2 allowed plugins, got %d: %v", len(plugins), plugins)
 	}
+}
+
+// TestPreparerInjectsAllowedTools pins the new defense-in-depth provider:
+// a preparer declaring allowed_tools via InjectContextArgs receives a sorted
+// JSON array of "<plugin>.<action>" FQNs the session can currently call,
+// after profile-level plugin allowance and preparer-action exclusion. This
+// lets RAG plugins constrain knowledge_context retrieval to the session's
+// actual tool surface (see defense-layers doc).
+func TestPreparerInjectsAllowedTools(t *testing.T) {
+	var capturedArgs map[string]string
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-preparer", Description: "RAG",
+		Actions: []Action{{
+			Name:              "prepare",
+			Description:       "RAG prepare",
+			Parameters:        []Parameter{{Name: "text", Description: "text"}},
+			InjectContextArgs: []string{"allowed_tools"},
+		}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		capturedArgs = call.Args
+		return ToolResult{CallID: call.ID, Content: `{"send_to_llm": true, "message": "ok"}`}
+	}})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{
+			{Name: "analyze_code", Description: "Analyze code"},
+			{Name: "list_projects", Description: "List projects"},
+		},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+
+	preparers := []ContentPreparerEntry{{Plugin: "rag-preparer", Action: "prepare"}}
+	orch := NewWithRules(&fakeLLM{responses: []string{"reply"}}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
+
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{
+		EntityID: "user1",
+		Group:    "team1",
+		Plugins:  []string{"gitlab", "rag-preparer"},
+	})
+
+	_, err := orch.Run(ctx, "s1", "test message")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capturedArgs == nil {
+		t.Fatal("preparer was not called")
+	}
+	raw, ok := capturedArgs["allowed_tools"]
+	if !ok || raw == "" {
+		t.Fatal("allowed_tools not injected into preparer args via ContextArgProvider")
+	}
+	var fqns []string
+	if err := json.Unmarshal([]byte(raw), &fqns); err != nil {
+		t.Fatalf("allowed_tools is not valid JSON: %v", err)
+	}
+	// The preparer action itself (rag-preparer.prepare) must be excluded —
+	// it is the consumer, not a session-callable tool.
+	for _, fqn := range fqns {
+		if fqn == "rag-preparer.prepare" {
+			t.Errorf("allowed_tools must not include the preparer action itself, got %v", fqns)
+		}
+	}
+	want := []string{"gitlab.analyze_code", "gitlab.list_projects"}
+	if len(fqns) != len(want) {
+		t.Fatalf("allowed_tools FQN count = %d, want %d (got %v)", len(fqns), len(want), fqns)
+	}
+	for i := range want {
+		if fqns[i] != want[i] {
+			t.Errorf("allowed_tools[%d] = %q, want %q (full: %v)", i, fqns[i], want[i], fqns)
+		}
+	}
+}
+
+// TestPreparerInjectsAllowedTools_emptyPaletteIsAlwaysExplicit is the
+// round-trip counterpart of TestResolveAllowedToolFQNs_filtering's
+// empty-set subtest: every empty-set path delivers the arg to the
+// preparer as "[]", never absent. Plugins fail-closed-by-default rely
+// on this — a buggy or older orchestrator that omits the arg would
+// otherwise still hit the fail-closed branch on the plugin side, but
+// operators would lose the "yes the palette ran and it was empty"
+// diagnostic signal that an explicit "[]" carries on the wire.
+//
+// Both subtests use a registry whose only action is the preparer
+// itself, so the palette is structurally empty regardless of profile
+// state — isolates the empty-set arg-injection path from the
+// non-empty happy path covered by TestPreparerInjectsAllowedTools.
+func TestPreparerInjectsAllowedTools_emptyPaletteIsAlwaysExplicit(t *testing.T) {
+	newOrch := func() (*Orchestrator, *map[string]string, *bool) {
+		var capturedArgs map[string]string
+		called := false
+		registry := NewToolRegistry()
+		_ = registry.Register(PluginCapability{
+			Name: "rag-preparer", Description: "RAG",
+			Actions: []Action{{
+				Name:              "prepare",
+				Description:       "RAG prepare",
+				Parameters:        []Parameter{{Name: "text", Description: "text"}},
+				InjectContextArgs: []string{"allowed_tools"},
+			}},
+		}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+			capturedArgs = call.Args
+			called = true
+			return ToolResult{CallID: call.ID, Content: `{"send_to_llm": true, "message": "ok"}`}
+		}})
+
+		memory := state.NewMemoryStore("")
+		sessions := state.NewSessionStore("")
+		sessions.Create("s1", "", "")
+		preparers := []ContentPreparerEntry{{Plugin: "rag-preparer", Action: "prepare"}}
+		orch := NewWithRules(&fakeLLM{responses: []string{"reply"}}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
+		return orch, &capturedArgs, &called
+	}
+
+	assertPresentEmpty := func(t *testing.T, capturedArgs map[string]string) {
+		t.Helper()
+		raw, ok := capturedArgs["allowed_tools"]
+		if !ok {
+			t.Fatalf("allowed_tools arg missing — expected present-as-\"[]\", got args=%v", capturedArgs)
+		}
+		if raw != "[]" {
+			t.Errorf("expected allowed_tools=\"[]\" (explicit empty), got %q", raw)
+		}
+	}
+
+	t.Run("profile in scope, every plugin filtered → arg present as \"[]\"", func(t *testing.T) {
+		orch, capturedArgs, called := newOrch()
+		ctx := profile.WithProfile(context.Background(), &profile.Profile{
+			EntityID: "u", Group: "g",
+			Plugins: []string{"nonexistent-plugin"},
+		})
+		if _, err := orch.Run(ctx, "s1", "test"); err != nil {
+			t.Fatal(err)
+		}
+		if !*called {
+			t.Fatal("preparer was not called")
+		}
+		assertPresentEmpty(t, *capturedArgs)
+	})
+
+	t.Run("no profile in scope, preparer-only registry → arg present as \"[]\"", func(t *testing.T) {
+		orch, capturedArgs, called := newOrch()
+		// context.Background() carries no profile → all plugins allowed, but
+		// every registered action IS the preparer itself, filtered out by
+		// preparerActionSet. Empty set, arg still emitted as "[]" — the wire
+		// stays predictable across profile states.
+		if _, err := orch.Run(context.Background(), "s1", "test"); err != nil {
+			t.Fatal(err)
+		}
+		if !*called {
+			t.Fatal("preparer was not called")
+		}
+		assertPresentEmpty(t, *capturedArgs)
+	})
+}
+
+// TestResolveAllowedToolFQNs_filtering directly exercises the helper used
+// by the allowed_tools ContextArgProvider, covering the four filter axes:
+// plugin allowance, preparer/guard exclusion, UserOnly exclusion, and empty
+// → "" so the host's executeCall omits the arg.
+func TestResolveAllowedToolFQNs_filtering(t *testing.T) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "rag-preparer", Description: "RAG",
+		Actions: []Action{{Name: "prepare", Description: "RAG prepare"}},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name: "gitlab", Description: "GitLab",
+		Actions: []Action{
+			{Name: "analyze_code", Description: "Analyze code"},
+			{Name: "internal_panel", Description: "Internal panel", UserOnly: true},
+		},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name: "jira", Description: "Jira",
+		Actions: []Action{{Name: "create_issue", Description: "Create issue"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+
+	preparers := []ContentPreparerEntry{{Plugin: "rag-preparer", Action: "prepare"}}
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
+
+	t.Run("strict profile filters by plugin allowance", func(t *testing.T) {
+		ctx := profile.WithProfile(context.Background(), &profile.Profile{
+			EntityID: "u", Group: "g",
+			Plugins: []string{"gitlab"}, // jira and rag-preparer excluded
+		})
+		raw := resolveAllowedToolFQNs(ctx, orch)
+		var fqns []string
+		if err := json.Unmarshal([]byte(raw), &fqns); err != nil {
+			t.Fatalf("not JSON: %v (raw=%q)", err, raw)
+		}
+		want := []string{"gitlab.analyze_code"} // internal_panel UserOnly excluded
+		if len(fqns) != len(want) || fqns[0] != want[0] {
+			t.Errorf("got %v, want %v", fqns, want)
+		}
+	})
+
+	t.Run("empty effective set returns \"[]\" (always; both profile-in-scope and no-profile cases)", func(t *testing.T) {
+		// resolveAllowedToolFQNs always emits JSON so the plugin sees a
+		// definitive palette on every call. Both empty-set paths — strict
+		// profile with no matching plugins, AND no-profile-context with a
+		// registry that contains only preparer-internal actions — collapse
+		// to the same wire value, because the plugin's fail-closed default
+		// makes the distinction meaningless on the consumer side.
+
+		// Path 1: profile in scope, every registered plugin filtered out.
+		ctx := profile.WithProfile(context.Background(), &profile.Profile{
+			EntityID: "u", Group: "g",
+			Plugins: []string{"nonexistent-plugin"},
+		})
+		if raw := resolveAllowedToolFQNs(ctx, orch); raw != "[]" {
+			t.Errorf("profile-in-scope empty palette: expected \"[]\", got %q", raw)
+		}
+
+		// Path 2: no profile, registry contains only preparer-internal actions.
+		registry := NewToolRegistry()
+		_ = registry.Register(PluginCapability{
+			Name: "rag", Description: "RAG", Actions: []Action{{Name: "prepare"}},
+		}, &echoExecutor{})
+		preparers := []ContentPreparerEntry{{Plugin: "rag", Action: "prepare"}}
+		emptyOrch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{ContentPreparers: preparers})
+		if raw := resolveAllowedToolFQNs(context.Background(), emptyOrch); raw != "[]" {
+			t.Errorf("no-profile preparer-only registry: expected \"[]\", got %q", raw)
+		}
+	})
+
+	t.Run("no profile allows everything except UserOnly and preparer actions", func(t *testing.T) {
+		raw := resolveAllowedToolFQNs(context.Background(), orch)
+		var fqns []string
+		if err := json.Unmarshal([]byte(raw), &fqns); err != nil {
+			t.Fatalf("not JSON: %v (raw=%q)", err, raw)
+		}
+		// Must include both gitlab.analyze_code and jira.create_issue;
+		// must NOT include gitlab.internal_panel (UserOnly) or
+		// rag-preparer.prepare (preparer action).
+		got := map[string]bool{}
+		for _, f := range fqns {
+			got[f] = true
+		}
+		if !got["gitlab.analyze_code"] || !got["jira.create_issue"] {
+			t.Errorf("missing expected FQNs: got %v", fqns)
+		}
+		if got["gitlab.internal_panel"] {
+			t.Errorf("UserOnly action leaked into FQNs: %v", fqns)
+		}
+		if got["rag-preparer.prepare"] {
+			t.Errorf("preparer action leaked into FQNs: %v", fqns)
+		}
+	})
 }
 
 func TestSyncActions(t *testing.T) {
