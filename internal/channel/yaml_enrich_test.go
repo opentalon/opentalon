@@ -64,10 +64,19 @@ func TestRunEnrich_Success(t *testing.T) {
 	if got["user"]["real_name"] != "Alex" {
 		t.Errorf("real_name = %q, want Alex", got["user"]["real_name"])
 	}
-	// Verify the step's results are also visible under enrich.<step> in
-	// the contexts map so chained metadata templates can reference them.
-	if v := contexts["enrich.user"]["email"]; v != "alex@example.com" {
-		t.Errorf("contexts[enrich.user][email] = %q, want propagated", v)
+	// Verify the step's results are visible under the "enrich" namespace
+	// keyed by "<step>.<field>" so {{enrich.<step>.<field>}} resolves
+	// against contexts["enrich"]["<step>.<field>"] via the template regex
+	// (which splits on the first dot — see yaml_template.go).
+	if v := contexts["enrich"]["user.email"]; v != "alex@example.com" {
+		t.Errorf("contexts[enrich][user.email] = %q, want propagated", v)
+	}
+	// And the same value must round-trip through substituteTemplate so the
+	// metadata mapping in channel.yaml actually receives it. This is the
+	// load-bearing regression: a previous storage scheme stored under
+	// "enrich.user" and {{enrich.user.email}} silently resolved to "".
+	if got := substituteTemplate("{{enrich.user.email}}", contexts); got != "alex@example.com" {
+		t.Errorf("substituteTemplate({{enrich.user.email}}) = %q, want alex@example.com", got)
 	}
 	if atomic.LoadInt32(&calls) != 1 {
 		t.Errorf("server calls = %d, want 1", atomic.LoadInt32(&calls))
