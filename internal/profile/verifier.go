@@ -365,18 +365,31 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 		}
 	}
 
-	// Log the outgoing request for debugging (token value is redacted).
-	if slog.Default().Enabled(ctx, slog.LevelDebug) {
-		logHeaders := make(map[string]string, len(req.Header))
-		for k := range req.Header {
-			if textproto.CanonicalMIMEHeaderKey(k) == textproto.CanonicalMIMEHeaderKey(v.cfg.TokenHeader) {
-				logHeaders[k] = "[REDACTED]"
-			} else {
-				logHeaders[k] = req.Header.Get(k)
-			}
-		}
-		slog.DebugContext(ctx, "whoami request", "method", req.Method, "url", req.URL.String(), "headers", logHeaders)
+	// Log every outgoing WhoAmI call at INFO so operators can confirm
+	// which identity headers reach the server without enabling DEBUG. Only
+	// fires on cache miss, so traffic-per-line is bounded by CacheTTL.
+	// Credential-bearing headers (token + every static ExtraHeaders entry)
+	// are replaced with a "[REDACTED:<len>]" marker so the log proves the
+	// header was sent without leaking the secret. Metadata-derived headers
+	// (user id/email, channel id) and the channel-type header are emitted
+	// in full — they are the ones operators usually need to diagnose
+	// misrouted profiles.
+	logHeaders := make(map[string]string, len(req.Header))
+	redacted := map[string]struct{}{
+		textproto.CanonicalMIMEHeaderKey(v.cfg.TokenHeader): {},
 	}
+	for k := range v.cfg.ExtraHeaders {
+		redacted[textproto.CanonicalMIMEHeaderKey(k)] = struct{}{}
+	}
+	for k := range req.Header {
+		val := req.Header.Get(k)
+		if _, hide := redacted[textproto.CanonicalMIMEHeaderKey(k)]; hide {
+			logHeaders[k] = fmt.Sprintf("[REDACTED:%d]", len(val))
+		} else {
+			logHeaders[k] = val
+		}
+	}
+	slog.InfoContext(ctx, "whoami request", "method", req.Method, "url", req.URL.String(), "channel_type", channelType, "headers", logHeaders)
 
 	resp, err := v.client.Do(req)
 	if err != nil {
