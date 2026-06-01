@@ -105,6 +105,32 @@ func TestSanitizeHistory_StripsBrokenToolCall(t *testing.T) {
 	}
 }
 
+// TestSanitizeHistory_BrokenToolCallDoesNotOrphanResult: stripping a broken
+// [tool_call] turn must not orphan the tool result that follows it — the
+// plugin_output message and the summary that reads it both survive.
+func TestSanitizeHistory_BrokenToolCallDoesNotOrphanResult(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: provider.RoleUser, Content: "how many items?"},
+		{Role: provider.RoleAssistant, Content: "[tool_call] ."}, // broken → dropped
+		{Role: provider.RoleUser, Content: "[plugin_output]{\"pagination\":{\"total\":5}}[/plugin_output]"},
+		{Role: provider.RoleAssistant, Content: "You have 5 items."},
+	}
+	got := sanitizeHistory(msgs)
+	want := []string{
+		"how many items?",
+		"[plugin_output]{\"pagination\":{\"total\":5}}[/plugin_output]",
+		"You have 5 items.",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("broken turn dropped but result+summary must survive: got %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i].Content != want[i] {
+			t.Errorf("message %d = %q, want %q", i, got[i].Content, want[i])
+		}
+	}
+}
+
 // TestSanitizeHistory_KeepsFabricatedTextAnswer: a plain (even if factually
 // wrong) text answer with NO template/broken-tool-call poison is kept now —
 // conversation integrity beats over-eager scrubbing. Native tool calling plus

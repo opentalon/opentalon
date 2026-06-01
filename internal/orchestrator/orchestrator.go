@@ -3203,12 +3203,6 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 	}, nil
 }
 
-// sanitizeHistory removes poisoned assistant messages from session history.
-// An assistant message is "legitimate" only if it contains a [tool_call] block
-// OR is immediately preceded by a [plugin_output] (meaning it's a summary of
-// real tool results). Everything else is the LLM talking without acting —
-// hallucinated numbers, narrated intent, placeholder text — and teaches the
-// model to repeat the same bad pattern.
 // sanitizeHistory removes ONLY genuinely poisoned assistant turns from the
 // session history before it is sent to the model: a malformed [tool_call]
 // block, or a fabricated {{template}} result placeholder. A weak model imitates
