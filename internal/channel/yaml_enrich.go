@@ -69,11 +69,22 @@ func (ch *YAMLChannel) runEnrich(ctx context.Context, contexts map[string]map[st
 			return out, fmt.Errorf("%w: step %q: %v", ErrEnrichmentFailed, name, err)
 		}
 		out[name] = fields
-		// Make this step's results visible to subsequent steps via the
-		// template context, so step B can reference {{enrich.stepA.field}}
-		// in its URL/body. Mutates `contexts` in place — safe because we
-		// own the snapshot built in processEvent.
-		contexts["enrich."+name] = fields
+		// Make this step's results visible to subsequent steps and to the
+		// metadata mapping via the template context, so a value can be
+		// referenced as {{enrich.<step>.<field>}}. The template regex
+		// treats the first dot as the namespace/key separator, so we
+		// must store under a single "enrich" namespace keyed by
+		// "<step>.<field>" — storing under "enrich.<step>" would never
+		// match because ns="enrich" / key="<step>.<field>" looks up
+		// contexts["enrich"], which would be missing. Mutates `contexts`
+		// in place — safe because we own the snapshot built in
+		// processEvent.
+		if contexts["enrich"] == nil {
+			contexts["enrich"] = make(map[string]string, len(fields))
+		}
+		for fk, fv := range fields {
+			contexts["enrich"][name+"."+fk] = fv
+		}
 	}
 	return out, nil
 }
