@@ -3209,38 +3209,40 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 // real tool results). Everything else is the LLM talking without acting —
 // hallucinated numbers, narrated intent, placeholder text — and teaches the
 // model to repeat the same bad pattern.
+// sanitizeHistory removes ONLY genuinely poisoned assistant turns from the
+// session history before it is sent to the model: a malformed [tool_call]
+// block, or a fabricated {{template}} result placeholder. A weak model imitates
+// such patterns from its own past turns, so they must not be fed back.
+//
+// Everything else is real conversation and is preserved verbatim — plain-text
+// answers, clarifying questions, valid tool calls and their tool results. USER
+// MESSAGES ARE NEVER DROPPED, and an assistant turn carrying a native tool call
+// is always kept (dropping it would orphan the following tool result). Context-
+// window pressure is handled separately and oldest-first by trimToContextWindow;
+// this function must never silently delete in-task history — erasing a user's
+// earlier request is exactly what breaks multi-turn tasks (the #162 over-reach:
+// it stripped every tool-less assistant turn AND its preceding user message,
+// which wiped clarification dialogues like a multi-step create-item request).
 func sanitizeHistory(msgs []provider.Message) []provider.Message {
 	out := make([]provider.Message, 0, len(msgs))
-	for i, m := range msgs {
-		if m.Role == provider.RoleAssistant {
-			// Keep assistant messages that contain VALID tool calls — they drove real actions.
-			// Drop broken tool calls like "[tool_call] ." or "[tool_call] " that were
-			// malformed by the LLM; keeping them in history teaches bad patterns.
-			if strings.Contains(m.Content, "[tool_call]") && !isBrokenToolCall(m.Content) {
-				out = append(out, m)
-				continue
-			}
-			// Keep assistant messages with native tool calls (ToolCalls field set).
-			if len(m.ToolCalls) > 0 {
-				out = append(out, m)
-				continue
-			}
-			// Keep assistant messages that follow a tool result — they summarize
-			// real data (the normal round-2 response after a tool call).
-			if i > 0 && (strings.Contains(msgs[i-1].Content, "[plugin_output]") || msgs[i-1].Role == provider.RoleTool) {
-				out = append(out, m)
-				continue
-			}
-			// Everything else is the LLM answering without calling a tool.
-			// Drop it and its orphaned preceding user message.
-			if len(out) > 0 && out[len(out)-1].Role == provider.RoleUser {
-				out = out[:len(out)-1]
-			}
+	for _, m := range msgs {
+		if m.Role == provider.RoleAssistant && len(m.ToolCalls) == 0 && isPoisonedAssistantContent(m.Content) {
 			continue
 		}
 		out = append(out, m)
 	}
 	return out
+}
+
+// isPoisonedAssistantContent reports whether a tool-less assistant turn is a
+// self-poisoning artifact that must not be replayed to the model: a broken
+// [tool_call] block, or a fabricated {{template}} result placeholder. Legitimate
+// text — answers, clarifying questions — returns false and is kept.
+func isPoisonedAssistantContent(content string) bool {
+	if strings.Contains(content, "[tool_call]") && isBrokenToolCall(content) {
+		return true
+	}
+	return hasHallucinatedResult(content)
 }
 
 // isBrokenToolCall returns true if the message contains a [tool_call] block
