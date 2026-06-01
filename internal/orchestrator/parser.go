@@ -447,7 +447,10 @@ func hasNarratedToolCall(response string) bool {
 
 // hallucinatedResultRe matches template-like patterns the LLM fabricates when
 // pretending it already called a tool (e.g. "{{plugin_output.pagination.total}}").
-var hallucinatedResultRe = regexp.MustCompile(`\{\{[a-zA-Z_.]+(\.[\w.]+)+\}\}`)
+// The root is anchored to result-shaped identifiers so a legitimate turn that
+// merely mentions a dotted template (e.g. "{{user.name}}" in a config example)
+// is not mistaken for a fabricated tool result.
+var hallucinatedResultRe = regexp.MustCompile(`\{\{(plugin_output|pagination|result|results|data|response|output|tool_result)(\.\w+)+\}\}`)
 
 // hasHallucinatedResult returns true if the response contains fabricated
 // template variables like {{plugin_output.pagination.total}}.

@@ -1366,6 +1366,67 @@ func TestTrimToContextWindow_ZeroWindow(t *testing.T) {
 	}
 }
 
+func TestFirstNonOrphanIndex(t *testing.T) {
+	// Leading native result + text-format [plugin_output] are skipped; the first
+	// real message (an assistant summary here) is the boundary.
+	msgs := []provider.Message{
+		{Role: provider.RoleTool, Content: "result", ToolCallID: "c1"},
+		{Role: provider.RoleUser, Content: "[plugin_output]x[/plugin_output]"},
+		{Role: provider.RoleAssistant, Content: "summary of results"},
+		{Role: provider.RoleUser, Content: "next question"},
+	}
+	if got := firstNonOrphanIndex(msgs, 0); got != 2 {
+		t.Errorf("expected leading results skipped to index 2, got %d", got)
+	}
+
+	// No leading orphan → unchanged.
+	clean := []provider.Message{
+		{Role: provider.RoleUser, Content: "hi"},
+		{Role: provider.RoleAssistant, Content: "yo"},
+	}
+	if got := firstNonOrphanIndex(clean, 0); got != 0 {
+		t.Errorf("expected no advance, got %d", got)
+	}
+
+	// Every remaining message is a result → returns len (caller guards).
+	allOrphan := []provider.Message{{Role: provider.RoleTool, Content: "r", ToolCallID: "c1"}}
+	if got := firstNonOrphanIndex(allOrphan, 0); got != 1 {
+		t.Errorf("expected len(=1) for all-orphan, got %d", got)
+	}
+}
+
+func TestTrimToContextWindow_DoesNotOrphanToolResult(t *testing.T) {
+	// The token budget forces dropping the oldest user turn AND the assistant
+	// tool-call — which would leave the tool RESULT as the new first message: a
+	// RoleTool with no preceding call, which the LLM API rejects. The trim must
+	// advance past the orphaned result.
+	big := func(c string) string { return strings.Repeat(c, 400) } // ~100 tokens each
+	msgs := []provider.Message{
+		{Role: provider.RoleSystem, Content: strings.Repeat("s", 40)},
+		{Role: provider.RoleUser, Content: big("a")},
+		{Role: provider.RoleAssistant, Content: big("b"), ToolCalls: []provider.ToolCall{{ID: "c1", Name: "inv.list"}}},
+		{Role: provider.RoleTool, Content: big("r"), ToolCallID: "c1"},
+		{Role: provider.RoleAssistant, Content: big("d")},
+		{Role: provider.RoleUser, Content: big("e")},
+	}
+
+	result := trimToContextWindow(context.Background(), msgs, 400) // maxInput ≈ 360 tokens
+
+	// The orphaned result (its tool-call was dropped) must not survive.
+	for i, m := range result {
+		if m.Role == provider.RoleTool {
+			t.Errorf("orphaned tool result survived at index %d: %q", i, m.Content)
+		}
+	}
+	// System preserved, most recent user turn kept.
+	if result[0].Role != provider.RoleSystem {
+		t.Errorf("first message should be system, got %s", result[0].Role)
+	}
+	if result[len(result)-1].Content != big("e") {
+		t.Error("most recent user message must be kept")
+	}
+}
+
 // --- UserOnly tests ---
 
 func setupUserOnlyOrchestrator(parser ToolCallParser) *Orchestrator {

@@ -597,6 +597,12 @@ func TestHasHallucinatedResult(t *testing.T) {
 		"You have 42 items.",
 		"Here are the results.",
 		"Use {{ for templates in Go.",
+		// Legitimate dotted templates whose root is NOT a tool-result shape —
+		// must not be mistaken for a fabricated result (regression for the
+		// over-broad {{a.b}} match that stripped such turns from history).
+		"Use {{user.name}} in your config.",
+		"Set {{category.name}} on the form.",
+		"Write {{config.db.host}} into the file.",
 	}
 	for _, input := range noMatch {
 		if hasHallucinatedResult(input) {

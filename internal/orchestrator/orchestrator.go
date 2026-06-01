@@ -3203,44 +3203,40 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 	}, nil
 }
 
-// sanitizeHistory removes poisoned assistant messages from session history.
-// An assistant message is "legitimate" only if it contains a [tool_call] block
-// OR is immediately preceded by a [plugin_output] (meaning it's a summary of
-// real tool results). Everything else is the LLM talking without acting —
-// hallucinated numbers, narrated intent, placeholder text — and teaches the
-// model to repeat the same bad pattern.
+// sanitizeHistory removes ONLY genuinely poisoned assistant turns from the
+// session history before it is sent to the model: a malformed [tool_call]
+// block, or a fabricated {{template}} result placeholder. A weak model imitates
+// such patterns from its own past turns, so they must not be fed back.
+//
+// Everything else is real conversation and is preserved verbatim — plain-text
+// answers, clarifying questions, valid tool calls and their tool results. USER
+// MESSAGES ARE NEVER DROPPED, and an assistant turn carrying a native tool call
+// is always kept (dropping it would orphan the following tool result). Context-
+// window pressure is handled separately and oldest-first by trimToContextWindow;
+// this function must never silently delete in-task history — erasing a user's
+// earlier request is exactly what breaks multi-turn tasks (the #162 over-reach:
+// it stripped every tool-less assistant turn AND its preceding user message,
+// which wiped clarification dialogues like a multi-step create-item request).
 func sanitizeHistory(msgs []provider.Message) []provider.Message {
 	out := make([]provider.Message, 0, len(msgs))
-	for i, m := range msgs {
-		if m.Role == provider.RoleAssistant {
-			// Keep assistant messages that contain VALID tool calls — they drove real actions.
-			// Drop broken tool calls like "[tool_call] ." or "[tool_call] " that were
-			// malformed by the LLM; keeping them in history teaches bad patterns.
-			if strings.Contains(m.Content, "[tool_call]") && !isBrokenToolCall(m.Content) {
-				out = append(out, m)
-				continue
-			}
-			// Keep assistant messages with native tool calls (ToolCalls field set).
-			if len(m.ToolCalls) > 0 {
-				out = append(out, m)
-				continue
-			}
-			// Keep assistant messages that follow a tool result — they summarize
-			// real data (the normal round-2 response after a tool call).
-			if i > 0 && (strings.Contains(msgs[i-1].Content, "[plugin_output]") || msgs[i-1].Role == provider.RoleTool) {
-				out = append(out, m)
-				continue
-			}
-			// Everything else is the LLM answering without calling a tool.
-			// Drop it and its orphaned preceding user message.
-			if len(out) > 0 && out[len(out)-1].Role == provider.RoleUser {
-				out = out[:len(out)-1]
-			}
+	for _, m := range msgs {
+		if m.Role == provider.RoleAssistant && len(m.ToolCalls) == 0 && isPoisonedAssistantContent(m.Content) {
 			continue
 		}
 		out = append(out, m)
 	}
 	return out
+}
+
+// isPoisonedAssistantContent reports whether a tool-less assistant turn is a
+// self-poisoning artifact that must not be replayed to the model: a broken
+// [tool_call] block, or a fabricated {{template}} result placeholder. Legitimate
+// text — answers, clarifying questions — returns false and is kept.
+func isPoisonedAssistantContent(content string) bool {
+	if strings.Contains(content, "[tool_call]") && isBrokenToolCall(content) {
+		return true
+	}
+	return hasHallucinatedResult(content)
 }
 
 // isBrokenToolCall returns true if the message contains a [tool_call] block
@@ -3284,6 +3280,25 @@ func hasToolResults(msgs []provider.Message) bool {
 	return false
 }
 
+// firstNonOrphanIndex advances start past any leading tool-result messages
+// whose originating tool-call would be left behind by a cut at start. A native
+// tool result (RoleTool) or a text-format [plugin_output] message must be
+// immediately preceded by its tool-call; if a trim drops the call but keeps the
+// result, the result is orphaned — and the LLM API rejects a dangling tool
+// message. Skipping the leading orphaned results keeps the kept slice a valid
+// transcript. Returns len(msgs) only if every remaining message is a result.
+func firstNonOrphanIndex(msgs []provider.Message, start int) int {
+	for start < len(msgs) {
+		m := msgs[start]
+		if m.Role == provider.RoleTool || (m.Role == provider.RoleUser && strings.Contains(m.Content, "[plugin_output]")) {
+			start++
+			continue
+		}
+		break
+	}
+	return start
+}
+
 // applySlidingWindow keeps only the last o.contextMessages entries
 // from msgs when configured. When the cut fires, it emits one
 // messages_truncated event with the dropped index range so analytics
@@ -3301,6 +3316,9 @@ func (o *Orchestrator) applySlidingWindow(ctx context.Context, msgs []provider.M
 		return msgs
 	}
 	dropped := len(msgs) - o.contextMessages
+	// Don't cut between a tool-call and its result — advance the boundary past
+	// any leading orphaned results so the kept slice stays a valid transcript.
+	dropped = firstNonOrphanIndex(msgs, dropped)
 	// RFC #249 Pillar C: scan the dropped slice for [knowledge_context]
 	// blocks so consumers can correlate the cut with InjectionState
 	// release without re-reconciling. Visible-message scan is the same
@@ -3350,6 +3368,54 @@ func uniqueKnowledgeArticles(blocks []parsedKCBlock) []string {
 	return out
 }
 
+// appendConversation appends the message tail shared by buildMessages and
+// buildMessagesWithPrompt onto `messages` (which must already carry the system
+// prompt): the optional summary, the sliding-window-trimmed + sanitized +
+// knowledge-context-stripped history, the trailing format-hint and don't-repeat
+// reminders, and the final context-window trim. Extracted so the two assembly
+// paths cannot drift — the reminder strings and their gating were previously
+// duplicated verbatim in both.
+func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Session, messages []provider.Message) []provider.Message {
+	if sess.Summary != "" {
+		messages = append(messages, provider.Message{
+			Role:    provider.RoleSystem,
+			Content: "Previous conversation summary: " + sess.Summary,
+		})
+	}
+	// Sliding-window cutter (config-driven via o.contextMessages); emits
+	// messages_truncated when it fires.
+	convMessages := o.applySlidingWindow(ctx, sess.Messages)
+	// Strip [knowledge_context] from HISTORICAL user messages only (current turn
+	// kept verbatim so preparer-injected RAG reaches the LLM), and drop genuinely
+	// poisoned assistant turns via sanitizeHistory.
+	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
+
+	// For weaker / OSS models, repeat the channel format hint as a trailing
+	// system reminder — but only after a tool result exists, so it doesn't
+	// compete with the tool-calling instruction on the first round.
+	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
+		messages = append(messages, provider.Message{
+			Role:    provider.RoleSystem,
+			Content: "[IMPORTANT — output format reminder] " + hint,
+		})
+	}
+
+	// Don't-repeat reminder, only with actual prior conversation. Placed close to
+	// the generation point where the model is most likely to follow it.
+	if len(convMessages) > 2 {
+		messages = append(messages, provider.Message{
+			Role:    provider.RoleSystem,
+			Content: "[IMPORTANT] Answer ONLY the user's last message above. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.",
+		})
+	}
+
+	if o.contextWindow > 0 {
+		messages = trimToContextWindow(ctx, messages, o.contextWindow)
+	}
+
+	return messages
+}
+
 func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 
@@ -3368,58 +3434,7 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 		Role:    provider.RoleSystem,
 		Content: systemPrompt,
 	})
-	if sess.Summary != "" {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "Previous conversation summary: " + sess.Summary,
-		})
-	}
-	// Apply the sliding-window cutter (config-driven via o.contextMessages)
-	// and emit messages_truncated when it fires. Both buildMessages and
-	// buildMessagesWithPrompt go through the same helper so analytics see
-	// exactly one event per cut regardless of which assembly path ran.
-	convMessages := o.applySlidingWindow(ctx, sess.Messages)
-	// Strip [knowledge_context] from HISTORICAL user messages only. The
-	// current turn's user message is preserved verbatim so preparer-injected
-	// RAG content actually reaches the LLM. Historical turns are still
-	// stripped to avoid per-turn accumulation and redundancy with the
-	// system prompt (server-instruction articles are already filtered out
-	// plugin-side via filterOutMCPItems).
-	//
-	// Also sanitize poisoned assistant messages from session history: remove
-	// hallucinated template variables and narrated tool calls that were saved
-	// before detection was in place. These teach the LLM bad patterns.
-	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
-
-	// For weaker / OSS models that tend to ignore system-prompt formatting
-	// instructions, repeat the channel format hint as a trailing system
-	// reminder. Only inject it after at least one tool-result exchange so it
-	// doesn't compete with the tool-calling instruction on the very first
-	// round — the OUTPUT FORMAT section in the system prompt is sufficient
-	// there. Once tool results are present the model switches to answer
-	// mode and benefits from the nudge.
-	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "[IMPORTANT — output format reminder] " + hint,
-		})
-	}
-
-	// Only inject the "don't repeat" reminder when there's actual prior
-	// conversation (at least one assistant reply). On the first turn there's
-	// nothing to repeat.
-	if len(convMessages) > 2 {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "[IMPORTANT] Answer ONLY the user's last message above. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.",
-		})
-	}
-
-	if o.contextWindow > 0 {
-		messages = trimToContextWindow(ctx, messages, o.contextWindow)
-	}
-
-	return messages
+	return o.appendConversation(ctx, sess, messages)
 }
 
 // buildMessagesWithPrompt assembles the LLM message list using a pre-built
@@ -3431,40 +3446,7 @@ func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.
 		Role:    provider.RoleSystem,
 		Content: systemPrompt,
 	})
-	if sess.Summary != "" {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "Previous conversation summary: " + sess.Summary,
-		})
-	}
-	convMessages := o.applySlidingWindow(ctx, sess.Messages)
-	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
-
-	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "[IMPORTANT — output format reminder] " + hint,
-		})
-	}
-
-	// Trailing instruction placed close to the generation point where
-	// the model is most likely to follow it. The same instruction in the
-	// preamble (far away) gets buried under 50-100k tokens.
-	// Only inject the "don't repeat" reminder when there's actual prior
-	// conversation (at least one assistant reply). On the first turn there's
-	// nothing to repeat.
-	if len(convMessages) > 2 {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "[IMPORTANT] Answer ONLY the user's last message above. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.",
-		})
-	}
-
-	if o.contextWindow > 0 {
-		messages = trimToContextWindow(ctx, messages, o.contextWindow)
-	}
-
-	return messages
+	return o.appendConversation(ctx, sess, messages)
 }
 
 // estimateTokens returns a rough token count for a string.
@@ -3498,6 +3480,11 @@ func trimToContextWindow(ctx context.Context, messages []provider.Message, conte
 	for total > maxInputTokens && convStart < len(messages)-1 {
 		total -= estimateTokens(messages[convStart].Content)
 		convStart++
+	}
+	// Don't leave a tool result orphaned by dropping its tool-call — advance the
+	// boundary past any leading orphaned results (but never to an empty slice).
+	if i := firstNonOrphanIndex(messages, convStart); i < len(messages) {
+		convStart = i
 	}
 
 	trimmed := make([]provider.Message, 0, len(messages)-convStart+convStart)
