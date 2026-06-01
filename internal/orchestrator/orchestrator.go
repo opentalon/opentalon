@@ -3346,6 +3346,54 @@ func uniqueKnowledgeArticles(blocks []parsedKCBlock) []string {
 	return out
 }
 
+// appendConversation appends the message tail shared by buildMessages and
+// buildMessagesWithPrompt onto `messages` (which must already carry the system
+// prompt): the optional summary, the sliding-window-trimmed + sanitized +
+// knowledge-context-stripped history, the trailing format-hint and don't-repeat
+// reminders, and the final context-window trim. Extracted so the two assembly
+// paths cannot drift — the reminder strings and their gating were previously
+// duplicated verbatim in both.
+func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Session, messages []provider.Message) []provider.Message {
+	if sess.Summary != "" {
+		messages = append(messages, provider.Message{
+			Role:    provider.RoleSystem,
+			Content: "Previous conversation summary: " + sess.Summary,
+		})
+	}
+	// Sliding-window cutter (config-driven via o.contextMessages); emits
+	// messages_truncated when it fires.
+	convMessages := o.applySlidingWindow(ctx, sess.Messages)
+	// Strip [knowledge_context] from HISTORICAL user messages only (current turn
+	// kept verbatim so preparer-injected RAG reaches the LLM), and drop genuinely
+	// poisoned assistant turns via sanitizeHistory.
+	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
+
+	// For weaker / OSS models, repeat the channel format hint as a trailing
+	// system reminder — but only after a tool result exists, so it doesn't
+	// compete with the tool-calling instruction on the first round.
+	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
+		messages = append(messages, provider.Message{
+			Role:    provider.RoleSystem,
+			Content: "[IMPORTANT — output format reminder] " + hint,
+		})
+	}
+
+	// Don't-repeat reminder, only with actual prior conversation. Placed close to
+	// the generation point where the model is most likely to follow it.
+	if len(convMessages) > 2 {
+		messages = append(messages, provider.Message{
+			Role:    provider.RoleSystem,
+			Content: "[IMPORTANT] Answer ONLY the user's last message above. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.",
+		})
+	}
+
+	if o.contextWindow > 0 {
+		messages = trimToContextWindow(ctx, messages, o.contextWindow)
+	}
+
+	return messages
+}
+
 func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 
@@ -3364,58 +3412,7 @@ func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, u
 		Role:    provider.RoleSystem,
 		Content: systemPrompt,
 	})
-	if sess.Summary != "" {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "Previous conversation summary: " + sess.Summary,
-		})
-	}
-	// Apply the sliding-window cutter (config-driven via o.contextMessages)
-	// and emit messages_truncated when it fires. Both buildMessages and
-	// buildMessagesWithPrompt go through the same helper so analytics see
-	// exactly one event per cut regardless of which assembly path ran.
-	convMessages := o.applySlidingWindow(ctx, sess.Messages)
-	// Strip [knowledge_context] from HISTORICAL user messages only. The
-	// current turn's user message is preserved verbatim so preparer-injected
-	// RAG content actually reaches the LLM. Historical turns are still
-	// stripped to avoid per-turn accumulation and redundancy with the
-	// system prompt (server-instruction articles are already filtered out
-	// plugin-side via filterOutMCPItems).
-	//
-	// Also sanitize poisoned assistant messages from session history: remove
-	// hallucinated template variables and narrated tool calls that were saved
-	// before detection was in place. These teach the LLM bad patterns.
-	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
-
-	// For weaker / OSS models that tend to ignore system-prompt formatting
-	// instructions, repeat the channel format hint as a trailing system
-	// reminder. Only inject it after at least one tool-result exchange so it
-	// doesn't compete with the tool-calling instruction on the very first
-	// round — the OUTPUT FORMAT section in the system prompt is sufficient
-	// there. Once tool results are present the model switches to answer
-	// mode and benefits from the nudge.
-	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "[IMPORTANT — output format reminder] " + hint,
-		})
-	}
-
-	// Only inject the "don't repeat" reminder when there's actual prior
-	// conversation (at least one assistant reply). On the first turn there's
-	// nothing to repeat.
-	if len(convMessages) > 2 {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "[IMPORTANT] Answer ONLY the user's last message above. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.",
-		})
-	}
-
-	if o.contextWindow > 0 {
-		messages = trimToContextWindow(ctx, messages, o.contextWindow)
-	}
-
-	return messages
+	return o.appendConversation(ctx, sess, messages)
 }
 
 // buildMessagesWithPrompt assembles the LLM message list using a pre-built
@@ -3427,40 +3424,7 @@ func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.
 		Role:    provider.RoleSystem,
 		Content: systemPrompt,
 	})
-	if sess.Summary != "" {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "Previous conversation summary: " + sess.Summary,
-		})
-	}
-	convMessages := o.applySlidingWindow(ctx, sess.Messages)
-	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
-
-	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "[IMPORTANT — output format reminder] " + hint,
-		})
-	}
-
-	// Trailing instruction placed close to the generation point where
-	// the model is most likely to follow it. The same instruction in the
-	// preamble (far away) gets buried under 50-100k tokens.
-	// Only inject the "don't repeat" reminder when there's actual prior
-	// conversation (at least one assistant reply). On the first turn there's
-	// nothing to repeat.
-	if len(convMessages) > 2 {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "[IMPORTANT] Answer ONLY the user's last message above. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.",
-		})
-	}
-
-	if o.contextWindow > 0 {
-		messages = trimToContextWindow(ctx, messages, o.contextWindow)
-	}
-
-	return messages
+	return o.appendConversation(ctx, sess, messages)
 }
 
 // estimateTokens returns a rough token count for a string.
