@@ -3280,6 +3280,25 @@ func hasToolResults(msgs []provider.Message) bool {
 	return false
 }
 
+// firstNonOrphanIndex advances start past any leading tool-result messages
+// whose originating tool-call would be left behind by a cut at start. A native
+// tool result (RoleTool) or a text-format [plugin_output] message must be
+// immediately preceded by its tool-call; if a trim drops the call but keeps the
+// result, the result is orphaned — and the LLM API rejects a dangling tool
+// message. Skipping the leading orphaned results keeps the kept slice a valid
+// transcript. Returns len(msgs) only if every remaining message is a result.
+func firstNonOrphanIndex(msgs []provider.Message, start int) int {
+	for start < len(msgs) {
+		m := msgs[start]
+		if m.Role == provider.RoleTool || (m.Role == provider.RoleUser && strings.Contains(m.Content, "[plugin_output]")) {
+			start++
+			continue
+		}
+		break
+	}
+	return start
+}
+
 // applySlidingWindow keeps only the last o.contextMessages entries
 // from msgs when configured. When the cut fires, it emits one
 // messages_truncated event with the dropped index range so analytics
@@ -3297,6 +3316,9 @@ func (o *Orchestrator) applySlidingWindow(ctx context.Context, msgs []provider.M
 		return msgs
 	}
 	dropped := len(msgs) - o.contextMessages
+	// Don't cut between a tool-call and its result — advance the boundary past
+	// any leading orphaned results so the kept slice stays a valid transcript.
+	dropped = firstNonOrphanIndex(msgs, dropped)
 	// RFC #249 Pillar C: scan the dropped slice for [knowledge_context]
 	// blocks so consumers can correlate the cut with InjectionState
 	// release without re-reconciling. Visible-message scan is the same
@@ -3458,6 +3480,11 @@ func trimToContextWindow(ctx context.Context, messages []provider.Message, conte
 	for total > maxInputTokens && convStart < len(messages)-1 {
 		total -= estimateTokens(messages[convStart].Content)
 		convStart++
+	}
+	// Don't leave a tool result orphaned by dropping its tool-call — advance the
+	// boundary past any leading orphaned results (but never to an empty slice).
+	if i := firstNonOrphanIndex(messages, convStart); i < len(messages) {
+		convStart = i
 	}
 
 	trimmed := make([]provider.Message, 0, len(messages)-convStart+convStart)
