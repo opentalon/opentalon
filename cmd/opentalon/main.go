@@ -28,6 +28,7 @@ import (
 	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/plugin"
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/redisclient"
 	"github.com/opentalon/opentalon/internal/reminder"
@@ -579,6 +580,21 @@ func main() {
 	// rebuilding either consumer. Created here to break the
 	// orch ← ChannelSender ← notifier ← reg ← handler ← orch cycle.
 	notifier := &channelNotifier{reg: nil}
+
+	// Apply built-in prompt overrides from config before the orchestrator is
+	// built (NewWithRules reads the default/scheduling rules). Unknown keys are
+	// surfaced as a warning rather than a hard failure so a typo doesn't block
+	// startup. This only swaps the embedded prompt defaults; plugin/MCP server
+	// instructions are still appended to the system prompt as before.
+	if len(cfg.Orchestrator.PromptOverrides) > 0 {
+		applied, unknown := prompts.ApplyOverrides(cfg.Orchestrator.PromptOverrides)
+		if len(applied) > 0 {
+			slog.Info("prompt overrides applied", "prompts", applied)
+		}
+		if len(unknown) > 0 {
+			slog.Warn("ignoring unknown prompt override keys", "keys", unknown, "valid", prompts.OverridableNames())
+		}
+	}
 
 	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, orchestrator.OrchestratorOpts{
 		CustomRules:             cfg.Orchestrator.Rules,
