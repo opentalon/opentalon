@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -144,4 +145,71 @@ func splitLines(s string) []string {
 		}
 	}
 	return out
+}
+
+// promptSetters maps each built-in prompt's canonical name — its .txt filename
+// without the extension — to a function that overrides the corresponding
+// exported value, applying the same post-processing the embedded default gets
+// (raw, trailing-newline-trimmed, or line-split). ApplyOverrides uses it so
+// every built-in prompt is configurable without touching any call site.
+var promptSetters = map[string]func(string){
+	"orchestrator_preamble":         func(s string) { OrchestratorPreamble = s },
+	"orchestrator_preamble_native":  func(s string) { OrchestratorPreambleNative = s },
+	"orchestrator_subprocess":       func(s string) { OrchestratorSubprocess = s },
+	"subprocess_preamble":           func(s string) { SubprocessPreamble = s },
+	"planner_preamble":              func(s string) { PlannerPreamble = s },
+	"planner_suffix":                func(s string) { PlannerSuffix = strings.TrimRight(s, "\n") },
+	"planner_narrate":               func(s string) { PlannerNarrate = strings.TrimRight(s, "\n") },
+	"planner_narrate_tool":          func(s string) { PlannerNarrateTool = strings.TrimRight(s, "\n") },
+	"orchestrator_summarize":        func(s string) { SummarizeDefault = strings.TrimRight(s, "\n") },
+	"orchestrator_summarize_update": func(s string) { SummarizeUpdate = strings.TrimRight(s, "\n") },
+	"orchestrator_session_title":    func(s string) { SessionTitle = strings.TrimRight(s, "\n") },
+	"rules_default":                 func(s string) { DefaultRules = splitLines(s) },
+	"rules_scheduling":              func(s string) { SchedulingRules = splitLines(s) },
+	"format_slack":                  func(s string) { FormatSlack = strings.TrimRight(s, "\n") },
+	"format_markdown":               func(s string) { FormatMarkdown = strings.TrimRight(s, "\n") },
+	"format_html":                   func(s string) { FormatHTML = strings.TrimRight(s, "\n") },
+	"format_telegram":               func(s string) { FormatTelegram = strings.TrimRight(s, "\n") },
+	"format_teams":                  func(s string) { FormatTeams = strings.TrimRight(s, "\n") },
+	"format_whatsapp":               func(s string) { FormatWhatsApp = strings.TrimRight(s, "\n") },
+	"format_discord":                func(s string) { FormatDiscord = strings.TrimRight(s, "\n") },
+	"format_text":                   func(s string) { FormatText = strings.TrimRight(s, "\n") },
+}
+
+// OverridableNames returns the sorted canonical names ApplyOverrides accepts —
+// one per built-in prompt. Useful for config validation and documentation.
+func OverridableNames() []string {
+	names := make([]string, 0, len(promptSetters))
+	for name := range promptSetters {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ApplyOverrides replaces built-in prompt defaults with values supplied from
+// config, keyed by canonical prompt name (the .txt filename without extension).
+// Every key present is applied, including an empty value — that blanks the
+// prompt, which is how a deployment removes a built-in block it does not want
+// (e.g. set "rules_scheduling" to "" where no scheduler plugin is loaded). To
+// keep a default, omit its key. Unknown keys are returned (sorted) so the caller
+// can warn about typos; applied keys are returned for logging.
+//
+// It mutates package-level defaults, so call it once at startup before the
+// orchestrator serves traffic — it is not safe to run concurrently with prompt
+// reads. It does NOT change how plugin / MCP server instructions get appended to
+// the system prompt; the orchestrator adds those separately at request time.
+func ApplyOverrides(overrides map[string]string) (applied, unknown []string) {
+	for name, text := range overrides {
+		setter, ok := promptSetters[name]
+		if !ok {
+			unknown = append(unknown, name)
+			continue
+		}
+		setter(text)
+		applied = append(applied, name)
+	}
+	sort.Strings(applied)
+	sort.Strings(unknown)
+	return applied, unknown
 }

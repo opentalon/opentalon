@@ -40,6 +40,21 @@ routing:
 
 orchestrator:
   rules: []
+  # Override any built-in prompt. Key = canonical name (the .txt filename under
+  # internal/prompts/ without the extension); omit a key to keep its embedded
+  # default; set an empty value to blank that block entirely. Plugin/MCP server
+  # instructions are still appended to the system prompt regardless.
+  # Valid keys: orchestrator_preamble, orchestrator_preamble_native,
+  # orchestrator_subprocess, subprocess_preamble, planner_preamble,
+  # planner_suffix, planner_narrate, planner_narrate_tool,
+  # orchestrator_summarize, orchestrator_summarize_update,
+  # orchestrator_session_title, rules_default, rules_scheduling,
+  # format_slack, format_markdown, format_html, format_telegram, format_teams,
+  # format_whatsapp, format_discord, format_text
+  # prompt_overrides:
+  #   orchestrator_preamble_native: |
+  #     You are a focused assistant for ACME. Call tools to act; never guess.
+  #   rules_scheduling: ""   # remove the scheduler rules where no scheduler plugin is loaded
   # permission_plugin: permission   # optional; core calls this plugin with action "check"(actor, plugin) before running a tool
   # debounce_window: "800ms"       # merge rapid messages into one LLM call (default "0" = disabled)
   # Run these plugin actions before the first LLM call; their output becomes the user message (or they can block with send_to_llm: false).

@@ -323,6 +323,7 @@ type KnowledgeConfig struct {
 
 type OrchestratorConfig struct {
 	Rules                 []string                     `yaml:"rules"`
+	PromptOverrides       map[string]string            `yaml:"prompt_overrides,omitempty"` // override built-in prompts by canonical name (.txt filename without extension); omitted key = embedded default, empty value = blank it. See prompts.OverridableNames().
 	ContentPreparers      []ContentPreparerEntry       `yaml:"content_preparers,omitempty"`
 	ResponseFormatters    []ResponseFormatterEntry     `yaml:"response_formatters,omitempty"`
 	PermissionPlugin      string                       `yaml:"permission_plugin,omitempty"`       // if set, core calls this plugin with action "check" (actor, plugin) before running a tool
