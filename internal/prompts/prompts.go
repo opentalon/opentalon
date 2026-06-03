@@ -65,6 +65,15 @@ var OrchestratorPreambleNative string
 //go:embed orchestrator_subprocess.txt
 var OrchestratorSubprocess string
 
+//go:embed orchestrator_knowledge_instructions.txt
+var orchestratorKnowledgeInstructionsRaw string
+
+// OrchestratorKnowledgeInstructions is the behavior anchor for the always-on
+// knowledge catalog the orchestrator renders into the system prompt: it tells
+// the model to consult the knowledge base (via ask_knowledge slug/query) before
+// asking the user. Trailing newline trimmed so the caller controls spacing.
+var OrchestratorKnowledgeInstructions = strings.TrimRight(orchestratorKnowledgeInstructionsRaw, "\n")
+
 //go:embed orchestrator_summarize.txt
 var summarizeDefaultRaw string
 
@@ -153,9 +162,12 @@ func splitLines(s string) []string {
 // (raw, trailing-newline-trimmed, or line-split). ApplyOverrides uses it so
 // every built-in prompt is configurable without touching any call site.
 var promptSetters = map[string]func(string){
-	"orchestrator_preamble":         func(s string) { OrchestratorPreamble = s },
-	"orchestrator_preamble_native":  func(s string) { OrchestratorPreambleNative = s },
-	"orchestrator_subprocess":       func(s string) { OrchestratorSubprocess = s },
+	"orchestrator_preamble":        func(s string) { OrchestratorPreamble = s },
+	"orchestrator_preamble_native": func(s string) { OrchestratorPreambleNative = s },
+	"orchestrator_subprocess":      func(s string) { OrchestratorSubprocess = s },
+	"orchestrator_knowledge_instructions": func(s string) {
+		OrchestratorKnowledgeInstructions = strings.TrimRight(s, "\n")
+	},
 	"subprocess_preamble":           func(s string) { SubprocessPreamble = s },
 	"planner_preamble":              func(s string) { PlannerPreamble = s },
 	"planner_suffix":                func(s string) { PlannerSuffix = strings.TrimRight(s, "\n") },

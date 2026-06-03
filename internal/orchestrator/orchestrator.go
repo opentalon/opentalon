@@ -358,6 +358,17 @@ type Orchestrator struct {
 	// "<sessionID>|<pluginName>"; value is unused. Zero value is
 	// usable directly, so no NewWithRules wiring is needed.
 	legacyKnowledgeWarnings sync.Map
+	// knowledgeCatalog is the rendered "## Available knowledge" section (anchor
+	// + slug/title list) shown in every system prompt so the model knows which
+	// articles it can pull via ask_knowledge. Served from cache on the hot path;
+	// refreshed lazily in the background when older than knowledgeCatalogTTL so
+	// buildSystemPrompt never makes a network call. Empty = no catalog (no
+	// knowledge plugin, or zero articles). knowledgeCatalogRefreshing is the
+	// single-flight guard; knowledgeCatalogAt stamps the last refresh attempt.
+	knowledgeCatalogMu         sync.RWMutex
+	knowledgeCatalog           string
+	knowledgeCatalogAt         time.Time
+	knowledgeCatalogRefreshing bool
 }
 
 // resolveAllowedPluginNames returns a JSON array of allowed plugin names for the
@@ -3520,6 +3531,13 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 
 	sb.WriteString(o.rules.BuildPromptSection())
 
+	// Always-on knowledge catalog: titles + slugs of pullable articles, so the
+	// model knows what background it can fetch via ask_knowledge. Served from
+	// cache; a stale cache triggers a non-blocking background refresh.
+	if catalog := o.knowledgeCatalogSection(); catalog != "" {
+		sb.WriteString(catalog)
+	}
+
 	if o.runtimePromptPath != "" {
 		if data, err := os.ReadFile(o.runtimePromptPath); err == nil {
 			sb.WriteString("\n## Additional instructions (editable from chat)\n")
@@ -5258,6 +5276,117 @@ type syncActionsPayload struct {
 	// continue to pre-delete on every batch and exhibit the legacy
 	// last-batch-wins truncation behaviour.
 	IsContinuationBatch bool `json:"is_continuation_batch,omitempty"`
+}
+
+// knowledgeCatalogAction is the weaviate-plugin action that lists all
+// slug-bearing knowledge articles as {slug,title}. It lives on the same plugin
+// as action sync (o.syncActionsPlugin). Guarded by a HasAction check so an
+// older sync plugin without it degrades gracefully to "no catalog".
+const knowledgeCatalogAction = "list_knowledge_titles"
+
+// knowledgeCatalogTTL is how long a fetched catalog is served before a
+// background refresh is triggered. The corpus changes rarely (only when the
+// MCP server's articles change), so a few minutes of staleness is fine.
+const knowledgeCatalogTTL = 5 * time.Minute
+
+// knowledgeCatalogSection returns the cached "## Available knowledge" block and,
+// when the cache is stale, kicks off a single-flight background refresh so the
+// hot path (buildSystemPrompt) never blocks on a network call. The first call
+// after startup returns "" and warms the cache for subsequent calls.
+func (o *Orchestrator) knowledgeCatalogSection() string {
+	o.knowledgeCatalogMu.RLock()
+	section := o.knowledgeCatalog
+	stale := time.Since(o.knowledgeCatalogAt) > knowledgeCatalogTTL
+	refreshing := o.knowledgeCatalogRefreshing
+	o.knowledgeCatalogMu.RUnlock()
+
+	if stale && !refreshing {
+		o.knowledgeCatalogMu.Lock()
+		if !o.knowledgeCatalogRefreshing { // double-check under the write lock
+			o.knowledgeCatalogRefreshing = true
+			go o.refreshKnowledgeCatalog(context.Background())
+		}
+		o.knowledgeCatalogMu.Unlock()
+	}
+	return section
+}
+
+// refreshKnowledgeCatalog fetches the current catalog from the knowledge plugin
+// and stores the rendered section. A failed/skipped fetch keeps the previous
+// value (so a transient error doesn't blank a good catalog); a successful fetch
+// of zero articles legitimately stores "". Always stamps the attempt time and
+// clears the single-flight guard.
+func (o *Orchestrator) refreshKnowledgeCatalog(ctx context.Context) {
+	section, ok := o.fetchKnowledgeCatalogSection(ctx)
+	o.knowledgeCatalogMu.Lock()
+	o.knowledgeCatalogAt = time.Now()
+	if ok {
+		o.knowledgeCatalog = section
+	}
+	o.knowledgeCatalogRefreshing = false
+	o.knowledgeCatalogMu.Unlock()
+}
+
+// fetchKnowledgeCatalogSection calls the knowledge plugin's list action and
+// renders the always-on catalog section (anchor + sorted slug/title list).
+// Returns ok=false when there is no knowledge plugin, the action is absent
+// (older plugin), or the call/parse fails — callers keep the previous value.
+// Returns ("", true) when the corpus is legitimately empty.
+func (o *Orchestrator) fetchKnowledgeCatalogSection(ctx context.Context) (string, bool) {
+	if o.syncActionsPlugin == "" || !o.registry.HasAction(o.syncActionsPlugin, knowledgeCatalogAction) {
+		return "", false
+	}
+	exec, ok := o.registry.GetExecutor(o.syncActionsPlugin)
+	if !ok {
+		return "", false
+	}
+	call := ToolCall{ID: "knowledge-catalog", Plugin: o.syncActionsPlugin, Action: knowledgeCatalogAction}
+	result := o.guard.ExecuteWithDeadline(ctx, exec, call, 30*time.Second)
+	if result.Error != "" {
+		slog.Warn("knowledge catalog refresh failed", "component", "orchestrator", "error", result.Error)
+		return "", false
+	}
+	var entries []knowledgeCatalogEntry
+	if err := json.Unmarshal([]byte(result.Content), &entries); err != nil {
+		slog.Warn("knowledge catalog parse failed", "component", "orchestrator", "error", err)
+		return "", false
+	}
+	return renderKnowledgeCatalog(entries, prompts.OrchestratorKnowledgeInstructions), true
+}
+
+// knowledgeCatalogEntry is one {slug,title} row returned by the knowledge
+// plugin's list action.
+type knowledgeCatalogEntry struct {
+	Slug  string `json:"slug"`
+	Title string `json:"title"`
+}
+
+// renderKnowledgeCatalog builds the "## Available knowledge" system-prompt
+// section from the catalog entries (anchor + one "- Title (slug: `slug`)" line
+// each, in the order given). Pure (no I/O) so it is unit-testable; returns ""
+// when there are no valid entries.
+func renderKnowledgeCatalog(entries []knowledgeCatalogEntry, anchor string) string {
+	var sb strings.Builder
+	n := 0
+	for _, e := range entries {
+		if e.Slug == "" || e.Title == "" {
+			continue
+		}
+		if n == 0 {
+			sb.WriteString("\n## Available knowledge\n")
+			if anchor != "" {
+				sb.WriteString(anchor)
+				sb.WriteString("\n")
+			}
+		}
+		fmt.Fprintf(&sb, "- %s (slug: `%s`)\n", e.Title, e.Slug)
+		n++
+	}
+	if n == 0 {
+		return ""
+	}
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 // SyncActions iterates all registered plugin capabilities and calls the configured
