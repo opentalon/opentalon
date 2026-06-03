@@ -77,10 +77,19 @@ jobs:
           --health-timeout 3s
           --health-retries 5
       sentinel:
-        image: bitnami/redis-sentinel:latest
+        # Digest-pinned: Bitnami's secure-images migration dropped versioned
+        # tags from the free Docker Hub catalog, so only the floating `latest`
+        # and bare digests remain. Pinning the digest keeps CI reproducible and
+        # immune to `latest` drift (a drift on 2026-06-03 is what required the
+        # ALLOW_EMPTY_PASSWORD flag below). Bump the digest deliberately.
+        image: bitnami/redis-sentinel@sha256:ffa20700e642abc61f0d23b174b32dc923ee3e49aebe890f5b9a1f2c94bcfc4a
         ports:
           - 26379:26379
         env:
+          # Newer Bitnami images refuse to boot without a password unless this
+          # dev-mode flag is set explicitly. CI runs a throwaway sentinel with
+          # no auth, so an empty password is intentional here.
+          ALLOW_EMPTY_PASSWORD: "yes"
           REDIS_SENTINEL_ANNOUNCE_IP: "127.0.0.1"
           REDIS_MASTER_HOST: "redis"
           REDIS_MASTER_PORT_NUMBER: "6379"
