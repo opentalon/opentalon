@@ -3721,7 +3721,12 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 
 	if p := profile.FromContext(ctx); p != nil && p.Language != "" {
 		sb.WriteString("## Language\n")
-		fmt.Fprintf(&sb, "IMPORTANT: You MUST respond in %s. All your replies, explanations, and summaries must be written in %s.\n\n", p.Language, p.Language)
+		fmt.Fprintf(&sb, "Reply in the language of the user's most recent message, judged from the words and script they actually use. Only if that message is too short or ambiguous to identify a language, default to %s. When unsure between the message language and %s, follow the message.\n\n", p.Language, p.Language)
+	}
+
+	if p := profile.FromContext(ctx); p != nil && p.Name != "" {
+		sb.WriteString("## User\n")
+		fmt.Fprintf(&sb, "The user's name is %s. Address them by name where it feels natural; do not force it into every message.\n\n", p.Name)
 	}
 
 	return sb.String()

@@ -114,6 +114,7 @@ type WhoAmIConfig struct {
 	LimitTimeField    string            `yaml:"limit_time_field"`        // optional JSON field for limit window duration (e.g. "1h"); default "limit_time"
 	CredentialsField  string            `yaml:"credentials_field"`       // optional JSON field for per-MCP-server tokens map; default "credentials"
 	LanguageField     string            `yaml:"language_field"`          // optional JSON field for user language; default "language"
+	NameField         string            `yaml:"name_field"`              // optional JSON field for user display name; default "name"
 	ExtraHeaders      map[string]string `yaml:"extra_headers,omitempty"` // static headers added to every WhoAmI call; values support ${ENV_VAR}
 	// MetadataHeaders maps an inbound message metadata key to an outbound HTTP
 	// header name. For each entry, the verifier reads msg.Metadata[key] and

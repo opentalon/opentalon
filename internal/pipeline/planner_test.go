@@ -221,7 +221,7 @@ func TestBuildPlannerPrompt(t *testing.T) {
 			},
 		},
 	}
-	prompt := buildPlannerPrompt(caps, "")
+	prompt := buildPlannerPrompt(caps)
 	if prompt == "" {
 		t.Error("expected non-empty prompt")
 	}
@@ -240,7 +240,7 @@ func TestBuildPlannerPrompt(t *testing.T) {
 // `containers[]`/`items[]`), and the executor's substitution layer is
 // only useful if the planner emits paths it can actually resolve.
 func TestBuildPlannerPrompt_DocumentsChainingSyntax(t *testing.T) {
-	prompt := buildPlannerPrompt(nil, "")
+	prompt := buildPlannerPrompt(nil)
 	for _, want := range []string{
 		"Referencing prior step output",
 		"{{<step-id>.output.<json-path>}}",
@@ -269,7 +269,7 @@ func TestBuildPlannerPromptMCPDotActions(t *testing.T) {
 			},
 		},
 	}
-	prompt := buildPlannerPrompt(caps, "")
+	prompt := buildPlannerPrompt(caps)
 
 	// The explicit format must appear so the LLM knows plugin="mcp", not "mcp.appsignal".
 	if !containsStr(prompt, "plugin=mcp | action=appsignal.get_applications") {
@@ -296,7 +296,7 @@ func TestBuildPlannerPrompt_ExcludesServerInstructions(t *testing.T) {
 			},
 		},
 	}
-	prompt := buildPlannerPrompt(caps, "")
+	prompt := buildPlannerPrompt(caps)
 
 	// Server instructions must NOT be in the planner prompt — it only decides
 	// direct vs pipeline. The main LLM system prompt has them.
@@ -306,24 +306,6 @@ func TestBuildPlannerPrompt_ExcludesServerInstructions(t *testing.T) {
 	// Tool definitions must still be present.
 	if !containsStr(prompt, "plugin=inventory | action=list-items") {
 		t.Error("planner prompt must include tool definitions")
-	}
-}
-
-func TestBuildPlannerPromptWithLanguage(t *testing.T) {
-	caps := []CapabilityInfo{
-		{Name: "jira", Description: "Jira", Actions: []ActionInfo{
-			{Name: "create_issue", Description: "Create issue"},
-		}},
-	}
-	prompt := buildPlannerPrompt(caps, "English")
-	if !containsStr(prompt, "English") {
-		t.Error("prompt should contain language instruction for English")
-	}
-
-	// Without language, no language instruction should appear.
-	promptNoLang := buildPlannerPrompt(caps, "")
-	if containsStr(promptNoLang, "must be written in") {
-		t.Error("prompt without language should not contain language instruction")
 	}
 }
 

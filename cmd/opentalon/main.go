@@ -549,6 +549,7 @@ func main() {
 			LimitField:        cfg.Profiles.WhoAmI.LimitField,
 			LimitTimeField:    cfg.Profiles.WhoAmI.LimitTimeField,
 			LanguageField:     cfg.Profiles.WhoAmI.LanguageField,
+			NameField:         cfg.Profiles.WhoAmI.NameField,
 			ExtraHeaders:      cfg.Profiles.WhoAmI.ExtraHeaders,
 			MetadataHeaders:   cfg.Profiles.WhoAmI.MetadataHeaders,
 		}

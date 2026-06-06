@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/prompts"
 )
 
@@ -101,11 +100,7 @@ const DefaultPlanTimeout = 15 * time.Second
 // conversationContext is an optional summary of prior turns so the planner understands
 // follow-up messages (e.g. "Item" after "Create some arbitrary test object").
 func (p *Planner) Plan(ctx context.Context, message string, capabilities []CapabilityInfo, conversationContext string) (*PlanResult, error) {
-	lang := ""
-	if prof := profile.FromContext(ctx); prof != nil {
-		lang = prof.Language
-	}
-	systemPrompt := buildPlannerPrompt(capabilities, lang)
+	systemPrompt := buildPlannerPrompt(capabilities)
 	slog.Debug("planner system prompt", "prompt", systemPrompt)
 
 	// Prepend conversation context so the planner can interpret follow-up messages.
@@ -133,7 +128,7 @@ func (p *Planner) Plan(ctx context.Context, message string, capabilities []Capab
 	return parsePlanResponse(resp.Content)
 }
 
-func buildPlannerPrompt(capabilities []CapabilityInfo, language string) string {
+func buildPlannerPrompt(capabilities []CapabilityInfo) string {
 	var sb strings.Builder
 	sb.WriteString(prompts.PlannerPreamble)
 	for _, cap := range capabilities {
@@ -151,9 +146,6 @@ func buildPlannerPrompt(capabilities []CapabilityInfo, language string) string {
 				fmt.Fprintf(&sb, "  - %s: %s%s\n", param.Name, truncatePlannerDescription(param.Description, 80), req)
 			}
 		}
-	}
-	if language != "" {
-		fmt.Fprintf(&sb, "\nThe step names and descriptions must be written in %s.\n", language)
 	}
 	sb.WriteString("\n")
 	sb.WriteString(prompts.PlannerSuffix)
@@ -332,10 +324,6 @@ func repairJSON(s string) string {
 // and invite the user to confirm or cancel. userMessage is optional; when set,
 // the LLM uses it to detect the user's language and respond accordingly.
 func (p *Planner) NarratePlan(ctx context.Context, steps []*Step, userMessage ...string) (string, error) {
-	lang := ""
-	if prof := profile.FromContext(ctx); prof != nil {
-		lang = prof.Language
-	}
 	var sb strings.Builder
 	if len(userMessage) > 0 && userMessage[0] != "" {
 		fmt.Fprintf(&sb, "User's original request: %s\n\n", userMessage[0])
@@ -349,9 +337,6 @@ func (p *Planner) NarratePlan(ctx context.Context, steps []*Step, userMessage ..
 		sb.WriteString("\n")
 	}
 	systemContent := prompts.PlannerNarrate
-	if lang != "" {
-		systemContent += fmt.Sprintf(" Respond in %s.", lang)
-	}
 	resp, err := p.llm.Complete(ctx, &CompletionRequest{
 		Messages: []Message{
 			{Role: "system", Content: systemContent},
@@ -368,10 +353,6 @@ func (p *Planner) NarratePlan(ctx context.Context, steps []*Step, userMessage ..
 // hiding plugin/action names. userMessage is optional; when set, the LLM uses it
 // to detect the user's language.
 func (p *Planner) NarrateToolCall(ctx context.Context, action string, args map[string]string, userMessage ...string) (string, error) {
-	lang := ""
-	if prof := profile.FromContext(ctx); prof != nil {
-		lang = prof.Language
-	}
 	var sb strings.Builder
 	if len(userMessage) > 0 && userMessage[0] != "" {
 		fmt.Fprintf(&sb, "User's original request: %s\n\n", userMessage[0])
@@ -384,9 +365,6 @@ func (p *Planner) NarrateToolCall(ctx context.Context, action string, args map[s
 		}
 	}
 	systemContent := prompts.PlannerNarrateTool
-	if lang != "" {
-		systemContent += fmt.Sprintf(" Respond in %s.", lang)
-	}
 	resp, err := p.llm.Complete(ctx, &CompletionRequest{
 		Messages: []Message{
 			{Role: "system", Content: systemContent},
