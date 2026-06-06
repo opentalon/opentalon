@@ -568,6 +568,53 @@ func TestVerifier_Language_CustomField(t *testing.T) {
 	}
 }
 
+// TestVerifier_Name verifies that the name field from the WhoAmI response is
+// stored on the profile.
+func TestVerifier_Name(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"entity_id": "u1",
+			"group":     "g1",
+			"name":      "Alex",
+		})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
+	defer v.Close()
+
+	p, err := v.Verify(context.Background(), "tok", "", nil)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if p.Name != "Alex" {
+		t.Errorf("Name = %q, want Alex", p.Name)
+	}
+}
+
+// TestVerifier_Name_Missing verifies that an absent name field results in an
+// empty string.
+func TestVerifier_Name_Missing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"entity_id": "u1",
+			"group":     "g1",
+		})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
+	defer v.Close()
+
+	p, err := v.Verify(context.Background(), "tok", "", nil)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if p.Name != "" {
+		t.Errorf("Name = %q, want empty when not provided", p.Name)
+	}
+}
+
 // TestVerifier_MetadataHeaders_Forwarded verifies that values from the
 // inbound metadata map configured under MetadataHeaders are sent as outbound
 // HTTP headers on every WhoAmI request.
