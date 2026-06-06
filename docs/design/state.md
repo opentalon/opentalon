@@ -16,8 +16,7 @@ graph TD
     Core -->|"conversation context only"| PluginB[Plugin B]
     PluginB -->|"result"| Core
     Core --> LLM3[LLM composes final answer]
-    LLM3 --> Save[Save workflow to memory]
-    Save --> Response[Response to User]
+    LLM3 --> Response[Response to User]
 ```
 
 ## Core Rules
@@ -34,14 +33,12 @@ The orchestrator implements a tool-calling agent loop:
 
 ```mermaid
 flowchart TD
-    Start[User message + session] --> Recall[Recall relevant workflow memories]
-    Recall --> LLMCall[Send to LLM with history + tools + past workflows]
+    Start[User message + session] --> LLMCall[Send to LLM with history + tools]
     LLMCall --> Decision{LLM response?}
     Decision -->|Tool call| Execute[Execute plugin via gRPC]
     Execute --> FeedBack[Feed result back to LLM]
     FeedBack --> LLMCall
-    Decision -->|Final answer| Record[Record workflow if multi-step]
-    Record --> Respond[Return response to user]
+    Decision -->|Final answer| Respond[Return response to user]
 ```
 
 ### Plugin Capabilities
@@ -81,39 +78,6 @@ type ToolResult struct {
 }
 ```
 
-## Workflow Memory
-
-Successful multi-step flows are saved so the LLM can recall them on similar future requests.
-
-### How it works
-
-1. User says: "analyze GitLab code and post issue to Jira and create PR"
-2. LLM plans the flow, calling plugins one by one
-3. On success, the orchestrator saves the workflow pattern:
-
-```yaml
-- trigger: "analyze code, create issue, create PR"
-  steps:
-    - plugin: gitlab
-      action: analyze_code
-      order: 1
-    - plugin: jira
-      action: create_issue
-      order: 2
-    - plugin: gitlab
-      action: create_pr
-      order: 3
-  outcome: success
-  timestamp: 2026-02-21T15:00:00Z
-```
-
-4. Next time a similar request arrives, the orchestrator retrieves this pattern from memory and includes it as context for the LLM
-5. The LLM plans faster because it remembers what worked
-
-### Storage
-
-Workflows are stored in the `MemoryStore` with a `workflow` tag, alongside other long-term memories.
-
 ## Configuration
 
 The state directory is configurable via `config.yaml`. If omitted, it defaults to `~/.opentalon`.
@@ -131,7 +95,7 @@ Environment variable substitution is supported (`${VAR_NAME}`).
 <data_dir>/
 ├── sessions/          # per-session conversation history
 │   └── <session_id>.yaml
-├── memory/            # long-term facts and workflow patterns
+├── memory/            # long-term facts
 │   └── memories.yaml
 └── plugins/           # isolated per-plugin key-value state
     └── <plugin_id>/
@@ -167,14 +131,13 @@ Facts and patterns the system learns over time.
 type Memory struct {
     ID        string
     Content   string
-    Tags      []string  // e.g. ["workflow", "fact", "preference"]
+    Tags      []string  // e.g. ["fact", "preference"]
     CreatedAt time.Time
 }
 ```
 
 - Persisted to `<data_dir>/memory/`
 - Searchable by content and tags
-- Includes workflow memories (tagged `workflow`)
 
 ### 3. Plugin State
 
