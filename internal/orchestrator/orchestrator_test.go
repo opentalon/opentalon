@@ -254,57 +254,6 @@ func TestOrchestratorMultiStepWorkflow(t *testing.T) {
 	}
 }
 
-func TestOrchestratorWorkflowMemory(t *testing.T) {
-	llm := &fakeLLM{responses: []string{
-		"[tool] gitlab.analyze_code",
-		"[tool] jira.create_issue",
-		"All done.",
-	}}
-	callNum := 0
-	parser := &fakeParser{parseFn: func(response string) []ToolCall {
-		callNum++
-		switch callNum {
-		case 1:
-			return []ToolCall{{ID: "c1", Plugin: "gitlab", Action: "analyze_code"}}
-		case 2:
-			return []ToolCall{{ID: "c2", Plugin: "jira", Action: "create_issue"}}
-		default:
-			return nil
-		}
-	}}
-
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "gitlab", Description: "GitLab",
-		Actions: []Action{{Name: "analyze_code", Description: "Analyze"}},
-	}, &echoExecutor{})
-	_ = registry.Register(PluginCapability{
-		Name: "jira", Description: "Jira",
-		Actions: []Action{{Name: "create_issue", Description: "Create issue"}},
-	}, &echoExecutor{})
-
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	orch := New(llm, parser, registry, memory, sessions)
-	_, err := orch.Run(context.Background(), "s1", "analyze and create issue")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	workflows := memory.SearchByTag("workflow")
-	if len(workflows) != 1 {
-		t.Fatalf("expected 1 workflow memory, got %d", len(workflows))
-	}
-	if !strings.Contains(workflows[0].Content, "gitlab") {
-		t.Error("workflow should mention gitlab")
-	}
-	if !strings.Contains(workflows[0].Content, "jira") {
-		t.Error("workflow should mention jira")
-	}
-}
-
 func TestOrchestratorUnknownPlugin(t *testing.T) {
 	llm := &fakeLLM{responses: []string{
 		"[tool] unknown.do_thing",
@@ -361,42 +310,6 @@ func TestOrchestratorSessionNotFound(t *testing.T) {
 	_, err := orch.Run(context.Background(), "nonexistent", "hi")
 	if err == nil {
 		t.Error("expected error for nonexistent session")
-	}
-}
-
-func TestOrchestratorNoWorkflowForSingleCall(t *testing.T) {
-	llm := &fakeLLM{responses: []string{
-		"[tool] gitlab.analyze_code",
-		"Done.",
-	}}
-	callNum := 0
-	parser := &fakeParser{parseFn: func(response string) []ToolCall {
-		callNum++
-		if callNum == 1 {
-			return []ToolCall{{ID: "c1", Plugin: "gitlab", Action: "analyze_code"}}
-		}
-		return nil
-	}}
-
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "gitlab", Description: "GitLab",
-		Actions: []Action{{Name: "analyze_code", Description: "Analyze"}},
-	}, &echoExecutor{})
-
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	orch := New(llm, parser, registry, memory, sessions)
-	_, err := orch.Run(context.Background(), "s1", "analyze code")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	workflows := memory.SearchByTag("workflow")
-	if len(workflows) != 0 {
-		t.Errorf("expected no workflow for single tool call, got %d", len(workflows))
 	}
 }
 
@@ -478,28 +391,6 @@ func TestFormatToolResultMessageError(t *testing.T) {
 	got := formatToolResultMessage(result)
 	if got != "[tool_result] error: not found" {
 		t.Errorf("formatToolResultMessage = %q", got)
-	}
-}
-
-func TestFilterByTag(t *testing.T) {
-	memories := []*state.Memory{
-		{ID: "m1", Content: "wf1", Tags: []string{"workflow"}},
-		{ID: "m2", Content: "fact1", Tags: []string{"fact"}},
-		{ID: "m3", Content: "wf2", Tags: []string{"workflow", "important"}},
-	}
-	got := filterByTag(memories, "workflow")
-	if len(got) != 2 {
-		t.Errorf("expected 2 workflows, got %d", len(got))
-	}
-}
-
-func TestFilterByTagNone(t *testing.T) {
-	memories := []*state.Memory{
-		{ID: "m1", Content: "fact", Tags: []string{"fact"}},
-	}
-	got := filterByTag(memories, "workflow")
-	if len(got) != 0 {
-		t.Errorf("expected 0, got %d", len(got))
 	}
 }
 

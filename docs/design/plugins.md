@@ -550,36 +550,6 @@ orchestrator:
 
 Custom rules are injected alongside the defaults -- they cannot weaken the built-in rules, only add to them.
 
-## Workflow Memory
-
-Successful multi-step plugin invocations are saved so the LLM can recall them on similar future requests.
-
-### How it works
-
-1. User: "analyze GitLab code and post issue to Jira and create PR"
-2. LLM plans the flow, calling plugins one by one
-3. On success, the orchestrator saves the workflow pattern:
-
-```yaml
-trigger: "analyze code, create issue, create PR"
-steps:
-  - plugin: gitlab
-    action: analyze_code
-    order: 1
-  - plugin: jira
-    action: create_issue
-    order: 2
-  - plugin: gitlab
-    action: create_pr
-    order: 3
-outcome: success
-```
-
-4. Next time a similar request arrives, the pattern is included in the LLM's context
-5. The LLM plans faster because it remembers what worked
-
-Workflows are stored in the `MemoryStore` with a `workflow` tag.
-
 ## Configuration
 
 ### gRPC plugins

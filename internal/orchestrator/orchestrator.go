@@ -28,6 +28,7 @@ import (
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 	pkgchannel "github.com/opentalon/opentalon/pkg/channel"
 	"github.com/opentalon/opentalon/pkg/plugin/contextargs"
+	lingua "github.com/pemistahl/lingua-go"
 )
 
 const maxAgentLoopIterations = 20
@@ -369,6 +370,12 @@ type Orchestrator struct {
 	knowledgeCatalog           string
 	knowledgeCatalogAt         time.Time
 	knowledgeCatalogRefreshing bool
+	// langDetector identifies the language of the user's current message so
+	// buildSystemPrompt can pin the reply language for that turn. Built once
+	// in NewWithRules over a bounded language set, with its n-gram models
+	// preloaded at construction; nil-safe (a nil detector simply skips the
+	// directive, e.g. in tests).
+	langDetector lingua.LanguageDetector
 }
 
 // resolveAllowedPluginNames returns a JSON array of allowed plugin names for the
@@ -628,6 +635,7 @@ func NewWithRules(
 		toolErrorTracker:        newToolErrorTracker(),
 		channelSender:           opts.ChannelSender,
 		titleMuxes:              make(map[string]*sessionMutex),
+		langDetector:            buildReplyLanguageDetector(),
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
@@ -1438,6 +1446,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		content, files = o.runSTTPreparers(ctx, content, files)
 	}
 
+	// Pin the reply language for this turn from the user's own message
+	// (post-STT, before any [knowledge_context] is injected by preparers,
+	// whose retrieved text may be in another language). The directive rides
+	// ctx into the per-variant buildSystemPrompt calls so detection runs once.
+	ctx = withReplyLanguageDirective(ctx, o.replyLanguageDirective(content))
+
 	// Run content preparers before the first LLM call (config-driven).
 	// relevantTools stays nil when no preparer returns a tools list.
 	// An explicit empty slice means "preparer found nothing relevant" →
@@ -2201,7 +2215,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 						Role:    provider.RoleAssistant,
 						Content: result.Response,
 					})
-					o.maybeRecordWorkflow(ctx, result, userMessage)
 					return result, nil
 				}
 				stripRetries++
@@ -2310,7 +2323,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				Role:    provider.RoleAssistant,
 				Content: resp.Content,
 			})
-			o.maybeRecordWorkflow(ctx, result, userMessage)
 			o.applyShowToolCalls(result)
 			if timing != nil {
 				timing.begin("format")
@@ -3686,47 +3698,22 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		sb.WriteString(prompts.OrchestratorSubprocess)
 	}
 
-	workflowMemories, _ := o.memory.MemoriesForContext(ctx, "workflow")
-	if len(workflowMemories) > 0 {
-		sb.WriteString("## Relevant past workflows\n")
-		const maxWorkflows = 5
-		count := 0
-		for _, m := range workflowMemories {
-			if count >= maxWorkflows {
-				break
-			}
-			// Skip garbage workflow entries with very short triggers
-			// (e.g. "trigger: ?", "trigger: ,") that waste tokens.
-			if idx := strings.Index(m.Content, "trigger: "); idx >= 0 {
-				trigger := m.Content[idx+9:]
-				if nl := strings.Index(trigger, "\n"); nl >= 0 {
-					trigger = trigger[:nl]
-				}
-				if len(strings.TrimSpace(trigger)) < 5 {
-					continue
-				}
-			}
-			sb.WriteString(m.Content)
-			sb.WriteString("\n")
-			count++
-		}
-		sb.WriteString("\n")
-	}
-
 	if hint := channelFormatHint(ctx); hint != "" && !skipFormatHintFromContext(ctx) {
 		sb.WriteString("## OUTPUT FORMAT\n")
 		sb.WriteString(hint)
 		sb.WriteString("\n")
 	}
 
-	if p := profile.FromContext(ctx); p != nil && p.Language != "" {
-		sb.WriteString("## Language\n")
-		fmt.Fprintf(&sb, "Reply in the language of the user's most recent message, judged from the words and script they actually use. Only if that message is too short or ambiguous to identify a language, default to %s. When unsure between the message language and %s, follow the message.\n\n", p.Language, p.Language)
-	}
-
 	if p := profile.FromContext(ctx); p != nil && p.Name != "" {
 		sb.WriteString("## User\n")
 		fmt.Fprintf(&sb, "The user's name is %s. Address them by name where it feels natural; do not force it into every message.\n\n", p.Name)
+	}
+
+	// Reply-language directive last, so it is the most recent instruction the
+	// model reads before the conversation. Empty unless detection was confident
+	// (see replyLanguageDirective).
+	if dir := replyLanguageDirectiveFromContext(ctx); dir != "" {
+		sb.WriteString(dir)
 	}
 
 	return sb.String()
@@ -3794,16 +3781,6 @@ func channelFormatHint(ctx context.Context) string {
 	default:
 		return ""
 	}
-}
-
-func filterByTag(memories []*state.Memory, tag string) []*state.Memory {
-	var result []*state.Memory
-	for _, m := range memories {
-		if m.HasTag(tag) {
-			result = append(result, m)
-		}
-	}
-	return result
 }
 
 // runInvokeSteps runs a list of plugin actions in order without calling the LLM.
@@ -4197,22 +4174,6 @@ func (o *Orchestrator) emitRefusalResult(ctx context.Context, call ToolCall, err
 		})
 	}
 	return ToolResult{CallID: call.ID, Error: errMsg}
-}
-
-func (o *Orchestrator) maybeRecordWorkflow(ctx context.Context, result *RunResult, userMessage string) {
-	if len(result.ToolCalls) < 2 {
-		return
-	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "trigger: %s\nsteps:\n", userMessage)
-	for i, call := range result.ToolCalls {
-		fmt.Fprintf(&sb, "  - plugin: %s, action: %s, order: %d\n", call.Plugin, call.Action, i+1)
-	}
-	sb.WriteString("outcome: success\n")
-
-	actorID := actor.Actor(ctx)
-	_, _ = o.memory.AddScoped(ctx, actorID, sb.String(), "workflow")
 }
 
 // maxSessionTitleChars caps the persisted title length. Generous so a
