@@ -140,6 +140,21 @@ channels:
     # ref: "master"
     config: {}
 
+  # Synchronous HTTP request/response channel — POST a message with a profile
+  # token (same auth model as websocket-channel) and get the LLM's reply in the
+  # HTTP response body. Useful for curl, server-side cron, and backend services
+  # that prefer REST over a streaming socket. See: opentalon/http-channel.
+  # http:
+  #   enabled: true
+  #   github: "opentalon/http-channel"
+  #   ref: "master"
+  #   config:
+  #     addr: "0.0.0.0:9100"   # host:port to listen on
+  #     path: "/chat"           # endpoint path (set "/" when an ingress strips the prefix upstream)
+  #     timeout: "120s"         # max wait per request for the LLM response
+  #     cors_origins:           # omit to allow all (dev only)
+  #       - "https://mysite.com"
+
   # YAML-driven channels (no compiled binary — run in-process from channel.yaml spec)
   # slack:
   #   enabled: true
