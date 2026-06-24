@@ -263,3 +263,42 @@ func TestRegistryAlias_TargetNotFound(t *testing.T) {
 		t.Error("expected error when alias target not registered")
 	}
 }
+
+// TestUpdateCapabilityReflectsAddedAndRemovedActions locks in the guarantee that
+// makes the periodic-refresh UpdateCapability safe: replacing a plugin's
+// capability in place must change what the live-resolving reads (ListCapabilities
+// / HasAction) return — added actions become routable, removed ones disappear —
+// so a future derived index can't silently break it.
+func TestUpdateCapabilityReflectsAddedAndRemovedActions(t *testing.T) {
+	reg := NewToolRegistry()
+	if err := reg.Register(PluginCapability{
+		Name:    "mcp",
+		Actions: []Action{{Name: "a"}, {Name: "b"}},
+	}, &mockExecutor{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// A refresh drops b and adds c.
+	reg.UpdateCapability("mcp", PluginCapability{
+		Name:    "mcp",
+		Actions: []Action{{Name: "a"}, {Name: "c"}},
+	})
+
+	cap, ok := reg.GetCapability("mcp")
+	if !ok {
+		t.Fatal("GetCapability(mcp) missing after update")
+	}
+	names := map[string]bool{}
+	for _, a := range cap.Actions {
+		names[a.Name] = true
+	}
+	if len(cap.Actions) != 2 || !names["a"] || !names["c"] || names["b"] {
+		t.Errorf("actions after update = %+v, want exactly {a, c}", cap.Actions)
+	}
+	if !reg.HasAction("mcp", "c") {
+		t.Error("HasAction(mcp, c) = false, want true (added action is routable)")
+	}
+	if reg.HasAction("mcp", "b") {
+		t.Error("HasAction(mcp, b) = true, want false (removed action is gone)")
+	}
+}

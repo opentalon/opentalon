@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -41,6 +42,7 @@ func (f *fakeCorpusSyncer) SyncPluginActions(_ context.Context, name string) {
 
 type fakePluginLocker struct {
 	acquire  map[string]bool
+	errs     map[string]error
 	released []string
 }
 
@@ -48,7 +50,7 @@ func (f *fakePluginLocker) AcquireOrWait(context.Context) (bool, error) { return
 func (f *fakePluginLocker) ReleaseDone(context.Context)                 {}
 func (f *fakePluginLocker) ReleaseAbort(context.Context)                {}
 func (f *fakePluginLocker) TryAcquirePlugin(_ context.Context, name string) (bool, error) {
-	return f.acquire[name], nil
+	return f.acquire[name], f.errs[name]
 }
 func (f *fakePluginLocker) ReleasePlugin(_ context.Context, name string) {
 	f.released = append(f.released, name)
@@ -90,5 +92,29 @@ func TestRefreshAllCapabilities(t *testing.T) {
 	}
 	if got := strings.Join(locker.released, ","); got != "mcp" {
 		t.Errorf("released = %q, want mcp (release only where acquired)", got)
+	}
+}
+
+// TestRefreshAllCapabilities_lockErrorProceedsWithoutRelease verifies the
+// fail-open branch: on a lock-acquire error (Redis blip) the cycle still
+// refreshes, updates the registry and syncs best-effort — but must NOT release a
+// lock it never acquired (ReleasePlugin is a bare delete with no owner check, so
+// releasing here would free another pod's lock).
+func TestRefreshAllCapabilities_lockErrorProceedsWithoutRelease(t *testing.T) {
+	ref := &fakeCapRefresher{
+		names: []string{"mcp"},
+		caps:  map[string]orchestrator.PluginCapability{"mcp": {Name: "mcp"}},
+	}
+	reg := &fakeCapRegistry{}
+	syncer := &fakeCorpusSyncer{}
+	locker := &fakePluginLocker{errs: map[string]error{"mcp": errors.New("redis down")}}
+
+	refreshAllCapabilities(context.Background(), ref, reg, syncer, locker)
+
+	if got := strings.Join(syncer.synced, ","); got != "mcp" {
+		t.Errorf("synced = %q, want mcp (best-effort sync proceeds on lock error)", got)
+	}
+	if len(locker.released) != 0 {
+		t.Errorf("released = %v, want none (must not release a lock it didn't acquire)", locker.released)
 	}
 }

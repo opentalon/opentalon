@@ -70,46 +70,64 @@ type corpusSyncer interface {
 	SyncPluginActions(ctx context.Context, name string)
 }
 
-// refreshAllCapabilities runs one capability-refresh cycle: for each loaded
-// plugin it re-fetches upstream capabilities, updates the executable registry,
-// and (leader-gated) re-syncs the corpus, so a changed tool description, server
-// instruction or knowledge article on an upstream MCP server propagates without
-// a pod restart. Plugins that don't support refresh report gRPC Unimplemented
-// and are skipped.
-//
-// The cheap re-fetch + registry update runs on every pod (each keeps a fresh
-// executable view); only the corpus write is leader-gated via TryAcquirePlugin
-// so a cluster doesn't double-write.
+// refreshPluginTimeout bounds a single plugin's live capability re-fetch so one
+// hung upstream can't starve the rest of a poll cycle. It caps only the refresh
+// RPC; the corpus sync keeps the parent context (it has its own per-batch
+// deadline) so a large but healthy re-vectorize is never cut short.
+const refreshPluginTimeout = 90 * time.Second
+
+// refreshAllCapabilities runs one capability-refresh cycle over every loaded
+// plugin. See refreshOnePlugin for the per-plugin behaviour.
 func refreshAllCapabilities(ctx context.Context, pm capabilityRefresher, reg capabilityRegistry, syncer corpusSyncer, locker synclock.Locker) {
 	names := pm.List()
 	slog.Info("refresh poll: cycle start", "component", "refresh", "plugins", len(names))
 	for _, name := range names {
-		fresh, err := pm.RefreshCapabilities(ctx, name)
-		if err != nil {
-			if status.Code(err) == codes.Unimplemented {
-				slog.Debug("refresh poll: plugin does not support refresh, skipping", "component", "refresh", "plugin", name)
-				continue
-			}
-			slog.Warn("refresh poll: refresh failed", "component", "refresh", "plugin", name, "error", err)
-			continue
-		}
-		reg.UpdateCapability(name, fresh)
-		slog.Info("refresh poll: capabilities refreshed",
-			"component", "refresh", "plugin", name,
-			"actions", len(fresh.Actions), "knowledge", len(fresh.KnowledgeArticles))
-
-		ok, lockErr := locker.TryAcquirePlugin(ctx, name)
-		if lockErr != nil {
-			slog.Warn("refresh poll: sync lock failed, proceeding", "component", "refresh", "plugin", name, "error", lockErr)
-			ok = true
-		}
-		if !ok {
-			slog.Debug("refresh poll: corpus sync skipped (another pod is syncing)", "component", "refresh", "plugin", name)
-			continue
-		}
-		syncer.SyncPluginActions(ctx, name)
-		locker.ReleasePlugin(ctx, name)
+		refreshOnePlugin(ctx, name, pm, reg, syncer, locker)
 	}
+}
+
+// refreshOnePlugin re-fetches one plugin's capabilities, updates the executable
+// registry, and (leader-gated) re-syncs its corpus, so a changed tool
+// description / server instruction / knowledge article on an upstream MCP server
+// propagates without a pod restart. Plugins that don't support refresh report
+// gRPC Unimplemented and are skipped.
+//
+// The cheap re-fetch + registry update runs on every pod (each keeps a fresh
+// executable view); only the corpus write is leader-gated via TryAcquirePlugin
+// so a cluster doesn't double-write.
+func refreshOnePlugin(ctx context.Context, name string, pm capabilityRefresher, reg capabilityRegistry, syncer corpusSyncer, locker synclock.Locker) {
+	// Bound the refresh RPC so one hung upstream can't stall the whole cycle.
+	rctx, cancel := context.WithTimeout(ctx, refreshPluginTimeout)
+	fresh, err := pm.RefreshCapabilities(rctx, name)
+	cancel()
+	if err != nil {
+		if status.Code(err) == codes.Unimplemented {
+			slog.Debug("refresh poll: plugin does not support refresh, skipping", "component", "refresh", "plugin", name)
+			return
+		}
+		slog.Warn("refresh poll: refresh failed", "component", "refresh", "plugin", name, "error", err)
+		return
+	}
+	reg.UpdateCapability(name, fresh)
+	slog.Info("refresh poll: capabilities refreshed", "component", "refresh", "plugin", name,
+		"actions", len(fresh.Actions), "knowledge", len(fresh.KnowledgeArticles))
+
+	// Leader-gate the corpus write so a cluster doesn't double-write.
+	acquired, lockErr := locker.TryAcquirePlugin(ctx, name)
+	switch {
+	case lockErr != nil:
+		// Redis blip: proceed best-effort (the per-doc sync is idempotent), but we
+		// do NOT own the lock — so we must not release it, or we'd delete the key
+		// the actual holder owns.
+		slog.Warn("refresh poll: sync lock errored, proceeding without it", "component", "refresh", "plugin", name, "error", lockErr)
+	case !acquired:
+		slog.Debug("refresh poll: corpus sync skipped (another pod is syncing)", "component", "refresh", "plugin", name)
+		return
+	default:
+		// Release only the lock we actually acquired, even if the sync panics.
+		defer locker.ReleasePlugin(ctx, name)
+	}
+	syncer.SyncPluginActions(ctx, name)
 }
 
 func main() {
