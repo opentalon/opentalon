@@ -37,6 +37,16 @@ type Configurable interface {
 	Configure(configJSON string) error
 }
 
+// Refreshable may be implemented by a Handler that caches capabilities fetched
+// from an upstream source. The host calls RefreshCapabilities (on its periodic
+// poll) to make the plugin re-fetch from upstream and return the fresh set, so
+// upstream changes propagate without restarting the plugin. Handlers that do
+// not implement it report gRPC Unimplemented, and the host leaves their
+// capabilities untouched.
+type Refreshable interface {
+	RefreshCapabilities() CapabilitiesMsg
+}
+
 // ServeListener starts a gRPC server on an existing listener. The caller is
 // responsible for printing the handshake line to stdout before calling this,
 // and for closing the listener after ServeListener returns.

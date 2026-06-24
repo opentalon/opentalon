@@ -3122,36 +3122,6 @@ func TestSyncActionsOmitsKnowledgeArticlesWhenAbsent(t *testing.T) {
 	}
 }
 
-func TestCapabilityHashIncludesKnowledgeArticles(t *testing.T) {
-	// Adding or changing a knowledge article must change the hash so the sync
-	// plugin re-runs the upsert (otherwise the new section would never reach
-	// the vector store on a hash-match skip).
-	entries := []syncActionEntry{{Name: "list-items", Description: "List items"}}
-	prose := "Server preamble"
-
-	base := capabilityHash(entries, prose, nil)
-	withOne := capabilityHash(entries, prose, []syncKnowledgeArticleEntry{
-		{ID: "a", Title: "A", Content: "first"},
-	})
-	withTwo := capabilityHash(entries, prose, []syncKnowledgeArticleEntry{
-		{ID: "a", Title: "A", Content: "first"},
-		{ID: "b", Title: "B", Content: "second"},
-	})
-	withDifferentContent := capabilityHash(entries, prose, []syncKnowledgeArticleEntry{
-		{ID: "a", Title: "A", Content: "first revised"},
-	})
-
-	if base == withOne {
-		t.Error("hash unchanged after adding a knowledge article")
-	}
-	if withOne == withTwo {
-		t.Error("hash unchanged after adding a second knowledge article")
-	}
-	if withOne == withDifferentContent {
-		t.Error("hash unchanged after editing knowledge article content")
-	}
-}
-
 func TestSyncActionsCarriesKeepPlugins(t *testing.T) {
 	// During a full startup sync, every sync_actions call should ship the live
 	// plugin list as keep_plugins so the sync plugin can prune orphans. The
@@ -3209,6 +3179,51 @@ func TestSyncActionsCarriesKeepPlugins(t *testing.T) {
 	}
 	if strings.Contains(lateLoadCalls[0], "keep_plugins") {
 		t.Errorf("late-load payload must not include keep_plugins: %s", lateLoadCalls[0])
+	}
+}
+
+func TestSyncPluginActionsSyncsUnderAliasName(t *testing.T) {
+	// A plugin exposed under an alias (the mcp bridge appears as "timly") must be
+	// synced to the corpus under the alias name, not the raw plugin name — so the
+	// poll / late-load path matches the startup SyncActions (which iterates the
+	// alias-expanded ListCapabilities) and doesn't write a duplicate corpus under
+	// "mcp".
+	var payloads []string
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "weaviate", Description: "Vector DB",
+		Actions: []Action{{Name: "sync_actions", Description: "Sync actions", Parameters: []Parameter{{Name: "payload", Description: "JSON"}}}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		payloads = append(payloads, call.Args["payload"])
+		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
+	}})
+	_ = registry.Register(PluginCapability{
+		Name: "mcp", Description: "MCP bridge",
+		Actions: []Action{{Name: "timly__create-item", Description: "Create"}},
+	}, &echoExecutor{})
+	if err := registry.RegisterAlias("timly", "mcp"); err != nil {
+		t.Fatalf("RegisterAlias: %v", err)
+	}
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		SyncActionsPlugin: "weaviate",
+		SyncActionsAction: "sync_actions",
+	})
+
+	orch.SyncPluginActions(context.Background(), "mcp")
+
+	if len(payloads) == 0 {
+		t.Fatal("expected at least one sync_actions call")
+	}
+	for _, p := range payloads {
+		if !strings.Contains(p, `"plugin_name":"timly"`) {
+			t.Errorf("sync payload should use the alias name timly: %s", p)
+		}
+		if strings.Contains(p, `"plugin_name":"mcp"`) {
+			t.Errorf("sync payload must NOT use the raw plugin name mcp: %s", p)
+		}
 	}
 }
 

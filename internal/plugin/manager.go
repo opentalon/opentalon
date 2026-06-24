@@ -89,6 +89,20 @@ func (m *Manager) OnPluginLoaded(fn PluginLoadedFunc) {
 	m.onPluginLoaded = fn
 }
 
+// RefreshCapabilities asks a loaded plugin to re-fetch its capabilities from its
+// upstream source and returns the fresh set. The caller updates the registry and
+// re-syncs the corpus. Plugins that don't support refresh return a gRPC
+// Unimplemented error (inspect via status.Code).
+func (m *Manager) RefreshCapabilities(ctx context.Context, name string) (orchestrator.PluginCapability, error) {
+	m.mu.Lock()
+	mg, ok := m.plugins[name]
+	m.mu.Unlock()
+	if !ok {
+		return orchestrator.PluginCapability{}, fmt.Errorf("plugin %q not loaded", name)
+	}
+	return mg.client.RefreshCapabilities(ctx)
+}
+
 // LoadAll launches all enabled plugins and registers them. Plugins that fail
 // to load are recorded in the known map so they can be retried via Reload.
 func (m *Manager) LoadAll(ctx context.Context, entries []PluginEntry) error {

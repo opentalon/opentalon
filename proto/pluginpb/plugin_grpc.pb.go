@@ -20,10 +20,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	PluginService_Init_FullMethodName         = "/opentalon.plugin.v1.PluginService/Init"
-	PluginService_Execute_FullMethodName      = "/opentalon.plugin.v1.PluginService/Execute"
-	PluginService_Capabilities_FullMethodName = "/opentalon.plugin.v1.PluginService/Capabilities"
-	PluginService_ExecuteBidi_FullMethodName  = "/opentalon.plugin.v1.PluginService/ExecuteBidi"
+	PluginService_Init_FullMethodName                = "/opentalon.plugin.v1.PluginService/Init"
+	PluginService_Execute_FullMethodName             = "/opentalon.plugin.v1.PluginService/Execute"
+	PluginService_Capabilities_FullMethodName        = "/opentalon.plugin.v1.PluginService/Capabilities"
+	PluginService_RefreshCapabilities_FullMethodName = "/opentalon.plugin.v1.PluginService/RefreshCapabilities"
+	PluginService_ExecuteBidi_FullMethodName         = "/opentalon.plugin.v1.PluginService/ExecuteBidi"
 )
 
 // PluginServiceClient is the client API for PluginService service.
@@ -34,6 +35,13 @@ type PluginServiceClient interface {
 	Init(ctx context.Context, in *PluginInitRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Execute(ctx context.Context, in *ToolCallRequest, opts ...grpc.CallOption) (*ToolResultResponse, error)
 	Capabilities(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*PluginCapabilities, error)
+	// RefreshCapabilities asks the plugin to re-fetch its capabilities from its
+	// upstream source and return the fresh set. The host calls it on its periodic
+	// corpus-sync poll so upstream changes (tool descriptions, server
+	// instructions, knowledge articles) propagate without a plugin restart.
+	// Plugins that do not cache an upstream return Unimplemented, and the host
+	// leaves their capabilities untouched.
+	RefreshCapabilities(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*PluginCapabilities, error)
 	// ExecuteBidi is the bidirectional-streaming variant of Execute. The
 	// host opens the stream and sends a single HostMessage{call} to start
 	// the action; the plugin may then send zero or more
@@ -88,6 +96,16 @@ func (c *pluginServiceClient) Capabilities(ctx context.Context, in *emptypb.Empt
 	return out, nil
 }
 
+func (c *pluginServiceClient) RefreshCapabilities(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*PluginCapabilities, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PluginCapabilities)
+	err := c.cc.Invoke(ctx, PluginService_RefreshCapabilities_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *pluginServiceClient) ExecuteBidi(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[HostMessage, PluginMessage], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &PluginService_ServiceDesc.Streams[0], PluginService_ExecuteBidi_FullMethodName, cOpts...)
@@ -109,6 +127,13 @@ type PluginServiceServer interface {
 	Init(context.Context, *PluginInitRequest) (*emptypb.Empty, error)
 	Execute(context.Context, *ToolCallRequest) (*ToolResultResponse, error)
 	Capabilities(context.Context, *emptypb.Empty) (*PluginCapabilities, error)
+	// RefreshCapabilities asks the plugin to re-fetch its capabilities from its
+	// upstream source and return the fresh set. The host calls it on its periodic
+	// corpus-sync poll so upstream changes (tool descriptions, server
+	// instructions, knowledge articles) propagate without a plugin restart.
+	// Plugins that do not cache an upstream return Unimplemented, and the host
+	// leaves their capabilities untouched.
+	RefreshCapabilities(context.Context, *emptypb.Empty) (*PluginCapabilities, error)
 	// ExecuteBidi is the bidirectional-streaming variant of Execute. The
 	// host opens the stream and sends a single HostMessage{call} to start
 	// the action; the plugin may then send zero or more
@@ -141,6 +166,9 @@ func (UnimplementedPluginServiceServer) Execute(context.Context, *ToolCallReques
 }
 func (UnimplementedPluginServiceServer) Capabilities(context.Context, *emptypb.Empty) (*PluginCapabilities, error) {
 	return nil, status.Error(codes.Unimplemented, "method Capabilities not implemented")
+}
+func (UnimplementedPluginServiceServer) RefreshCapabilities(context.Context, *emptypb.Empty) (*PluginCapabilities, error) {
+	return nil, status.Error(codes.Unimplemented, "method RefreshCapabilities not implemented")
 }
 func (UnimplementedPluginServiceServer) ExecuteBidi(grpc.BidiStreamingServer[HostMessage, PluginMessage]) error {
 	return status.Error(codes.Unimplemented, "method ExecuteBidi not implemented")
@@ -220,6 +248,24 @@ func _PluginService_Capabilities_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PluginService_RefreshCapabilities_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).RefreshCapabilities(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_RefreshCapabilities_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).RefreshCapabilities(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _PluginService_ExecuteBidi_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(PluginServiceServer).ExecuteBidi(&grpc.GenericServerStream[HostMessage, PluginMessage]{ServerStream: stream})
 }
@@ -245,6 +291,10 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Capabilities",
 			Handler:    _PluginService_Capabilities_Handler,
+		},
+		{
+			MethodName: "RefreshCapabilities",
+			Handler:    _PluginService_RefreshCapabilities_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
