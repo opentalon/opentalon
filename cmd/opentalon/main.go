@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -904,8 +905,16 @@ func main() {
 	}
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
+	// SIGTERM is what Kubernetes sends to terminate a pod; without it the
+	// graceful teardown below never runs and the process is hard-killed,
+	// severing every open WebSocket chat session on every rollout.
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh
+
+	// Stop advertising readiness as the first shutdown step so Kubernetes
+	// removes this pod from the Service endpoints before we close connections.
+	// The bounded writer flushes below double as the endpoint-drain window.
+	healthSrv.SetReady("opentalon", false)
 
 	// Flush debug-event writer first so any /debug rows captured up to the
 	// signal are persisted. Bounded wait — never block shutdown forever.
