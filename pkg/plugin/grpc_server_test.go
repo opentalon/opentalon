@@ -7,7 +7,10 @@ import (
 
 	"github.com/opentalon/opentalon/proto/pluginpb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // credHeaderCapturingHandler records the CredentialHeaders from each Execute call.
@@ -88,5 +91,42 @@ func TestGRPCServer_NoCredentialHeaders(t *testing.T) {
 
 	if creds := <-received; len(creds) != 0 {
 		t.Errorf("CredentialHeaders = %v, want empty when none sent", creds)
+	}
+}
+
+// refreshableHandler implements Handler + Refreshable. RefreshCapabilities
+// returns a capability set distinct from Capabilities() so the test can tell
+// the refresh path (not the cached read) was taken.
+type refreshableHandler struct{}
+
+func (h *refreshableHandler) Capabilities() CapabilitiesMsg {
+	return CapabilitiesMsg{Name: "mcp", Actions: []ActionMsg{{Name: "cached"}}}
+}
+func (h *refreshableHandler) Execute(req Request) Response { return Response{CallID: req.ID} }
+func (h *refreshableHandler) RefreshCapabilities() CapabilitiesMsg {
+	return CapabilitiesMsg{Name: "mcp", Actions: []ActionMsg{{Name: "fresh"}}}
+}
+
+// TestGRPCServer_RefreshCapabilities_Refreshable verifies the RPC calls the
+// handler's RefreshCapabilities when it implements Refreshable.
+func TestGRPCServer_RefreshCapabilities_Refreshable(t *testing.T) {
+	client := startGRPCServer(t, &refreshableHandler{})
+	resp, err := client.RefreshCapabilities(context.Background(), &emptypb.Empty{})
+	if err != nil {
+		t.Fatalf("RefreshCapabilities: %v", err)
+	}
+	if len(resp.Actions) != 1 || resp.Actions[0].Name != "fresh" {
+		t.Errorf("expected fresh actions from refresh path, got %+v", resp.Actions)
+	}
+}
+
+// TestGRPCServer_RefreshCapabilities_NotRefreshable verifies a handler that does
+// not implement Refreshable reports gRPC Unimplemented, which the host poll uses
+// to skip non-refreshable plugins.
+func TestGRPCServer_RefreshCapabilities_NotRefreshable(t *testing.T) {
+	client := startGRPCServer(t, &credHeaderCapturingHandler{received: make(chan map[string]CredentialHeader, 1)})
+	_, err := client.RefreshCapabilities(context.Background(), &emptypb.Empty{})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected Unimplemented for non-refreshable handler, got %v", err)
 	}
 }

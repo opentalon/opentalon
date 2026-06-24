@@ -1113,11 +1113,12 @@ const file_plugin_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x12\n" +
 	"\x04type\x18\x03 \x01(\tR\x04type\x12\x1a\n" +
-	"\brequired\x18\x04 \x01(\bR\brequired2\xdb\x02\n" +
+	"\brequired\x18\x04 \x01(\bR\brequired2\xb3\x03\n" +
 	"\rPluginService\x12F\n" +
 	"\x04Init\x12&.opentalon.plugin.v1.PluginInitRequest\x1a\x16.google.protobuf.Empty\x12X\n" +
 	"\aExecute\x12$.opentalon.plugin.v1.ToolCallRequest\x1a'.opentalon.plugin.v1.ToolResultResponse\x12O\n" +
-	"\fCapabilities\x12\x16.google.protobuf.Empty\x1a'.opentalon.plugin.v1.PluginCapabilities\x12W\n" +
+	"\fCapabilities\x12\x16.google.protobuf.Empty\x1a'.opentalon.plugin.v1.PluginCapabilities\x12V\n" +
+	"\x13RefreshCapabilities\x12\x16.google.protobuf.Empty\x1a'.opentalon.plugin.v1.PluginCapabilities\x12W\n" +
 	"\vExecuteBidi\x12 .opentalon.plugin.v1.HostMessage\x1a\".opentalon.plugin.v1.PluginMessage(\x010\x01B/Z-github.com/opentalon/opentalon/proto/pluginpbb\x06proto3"
 
 var (
@@ -1168,13 +1169,15 @@ var file_plugin_proto_depIdxs = []int32{
 	4,  // 12: opentalon.plugin.v1.PluginService.Init:input_type -> opentalon.plugin.v1.PluginInitRequest
 	5,  // 13: opentalon.plugin.v1.PluginService.Execute:input_type -> opentalon.plugin.v1.ToolCallRequest
 	16, // 14: opentalon.plugin.v1.PluginService.Capabilities:input_type -> google.protobuf.Empty
-	0,  // 15: opentalon.plugin.v1.PluginService.ExecuteBidi:input_type -> opentalon.plugin.v1.HostMessage
-	16, // 16: opentalon.plugin.v1.PluginService.Init:output_type -> google.protobuf.Empty
-	7,  // 17: opentalon.plugin.v1.PluginService.Execute:output_type -> opentalon.plugin.v1.ToolResultResponse
-	8,  // 18: opentalon.plugin.v1.PluginService.Capabilities:output_type -> opentalon.plugin.v1.PluginCapabilities
-	1,  // 19: opentalon.plugin.v1.PluginService.ExecuteBidi:output_type -> opentalon.plugin.v1.PluginMessage
-	16, // [16:20] is the sub-list for method output_type
-	12, // [12:16] is the sub-list for method input_type
+	16, // 15: opentalon.plugin.v1.PluginService.RefreshCapabilities:input_type -> google.protobuf.Empty
+	0,  // 16: opentalon.plugin.v1.PluginService.ExecuteBidi:input_type -> opentalon.plugin.v1.HostMessage
+	16, // 17: opentalon.plugin.v1.PluginService.Init:output_type -> google.protobuf.Empty
+	7,  // 18: opentalon.plugin.v1.PluginService.Execute:output_type -> opentalon.plugin.v1.ToolResultResponse
+	8,  // 19: opentalon.plugin.v1.PluginService.Capabilities:output_type -> opentalon.plugin.v1.PluginCapabilities
+	8,  // 20: opentalon.plugin.v1.PluginService.RefreshCapabilities:output_type -> opentalon.plugin.v1.PluginCapabilities
+	1,  // 21: opentalon.plugin.v1.PluginService.ExecuteBidi:output_type -> opentalon.plugin.v1.PluginMessage
+	17, // [17:22] is the sub-list for method output_type
+	12, // [12:17] is the sub-list for method input_type
 	12, // [12:12] is the sub-list for extension type_name
 	12, // [12:12] is the sub-list for extension extendee
 	0,  // [0:12] is the sub-list for field type_name

@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/bootstrap"
@@ -50,6 +52,65 @@ import (
 // where both are already imported, so it's the right place to pin the
 // contract. RFC #249 Phase 3.
 var _ orchestrator.InjectionStateStore = (*store.SessionStore)(nil)
+
+// capabilityRefresher, capabilityRegistry and corpusSyncer are the slices of the
+// plugin manager, tool registry and orchestrator that the capability-refresh
+// poll needs. Declaring them as interfaces keeps refreshAllCapabilities unit
+// testable with fakes.
+type capabilityRefresher interface {
+	List() []string
+	RefreshCapabilities(ctx context.Context, name string) (orchestrator.PluginCapability, error)
+}
+
+type capabilityRegistry interface {
+	UpdateCapability(name string, cap orchestrator.PluginCapability)
+}
+
+type corpusSyncer interface {
+	SyncPluginActions(ctx context.Context, name string)
+}
+
+// refreshAllCapabilities runs one capability-refresh cycle: for each loaded
+// plugin it re-fetches upstream capabilities, updates the executable registry,
+// and (leader-gated) re-syncs the corpus, so a changed tool description, server
+// instruction or knowledge article on an upstream MCP server propagates without
+// a pod restart. Plugins that don't support refresh report gRPC Unimplemented
+// and are skipped.
+//
+// The cheap re-fetch + registry update runs on every pod (each keeps a fresh
+// executable view); only the corpus write is leader-gated via TryAcquirePlugin
+// so a cluster doesn't double-write.
+func refreshAllCapabilities(ctx context.Context, pm capabilityRefresher, reg capabilityRegistry, syncer corpusSyncer, locker synclock.Locker) {
+	names := pm.List()
+	slog.Info("refresh poll: cycle start", "component", "refresh", "plugins", len(names))
+	for _, name := range names {
+		fresh, err := pm.RefreshCapabilities(ctx, name)
+		if err != nil {
+			if status.Code(err) == codes.Unimplemented {
+				slog.Debug("refresh poll: plugin does not support refresh, skipping", "component", "refresh", "plugin", name)
+				continue
+			}
+			slog.Warn("refresh poll: refresh failed", "component", "refresh", "plugin", name, "error", err)
+			continue
+		}
+		reg.UpdateCapability(name, fresh)
+		slog.Info("refresh poll: capabilities refreshed",
+			"component", "refresh", "plugin", name,
+			"actions", len(fresh.Actions), "knowledge", len(fresh.KnowledgeArticles))
+
+		ok, lockErr := locker.TryAcquirePlugin(ctx, name)
+		if lockErr != nil {
+			slog.Warn("refresh poll: sync lock failed, proceeding", "component", "refresh", "plugin", name, "error", lockErr)
+			ok = true
+		}
+		if !ok {
+			slog.Debug("refresh poll: corpus sync skipped (another pod is syncing)", "component", "refresh", "plugin", name)
+			continue
+		}
+		syncer.SyncPluginActions(ctx, name)
+		locker.ReleasePlugin(ctx, name)
+	}
+}
 
 func main() {
 	fmt.Fprintln(os.Stderr, "OpenTalon starting...")
@@ -758,6 +819,37 @@ func main() {
 			healthSrv.SetReady("opentalon", true)
 		}
 	})
+
+	// Capability refresh poll: every refreshInterval, re-fetch each loaded
+	// plugin's upstream capabilities, update the executable registry, and
+	// re-sync the corpus (leader-gated), so changed tool descriptions, server
+	// instructions or knowledge articles propagate without a pod restart.
+	refreshInterval := 15 * time.Minute
+	if raw := cfg.Orchestrator.Knowledge.RefreshInterval; raw != "" {
+		if d, err := time.ParseDuration(raw); err != nil {
+			slog.Warn("invalid knowledge.refresh_interval, using default",
+				"component", "refresh", "value", raw, "default", refreshInterval.String(), "error", err)
+		} else {
+			refreshInterval = d
+		}
+	}
+	if refreshInterval > 0 {
+		slog.Info("startup: capability refresh poll enabled", "component", "refresh", "interval", refreshInterval.String())
+		go func() {
+			ticker := time.NewTicker(refreshInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-retryCtx.Done():
+					return
+				case <-ticker.C:
+					refreshAllCapabilities(retryCtx, pluginManager, toolRegistry, orch, slocker)
+				}
+			}
+		}()
+	} else {
+		slog.Info("startup: capability refresh poll disabled", "component", "refresh")
+	}
 
 	// Scheduler: wired after orchestrator so it can route job actions through orch.
 	// Personal reminders bypass the approver policy via AddPersonalJob.

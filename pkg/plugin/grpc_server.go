@@ -29,6 +29,14 @@ func (s *grpcServer) Capabilities(_ context.Context, _ *emptypb.Empty) (*pluginp
 	return capsToProto(caps), nil
 }
 
+func (s *grpcServer) RefreshCapabilities(_ context.Context, _ *emptypb.Empty) (*pluginpb.PluginCapabilities, error) {
+	r, ok := s.handler.(Refreshable)
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "plugin does not support capability refresh")
+	}
+	return capsToProto(r.RefreshCapabilities()), nil
+}
+
 func (s *grpcServer) Execute(_ context.Context, req *pluginpb.ToolCallRequest) (*pluginpb.ToolResultResponse, error) {
 	resp := s.handler.Execute(requestFromProto(req))
 	return responseToProto(resp), nil

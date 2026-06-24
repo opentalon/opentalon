@@ -12,6 +12,14 @@ service PluginService {
   rpc Execute(ToolCallRequest) returns (ToolResultResponse);
   rpc Capabilities(google.protobuf.Empty) returns (PluginCapabilities);
 
+  // RefreshCapabilities asks the plugin to re-fetch its capabilities from its
+  // upstream source and return the fresh set. The host calls it on its periodic
+  // corpus-sync poll so upstream changes (tool descriptions, server
+  // instructions, knowledge articles) propagate without a plugin restart.
+  // Plugins that do not cache an upstream return Unimplemented, and the host
+  // leaves their capabilities untouched.
+  rpc RefreshCapabilities(google.protobuf.Empty) returns (PluginCapabilities);
+
   // ExecuteBidi is the bidirectional-streaming variant of Execute. The
   // host opens the stream and sends a single HostMessage{call} to start
   // the action; the plugin may then send zero or more

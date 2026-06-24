@@ -5228,12 +5228,6 @@ type syncActionsPayload struct {
 	// it — the upsert path is unaffected.
 	KnowledgeArticles []syncKnowledgeArticleEntry `json:"knowledge_articles,omitempty"`
 	KeepPlugins       []string                    `json:"keep_plugins,omitempty"`
-	// Hash is a SHA-256 digest of the plugin's actions + server_instructions
-	// + knowledge_articles. When the sync plugin receives the same hash on
-	// consecutive calls for a given plugin_name, it can skip the upsert (the
-	// data hasn't changed). Computed by the orchestrator; older sync plugins
-	// ignore unknown fields.
-	Hash string `json:"hash,omitempty"`
 	// IsContinuationBatch tells the sync plugin to skip the per-plugin
 	// pre-delete on this call. Set on batches 1..N of a chunked plugin sync
 	// so each subsequent batch only inserts and does not wipe what batch 0
@@ -5408,21 +5402,35 @@ func (o *Orchestrator) SyncActions(ctx context.Context) {
 }
 
 // SyncPluginActions syncs a single plugin's capabilities to the vector store.
-// Intended for use when a plugin comes online after initial startup (e.g. via retry).
+// Used when a plugin comes online after initial startup (e.g. via retry) or is
+// refreshed by the periodic capability poll.
+//
+// A plugin exposed under alias names (e.g. the mcp bridge appears in the corpus
+// as "timly") is stored under those alias names — matching the startup
+// SyncActions, which iterates the alias-expanded ListCapabilities. We therefore
+// sync under the alias identity, not the raw plugin name; syncing the raw name
+// would write a duplicate corpus under a plugin name that retrieval never
+// queries (and that the startup orphan-prune would later delete).
 func (o *Orchestrator) SyncPluginActions(ctx context.Context, pluginName string) {
 	if o.syncActionsPlugin == "" || o.syncActionsAction == "" {
 		return
 	}
-	cap, ok := o.registry.GetCapability(pluginName)
-	if !ok {
-		slog.Warn("sync_actions: plugin not found in registry", "component", "orchestrator", "plugin", pluginName)
-		return
+	names := o.registry.AliasesFor(pluginName)
+	if len(names) == 0 {
+		names = []string{pluginName}
 	}
-	slog.Info("sync_actions: syncing late-loaded plugin", "component", "orchestrator", "plugin", pluginName)
-	// Late-load: omit keep_plugins so the sync plugin only upserts this one
-	// capability and does not interpret the call as a full-snapshot prune.
-	if err := o.syncPluginCapability(ctx, cap, nil); err != nil {
-		slog.Warn("sync_actions failed for late-loaded plugin", "component", "orchestrator", "plugin", pluginName, "error", err)
+	for _, name := range names {
+		cap, ok := o.registry.GetCapability(name)
+		if !ok {
+			slog.Warn("sync_actions: plugin not found in registry", "component", "orchestrator", "plugin", name)
+			continue
+		}
+		slog.Info("sync_actions: syncing plugin", "component", "orchestrator", "plugin", name)
+		// Single-plugin sync: omit keep_plugins so the sync plugin only upserts
+		// this one capability and does not interpret the call as a full-snapshot prune.
+		if err := o.syncPluginCapability(ctx, cap, nil); err != nil {
+			slog.Warn("sync_actions failed for plugin", "component", "orchestrator", "plugin", name, "error", err)
+		}
 	}
 }
 
@@ -5463,12 +5471,6 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 		return fmt.Errorf("executor disappeared")
 	}
 
-	// Compute a deterministic hash over the full set of actions + server
-	// instructions + knowledge articles. The sync plugin stores this per
-	// plugin and skips the upsert when unchanged — avoids redundant Weaviate
-	// writes on restart.
-	hash := capabilityHash(entries, cap.SystemPromptAddition, knowledge)
-
 	// keepActions is the authoritative full set of this plugin's action names.
 	// Built from the full entries slice before chunking (each batch carries only
 	// its chunk) and sent on batch 0 so the sync plugin can prune removed actions
@@ -5494,7 +5496,6 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 		payload := syncActionsPayload{
 			PluginName:          cap.Name,
 			Actions:             batch,
-			Hash:                hash,
 			IsContinuationBatch: i > 0,
 		}
 		if i == 0 {
@@ -5530,34 +5531,6 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 	}
 	slog.Info("sync_actions done", "component", "orchestrator", "plugin", cap.Name, "actions", len(entries), "batches", len(batches))
 	return nil
-}
-
-// capabilityHash computes a SHA-256 digest over a plugin's actions, server
-// instructions and knowledge articles. The sync plugin stores this hash and
-// skips re-syncing when it matches — avoiding redundant Weaviate writes on
-// restart.
-func capabilityHash(entries []syncActionEntry, serverInstructions string, knowledge []syncKnowledgeArticleEntry) string {
-	h := sha256.New()
-	// Deterministic: entries are built in stable order from cap.Actions.
-	for _, e := range entries {
-		_, _ = fmt.Fprintf(h, "%s\n%s\n", e.Name, e.Description)
-		if len(e.Parameters) > 0 {
-			b, _ := json.Marshal(e.Parameters)
-			h.Write(b)
-		}
-		h.Write([]byte{'\n'})
-	}
-	_, _ = fmt.Fprintf(h, "instructions:%s\n", serverInstructions)
-	// Knowledge articles arrive in stable order from cap.KnowledgeArticles.
-	for _, ka := range knowledge {
-		_, _ = fmt.Fprintf(h, "knowledge:%s\n%s\n%s\n", ka.ID, ka.Title, ka.Content)
-		if len(ka.Tags) > 0 {
-			b, _ := json.Marshal(ka.Tags)
-			h.Write(b)
-		}
-		h.Write([]byte{'\n'})
-	}
-	return hex.EncodeToString(h.Sum(nil))
 }
 
 // chunkActions splits a slice of syncActionEntry into batches of at most size n.

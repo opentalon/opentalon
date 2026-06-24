@@ -59,6 +59,21 @@ func (r *ToolRegistry) Register(cap PluginCapability, exec PluginExecutor) error
 	return nil
 }
 
+// UpdateCapability replaces a registered plugin's capability in place, keeping
+// its executor. Used by the periodic refresh poll to propagate upstream changes
+// (tool descriptions, server instructions, knowledge articles) without a plugin
+// reload. Aliases pointing at this plugin resolve against the updated capability
+// automatically (see ListCapabilities). No-op if the plugin is not registered
+// (e.g. it was unloaded between the refresh call and this update).
+func (r *ToolRegistry) UpdateCapability(name string, cap PluginCapability) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.plugins[name]; !exists {
+		return
+	}
+	r.plugins[name] = cap
+}
+
 func (r *ToolRegistry) Deregister(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

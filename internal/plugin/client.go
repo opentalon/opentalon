@@ -99,6 +99,19 @@ func (c *Client) HTTPAddr() string { return c.httpAddr }
 // Capability returns the plugin's declared capabilities.
 func (c *Client) Capability() orchestrator.PluginCapability { return c.caps }
 
+// RefreshCapabilities asks the plugin to re-fetch its capabilities from its
+// upstream source and returns the fresh set. It does NOT mutate the cached
+// capability set at Dial: the runtime source of truth is the orchestrator's
+// ToolRegistry, which the caller updates. Plugins that don't support refresh
+// return a gRPC Unimplemented error — inspect with status.Code(err).
+func (c *Client) RefreshCapabilities(ctx context.Context) (orchestrator.PluginCapability, error) {
+	resp, err := c.client.RefreshCapabilities(ctx, &emptypb.Empty{})
+	if err != nil {
+		return orchestrator.PluginCapability{}, err
+	}
+	return toPluginCapability(resp), nil
+}
+
 // Execute sends a tool call to the plugin and returns the result.
 // It implements orchestrator.PluginExecutor.
 func (c *Client) Execute(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
