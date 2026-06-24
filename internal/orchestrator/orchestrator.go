@@ -5242,6 +5242,15 @@ type syncActionsPayload struct {
 	// continue to pre-delete on every batch and exhibit the legacy
 	// last-batch-wins truncation behaviour.
 	IsContinuationBatch bool `json:"is_continuation_batch,omitempty"`
+	// KeepActions is the full list of this plugin's current action names. The
+	// action set is chunked across batches, so only batch 0 can carry the
+	// authoritative complete set. When present, the sync plugin deletes only the
+	// stored actions for this plugin that are NOT in this list (an in-place diff
+	// prune) instead of delete-all-then-reinsert — so the vector store never
+	// briefly drops the plugin's tools during a resync (e.g. a rolling restart).
+	// Sent on batch 0 only. Older sync plugins ignore the field and fall back to
+	// the blanket pre-delete.
+	KeepActions []string `json:"keep_actions,omitempty"`
 }
 
 // knowledgeCatalogAction is the weaviate-plugin action that lists all
@@ -5460,6 +5469,17 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 	// writes on restart.
 	hash := capabilityHash(entries, cap.SystemPromptAddition, knowledge)
 
+	// keepActions is the authoritative full set of this plugin's action names.
+	// Built from the full entries slice before chunking (each batch carries only
+	// its chunk) and sent on batch 0 so the sync plugin can prune removed actions
+	// in place instead of delete-all-then-reinsert. Empty when the plugin has no
+	// actions — then it's omitted and the plugin falls back to the blanket
+	// pre-delete (which correctly clears the plugin's now-empty action set).
+	keepActions := make([]string, len(entries))
+	for idx, e := range entries {
+		keepActions[idx] = e.Name
+	}
+
 	// Batch actions into chunks to avoid oversized payloads that time out
 	// on the vector store side. Instructions and keep_plugins go on the
 	// first batch only; subsequent batches are pure action upserts.
@@ -5491,6 +5511,7 @@ func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapab
 			payload.ServerInstructions = cap.SystemPromptAddition
 			payload.KnowledgeArticles = knowledge
 			payload.KeepPlugins = keepPlugins
+			payload.KeepActions = keepActions
 		}
 		b, err := json.Marshal(payload)
 		if err != nil {
