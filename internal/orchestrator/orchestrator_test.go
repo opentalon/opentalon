@@ -2876,6 +2876,70 @@ func TestSyncActionsMarksContinuationBatches(t *testing.T) {
 	}
 }
 
+// TestSyncActionsCarriesKeepActions verifies that batch 0 carries the full set
+// of the plugin's action names in keep_actions (so the sync plugin can prune
+// removed actions in place instead of delete-all-then-reinsert), and that
+// continuation batches do not resend it.
+func TestSyncActionsCarriesKeepActions(t *testing.T) {
+	var syncCalls []string
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "weaviate", Description: "Vector DB",
+		Actions: []Action{{Name: "sync_actions", Description: "Sync actions", Parameters: []Parameter{{Name: "payload", Description: "JSON"}}}},
+	}, &capturingExecutor{fn: func(call ToolCall) ToolResult {
+		syncCalls = append(syncCalls, call.Args["payload"])
+		return ToolResult{CallID: call.ID, Content: `{"ok": true}`}
+	}})
+
+	// 25 actions → 3 batches (10+10+5). keep_actions must carry ALL 25 names on
+	// batch 0, even though batch 0 itself only upserts its first 10.
+	actions := make([]Action, 25)
+	want := make([]string, 25)
+	for i := range actions {
+		name := fmt.Sprintf("action_%02d", i)
+		actions[i] = Action{Name: name, Description: "test"}
+		want[i] = name
+	}
+	_ = registry.Register(PluginCapability{
+		Name: "bigplugin", Description: "Many actions", Actions: actions,
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{
+		SyncActionsPlugin: "weaviate",
+		SyncActionsAction: "sync_actions",
+	})
+
+	orch.SyncActions(context.Background())
+
+	if len(syncCalls) != 3 {
+		t.Fatalf("expected 3 sync_actions calls, got %d", len(syncCalls))
+	}
+
+	// Batch 0 must carry the full keep_actions set, in order.
+	var batch0 syncActionsPayload
+	if err := json.Unmarshal([]byte(syncCalls[0]), &batch0); err != nil {
+		t.Fatalf("unmarshal batch 0: %v", err)
+	}
+	if len(batch0.KeepActions) != len(want) {
+		t.Fatalf("batch 0 keep_actions len = %d, want %d (full set): %v", len(batch0.KeepActions), len(want), batch0.KeepActions)
+	}
+	for i, name := range want {
+		if batch0.KeepActions[i] != name {
+			t.Errorf("keep_actions[%d] = %q, want %q", i, batch0.KeepActions[i], name)
+		}
+	}
+
+	// Continuation batches must NOT resend keep_actions (batch 0 is authoritative).
+	for i := 1; i < len(syncCalls); i++ {
+		if strings.Contains(syncCalls[i], `"keep_actions"`) {
+			t.Errorf("continuation batch %d must not carry keep_actions: %s", i, syncCalls[i])
+		}
+	}
+}
+
 func TestSyncActionsCarriesServerInstructions(t *testing.T) {
 	var syncCalls []string
 	registry := NewToolRegistry()
