@@ -2402,16 +2402,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					log.Info("tool call requires confirmation", "plugin", calls[i].Plugin, "action", calls[i].Action)
 					pending := calls[i]
 					// Build a confirmation message describing what will be done.
-					// Prefer LLM narration to hide raw tool names from the user.
+					// Narrate with the main LLM so it (a) speaks the user's language
+					// and (b) makes the EFFECT explicit — for a batch / scope_token
+					// call the count + example records live in the preceding tool
+					// result, not in the opaque args. Independent of the pipeline
+					// planner, so it works without pipeline mode.
 					var confirmMsg string
-					if o.planner != nil {
-						narrated, narrErr := o.planner.NarrateToolCall(ctx, calls[i].Action, calls[i].Args, userMessage)
-						if narrErr != nil {
-							log.Warn("tool call narration failed, using fallback", "error", narrErr)
-						} else {
-							confirmMsg = narrated
-						}
+					var recentMsgs []provider.Message
+					if s, gerr := sessions.Get(sessionID); gerr == nil && s != nil {
+						recentMsgs = s.Messages
 					}
+					confirmMsg = o.narrateConfirmation(ctx, recentMsgs, calls[i], userMessage)
 					if confirmMsg == "" {
 						confirmMsg = fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", calls[i].Action)
 						for k, v := range calls[i].Args {
@@ -2731,6 +2732,55 @@ func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCal
 		return sw.OnChunk
 	}
 	return o.onStreamChunk
+}
+
+// confirmationNarratePrompt steers the pre-write confirmation: it must be in the
+// user's language and make explicit WHAT will be affected.
+const confirmationNarratePrompt = `You write the short confirmation question shown to the user immediately before a write or delete tool runs.
+Rules:
+1. Reply in the SAME language as the user's latest request.
+2. Make the effect explicit. If the call acts on many records at once (a batch, an ids array, or a scope_token), state the COUNT of affected records and 2-3 concrete examples (names and/or ids) taken from the recent conversation. Never show a raw scope_token or dump internal arguments.
+3. Keep it to 1-3 sentences and end with a clear yes/no question. You are ONLY asking permission — do not claim anything has happened yet.`
+
+// narrateConfirmation produces the user-facing confirmation prompt with the main
+// LLM. It feeds the recent conversation so the model can resolve an opaque
+// scope_token to the count + example records the preceding list call returned,
+// and phrase the question in the user's language. Returns "" on any error so the
+// caller falls back to the static template.
+func (o *Orchestrator) narrateConfirmation(ctx context.Context, recent []provider.Message, call ToolCall, userMessage string) string {
+	if o.llm == nil {
+		return ""
+	}
+	var ub strings.Builder
+	if userMessage != "" {
+		fmt.Fprintf(&ub, "User's latest request: %s\n\n", userMessage)
+	}
+	fmt.Fprintf(&ub, "About to call tool %q with arguments: %v\n\n", call.Action, call.Args)
+	if len(recent) > 0 {
+		start := 0
+		if len(recent) > 8 {
+			start = len(recent) - 8
+		}
+		ub.WriteString("Recent conversation (oldest first) — describe what will be affected from this:\n")
+		for _, m := range recent[start:] {
+			c := m.Content
+			if len(c) > 800 {
+				c = c[:800]
+			}
+			fmt.Fprintf(&ub, "[%s] %s\n", m.Role, c)
+		}
+	}
+	resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{
+		Messages: []provider.Message{
+			{Role: provider.RoleSystem, Content: confirmationNarratePrompt},
+			{Role: provider.RoleUser, Content: ub.String()},
+		},
+	})
+	if err != nil {
+		slog.Warn("confirmation narration failed, using fallback", "error", err)
+		return ""
+	}
+	return strings.TrimSpace(resp.Content)
 }
 
 // streamComplete attempts a streaming LLM call, forwarding chunks via the
