@@ -95,6 +95,53 @@ func TestGetToolDetails_ReturnsFormattedDescription(t *testing.T) {
 	}
 }
 
+// TestGetToolDetails_ResolvesBridgedMCPBareName pins the fix for the
+// double-prefix tool name an mcp bridge produces: a server "timly" surfaces as
+// alias "timly" whose actions keep the "timly__" prefix, so the canonical FQN is
+// "timly.timly__delete-item". The execute path already forgives the dropped
+// prefix; get_tool_details must too, or an LLM that addresses the tool as
+// "timly.delete-item" gets "not found", never sees the parameters, and falls
+// back to a degraded single-record call.
+func TestGetToolDetails_ResolvesBridgedMCPBareName(t *testing.T) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "mcp", Description: "MCP bridge",
+		Actions: []Action{
+			{Name: "timly__delete-item", Description: "Permanently remove an item.", Parameters: []Parameter{
+				{Name: "scope_token", Description: "act on every item in a frozen set", Required: false},
+			}},
+		},
+	}, &fixedResultExecutor{content: "ok"})
+	if err := registry.RegisterAlias("timly", "mcp"); err != nil {
+		t.Fatalf("RegisterAlias: %v", err)
+	}
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
+		ToolTiers: ToolTiersConfig{Enabled: true, EnableGetToolDetails: true},
+	})
+	exec, ok := orch.registry.GetExecutor(metaPluginName)
+	if !ok {
+		t.Fatal("meta plugin executor missing")
+	}
+
+	for _, name := range []string{
+		"timly.timly__delete-item", // canonical
+		"timly.delete-item",        // LLM dropped the redundant server prefix
+		"timly__delete-item",       // no dot — __-split fallback
+	} {
+		res := exec.Execute(context.Background(), ToolCall{ID: "c1", Args: map[string]string{"name": name}})
+		if res.Error != "" {
+			t.Errorf("name %q: expected resolution, got error %q", name, res.Error)
+			continue
+		}
+		if !strings.Contains(res.Content, "scope_token") {
+			t.Errorf("name %q: details must expose the scope_token param, got: %q", name, res.Content)
+		}
+	}
+}
+
 func TestGetToolDetails_ParameterlessActionRendersNoneSentinel(t *testing.T) {
 	orch := newOrchForMetaTests(t, nil, true)
 	exec, _ := orch.registry.GetExecutor(metaPluginName)

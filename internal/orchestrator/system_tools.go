@@ -10,6 +10,20 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
+// actionNameCandidates returns the forgiving normalizations of an LLM-supplied
+// action name (underscore<->hyphen, and the dropped "<plugin>__" prefix that a
+// bridged MCP server's tools carry). The execute path and get_tool_details both
+// try these, so a tool resolves the SAME way whether it is inspected or invoked.
+func actionNameCandidates(plugin, action string) []string {
+	return []string{
+		strings.ReplaceAll(action, "_", "-"),
+		plugin + "__" + action,
+		plugin + "__" + strings.ReplaceAll(action, "_", "-"),
+		strings.ReplaceAll(action, "-", "_"),
+		plugin + "__" + strings.ReplaceAll(action, "-", "_"),
+	}
+}
+
 // RFC #249 Phase 4 D4 meta-tool: orchestrator-owned built-in that
 // returns the full description + parameter schema for a Tier-2 or
 // Tier-3 tool the LLM wants to call.
@@ -97,6 +111,27 @@ func (e *getToolDetailsExecutor) Execute(ctx context.Context, call ToolCall) Too
 		if cap.Actions[i].Name == action {
 			found = &cap.Actions[i]
 			break
+		}
+	}
+	if found == nil {
+		// Apply the same forgiving resolution as the execute path so a tool can be
+		// INSPECTED by every name it can be INVOKED by — notably a bridged MCP tool
+		// addressed as "<server>.<tool>" instead of the canonical
+		// "<server>.<server>__<tool>". Without this, get_tool_details rejects a
+		// name execute would accept, so the LLM never sees the tool's parameters
+		// and falls back to a degraded call (e.g. a single id instead of a batch).
+		for _, candidate := range actionNameCandidates(plugin, action) {
+			for i := range cap.Actions {
+				if cap.Actions[i].Name == candidate {
+					found = &cap.Actions[i]
+					action = candidate
+					name = plugin + "." + action // canonical form for the visibility check below
+					break
+				}
+			}
+			if found != nil {
+				break
+			}
 		}
 	}
 	if found == nil {
