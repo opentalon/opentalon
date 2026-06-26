@@ -3603,7 +3603,7 @@ func TestOrchestrator_PreparerPhase_ToolTiersEnabledEmitsTieredBlock(t *testing.
 	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
 		EventSink:           sink,
 		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: 2, Tier2Cap: 1},
+		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(1)},
 		InjectionStateStore: tierStore,
 	})
 
@@ -3715,7 +3715,7 @@ func TestOrchestrator_PreparerPhase_ToolTiersSecondTurnLRUCarriesOver(t *testing
 	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
 		EventSink:           sink,
 		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: 2, Tier2Cap: 1},
+		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(1)},
 		InjectionStateStore: tierStore,
 	})
 
@@ -3745,7 +3745,7 @@ func TestOrchestrator_PreparerPhase_ToolTiersSecondTurnLRUCarriesOver(t *testing
 	orch2 := NewWithRules(llm, parser, registry2, memory, sessions, OrchestratorOpts{
 		EventSink:           sink,
 		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: 2, Tier2Cap: 1},
+		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(1)},
 		InjectionStateStore: tierStore,
 	})
 	if _, err := orch2.Run(context.Background(), "s1", "second"); err != nil {
@@ -3804,7 +3804,7 @@ func TestOrchestrator_PreparerPhase_ToolTiersSystemPromptHasTier2AndTier3Section
 	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
 		EventSink:           sink,
 		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: 2, Tier2Cap: 1},
+		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(1)},
 		InjectionStateStore: tierStore,
 	})
 	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
@@ -3911,7 +3911,7 @@ func TestOrchestrator_PreparerPhase_ToolTiersWithDedupSingleStateWrite(t *testin
 		EventSink:           sink,
 		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
 		KnowledgeDedup:      KnowledgeDedupConfig{Enabled: true},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: 3, Tier2Cap: 2},
+		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(3), Tier2Cap: intPtr(2)},
 		InjectionStateStore: combinedStore,
 	})
 	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {

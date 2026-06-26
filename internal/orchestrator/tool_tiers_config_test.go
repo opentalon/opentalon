@@ -17,11 +17,11 @@ func TestToolTiersConfig_NormalizesZeroValuesToRFCDefaults(t *testing.T) {
 	if got.Enabled {
 		t.Error("zero-value ToolTiers must keep Enabled=false")
 	}
-	if got.Tier1Cap != 10 {
-		t.Errorf("Tier1Cap default = %d, want 10", got.Tier1Cap)
+	if got.Tier1Cap == nil || *got.Tier1Cap != 10 {
+		t.Errorf("Tier1Cap default = %v, want 10", got.Tier1Cap)
 	}
-	if got.Tier2Cap != 15 {
-		t.Errorf("Tier2Cap default = %d, want 15", got.Tier2Cap)
+	if got.Tier2Cap == nil || *got.Tier2Cap != 15 {
+		t.Errorf("Tier2Cap default = %v, want 15", got.Tier2Cap)
 	}
 	if got.EnableGetToolDetails {
 		t.Error("EnableGetToolDetails must default to false")
@@ -42,8 +42,8 @@ func TestToolTiersConfig_PreservesExplicitValues(t *testing.T) {
 	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
 		ToolTiers: ToolTiersConfig{
 			Enabled:              true,
-			Tier1Cap:             12,
-			Tier2Cap:             18,
+			Tier1Cap:             intPtr(12),
+			Tier2Cap:             intPtr(18),
 			EnableGetToolDetails: true,
 		},
 		ToolErrorHandling: ToolErrorHandlingConfig{
@@ -52,7 +52,8 @@ func TestToolTiersConfig_PreservesExplicitValues(t *testing.T) {
 		},
 	})
 	got := orch.toolTiers
-	if !got.Enabled || got.Tier1Cap != 12 || got.Tier2Cap != 18 || !got.EnableGetToolDetails {
+	if !got.Enabled || got.Tier1Cap == nil || *got.Tier1Cap != 12 ||
+		got.Tier2Cap == nil || *got.Tier2Cap != 18 || !got.EnableGetToolDetails {
 		t.Errorf("explicit ToolTiers values clobbered: %+v", got)
 	}
 	errGot := orch.toolErrorHandling
@@ -101,7 +102,8 @@ func TestToolTiersConfig_DisabledStaysDisabled(t *testing.T) {
 	if orch.toolTiers.Enabled {
 		t.Error("Enabled=false + EnableGetToolDetails=false must stay disabled")
 	}
-	if orch.toolTiers.Tier1Cap != 10 || orch.toolTiers.Tier2Cap != 15 {
+	if orch.toolTiers.Tier1Cap == nil || *orch.toolTiers.Tier1Cap != 10 ||
+		orch.toolTiers.Tier2Cap == nil || *orch.toolTiers.Tier2Cap != 15 {
 		t.Errorf("caps must still normalize even when disabled, got %+v", orch.toolTiers)
 	}
 }
