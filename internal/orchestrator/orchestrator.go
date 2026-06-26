@@ -3983,13 +3983,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		// 2. Dropping plugin prefix: "list-items" → "plugin__list-items"
 		// Try each normalization and their combination before giving up.
 		resolved := false
-		candidates := []string{
-			strings.ReplaceAll(call.Action, "_", "-"),
-			call.Plugin + "__" + call.Action,
-			call.Plugin + "__" + strings.ReplaceAll(call.Action, "_", "-"),
-			strings.ReplaceAll(call.Action, "-", "_"),
-			call.Plugin + "__" + strings.ReplaceAll(call.Action, "-", "_"),
-		}
+		candidates := actionNameCandidates(call.Plugin, call.Action)
 		for _, candidate := range candidates {
 			if candidate != call.Action && o.registry.HasAction(call.Plugin, candidate) {
 				call.Action = candidate
