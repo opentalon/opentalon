@@ -29,7 +29,7 @@ func TestRenderTier2Section_NameAndOneLinerPerEntry(t *testing.T) {
 	d := &toolTierDecision{Tier2: []string{"p.a", "p.b"}}
 	got := renderTier2Section(d, registry)
 
-	if !strings.Contains(got, "## Available tools — summary tier") {
+	if !strings.Contains(got, "## Tool catalog — name + one-line summary") {
 		t.Errorf("missing header, got: %q", got)
 	}
 	if !strings.Contains(got, "- p.a: First action description.") {
