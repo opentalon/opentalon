@@ -16,8 +16,10 @@
 --
 -- TEXT not VARCHAR for SQLite/PostgreSQL portability — matches migration 011.
 -- Column is NOT NULL with a DEFAULT '' so existing readers that SELECT * from
--- sessions never see NULL for this field; matches the entity_id / group_id
--- pattern from migration 004.
+-- sessions never see NULL for this field. This is stricter than the entity_id /
+-- group_id columns from migration 004, which are nullable (TEXT DEFAULT '',
+-- without NOT NULL); the '' default carries the same "unknown" convention here,
+-- and NOT NULL additionally rules out NULL.
 ALTER TABLE sessions ADD COLUMN channel_id TEXT NOT NULL DEFAULT '';
 
 UPDATE sessions
