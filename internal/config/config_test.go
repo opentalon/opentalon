@@ -1065,11 +1065,11 @@ orchestrator:
 	if !got.Enabled {
 		t.Errorf("Enabled = false, want true")
 	}
-	if got.Tier1Cap != 12 {
-		t.Errorf("Tier1Cap = %d, want 12", got.Tier1Cap)
+	if got.Tier1Cap == nil || *got.Tier1Cap != 12 {
+		t.Errorf("Tier1Cap = %v, want 12", got.Tier1Cap)
 	}
-	if got.Tier2Cap != 18 {
-		t.Errorf("Tier2Cap = %d, want 18", got.Tier2Cap)
+	if got.Tier2Cap == nil || *got.Tier2Cap != 18 {
+		t.Errorf("Tier2Cap = %v, want 18", got.Tier2Cap)
 	}
 	if !got.EnableGetToolDetails {
 		t.Errorf("EnableGetToolDetails = false, want true")
@@ -1115,8 +1115,8 @@ orchestrator:
 		t.Fatal(err)
 	}
 	tt := cfg.Orchestrator.Preparer.ToolTiers
-	if tt.Enabled || tt.Tier1Cap != 0 || tt.Tier2Cap != 0 || tt.EnableGetToolDetails {
-		t.Errorf("absent tool_tiers block must parse to zero ToolTiersConfig, got %+v", tt)
+	if tt.Enabled || tt.Tier1Cap != nil || tt.Tier2Cap != nil || tt.EnableGetToolDetails {
+		t.Errorf("absent tool_tiers block must parse to zero ToolTiersConfig (nil caps), got %+v", tt)
 	}
 	eh := cfg.Orchestrator.Preparer.ToolErrorHandling
 	if eh.LoopCapPerTurn != 0 || eh.StickyDemotionThreshold != 0 {

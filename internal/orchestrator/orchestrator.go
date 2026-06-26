@@ -161,11 +161,14 @@ type InjectionStateStore interface {
 }
 
 // ToolTiersConfig is the runtime form of the RFC #249 Phase 4 tool-tier
-// visibility flags. Zero values are normalized to the RFC defaults in
-// NewWithRules, mirroring the KnowledgeDedupConfig precedent. Enabled
-// is the master switch — when false the orchestrator falls back to the
-// pre-Phase-4 behaviour (all RAG-matched tools land in `tools` with
-// full schemas) and the Tier-2/Tier-3 system-prompt sections are
+// visibility flags. The tier caps are *int so an unset cap (nil) can be
+// distinguished from an explicit 0: nil resolves to the RFC default at
+// decision time (see tierCap), while an explicit 0 is honored — e.g.
+// catalog-mode sets Tier1Cap=0 for an empty Tier 1 (every tool surfaces
+// as a one-line catalog entry, fetched on demand via get_tool_details).
+// Enabled is the master switch — when false the orchestrator falls back
+// to the pre-Phase-4 behaviour (all RAG-matched tools land in `tools`
+// with full schemas) and the Tier-2/Tier-3 system-prompt sections are
 // suppressed.
 //
 // EnableGetToolDetails activates the meta-tool that lets the LLM
@@ -175,8 +178,8 @@ type InjectionStateStore interface {
 // case (matching the operator-friendly intent of the YAML flag).
 type ToolTiersConfig struct {
 	Enabled              bool
-	Tier1Cap             int  // max Tier-1 tools (full schemas in `tools`); default 10
-	Tier2Cap             int  // max Tier-2 tools (name + 1-line summary in system prompt); default 15
+	Tier1Cap             *int // max Tier-1 tools (full schemas in `tools`); nil → default 10, explicit 0 → empty Tier 1 (catalog-mode)
+	Tier2Cap             *int // max Tier-2 tools (name + 1-line summary in system prompt); nil → default 15, explicit 0 → empty Tier 2
 	EnableGetToolDetails bool // expose the LLM-driven promotion meta-tool; default false
 }
 
@@ -566,11 +569,17 @@ func NewWithRules(
 	// true in that case — keeps the YAML surface obvious for operators
 	// who only set the meta-tool flag.
 	tierCfg := opts.ToolTiers
-	if tierCfg.Tier1Cap == 0 {
-		tierCfg.Tier1Cap = 10
+	// Tier caps are *int so an unset cap (nil) is distinguishable from an
+	// explicit 0: nil normalizes to the RFC default here, while an
+	// explicit value — including 0 for catalog-mode's empty Tier 1 — is
+	// honored as-is.
+	if tierCfg.Tier1Cap == nil {
+		d := defaultTier1Cap
+		tierCfg.Tier1Cap = &d
 	}
-	if tierCfg.Tier2Cap == 0 {
-		tierCfg.Tier2Cap = 15
+	if tierCfg.Tier2Cap == nil {
+		d := defaultTier2Cap
+		tierCfg.Tier2Cap = &d
 	}
 	if tierCfg.EnableGetToolDetails {
 		tierCfg.Enabled = true

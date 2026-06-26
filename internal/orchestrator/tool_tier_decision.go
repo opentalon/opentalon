@@ -8,6 +8,28 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
+// RFC #249 default tier caps, applied when the YAML cap is unset (nil).
+// An explicit 0 is honored as-is (catalog-mode: empty Tier 1, so every
+// tool surfaces as a one-line catalog entry fetched on demand via
+// get_tool_details).
+const (
+	defaultTier1Cap = 10
+	defaultTier2Cap = 15
+)
+
+// tierCap resolves a tier-cap pointer: nil → the RFC default, otherwise
+// the configured value (including an explicit 0). A negative value is
+// clamped to 0 so it can never produce a negative slice capacity.
+func tierCap(p *int, def int) int {
+	if p == nil {
+		return def
+	}
+	if *p < 0 {
+		return 0
+	}
+	return *p
+}
+
 // RFC #249 Phase 4 three-tier tool visibility decision logic.
 //
 // Pure functions over the per-turn candidate list, the persisted
@@ -155,6 +177,10 @@ func applyToolTierDecision(
 		priorByName[kt.ToolName] = kt
 	}
 
+	// Resolve the tier caps once: nil → RFC default, explicit 0 honored.
+	tier1Cap := tierCap(cfg.Tier1Cap, defaultTier1Cap)
+	tier2Cap := tierCap(cfg.Tier2Cap, defaultTier2Cap)
+
 	// Tier 0: always-include set intersected with availability.
 	tier0 := sortedIntersection(alwaysSet, availSet)
 	tier0Set := stringSet(tier0)
@@ -198,11 +224,11 @@ func applyToolTierDecision(
 		return pool[i].Name < pool[j].Name
 	})
 
-	tier1 := make([]string, 0, cfg.Tier1Cap)
-	tier1Set := make(map[string]bool, cfg.Tier1Cap)
+	tier1 := make([]string, 0, tier1Cap)
+	tier1Set := make(map[string]bool, tier1Cap)
 	overflow := make([]toolTierPoolEntry, 0)
 	for i, p := range pool {
-		if i < cfg.Tier1Cap {
+		if i < tier1Cap {
 			tier1 = append(tier1, p.Name)
 			tier1Set[p.Name] = true
 			continue
@@ -233,8 +259,8 @@ func applyToolTierDecision(
 
 	// Tier 2: candidates not in Tier 0/1, in input (= score) order,
 	// capped at Tier2Cap.
-	tier2 := make([]string, 0, cfg.Tier2Cap)
-	tier2Set := make(map[string]bool, cfg.Tier2Cap)
+	tier2 := make([]string, 0, tier2Cap)
+	tier2Set := make(map[string]bool, tier2Cap)
 	for _, c := range candidates {
 		if tier0Set[c.ToolName] || tier1Set[c.ToolName] || tier2Set[c.ToolName] {
 			continue
@@ -242,7 +268,7 @@ func applyToolTierDecision(
 		if !availSet[c.ToolName] {
 			continue
 		}
-		if len(tier2) >= cfg.Tier2Cap {
+		if len(tier2) >= tier2Cap {
 			break
 		}
 		tier2 = append(tier2, c.ToolName)
@@ -278,8 +304,8 @@ func applyToolTierDecision(
 		Tier1Carried:              tier1Carried,
 		Tier1EvictedToTier3:       evicted,
 		Tier1SizeAfter:            len(tier1),
-		Tier1Cap:                  cfg.Tier1Cap,
-		Tier2Cap:                  cfg.Tier2Cap,
+		Tier1Cap:                  tier1Cap,
+		Tier2Cap:                  tier2Cap,
 		PromotedViaGetToolDetails: appendIfPresent(nil, promoted, availSet, tier0Set),
 		UpdatedState: state.InjectionState{
 			KnownKnowledge: append([]state.KnownKnowledgeEntry(nil), prior.KnownKnowledge...),

@@ -384,8 +384,8 @@ type KnowledgeDedupConfig struct {
 // implies Enabled=true at the orchestrator (see runtime normalization).
 type ToolTiersConfig struct {
 	Enabled              bool `yaml:"enabled"`                           // master switch; default false
-	Tier1Cap             int  `yaml:"tier1_cap,omitempty"`               // max Tier-1 tools with full schemas; default 10 when zero
-	Tier2Cap             int  `yaml:"tier2_cap,omitempty"`               // max Tier-2 tools surfaced as name + 1-line summary; default 15 when zero
+	Tier1Cap             *int `yaml:"tier1_cap,omitempty"`               // max Tier-1 tools with full schemas; nil → default 10, explicit 0 → empty Tier 1 (catalog-mode)
+	Tier2Cap             *int `yaml:"tier2_cap,omitempty"`               // max Tier-2 tools surfaced as name + 1-line summary; nil → default 15, explicit 0 → empty Tier 2
 	EnableGetToolDetails bool `yaml:"enable_get_tool_details,omitempty"` // expose the get_tool_details meta-tool for Tier-3→Tier-1 promotion; default false
 }
 

@@ -8,11 +8,13 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
+func intPtr(i int) *int { return &i }
+
 func defaultTierCfg() ToolTiersConfig {
 	return ToolTiersConfig{
 		Enabled:  true,
-		Tier1Cap: 3,
-		Tier2Cap: 2,
+		Tier1Cap: intPtr(3),
+		Tier2Cap: intPtr(2),
 	}
 }
 
@@ -108,7 +110,7 @@ func TestApplyToolTierDecision_DemotedAreEvictionPreferred(t *testing.T) {
 }
 
 func TestApplyToolTierDecision_Tier2FromCandidatesAboveCap(t *testing.T) {
-	cfg := ToolTiersConfig{Enabled: true, Tier1Cap: 2, Tier2Cap: 2}
+	cfg := ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(2)}
 	candidates := []ToolCandidate{
 		tc("a.1", 0.9), tc("a.2", 0.8), // Tier 1 (cap=2)
 		tc("a.3", 0.7), tc("a.4", 0.6), // Tier 2 (cap=2)
@@ -128,8 +130,8 @@ func TestApplyToolTierDecision_Tier2FromCandidatesAboveCap(t *testing.T) {
 	if !reflect.DeepEqual(got.Tier3, []string{"a.5"}) {
 		t.Errorf("Tier3 = %v, want [a.5]", got.Tier3)
 	}
-	if got.Tier2Cap != cfg.Tier2Cap {
-		t.Errorf("Tier2Cap snapshot = %d, want %d (cfg.Tier2Cap)", got.Tier2Cap, cfg.Tier2Cap)
+	if got.Tier2Cap != *cfg.Tier2Cap {
+		t.Errorf("Tier2Cap snapshot = %d, want %d (cfg.Tier2Cap)", got.Tier2Cap, *cfg.Tier2Cap)
 	}
 }
 
@@ -387,7 +389,7 @@ func TestApplyToolTierDecision_Tier1CapLargerThanAvailable(t *testing.T) {
 	// cfg.Tier1Cap=100, only 2 available — no panic, Tier 1 holds
 	// what's there. Guards against accidental over-allocation in the
 	// pool-slicing path.
-	cfg := ToolTiersConfig{Enabled: true, Tier1Cap: 100, Tier2Cap: 5}
+	cfg := ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(100), Tier2Cap: intPtr(5)}
 	candidates := []ToolCandidate{tc("a.x", 0.9), tc("a.y", 0.8)}
 	got := applyToolTierDecision(candidates, []string{"a.x", "a.y"}, nil, nil, state.InjectionState{}, cfg, 1)
 	if len(got.Tier1) != 2 {
@@ -403,7 +405,7 @@ func TestApplyToolTierDecision_Tier2CapZeroSendsAllToTier3(t *testing.T) {
 	// candidate falls straight through to Tier 3. Legal edge case
 	// since an operator might want to suppress the system-prompt
 	// "name + 1-liner" block entirely without disabling tier logic.
-	cfg := ToolTiersConfig{Enabled: true, Tier1Cap: 1, Tier2Cap: 0}
+	cfg := ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(1), Tier2Cap: intPtr(0)}
 	candidates := []ToolCandidate{tc("a.1", 0.9), tc("a.2", 0.8), tc("a.3", 0.7)}
 	got := applyToolTierDecision(candidates, []string{"a.1", "a.2", "a.3"}, nil, nil, state.InjectionState{}, cfg, 1)
 	if len(got.Tier2) != 0 {
