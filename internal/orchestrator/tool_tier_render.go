@@ -60,8 +60,8 @@ func renderTier2Section(decision *toolTierDecision, registry *ToolRegistry) stri
 	}
 	descByFQN := actionDescriptionMap(registry, decision.Tier2)
 	var sb strings.Builder
-	sb.WriteString("## Available tools — summary tier\n")
-	sb.WriteString("These tools are likely relevant. Use them directly when appropriate; call `_meta.get_tool_details(name=\"plugin.action\")` for the full schema before invocation.\n")
+	sb.WriteString("## Tool catalog — name + one-line summary\n")
+	sb.WriteString("Pick the tool(s) whose summary fits the request. The summary has NO parameters: you MUST call `_meta.get_tool_details(name=\"plugin.action\")` to read a tool's full description and parameters BEFORE invoking it — never guess parameters from a summary. When the summary makes the choice clear, fetch that one tool's details and proceed; when several could fit, fetch the top candidates' details and compare first.\n")
 	for _, fqn := range decision.Tier2 {
 		summary := firstLine(descByFQN[fqn])
 		if summary == "" {

@@ -3823,7 +3823,7 @@ func TestOrchestrator_PreparerPhase_ToolTiersSystemPromptHasTier2AndTier3Section
 	if sysMsg == "" {
 		t.Fatal("system message missing in LLM request")
 	}
-	if !strings.Contains(sysMsg, "## Available tools — summary tier") {
+	if !strings.Contains(sysMsg, "## Tool catalog — name + one-line summary") {
 		t.Errorf("system prompt missing Tier 2 header, got:\n%s", sysMsg)
 	}
 	if !strings.Contains(sysMsg, "## Other available tools (request details before use)") {
@@ -3873,7 +3873,7 @@ func TestOrchestrator_PreparerPhase_ToolTiersDisabledNoTierSectionsInPrompt(t *t
 			sysMsg = m.Content
 		}
 	}
-	if strings.Contains(sysMsg, "## Available tools — summary tier") {
+	if strings.Contains(sysMsg, "## Tool catalog — name + one-line summary") {
 		t.Errorf("Tier 2 section must NOT appear when tier logic off, got:\n%s", sysMsg)
 	}
 	if strings.Contains(sysMsg, "## Other available tools (request details before use)") {
