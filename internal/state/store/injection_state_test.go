@@ -36,7 +36,7 @@ func TestInjectionState_DefaultsToZeroValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetInjectionState: %v", err)
 	}
-	if len(got.KnownKnowledge) != 0 || len(got.KnownTools) != 0 {
+	if len(got.KnownTools) != 0 {
 		t.Errorf("fresh session must yield zero-valued state, got %+v", got)
 	}
 }
@@ -45,9 +45,9 @@ func TestInjectionState_RoundTrip(t *testing.T) {
 	s, id := freshSessionStore(t)
 	ctx := context.Background()
 	want := state.InjectionState{
-		KnownKnowledge: []state.KnownKnowledgeEntry{
-			{ArticleID: "kb_recurring-tickets", ContentSHA256: "9f3a", FirstInjectedTurn: 3},
-			{ArticleID: "kb_ticket-basics", ContentSHA256: "ab12", FirstInjectedTurn: 1},
+		KnownTools: []state.KnownToolEntry{
+			{ToolName: "weaviate__list-items", Tier: state.KnownToolTier1, LRURank: 3},
+			{ToolName: "weaviate__get-item", Tier: state.KnownToolTier1, LRURank: 1},
 		},
 	}
 	if err := s.UpdateInjectionState(ctx, id, want); err != nil {
@@ -57,22 +57,22 @@ func TestInjectionState_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetInjectionState: %v", err)
 	}
-	if len(got.KnownKnowledge) != 2 {
-		t.Fatalf("got %d known_knowledge entries, want 2", len(got.KnownKnowledge))
+	if len(got.KnownTools) != 2 {
+		t.Fatalf("got %d known_tools entries, want 2", len(got.KnownTools))
 	}
-	if got.KnownKnowledge[0].ContentSHA256 != "9f3a" || got.KnownKnowledge[1].FirstInjectedTurn != 1 {
-		t.Errorf("round-trip mismatch: %+v", got.KnownKnowledge)
+	if got.KnownTools[0].ToolName != "weaviate__list-items" || got.KnownTools[1].LRURank != 1 {
+		t.Errorf("round-trip mismatch: %+v", got.KnownTools)
 	}
 }
 
 func TestInjectionState_OverwritesPreviousState(t *testing.T) {
 	s, id := freshSessionStore(t)
 	ctx := context.Background()
-	first := state.InjectionState{KnownKnowledge: []state.KnownKnowledgeEntry{{ArticleID: "kb_a", ContentSHA256: "aaa"}}}
+	first := state.InjectionState{KnownTools: []state.KnownToolEntry{{ToolName: "tool_a", Tier: state.KnownToolTier1}}}
 	if err := s.UpdateInjectionState(ctx, id, first); err != nil {
 		t.Fatalf("UpdateInjectionState first: %v", err)
 	}
-	second := state.InjectionState{KnownKnowledge: []state.KnownKnowledgeEntry{{ArticleID: "kb_b", ContentSHA256: "bbb"}}}
+	second := state.InjectionState{KnownTools: []state.KnownToolEntry{{ToolName: "tool_b", Tier: state.KnownToolTier1}}}
 	if err := s.UpdateInjectionState(ctx, id, second); err != nil {
 		t.Fatalf("UpdateInjectionState second: %v", err)
 	}
@@ -80,16 +80,15 @@ func TestInjectionState_OverwritesPreviousState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetInjectionState: %v", err)
 	}
-	if len(got.KnownKnowledge) != 1 || got.KnownKnowledge[0].ArticleID != "kb_b" {
-		t.Errorf("overwrite expected only kb_b, got %+v", got.KnownKnowledge)
+	if len(got.KnownTools) != 1 || got.KnownTools[0].ToolName != "tool_b" {
+		t.Errorf("overwrite expected only tool_b, got %+v", got.KnownTools)
 	}
 }
 
-func TestInjectionState_PreservesPhase4Fields(t *testing.T) {
-	// Forward-compat guarantee: a row written with KnownTools entries
-	// (Phase 4 land) round-trips through GetInjectionState even though
-	// the Phase-3 writer never produces such entries. Lets Phase 4 land
-	// without a migration / data backfill.
+func TestInjectionState_PreservesToolFields(t *testing.T) {
+	// Round-trip guarantee: a row written with KnownTools entries
+	// preserves every field (tier, lru_rank, demoted) through
+	// GetInjectionState.
 	s, id := freshSessionStore(t)
 	ctx := context.Background()
 	want := state.InjectionState{
@@ -160,8 +159,7 @@ func TestInjectionState_EmptyAndNilSlicesAreOmittedOnMarshal(t *testing.T) {
 	}{
 		{"nil-slices", state.InjectionState{}},
 		{"empty-non-nil-slices", state.InjectionState{
-			KnownKnowledge: []state.KnownKnowledgeEntry{},
-			KnownTools:     []state.KnownToolEntry{},
+			KnownTools: []state.KnownToolEntry{},
 		}},
 	}
 	d := s.db.Dialect()
@@ -186,7 +184,7 @@ func TestInjectionState_EmptyAndNilSlicesAreOmittedOnMarshal(t *testing.T) {
 func TestInjectionState_DefaultObjectUnmarshalsToNilSlices(t *testing.T) {
 	// On a fresh session, the "{}" default produced by migration 010
 	// must yield nil (not zero-length) slices so producers can rely on
-	// `len(state.KnownKnowledge) == 0` as the "first turn" sentinel
+	// `len(state.KnownTools) == 0` as the "first turn" sentinel
 	// without worrying about nil-vs-empty semantics.
 	s, id := freshSessionStore(t)
 	ctx := context.Background()
@@ -194,11 +192,31 @@ func TestInjectionState_DefaultObjectUnmarshalsToNilSlices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetInjectionState: %v", err)
 	}
-	if got.KnownKnowledge != nil {
-		t.Errorf("KnownKnowledge must be nil for a fresh row, got %#v", got.KnownKnowledge)
-	}
 	if got.KnownTools != nil {
 		t.Errorf("KnownTools must be nil for a fresh row, got %#v", got.KnownTools)
+	}
+}
+
+func TestInjectionState_IgnoresLegacyKnownKnowledgeKey(t *testing.T) {
+	// Forward-compat: rows written before knowledge went pull-only carry
+	// a `known_knowledge` JSON key. It is now an unknown field and must
+	// be dropped on read without error, leaving KnownTools intact.
+	s, id := freshSessionStore(t)
+	ctx := context.Background()
+	d := s.db.Dialect()
+	if _, err := s.db.SQLDB().ExecContext(ctx,
+		d.Rebind(`UPDATE sessions SET injection_state = ? WHERE id = ?`),
+		`{"known_knowledge":[{"article_id":"kb_a","content_sha256":"aaa"}],"known_tools":[{"tool_name":"t","tier":"tier1"}]}`,
+		id,
+	); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	got, err := s.GetInjectionState(ctx, id)
+	if err != nil {
+		t.Fatalf("GetInjectionState: %v", err)
+	}
+	if len(got.KnownTools) != 1 || got.KnownTools[0].ToolName != "t" {
+		t.Errorf("legacy row must round-trip KnownTools, got %+v", got.KnownTools)
 	}
 }
 

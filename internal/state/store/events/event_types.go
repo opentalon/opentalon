@@ -135,13 +135,13 @@ const (
 //	for analytics. One deprecation warning per plugin per session is
 //	logged alongside.
 //
-// pull_only — knowledge PUSH is disabled (orchestrator.knowledge.
+// pull_only — knowledge is pull-only: retrieval still ran, so
 //
-//	push_enabled: false). Retrieval still ran, so CandidateIDs report
-//	what a push WOULD have surfaced, but nothing was injected: Injected
-//	and InjectedBytes are empty/zero. Lets a session-log consumer tell
-//	push from pull at a glance (full/instrumentation_only carry a
-//	populated Injected list; pull_only never does).
+//	CandidateIDs report what was retrieved, but nothing was auto-injected:
+//	Injected and InjectedBytes are empty/zero. The model fetches article
+//	bodies on demand via ask_knowledge instead. This is the only mode the
+//	current orchestrator emits; the other values above document modes that
+//	historical event rows may still carry.
 const (
 	PreparerDecisionModeInstrumentationOnly = "instrumentation_only"
 	PreparerDecisionModeFull                = "full"

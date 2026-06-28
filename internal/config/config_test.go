@@ -991,58 +991,6 @@ health:
 	}
 }
 
-func TestParsePreparerKnowledgeDedup(t *testing.T) {
-	// Round-trips the RFC #249 Phase 3 YAML block: catches drift between
-	// the operator-facing key names and Go struct tags. The orchestrator-
-	// side normalization to RFC defaults is exercised separately under
-	// internal/orchestrator/knowledge_dedup_config_test.go — here we just
-	// verify the bytes-in / struct-out shape.
-	yaml := `
-orchestrator:
-  preparer:
-    knowledge_dedup:
-      enabled: true
-      reinject_score_threshold: 0.92
-      reinject_top_k_force: 4
-      cap_per_turn: 7
-`
-	cfg, err := Parse([]byte(yaml))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := cfg.Orchestrator.Preparer.KnowledgeDedup
-	if !got.Enabled {
-		t.Errorf("Enabled = false, want true")
-	}
-	if got.ReinjectScoreThreshold != 0.92 {
-		t.Errorf("ReinjectScoreThreshold = %v, want 0.92", got.ReinjectScoreThreshold)
-	}
-	if got.ReinjectTopKForce != 4 {
-		t.Errorf("ReinjectTopKForce = %d, want 4", got.ReinjectTopKForce)
-	}
-	if got.CapPerTurn != 7 {
-		t.Errorf("CapPerTurn = %d, want 7", got.CapPerTurn)
-	}
-}
-
-func TestParsePreparerKnowledgeDedupAbsentLeavesZeroValues(t *testing.T) {
-	// Confirms an absent `preparer:` block parses to the zero-valued
-	// struct so the orchestrator's default-normalization takes over.
-	// Regression guard against accidentally requiring the block.
-	yaml := `
-orchestrator:
-  rules: []
-`
-	cfg, err := Parse([]byte(yaml))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := cfg.Orchestrator.Preparer.KnowledgeDedup
-	if got.Enabled || got.ReinjectScoreThreshold != 0 || got.ReinjectTopKForce != 0 || got.CapPerTurn != 0 {
-		t.Errorf("absent preparer block must parse to zero KnowledgeDedupConfig, got %+v", got)
-	}
-}
-
 func TestParsePreparerToolErrorHandling(t *testing.T) {
 	// Round-trips the Phase-4 tool-error YAML block — guards the
 	// YAML→struct mapping; orchestrator-side default-normalization is

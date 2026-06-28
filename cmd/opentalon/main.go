@@ -713,18 +713,12 @@ func main() {
 			Action: cfg.Orchestrator.Knowledge.Action,
 			Dir:    cfg.Orchestrator.Knowledge.Dir,
 		},
-		KnowledgePushEnabled: cfg.Orchestrator.Knowledge.PushEnabled,
-		ShowToolCalls:        cfg.Orchestrator.ShowToolCalls,
-		KnowledgeDedup: orchestrator.KnowledgeDedupConfig{
-			Enabled:                cfg.Orchestrator.Preparer.KnowledgeDedup.Enabled,
-			ReinjectScoreThreshold: cfg.Orchestrator.Preparer.KnowledgeDedup.ReinjectScoreThreshold,
-			ReinjectTopKForce:      cfg.Orchestrator.Preparer.KnowledgeDedup.ReinjectTopKForce,
-			CapPerTurn:             cfg.Orchestrator.Preparer.KnowledgeDedup.CapPerTurn,
-		},
+		ShowToolCalls: cfg.Orchestrator.ShowToolCalls,
 		// The DB-backed SessionStore satisfies InjectionStateStore via
-		// its GetInjectionState / UpdateInjectionState methods (Phase 3,
-		// migration 010). When state DB is not configured the variable
-		// stays nil and dedup short-circuits to instrumentation_only.
+		// its GetInjectionState / UpdateInjectionState methods
+		// (migration 010). When state DB is not configured the variable
+		// stays nil and load_tools sticky promotions don't persist
+		// across turns.
 		InjectionStateStore: injectionStateStore,
 		ToolErrorHandling: orchestrator.ToolErrorHandlingConfig{
 			LoopCapPerTurn:          cfg.Orchestrator.Preparer.ToolErrorHandling.LoopCapPerTurn,

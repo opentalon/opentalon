@@ -320,7 +320,6 @@ type KnowledgeConfig struct {
 	Action             string `yaml:"action"`                     // action name for single-article ingestion (e.g. "ingest")
 	Dir                string `yaml:"dir"`                        // optional directory of .md files to ingest at startup
 	RefreshInterval    string `yaml:"refresh_interval,omitempty"` // Go duration (e.g. "15m"); periodically re-fetch each plugin's upstream capabilities and re-sync the corpus so description/instruction/knowledge changes propagate without a restart. "" = default 15m, "0" = disabled.
-	PushEnabled        *bool  `yaml:"push_enabled,omitempty"`     // RAG knowledge PUSH: auto-inject retrieved article bodies into the user turn as [knowledge_context]. nil/true = push (legacy). false = pull-only: the system-prompt catalog (titles + slugs) and ask_knowledge stay, but no article body is auto-injected — the model fetches on demand.
 }
 
 type OrchestratorConfig struct {
@@ -335,38 +334,13 @@ type OrchestratorConfig struct {
 	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`       // knowledge-augmented RAG configuration
 	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`      // subprocess (sub-agent) support
 	ShowToolCalls         string                       `yaml:"show_tool_calls,omitempty"` // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	Preparer              PreparerOrchestratorConfig   `yaml:"preparer,omitempty"`        // RFC #249 preparer-phase behaviour (knowledge dedup, tool error handling)
+	Preparer              PreparerOrchestratorConfig   `yaml:"preparer,omitempty"`        // RFC #249 preparer-phase behaviour (tool error handling)
 }
 
 // PreparerOrchestratorConfig groups the RFC #249 preparer-phase
-// behaviour flags. Each pillar (knowledge dedup, tool error handling)
-// is independently togglable so phases can be A/B-tested in production
-// without coupled rollout risk.
+// behaviour flags.
 type PreparerOrchestratorConfig struct {
-	KnowledgeDedup    KnowledgeDedupConfig    `yaml:"knowledge_dedup,omitempty"`
 	ToolErrorHandling ToolErrorHandlingConfig `yaml:"tool_error_handling,omitempty"`
-}
-
-// KnowledgeDedupConfig configures the per-session content_sha-keyed
-// knowledge dedup logic (RFC #249 Phase 3). When Enabled is false
-// (the safe default), the orchestrator falls through to the legacy
-// per-turn re-inject behaviour and only emits the Phase-2
-// instrumentation_only preparer_decision events.
-//
-// ReinjectScoreThreshold is the "bury defense" override: a knowledge
-// article already in known_knowledge is re-injected when the current
-// turn's score exceeds this value, on the theory that a strong current
-// match outweighs the cache-stable prefix concern. ReinjectTopKForce
-// is the floor: the top-N candidates of the current retrieval always
-// inject so the LLM never starves on truly relevant context. CapPerTurn
-// hard-bounds the delta size so a query that hits many candidates
-// can't tank the prompt budget — the dedup logic skips overflow
-// candidates with reason "cap_exceeded".
-type KnowledgeDedupConfig struct {
-	Enabled                bool    `yaml:"enabled"`                            // master switch; default false
-	ReinjectScoreThreshold float64 `yaml:"reinject_score_threshold,omitempty"` // default 0.85 when zero
-	ReinjectTopKForce      int     `yaml:"reinject_top_k_force,omitempty"`     // default 3 when zero
-	CapPerTurn             int     `yaml:"cap_per_turn,omitempty"`             // default 5 when zero
 }
 
 // ToolErrorHandlingConfig configures the runaway-tool-failure

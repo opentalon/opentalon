@@ -132,25 +132,10 @@ type KnowledgeConfig struct {
 	Dir    string // directory to scan for .md files
 }
 
-// KnowledgeDedupConfig is the runtime form of the RFC #249 Phase 3
-// knowledge-dedup flags. Zero values are normalized to the RFC defaults
-// inside NewWithRules so an OrchestratorOpts authored by a test (no
-// YAML in scope) gets sensible thresholds without having to repeat the
-// canonical numbers.
-//
-// When Enabled is false the dedup decision logic short-circuits to the
-// Phase-2 "instrumentation_only" mode and the InjectionStateStore is
-// not consulted — callers can leave that interface nil in that case.
-type KnowledgeDedupConfig struct {
-	Enabled                bool
-	ReinjectScoreThreshold float64 // overrides "already known" when current score > threshold; default 0.85
-	ReinjectTopKForce      int     // top-N candidates always inject regardless of known state; default 3
-	CapPerTurn             int     // hard ceiling on delta articles per turn; default 5
-}
-
 // InjectionStateStore is the optional store dependency the orchestrator
-// uses to read/write the per-session knowledge dedup bookkeeping. It is
-// only consulted when KnowledgeDedupConfig.Enabled is true.
+// uses to read/write the per-session tool-promotion bookkeeping
+// (known_tools sticky tiers). When nil, load_tools promotions don't
+// persist across turns.
 // SessionStore (state/store) satisfies this interface in production;
 // tests may inject a fake. The shape matches SessionStore's helpers
 // exactly so structural typing wires both ends without an explicit
@@ -204,12 +189,10 @@ type OrchestratorOpts struct {
 	SyncActionsAction       string                  // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
 	SyncGlossaryAction      string                  // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
 	Knowledge               KnowledgeConfig         // optional; knowledge directory ingestion
-	KnowledgePushEnabled    *bool                   // optional; nil/true = auto-inject retrieved knowledge (push); false = pull-only (system-prompt catalog + ask_knowledge only, no auto-injection)
 	Subprocess              SubprocessConfig        // optional; subprocess (sub-agent) support
 	OnStreamChunk           StreamChunkCallback     // optional; when set and LLM supports streaming, final answers are streamed
 	ShowToolCalls           string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	KnowledgeDedup          KnowledgeDedupConfig    // RFC #249 Phase 3 dedup flags; zero value disables (= instrumentation_only mode)
-	InjectionStateStore     InjectionStateStore     // optional; required only when KnowledgeDedup.Enabled is true
+	InjectionStateStore     InjectionStateStore     // optional; persists known_tools sticky tiers across turns (load_tools promotion)
 	ToolErrorHandling       ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; zero value normalizes to RFC defaults
 	ChannelSender           ChannelSender           // optional; when set, maybeGenerateTitle pushes the generated title to the originating channel as a session.title frame
 }
@@ -312,12 +295,10 @@ type Orchestrator struct {
 	syncActionsAction      string                  // optional; action name for action sync
 	syncGlossaryAction     string                  // optional; action name for glossary sync (uses syncActionsPlugin)
 	knowledge              KnowledgeConfig         // optional; knowledge directory ingestion
-	knowledgePushEnabled   bool                    // false = pull-only: retrieved knowledge is never auto-injected; the system-prompt catalog + ask_knowledge carry the pull path. Resolved from Options.KnowledgePushEnabled (nil → true).
 	subprocessConfig       SubprocessConfig        // optional; subprocess (sub-agent) support
 	onStreamChunk          StreamChunkCallback     // optional; when set, final answers stream to caller
 	showToolCalls          string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	knowledgeDedup         KnowledgeDedupConfig    // RFC #249 Phase 3 dedup flags; Enabled=false skips dedup logic and InjectionStateStore reads
-	injectionStateStore    InjectionStateStore     // optional; nil = dedup decision logic short-circuits to instrumentation_only mode
+	injectionStateStore    InjectionStateStore     // optional; nil = load_tools sticky promotions don't persist across turns
 	toolErrorHandling      ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; thresholds always carry RFC defaults after NewWithRules
 	toolErrorTracker       *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by injectionStateStore
 	channelSender          ChannelSender           // optional; nil = title generation persists silently, no live push to clients
@@ -331,12 +312,6 @@ type Orchestrator struct {
 	// the same session both see Title=="" and would both call the LLM).
 	titleMuxMu sync.Mutex
 	titleMuxes map[string]*sessionMutex
-	// legacyKnowledgeWarnings tracks the (sessionID, pluginName) pairs
-	// we've already deprecation-warned for, so a session that keeps
-	// using a legacy preparer doesn't spam the log every turn. Key is
-	// "<sessionID>|<pluginName>"; value is unused. Zero value is
-	// usable directly, so no NewWithRules wiring is needed.
-	legacyKnowledgeWarnings sync.Map
 	// knowledgeCatalog is the rendered "## Available knowledge" section (anchor
 	// + slug/title list) shown in every system prompt so the model knows which
 	// articles it can pull via ask_knowledge. Served from cache on the hot path;
@@ -528,23 +503,9 @@ func NewWithRules(
 		eventSink = emit.NoOpSink{}
 	}
 
-	// Normalize KnowledgeDedup to RFC #249 defaults so callers that
-	// build OrchestratorOpts in code (mostly tests) don't have to
-	// repeat the canonical numbers. The Enabled flag stays false by
-	// default — that's the whole point of the master switch.
-	dedupCfg := opts.KnowledgeDedup
-	if dedupCfg.ReinjectScoreThreshold == 0 {
-		dedupCfg.ReinjectScoreThreshold = 0.85
-	}
-	if dedupCfg.ReinjectTopKForce == 0 {
-		dedupCfg.ReinjectTopKForce = 3
-	}
-	if dedupCfg.CapPerTurn == 0 {
-		dedupCfg.CapPerTurn = 5
-	}
-
-	// Normalize ToolErrorHandling to RFC #249 Phase 4 defaults, same
-	// precedent as KnowledgeDedup above.
+	// Normalize ToolErrorHandling to RFC #249 Phase 4 defaults so callers
+	// that build OrchestratorOpts in code (mostly tests) don't have to
+	// repeat the canonical numbers.
 	errCfg := opts.ToolErrorHandling
 	if errCfg.LoopCapPerTurn == 0 {
 		errCfg.LoopCapPerTurn = 2
@@ -596,10 +557,8 @@ func NewWithRules(
 		syncActionsAction:       opts.SyncActionsAction,
 		syncGlossaryAction:      opts.SyncGlossaryAction,
 		knowledge:               opts.Knowledge,
-		knowledgePushEnabled:    opts.KnowledgePushEnabled == nil || *opts.KnowledgePushEnabled,
 		onStreamChunk:           opts.OnStreamChunk,
 		showToolCalls:           opts.ShowToolCalls,
-		knowledgeDedup:          dedupCfg,
 		injectionStateStore:     opts.InjectionStateStore,
 		toolErrorHandling:       errCfg,
 		toolErrorTracker:        newToolErrorTracker(),
@@ -1492,55 +1451,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// prepare_actions / prepare_glossary / search).
 			o.emitPreparerTranslations(ctx, outcome.Response)
 			o.emitPreparerRetrievals(ctx, userMessage, searchSource, outcome.Response)
-			prepAgg.append(prep.Plugin, outcome.Response)
+			prepAgg.append(outcome.Response)
 		}
-		// RFC #249 Phase 3 dedup decision tree:
-		//   - Any preparer used the legacy [knowledge_context]-in-Message
-		//     shape AND dedup is enabled → mode=legacy_fallback. Skip
-		//     the dedup pass entirely (content stays as the legacy
-		//     plugin produced it), log one deprecation warning per
-		//     (plugin, session).
-		//   - Dedup enabled AND store wired AND structured candidates
-		//     present → run the full dedup decision; content rewrite
-		//     happens before the event emits, state persist happens
-		//     AFTER the emit so the event log is the durable record
-		//     even on partial failure (RFC #249 cross-phase invariant).
-		//   - Otherwise → Phase 2 mode = instrumentation_only.
-		// prepAgg.LegacyKnowledgePlugins is built by the sequential
-		// preparer loop above; no concurrent access. If that loop
-		// ever parallelizes, the append in preparerAggregate.append
-		// would race — keep the assumption documented here so the
-		// next refactor knows to guard the aggregate.
-		legacyFallback := o.knowledgeDedup.Enabled && len(prepAgg.LegacyKnowledgePlugins) > 0
-		// dedupActive is declared here (not inside the branch) because the
-		// post-emit persist step below reads it.
-		dedupActive := false
-		if !o.knowledgePushEnabled {
-			// Pull-only mode (orchestrator.knowledge.push_enabled: false):
-			// never auto-inject retrieved article bodies. Strip any
-			// [knowledge_context] a preparer embedded in the message so
-			// nothing leaks into the turn, and skip the dedup render. The
-			// system-prompt knowledge catalog (titles + slugs) and the
-			// always-on ask_knowledge tool stay in place, so the model
-			// fetches articles on demand instead of being force-fed
-			// (often mis-ranked) RAG context every turn. Retrieval still
-			// ran, so the preparer_decision event below still reports what
-			// a push WOULD have surfaced (mode=pull_only) — keeping
-			// push-vs-pull A/B observable in the session log.
-			content = stripKnowledgeContext(content)
-			prepAgg.KnowledgePushSuppressed = true
-		} else {
-			if legacyFallback {
-				o.warnLegacyKnowledgePluginsOnce(ctx, sessionID, prepAgg.LegacyKnowledgePlugins)
-			}
-			dedupActive = !legacyFallback &&
-				o.knowledgeDedup.Enabled &&
-				o.injectionStateStore != nil &&
-				len(prepAgg.Knowledge) > 0
-			if dedupActive {
-				content = o.prepareDedupDecision(ctx, sessionID, content, &prepAgg)
-			}
-		}
+		// Knowledge is pull-only, always: never auto-inject retrieved
+		// article bodies. Strip any [knowledge_context] a preparer
+		// embedded in the message so nothing leaks into the turn. The
+		// system-prompt knowledge catalog (titles + slugs) and the
+		// always-on ask_knowledge tool carry discovery, so the model
+		// fetches articles on demand instead of being force-fed
+		// (often mis-ranked) RAG context every turn. Retrieval still
+		// ran, so the preparer_decision event below reports what was
+		// retrieved (mode=pull_only) without claiming an injection.
+		content = stripKnowledgeContext(content)
 		decisionID := o.emitPreparerDecision(ctx, prepAgg)
 		if decisionID != "" {
 			refs, tier1Count, tier3Count := turnStartRefsFromAggregate(prepAgg)
@@ -1550,9 +1472,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				Tier1Count:         tier1Count,
 				Tier3Count:         tier3Count,
 			})
-		}
-		if dedupActive {
-			o.persistDedupDecision(ctx, sessionID, &prepAgg)
 		}
 	}
 
@@ -1600,9 +1519,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			MessageCount: 2,  // planner hardcodes system+user, see pipeline.Planner.Plan
 		})
 		plannerStart := time.Now()
-		// Pass the raw content (including any [knowledge_context] block the
-		// preparer injected for the current turn) so the planner sees the
-		// retrieved knowledge alongside the user's request.
+		// Pass the user-turn content to the planner. Knowledge is pull-only,
+		// so the content carries no auto-injected [knowledge_context] — the
+		// planner sees the user's request as-is.
 		planResult, err := o.planner.Plan(plannerCtx, content, capabilitiesToPlannerInfo(plannerCaps), convContext)
 		plannerLatency := time.Since(plannerStart).Milliseconds()
 		var plannerRaw string

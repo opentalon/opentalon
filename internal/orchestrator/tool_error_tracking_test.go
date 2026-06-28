@@ -179,7 +179,7 @@ func TestRecordToolOutcome_NewTurnResetsTurnCounter(t *testing.T) {
 	ctx := actor.WithSessionID(context.Background(), "s1")
 	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
 
-	// Simulate next turn by adding a user message — turnNumberForDedup
+	// Simulate next turn by adding a user message — sessionTurnNumber
 	// counts user messages + 1, so this bumps the orchestrator's view
 	// of "current turn" without going through the full agent loop.
 	_ = sessions.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "next"})

@@ -222,8 +222,8 @@ func splitToolNames(raw string) []string {
 // marked tier1 — an explicit load_tools call is a strong relevance
 // signal. Missing entries are appended.
 //
-// Defensive copy of KnownTools mirrors the applyKnowledgeDedup pattern:
-// stores may return slices that share the backing array with their
+// KnownTools is defensively copied before mutation: stores may return
+// slices that share the backing array with their
 // internal cache (the in-process fakeInjectionStateStore does, the
 // DB-backed one in production doesn't), and mutating the read snapshot in
 // place before a write could leave partially-applied state visible to a
@@ -242,10 +242,9 @@ func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name
 		return
 	}
 	updated := state.InjectionState{
-		KnownKnowledge: existing.KnownKnowledge,
-		KnownTools:     append([]state.KnownToolEntry(nil), existing.KnownTools...),
+		KnownTools: append([]state.KnownToolEntry(nil), existing.KnownTools...),
 	}
-	turn := o.turnNumberForDedup(sessionID)
+	turn := o.sessionTurnNumber(sessionID)
 	found := false
 	for i := range updated.KnownTools {
 		if updated.KnownTools[i].ToolName != name {

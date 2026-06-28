@@ -13,6 +13,45 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
+// fakeInjectionStateStore is a minimal InjectionStateStore
+// implementation used by the load_tools sticky-promotion and tool-error
+// tracking tests. It round-trips state per session (so a two-turn test
+// sees turn 1's writes in turn 2), counts calls for assertion, and lets
+// a test inject failure modes via failGetErr / failUpdateErr to exercise
+// the orchestrator's "warn-and-continue" fallback paths.
+type fakeInjectionStateStore struct {
+	getCalls      int
+	updateCalls   int
+	lastWritten   state.InjectionState
+	store         map[string]state.InjectionState
+	failGetErr    error
+	failUpdateErr error
+}
+
+func (f *fakeInjectionStateStore) GetInjectionState(_ context.Context, sessionID string) (state.InjectionState, error) {
+	f.getCalls++
+	if f.failGetErr != nil {
+		return state.InjectionState{}, f.failGetErr
+	}
+	if f.store == nil {
+		return state.InjectionState{}, nil
+	}
+	return f.store[sessionID], nil
+}
+
+func (f *fakeInjectionStateStore) UpdateInjectionState(_ context.Context, sessionID string, st state.InjectionState) error {
+	f.updateCalls++
+	f.lastWritten = st
+	if f.failUpdateErr != nil {
+		return f.failUpdateErr
+	}
+	if f.store == nil {
+		f.store = make(map[string]state.InjectionState)
+	}
+	f.store[sessionID] = st
+	return nil
+}
+
 func newOrchForMetaTests(t *testing.T, store *fakeInjectionStateStore) *Orchestrator {
 	t.Helper()
 	registry := NewToolRegistry()

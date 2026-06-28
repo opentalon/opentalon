@@ -32,61 +32,17 @@ type preparerAggregate struct {
 	// preparer_decision still surfaces them under tools.tier1_new so
 	// instrumentation does not blank out on legacy plugins.
 	LegacyRelevantTools []string
-
-	// KnowledgeDedup, when non-nil, switches emitPreparerDecision into
-	// the Phase-3 "full" mode: the injected/skipped/score-override
-	// buckets reflect the actual dedup outcome rather than the
-	// instrumentation_only pass-through. Nil means dedup didn't run
-	// (config disabled, no store wired, or no knowledge candidates).
-	KnowledgeDedup *knowledgeDedupDecision
-
-	// LegacyKnowledgePlugins lists plugin names whose response carried
-	// a legacy [knowledge_context] injection (pr.Message contains the
-	// envelope) without the structured KnowledgeCandidates that Phase 3
-	// dedup needs. When non-empty AND dedup is enabled, the orchestrator
-	// switches the whole turn to mode=legacy_fallback — dedup is
-	// skipped and the plugin's pr.Message passes through verbatim.
-	LegacyKnowledgePlugins []string
-
-	// KnowledgePushSuppressed is set when knowledge PUSH is disabled
-	// (orchestrator.knowledge.push_enabled: false). Retrieval still ran
-	// — so Knowledge holds the candidates — but the orchestrator stripped
-	// every [knowledge_context] block and injected nothing. It switches
-	// emitPreparerDecision / turnStartRefsFromAggregate to mode=pull_only
-	// so the event log reports the candidates as retrieved-not-injected
-	// instead of falsely claiming an injection that never shipped.
-	KnowledgePushSuppressed bool
 }
 
 // append pulls the candidate slices off one preparer's response into
 // the aggregate. Safe to call with a zero-valued response (no-op).
-// pluginName identifies the source plugin so legacy-injection
-// fallback can name the affected plugin in the deprecation warning.
-func (a *preparerAggregate) append(pluginName string, pr preparerResponse) {
+func (a *preparerAggregate) append(pr preparerResponse) {
 	a.Knowledge = append(a.Knowledge, pr.KnowledgeCandidates...)
 	a.Glossary = append(a.Glossary, pr.GlossaryCandidates...)
 	a.Tools = append(a.Tools, pr.ToolCandidates...)
 	if len(pr.ToolCandidates) == 0 && len(pr.RelevantTools) > 0 {
 		a.LegacyRelevantTools = append(a.LegacyRelevantTools, pr.RelevantTools...)
 	}
-	if responseUsesLegacyKnowledgeInjection(pr) {
-		a.LegacyKnowledgePlugins = append(a.LegacyKnowledgePlugins, pluginName)
-	}
-}
-
-// responseUsesLegacyKnowledgeInjection returns true when the plugin
-// returned a [knowledge_context] block in pr.Message without the
-// structured KnowledgeCandidates slice that Phase 3 dedup needs.
-// Detection is content-based (parser recognizes both legacy bare
-// and tagged forms) so a plugin that started emitting tagged blocks
-// without populating candidates still triggers the fallback path —
-// dedup can only run when the per-candidate identity is in the
-// structured field.
-func responseUsesLegacyKnowledgeInjection(pr preparerResponse) bool {
-	if len(pr.KnowledgeCandidates) > 0 {
-		return false
-	}
-	return len(parseKnowledgeContextBlocks(pr.Message)) > 0
 }
 
 // emitPreparerRetrievals fires the per-corpus *_retrieval events for
@@ -169,20 +125,13 @@ func (o *Orchestrator) emitPreparerTranslations(ctx context.Context, pr preparer
 }
 
 // emitPreparerDecision publishes the composite preparer-pass outcome
-// once per user turn. The shape of the Knowledge block depends on
-// whether agg.KnowledgeDedup is set:
+// once per user turn. Knowledge is pull-only: retrieval still ran (the
+// candidates are reported under Knowledge.CandidateIDs so the consumer
+// sees what was retrieved), but nothing is auto-injected — Injected /
+// InjectedBytes stay empty because the LLM received zero article bytes.
 //
-//   - nil: Phase 2 / instrumentation_only mode. Every candidate is
-//     reported under Knowledge.Injected with reason
-//     "instrumentation_only"; the skipped / score-override buckets
-//     stay empty.
-//   - non-nil: Phase 3 / full mode. Injected / Skipped /
-//     ScoreOverridesApplied reflect the dedup decision exactly; the
-//     reason on each injected entry is "new" / "score_override" /
-//     "top_k_force"; cap-exceeded entries land in Skipped.
-//
-// In both modes Tools.Tier1New surfaces every ToolCandidate plus any
-// legacy relevant_tools fallback list, recording what RAG retrieved (it
+// Tools.Tier1New surfaces every ToolCandidate plus any legacy
+// relevant_tools fallback list, recording what RAG retrieved (it
 // no longer drives the LLM's tools array, which is selected by the
 // always-include + sticky model).
 //
@@ -196,109 +145,38 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 	hasSignal := len(agg.Knowledge) > 0 ||
 		len(agg.Glossary) > 0 ||
 		len(agg.Tools) > 0 ||
-		len(agg.LegacyRelevantTools) > 0 ||
-		len(agg.LegacyKnowledgePlugins) > 0
+		len(agg.LegacyRelevantTools) > 0
 	if !hasSignal {
-		// Nothing retrieved from any corpus and no legacy-fallback
-		// trigger → skip the event. Avoids noisy preparer_decision
-		// rows on turns where no preparer ran (toolCallSeeded path,
-		// sessions with empty o.preparers, …). Legacy-fallback is
-		// counted as signal because the audit trail benefits from
-		// recording the fallback even if no candidates surfaced.
+		// Nothing retrieved from any corpus → skip the event. Avoids
+		// noisy preparer_decision rows on turns where no preparer ran
+		// (toolCallSeeded path, sessions with empty o.preparers, …).
 		return ""
 	}
 
-	var knowledgeBlock events.PreparerDecisionKnowledgeBlock
-	var mode string
-	switch {
-	case agg.KnowledgePushSuppressed:
-		// Pull-only: retrieval ran but nothing was injected (the content
-		// was stripped). Report the candidates so the consumer sees what
-		// a push would have surfaced, but leave Injected/InjectedBytes
-		// empty — the LLM received zero article bytes this turn.
-		mode = events.PreparerDecisionModePullOnly
-		knowledgeBlock = events.PreparerDecisionKnowledgeBlock{
-			CandidateIDs: knowledgeCandidateIDs(agg.Knowledge),
-		}
-	case o.knowledgeDedup.Enabled && len(agg.LegacyKnowledgePlugins) > 0:
-		// A plugin still uses the legacy [knowledge_context]-in-Message
-		// shape, so dedup can't decide on a per-candidate basis. Report
-		// fallback mode; Injected/Skipped stay empty since dedup didn't
-		// run. CandidateIDs are surfaced for any non-legacy plugin that
-		// did return structured candidates — the consumer can still
-		// see what was retrieved even though the decision was forced
-		// to pass-through.
-		mode = events.PreparerDecisionModeLegacyFallback
-		knowledgeBlock = events.PreparerDecisionKnowledgeBlock{
-			CandidateIDs: knowledgeCandidateIDs(agg.Knowledge),
-		}
-	case agg.KnowledgeDedup != nil:
-		mode = events.PreparerDecisionModeFull
-		knowledgeBlock = events.PreparerDecisionKnowledgeBlock{
-			CandidateIDs:          knowledgeCandidateIDs(agg.Knowledge),
-			Injected:              dedupInjectedItems(agg.KnowledgeDedup),
-			SkippedKnown:          dedupSkippedItems(agg.KnowledgeDedup),
-			ScoreOverridesApplied: agg.KnowledgeDedup.ScoreOverrides,
-			InjectedBytes:         agg.KnowledgeDedup.InjectedBytes(),
-		}
-	default:
-		mode = events.PreparerDecisionModeInstrumentationOnly
-		knowledgeBlock = events.PreparerDecisionKnowledgeBlock{
-			CandidateIDs:  knowledgeCandidateIDs(agg.Knowledge),
-			Injected:      knowledgeCandidatesToInjected(agg.Knowledge),
-			InjectedBytes: knowledgeInjectedBytes(agg.Knowledge),
-		}
+	knowledgeBlock := events.PreparerDecisionKnowledgeBlock{
+		CandidateIDs: knowledgeCandidateIDs(agg.Knowledge),
 	}
-
 	toolsBlock := buildToolsBlock(agg)
 
 	return emit.EmitPreparerDecision(ctx, o.eventSink, emit.PreparerDecisionArgs{
-		Mode:      mode,
+		Mode:      events.PreparerDecisionModePullOnly,
 		Knowledge: knowledgeBlock,
 		Tools:     toolsBlock,
 	})
 }
 
 // turnStartRefsFromAggregate extracts the Pillar-C fields the
-// turn_start event references back from the preparer aggregate:
-// the injected-knowledge ref list and the tier1/tier3 counts. Each
-// is mode-aware:
+// turn_start event references back from the preparer aggregate: the
+// injected-knowledge ref list and the tier1/tier3 counts.
 //
-//   - InjectedKnowledge in full mode = the dedup decision's Injected
-//     slice (the deduped set the LLM actually sees this turn).
-//   - InjectedKnowledge in instrumentation_only mode = every
-//     retrieved candidate (Phase 2 passes everything through).
-//   - InjectedKnowledge in legacy_fallback mode = empty — the plugin
-//     handed the orchestrator a pre-rendered block with no
-//     structured handle, so no ref list can be assembled without
-//     re-parsing.
-//
-// The tier counts are retained in the return signature (and the turn_start
-// payload) for schema stability, but always zero now that tool discovery
-// is the registry-sourced catalog rather than a per-turn tier decision;
-// `omitempty` keeps them out of the emitted payload.
+// Knowledge is pull-only, so nothing is auto-injected — the ref list is
+// always empty (the retrieved candidates surface on preparer_decision
+// instead). The tier counts are retained in the return signature (and
+// the turn_start payload) for schema stability, but always zero now that
+// tool discovery is the registry-sourced catalog rather than a per-turn
+// tier decision; `omitempty` keeps them out of the emitted payload.
 func turnStartRefsFromAggregate(agg preparerAggregate) (refs []events.KnowledgeRef, tier1Count, tier3Count int) {
-	switch {
-	case agg.KnowledgePushSuppressed:
-		// pull_only — nothing injected, so no injected-knowledge refs
-		// (the candidates surface on preparer_decision instead).
-	case agg.KnowledgeDedup != nil:
-		for _, c := range agg.KnowledgeDedup.Injected {
-			refs = append(refs, events.KnowledgeRef{
-				ArticleID:     c.ArticleID,
-				ContentSHA256: c.ContentSHA256,
-			})
-		}
-	case len(agg.LegacyKnowledgePlugins) == 0:
-		// instrumentation_only — emit every candidate as injected.
-		for _, c := range agg.Knowledge {
-			refs = append(refs, events.KnowledgeRef{
-				ArticleID:     c.ArticleID,
-				ContentSHA256: c.ContentSHA256,
-			})
-		}
-	}
-	return refs, tier1Count, tier3Count
+	return nil, 0, 0
 }
 
 // buildToolsBlock returns the preparer_decision.tools payload for the
@@ -311,39 +189,6 @@ func buildToolsBlock(agg preparerAggregate) events.PreparerDecisionToolsBlock {
 	return events.PreparerDecisionToolsBlock{
 		Tier1New: toolCandidateNames(agg.Tools, agg.LegacyRelevantTools),
 	}
-}
-
-// dedupInjectedItems converts the dedup decision's parallel
-// Injected/InjectedReasons slices into the event payload shape.
-func dedupInjectedItems(d *knowledgeDedupDecision) []events.PreparerDecisionInjectedItem {
-	if len(d.Injected) == 0 {
-		return nil
-	}
-	out := make([]events.PreparerDecisionInjectedItem, len(d.Injected))
-	for i, c := range d.Injected {
-		out[i] = events.PreparerDecisionInjectedItem{
-			ArticleID:     c.ArticleID,
-			ContentSHA256: c.ContentSHA256,
-			Reason:        d.InjectedReasons[i],
-		}
-	}
-	return out
-}
-
-// dedupSkippedItems converts the dedup decision's parallel
-// Skipped/SkippedReasons slices into the event payload shape.
-func dedupSkippedItems(d *knowledgeDedupDecision) []events.PreparerDecisionSkippedItem {
-	if len(d.Skipped) == 0 {
-		return nil
-	}
-	out := make([]events.PreparerDecisionSkippedItem, len(d.Skipped))
-	for i, c := range d.Skipped {
-		out[i] = events.PreparerDecisionSkippedItem{
-			ArticleID: c.ArticleID,
-			Reason:    d.SkippedReasons[i],
-		}
-	}
-	return out
 }
 
 // ----- Pure conversion helpers (no orchestrator state) -----
@@ -404,33 +249,6 @@ func knowledgeCandidateIDs(cands []KnowledgeCandidate) []string {
 		out[i] = c.ArticleID
 	}
 	return out
-}
-
-func knowledgeCandidatesToInjected(cands []KnowledgeCandidate) []events.PreparerDecisionInjectedItem {
-	if len(cands) == 0 {
-		return nil
-	}
-	out := make([]events.PreparerDecisionInjectedItem, len(cands))
-	for i, c := range cands {
-		out[i] = events.PreparerDecisionInjectedItem{
-			ArticleID:     c.ArticleID,
-			ContentSHA256: c.ContentSHA256,
-			// Phase 2 has no dedup state, so every candidate is reported
-			// as if newly injected. Phase 3+ switches to "new" /
-			// "score_override" / "top_k_force" per the dedup decision
-			// (see dedupInjectedItems).
-			Reason: events.PreparerDecisionReasonInstrumentationOnly,
-		}
-	}
-	return out
-}
-
-func knowledgeInjectedBytes(cands []KnowledgeCandidate) int {
-	total := 0
-	for _, c := range cands {
-		total += len(c.Content)
-	}
-	return total
 }
 
 func toolCandidateNames(cands []ToolCandidate, legacy []string) []string {

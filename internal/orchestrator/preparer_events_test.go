@@ -9,60 +9,22 @@ import (
 	"github.com/opentalon/opentalon/internal/state/store/events"
 )
 
-// TestTurnStartRefsFromAggregate covers the four input modes the
-// preparer aggregate can be in by the time turn_start needs its
-// Pillar-C back-references:
-//
-//   - full dedup mode (KnowledgeDedup set) → InjectedKnowledge from the decision's Injected slice
-//   - instrumentation_only mode (no dedup, no legacy plugin) → every retrieved candidate
-//   - legacy_fallback mode (any legacy plugin returned a pre-rendered block) → empty (no structured handle)
-//   - no preparer ran (aggregate empty) → nothing
-//
-// The tier counts are always zero now that tool discovery is the
-// registry-sourced catalog rather than a per-turn tier decision.
+// TestTurnStartRefsFromAggregate pins the pull-only contract: knowledge
+// is never auto-injected, so turn_start's Pillar-C injected-knowledge
+// back-references are always empty and the tier counts always zero —
+// regardless of what the aggregate retrieved (the retrieved candidates
+// surface on preparer_decision instead).
 func TestTurnStartRefsFromAggregate(t *testing.T) {
 	candA := KnowledgeCandidate{ArticleID: "kb_a", ContentSHA256: "sha_a"}
 	candB := KnowledgeCandidate{ArticleID: "kb_b", ContentSHA256: "sha_b"}
-	candC := KnowledgeCandidate{ArticleID: "kb_c", ContentSHA256: "sha_c"}
 
 	tests := []struct {
-		name           string
-		agg            preparerAggregate
-		wantRefs       []events.KnowledgeRef
-		wantTier1Count int
-		wantTier3Count int
+		name string
+		agg  preparerAggregate
 	}{
 		{
-			name: "full dedup mode — refs from KnowledgeDedup.Injected",
-			agg: preparerAggregate{
-				Knowledge: []KnowledgeCandidate{candA, candB, candC}, // retrieved set
-				KnowledgeDedup: &knowledgeDedupDecision{
-					Injected: []KnowledgeCandidate{candA, candC}, // deduped: B was already known
-				},
-			},
-			wantRefs: []events.KnowledgeRef{
-				{ArticleID: "kb_a", ContentSHA256: "sha_a"},
-				{ArticleID: "kb_c", ContentSHA256: "sha_c"},
-			},
-		},
-		{
-			name: "instrumentation_only mode — refs from every retrieved candidate",
-			agg: preparerAggregate{
-				Knowledge: []KnowledgeCandidate{candA, candB},
-				// KnowledgeDedup nil, LegacyKnowledgePlugins empty → Phase 2
-			},
-			wantRefs: []events.KnowledgeRef{
-				{ArticleID: "kb_a", ContentSHA256: "sha_a"},
-				{ArticleID: "kb_b", ContentSHA256: "sha_b"},
-			},
-		},
-		{
-			name: "legacy_fallback mode — refs empty (no structured handle for the rendered block)",
-			agg: preparerAggregate{
-				Knowledge:              []KnowledgeCandidate{candA},
-				LegacyKnowledgePlugins: []string{"legacy_plugin"},
-			},
-			wantRefs: nil,
+			name: "retrieved candidates — still no injected refs (pull-only)",
+			agg:  preparerAggregate{Knowledge: []KnowledgeCandidate{candA, candB}},
 		},
 		{
 			name: "no preparer ran — empty aggregate yields no refs",
@@ -72,14 +34,14 @@ func TestTurnStartRefsFromAggregate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			refs, tier1, tier3 := turnStartRefsFromAggregate(tc.agg)
-			if !reflect.DeepEqual(refs, tc.wantRefs) {
-				t.Errorf("refs = %+v, want %+v", refs, tc.wantRefs)
+			if !reflect.DeepEqual(refs, []events.KnowledgeRef(nil)) {
+				t.Errorf("refs = %+v, want nil", refs)
 			}
-			if tier1 != tc.wantTier1Count {
-				t.Errorf("tier1Count = %d, want %d", tier1, tc.wantTier1Count)
+			if tier1 != 0 {
+				t.Errorf("tier1Count = %d, want 0", tier1)
 			}
-			if tier3 != tc.wantTier3Count {
-				t.Errorf("tier3Count = %d, want %d", tier3, tc.wantTier3Count)
+			if tier3 != 0 {
+				t.Errorf("tier3Count = %d, want 0", tier3)
 			}
 		})
 	}

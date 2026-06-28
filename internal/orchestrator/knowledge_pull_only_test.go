@@ -10,23 +10,20 @@ import (
 	"github.com/opentalon/opentalon/internal/state/store/events"
 )
 
-// With knowledge PUSH disabled (orchestrator.knowledge.push_enabled:
-// false) the orchestrator runs pull-only: a preparer that returns
-// structured candidates AND an embedded [knowledge_context] block must
-// have its block stripped from the content the LLM sees, the dedup
-// decision skipped (no state persist), and preparer_decision must
-// report mode=pull_only — the retrieved candidates listed (what a push
-// WOULD have surfaced) but nothing injected. This guards both the
-// pull-only branch and the honest telemetry that keeps push-vs-pull
-// A/B readable in the session log.
-func TestOrchestrator_PreparerPhase_PushDisabledEmitsPullOnly(t *testing.T) {
+// Knowledge is pull-only, always: a preparer that returns structured
+// candidates AND an embedded [knowledge_context] block must have its
+// block stripped from the content the LLM sees, nothing injected, and
+// preparer_decision must report mode=pull_only — the retrieved
+// candidates listed (so the consumer sees what was retrieved) but no
+// article bytes injected. This pins both the strip behaviour and the
+// honest telemetry.
+func TestOrchestrator_PreparerPhase_EmitsPullOnly(t *testing.T) {
 	preparerJSON := `{
 		"send_to_llm": true,
 		"message": "[knowledge_context]\nplugin-rendered body\n[/knowledge_context]\n\nuser question",
 		"knowledge_candidates": [{"article_id": "kb_a", "content_sha256": "aaa", "content": "plugin-rendered body", "score": 0.7}]
 	}`
 	sink := &recordingEventSink{}
-	dedupStore := &fakeInjectionStateStore{}
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
 		Name: "modern-rag", Description: "modern RAG",
@@ -35,15 +32,11 @@ func TestOrchestrator_PreparerPhase_PushDisabledEmitsPullOnly(t *testing.T) {
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1", "", "")
 	llm := &capturingLLM{responses: []string{"answer"}}
-	pushOff := false
 	orch := NewWithRules(llm,
 		&fakeParser{parseFn: func(string) []ToolCall { return nil }},
 		registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
-			EventSink:            sink,
-			ContentPreparers:     []ContentPreparerEntry{{Plugin: "modern-rag", Action: "prepare"}},
-			KnowledgeDedup:       KnowledgeDedupConfig{Enabled: true},
-			InjectionStateStore:  dedupStore,
-			KnowledgePushEnabled: &pushOff,
+			EventSink:        sink,
+			ContentPreparers: []ContentPreparerEntry{{Plugin: "modern-rag", Action: "prepare"}},
 		})
 	if _, err := orch.Run(context.Background(), "s1", "user question"); err != nil {
 		t.Fatal(err)
@@ -66,11 +59,6 @@ func TestOrchestrator_PreparerPhase_PushDisabledEmitsPullOnly(t *testing.T) {
 	}
 	if len(p.Knowledge.CandidateIDs) != 1 || p.Knowledge.CandidateIDs[0] != "kb_a" {
 		t.Errorf("pull_only must still list retrieved candidates, got CandidateIDs=%+v", p.Knowledge.CandidateIDs)
-	}
-
-	// No dedup state persisted — the decision was skipped entirely.
-	if dedupStore.updateCalls != 0 {
-		t.Errorf("pull_only must NOT persist dedup state, got updateCalls=%d", dedupStore.updateCalls)
 	}
 
 	// The content the LLM saw must have the [knowledge_context] stripped

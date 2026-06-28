@@ -34,10 +34,9 @@ import (
 // contract as Phase-3 write paths).
 //
 // State location: in-memory sync.Map keyed by sessionID. Counters
-// are NOT persisted — a process restart resets them, matching the
-// Phase-3 legacyKnowledgeWarnings precedent. The persisted artifact
-// is only the Demoted flag (which lives in state.InjectionState
-// alongside the rest of KnownTools).
+// are NOT persisted — a process restart resets them. The persisted
+// artifact is only the Demoted flag (which lives in
+// state.InjectionState alongside the rest of KnownTools).
 
 // sessionErrorState holds the per-session error counters. Guarded
 // by an internal mutex so concurrent tool-result handlers (rare —
@@ -87,10 +86,9 @@ func (s *sessionErrorState) record(turn int, fqn string, success bool) (turnCoun
 	return s.turnErrors[fqn], s.sessionErrors[fqn], false
 }
 
-// toolErrorTracker holds per-session counter state. Sync.Map keyed
-// by sessionID matches the legacyKnowledgeWarnings precedent. Not
-// persisted — a process restart resets all counters, accepted as a
-// trade-off for not pinning observability state to the DB.
+// toolErrorTracker holds per-session counter state in a sync.Map keyed
+// by sessionID. Not persisted — a process restart resets all counters,
+// accepted as a trade-off for not pinning observability state to the DB.
 type toolErrorTracker struct {
 	sessions sync.Map // sessionID → *sessionErrorState
 }
@@ -128,7 +126,7 @@ func (o *Orchestrator) recordToolOutcome(ctx context.Context, sessionID string, 
 	}
 	fqn := toolFQN(call.Plugin, call.Action)
 	st := o.toolErrorTracker.stateFor(sessionID)
-	turnCount, sessionCount, wasFailing := st.record(o.turnNumberForDedup(sessionID), fqn, result.Error == "")
+	turnCount, sessionCount, wasFailing := st.record(o.sessionTurnNumber(sessionID), fqn, result.Error == "")
 
 	if result.Error == "" {
 		if wasFailing && o.injectionStateStore != nil {
@@ -178,8 +176,7 @@ func (o *Orchestrator) updateToolDemotion(ctx context.Context, sessionID, fqn st
 	}
 
 	updated := state.InjectionState{
-		KnownKnowledge: existing.KnownKnowledge,
-		KnownTools:     append([]state.KnownToolEntry(nil), existing.KnownTools...),
+		KnownTools: append([]state.KnownToolEntry(nil), existing.KnownTools...),
 	}
 	changed := false
 	found := false
@@ -212,4 +209,27 @@ func (o *Orchestrator) updateToolDemotion(ctx context.Context, sessionID, fqn st
 		slog.WarnContext(ctx, "tool_error_tracking: write state failed, demotion not persisted",
 			"component", "orchestrator", "session", sessionID, "tool", fqn, "demoted", demoted, "error", err)
 	}
+}
+
+// sessionTurnNumber returns a stable monotonically-increasing turn
+// counter for the session. Used as KnownToolEntry.LRURank for sticky
+// tool promotion and as the per-turn key for tool-error tracking.
+//
+// Implemented as the count of user-role messages in the session plus
+// one, on the theory that the upcoming user message will become the
+// next entry. Imperfect (assistant-led turns aren't counted, store
+// errors silently fall back to turn=1) but sufficient for diagnostic
+// value.
+func (o *Orchestrator) sessionTurnNumber(sessionID string) int {
+	sess, err := o.sessions.Get(sessionID)
+	if err != nil || sess == nil {
+		return 1
+	}
+	turn := 1
+	for _, m := range sess.Messages {
+		if m.Role == provider.RoleUser {
+			turn++
+		}
+	}
+	return turn
 }
