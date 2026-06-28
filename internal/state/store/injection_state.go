@@ -9,15 +9,15 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
-// GetInjectionState returns the deserialized dedup state for sessionID.
-// An empty / NULL / "{}" column yields a zero-valued state without
-// error — the caller treats that as "first turn, nothing known yet".
+// GetInjectionState returns the deserialized injection state for
+// sessionID. An empty / NULL / "{}" column yields a zero-valued state
+// without error — the caller treats that as "first turn, nothing known
+// yet".
 //
 // A row that exists but contains invalid JSON returns the parse error
 // so callers can decide between aborting the turn and dropping state
-// to start fresh. Phase 3 always picks "start fresh" to keep service
-// availability ahead of dedup correctness (see Orchestrator.applyKnowledgeDedup
-// once that lands).
+// to start fresh. The orchestrator picks "start fresh" to keep service
+// availability ahead of bookkeeping correctness.
 //
 // Missing sessions return a `session %q not found` error, matching the
 // shape SessionStore.Get returns. The underlying sql.ErrNoRows is not

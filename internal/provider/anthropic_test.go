@@ -384,3 +384,315 @@ func TestToAnthMessageEmptyContent(t *testing.T) {
 		t.Errorf("blocks[0] type = %q, want document", blocks[0].Type)
 	}
 }
+
+// --- native tool calling ---
+
+// TestAnthropicToolsInRequest verifies the request side: ToolDefinitions map
+// onto Anthropic's `tools` array with input_schema, and the fully-qualified
+// "__"-separated tool name is sent verbatim (no wire encoding).
+func TestAnthropicToolsInRequest(t *testing.T) {
+	const fqn = "timly__timly__list-items"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req anthRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if len(req.Tools) != 1 {
+			t.Fatalf("tools = %d, want 1", len(req.Tools))
+		}
+		if req.Tools[0].Name != fqn {
+			t.Errorf("tool name = %q, want %q (verbatim, no encoding)", req.Tools[0].Name, fqn)
+		}
+		if req.Tools[0].InputSchema == nil {
+			t.Error("input_schema missing")
+		}
+		resp := anthResponse{
+			ID:      "msg_t",
+			Model:   "claude-sonnet-4-20250514",
+			Content: []anthContentBlock{{Type: "text", Text: "ok"}},
+			Usage:   anthUsage{InputTokens: 1, OutputTokens: 1},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewAnthropicProvider("anthropic", server.URL, "key", nil)
+	_, err := p.Complete(context.Background(), &CompletionRequest{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []Message{{Role: RoleUser, Content: "how many?"}},
+		Tools: []ToolDefinition{{
+			Name:        fqn,
+			Description: "list items",
+			Parameters: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{"limit": map[string]interface{}{"type": "string"}},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAnthropicNoToolsOmitsField guards the "Anthropic 400s on empty tools"
+// invariant: a request with no tools must omit the field entirely.
+func TestAnthropicNoToolsOmitsField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatal(err)
+		}
+		if _, present := raw["tools"]; present {
+			t.Error("tools field present, want omitted when no tools")
+		}
+		resp := anthResponse{ID: "m", Content: []anthContentBlock{{Type: "text", Text: "ok"}}}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewAnthropicProvider("anthropic", server.URL, "key", nil)
+	if _, err := p.Complete(context.Background(), &CompletionRequest{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAnthropicToolUseResponse verifies the response side: a tool_use content
+// block parses into CompletionResponse.ToolCalls with the name passed through
+// verbatim, the id preserved, and arguments flattened to map[string]string.
+func TestAnthropicToolUseResponse(t *testing.T) {
+	const fqn = "_meta__load_tools"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := anthResponse{
+			ID:         "msg_tu",
+			Model:      "claude-sonnet-4-20250514",
+			StopReason: "tool_use",
+			Content: []anthContentBlock{
+				{Type: "text", Text: "Let me load that."},
+				{
+					Type:  "tool_use",
+					ID:    "toolu_01",
+					Name:  fqn,
+					Input: json.RawMessage(`{"names":"timly__list-items","limit":5}`),
+				},
+			},
+			Usage: anthUsage{InputTokens: 20, OutputTokens: 12},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewAnthropicProvider("anthropic", server.URL, "key", nil)
+	resp, err := p.Complete(context.Background(), &CompletionRequest{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []Message{{Role: RoleUser, Content: "list my items"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Content != "Let me load that." {
+		t.Errorf("content = %q", resp.Content)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("tool_calls = %d, want 1", len(resp.ToolCalls))
+	}
+	tc := resp.ToolCalls[0]
+	if tc.Name != fqn {
+		t.Errorf("tool name = %q, want %q (verbatim)", tc.Name, fqn)
+	}
+	if tc.ID != "toolu_01" {
+		t.Errorf("tool id = %q", tc.ID)
+	}
+	if tc.Arguments["names"] != "timly__list-items" {
+		t.Errorf("args[names] = %q", tc.Arguments["names"])
+	}
+	if tc.Arguments["limit"] != "5" {
+		t.Errorf("args[limit] = %q, want \"5\" (number flattened)", tc.Arguments["limit"])
+	}
+}
+
+// TestToAnthMessageToolResult verifies a RoleTool message becomes a role:user
+// message carrying a single tool_result block keyed by the tool_use id.
+func TestToAnthMessageToolResult(t *testing.T) {
+	p := NewAnthropicProvider("anthropic", "", "key", nil)
+
+	msg, err := p.toAnthMessage(Message{
+		Role:       RoleTool,
+		Content:    `{"count":952}`,
+		ToolCallID: "toolu_01",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Role != string(RoleUser) {
+		t.Errorf("role = %q, want user (Anthropic carries tool results in user turns)", msg.Role)
+	}
+	var blocks []anthContentBlock
+	if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || blocks[0].Type != "tool_result" {
+		t.Fatalf("blocks = %+v, want one tool_result", blocks)
+	}
+	if blocks[0].ToolUseID != "toolu_01" {
+		t.Errorf("tool_use_id = %q", blocks[0].ToolUseID)
+	}
+	var content string
+	if err := json.Unmarshal(blocks[0].Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	if content != `{"count":952}` {
+		t.Errorf("tool_result content = %q", content)
+	}
+}
+
+// TestToAnthMessageAssistantToolUse verifies an assistant turn that invoked a
+// tool replays as [optional text] + tool_use blocks with the name verbatim and
+// the arguments re-shaped into the input object.
+func TestToAnthMessageAssistantToolUse(t *testing.T) {
+	p := NewAnthropicProvider("anthropic", "", "key", nil)
+	const fqn = "timly__timly__list-items"
+
+	msg, err := p.toAnthMessage(Message{
+		Role:    RoleAssistant,
+		Content: "Checking now.",
+		ToolCalls: []ToolCall{{
+			ID:        "toolu_42",
+			Name:      fqn,
+			Arguments: map[string]string{"limit": "5"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Role != string(RoleAssistant) {
+		t.Errorf("role = %q, want assistant", msg.Role)
+	}
+	var blocks []anthContentBlock
+	if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %d, want 2 (text + tool_use)", len(blocks))
+	}
+	if blocks[0].Type != "text" || blocks[0].Text != "Checking now." {
+		t.Errorf("blocks[0] = %+v, want text 'Checking now.'", blocks[0])
+	}
+	if blocks[1].Type != "tool_use" || blocks[1].Name != fqn || blocks[1].ID != "toolu_42" {
+		t.Errorf("blocks[1] = %+v, want tool_use %q id toolu_42", blocks[1], fqn)
+	}
+	var input map[string]string
+	if err := json.Unmarshal(blocks[1].Input, &input); err != nil {
+		t.Fatal(err)
+	}
+	if input["limit"] != "5" {
+		t.Errorf("input[limit] = %q", input["limit"])
+	}
+}
+
+// TestAnthropicMultipleToolUseBlocks verifies that a response carrying more
+// than one tool_use block parses into multiple ToolCalls, preserving each
+// block's id, name, and flattened arguments in order.
+func TestAnthropicMultipleToolUseBlocks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := anthResponse{
+			ID:         "msg_multi",
+			Model:      "claude-sonnet-4-20250514",
+			StopReason: "tool_use",
+			Content: []anthContentBlock{
+				{Type: "text", Text: "Running both."},
+				{
+					Type:  "tool_use",
+					ID:    "toolu_a",
+					Name:  "timly__timly__list-items",
+					Input: json.RawMessage(`{"limit":3}`),
+				},
+				{
+					Type:  "tool_use",
+					ID:    "toolu_b",
+					Name:  "timly__timly__show-item",
+					Input: json.RawMessage(`{"id":"42"}`),
+				},
+			},
+			Usage: anthUsage{InputTokens: 9, OutputTokens: 14},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewAnthropicProvider("anthropic", server.URL, "key", nil)
+	resp, err := p.Complete(context.Background(), &CompletionRequest{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []Message{{Role: RoleUser, Content: "do both"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.ToolCalls) != 2 {
+		t.Fatalf("tool_calls = %d, want 2", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].ID != "toolu_a" || resp.ToolCalls[0].Name != "timly__timly__list-items" {
+		t.Errorf("tool_calls[0] = %+v", resp.ToolCalls[0])
+	}
+	if resp.ToolCalls[0].Arguments["limit"] != "3" {
+		t.Errorf("tool_calls[0].args[limit] = %q, want 3", resp.ToolCalls[0].Arguments["limit"])
+	}
+	if resp.ToolCalls[1].ID != "toolu_b" || resp.ToolCalls[1].Name != "timly__timly__show-item" {
+		t.Errorf("tool_calls[1] = %+v", resp.ToolCalls[1])
+	}
+	if resp.ToolCalls[1].Arguments["id"] != "42" {
+		t.Errorf("tool_calls[1].args[id] = %q, want 42", resp.ToolCalls[1].Arguments["id"])
+	}
+}
+
+// TestAnthropicThinkingBlockExtraction verifies that a thinking content block
+// carries its text in the `thinking` field (not `text`) and is captured by
+// extractContent. Regression guard for reading the wrong field.
+func TestAnthropicThinkingBlockExtraction(t *testing.T) {
+	content, thinking, calls := (&AnthropicProvider{}).extractContent([]anthContentBlock{
+		{Type: "thinking", Thinking: "step-by-step reasoning"},
+		{Type: "text", Text: "final answer"},
+	})
+	if thinking != "step-by-step reasoning" {
+		t.Errorf("thinking = %q, want %q (must read the thinking field, not text)", thinking, "step-by-step reasoning")
+	}
+	if content != "final answer" {
+		t.Errorf("content = %q, want %q", content, "final answer")
+	}
+	if len(calls) != 0 {
+		t.Errorf("tool_calls = %d, want 0", len(calls))
+	}
+}
+
+// TestAnthropicConcatenatesSystemMessages verifies the defense-in-depth in
+// toAnthRequest: multiple RoleSystem messages are joined (not last-wins) so a
+// stray mid-array system message cannot silently clobber the real prompt.
+func TestAnthropicConcatenatesSystemMessages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req anthRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.System != "Real prompt.\n\nStray nudge." {
+			t.Errorf("system = %q, want both system messages concatenated", req.System)
+		}
+		resp := anthResponse{ID: "m", Content: []anthContentBlock{{Type: "text", Text: "ok"}}}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewAnthropicProvider("anthropic", server.URL, "key", nil)
+	_, err := p.Complete(context.Background(), &CompletionRequest{
+		Model: "claude-sonnet-4-20250514",
+		Messages: []Message{
+			{Role: RoleSystem, Content: "Real prompt."},
+			{Role: RoleUser, Content: "hi"},
+			{Role: RoleSystem, Content: "Stray nudge."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

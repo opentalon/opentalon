@@ -6,13 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
@@ -224,6 +224,10 @@ func TestOrchestrator_TurnStart_AvailableToolsTextMode_Empty(t *testing.T) {
 }
 
 func TestOrchestrator_TurnStart_AvailableToolsNativeMode_Populated(t *testing.T) {
+	// Native mode builds a tools array, so AvailableTools is non-empty. With
+	// nothing loaded, the array carries only the always-include core
+	// (load_tools); the registry's gitlab/jira tools are catalog-only until
+	// the LLM loads them, so they must NOT appear here.
 	sink := &recordingEventSink{}
 	llm := nativeToolsLLM{fakeLLM: &fakeLLM{responses: []string{"answer"}}}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
@@ -239,15 +243,15 @@ func TestOrchestrator_TurnStart_AvailableToolsNativeMode_Populated(t *testing.T)
 	for _, tr := range p.AvailableTools {
 		got[tr.Name] = tr.DescSHA256
 	}
-	if _, ok := got["gitlab.analyze_code"]; !ok {
-		t.Errorf("gitlab.analyze_code missing from AvailableTools; got: %v", got)
+	loadFQN := toolFQN(metaPluginName, metaLoadTools)
+	if _, ok := got[loadFQN]; !ok {
+		t.Errorf("%s missing from AvailableTools (native mode must build the always-include core); got: %v", loadFQN, got)
 	}
-	if _, ok := got["jira.create_issue"]; !ok {
-		t.Errorf("jira.create_issue missing from AvailableTools; got: %v", got)
+	if _, ok := got["gitlab__analyze_code"]; ok {
+		t.Errorf("catalog-only gitlab__analyze_code must NOT be in the native tools array until loaded; got: %v", got)
 	}
-	wantDesc := sha256.Sum256([]byte("Analyze code for issues"))
-	if got["gitlab.analyze_code"] != hex.EncodeToString(wantDesc[:]) {
-		t.Errorf("gitlab.analyze_code desc_sha256 = %s, want %s", got["gitlab.analyze_code"], hex.EncodeToString(wantDesc[:]))
+	if _, ok := got["jira__create_issue"]; ok {
+		t.Errorf("catalog-only jira__create_issue must NOT be in the native tools array until loaded; got: %v", got)
 	}
 }
 
@@ -257,8 +261,8 @@ func TestOrchestrator_TurnStartFiresOnce_AcrossMultiRoundAgentLoop(t *testing.T)
 	// surrounding model_id/system_prompt/tool catalogue don't change
 	// mid-turn, so re-emitting would be noise.
 	llm := &fakeLLM{responses: []string{
-		"[tool] gitlab.analyze_code",
-		"[tool] jira.create_issue",
+		"[tool] gitlab__analyze_code",
+		"[tool] jira__create_issue",
 		"Done!",
 	}}
 	callNum := 0
@@ -722,8 +726,8 @@ func TestOrchestrator_ExecuteCall_EmitsExtractedAndResult_NativeMode(t *testing.
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
 			ID:   "call-1",
-			Name: "gitlab.analyze_code",
-			// gitlab.analyze_code declares no Parameters in the test fixture,
+			Name: "gitlab__analyze_code",
+			// gitlab__analyze_code declares no Parameters in the test fixture,
 			// so any args would trip rejectUnknownArgs. Leave empty for the
 			// happy-path assertion.
 			Arguments: map[string]string{},
@@ -752,7 +756,7 @@ func TestOrchestrator_ExecuteCall_EmitsExtractedAndResult_NativeMode(t *testing.
 		t.Errorf("CallID = %q, want call-1", got.CallID)
 	}
 	if got.Plugin != "gitlab" || got.Action != "analyze_code" {
-		t.Errorf("Plugin/Action = %q/%q, want gitlab/analyze_code", got.Plugin, got.Action)
+		t.Errorf("Plugin/Action = %q/%q, want gitlab__analyze_code", got.Plugin, got.Action)
 	}
 
 	results := findToolCallResultPayloads(t, sink.snapshot())
@@ -781,7 +785,7 @@ func TestOrchestrator_ExecuteCall_EmitsExtractedAndResult_TextMode(t *testing.T)
 				ID:     "call-text-1",
 				Plugin: "gitlab",
 				Action: "analyze_code",
-				// gitlab.analyze_code declares no Parameters; args would
+				// gitlab__analyze_code declares no Parameters; args would
 				// trip rejectUnknownArgs. Happy-path assertion uses none.
 				Args: map[string]string{},
 			}}
@@ -968,8 +972,8 @@ func TestOrchestrator_ExecuteCall_EmitsNotFound_UnknownPlugin(t *testing.T) {
 	if err := json.Unmarshal(notFound[0].Payload, &p); err != nil {
 		t.Fatal(err)
 	}
-	if p.RequestedName != "no-such-plugin.anything" {
-		t.Errorf("RequestedName = %q, want no-such-plugin.anything", p.RequestedName)
+	if p.RequestedName != "no-such-plugin__anything" {
+		t.Errorf("RequestedName = %q, want no-such-plugin__anything", p.RequestedName)
 	}
 	// A tool_call_result MUST NOT fire on the not-found path (no dispatch happened).
 	if len(findToolCallResultPayloads(t, evs)) != 0 {
@@ -1316,7 +1320,7 @@ func TestOrchestrator_ParseFailed_NotEmittedOnSuccessfulParse(t *testing.T) {
 	// entry → no event.
 	sink := &recordingEventSink{}
 	llm := &fakeLLM{responses: []string{
-		`[tool_call]{"tool": "gitlab.analyze_code", "args": {}}[/tool_call]`,
+		`[tool_call]{"tool": "gitlab__analyze_code", "args": {}}[/tool_call]`,
 		"summary after tool call",
 	}}
 	orch, sessID := setupOrchestratorWithSink(llm, DefaultParser, sink)
@@ -1545,8 +1549,8 @@ func TestOrchestrator_Planner_EmitsStepEventsOnPipelinePlan(t *testing.T) {
 		if p.StepKind != "tool" {
 			t.Errorf("step[%d].StepKind = %q, want tool", i, p.StepKind)
 		}
-		if p.Note != "gitlab.analyze_code" {
-			t.Errorf("step[%d].Note = %q, want gitlab.analyze_code", i, p.Note)
+		if p.Note != "gitlab__analyze_code" {
+			t.Errorf("step[%d].Note = %q, want gitlab__analyze_code", i, p.Note)
 		}
 	}
 }
@@ -1647,63 +1651,6 @@ func TestOrchestrator_Summarization_EmitsTriggeredAndCompleted(t *testing.T) {
 	}
 	if cp.LatencyMS < 0 {
 		t.Errorf("completed.LatencyMS = %d, want >= 0", cp.LatencyMS)
-	}
-}
-
-func TestOrchestrator_Summarization_PopulatesReleasedKnowledgeIDs(t *testing.T) {
-	// When summarization replaces a message range that carried tagged
-	// [knowledge_context] blocks, summarization_completed lists the
-	// released article_ids so consumers correlate with InjectionState
-	// without diffing two reconciliation snapshots.
-	sink := &recordingEventSink{}
-	registry := NewToolRegistry()
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("sess", "", "")
-	kc := func(id, sha string) string {
-		return "[knowledge_context id=\"" + id + "\" sha=\"" + sha + "\"]body[/knowledge_context]\n\nuser text"
-	}
-	// 10 seeded; SummarizeAfterMessages=5, MaxMessagesAfterSummary=3 →
-	// kept = last 3, summarized-away = first 7. Seed two KC-bearing
-	// user messages in the first half (will be summarized away) plus
-	// a duplicate article_id to verify dedup.
-	toSummarize := []provider.Message{
-		{Role: provider.RoleUser, Content: kc("kb_a", "sha_a1")},
-		{Role: provider.RoleAssistant, Content: "answer-a"},
-		{Role: provider.RoleUser, Content: kc("kb_b", "sha_b1")},
-		{Role: provider.RoleAssistant, Content: "answer-b"},
-		{Role: provider.RoleUser, Content: kc("kb_a", "sha_a2")}, // duplicate article_id
-		{Role: provider.RoleAssistant, Content: "answer-a2"},
-		{Role: provider.RoleUser, Content: "plain text"},
-	}
-	keep := []provider.Message{
-		{Role: provider.RoleUser, Content: kc("kb_c", "sha_c1")},
-		{Role: provider.RoleAssistant, Content: "answer-c"},
-		{Role: provider.RoleUser, Content: "tail"},
-	}
-	for _, m := range append(toSummarize, keep...) {
-		_ = sessions.AddMessage("sess", m)
-	}
-
-	llm := &fakeLLM{responses: []string{"summary of older turns"}}
-	orch := NewWithRules(llm, DefaultParser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:               sink,
-		SummarizeAfterMessages:  5,
-		MaxMessagesAfterSummary: 3,
-	})
-
-	orch.maybeSummarizeSession(context.Background(), "sess")
-
-	comp := findPayloadsByType(t, sink.snapshot(), events.TypeSummarizationCompleted)
-	if len(comp) != 1 {
-		t.Fatalf("summarization_completed count = %d, want 1", len(comp))
-	}
-	var cp events.SummarizationCompletedPayload
-	_ = json.Unmarshal(comp[0], &cp)
-	want := []string{"kb_a", "kb_b"}
-	if !reflect.DeepEqual(cp.ReleasedKnowledgeIDs, want) {
-		t.Errorf("ReleasedKnowledgeIDs = %v, want %v (dedup of kb_a + kb_b in summarized range; kb_c is in kept and must not appear)",
-			cp.ReleasedKnowledgeIDs, want)
 	}
 }
 
@@ -2066,7 +2013,7 @@ func TestOrchestrator_Confirmation_ToolCallRequiresConfirmation_EmitsRequested(t
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
 			ID:        "tc-1",
-			Name:      "gitlab.analyze_code",
+			Name:      "gitlab__analyze_code",
 			Arguments: map[string]string{},
 		}},
 		textAfter: "summary",
@@ -2127,7 +2074,7 @@ func TestOrchestrator_Confirmation_ReadOnlyAction_SkipsPrompt(t *testing.T) {
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
 			ID:        "tc-readonly",
-			Name:      "gitlab.list_issues",
+			Name:      "gitlab__list_issues",
 			Arguments: map[string]string{},
 		}},
 		textAfter: "here are your issues",
@@ -2233,7 +2180,7 @@ func TestOrchestrator_Confirmation_NonReadOnlyAction_StillPrompts(t *testing.T) 
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
 			ID:        "tc-write",
-			Name:      "gitlab.create_issue",
+			Name:      "gitlab__create_issue",
 			Arguments: map[string]string{},
 		}},
 		textAfter: "done",
@@ -2338,7 +2285,7 @@ func TestParentID_ToolCallResultParentsExtracted(t *testing.T) {
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
 			ID:        "call-1",
-			Name:      "gitlab.analyze_code",
+			Name:      "gitlab__analyze_code",
 			Arguments: map[string]string{},
 		}},
 		textAfter: "done",
@@ -2409,7 +2356,7 @@ func TestParentID_ConfirmationResolvedParentsRequested_ToolCall(t *testing.T) {
 	sink := &recordingEventSink{}
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
-			ID: "tc-7", Name: "gitlab.analyze_code", Arguments: map[string]string{},
+			ID: "tc-7", Name: "gitlab__analyze_code", Arguments: map[string]string{},
 		}},
 		textAfter: "after-confirm-summary",
 	}
@@ -2524,7 +2471,7 @@ func TestParentID_ToolCallExtractedParentsLLMResponse(t *testing.T) {
 		sink: sink,
 		toolCalls: []provider.ToolCall{{
 			ID:        "tc-9",
-			Name:      "gitlab.analyze_code",
+			Name:      "gitlab__analyze_code",
 			Arguments: map[string]string{},
 		}},
 		textAfter: "done",
@@ -2556,7 +2503,7 @@ func TestParentID_EveryEventHasID(t *testing.T) {
 	sink := &recordingEventSink{}
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
-			ID: "x", Name: "gitlab.analyze_code", Arguments: map[string]string{},
+			ID: "x", Name: "gitlab__analyze_code", Arguments: map[string]string{},
 		}},
 		textAfter: "done",
 	}
@@ -2573,15 +2520,14 @@ func TestParentID_EveryEventHasID(t *testing.T) {
 }
 
 func TestOrchestrator_PreparerPhase_EmitsRetrievalAndDecision(t *testing.T) {
-	// RFC #249 Phase 2: a preparer that returns structured knowledge /
-	// glossary / tool candidates should trigger three retrieval events
-	// (one per non-empty corpus) plus a composite preparer_decision —
-	// all parented to user_message so the session timeline reads as a
-	// tree.
+	// A preparer that returns structured knowledge / glossary / tool
+	// candidates should trigger three retrieval events (one per non-empty
+	// corpus) plus a composite preparer_decision — all parented to
+	// user_message so the session timeline reads as a tree.
 	//
-	// Mode is instrumentation_only since Phase 2 has no dedup state;
-	// every candidate appears under Knowledge.Injected with that
-	// reason, and tool names land under Tools.Tier1New.
+	// Mode is pull_only: the retrieved knowledge candidates are listed
+	// under Knowledge.CandidateIDs but never auto-injected, and tool
+	// names land under Tools.Tier1New.
 
 	preparerJSON := `{
 		"send_to_llm": true,
@@ -2594,7 +2540,7 @@ func TestOrchestrator_PreparerPhase_EmitsRetrievalAndDecision(t *testing.T) {
 			{"term": "ticket", "content": "definition", "score": 0.71}
 		],
 		"tool_candidates": [
-			{"tool_name": "gitlab.analyze_code", "score": 0.88, "position_in_results": 0}
+			{"tool_name": "gitlab__analyze_code", "score": 0.88, "position_in_results": 0}
 		],
 		"retrieval_metrics": {
 			"knowledge": {"search_text_source": "enriched", "top_k": 5, "min_score": 0.45, "latency_ms": 142},
@@ -2697,15 +2643,18 @@ func TestOrchestrator_PreparerPhase_EmitsRetrievalAndDecision(t *testing.T) {
 	if err := json.Unmarshal(tr.Payload, &trPayload); err != nil {
 		t.Fatalf("unmarshal tool_retrieval payload: %v", err)
 	}
-	if len(trPayload.Hits) != 1 || trPayload.Hits[0].ToolName != "gitlab.analyze_code" {
+	if len(trPayload.Hits) != 1 || trPayload.Hits[0].ToolName != "gitlab__analyze_code" {
 		t.Errorf("tool_retrieval hits mismatch: %+v", trPayload.Hits)
 	}
 	if trPayload.LatencyMS != 98 || trPayload.TopK != 8 {
 		t.Errorf("tool_retrieval metrics mismatch: TopK=%d LatencyMS=%d", trPayload.TopK, trPayload.LatencyMS)
 	}
 
-	// preparer_decision should carry mode=instrumentation_only with
-	// both knowledge and tools populated from the candidate slices.
+	// preparer_decision should carry mode=pull_only: the retrieved
+	// candidates are listed under CandidateIDs (so the consumer sees what
+	// was retrieved), but knowledge is never auto-injected, so Injected is
+	// empty and InjectedBytes is zero. Tools.Tier1New still records what
+	// RAG surfaced.
 	pd := findEventByType(evs, events.TypePreparerDecision)
 	if pd == nil {
 		t.Fatal("preparer_decision event missing")
@@ -2714,21 +2663,20 @@ func TestOrchestrator_PreparerPhase_EmitsRetrievalAndDecision(t *testing.T) {
 	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
 		t.Fatalf("unmarshal preparer_decision payload: %v", err)
 	}
-	if pdPayload.Mode != events.PreparerDecisionModeInstrumentationOnly {
+	if pdPayload.Mode != events.PreparerDecisionModePullOnly {
 		t.Errorf("preparer_decision Mode = %q, want %q",
-			pdPayload.Mode, events.PreparerDecisionModeInstrumentationOnly)
+			pdPayload.Mode, events.PreparerDecisionModePullOnly)
 	}
 	if len(pdPayload.Knowledge.CandidateIDs) != 2 {
 		t.Errorf("preparer_decision Knowledge.CandidateIDs len = %d, want 2", len(pdPayload.Knowledge.CandidateIDs))
 	}
-	if len(pdPayload.Knowledge.Injected) != 2 {
-		t.Errorf("preparer_decision Knowledge.Injected len = %d, want 2", len(pdPayload.Knowledge.Injected))
+	if len(pdPayload.Knowledge.Injected) != 0 {
+		t.Errorf("preparer_decision Knowledge.Injected len = %d, want 0 (pull-only)", len(pdPayload.Knowledge.Injected))
 	}
-	if pdPayload.Knowledge.InjectedBytes != len("body-a")+len("body-bb") {
-		t.Errorf("preparer_decision Knowledge.InjectedBytes = %d, want %d",
-			pdPayload.Knowledge.InjectedBytes, len("body-a")+len("body-bb"))
+	if pdPayload.Knowledge.InjectedBytes != 0 {
+		t.Errorf("preparer_decision Knowledge.InjectedBytes = %d, want 0 (pull-only)", pdPayload.Knowledge.InjectedBytes)
 	}
-	if len(pdPayload.Tools.Tier1New) != 1 || pdPayload.Tools.Tier1New[0] != "gitlab.analyze_code" {
+	if len(pdPayload.Tools.Tier1New) != 1 || pdPayload.Tools.Tier1New[0] != "gitlab__analyze_code" {
 		t.Errorf("preparer_decision Tools.Tier1New = %v", pdPayload.Tools.Tier1New)
 	}
 }
@@ -2766,7 +2714,7 @@ func TestOrchestrator_PreparerPhase_LegacyPluginNoCandidates(t *testing.T) {
 	preparerJSON := `{
 		"send_to_llm": true,
 		"message": "do the thing",
-		"relevant_tools": ["gitlab.analyze_code", "jira.create_issue"]
+		"relevant_tools": ["gitlab__analyze_code", "jira__create_issue"]
 	}`
 
 	sink := &recordingEventSink{}
@@ -2837,8 +2785,8 @@ func TestOrchestrator_PreparerPhase_MultiPreparerAggregation(t *testing.T) {
 	// When the orchestrator runs more than one preparer per turn, the
 	// composite preparer_decision must aggregate the candidate lists
 	// across all of them. Two preparers each returning one knowledge
-	// candidate should produce two CandidateIDs + two Injected entries
-	// with InjectedBytes summed.
+	// candidate should produce two CandidateIDs. Knowledge is pull-only,
+	// so nothing is injected (InjectedBytes stays 0).
 	prepA := `{"send_to_llm": true, "message": "x",
 	 "knowledge_candidates": [{"article_id": "kb_a", "content": "AAA", "score": 0.9}]}`
 	prepB := `{"send_to_llm": true, "message": "x",
@@ -2900,495 +2848,11 @@ func TestOrchestrator_PreparerPhase_MultiPreparerAggregation(t *testing.T) {
 		t.Errorf("CandidateIDs len = %d, want 2 (kb_a + kb_b across both preparers)",
 			len(pdPayload.Knowledge.CandidateIDs))
 	}
-	if pdPayload.Knowledge.InjectedBytes != len("AAA")+len("BBBB") {
-		t.Errorf("InjectedBytes = %d, want %d (sum across preparers)",
-			pdPayload.Knowledge.InjectedBytes, len("AAA")+len("BBBB"))
+	if pdPayload.Mode != events.PreparerDecisionModePullOnly {
+		t.Errorf("Mode = %q, want %q", pdPayload.Mode, events.PreparerDecisionModePullOnly)
 	}
-}
-
-func TestOrchestrator_PreparerPhase_DedupEnabledEmitsFullMode(t *testing.T) {
-	// RFC #249 Phase 3: with knowledge_dedup.enabled + a wired
-	// InjectionStateStore, the orchestrator runs the dedup decision
-	// over the candidate list, rewrites the user-turn content with
-	// an ID-tagged [knowledge_context] block, persists the updated
-	// state, and emits preparer_decision with mode=full.
-	preparerJSON := `{
-		"send_to_llm": true,
-		"message": "[knowledge_context]\nplugin-rendered body\n[/knowledge_context]\n\nuser question",
-		"knowledge_candidates": [
-			{"article_id": "kb_a", "content": "body-a", "content_sha256": "sha-a", "score": 0.9},
-			{"article_id": "kb_b", "content": "body-bb", "content_sha256": "sha-b", "score": 0.6}
-		]
-	}`
-
-	sink := &recordingEventSink{}
-	llm := &capturingLLM{responses: []string{"final answer"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	dedupStore := &fakeInjectionStateStore{}
-
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "rag-plugin", Description: "RAG preparer",
-		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
-	}, &fixedResultExecutor{content: preparerJSON})
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:        sink,
-		ContentPreparers: []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		KnowledgeDedup: KnowledgeDedupConfig{
-			Enabled:                true,
-			ReinjectScoreThreshold: 0.95,
-			ReinjectTopKForce:      3,
-			CapPerTurn:             5,
-		},
-		InjectionStateStore: dedupStore,
-	})
-
-	if _, err := orch.Run(context.Background(), "s1", "user question"); err != nil {
-		t.Fatal(err)
-	}
-
-	// preparer_decision must report mode=full with both candidates injected
-	// as "new" (first turn, empty state).
-	evs := sink.snapshot()
-	pd := findEventByType(evs, events.TypePreparerDecision)
-	if pd == nil {
-		t.Fatal("preparer_decision event missing")
-	}
-	var pdPayload events.PreparerDecisionPayload
-	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
-		t.Fatalf("unmarshal preparer_decision payload: %v", err)
-	}
-	if pdPayload.Mode != events.PreparerDecisionModeFull {
-		t.Errorf("Mode = %q, want %q", pdPayload.Mode, events.PreparerDecisionModeFull)
-	}
-	if len(pdPayload.Knowledge.Injected) != 2 {
-		t.Fatalf("Injected len = %d, want 2", len(pdPayload.Knowledge.Injected))
-	}
-	for _, item := range pdPayload.Knowledge.Injected {
-		if item.Reason != "new" {
-			t.Errorf("first-turn injected reason = %q, want %q", item.Reason, "new")
-		}
-	}
-
-	// The state store must have been written with both SHAs.
-	if dedupStore.updateCalls != 1 {
-		t.Errorf("UpdateInjectionState called %d times, want 1", dedupStore.updateCalls)
-	}
-	if len(dedupStore.lastWritten.KnownKnowledge) != 2 {
-		t.Errorf("persisted KnownKnowledge len = %d, want 2", len(dedupStore.lastWritten.KnownKnowledge))
-	}
-
-	// The LLM's user message must carry the rebuilt ID-tagged KC
-	// block (with id="kb_a") and the user's original text, NOT the
-	// plugin's pre-tagged "plugin-rendered body" string.
-	if len(llm.requests) == 0 {
-		t.Fatal("LLM was not called")
-	}
-	var lastUser provider.Message
-	for _, m := range llm.requests[0].Messages {
-		if m.Role == provider.RoleUser {
-			lastUser = m
-		}
-	}
-	if !strings.Contains(lastUser.Content, `[knowledge_context id="kb_a"`) {
-		t.Errorf("LLM user message missing ID-tagged KC block, got: %q", lastUser.Content)
-	}
-	if strings.Contains(lastUser.Content, "plugin-rendered body") {
-		t.Errorf("LLM user message must drop plugin's pre-tagged KC, got: %q", lastUser.Content)
-	}
-	if !strings.Contains(lastUser.Content, "user question") {
-		t.Errorf("LLM user message missing user text, got: %q", lastUser.Content)
-	}
-}
-
-func TestOrchestrator_PreparerPhase_DedupSecondTurnReusesKnownState(t *testing.T) {
-	// Two-turn test: turn 1 introduces two candidates, turn 2 returns
-	// the same candidates. With reinject_top_k_force=1 only kb_a (at
-	// index 0) re-injects via top_k_force; kb_b is skipped as
-	// content_sha_already_known.
-	preparerJSON := `{
-		"send_to_llm": true,
-		"message": "user question",
-		"knowledge_candidates": [
-			{"article_id": "kb_a", "content": "body-a", "content_sha256": "sha-a", "score": 0.7},
-			{"article_id": "kb_b", "content": "body-bb", "content_sha256": "sha-b", "score": 0.5}
-		]
-	}`
-
-	sink := &recordingEventSink{}
-	llm := &capturingLLM{responses: []string{"first", "second"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	dedupStore := &fakeInjectionStateStore{}
-
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "rag-plugin", Description: "RAG preparer",
-		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
-	}, &fixedResultExecutor{content: preparerJSON})
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:        sink,
-		ContentPreparers: []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		KnowledgeDedup: KnowledgeDedupConfig{
-			Enabled:                true,
-			ReinjectScoreThreshold: 0.95,
-			ReinjectTopKForce:      1,
-			CapPerTurn:             5,
-		},
-		InjectionStateStore: dedupStore,
-	})
-
-	// Turn 1: both candidates inject as "new".
-	if _, err := orch.Run(context.Background(), "s1", "first user question"); err != nil {
-		t.Fatal(err)
-	}
-	// Turn 2: same candidates, expect 1 injected (top_k_force) + 1 skipped (known).
-	if _, err := orch.Run(context.Background(), "s1", "second user question"); err != nil {
-		t.Fatal(err)
-	}
-
-	// LLM-content sanity check: the second-turn user message must
-	// carry kb_a's body but NOT kb_b's body (kb_b was skipped as
-	// already_known). The preparer replaces the user's literal input
-	// with its own `pr.Message`, then dedup prepends the rebuilt KC
-	// block — so the assertion targets the rendered KC content, not
-	// the user's typed text.
-	if len(llm.requests) < 2 {
-		t.Fatalf("expected 2 LLM calls, got %d", len(llm.requests))
-	}
-	turn2Msgs := llm.requests[1].Messages
-	var lastTurn2User string
-	for _, m := range turn2Msgs {
-		if m.Role == provider.RoleUser {
-			lastTurn2User = m.Content
-		}
-	}
-	if lastTurn2User == "" {
-		t.Fatalf("turn-2 user message missing from LLM request: %+v", turn2Msgs)
-	}
-	if !strings.Contains(lastTurn2User, "body-a") {
-		t.Errorf("turn-2 user message must carry kb_a's body, got: %q", lastTurn2User)
-	}
-	if strings.Contains(lastTurn2User, "body-bb") {
-		t.Errorf("turn-2 user message must NOT carry kb_b's body (already known), got: %q", lastTurn2User)
-	}
-	if !strings.Contains(lastTurn2User, `id="kb_a"`) {
-		t.Errorf("turn-2 KC block must be ID-tagged, got: %q", lastTurn2User)
-	}
-
-	// Find the SECOND preparer_decision event (turn 2's). The first one
-	// reports turn 1's "all new" decision.
-	evs := sink.snapshot()
-	var pds []emit.Event
-	for _, e := range evs {
-		if e.EventType == events.TypePreparerDecision {
-			pds = append(pds, e)
-		}
-	}
-	if len(pds) != 2 {
-		t.Fatalf("got %d preparer_decision events, want 2", len(pds))
-	}
-
-	var turn2 events.PreparerDecisionPayload
-	if err := json.Unmarshal(pds[1].Payload, &turn2); err != nil {
-		t.Fatalf("unmarshal turn-2 preparer_decision payload: %v", err)
-	}
-	if len(turn2.Knowledge.Injected) != 1 || turn2.Knowledge.Injected[0].ArticleID != "kb_a" {
-		t.Fatalf("turn 2 must inject only kb_a, got %+v", turn2.Knowledge.Injected)
-	}
-	if turn2.Knowledge.Injected[0].Reason != "top_k_force" {
-		t.Errorf("kb_a reason = %q, want top_k_force", turn2.Knowledge.Injected[0].Reason)
-	}
-	if len(turn2.Knowledge.SkippedKnown) != 1 || turn2.Knowledge.SkippedKnown[0].ArticleID != "kb_b" {
-		t.Fatalf("turn 2 must skip kb_b, got %+v", turn2.Knowledge.SkippedKnown)
-	}
-	if turn2.Knowledge.SkippedKnown[0].Reason != "content_sha_already_known" {
-		t.Errorf("kb_b skip reason = %q", turn2.Knowledge.SkippedKnown[0].Reason)
-	}
-
-	// The dedup store should still hold both SHAs after turn 2 (not
-	// duplicated despite being seen twice across turns).
-	if len(dedupStore.lastWritten.KnownKnowledge) != 2 {
-		t.Errorf("post-turn-2 KnownKnowledge len = %d, want 2", len(dedupStore.lastWritten.KnownKnowledge))
-	}
-}
-
-func TestOrchestrator_PreparerPhase_DedupEnabledWithNilStoreStaysInstrumentationOnly(t *testing.T) {
-	// Defensive guard: even with KnowledgeDedup.Enabled=true, the
-	// preparer-loop's `o.injectionStateStore != nil` precondition
-	// short-circuits when no store was wired. The path must stay on
-	// the Phase-2 instrumentation_only branch without panicking.
-	preparerJSON := `{
-		"send_to_llm": true,
-		"message": "x",
-		"knowledge_candidates": [
-			{"article_id": "kb_a", "content": "body", "content_sha256": "sha-a", "score": 0.9}
-		]
-	}`
-	sink := &recordingEventSink{}
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "rag-plugin", Description: "RAG",
-		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
-	}, &fixedResultExecutor{content: preparerJSON})
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-	orch := NewWithRules(&fakeLLM{responses: []string{"final"}},
-		&fakeParser{parseFn: func(string) []ToolCall { return nil }},
-		registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
-			EventSink:        sink,
-			ContentPreparers: []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-			KnowledgeDedup:   KnowledgeDedupConfig{Enabled: true},
-			// InjectionStateStore intentionally nil.
-		})
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
-	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
-	if pd == nil {
-		t.Fatal("preparer_decision missing")
-	}
-	var pdPayload events.PreparerDecisionPayload
-	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if pdPayload.Mode != events.PreparerDecisionModeInstrumentationOnly {
-		t.Errorf("enabled-flag + nil-store must stay in instrumentation_only, got %q", pdPayload.Mode)
-	}
-}
-
-func TestOrchestrator_PreparerPhase_DedupStoreReadFailureStartsFresh(t *testing.T) {
-	// RFC #249 robustness: a store-read failure must NOT abort the
-	// user turn. The dedup logic falls back to an empty existing
-	// state — every candidate appears as "new" — and the event still
-	// emits with mode=full.
-	preparerJSON := `{
-		"send_to_llm": true,
-		"message": "x",
-		"knowledge_candidates": [
-			{"article_id": "kb_a", "content": "body", "content_sha256": "sha-a", "score": 0.9}
-		]
-	}`
-	sink := &recordingEventSink{}
-	dedupStore := &fakeInjectionStateStore{failGetErr: errors.New("simulated read failure")}
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "rag-plugin", Description: "RAG",
-		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
-	}, &fixedResultExecutor{content: preparerJSON})
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-	orch := NewWithRules(&fakeLLM{responses: []string{"final"}},
-		&fakeParser{parseFn: func(string) []ToolCall { return nil }},
-		registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
-			EventSink:           sink,
-			ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-			KnowledgeDedup:      KnowledgeDedupConfig{Enabled: true},
-			InjectionStateStore: dedupStore,
-		})
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatalf("dedup must not abort run on read failure: %v", err)
-	}
-	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
-	if pd == nil {
-		t.Fatal("preparer_decision missing despite read failure")
-	}
-	var pdPayload events.PreparerDecisionPayload
-	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if pdPayload.Mode != events.PreparerDecisionModeFull {
-		t.Errorf("mode = %q, want full (graceful-degradation still emits full)", pdPayload.Mode)
-	}
-	if len(pdPayload.Knowledge.Injected) != 1 || pdPayload.Knowledge.Injected[0].Reason != events.PreparerDecisionReasonNew {
-		t.Errorf("read-failure fallback must treat candidate as new, got %+v", pdPayload.Knowledge.Injected)
-	}
-}
-
-func TestOrchestrator_PreparerPhase_DedupStoreWriteFailureStillEmitsEvent(t *testing.T) {
-	// RFC #249 invariant: "Event emission precedes state writes." A
-	// write failure must not lose the event — the next preparer pass's
-	// reconciliation step will catch the drift later.
-	preparerJSON := `{
-		"send_to_llm": true,
-		"message": "x",
-		"knowledge_candidates": [
-			{"article_id": "kb_a", "content": "body", "content_sha256": "sha-a", "score": 0.9}
-		]
-	}`
-	sink := &recordingEventSink{}
-	dedupStore := &fakeInjectionStateStore{failUpdateErr: errors.New("simulated write failure")}
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "rag-plugin", Description: "RAG",
-		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
-	}, &fixedResultExecutor{content: preparerJSON})
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-	orch := NewWithRules(&fakeLLM{responses: []string{"final"}},
-		&fakeParser{parseFn: func(string) []ToolCall { return nil }},
-		registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
-			EventSink:           sink,
-			ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-			KnowledgeDedup:      KnowledgeDedupConfig{Enabled: true},
-			InjectionStateStore: dedupStore,
-		})
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatalf("dedup must not abort run on write failure: %v", err)
-	}
-	if dedupStore.updateCalls != 1 {
-		t.Errorf("UpdateInjectionState must still be attempted, got %d calls", dedupStore.updateCalls)
-	}
-	// Event must have emitted before the (failing) write — i.e. it
-	// exists despite the write returning an error.
-	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
-	if pd == nil {
-		t.Fatal("preparer_decision missing — emit must precede state write")
-	}
-}
-
-func TestOrchestrator_PreparerPhase_DedupReconciliationEmitsDriftAndCorrectsState(t *testing.T) {
-	// Pre-load the dedup store with a SHA that the session's visible
-	// messages don't carry (the message was deleted between turns —
-	// summarization, retention, or external mutation). The next
-	// preparer pass must:
-	//   - detect the drift via lazy reconciliation
-	//   - emit drift_detected with kb_gone in missing_from_visible
-	//   - run applyKnowledgeDedup against the CORRECTED state, so the
-	//     new candidate kb_new is treated as "new" (an empty corrected
-	//     state means kb_new is unseen).
-	preparerJSON := `{
-		"send_to_llm": true,
-		"message": "user question",
-		"knowledge_candidates": [
-			{"article_id": "kb_new", "content": "fresh body", "content_sha256": "sha-new", "score": 0.9}
-		]
-	}`
-	sink := &recordingEventSink{}
-	dedupStore := &fakeInjectionStateStore{
-		store: map[string]state.InjectionState{
-			"s1": {KnownKnowledge: []state.KnownKnowledgeEntry{
-				{ArticleID: "kb_gone", ContentSHA256: "sha-gone", FirstInjectedTurn: 1},
-			}},
-		},
-	}
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "rag-plugin", Description: "RAG",
-		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
-	}, &fixedResultExecutor{content: preparerJSON})
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-	orch := NewWithRules(&fakeLLM{responses: []string{"final"}},
-		&fakeParser{parseFn: func(string) []ToolCall { return nil }},
-		registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
-			EventSink:           sink,
-			ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-			KnowledgeDedup:      KnowledgeDedupConfig{Enabled: true},
-			InjectionStateStore: dedupStore,
-		})
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
-
-	// drift_detected must have fired with kb_gone missing and kb_new
-	// not yet visible (the preparer-loop runs reconciliation BEFORE
-	// the orchestrator splices the new KC block — so the snapshot the
-	// reconciler sees has no current-turn KC yet).
-	evs := sink.snapshot()
-	drift := findEventByType(evs, events.TypeDriftDetected)
-	if drift == nil {
-		t.Fatal("drift_detected event missing")
-	}
-	var dp events.DriftDetectedPayload
-	if err := json.Unmarshal(drift.Payload, &dp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(dp.MissingFromVisible) != 1 || dp.MissingFromVisible[0] != "sha-gone" {
-		t.Errorf("MissingFromVisible = %v, want [sha-gone]", dp.MissingFromVisible)
-	}
-
-	// preparer_decision must report kb_new as "new" (corrected state
-	// is empty, so the kb_new SHA isn't recognized as known) and
-	// kb_gone must NOT appear under SkippedKnown (the reconciliation
-	// already dropped it).
-	pd := findEventByType(evs, events.TypePreparerDecision)
-	if pd == nil {
-		t.Fatal("preparer_decision missing")
-	}
-	var pdPayload events.PreparerDecisionPayload
-	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if pdPayload.Mode != events.PreparerDecisionModeFull {
-		t.Errorf("Mode = %q, want full", pdPayload.Mode)
-	}
-	if len(pdPayload.Knowledge.Injected) != 1 || pdPayload.Knowledge.Injected[0].Reason != events.PreparerDecisionReasonNew {
-		t.Errorf("kb_new must inject as new, got %+v", pdPayload.Knowledge.Injected)
-	}
-
-	// Persisted state after the turn should only carry kb_new (the
-	// reconciliation dropped kb_gone, the dedup added kb_new).
-	if len(dedupStore.lastWritten.KnownKnowledge) != 1 || dedupStore.lastWritten.KnownKnowledge[0].ContentSHA256 != "sha-new" {
-		t.Errorf("post-turn state must only carry kb_new, got %+v", dedupStore.lastWritten.KnownKnowledge)
-	}
-}
-
-func TestOrchestrator_PreparerPhase_DedupDisabledStaysInstrumentationOnly(t *testing.T) {
-	// Regression guard: even with an InjectionStateStore wired, if the
-	// master Enabled flag is false the orchestrator must keep emitting
-	// mode=instrumentation_only and must NOT call the store.
-	preparerJSON := `{
-		"send_to_llm": true,
-		"message": "x",
-		"knowledge_candidates": [
-			{"article_id": "kb_a", "content": "body", "content_sha256": "sha-a", "score": 0.9}
-		]
-	}`
-
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"final"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	dedupStore := &fakeInjectionStateStore{}
-
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "rag-plugin", Description: "RAG preparer",
-		Actions: []Action{{Name: "prepare", Description: "Prepare"}},
-	}, &fixedResultExecutor{content: preparerJSON})
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		KnowledgeDedup:      KnowledgeDedupConfig{Enabled: false}, // explicit off
-		InjectionStateStore: dedupStore,
-	})
-
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
-
-	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
-	if pd == nil {
-		t.Fatal("preparer_decision missing")
-	}
-	var pdPayload events.PreparerDecisionPayload
-	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if pdPayload.Mode != events.PreparerDecisionModeInstrumentationOnly {
-		t.Errorf("Mode = %q, want %q", pdPayload.Mode, events.PreparerDecisionModeInstrumentationOnly)
-	}
-	if dedupStore.getCalls != 0 || dedupStore.updateCalls != 0 {
-		t.Errorf("disabled dedup must not touch the store, got get=%d update=%d",
-			dedupStore.getCalls, dedupStore.updateCalls)
+	if pdPayload.Knowledge.InjectedBytes != 0 {
+		t.Errorf("InjectedBytes = %d, want 0 (pull-only injects nothing)", pdPayload.Knowledge.InjectedBytes)
 	}
 }
 
@@ -3396,10 +2860,7 @@ func TestOrchestrator_MessagesTruncated_EmittedWhenSlidingWindowCuts(t *testing.
 	// Sliding window: when sess.Messages exceeds ContextMessages, the
 	// orchestrator drops the oldest N entries and emits one
 	// messages_truncated event carrying the dropped index range and
-	// count. With no [knowledge_context] blocks in the dropped slice,
-	// ReleasedKnowledgeIDs stays nil and RemainingKnownKnowledgeCount
-	// stays 0 — both omitted under `omitempty`. The KC-bearing case is
-	// covered by TestOrchestrator_MessagesTruncated_PopulatesReleasedKnowledgeIDs.
+	// count.
 	sink := &recordingEventSink{}
 	llm := &fakeLLM{responses: []string{"answer"}}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
@@ -3443,75 +2904,6 @@ func TestOrchestrator_MessagesTruncated_EmittedWhenSlidingWindowCuts(t *testing.
 	}
 }
 
-func TestOrchestrator_MessagesTruncated_PopulatesReleasedKnowledgeIDs(t *testing.T) {
-	// When the sliding-window cutter drops messages that carry tagged
-	// [knowledge_context id="..." sha="..."] blocks, the emitted
-	// messages_truncated event lists the released article_ids (deduped,
-	// in-order) and the remaining KC-bearing article count among the
-	// kept messages. RFC #249 Pillar C — consumers correlate with
-	// InjectionState without re-reconciling.
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"answer"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-
-	registry := NewToolRegistry()
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	// Seed: 8 messages. Run() adds 1 current-turn user message before
-	// applySlidingWindow fires → 9 total. ContextMessages=4 → drop the
-	// first 5 (indices 0..4), keep the last 4 (indices 5..8). Place two
-	// distinct + one duplicate article_id in the dropped range; one
-	// fresh article_id in the kept range.
-	kc := func(id, sha string) string {
-		return "[knowledge_context id=\"" + id + "\" sha=\"" + sha + "\"]body[/knowledge_context]\n\nuser text"
-	}
-	seed := []provider.Message{
-		{Role: provider.RoleUser, Content: kc("kb_a", "sha_a1")}, // 0 dropped
-		{Role: provider.RoleAssistant, Content: "answer-1"},      // 1 dropped
-		{Role: provider.RoleUser, Content: kc("kb_b", "sha_b1")}, // 2 dropped
-		{Role: provider.RoleUser, Content: kc("kb_a", "sha_a2")}, // 3 dropped — duplicate article_id
-		{Role: provider.RoleAssistant, Content: "answer-b"},      // 4 dropped
-		{Role: provider.RoleUser, Content: kc("kb_c", "sha_c1")}, // 5 kept
-		{Role: provider.RoleAssistant, Content: "answer-c"},      // 6 kept
-		{Role: provider.RoleUser, Content: "plain follow-up"},    // 7 kept
-		// index 8 is the "next message" Run() prepends — kept, no KC
-	}
-	for _, m := range seed {
-		_ = sessions.AddMessage("s1", m)
-	}
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:       sink,
-		ContextMessages: 4,
-	})
-
-	if _, err := orch.Run(context.Background(), "s1", "next message"); err != nil {
-		t.Fatal(err)
-	}
-
-	mt := findEventByType(sink.snapshot(), events.TypeMessagesTruncated)
-	if mt == nil {
-		t.Fatal("messages_truncated event not emitted")
-	}
-	var p events.MessagesTruncatedPayload
-	if err := json.Unmarshal(mt.Payload, &p); err != nil {
-		t.Fatalf("unmarshal messages_truncated payload: %v", err)
-	}
-	want := []string{"kb_a", "kb_b"}
-	if !reflect.DeepEqual(p.ReleasedKnowledgeIDs, want) {
-		t.Errorf("ReleasedKnowledgeIDs = %v, want %v (dedup of kb_a + kb_b in dropped range)",
-			p.ReleasedKnowledgeIDs, want)
-	}
-	// Kept slice has one KC-bearing message (kb_c); the current-turn
-	// user message added by Run is plain — remaining = 1.
-	if p.RemainingKnownKnowledgeCount != 1 {
-		t.Errorf("RemainingKnownKnowledgeCount = %d, want 1 (kb_c in kept range)",
-			p.RemainingKnownKnowledgeCount)
-	}
-}
-
 func TestOrchestrator_MessagesTruncated_NotEmittedWhenWithinWindow(t *testing.T) {
 	// Sliding window does not fire when len(messages) <= ContextMessages.
 	// No messages_truncated event must reach the sink in that case.
@@ -3539,29 +2931,12 @@ func TestOrchestrator_MessagesTruncated_NotEmittedWhenWithinWindow(t *testing.T)
 	}
 }
 
-// --- RFC #249 Phase 4 (tool tiers) integration tests ---
+// --- Tool catalog + load_tools integration tests ---
 
-// preparerJSONWithTools returns a fake preparer Capabilities body that
-// surfaces tool_candidates so the tier decision has something to rank.
-// The plugin name "rag-plugin" + action "prepare" is preparer-only;
-// the candidates name a SEPARATE registry plugin's actions ("tools-
-// plugin.t1" etc.) so they're profile-allowed, non-user-only, and
-// non-preparer when the tier decision runs.
-const preparerJSONForTierTests = `{
-		"send_to_llm": true,
-		"message": "user question",
-		"tool_candidates": [
-			{"tool_name": "tools-plugin.t1", "score": 0.95},
-			{"tool_name": "tools-plugin.t2", "score": 0.85},
-			{"tool_name": "tools-plugin.t3", "score": 0.75},
-			{"tool_name": "tools-plugin.t4", "score": 0.55}
-		]
-	}`
-
-// registerTierTestPlugins wires a preparer (rag-plugin.prepare) +
-// five callable tools (tools-plugin.t1..t5) into the registry. The
-// preparer JSON returns ranked candidates that name t1..t4 so a tier
-// decision can split them across Tier 1 / Tier 2 / Tier 3.
+// registerTierTestPlugins wires a preparer (rag-plugin.prepare) + five
+// callable tools (tools-plugin__t1..t5) into the registry. The preparer
+// JSON is whatever the caller supplies; the tools are the catalog surface
+// the LLM discovers and loads via load_tools.
 func registerTierTestPlugins(t *testing.T, registry *ToolRegistry, prepJSON string) {
 	t.Helper()
 	if err := registry.Register(PluginCapability{
@@ -3584,347 +2959,153 @@ func registerTierTestPlugins(t *testing.T, registry *ToolRegistry, prepJSON stri
 	}
 }
 
-func TestOrchestrator_PreparerPhase_ToolTiersEnabledEmitsTieredBlock(t *testing.T) {
-	// RFC #249 Phase 4: with tool_tiers.enabled + a wired
-	// InjectionStateStore, the preparer_decision event's Tools block
-	// reports Tier 0/1/2/3 splits AND the cap snapshot, instead of the
-	// Phase-2 pass-through (all candidates in tier1_new).
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"final"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	tierStore := &fakeInjectionStateStore{}
-
+// newCatalogOrch builds a native-tools orchestrator over the tier test
+// plugins + a wired state store, so the catalog renders and load_tools can
+// persist sticky promotions.
+func newCatalogOrch(t *testing.T, store *fakeInjectionStateStore) *Orchestrator {
+	t.Helper()
 	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, preparerJSONForTierTests)
+	registerTierTestPlugins(t, registry, `{"send_to_llm": true, "message": "q"}`)
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1", "", "")
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
+	return NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
 		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(1)},
-		InjectionStateStore: tierStore,
+		InjectionStateStore: store,
 	})
-
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
-
-	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
-	if pd == nil {
-		t.Fatal("preparer_decision event missing")
-	}
-	var pdPayload events.PreparerDecisionPayload
-	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	tb := pdPayload.Tools
-	// Tier1Cap=2 + Tier2Cap=1 + 4 candidates + 1 non-candidate (t5):
-	//   Tier 1 = [t1, t2]; Tier 2 = [t3]; Tier 3 = [t4, t5].
-	if tb.Tier1Cap != 2 {
-		t.Errorf("Tier1Cap snapshot = %d, want 2", tb.Tier1Cap)
-	}
-	if tb.Tier1SizeAfter != 2 {
-		t.Errorf("Tier1SizeAfter = %d, want 2", tb.Tier1SizeAfter)
-	}
-	wantT1New := []string{"tools-plugin.t1", "tools-plugin.t2"}
-	gotT1New := append([]string(nil), tb.Tier1New...)
-	sort.Strings(gotT1New)
-	sort.Strings(wantT1New)
-	if !reflect.DeepEqual(gotT1New, wantT1New) {
-		t.Errorf("Tier1New = %v, want %v", gotT1New, wantT1New)
-	}
-	if tb.Tier3TotalVisible != 2 {
-		t.Errorf("Tier3TotalVisible = %d, want 2 (t4 + t5)", tb.Tier3TotalVisible)
-	}
-	if tierStore.updateCalls != 1 {
-		t.Errorf("UpdateInjectionState calls = %d, want 1", tierStore.updateCalls)
-	}
-	if len(tierStore.lastWritten.KnownTools) == 0 {
-		t.Errorf("KnownTools must be persisted, got empty")
-	}
 }
 
-func TestOrchestrator_PreparerPhase_ToolTiersDisabledStaysPassThrough(t *testing.T) {
-	// Regression guard: with the master switch off (and even when a
-	// store is wired), preparer_decision must keep the Phase-2
-	// pass-through Tools block — every candidate in tier1_new, no
-	// tier1_cap snapshot, no store writes.
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"final"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	tierStore := &fakeInjectionStateStore{}
+func TestToolCatalog_NativeMode_RendersCatalogAndKeepsToolsArraySmall(t *testing.T) {
+	// With native tools and nothing loaded, the tools array carries only the
+	// always-include core (load_tools); every other allowed tool surfaces in
+	// the system-prompt catalog with the load_tools nudge.
+	orch := newCatalogOrch(t, &fakeInjectionStateStore{})
+	ctx := actor.WithSessionID(context.Background(), "s1")
 
-	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, preparerJSONForTierTests)
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: false},
-		InjectionStateStore: tierStore,
-	})
-
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
-
-	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
-	var pdPayload events.PreparerDecisionPayload
-	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if pdPayload.Tools.Tier1Cap != 0 {
-		t.Errorf("Tier1Cap must stay zero when tier logic disabled, got %d", pdPayload.Tools.Tier1Cap)
-	}
-	if len(pdPayload.Tools.Tier1New) != 4 {
-		t.Errorf("pass-through Tier1New len = %d, want 4 (all candidates)", len(pdPayload.Tools.Tier1New))
-	}
-	if tierStore.updateCalls != 0 {
-		t.Errorf("disabled tier_tiers must not write state, got %d update calls", tierStore.updateCalls)
-	}
-}
-
-func TestOrchestrator_PreparerPhase_ToolTiersSecondTurnLRUCarriesOver(t *testing.T) {
-	// Two-turn LRU sanity: turn 1 establishes t1/t2 as Tier 1. Turn 2
-	// sees DIFFERENT candidates (t3/t4) and Tier1Cap=2 — but t1/t2's
-	// LRURank from turn 1 still falls below currentTurn=2, so t3/t4
-	// take Tier 1 and t1/t2 land in Tier1EvictedToTier3.
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"final-1", "final-2"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	tierStore := &fakeInjectionStateStore{}
-
-	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, `{
-		"send_to_llm": true,
-		"message": "q",
-		"tool_candidates": [
-			{"tool_name": "tools-plugin.t1", "score": 0.9},
-			{"tool_name": "tools-plugin.t2", "score": 0.8}
-		]
-	}`)
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(1)},
-		InjectionStateStore: tierStore,
-	})
-
-	// Turn 1: t1/t2 enter Tier 1.
-	if _, err := orch.Run(context.Background(), "s1", "first"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Swap the preparer to return t3/t4 instead.
-	t1Caps := registry.ListCapabilities()
-	for _, cap := range t1Caps {
-		if cap.Name == "rag-plugin" {
-			_, _ = registry.GetExecutor(cap.Name) // sanity: it's registered
-		}
-	}
-	registry2 := NewToolRegistry()
-	registerTierTestPlugins(t, registry2, `{
-		"send_to_llm": true,
-		"message": "q2",
-		"tool_candidates": [
-			{"tool_name": "tools-plugin.t3", "score": 0.9},
-			{"tool_name": "tools-plugin.t4", "score": 0.8}
-		]
-	}`)
-	// Re-create the orchestrator with the new registry but the SAME
-	// store (so turn 2 reads turn 1's KnownTools).
-	orch2 := NewWithRules(llm, parser, registry2, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(1)},
-		InjectionStateStore: tierStore,
-	})
-	if _, err := orch2.Run(context.Background(), "s1", "second"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Find the LAST preparer_decision (turn 2's).
-	evs := sink.snapshot()
-	var turn2 *emit.Event
-	for i := range evs {
-		if evs[i].EventType == events.TypePreparerDecision {
-			ev := evs[i]
-			turn2 = &ev
-		}
-	}
-	if turn2 == nil {
-		t.Fatal("turn 2 preparer_decision missing")
-	}
-	var p events.PreparerDecisionPayload
-	if err := json.Unmarshal(turn2.Payload, &p); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	wantEvicted := []string{"tools-plugin.t1", "tools-plugin.t2"}
-	gotEvicted := append([]string(nil), p.Tools.Tier1EvictedToTier3...)
-	sort.Strings(gotEvicted)
-	sort.Strings(wantEvicted)
-	if !reflect.DeepEqual(gotEvicted, wantEvicted) {
-		t.Errorf("turn 2 Tier1EvictedToTier3 = %v, want %v", gotEvicted, wantEvicted)
-	}
-	gotT1New := append([]string(nil), p.Tools.Tier1New...)
-	sort.Strings(gotT1New)
-	wantT1New := []string{"tools-plugin.t3", "tools-plugin.t4"}
-	if !reflect.DeepEqual(gotT1New, wantT1New) {
-		t.Errorf("turn 2 Tier1New = %v, want %v", gotT1New, wantT1New)
-	}
-}
-
-func TestOrchestrator_PreparerPhase_ToolTiersSystemPromptHasTier2AndTier3Sections(t *testing.T) {
-	// RFC #249 Phase 4 D3: with tier decision active, the system
-	// prompt sent to the LLM must include "## Available tools —
-	// summary tier" (Tier 2 name + 1-liner) and "## Other available
-	// tools" (Tier 3 names-only grouped). Tier 0+1 stay in the per-
-	// plugin sections (the existing relevant_tools narrowing handles
-	// them, now driven by Tier 0+1 names from the decision).
-	sink := &recordingEventSink{}
-	llm := &capturingLLM{responses: []string{"answer"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	tierStore := &fakeInjectionStateStore{}
-
-	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, preparerJSONForTierTests)
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(1)},
-		InjectionStateStore: tierStore,
-	})
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(llm.requests) == 0 {
-		t.Fatal("LLM was not called")
-	}
-	var sysMsg string
-	for _, m := range llm.requests[0].Messages {
-		if m.Role == provider.RoleSystem {
-			sysMsg = m.Content
-		}
-	}
-	if sysMsg == "" {
-		t.Fatal("system message missing in LLM request")
-	}
+	sysMsg := orch.buildSystemPrompt(ctx, "ask", true)
 	if !strings.Contains(sysMsg, "## Tool catalog — name + one-line summary") {
-		t.Errorf("system prompt missing Tier 2 header, got:\n%s", sysMsg)
+		t.Errorf("system prompt missing catalog header, got:\n%s", sysMsg)
 	}
-	if !strings.Contains(sysMsg, "## Other available tools (request details before use)") {
-		t.Errorf("system prompt missing Tier 3 header, got:\n%s", sysMsg)
+	if !strings.Contains(sysMsg, "_meta__load_tools") {
+		t.Errorf("catalog nudge must reference load_tools, got:\n%s", sysMsg)
 	}
-	// Tier 3 includes t4 (overflow of Tier 1+2 caps) and t5 (never a
-	// candidate). Both must appear under the tools-plugin group.
-	if !strings.Contains(sysMsg, "tools-plugin:") {
-		t.Errorf("Tier 3 plugin group header missing, got:\n%s", sysMsg)
-	}
-	if !strings.Contains(sysMsg, "t4") || !strings.Contains(sysMsg, "t5") {
-		t.Errorf("Tier 3 missing t4 / t5, got:\n%s", sysMsg)
-	}
-	// Tier 2 has exactly one entry (Tier2Cap=1): tools-plugin.t3.
-	if !strings.Contains(sysMsg, "tools-plugin.t3") {
-		t.Errorf("Tier 2 must list tools-plugin.t3, got:\n%s", sysMsg)
-	}
-}
-
-func TestOrchestrator_PreparerPhase_ToolTiersDisabledNoTierSectionsInPrompt(t *testing.T) {
-	// Regression guard: with tier_tiers.enabled=false, the system
-	// prompt must NOT contain the Phase-4 "Available tools — summary
-	// tier" or "Other available tools (request details before use)"
-	// sections. The pre-Phase-4 prompt structure is fully preserved.
-	sink := &recordingEventSink{}
-	llm := &capturingLLM{responses: []string{"answer"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-
-	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, preparerJSONForTierTests)
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:        sink,
-		ContentPreparers: []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:        ToolTiersConfig{Enabled: false},
-	})
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
-
-	var sysMsg string
-	for _, m := range llm.requests[0].Messages {
-		if m.Role == provider.RoleSystem {
-			sysMsg = m.Content
+	for _, fqn := range []string{"tools-plugin__t1", "tools-plugin__t2", "tools-plugin__t5"} {
+		if !strings.Contains(sysMsg, fqn) {
+			t.Errorf("catalog missing %s, got:\n%s", fqn, sysMsg)
 		}
 	}
-	if strings.Contains(sysMsg, "## Tool catalog — name + one-line summary") {
-		t.Errorf("Tier 2 section must NOT appear when tier logic off, got:\n%s", sysMsg)
-	}
-	if strings.Contains(sysMsg, "## Other available tools (request details before use)") {
-		t.Errorf("Tier 3 section must NOT appear when tier logic off, got:\n%s", sysMsg)
+
+	// Native tools array: only the always-include load_tools meta-tool.
+	tools := orch.buildToolDefinitions(ctx)
+	if len(tools) != 1 || tools[0].Name != toolFQN(metaPluginName, metaLoadTools) {
+		t.Errorf("tools array = %+v, want only the always-include load_tools meta-tool", tools)
 	}
 }
 
-func TestOrchestrator_PreparerPhase_ToolTiersWithDedupSingleStateWrite(t *testing.T) {
-	// When BOTH dedup and tier decisions run, the tier preparer merges
-	// its KnownTools delta into the dedup decision's UpdatedState so a
-	// single UpdateInjectionState call carries both — avoids one
-	// clobbering the other and keeps writes to one round-trip.
-	preparerJSON := `{
-		"send_to_llm": true,
-		"message": "q",
-		"knowledge_candidates": [
-			{"article_id": "kb_a", "content": "body", "content_sha256": "sha-a", "score": 0.9}
-		],
-		"tool_candidates": [
-			{"tool_name": "tools-plugin.t1", "score": 0.95}
-		]
-	}`
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"final"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	combinedStore := &fakeInjectionStateStore{}
+func TestToolCatalog_LoadedToolLeavesCatalogAndEntersToolsArray(t *testing.T) {
+	// After load_tools promotes a tool, it drops out of the catalog and into
+	// the native tools array with its full schema; the rest stay in the catalog.
+	store := &fakeInjectionStateStore{}
+	orch := newCatalogOrch(t, store)
+	exec, ok := orch.registry.GetExecutor(metaPluginName)
+	if !ok {
+		t.Fatal("load_tools executor missing")
+	}
+	ctx := actor.WithSessionID(context.Background(), "s1")
 
+	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": "tools-plugin__t1"}})
+	if res.Error != "" {
+		t.Fatalf("load_tools failed: %q", res.Error)
+	}
+
+	// Now t1 is sticky: tools array has load_tools + t1; catalog omits t1.
+	promoted := orch.promotedToolSet(ctx)
+	if !promoted["tools-plugin__t1"] {
+		t.Fatalf("promotedToolSet missing tools-plugin__t1, got %v", promoted)
+	}
+	tools := orch.buildToolDefinitions(ctx)
+	names := map[string]bool{}
+	for _, td := range tools {
+		names[td.Name] = true
+	}
+	if !names[toolFQN(metaPluginName, metaLoadTools)] || !names["tools-plugin__t1"] {
+		t.Errorf("tools array must contain load_tools + tools-plugin__t1, got %v", names)
+	}
+	if names["tools-plugin__t2"] {
+		t.Errorf("tools array must NOT contain the un-loaded tools-plugin__t2, got %v", names)
+	}
+
+	sysMsg := orch.buildSystemPrompt(ctx, "ask", true)
+	if strings.Contains(sysMsg, "- tools-plugin__t1:") {
+		t.Errorf("loaded tool must drop out of the catalog, still present:\n%s", sysMsg)
+	}
+	if !strings.Contains(sysMsg, "tools-plugin__t2") {
+		t.Errorf("un-loaded tools must remain in the catalog, missing t2:\n%s", sysMsg)
+	}
+}
+
+func TestToolCatalog_StickyCapKeepsMostRecentlyUsed(t *testing.T) {
+	// promotedToolSet caps the sticky set at maxStickyTools, keeping the
+	// highest-LRURank entries.
 	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, preparerJSON)
+	registerTierTestPlugins(t, registry, `{"send_to_llm": true, "message": "q"}`)
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1", "", "")
 
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		KnowledgeDedup:      KnowledgeDedupConfig{Enabled: true},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(3), Tier2Cap: intPtr(2)},
-		InjectionStateStore: combinedStore,
+	// Seed more than the cap; the lowest ranks must be dropped.
+	known := make([]state.KnownToolEntry, 0, maxStickyTools+5)
+	for i := 0; i < maxStickyTools+5; i++ {
+		known = append(known, state.KnownToolEntry{
+			ToolName: "p__a" + string(rune('A'+i%26)) + string(rune('0'+i/26)),
+			LRURank:  i, // higher i = more recent
+		})
+	}
+	store := &fakeInjectionStateStore{store: map[string]state.InjectionState{"s1": {KnownTools: known}}}
+	orch := NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
+		InjectionStateStore: store,
 	})
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
+	ctx := actor.WithSessionID(context.Background(), "s1")
 
-	if combinedStore.updateCalls != 1 {
-		t.Errorf("UpdateInjectionState calls = %d, want 1 (dedup write carries tier delta)", combinedStore.updateCalls)
+	promoted := orch.promotedToolSet(ctx)
+	if len(promoted) != maxStickyTools {
+		t.Fatalf("sticky set size = %d, want cap %d", len(promoted), maxStickyTools)
 	}
-	if len(combinedStore.lastWritten.KnownKnowledge) != 1 {
-		t.Errorf("KnownKnowledge persisted len = %d, want 1", len(combinedStore.lastWritten.KnownKnowledge))
+	// The lowest-rank entry (i=0) must have been dropped; the highest (i=last) kept.
+	lowest := known[0].ToolName
+	highest := known[len(known)-1].ToolName
+	if promoted[lowest] {
+		t.Errorf("lowest-LRURank tool %q must be dropped past the cap", lowest)
 	}
-	if len(combinedStore.lastWritten.KnownTools) == 0 {
-		t.Errorf("KnownTools must also be persisted in the same write, got 0 entries")
+	if !promoted[highest] {
+		t.Errorf("highest-LRURank tool %q must be kept under the cap", highest)
+	}
+}
+
+func TestToolCatalog_DemotedToolNotSticky(t *testing.T) {
+	// A Demoted entry is excluded from the sticky set even if its LRURank is
+	// high — it falls back to the catalog.
+	registry := NewToolRegistry()
+	registerTierTestPlugins(t, registry, `{"send_to_llm": true, "message": "q"}`)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	store := &fakeInjectionStateStore{store: map[string]state.InjectionState{
+		"s1": {KnownTools: []state.KnownToolEntry{
+			{ToolName: "tools-plugin__t1", LRURank: 99, Demoted: true},
+			{ToolName: "tools-plugin__t2", LRURank: 5},
+		}},
+	}}
+	orch := NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
+		InjectionStateStore: store,
+	})
+	ctx := actor.WithSessionID(context.Background(), "s1")
+
+	promoted := orch.promotedToolSet(ctx)
+	if promoted["tools-plugin__t1"] {
+		t.Errorf("Demoted tool must be excluded from the sticky set")
+	}
+	if !promoted["tools-plugin__t2"] {
+		t.Errorf("non-demoted tool must be in the sticky set")
 	}
 }

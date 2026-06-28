@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -300,5 +301,46 @@ func TestUpdateCapabilityReflectsAddedAndRemovedActions(t *testing.T) {
 	}
 	if reg.HasAction("mcp", "b") {
 		t.Error("HasAction(mcp, b) = true, want false (removed action is gone)")
+	}
+}
+
+// TestRegistryRejectsDottedPluginName verifies the registration-time FQN
+// charset guard: a plugin name containing a dot composes a name that an
+// LLM provider would reject as an opaque 400, so Register fails up front
+// with a clear error instead of letting it reach the API.
+func TestRegistryRejectsDottedPluginName(t *testing.T) {
+	reg := NewToolRegistry()
+	cap := PluginCapability{
+		Name: "my.server", // dot is illegal in a provider tool name
+		Actions: []Action{
+			{Name: "list-items"},
+		},
+	}
+	err := reg.Register(cap, &mockExecutor{})
+	if err == nil {
+		t.Fatal("Register must reject a dotted plugin name (composed FQN fails the provider charset)")
+	}
+	if !strings.Contains(err.Error(), "my.server__list-items") {
+		t.Errorf("error must name the offending composed FQN, got: %v", err)
+	}
+	if _, ok := reg.GetCapability("my.server"); ok {
+		t.Error("a rejected plugin must not be registered")
+	}
+}
+
+// TestRegistryAcceptsValidFQN is the positive control: ordinary plugin and
+// action names (including the bridged-MCP double-underscore action form)
+// compose valid FQNs and register cleanly.
+func TestRegistryAcceptsValidFQN(t *testing.T) {
+	reg := NewToolRegistry()
+	cap := PluginCapability{
+		Name: "timly",
+		Actions: []Action{
+			{Name: "list-items"},
+			{Name: "timly__create-item"}, // bridged-MCP action; FQN = timly__timly__create-item
+		},
+	}
+	if err := reg.Register(cap, &mockExecutor{}); err != nil {
+		t.Fatalf("valid names must register, got: %v", err)
 	}
 }

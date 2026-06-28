@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/opentalon/opentalon/pkg/toolfqn"
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 )
@@ -134,11 +134,15 @@ func (j *Job) schedule() (schedule, error) {
 }
 
 func (j *Job) parseAction() (plugin, action string, err error) {
-	parts := strings.SplitN(j.Action, ".", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("invalid action format %q, expected plugin.action", j.Action)
+	// Decode via the shared single decoder: canonical "plugin__action" plus the
+	// legacy "plugin.action" form persisted jobs may still carry. Returning a
+	// format hint that names the canonical separator keeps LLM-authored job
+	// actions consistent with the tool-call FQN convention.
+	plugin, action, err = toolfqn.Split(j.Action)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid action format %q, expected plugin__action", j.Action)
 	}
-	return parts[0], parts[1], nil
+	return plugin, action, nil
 }
 
 type runningJob struct {

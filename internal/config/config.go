@@ -313,13 +313,12 @@ type ResponseFormatterEntry struct {
 // KnowledgeConfig configures knowledge-augmented RAG: startup action sync and
 // optional knowledge directory scanning.
 type KnowledgeConfig struct {
-	SyncPlugin         string `yaml:"sync_plugin"`                // plugin name for action sync (e.g. "weaviate")
-	SyncAction         string `yaml:"sync_action"`                // action name for sync (e.g. "sync_actions")
-	SyncGlossaryAction string `yaml:"sync_glossary_action"`       // action name for glossary sync (e.g. "sync_glossary"); uses sync_plugin
-	Plugin             string `yaml:"plugin"`                     // plugin name for knowledge ingestion (e.g. "weaviate")
-	Action             string `yaml:"action"`                     // action name for single-article ingestion (e.g. "ingest")
-	Dir                string `yaml:"dir"`                        // optional directory of .md files to ingest at startup
-	RefreshInterval    string `yaml:"refresh_interval,omitempty"` // Go duration (e.g. "15m"); periodically re-fetch each plugin's upstream capabilities and re-sync the corpus so description/instruction/knowledge changes propagate without a restart. "" = default 15m, "0" = disabled.
+	SyncPlugin      string `yaml:"sync_plugin"`                // plugin name for action sync (e.g. "weaviate")
+	SyncAction      string `yaml:"sync_action"`                // action name for sync (e.g. "sync_actions")
+	Plugin          string `yaml:"plugin"`                     // plugin name for knowledge ingestion (e.g. "weaviate")
+	Action          string `yaml:"action"`                     // action name for single-article ingestion (e.g. "ingest")
+	Dir             string `yaml:"dir"`                        // optional directory of .md files to ingest at startup
+	RefreshInterval string `yaml:"refresh_interval,omitempty"` // Go duration (e.g. "15m"); periodically re-fetch each plugin's upstream capabilities and re-sync the corpus so description/instruction/knowledge changes propagate without a restart. "" = default 15m, "0" = disabled.
 }
 
 type OrchestratorConfig struct {
@@ -334,74 +333,27 @@ type OrchestratorConfig struct {
 	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`       // knowledge-augmented RAG configuration
 	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`      // subprocess (sub-agent) support
 	ShowToolCalls         string                       `yaml:"show_tool_calls,omitempty"` // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	Preparer              PreparerOrchestratorConfig   `yaml:"preparer,omitempty"`        // RFC #249 preparer-phase behaviour (knowledge dedup, tool tiers, error handling)
+	Preparer              PreparerOrchestratorConfig   `yaml:"preparer,omitempty"`        // RFC #249 preparer-phase behaviour (tool error handling)
 }
 
 // PreparerOrchestratorConfig groups the RFC #249 preparer-phase
-// behaviour flags. Each pillar (knowledge dedup, tool tiers, tool
-// error handling) is independently togglable so phases can be
-// A/B-tested in production without coupled rollout risk.
+// behaviour flags.
 type PreparerOrchestratorConfig struct {
-	KnowledgeDedup    KnowledgeDedupConfig    `yaml:"knowledge_dedup,omitempty"`
-	ToolTiers         ToolTiersConfig         `yaml:"tool_tiers,omitempty"`
 	ToolErrorHandling ToolErrorHandlingConfig `yaml:"tool_error_handling,omitempty"`
 }
 
-// KnowledgeDedupConfig configures the per-session content_sha-keyed
-// knowledge dedup logic (RFC #249 Phase 3). When Enabled is false
-// (the safe default), the orchestrator falls through to the legacy
-// per-turn re-inject behaviour and only emits the Phase-2
-// instrumentation_only preparer_decision events.
-//
-// ReinjectScoreThreshold is the "bury defense" override: a knowledge
-// article already in known_knowledge is re-injected when the current
-// turn's score exceeds this value, on the theory that a strong current
-// match outweighs the cache-stable prefix concern. ReinjectTopKForce
-// is the floor: the top-N candidates of the current retrieval always
-// inject so the LLM never starves on truly relevant context. CapPerTurn
-// hard-bounds the delta size so a query that hits many candidates
-// can't tank the prompt budget — the dedup logic skips overflow
-// candidates with reason "cap_exceeded".
-type KnowledgeDedupConfig struct {
-	Enabled                bool    `yaml:"enabled"`                            // master switch; default false
-	ReinjectScoreThreshold float64 `yaml:"reinject_score_threshold,omitempty"` // default 0.85 when zero
-	ReinjectTopKForce      int     `yaml:"reinject_top_k_force,omitempty"`     // default 3 when zero
-	CapPerTurn             int     `yaml:"cap_per_turn,omitempty"`             // default 5 when zero
-}
-
-// ToolTiersConfig configures the per-turn three-tier tool visibility
-// model (RFC #249 Phase 4). Tier 0 holds always_include actions plus
-// the get_tool_details meta-tool with full schemas; Tier 1 holds the
-// RAG-top-K relevant tools (also with full schemas) capped at Tier1Cap
-// with LRU eviction; Tier 2 surfaces the next slice as name + one-line
-// summary in the system prompt; Tier 3 fans out the remaining tools as
-// names-only grouped by plugin. The get_tool_details meta-tool promotes
-// any Tier 2/3 tool back into Tier 1 on demand.
-//
-// EnableGetToolDetails toggles the meta-tool independently of the
-// master Enabled flag so a deployment can ship the tier rendering
-// without yet exposing the LLM-driven promotion path. Setting it true
-// implies Enabled=true at the orchestrator (see runtime normalization).
-type ToolTiersConfig struct {
-	Enabled              bool `yaml:"enabled"`                           // master switch; default false
-	Tier1Cap             *int `yaml:"tier1_cap,omitempty"`               // max Tier-1 tools with full schemas; nil → default 10, explicit 0 → empty Tier 1 (catalog-mode)
-	Tier2Cap             *int `yaml:"tier2_cap,omitempty"`               // max Tier-2 tools surfaced as name + 1-line summary; nil → default 15, explicit 0 → empty Tier 2
-	EnableGetToolDetails bool `yaml:"enable_get_tool_details,omitempty"` // expose the get_tool_details meta-tool for Tier-3→Tier-1 promotion; default false
-}
-
 // ToolErrorHandlingConfig configures the runaway-tool-failure
-// protections from RFC #249 Phase 4. LoopCapPerTurn bounds how many
-// consecutive identical-tool errors the orchestrator tolerates in a
-// single turn before injecting a system message nudging the LLM toward
-// a different approach. StickyDemotionThreshold tracks consecutive
-// errors across the whole session and flips the tool's Demoted bit in
-// known_tools when the count crosses; a subsequent successful call
-// clears the flag (self-healing). Both fields default to the RFC
-// values via runtime normalization when zero so tests can leave the
-// struct empty.
+// protections. LoopCapPerTurn bounds how many consecutive identical-tool
+// errors the orchestrator tolerates in a single turn before injecting a
+// nudge message steering the LLM toward a different approach.
+// StickyDemotionThreshold tracks consecutive errors across the whole
+// session and flips the tool's Demoted bit in known_tools when the count
+// crosses; a subsequent successful call clears the flag (self-healing).
+// Both fields are opt-in: a zero/unset value turns that protection OFF —
+// no default is substituted.
 type ToolErrorHandlingConfig struct {
-	LoopCapPerTurn          int `yaml:"loop_cap_per_turn,omitempty"`         // consecutive identical-tool errors per turn before system-msg injection; default 2 when zero
-	StickyDemotionThreshold int `yaml:"sticky_demotion_threshold,omitempty"` // consecutive session-level errors before known_tools demotion; default 3 when zero
+	LoopCapPerTurn          int `yaml:"loop_cap_per_turn,omitempty"`         // consecutive identical-tool errors per turn before nudge injection; <= 0 disables
+	StickyDemotionThreshold int `yaml:"sticky_demotion_threshold,omitempty"` // consecutive session-level errors before known_tools demotion; <= 0 disables
 }
 
 // PipelineOrchestratorConfig enables structured multi-step pipeline execution.
@@ -430,8 +382,15 @@ type StateConfig struct {
 	SessionEvents SessionEventsConfig `yaml:"session_events,omitempty"`
 }
 
-// DebugConfig configures per-session deep debug capture (toggled by the
-// /debug command). Without an /debug-active session, this subsystem does
+// DebugConfig configures deep raw-HTTP capture of every LLM exchange into the
+// ai_debug_events table (the full request + response body that goes to / comes
+// from the provider endpoint). Capture is gated two ways:
+//   - per-session via the /debug command (opt-in, default), or
+//   - AlwaysCapture: persist EVERY session's raw traffic unconditionally — the
+//     "always see what really went to the API" mode. Pair it with a short
+//     RetentionDays (e.g. 7) so the table stays bounded.
+//
+// Without /debug-active sessions AND AlwaysCapture off, this subsystem does
 // nothing — the table stays empty and the writer goroutine is idle.
 //
 // Retention semantics, deliberately split into two fields rather than a
@@ -444,12 +403,12 @@ type StateConfig struct {
 //     meant "off".
 //
 // The async-writer buffer size is intentionally not configurable: 100 is
-// adequate for any realistic /debug load (opt-in per session, drained at
-// ~1k inserts/s by the worker), and a knob nobody will turn is just
-// surface area.
+// adequate for any realistic load (drained at ~1k inserts/s by the worker),
+// and a knob nobody will turn is just surface area.
 type DebugConfig struct {
 	RetentionDays     int  `yaml:"retention_days,omitempty"`     // default 30 when 0 or omitted
 	RetentionDisabled bool `yaml:"retention_disabled,omitempty"` // when true, never prune (overrides RetentionDays)
+	AlwaysCapture     bool `yaml:"always_capture,omitempty"`     // when true, persist raw HTTP for EVERY session, not only /debug-opted-in ones
 }
 
 // SessionEventsConfig configures the always-on structured session_events

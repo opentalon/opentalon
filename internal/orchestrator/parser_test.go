@@ -424,14 +424,20 @@ func TestParseToolName(t *testing.T) {
 		{"noaction", "", "", true},
 		{".nodot", "", "", true},
 		{"nodot.", "", "", true},
-		// double-underscore format (OpenAI-style function names)
+		// canonical double-underscore format (provider-safe function names)
 		{"jira__search_issues", "jira", "search_issues", false},
 		{"appsignal__get_applications", "appsignal", "get_applications", false},
 		{"brave_search__search", "brave_search", "search", false},
 		// hyphenated MCP action names
 		{"myapp.myapp__list-org-units", "myapp", "myapp__list-org-units", false},
 		{"jira__get-issue-details", "jira", "get-issue-details", false},
-		// dot is preferred over double-underscore when both could apply
+		// canonical "__" form round-trips, including MCP-bridged actions whose
+		// action part itself contains "__" (split on the FIRST "__").
+		{"timly__timly__create-item", "timly", "timly__create-item", false},
+		{"_meta__load_tools", "_meta", "load_tools", false},
+		{"weaviate__ask_knowledge", "weaviate", "ask_knowledge", false},
+		// the legacy dot form is still decoded first when a name carries a dot,
+		// so a dotted alias whose action contains "__" disambiguates by the dot.
 		{"mcp.jira__search", "mcp", "jira__search", false},
 		// natural-language fragments must be rejected
 		{"` syntax). Let me know which action you'd like to perform!", "", "", true},

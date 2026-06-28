@@ -1,26 +1,23 @@
 package orchestrator
 
-import (
-	"strings"
-)
+import "strings"
 
-// [knowledge_context] block parsing and rendering — RFC #249 Phase 3.
+// [knowledge_context] block parsing and stripping.
 //
-// The block format is the only Plugin→LLM bridge for retrieved RAG
-// knowledge: the orchestrator splices a `[knowledge_context]…[/knowledge_context]`
-// envelope into the current-turn user message, the LLM treats it as
-// part of its question, and historical-message strip removes the
-// envelope (but never the user text around it) on subsequent turns.
+// Knowledge is pull-only: the model discovers articles from the
+// system-prompt catalog (titles + slugs) and fetches bodies on demand
+// via the ask_knowledge tool. The orchestrator never auto-injects
+// retrieved article bodies into the user turn. stripKnowledgeContext
+// remains as a fail-safe: it removes any stray
+// `[knowledge_context]…[/knowledge_context]` envelope (legacy or tagged
+// form) from messages so nothing leaks into the LLM turn or the stored
+// history.
 //
-// Phase 3 extends the opening tag with optional `id="..."` and
-// `sha="..."` attributes so the orchestrator's lazy reconciliation
-// step can scan the visible message stream and tie each block back
-// to a known_knowledge entry without storing redundant copies of
-// the bodies. Plugins that haven't migrated to the candidate-list
-// shape keep emitting bare `[knowledge_context]` opening tags; the
-// parser recognizes both forms.
+// Some opening tags carry optional `id="..."` and `sha="..."`
+// attributes; the parser recognizes both the tagged and the bare
+// `[knowledge_context]` forms.
 //
-// Helpers live in their own file so the parser/strip/render logic is
+// Helpers live in their own file so the parser/strip logic is
 // readable in one place and easy to test in isolation.
 
 const (
@@ -30,28 +27,17 @@ const (
 
 // parsedKCBlock is one [knowledge_context]…[/knowledge_context] block
 // extracted from a message string. ArticleID and ContentSHA256 are
-// populated when the opening tag carried the Phase-3 id="…" and
-// sha="…" attributes; both fields stay empty for legacy untagged
-// blocks. Start/End are byte offsets into the source string —
-// inclusive at Start, exclusive at End — so callers can splice
-// around the block without re-running the parser.
+// populated when the opening tag carried the id="…" and sha="…"
+// attributes; both fields stay empty for legacy untagged blocks.
+// Start/End are byte offsets into the source string — inclusive at
+// Start, exclusive at End — so callers can splice around the block
+// without re-running the parser.
 type parsedKCBlock struct {
 	ArticleID     string
 	ContentSHA256 string
 	Body          string // text between opening `]` and `[/knowledge_context]`, not trimmed
 	Start         int    // offset of the opening `[`
 	End           int    // offset one past the closing `]`
-}
-
-// kcInjection is one article to render into a [knowledge_context]
-// block. The Phase-3 dedup logic (later commit) builds the input
-// slice from KnowledgeCandidate after the dedup decision; for
-// Phase 4+ extensions any additional metadata that needs to appear
-// inside the envelope would be added here.
-type kcInjection struct {
-	ArticleID     string
-	ContentSHA256 string
-	Body          string
 }
 
 // parseKnowledgeContextBlocks returns every [knowledge_context] block
@@ -65,10 +51,7 @@ type kcInjection struct {
 // `[/knowledge_context]` will be truncated at that point — the parser
 // has no escape mechanism for closing tags inside bodies. RAG-retrieved
 // knowledge articles practically never contain this string (it's an
-// orchestrator-internal wire token, not user-authored content), and
-// the Phase-3 reconciliation step catches the resulting drift on the
-// next turn. If a future plugin starts emitting bodies that mention
-// the closing tag, switch the renderer to length-prefixed bodies.
+// orchestrator-internal wire token, not user-authored content).
 //
 // The parser is intentionally non-allocating for the common
 // "no KC block here" path: the strings.Index call short-circuits and
@@ -110,45 +93,6 @@ func parseKnowledgeContextBlocks(s string) []parsedKCBlock {
 		cursor = bodyEnd + len(kcCloseTag)
 	}
 	return blocks
-}
-
-// renderKnowledgeContextBlock builds the orchestrator-side string the
-// current-turn user message will carry. One envelope per article, in
-// input order, separated by a blank line so the LLM sees the blocks
-// as distinct. Empty slice returns the empty string so callers can
-// concatenate the output without conditionals.
-//
-// Article IDs and SHAs are sanitized to drop any embedded `"` so the
-// parser can rely on simple name="value" matching. In practice IDs
-// are RAG-source slugs and SHAs are hex — neither carries quotes —
-// but the sanitization keeps the contract robust against future
-// plugins that might forward less constrained identifiers.
-func renderKnowledgeContextBlock(articles []kcInjection) string {
-	if len(articles) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for i, a := range articles {
-		if i > 0 {
-			b.WriteString("\n\n")
-		}
-		b.WriteString(kcOpenPrefix)
-		if id := sanitizeKCAttr(a.ArticleID); id != "" {
-			b.WriteString(` id="`)
-			b.WriteString(id)
-			b.WriteString(`"`)
-		}
-		if sha := sanitizeKCAttr(a.ContentSHA256); sha != "" {
-			b.WriteString(` sha="`)
-			b.WriteString(sha)
-			b.WriteString(`"`)
-		}
-		b.WriteString("]\n")
-		b.WriteString(a.Body)
-		b.WriteString("\n")
-		b.WriteString(kcCloseTag)
-	}
-	return b.String()
 }
 
 // stripKnowledgeContext removes every [knowledge_context]…[/knowledge_context]
@@ -204,14 +148,4 @@ func extractKCAttr(tagBody, name string) string {
 		return tagBody[valStart : valStart+end]
 	}
 	return ""
-}
-
-// sanitizeKCAttr drops embedded `"` so the rendered attribute string
-// stays parseable. Other whitespace and special characters survive —
-// the parser only treats `"` as significant.
-func sanitizeKCAttr(s string) string {
-	if !strings.ContainsRune(s, '"') {
-		return s
-	}
-	return strings.ReplaceAll(s, `"`, "")
 }

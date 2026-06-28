@@ -369,10 +369,12 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	// / EmitLLMError below so analytics get one request row per turn even
 	// when the response path fails.
 	emit.EmitLLMRequest(ctx, p.eventSink, emit.LLMRequestArgs{
-		ModelID:      oaiReq.Model,
-		MessageCount: len(oaiReq.Messages),
-		HasTools:     len(oaiReq.Tools) > 0,
-		MaxTokens:    oaiReq.MaxTokens,
+		ModelID:         oaiReq.Model,
+		MessageCount:    len(oaiReq.Messages),
+		HasTools:        len(oaiReq.Tools) > 0,
+		MaxTokens:       oaiReq.MaxTokens,
+		Reasoning:       req.Reasoning,
+		ReasoningEffort: oaiReq.ReasoningEffort,
 	})
 
 	start := time.Now()
@@ -602,10 +604,12 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 	// inside oaiResponseStream.
 	p.captureRawHTTP(ctx, "request", 0, body, nil)
 	emit.EmitLLMRequest(ctx, p.eventSink, emit.LLMRequestArgs{
-		ModelID:      oaiReq.Model,
-		MessageCount: len(oaiReq.Messages),
-		HasTools:     len(oaiReq.Tools) > 0,
-		MaxTokens:    oaiReq.MaxTokens,
+		ModelID:         oaiReq.Model,
+		MessageCount:    len(oaiReq.Messages),
+		HasTools:        len(oaiReq.Tools) > 0,
+		MaxTokens:       oaiReq.MaxTokens,
+		Reasoning:       req.Reasoning,
+		ReasoningEffort: oaiReq.ReasoningEffort,
 	})
 
 	// Use a client without timeout for streaming; context handles cancellation.

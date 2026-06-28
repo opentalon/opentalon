@@ -133,66 +133,6 @@ func TestExtractKCAttr_RejectsSubstringMatches(t *testing.T) {
 	}
 }
 
-func TestRenderKnowledgeContextBlock_RoundTripsThroughParser(t *testing.T) {
-	in := []kcInjection{
-		{ArticleID: "kb_a", ContentSHA256: "aaa", Body: "first body"},
-		{ArticleID: "kb_b", ContentSHA256: "bbb", Body: "second body"},
-	}
-	rendered := renderKnowledgeContextBlock(in)
-	if rendered == "" {
-		t.Fatal("renderKnowledgeContextBlock produced empty string for non-empty input")
-	}
-	blocks := parseKnowledgeContextBlocks(rendered)
-	if len(blocks) != 2 {
-		t.Fatalf("round-trip produced %d blocks, want 2", len(blocks))
-	}
-	for i, want := range in {
-		got := blocks[i]
-		if got.ArticleID != want.ArticleID || got.ContentSHA256 != want.ContentSHA256 {
-			t.Errorf("block %d: id/sha mismatch — got %+v, want %+v", i, got, want)
-		}
-		if strings.TrimSpace(got.Body) != want.Body {
-			t.Errorf("block %d: body = %q, want %q", i, got.Body, want.Body)
-		}
-	}
-}
-
-func TestRenderKnowledgeContextBlock_EmptyInput(t *testing.T) {
-	if got := renderKnowledgeContextBlock(nil); got != "" {
-		t.Errorf("nil input must render to empty string, got %q", got)
-	}
-	if got := renderKnowledgeContextBlock([]kcInjection{}); got != "" {
-		t.Errorf("empty slice must render to empty string, got %q", got)
-	}
-}
-
-func TestRenderKnowledgeContextBlock_SkipsEmptyAttributes(t *testing.T) {
-	// A legacy-style injection (no id/sha) must render as the bare
-	// `[knowledge_context]` form so downstream tooling unaware of the
-	// Phase-3 attributes still sees a recognizable envelope.
-	rendered := renderKnowledgeContextBlock([]kcInjection{{Body: "legacy"}})
-	if !strings.HasPrefix(rendered, "[knowledge_context]\n") {
-		t.Errorf("missing-attribute injection must render bare opening, got %q", rendered)
-	}
-}
-
-func TestRenderKnowledgeContextBlock_SanitizesEmbeddedQuotes(t *testing.T) {
-	rendered := renderKnowledgeContextBlock([]kcInjection{{
-		ArticleID:     `kb_"injected"`,
-		ContentSHA256: `sha"with"quote`,
-		Body:          "body",
-	}})
-	// Embedded quotes must be dropped so the parser's name="value"
-	// matching still works. Confirm by round-tripping.
-	blocks := parseKnowledgeContextBlocks(rendered)
-	if len(blocks) != 1 {
-		t.Fatalf("got %d blocks, want 1 — render: %q", len(blocks), rendered)
-	}
-	if strings.Contains(blocks[0].ArticleID, `"`) || strings.Contains(blocks[0].ContentSHA256, `"`) {
-		t.Errorf("sanitization left embedded quotes: %+v", blocks[0])
-	}
-}
-
 func TestStripKnowledgeContext_LegacyBare(t *testing.T) {
 	const msg = "[knowledge_context]\nbody\n[/knowledge_context]\nuser question"
 	if got := stripKnowledgeContext(msg); got != "user question" {

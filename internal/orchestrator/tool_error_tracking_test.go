@@ -18,7 +18,6 @@ func newOrchForErrorTrackingTests(t *testing.T, store *fakeInjectionStateStore) 
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1", "", "")
 	opts := OrchestratorOpts{
-		ToolTiers: ToolTiersConfig{Enabled: true},
 		ToolErrorHandling: ToolErrorHandlingConfig{
 			LoopCapPerTurn:          2,
 			StickyDemotionThreshold: 3,
@@ -51,7 +50,7 @@ func TestRecordToolOutcome_AtLoopCapEmitsWarning(t *testing.T) {
 	if warning == nil {
 		t.Fatal("second error (count=2, cap=2) must emit a warning")
 	}
-	if !strings.Contains(warning.Content, "p.a") || !strings.Contains(warning.Content, "failed 2 times") {
+	if !strings.Contains(warning.Content, "p__a") || !strings.Contains(warning.Content, "failed 2 times") {
 		t.Errorf("warning content lacks tool name or count, got %q", warning.Content)
 	}
 	if warning.Role == "" {
@@ -95,19 +94,15 @@ func TestRecordToolOutcome_DifferentToolsCountIndependently(t *testing.T) {
 	}
 }
 
-func TestRecordToolOutcome_TierLogicOffShortCircuits(t *testing.T) {
-	registry := NewToolRegistry()
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
-		ToolTiers: ToolTiersConfig{Enabled: false},
-	})
-	ctx := actor.WithSessionID(context.Background(), "s1")
+func TestRecordToolOutcome_EmptySessionShortCircuits(t *testing.T) {
+	// Without a session id the tracker has nowhere to key counters, so it
+	// short-circuits — no warning is ever emitted.
+	orch := newOrchForErrorTrackingTests(t, nil)
+	ctx := context.Background()
 	for i := 0; i < 5; i++ {
-		w := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
+		w := orch.recordToolOutcome(ctx, "", sampleCall(), errorResult())
 		if w != nil {
-			t.Errorf("tier-off must short-circuit tracking, got warning iter %d: %+v", i, w)
+			t.Errorf("empty session must short-circuit tracking, got warning iter %d: %+v", i, w)
 		}
 	}
 }
@@ -126,12 +121,12 @@ func TestRecordToolOutcome_StickyDemotionFlipsDemotedFlag(t *testing.T) {
 	}
 	found := false
 	for _, kt := range store.lastWritten.KnownTools {
-		if kt.ToolName == "p.a" && kt.Demoted {
+		if kt.ToolName == "p__a" && kt.Demoted {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("p.a must be Demoted=true after threshold, got %+v", store.lastWritten.KnownTools)
+		t.Errorf("p__a must be Demoted=true after threshold, got %+v", store.lastWritten.KnownTools)
 	}
 }
 
@@ -139,7 +134,7 @@ func TestRecordToolOutcome_SuccessAfterDemotionSelfHeals(t *testing.T) {
 	store := &fakeInjectionStateStore{
 		store: map[string]state.InjectionState{
 			"s1": {KnownTools: []state.KnownToolEntry{
-				{ToolName: "p.a", Tier: state.KnownToolTier3, Demoted: true},
+				{ToolName: "p__a", Demoted: true},
 			}},
 		},
 	}
@@ -159,7 +154,7 @@ func TestRecordToolOutcome_SuccessAfterDemotionSelfHeals(t *testing.T) {
 		t.Fatal("self-heal must write the cleared state")
 	}
 	for _, kt := range store.lastWritten.KnownTools {
-		if kt.ToolName == "p.a" && kt.Demoted {
+		if kt.ToolName == "p__a" && kt.Demoted {
 			t.Errorf("self-heal must clear Demoted, got Demoted=true")
 		}
 	}
@@ -174,7 +169,6 @@ func TestRecordToolOutcome_NewTurnResetsTurnCounter(t *testing.T) {
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1", "", "")
 	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
-		ToolTiers: ToolTiersConfig{Enabled: true},
 		ToolErrorHandling: ToolErrorHandlingConfig{
 			LoopCapPerTurn:          2,
 			StickyDemotionThreshold: 99,
@@ -185,7 +179,7 @@ func TestRecordToolOutcome_NewTurnResetsTurnCounter(t *testing.T) {
 	ctx := actor.WithSessionID(context.Background(), "s1")
 	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
 
-	// Simulate next turn by adding a user message — turnNumberForDedup
+	// Simulate next turn by adding a user message — sessionTurnNumber
 	// counts user messages + 1, so this bumps the orchestrator's view
 	// of "current turn" without going through the full agent loop.
 	_ = sessions.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "next"})

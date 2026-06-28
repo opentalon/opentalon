@@ -169,7 +169,7 @@ func TestToolCreateCapturesConversationID(t *testing.T) {
 
 // Regression: Haiku-class models routinely pass `message` as a top-level arg
 // to create_job instead of wrapping it in `args`. The shortcut must map that
-// to args={"message": ...} so reminder.say works on first fire.
+// to args={"message": ...} so reminder__say works on first fire.
 func TestToolCreateJobMessageShortcut(t *testing.T) {
 	tool := newTestTool(t)
 
@@ -178,7 +178,7 @@ func TestToolCreateJobMessageShortcut(t *testing.T) {
 		Args: map[string]string{
 			"name":     "lenin_quote_spam",
 			"interval": "2m",
-			"action":   "reminder.say",
+			"action":   "reminder__say",
 			"message":  "There are decades where nothing happens; and there are weeks where decades happen. - Lenin",
 		},
 	})
@@ -204,7 +204,7 @@ func TestToolCreateJobMessageAndArgsConflict(t *testing.T) {
 		Args: map[string]string{
 			"name":     "conflict",
 			"interval": "1h",
-			"action":   "reminder.say",
+			"action":   "reminder__say",
 			"message":  "hi",
 			"args":     `{"message":"also hi"}`,
 		},

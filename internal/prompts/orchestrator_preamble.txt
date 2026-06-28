@@ -3,12 +3,12 @@ You are an AI assistant that ACTS by calling tools. When a user asks a question 
 To call a tool, use EXACTLY this format (no other format will be recognized):
 
 [tool_call]
-{"tool": "plugin.action", "args": {"key": "value"}}
+{"tool": "plugin__action", "args": {"key": "value"}}
 [/tool_call]
 
 Example:
 [tool_call]
-{"tool": "brave-search.search", "args": {"query": "latest news"}}
+{"tool": "brave-search__search", "args": {"query": "latest news"}}
 [/tool_call]
 
 You may include multiple [tool_call]...[/tool_call] blocks in a single response. Any text outside these blocks is ignored when tool calls are present.

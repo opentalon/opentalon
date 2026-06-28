@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -12,8 +13,8 @@ import (
 
 // actionNameCandidates returns the forgiving normalizations of an LLM-supplied
 // action name (underscore<->hyphen, and the dropped "<plugin>__" prefix that a
-// bridged MCP server's tools carry). The execute path and get_tool_details both
-// try these, so a tool resolves the SAME way whether it is inspected or invoked.
+// bridged MCP server's tools carry). The execute path and load_tools both
+// try these, so a tool resolves the SAME way whether it is loaded or invoked.
 func actionNameCandidates(plugin, action string) []string {
 	return []string{
 		strings.ReplaceAll(action, "_", "-"),
@@ -24,34 +25,27 @@ func actionNameCandidates(plugin, action string) []string {
 	}
 }
 
-// RFC #249 Phase 4 D4 meta-tool: orchestrator-owned built-in that
-// returns the full description + parameter schema for a Tier-2 or
-// Tier-3 tool the LLM wants to call.
+// load_tools is the orchestrator-owned discovery meta-tool. The system
+// prompt renders a one-line CATALOG (name + first-line-of-description)
+// of every tool the LLM doesn't yet have in its native tools array.
+// Those tools carry only a summary — enough to know they EXIST, not
+// enough to invoke them safely. Calling
+// _meta__load_tools(names="plugin__a,plugin__b") pulls the named tools
+// into the LLM's native tools array (with full schemas) for the rest of
+// the session: each named tool gets a sticky KnownTools promotion, and
+// the rebuilt tools array on the NEXT request carries its full schema.
 //
-// Tier 2 / Tier 3 entries surface in the system prompt with only a
-// one-line summary (Tier 2) or bare name (Tier 3), which is enough
-// for the LLM to know they EXIST but not enough to invoke them
-// safely. Calling _meta.get_tool_details(name="plugin.action")
-// returns the full description + parameter schema AND persists a
-// Tier-1 promotion in the session's KnownTools so the tool stays
-// front-and-center for the rest of the session.
+// load_tools returns STATUS ONLY — a JSON string like
+// {"loaded":["plugin__a"],"ready":true} (with "failed":[...] for names
+// that didn't resolve or aren't visible to this session). It does NOT
+// return the description / parameter schema; that surfaces in the native
+// tools array on the next request via the sticky promotion. The contract
+// for the LLM is: call load_tools first, then call the loaded tools on
+// the next step — never guess parameters from a one-line summary.
 //
-// Registration is gated by ToolTiersConfig.EnableGetToolDetails (the
-// runtime-normalization step in NewWithRules upgrades the master
-// switch when the meta-tool flag is set, so an operator who only
-// enables this flag still gets the tier rendering it depends on).
-// The action is marked AlwaysInclude=true so the tier decision pins
-// it to Tier 0 regardless of RAG scoring — losing it would break
-// the LLM's only on-demand schema-expansion path.
-//
-// Known limitation (deferred from RFC §"get_tool_details meta-tool"
-// step 4): the promotion is durable across turns via KnownTools, but
-// the SAME-turn next-iteration tools array isn't rebuilt — the LLM
-// sees the description in this round-trip's tool_call_result and
-// can act on it (especially in text-tool-call mode), but the native
-// tools array refresh after a promotion is a separate follow-up
-// (would require invalidating the agent loop's cachedTools and
-// re-running buildToolDefinitions per iteration after a meta-call).
+// The action is AlwaysInclude=true (it is the core discovery mechanism,
+// so it must always be present in the tools array) and ReadOnly=true
+// (pure bookkeeping, no user-confirmation gate).
 
 // metaPluginName is the orchestrator-owned plugin namespace for
 // system meta-tools. Underscore prefix mirrors the existing
@@ -59,180 +53,203 @@ func actionNameCandidates(plugin, action string) []string {
 // configured plugin and keeps the namespace clear of collisions.
 const metaPluginName = "_meta"
 
-// metaGetToolDetails is the action name within the meta plugin. The
-// fully-qualified name LLMs see is "_meta.get_tool_details".
-const metaGetToolDetails = "get_tool_details"
+// metaLoadTools is the action name within the meta plugin. The
+// fully-qualified name LLMs see is "_meta__load_tools".
+const metaLoadTools = "load_tools"
 
-// getToolDetailsExecutor implements PluginExecutor for the meta-tool.
+// loadToolsExecutor implements PluginExecutor for the meta-tool.
 // The closure-over-Orchestrator pattern matches subprocessExecutor —
 // the handler needs registry + state-store access plus the per-call
 // session id (pulled from ctx via actor.SessionID).
-type getToolDetailsExecutor struct {
+type loadToolsExecutor struct {
 	orch *Orchestrator
 }
 
-// Execute looks up the named action in the registry, returns its
-// full description + parameter schema as plain text, and persists a
-// Tier-1 promotion so future turns keep the tool visible.
-// Validation errors are returned as ToolResult.Error so the LLM sees
-// the message and can correct its call (rather than the orchestrator
-// silently swallowing it). The promotion-write side effect is
-// best-effort: a store failure logs a warning and doesn't fail the
-// call — the LLM already has the description in this round-trip.
-func (e *getToolDetailsExecutor) Execute(ctx context.Context, call ToolCall) ToolResult {
-	name := strings.TrimSpace(call.Args["name"])
-	if name == "" {
-		return ToolResult{CallID: call.ID, Error: `missing "name" parameter (expected "plugin.action")`}
+// loadToolsResult is the status-only payload load_tools returns. loaded
+// carries the canonical FQNs that were promoted this call; failed carries
+// the names that didn't resolve or aren't visible to this session (omitted
+// when empty). ready is true whenever at least one tool loaded.
+type loadToolsResult struct {
+	Loaded []string `json:"loaded"`
+	Ready  bool     `json:"ready"`
+	Failed []string `json:"failed,omitempty"`
+}
+
+// Execute resolves each requested tool name, applies the same profile +
+// action-visibility gates the invoke path applies, and persists a sticky
+// promotion for the ones that pass. It returns a STATUS JSON string
+// (loaded / ready / failed) — never the description or parameter schema.
+// The full schema reaches the LLM via the native tools array on the next
+// request, once buildToolDefinitions picks up the promotion through
+// promotedToolSet.
+//
+// Batch contract: names is a comma-separated list (tool-call args are
+// map[string]string), with a single-name fallback. A failure on one name
+// adds it to failed and does NOT abort the rest of the batch. The
+// promotion write is best-effort: a store failure logs a warning and the
+// name still counts as loaded for this round-trip (the next request
+// rebuild simply won't see it).
+func (e *loadToolsExecutor) Execute(ctx context.Context, call ToolCall) ToolResult {
+	names := splitToolNames(call.Args["names"])
+	if len(names) == 0 {
+		names = splitToolNames(call.Args["name"])
 	}
+	if len(names) == 0 {
+		return ToolResult{CallID: call.ID, Error: `missing "names" parameter (expected a comma-separated list of "plugin__action" names)`}
+	}
+
+	sessionID := actor.SessionID(ctx)
+	allowed := allowedToolsSet(ctx, e.orch)
+	allowedPlugins := e.orch.resolveAllowedPlugins(ctx)
+
+	var loaded, failed []string
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		canonical, ok := e.resolveVisibleTool(name, allowed, allowedPlugins)
+		if !ok {
+			failed = append(failed, name)
+			continue
+		}
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		if sessionID != "" && e.orch.injectionStateStore != nil {
+			e.orch.persistToolPromotion(ctx, sessionID, canonical)
+		}
+		loaded = append(loaded, canonical)
+	}
+
+	payload := loadToolsResult{
+		Loaded: loaded,
+		Ready:  len(loaded) > 0,
+		Failed: failed,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		// Marshalling a slice of strings + two scalars cannot realistically
+		// fail; surface it as an error rather than returning malformed JSON.
+		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("load_tools: encode result failed: %v", err)}
+	}
+	return ToolResult{CallID: call.ID, Content: string(body)}
+}
+
+// resolveVisibleTool maps one LLM-supplied tool name to its canonical
+// FQN, applying the same profile gate (the INSPECTED plugin, not the
+// _meta route-through) and action-visibility gate (allowedToolsSet) the
+// invoke path applies. Returns (canonicalFQN, true) when the tool
+// resolves AND is visible to this session; ("", false) otherwise.
+//
+// The two gates are why load_tools cannot enumerate tools the operator
+// hid: the profile gate blocks plugins hidden via WhoAmI.Plugins /
+// AllowedGroups, and allowedToolsSet — the single source of truth for
+// "what this session can see" — blocks actions filtered out of the
+// per-session palette (preparer/guard actions, UserOnly actions, MCP
+// tools an upstream manifest filter excluded for this auth path).
+func (e *loadToolsExecutor) resolveVisibleTool(
+	name string, allowed map[string]struct{}, allowedPlugins cachedAllowedPlugins,
+) (string, bool) {
 	plugin, action, err := parseToolName(name)
 	if err != nil {
-		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("invalid tool name %q: %v", name, err)}
+		return "", false
 	}
 	cap, ok := e.orch.registry.GetCapability(plugin)
 	if !ok {
-		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("plugin %q not found", plugin)}
+		return "", false
 	}
-	// Profile-gate the INSPECTED plugin (not the _meta route-through, which
-	// pluginAllowed always passes). Without this, an LLM in a profile-
-	// restricted multi-tenant deployment could enumerate descriptions and
-	// parameter schemas of plugins the operator hid via WhoAmI.Plugins /
-	// AllowedGroups. Invocation is already blocked downstream by
-	// executeCall's own gate, so this is information-disclosure-only — but
-	// the disclosed surface IS what the operator's profile gate exists to
-	// hide. Mirror the "plugin not found" branch shape so denied and non-
-	// existent plugins are indistinguishable to the LLM. Denial happens
-	// before persistToolPromotion below, so the side-effect write does
-	// not fire on blocked requests.
-	if !e.orch.pluginAllowed(cap, e.orch.resolveAllowedPlugins(ctx)) {
-		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("plugin %q not found", plugin)}
+	if !e.orch.pluginAllowed(cap, allowedPlugins) {
+		return "", false
 	}
-	var found *Action
+	found := false
 	for i := range cap.Actions {
 		if cap.Actions[i].Name == action {
-			found = &cap.Actions[i]
+			found = true
 			break
 		}
 	}
-	if found == nil {
-		// Apply the same forgiving resolution as the execute path so a tool can be
-		// INSPECTED by every name it can be INVOKED by — notably a bridged MCP tool
-		// addressed as "<server>.<tool>" instead of the canonical
-		// "<server>.<server>__<tool>". Without this, get_tool_details rejects a
-		// name execute would accept, so the LLM never sees the tool's parameters
-		// and falls back to a degraded call (e.g. a single id instead of a batch).
+	if !found {
+		// Apply the same forgiving resolution as the execute path so a tool can
+		// be LOADED by every name it can be INVOKED by — notably a bridged MCP
+		// tool addressed as "<server>__<tool>" instead of the canonical
+		// "<server>__<server>__<tool>".
 		for _, candidate := range actionNameCandidates(plugin, action) {
 			for i := range cap.Actions {
 				if cap.Actions[i].Name == candidate {
-					found = &cap.Actions[i]
 					action = candidate
-					name = plugin + "." + action // canonical form for the visibility check below
+					found = true
 					break
 				}
 			}
-			if found != nil {
+			if found {
 				break
 			}
 		}
 	}
-	if found == nil {
-		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("action %q not found in plugin %q", action, plugin)}
+	if !found {
+		return "", false
 	}
-
-	// Action-level visibility gate. The plugin gate above is too coarse:
-	// cap.Actions may contain an action that the session's tools/list filter
-	// hides (e.g. an MCP backend whose manifest filter excludes admin tools
-	// per auth path, leaving them in the OpenTalon registry only because a
-	// downstream plugin instance with broader auth surfaced them on a sync).
-	// Without this gate, the LLM could fetch the full description + parameter
-	// schema of a tool it can never invoke — information disclosure around the
-	// per-session palette. Returns the same "action not found" shape as the
-	// missing-action branch so a denied lookup is indistinguishable from a
-	// non-existent action; no existence oracle for filtered tools.
-	//
-	// Same palette computation as the `allowed_tools` ContextArgProvider
-	// feeds — allowedToolsSet is the single source of truth for "what this
-	// session can see" across both the RAG-retrieval vector (preparer
-	// plugins consume the JSON form) and the direct-lookup vector here.
-	allowed := allowedToolsSet(ctx, e.orch)
-	if _, visible := allowed[name]; !visible {
-		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("action %q not found in plugin %q", action, plugin)}
+	// Re-compose the canonical FQN from the resolved (plugin, action) so the
+	// visibility check and the promotion key match allowedToolsSet's keys
+	// regardless of the separator (or dropped MCP prefix) the LLM passed in.
+	canonical := toolFQN(plugin, action)
+	if _, visible := allowed[canonical]; !visible {
+		return "", false
 	}
-
-	if sessionID := actor.SessionID(ctx); sessionID != "" && e.orch.injectionStateStore != nil {
-		e.orch.persistToolPromotion(ctx, sessionID, name)
-	}
-
-	return ToolResult{
-		CallID:  call.ID,
-		Content: renderToolDescription(plugin, *found),
-	}
+	return canonical, true
 }
 
-// renderToolDescription formats one action as a plain-text block —
-// "Tool: …", "Description: …", "Parameters: …". The LLM consumes
-// the text directly via its tool_call_result, so the format
-// prioritizes legibility over machine-parseability (it's not
-// expected to be re-parsed).
-func renderToolDescription(plugin string, a Action) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Tool: %s.%s\n\n", plugin, a.Name)
-	fmt.Fprintf(&sb, "Description:\n%s\n", a.Description)
-	if len(a.Parameters) == 0 {
-		sb.WriteString("\nParameters: (none)\n")
-		return sb.String()
+// splitToolNames splits a comma-separated tool-name list into trimmed,
+// non-empty entries. Tool-call args are map[string]string and the param
+// schema type is "string", so a batch arrives as one comma-joined value.
+func splitToolNames(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
 	}
-	sb.WriteString("\nParameters:\n")
-	for _, p := range a.Parameters {
-		req := ""
-		if p.Required {
-			req = " (required)"
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
 		}
-		fmt.Fprintf(&sb, "- %s%s: %s\n", p.Name, req, p.Description)
 	}
-	return sb.String()
+	return out
 }
 
-// persistToolPromotion upserts a Tier-1 entry for the named tool in
-// the session's KnownTools. Existing entries get their tier bumped
-// to "tier1", LRURank refreshed to the current turn (so they win
-// the next LRU sort), and Demoted=false — an explicit
-// schema-request via get_tool_details is a strong relevance signal,
-// matching the spirit of RFC §"Tool error handling" self-healing
-// even though the tool itself hasn't been invoked yet. Missing
-// entries are appended.
+// persistToolPromotion upserts a sticky entry for the named tool in the
+// session's KnownTools so future requests keep the tool in the native
+// tools array. Existing entries get LRURank refreshed to the current
+// turn (so they win the sticky-cap sort) and Demoted cleared — an
+// explicit load_tools call is a strong relevance signal. Missing entries
+// are appended.
 //
-// Defensive copy of KnownTools mirrors the Phase-3
-// applyKnowledgeDedup pattern: stores may return slices that share
-// the backing array with their internal cache (the in-process
-// fakeInjectionStateStore does, the DB-backed one in production
-// doesn't), and mutating the read snapshot in place before a write
-// could leave partially-applied state visible to a concurrent
-// reader if the write later fails. Copying once keeps the path
+// KnownTools is defensively copied before mutation: stores may return
+// slices that share the backing array with their
+// internal cache (the in-process fakeInjectionStateStore does, the
+// DB-backed one in production doesn't), and mutating the read snapshot in
+// place before a write could leave partially-applied state visible to a
+// concurrent reader if the write later fails. Copying once keeps the path
 // uniform across both store implementations.
 //
-// Read failures log a warning and return — the next turn's lazy
-// reconciliation cannot recover a lost promotion, so we surface the
-// failure for operator follow-up but don't fail the LLM's call.
-// Write failures log similarly; the LLM still has the description
-// from this round-trip.
+// Read/write failures log a warning and return — the LLM's load_tools
+// call already succeeded for this round-trip; only the durable promotion
+// is lost (the next request's rebuild won't see the tool until a
+// successful write).
 func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name string) {
 	existing, err := o.injectionStateStore.GetInjectionState(ctx, sessionID)
 	if err != nil {
-		slog.WarnContext(ctx, "get_tool_details: read state failed, promotion skipped",
+		slog.WarnContext(ctx, "load_tools: read state failed, promotion skipped",
 			"component", "orchestrator", "session", sessionID, "tool", name, "error", err)
 		return
 	}
 	updated := state.InjectionState{
-		KnownKnowledge: existing.KnownKnowledge,
-		KnownTools:     append([]state.KnownToolEntry(nil), existing.KnownTools...),
+		KnownTools: append([]state.KnownToolEntry(nil), existing.KnownTools...),
 	}
-	turn := o.turnNumberForDedup(sessionID)
+	turn := o.sessionTurnNumber(sessionID)
 	found := false
 	for i := range updated.KnownTools {
 		if updated.KnownTools[i].ToolName != name {
 			continue
 		}
-		updated.KnownTools[i].Tier = state.KnownToolTier1
 		if turn > updated.KnownTools[i].LRURank {
 			updated.KnownTools[i].LRURank = turn
 		}
@@ -243,71 +260,46 @@ func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name
 	if !found {
 		updated.KnownTools = append(updated.KnownTools, state.KnownToolEntry{
 			ToolName: name,
-			Tier:     state.KnownToolTier1,
 			LRURank:  turn,
 		})
 	}
 	if err := o.injectionStateStore.UpdateInjectionState(ctx, sessionID, updated); err != nil {
-		slog.WarnContext(ctx, "get_tool_details: write state failed, promotion will not survive turn",
+		slog.WarnContext(ctx, "load_tools: write state failed, promotion will not survive request",
 			"component", "orchestrator", "session", sessionID, "tool", name, "error", err)
-		// Skip the recent-promotions cache when the persist failed: the
-		// next preparer pass will read stale InjectionState that doesn't
-		// have this tool at LRURank=turn, so flagging the tool as
-		// "promoted via get_tool_details" in the event payload would
-		// be misleading provenance.
 		return
 	}
-	// Record the promotion in the per-session recents cache so the
-	// NEXT preparer pass can surface it via promoted_via_get_tool_details
-	// in preparer_decision. The InjectionState write above puts the
-	// tool into Tier 1 via LRU rank regardless; this cache is purely
-	// the provenance signal.
-	o.recordRecentPromotion(sessionID, name)
 }
 
-// recordRecentPromotion appends a tool name to the per-session
-// recents cache. Duplicate names within the same window are
-// deduplicated — if the LLM calls get_tool_details for the same
-// tool twice in one turn (unlikely but possible), the next preparer
-// surfaces it once.
-func (o *Orchestrator) recordRecentPromotion(sessionID, name string) {
-	o.recentToolPromotionsMu.Lock()
-	defer o.recentToolPromotionsMu.Unlock()
-	existing := o.recentToolPromotions[sessionID]
-	for _, n := range existing {
-		if n == name {
-			return
-		}
-	}
-	o.recentToolPromotions[sessionID] = append(existing, name)
-}
-
-// registerGetToolDetailsTool wires the meta-tool into the registry
-// so the LLM sees _meta.get_tool_details in its tools array and the
-// Tier 2/3 hint text becomes actionable. Called from NewWithRules
-// when ToolTiersConfig.EnableGetToolDetails is true.
-func (o *Orchestrator) registerGetToolDetailsTool() {
+// registerLoadToolsTool wires the meta-tool into the registry so the LLM
+// sees _meta__load_tools in its tools array and the system-prompt catalog
+// becomes actionable. Registered unconditionally — it is the core
+// discovery mechanism. AlwaysInclude pins it into the always-present core
+// set so the LLM always has a path to load catalog tools.
+func (o *Orchestrator) registerLoadToolsTool() {
 	cap := PluginCapability{
 		Name:        metaPluginName,
 		Description: "Orchestrator-owned meta-tools.",
 		Actions: []Action{{
-			Name:          metaGetToolDetails,
-			Description:   "Returns the full description and parameter schema for any tool listed in the system prompt's summary or other-tools sections. Calling it also promotes the tool back to the LLM's tools array for the rest of the session.",
+			Name: metaLoadTools,
+			Description: "Load one or more tools listed in the system prompt's tool catalog into your available tools so you can call them. " +
+				"The catalog shows each tool's name and a one-line summary; that summary has NO parameters. " +
+				`Call load_tools(names="plugin__action,plugin__action2") with the catalog names you need, ` +
+				"then call those tools on your NEXT step (their full parameter schemas appear in your tools then). " +
+				"Never guess a tool's parameters from its one-line summary. " +
+				`Returns a JSON status, e.g. {"loaded":["plugin__action"],"ready":true}.`,
 			AlwaysInclude: true,
-			// Pure lookup: returns a description string, mutates no
-			// user-visible state. The state change (Tier-3 → Tier-1
-			// promotion of the inspected tool) is orchestrator-internal
-			// bookkeeping for the next turn, not an action the user
-			// would want to confirm. Skipping the confirmation gate
-			// here removes a noise prompt + planner-narration LLM call
-			// every time the LLM asks for tool details.
+			// Pure bookkeeping: marks the named tools as loaded for the
+			// rest of the session and returns a status string. No
+			// user-visible state changes, so skipping the confirmation
+			// gate removes a noise prompt + planner-narration LLM call
+			// every time the LLM loads catalog tools.
 			ReadOnly: true,
 			Parameters: []Parameter{{
-				Name:        "name",
-				Description: `Fully-qualified tool name, e.g. "plugin.action".`,
+				Name:        "names",
+				Description: `Comma-separated fully-qualified tool names to load, e.g. "plugin__action,plugin__action2".`,
 				Required:    true,
 			}},
 		}},
 	}
-	_ = o.registry.Register(cap, &getToolDetailsExecutor{orch: o})
+	_ = o.registry.Register(cap, &loadToolsExecutor{orch: o})
 }

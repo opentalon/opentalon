@@ -238,11 +238,11 @@ func main() {
 	var sessionEventStore *store.SessionEventStore
 	var sessionEventWriter *store.SessionEventWriter
 	var sessionEventsRetentionCancel context.CancelFunc
-	// injectionStateStore is the orchestrator-side handle for the
-	// RFC #249 Phase 3 dedup helpers — the DB-backed SessionStore
-	// satisfies it, the in-memory fallback does not. Stays nil when
-	// the state DB is unavailable; dedup decision logic short-circuits
-	// to instrumentation_only in that case.
+	// injectionStateStore persists load_tools sticky promotion (the
+	// per-session KnownTools set) across turns — the DB-backed SessionStore
+	// satisfies it, the in-memory fallback does not. Stays nil when the
+	// state DB is unavailable; load_tools promotion is then best-effort and
+	// does not survive past the request.
 	var injectionStateStore orchestrator.InjectionStateStore
 	if dataDir != "" || cfg.State.DB.Driver == "postgres" {
 		db, err := store.Open(cfg.State.DB, dataDir)
@@ -308,17 +308,20 @@ func main() {
 		memory, sessions = newInMemoryState()
 	}
 
-	// Build the resolver for /debug capture: trace_id is derived from the
+	// Build the resolver for raw-HTTP capture: trace_id is derived from the
 	// session key and stamped onto ctx by orchestrator.Run; logger.IsSession-
 	// Debug reflects whether the session has metadata["debug"]=true. When
 	// debugStore is nil (no state DB configured) we still build a sink
 	// adapter for completeness, but the resolver short-circuits anyway.
+	// AlwaysCapture promotes capture from per-session opt-in to every session,
+	// so the raw request/response going to the LLM endpoint is always on record.
 	var debugSink provider.DebugEventSink
 	var debugResolver provider.DebugContextResolver
 	if debugWriter != nil {
+		alwaysCapture := cfg.State.Debug.AlwaysCapture
 		debugSink = &providerDebugSink{writer: debugWriter}
 		debugResolver = func(ctx context.Context) (string, string, bool) {
-			if !logger.IsSessionDebug(ctx) {
+			if !alwaysCapture && !logger.IsSessionDebug(ctx) {
 				return "", "", false
 			}
 			return actor.SessionID(ctx), logger.TraceID(ctx), true
@@ -704,30 +707,18 @@ func main() {
 		PromptSnapshotStore:     sessionEventStore, // direct/sync store; intentionally not async-buffered so a consumer reading a turn_start event can resolve its sha256 references without racing the writer. nil when state DB is not configured
 		SyncActionsPlugin:       cfg.Orchestrator.Knowledge.SyncPlugin,
 		SyncActionsAction:       cfg.Orchestrator.Knowledge.SyncAction,
-		SyncGlossaryAction:      cfg.Orchestrator.Knowledge.SyncGlossaryAction,
 		Knowledge: orchestrator.KnowledgeConfig{
 			Plugin: cfg.Orchestrator.Knowledge.Plugin,
 			Action: cfg.Orchestrator.Knowledge.Action,
 			Dir:    cfg.Orchestrator.Knowledge.Dir,
 		},
 		ShowToolCalls: cfg.Orchestrator.ShowToolCalls,
-		KnowledgeDedup: orchestrator.KnowledgeDedupConfig{
-			Enabled:                cfg.Orchestrator.Preparer.KnowledgeDedup.Enabled,
-			ReinjectScoreThreshold: cfg.Orchestrator.Preparer.KnowledgeDedup.ReinjectScoreThreshold,
-			ReinjectTopKForce:      cfg.Orchestrator.Preparer.KnowledgeDedup.ReinjectTopKForce,
-			CapPerTurn:             cfg.Orchestrator.Preparer.KnowledgeDedup.CapPerTurn,
-		},
 		// The DB-backed SessionStore satisfies InjectionStateStore via
-		// its GetInjectionState / UpdateInjectionState methods (Phase 3,
-		// migration 010). When state DB is not configured the variable
-		// stays nil and dedup short-circuits to instrumentation_only.
+		// its GetInjectionState / UpdateInjectionState methods
+		// (migration 010). When state DB is not configured the variable
+		// stays nil and load_tools sticky promotions don't persist
+		// across turns.
 		InjectionStateStore: injectionStateStore,
-		ToolTiers: orchestrator.ToolTiersConfig{
-			Enabled:              cfg.Orchestrator.Preparer.ToolTiers.Enabled,
-			Tier1Cap:             cfg.Orchestrator.Preparer.ToolTiers.Tier1Cap,
-			Tier2Cap:             cfg.Orchestrator.Preparer.ToolTiers.Tier2Cap,
-			EnableGetToolDetails: cfg.Orchestrator.Preparer.ToolTiers.EnableGetToolDetails,
-		},
 		ToolErrorHandling: orchestrator.ToolErrorHandlingConfig{
 			LoopCapPerTurn:          cfg.Orchestrator.Preparer.ToolErrorHandling.LoopCapPerTurn,
 			StickyDemotionThreshold: cfg.Orchestrator.Preparer.ToolErrorHandling.StickyDemotionThreshold,
@@ -778,7 +769,7 @@ func main() {
 	}
 
 	// Build sync locker: cluster mode uses Redis so only one pod runs
-	// SyncActions/SyncGlossary/IngestKnowledgeDir; single-instance uses noop.
+	// SyncActions/IngestKnowledgeDir; single-instance uses noop.
 	var slocker synclock.Locker
 	if cfg.Cluster.Enabled && sharedRedis != nil {
 		slocker = synclock.NewRedis(sharedRedis)
@@ -795,7 +786,7 @@ func main() {
 	// checks, audit logging, arg validation, and plugin-allowed filtering.
 	// If the sync or ingest plugin ever declares AuditLog=true, those calls
 	// will not be logged — acceptable for host-initiated startup work.
-	slog.Info("startup: syncing plugin actions and glossary to vector store", "component", "startup")
+	slog.Info("startup: syncing plugin actions and knowledge to vector store", "component", "startup")
 	acquired, err := slocker.AcquireOrWait(ctx)
 	if err != nil {
 		slog.Error("startup: sync lock failed, proceeding with local sync", "component", "startup", "error", err)
@@ -803,7 +794,6 @@ func main() {
 	}
 	if acquired {
 		orch.SyncActions(ctx)
-		orch.SyncGlossary(ctx)
 		orch.IngestKnowledgeDir(ctx)
 		slocker.ReleaseDone(ctx)
 		slog.Info("startup: sync complete (leader), orchestrator ready", "component", "startup")
