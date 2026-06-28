@@ -18,11 +18,10 @@ const (
 // capture today). Wire both from main.go to enable per-session /debug
 // capture; leaving either nil disables capture entirely.
 //
-// EventSink is the structured session-event sink. It is also currently
-// consumed only by the OpenAI-compatible provider; the Anthropic
-// provider will adopt it in a follow-up. Always-on by design — there is
-// no per-session resolver — so a non-nil sink enables capture for every
-// LLM call. A nil sink disables it.
+// EventSink is the structured session-event sink consumed by both the
+// OpenAI-compatible and the Anthropic provider. Always-on by design —
+// there is no per-session resolver — so a non-nil sink enables capture
+// for every LLM call. A nil sink disables it.
 type ProviderConfig struct {
 	ID           string
 	BaseURL      string
@@ -53,7 +52,11 @@ func FromConfig(cfg ProviderConfig) (Provider, error) {
 		}
 		return NewOpenAIProvider(cfg.ID, cfg.BaseURL, cfg.APIKey, cfg.Models, opts...), nil
 	case APIAnthropic:
-		return NewAnthropicProvider(cfg.ID, cfg.BaseURL, cfg.APIKey, cfg.Models), nil
+		opts := []AnthropicOption{}
+		if cfg.EventSink != nil {
+			opts = append(opts, WithAnthropicSessionEventSink(cfg.EventSink))
+		}
+		return NewAnthropicProvider(cfg.ID, cfg.BaseURL, cfg.APIKey, cfg.Models, opts...), nil
 	default:
 		return nil, fmt.Errorf("unknown api type %q for provider %q (supported: %s, %s)",
 			cfg.API, cfg.ID, APIOpenAI, APIAnthropic)
