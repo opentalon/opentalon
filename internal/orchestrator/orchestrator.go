@@ -227,6 +227,7 @@ type OrchestratorOpts struct {
 	SyncActionsAction       string                  // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
 	SyncGlossaryAction      string                  // optional; action name for glossary sync (e.g. "sync_glossary"); uses SyncActionsPlugin
 	Knowledge               KnowledgeConfig         // optional; knowledge directory ingestion
+	KnowledgePushEnabled    *bool                   // optional; nil/true = auto-inject retrieved knowledge (push); false = pull-only (system-prompt catalog + ask_knowledge only, no auto-injection)
 	Subprocess              SubprocessConfig        // optional; subprocess (sub-agent) support
 	OnStreamChunk           StreamChunkCallback     // optional; when set and LLM supports streaming, final answers are streamed
 	ShowToolCalls           string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
@@ -290,11 +291,11 @@ type Orchestrator struct {
 	preparers    []ContentPreparerEntry
 	formatters   []ResponseFormatterEntry // run after final response; text-in/text-out
 	guards       []ContentPreparerEntry   // subset of preparers with Guard:true; run before every LLM call
-	// preparerActions is the immutable "plugin.action" set of all
+	// preparerActions is the immutable "plugin__action" set of all
 	// preparers + guards, computed once in NewWithRules from the
 	// preparers/guards slices above (both append-once at construction).
 	// Reads happen on every Run (system prompt assembly, native tool
-	// definitions, palette computation) and every _meta.get_tool_details
+	// definitions, palette computation) and every _meta__get_tool_details
 	// call — rebuilding the map per read is wasted work that scales
 	// linearly with the LLM's appetite for meta-tool lookups.
 	preparerActions         map[string]bool
@@ -316,7 +317,7 @@ type Orchestrator struct {
 	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
 	pendingConfirmationIDs  map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
 	// recentToolPromotions holds tool names the LLM pulled in via
-	// _meta.get_tool_details since the last preparer pass on each
+	// _meta__get_tool_details since the last preparer pass on each
 	// session. persistToolPromotion appends; promotedToolsThisTurn
 	// returns + clears. In-memory only — across orchestrator restart
 	// the LRU rank persisted to InjectionState still puts the tool
@@ -337,6 +338,7 @@ type Orchestrator struct {
 	syncActionsAction      string                  // optional; action name for action sync
 	syncGlossaryAction     string                  // optional; action name for glossary sync (uses syncActionsPlugin)
 	knowledge              KnowledgeConfig         // optional; knowledge directory ingestion
+	knowledgePushEnabled   bool                    // false = pull-only: retrieved knowledge is never auto-injected; the system-prompt catalog + ask_knowledge carry the pull path. Resolved from Options.KnowledgePushEnabled (nil → true).
 	subprocessConfig       SubprocessConfig        // optional; subprocess (sub-agent) support
 	onStreamChunk          StreamChunkCallback     // optional; when set, final answers stream to caller
 	showToolCalls          string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
@@ -396,7 +398,7 @@ func resolveAllowedPluginNames(ctx context.Context, o *Orchestrator) string {
 }
 
 // allowedToolsSet returns the set of fully-qualified tool names
-// ("<plugin>.<action>") this session can call right now. Applies the same
+// ("<plugin>__<action>") this session can call right now. Applies the same
 // visibility rules as the system-prompt assembler — profile-level plugin
 // allowance, preparer/guard-action exclusion, UserOnly exclusion — but NOT
 // the preparer's RAG result (this set is the INPUT to the preparer, not its
@@ -406,7 +408,7 @@ func resolveAllowedPluginNames(ctx context.Context, o *Orchestrator) string {
 //   - resolveAllowedToolFQNs (JSON-array form for the `allowed_tools`
 //     ContextArgProvider; preparer plugins use it to constrain RAG
 //     retrieval to the session's actual tool surface)
-//   - _meta.get_tool_details action-level visibility gate (rejects
+//   - _meta__get_tool_details action-level visibility gate (rejects
 //     description lookups for actions the session cannot invoke, so the
 //     meta-tool cannot be used to enumerate tool schemas the
 //     manifest-filtering layer is hiding)
@@ -425,7 +427,7 @@ func allowedToolsSet(ctx context.Context, o *Orchestrator) map[string]struct{} {
 			continue
 		}
 		for _, action := range cap.Actions {
-			fqn := cap.Name + "." + action.Name
+			fqn := toolFQN(cap.Name, action.Name)
 			if preparerAction[fqn] || action.UserOnly {
 				continue
 			}
@@ -635,6 +637,7 @@ func NewWithRules(
 		syncActionsAction:       opts.SyncActionsAction,
 		syncGlossaryAction:      opts.SyncGlossaryAction,
 		knowledge:               opts.Knowledge,
+		knowledgePushEnabled:    opts.KnowledgePushEnabled == nil || *opts.KnowledgePushEnabled,
 		onStreamChunk:           opts.OnStreamChunk,
 		showToolCalls:           opts.ShowToolCalls,
 		knowledgeDedup:          dedupCfg,
@@ -671,7 +674,7 @@ func NewWithRules(
 				Description: "Fork a subprocess that runs its own agent loop. Use for sub-tasks like research, multi-step tool usage, or focused questions that benefit from independent reasoning.",
 				Parameters: []Parameter{
 					{Name: "task", Description: "Clear description of what the subprocess should accomplish", Required: true},
-					{Name: "tools", Description: "Comma-separated plugin.action allowlist (empty = all available tools)", Required: false},
+					{Name: "tools", Description: "Comma-separated plugin__action allowlist (empty = all available tools)", Required: false},
 					{Name: "max_iterations", Description: "Max agent loop iterations 1-10 (default 5)", Required: false},
 				},
 			}},
@@ -733,7 +736,7 @@ type preparerResponse struct {
 	SendToLLM     *bool                `json:"send_to_llm"`
 	Message       string               `json:"message"`
 	Invoke        invokeStepsUnmarshal `json:"invoke"`
-	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional: filter system prompt to these tools (format: "plugin.action")
+	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional: filter system prompt to these tools (format: "plugin__action")
 
 	KnowledgeCandidates []KnowledgeCandidate `json:"knowledge_candidates,omitempty"`
 	GlossaryCandidates  []GlossaryCandidate  `json:"glossary_candidates,omitempty"`
@@ -832,7 +835,7 @@ type PreparerCorpusMetrics struct {
 }
 
 func (o *Orchestrator) handlePreparerFailure(prep ContentPreparerEntry, details string) *RunResult {
-	name := prep.Plugin + "." + prep.Action
+	name := toolFQN(prep.Plugin, prep.Action)
 	if strings.HasPrefix(prep.Plugin, "lua:") {
 		name = prep.Plugin
 	}
@@ -1109,7 +1112,7 @@ func (o *Orchestrator) formatResponse(ctx context.Context, result *RunResult) er
 			}
 		} else {
 			if !o.registry.HasAction(f.Plugin, f.Action) {
-				err = fmt.Errorf("action %s.%s not found", f.Plugin, f.Action)
+				err = fmt.Errorf("action %s not found", toolFQN(f.Plugin, f.Action))
 			} else {
 				call := ToolCall{
 					ID:     fmt.Sprintf("formatter-%s-%s", f.Plugin, f.Action),
@@ -1132,7 +1135,7 @@ func (o *Orchestrator) formatResponse(ctx context.Context, result *RunResult) er
 		if err != nil {
 			name := f.Plugin
 			if f.Action != "" {
-				name += "." + f.Action
+				name = toolFQN(f.Plugin, f.Action)
 			}
 			if f.FailOpen {
 				slog.Warn("response formatter failed, skipping", "formatter", name, "error", err)
@@ -1405,7 +1408,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				_ = sessions.AddMessage(sessionID, provider.Message{
 					Role: provider.RoleAssistant,
 					ToolCalls: []provider.ToolCall{{
-						ID: tc.ID, Name: tc.Plugin + "." + tc.Action, Arguments: tc.Args,
+						ID: tc.ID, Name: toolFQN(tc.Plugin, tc.Action), Arguments: tc.Args,
 					}},
 				})
 				_ = sessions.AddMessage(sessionID, provider.Message{
@@ -1558,15 +1561,34 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// would race — keep the assumption documented here so the
 		// next refactor knows to guard the aggregate.
 		legacyFallback := o.knowledgeDedup.Enabled && len(prepAgg.LegacyKnowledgePlugins) > 0
-		if legacyFallback {
-			o.warnLegacyKnowledgePluginsOnce(ctx, sessionID, prepAgg.LegacyKnowledgePlugins)
-		}
-		dedupActive := !legacyFallback &&
-			o.knowledgeDedup.Enabled &&
-			o.injectionStateStore != nil &&
-			len(prepAgg.Knowledge) > 0
-		if dedupActive {
-			content = o.prepareDedupDecision(ctx, sessionID, content, &prepAgg)
+		// dedupActive is declared here (not inside the branch) because the
+		// post-emit persist step below reads it.
+		dedupActive := false
+		if !o.knowledgePushEnabled {
+			// Pull-only mode (orchestrator.knowledge.push_enabled: false):
+			// never auto-inject retrieved article bodies. Strip any
+			// [knowledge_context] a preparer embedded in the message so
+			// nothing leaks into the turn, and skip the dedup render. The
+			// system-prompt knowledge catalog (titles + slugs) and the
+			// always-on ask_knowledge tool stay in place, so the model
+			// fetches articles on demand instead of being force-fed
+			// (often mis-ranked) RAG context every turn. Retrieval still
+			// ran, so the preparer_decision event below still reports what
+			// a push WOULD have surfaced (mode=pull_only) — keeping
+			// push-vs-pull A/B observable in the session log.
+			content = stripKnowledgeContext(content)
+			prepAgg.KnowledgePushSuppressed = true
+		} else {
+			if legacyFallback {
+				o.warnLegacyKnowledgePluginsOnce(ctx, sessionID, prepAgg.LegacyKnowledgePlugins)
+			}
+			dedupActive = !legacyFallback &&
+				o.knowledgeDedup.Enabled &&
+				o.injectionStateStore != nil &&
+				len(prepAgg.Knowledge) > 0
+			if dedupActive {
+				content = o.prepareDedupDecision(ctx, sessionID, content, &prepAgg)
+			}
 		}
 		// RFC #249 Phase 4 tier decision: same activation contract as
 		// dedup (skip on legacy_fallback so the LLM sees the plugin's
@@ -1679,7 +1701,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			for i, step := range planResult.Steps {
 				note := ""
 				if step.Command != nil {
-					note = step.Command.Plugin + "." + step.Command.Action
+					note = toolFQN(step.Command.Plugin, step.Command.Action)
 				}
 				emit.EmitPlannerStep(plannerCtx, o.eventSink, emit.PlannerStepArgs{
 					StepIndex: i,
@@ -1725,7 +1747,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 							Role: provider.RoleAssistant,
 							ToolCalls: []provider.ToolCall{{
 								ID:        call.ID,
-								Name:      call.Plugin + "." + call.Action,
+								Name:      toolFQN(call.Plugin, call.Action),
 								Arguments: call.Args,
 							}},
 						})
@@ -1860,7 +1882,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 							Role: provider.RoleAssistant,
 							ToolCalls: []provider.ToolCall{{
 								ID:        call.ID,
-								Name:      call.Plugin + "." + call.Action,
+								Name:      toolFQN(call.Plugin, call.Action),
 								Arguments: call.Args,
 							}},
 						})
@@ -2011,7 +2033,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var stripRetries int
 	var toolRetries int // retries when planner expected tools but LLM didn't call any
 	var transientMessages []provider.Message
-	var lastCallSig string // "plugin.action\x00arg1=val1\x00..." for loop detection
+	var lastCallSig string // "plugin__action\x00arg1=val1\x00..." for loop detection
 	var repeatCount int
 	agentRound := 0
 	for i := 0; i < maxAgentLoopIterations; i++ {
@@ -2064,25 +2086,24 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		log.Debug("tool calling mode", "native", nativeMode, "model", req.Model)
 
-		// Enable reasoning only for pure text generation (no tools).
-		// When tools are attached, the LLM's job is picking the right
-		// tool + args — chain-of-thought adds ~10s overhead without
-		// improving tool-calling accuracy.
-		if o.supportsReasoning() && len(req.Tools) == 0 {
+		// Enable reasoning on EVERY turn the model supports it — including
+		// tool-attached turns, where the model decides WHICH tool to call.
+		// The earlier heuristic disabled reasoning whenever tools were
+		// attached (assuming chain-of-thought doesn't help tool selection and
+		// only adds ~10s/round); an A/B on gpt-oss-120b showed the opposite —
+		// with reasoning off it skipped/mis-routed tool calls (e.g. answered
+		// "no items" without ever calling list-items). We now run the
+		// configured effort ("high") on the decision turns too, without the
+		// old summary-round downgrade, so reasoning runs at max where it helps.
+		// The effort itself is left empty here; applyModelDefaults resolves it
+		// from the model config ("high") at the provider edge.
+		if o.supportsReasoning() {
 			req.Reasoning = true
 			if p := profile.FromContext(ctx); p != nil && p.BudgetTokens > 0 {
 				req.BudgetTokens = p.BudgetTokens
 			}
-			// Downgrade reasoning effort on summary rounds: when tool results
-			// are already in session, the LLM only needs to format a response,
-			// not reason deeply about which tools to call. Saves ~10s per round.
-			// Check for empty too — applyModelDefaults sets it later, so at this
-			// point it's "" which would become "high" from config.
-			if hasToolResults(sess.Messages) && (req.ReasoningEffort == "high" || req.ReasoningEffort == "") {
-				req.ReasoningEffort = "medium"
-				log.Debug("reasoning effort downgraded for summary round", "round", i+1)
-			}
 			log.Debug("reasoning enabled for LLM request", "round", i+1,
+				"has_tools", len(req.Tools) > 0,
 				"budget_tokens", req.BudgetTokens,
 				"reasoning_effort", req.ReasoningEffort)
 		}
@@ -2462,7 +2483,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 
 			if timing != nil {
-				timing.begin(fmt.Sprintf("tool_%s.%s", calls[i].Plugin, calls[i].Action))
+				timing.begin("tool_" + toolFQN(calls[i].Plugin, calls[i].Action))
 			}
 			pluginStart := time.Now()
 			toolResult := o.executeCall(ctx, calls[i])
@@ -2477,7 +2498,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
 			}
 
-			// Same-turn promotion completion for _meta.get_tool_details.
+			// Same-turn promotion completion for _meta__get_tool_details.
 			// The executor (system_tools.go) already persists a Tier-1
 			// KnownToolEntry so the NEXT turn's preparer puts the tool
 			// in the LLM's tools array. Without the rebuild below the
@@ -2504,7 +2525,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				if promoted := strings.TrimSpace(call.Args["name"]); promoted != "" {
 					ctx = withPromotedTool(ctx, promoted)
 					cachedTools = o.buildToolDefinitions(ctx)
-					log.Debug("cachedTools refreshed after _meta.get_tool_details promotion",
+					log.Debug("cachedTools refreshed after _meta__get_tool_details promotion",
 						"tool", promoted, "tools_count", len(cachedTools))
 				}
 			}
@@ -2528,7 +2549,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					Content: resp.Content,
 					ToolCalls: []provider.ToolCall{{
 						ID:        call.ID,
-						Name:      call.Plugin + "." + call.Action,
+						Name:      toolFQN(call.Plugin, call.Action),
 						Arguments: call.Args,
 					}},
 				})
@@ -2595,7 +2616,7 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 			continue
 		}
 		for _, action := range cap.Actions {
-			fqn := cap.Name + "." + action.Name
+			fqn := toolFQN(cap.Name, action.Name)
 			if preparerAction[fqn] || action.UserOnly {
 				slog.Debug("tool registration: action skipped (internal/user-only)", "tool", fqn)
 				continue
@@ -2879,7 +2900,7 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 // streamTagFilter suppresses [tool_call]...[/tool_call] blocks from streamed
 // output so channel users never see raw protocol tags. When a complete block
 // is detected, the filter emits a short human-friendly placeholder like
-// "⏳ Calling plugin.action…\n" instead of the raw protocol content.
+// "⏳ Calling plugin__action…\n" instead of the raw protocol content.
 //
 // Because tags may arrive split across multiple chunks (e.g. "[tool_" then
 // "call]"), the filter buffers partial matches against the opening/closing tag
@@ -3059,12 +3080,12 @@ func toolCallFriendlyLabel(body string) string {
 
 	var toolName string
 
-	// Format A: {"tool": "plugin.action", ...}
+	// Format A: {"tool": "plugin__action", ...}
 	var block toolCallJSON
 	if json.Unmarshal([]byte(body), &block) == nil && block.Tool != "" {
 		toolName = block.Tool
 	} else {
-		// Format B/C: first line is "plugin.action" or "plugin.action(...)"
+		// Format B/C: first line is "plugin__action" or "plugin__action(...)"
 		firstLine := body
 		if nl := strings.IndexByte(body, '\n'); nl >= 0 {
 			firstLine = body[:nl]
@@ -3073,8 +3094,9 @@ func toolCallFriendlyLabel(body string) string {
 		if paren := strings.IndexByte(firstLine, '('); paren > 0 {
 			firstLine = firstLine[:paren]
 		}
-		// Validate it looks like a tool name (has a dot or double underscore).
-		if strings.Contains(firstLine, ".") || strings.Contains(firstLine, "__") {
+		// Validate it looks like a tool name (has the canonical "__" separator
+		// or the legacy dot).
+		if strings.Contains(firstLine, "__") || strings.Contains(firstLine, ".") {
 			toolName = firstLine
 		}
 	}
@@ -3083,17 +3105,9 @@ func toolCallFriendlyLabel(body string) string {
 		return ""
 	}
 
-	// Normalise double-underscore to dot for display.
-	if !strings.Contains(toolName, ".") {
-		if dunder := strings.Index(toolName, "__"); dunder > 0 {
-			toolName = toolName[:dunder] + "." + toolName[dunder+2:]
-		}
-	}
-
-	// Split into plugin and action for a friendlier display.
-	if dot := strings.LastIndex(toolName, "."); dot > 0 && dot < len(toolName)-1 {
-		plugin := toolName[:dot]
-		action := toolName[dot+1:]
+	// Split into plugin and action for a friendlier display. parseToolName
+	// decodes both the canonical "__" and the legacy "." form.
+	if plugin, action, err := parseToolName(toolName); err == nil {
 		return fmt.Sprintf("_%s → %s…_\n", plugin, action)
 	}
 	return fmt.Sprintf("_Calling %s…_\n", toolName)
@@ -3262,7 +3276,7 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 				Role: provider.RoleAssistant,
 				ToolCalls: []provider.ToolCall{{
 					ID:        tc.ID,
-					Name:      tc.Plugin + "." + tc.Action,
+					Name:      toolFQN(tc.Plugin, tc.Action),
 					Arguments: tc.Args,
 				}},
 			})
@@ -3323,7 +3337,7 @@ func isPoisonedAssistantContent(content string) bool {
 
 // isBrokenToolCall returns true if the message contains a [tool_call] block
 // that is malformed — e.g. "[tool_call] ." or "[tool_call] " without a valid
-// JSON body or plugin.action identifier. These are LLM mistakes that should
+// JSON body or plugin__action identifier. These are LLM mistakes that should
 // be stripped from history to avoid teaching bad patterns.
 func isBrokenToolCall(content string) bool {
 	idx := strings.Index(content, "[tool_call]")
@@ -3331,18 +3345,20 @@ func isBrokenToolCall(content string) bool {
 		return false
 	}
 	after := strings.TrimSpace(content[idx+len("[tool_call]"):])
-	// A valid tool call must contain either JSON ({) or a plugin.action identifier (at least "a.b").
-	// Broken calls are typically just ".", empty, or a single word.
+	// A valid tool call must contain either JSON ({) or a plugin__action identifier
+	// (canonical "__" or the legacy "."). Broken calls are typically just ".",
+	// empty, or a single word.
 	if after == "" || after == "." {
 		return true
 	}
-	// Check for the compact format: "[tool_call] plugin.action(args)" — valid if it has a dot before any paren.
 	// Check for JSON format: "[tool_call]\n{...}\n[/tool_call]" — valid if it has a brace.
 	if strings.ContainsAny(after, "{") {
 		return false // has JSON body
 	}
-	if strings.Contains(after, ".") && len(after) > 3 {
-		return false // has plugin.action
+	// Check for the compact format: "[tool_call] plugin__action(args)" — valid if
+	// it carries a plugin/action separator ("__" canonical or "." legacy).
+	if (strings.Contains(after, "__") || strings.Contains(after, ".")) && len(after) > 3 {
+		return false // has plugin__action
 	}
 	return true
 }
@@ -3620,7 +3636,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	// Expose the caller's channel and conversation id so the LLM knows what
 	// "the current channel" means when a tool parameter says it defaults to
 	// it. Without this, small models (e.g. Haiku) fail to invoke tools like
-	// scheduler.create_job on non-Slack channels because they pattern-match
+	// scheduler__create_job on non-Slack channels because they pattern-match
 	// the Slack-shaped channel ids in other tool schemas and conclude they
 	// don't have a valid one on Telegram/Discord/etc.
 	if session := sessionDescriptor(ctx); session != "" {
@@ -3670,11 +3686,11 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		var visibleActions []Action
 		hasNonInternalActions := false
 		for _, action := range cap.Actions {
-			if preparerAction[cap.Name+"."+action.Name] || action.UserOnly {
+			if preparerAction[toolFQN(cap.Name, action.Name)] || action.UserOnly {
 				continue
 			}
 			hasNonInternalActions = true
-			if relevantToolsActive && !relevantToolSet[cap.Name+"."+action.Name] {
+			if relevantToolsActive && !relevantToolSet[toolFQN(cap.Name, action.Name)] {
 				continue
 			}
 			visibleActions = append(visibleActions, action)
@@ -3711,7 +3727,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		// tokens on accounts with many tools (e.g. 71 MCP tools).
 		if !o.supportsNativeTools() {
 			for _, action := range visibleActions {
-				fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
+				fmt.Fprintf(&sb, "- %s: %s\n", toolFQN(cap.Name, action.Name), action.Description)
 				for _, p := range action.Parameters {
 					req := ""
 					if p.Required {
@@ -3740,7 +3756,8 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		// Use alias names when available since those are what the LLM
 		// should call.
 		sb.WriteString("## Other available plugins\n")
-		sb.WriteString("These plugins have tools but none matched your current request. Use weaviate.ask_knowledge to discover their actions.\n")
+		fmt.Fprintf(&sb, "These plugins have tools but none matched your current request. Use %s to discover their actions.\n",
+			toolFQN("weaviate", "ask_knowledge"))
 		for _, name := range discoverablePlugins {
 			if aliases := o.registry.AliasesFor(name); len(aliases) > 0 {
 				for _, alias := range aliases {
@@ -3929,8 +3946,8 @@ func rejectUnknownArgs(call ToolCall, action *Action) error {
 	if len(allowedList) > 0 {
 		allowedStr = strings.Join(allowedList, ", ")
 	}
-	return fmt.Errorf("unknown argument(s) for %s.%s: %s; allowed: %s",
-		call.Plugin, call.Action, strings.Join(unknown, ", "), allowedStr)
+	return fmt.Errorf("unknown argument(s) for %s: %s; allowed: %s",
+		toolFQN(call.Plugin, call.Action), strings.Join(unknown, ", "), allowedStr)
 }
 
 func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResult {
@@ -3975,7 +3992,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		o.emitToolCallNotFound(ctx, call)
 		return ToolResult{
 			CallID: call.ID,
-			Error:  `tool call format not recognized. You MUST use this exact format: [tool_call] {"tool": "plugin.action", "args": {"key": "value"}} [/tool_call]. Do NOT use XML or any other format. Retry the same action now using the correct format.`,
+			Error:  `tool call format not recognized. You MUST use this exact format: [tool_call] {"tool": "plugin__action", "args": {"key": "value"}} [/tool_call]. Do NOT use XML or any other format. Retry the same action now using the correct format.`,
 		}
 	}
 	exec, ok := o.registry.GetExecutor(call.Plugin)
@@ -4166,13 +4183,13 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 
 // emitToolCallNotFound emits a tool_call_not_found event for an LLM-originated
 // call whose plugin or action could not be resolved. The requested-name format
-// matches the LLM's own "plugin.action" naming convention so analytics can
+// matches the LLM's own "plugin__action" naming convention so analytics can
 // group mis-spellings without re-parsing.
 func (o *Orchestrator) emitToolCallNotFound(ctx context.Context, call ToolCall) {
 	if !call.FromLLM {
 		return
 	}
-	emit.EmitToolCallNotFound(ctx, o.eventSink, call.Plugin+"."+call.Action)
+	emit.EmitToolCallNotFound(ctx, o.eventSink, toolFQN(call.Plugin, call.Action))
 }
 
 // emitParseFailedIfApplicable emits one tool_call_parse_failed event when
@@ -4513,7 +4530,7 @@ func (o *Orchestrator) RunAction(ctx context.Context, plugin, action string, arg
 
 	result := o.executeCall(ctx, call)
 	if result.Error != "" {
-		return "", fmt.Errorf("%s.%s: %s", plugin, action, result.Error)
+		return "", fmt.Errorf("%s: %s", toolFQN(plugin, action), result.Error)
 	}
 	return result.Content, nil
 }
@@ -4535,7 +4552,7 @@ func nativeToolContent(r ToolResult) string {
 
 func formatToolCallMessage(call ToolCall) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "[tool_call] %s.%s", call.Plugin, call.Action)
+	fmt.Fprintf(&sb, "[tool_call] %s", toolFQN(call.Plugin, call.Action))
 	if len(call.Args) > 0 {
 		sb.WriteString("(")
 		first := true
@@ -4606,7 +4623,7 @@ func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*Too
 func toolCallSignature(calls []ToolCall) string {
 	var sb strings.Builder
 	for _, c := range calls {
-		fmt.Fprintf(&sb, "%s.%s", c.Plugin, c.Action)
+		sb.WriteString(toolFQN(c.Plugin, c.Action))
 		// Sort keys for deterministic comparison (map iteration is random).
 		keys := make([]string, 0, len(c.Args))
 		for k := range c.Args {
@@ -4690,7 +4707,7 @@ func relevantToolsFromContext(ctx context.Context) ([]string, bool) {
 // unchanged because buildToolDefinitions already exposes every tool in
 // that mode — there's nothing to promote.
 //
-// Used by the agent-loop's `_meta.get_tool_details` follow-through to put
+// Used by the agent-loop's `_meta__get_tool_details` follow-through to put
 // the just-inspected tool into the SAME turn's tools array on the next
 // LLM round. Without it the promotion only takes effect next user turn
 // via the InjectionState LRU rank; the contract on get_tool_details's
@@ -4734,7 +4751,7 @@ func SearchQueryFromContext(ctx context.Context) string {
 }
 
 // filterCapabilitiesByRelevantTools returns only the capabilities and actions
-// that match the relevant tools list (format "plugin.action"). When set is
+// that match the relevant tools list (format "plugin__action"). When set is
 // false (no preparer ran), all capabilities are returned unchanged. When set
 // is true but the list is empty, no actions pass the filter.
 func filterCapabilitiesByRelevantTools(caps []PluginCapability, relevantTools []string, isSet bool) []PluginCapability {
@@ -4749,7 +4766,7 @@ func filterCapabilitiesByRelevantTools(caps []PluginCapability, relevantTools []
 	for _, cap := range caps {
 		var actions []Action
 		for _, a := range cap.Actions {
-			if set[cap.Name+"."+a.Name] {
+			if set[toolFQN(cap.Name, a.Name)] {
 				actions = append(actions, a)
 			}
 		}
@@ -4820,7 +4837,7 @@ func buildToolCallNudge(steps []*pipeline.Step) string {
 		if s.Command == nil || s.Command.Plugin == "" || s.Command.Action == "" {
 			continue
 		}
-		tool := s.Command.Plugin + "." + s.Command.Action
+		tool := toolFQN(s.Command.Plugin, s.Command.Action)
 		// Marshal typed args directly — JSON preserves number/bool/array
 		// shape exactly as the LLM should re-emit them in the [tool_call]
 		// block. Stringification (used for the gRPC wire) would force the
@@ -4927,7 +4944,7 @@ func (o *Orchestrator) pluginAllowed(cap PluginCapability, allowed cachedAllowed
 		// WhoAmI plugin-list gate is for external plugins and a customer's
 		// WhoAmI response never lists `_meta` because it isn't a plugin the
 		// customer owns. Special-casing here so an LLM-driven
-		// `_meta.get_tool_details` call doesn't get refused for a profile
+		// `_meta__get_tool_details` call doesn't get refused for a profile
 		// that legitimately registered the meta-tool via config.
 		return true
 	}

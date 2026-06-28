@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/opentalon/opentalon/pkg/toolfqn"
 	"gopkg.in/yaml.v3"
 )
 
@@ -38,7 +39,7 @@ type ScenarioAssert struct {
 	NoToolCalls      bool              `yaml:"no_tool_calls"`
 	ResponseContains []string          `yaml:"response_contains"`
 	ResponseNotEmpty bool              `yaml:"response_not_empty"`
-	ToolCalled       string            `yaml:"tool_called"` // "plugin.action"
+	ToolCalled       string            `yaml:"tool_called"` // "plugin__action"
 	ArgEquals        map[string]string `yaml:"arg_equals"`
 }
 
@@ -151,11 +152,12 @@ func CheckAssertions(s Scenario, result RunResult) string {
 		}
 	}
 	if s.Assert.ToolCalled != "" {
-		parts := strings.SplitN(s.Assert.ToolCalled, ".", 2)
-		if len(parts) != 2 {
+		// Decode via the shared single decoder so scenarios authored with either
+		// the canonical "plugin__action" or the legacy "plugin.action" form match.
+		wantPlugin, wantAction, err := toolfqn.Split(s.Assert.ToolCalled)
+		if err != nil {
 			return fmt.Sprintf("invalid tool_called format %q", s.Assert.ToolCalled)
 		}
-		wantPlugin, wantAction := parts[0], parts[1]
 		var found *ToolCallResult
 		for i := range result.ToolCalls {
 			if result.ToolCalls[i].Plugin == wantPlugin && result.ToolCalls[i].Action == wantAction {

@@ -73,12 +73,12 @@ func TestGetToolDetails_ReturnsFormattedDescription(t *testing.T) {
 	}
 	res := exec.Execute(context.Background(), ToolCall{
 		ID:   "c1",
-		Args: map[string]string{"name": "tools-plugin.t1"},
+		Args: map[string]string{"name": "tools-plugin__t1"},
 	})
 	if res.Error != "" {
 		t.Fatalf("expected no error, got %q", res.Error)
 	}
-	if !strings.Contains(res.Content, "Tool: tools-plugin.t1") {
+	if !strings.Contains(res.Content, "Tool: tools-plugin__t1") {
 		t.Errorf("output missing Tool: header, got: %q", res.Content)
 	}
 	if !strings.Contains(res.Content, "Tool one detailed description.") {
@@ -98,9 +98,9 @@ func TestGetToolDetails_ReturnsFormattedDescription(t *testing.T) {
 // TestGetToolDetails_ResolvesBridgedMCPBareName pins the fix for the
 // double-prefix tool name an mcp bridge produces: a server "timly" surfaces as
 // alias "timly" whose actions keep the "timly__" prefix, so the canonical FQN is
-// "timly.timly__delete-item". The execute path already forgives the dropped
+// "timly__timly__delete-item". The execute path already forgives the dropped
 // prefix; get_tool_details must too, or an LLM that addresses the tool as
-// "timly.delete-item" gets "not found", never sees the parameters, and falls
+// "timly__delete-item" gets "not found", never sees the parameters, and falls
 // back to a degraded single-record call.
 func TestGetToolDetails_ResolvesBridgedMCPBareName(t *testing.T) {
 	registry := NewToolRegistry()
@@ -127,9 +127,10 @@ func TestGetToolDetails_ResolvesBridgedMCPBareName(t *testing.T) {
 	}
 
 	for _, name := range []string{
-		"timly.timly__delete-item", // canonical
-		"timly.delete-item",        // LLM dropped the redundant server prefix
-		"timly__delete-item",       // no dot — __-split fallback
+		"timly__timly__delete-item", // canonical (split on first "__")
+		"timly__delete-item",        // LLM dropped the redundant server prefix
+		"timly.timly__delete-item",  // legacy dotted form still accepted
+		"timly.delete-item",         // legacy dotted, dropped prefix
 	} {
 		res := exec.Execute(context.Background(), ToolCall{ID: "c1", Args: map[string]string{"name": name}})
 		if res.Error != "" {
@@ -147,7 +148,7 @@ func TestGetToolDetails_ParameterlessActionRendersNoneSentinel(t *testing.T) {
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	res := exec.Execute(context.Background(), ToolCall{
 		ID:   "c1",
-		Args: map[string]string{"name": "tools-plugin.t2"},
+		Args: map[string]string{"name": "tools-plugin__t2"},
 	})
 	if !strings.Contains(res.Content, "Parameters: (none)") {
 		t.Errorf("zero-param action must render 'Parameters: (none)', got: %q", res.Content)
@@ -168,7 +169,7 @@ func TestGetToolDetails_MalformedFQNReturnsError(t *testing.T) {
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	res := exec.Execute(context.Background(), ToolCall{
 		ID:   "c1",
-		Args: map[string]string{"name": "no-dot-here"},
+		Args: map[string]string{"name": "no-separator-here"},
 	})
 	if res.Error == "" {
 		t.Errorf("malformed FQN must produce an error result")
@@ -180,7 +181,7 @@ func TestGetToolDetails_UnknownPluginReturnsError(t *testing.T) {
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	res := exec.Execute(context.Background(), ToolCall{
 		ID:   "c1",
-		Args: map[string]string{"name": "missing.action"},
+		Args: map[string]string{"name": "missing__action"},
 	})
 	if !strings.Contains(res.Error, "plugin") {
 		t.Errorf("error must mention unknown plugin, got: %q", res.Error)
@@ -192,7 +193,7 @@ func TestGetToolDetails_UnknownActionReturnsError(t *testing.T) {
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	res := exec.Execute(context.Background(), ToolCall{
 		ID:   "c1",
-		Args: map[string]string{"name": "tools-plugin.unknown"},
+		Args: map[string]string{"name": "tools-plugin__unknown"},
 	})
 	if !strings.Contains(res.Error, "action") {
 		t.Errorf("error must mention unknown action, got: %q", res.Error)
@@ -215,7 +216,7 @@ func TestGetToolDetails_ProfileRestrictedPluginReturnsNotFound(t *testing.T) {
 
 	res := exec.Execute(ctx, ToolCall{
 		ID:   "c1",
-		Args: map[string]string{"name": "tools-plugin.t1"},
+		Args: map[string]string{"name": "tools-plugin__t1"},
 	})
 
 	if res.Error == "" {
@@ -269,7 +270,7 @@ func TestGetToolDetails_FilteredByUserOnlyActionReturnsNotFound(t *testing.T) {
 
 	res := exec.Execute(ctx, ToolCall{
 		ID:   "c1",
-		Args: map[string]string{"name": "tools-plugin.user-only-tool"},
+		Args: map[string]string{"name": "tools-plugin__user-only-tool"},
 	})
 
 	if res.Error == "" {
@@ -314,7 +315,7 @@ func TestGetToolDetails_FilteredByPreparerActionReturnsNotFound(t *testing.T) {
 
 	denied := exec.Execute(ctx, ToolCall{
 		ID:   "c1",
-		Args: map[string]string{"name": "rag.prepare"},
+		Args: map[string]string{"name": "rag__prepare"},
 	})
 	if denied.Error == "" || !strings.Contains(denied.Error, "not found") {
 		t.Fatalf("preparer action lookup must be gated, got error=%q content=%q", denied.Error, denied.Content)
@@ -324,12 +325,12 @@ func TestGetToolDetails_FilteredByPreparerActionReturnsNotFound(t *testing.T) {
 	// resolve, proving the gate's granularity is action-level, not plugin-level.
 	allowed := exec.Execute(ctx, ToolCall{
 		ID:   "c2",
-		Args: map[string]string{"name": "rag.ask"},
+		Args: map[string]string{"name": "rag__ask"},
 	})
 	if allowed.Error != "" {
 		t.Fatalf("non-preparer action on the same plugin must resolve, got error=%q", allowed.Error)
 	}
-	if !strings.Contains(allowed.Content, "rag.ask") {
+	if !strings.Contains(allowed.Content, "rag__ask") {
 		t.Errorf("description rendering for allowed action regressed: %q", allowed.Content)
 	}
 }
@@ -405,7 +406,7 @@ func TestGetToolDetails_PromotionPersistsTier1Entry(t *testing.T) {
 	ctx := actor.WithSessionID(context.Background(), "s1")
 	res := exec.Execute(ctx, ToolCall{
 		ID:   "c1",
-		Args: map[string]string{"name": "tools-plugin.t1"},
+		Args: map[string]string{"name": "tools-plugin__t1"},
 	})
 	if res.Error != "" {
 		t.Fatalf("execute failed: %q", res.Error)
@@ -415,7 +416,7 @@ func TestGetToolDetails_PromotionPersistsTier1Entry(t *testing.T) {
 	}
 	var found *state.KnownToolEntry
 	for i := range store.lastWritten.KnownTools {
-		if store.lastWritten.KnownTools[i].ToolName == "tools-plugin.t1" {
+		if store.lastWritten.KnownTools[i].ToolName == "tools-plugin__t1" {
 			found = &store.lastWritten.KnownTools[i]
 			break
 		}
@@ -435,8 +436,8 @@ func TestGetToolDetails_PromotionPersistsTier1Entry(t *testing.T) {
 	// cache on read, so a single call returns the slice and a second
 	// returns empty.
 	got := orch.promotedToolsThisTurn(ctx, "s1")
-	if len(got) != 1 || got[0] != "tools-plugin.t1" {
-		t.Errorf("promotedToolsThisTurn = %v, want [tools-plugin.t1] (the just-promoted tool)", got)
+	if len(got) != 1 || got[0] != "tools-plugin__t1" {
+		t.Errorf("promotedToolsThisTurn = %v, want [tools-plugin__t1] (the just-promoted tool)", got)
 	}
 	if again := orch.promotedToolsThisTurn(ctx, "s1"); len(again) != 0 {
 		t.Errorf("promotedToolsThisTurn drain failed: second call returned %v, want empty", again)
@@ -455,15 +456,15 @@ func TestGetToolDetails_PromotionRecentsCache_DedupsRepeatedPromotion(t *testing
 	for i := 0; i < 2; i++ {
 		res := exec.Execute(ctx, ToolCall{
 			ID:   "c-repeat",
-			Args: map[string]string{"name": "tools-plugin.t1"},
+			Args: map[string]string{"name": "tools-plugin__t1"},
 		})
 		if res.Error != "" {
 			t.Fatalf("execute %d failed: %q", i, res.Error)
 		}
 	}
 	got := orch.promotedToolsThisTurn(ctx, "s1")
-	if len(got) != 1 || got[0] != "tools-plugin.t1" {
-		t.Errorf("promotedToolsThisTurn = %v, want exactly [tools-plugin.t1] (deduped)", got)
+	if len(got) != 1 || got[0] != "tools-plugin__t1" {
+		t.Errorf("promotedToolsThisTurn = %v, want exactly [tools-plugin__t1] (deduped)", got)
 	}
 }
 
@@ -489,14 +490,14 @@ func TestWithPromotedTool_AppendsWhenRelevantToolsSet(t *testing.T) {
 	// promoted tool appended. The resulting ctx is what buildToolDefinitions
 	// reads to filter — putting the promoted tool here is what makes the
 	// next agent-loop round expose it with its full schema.
-	ctx := withRelevantTools(context.Background(), []string{"timly.list-items"})
-	got := withPromotedTool(ctx, "timly.show-item")
+	ctx := withRelevantTools(context.Background(), []string{"timly__list-items"})
+	got := withPromotedTool(ctx, "timly__show-item")
 
 	tools, ok := relevantToolsFromContext(got)
 	if !ok {
 		t.Fatal("relevant-tools list missing after withPromotedTool")
 	}
-	want := []string{"timly.list-items", "timly.show-item"}
+	want := []string{"timly__list-items", "timly__show-item"}
 	if !reflect.DeepEqual(tools, want) {
 		t.Errorf("relevant tools = %v, want %v", tools, want)
 	}
@@ -507,11 +508,11 @@ func TestWithPromotedTool_DedupsExistingEntry(t *testing.T) {
 	// entry. Native-tools-mode providers de-dupe `tools[]` themselves, but
 	// keeping the list canonical avoids the round-trip and any vendor-side
 	// surprises.
-	ctx := withRelevantTools(context.Background(), []string{"timly.list-items"})
-	got := withPromotedTool(ctx, "timly.list-items")
+	ctx := withRelevantTools(context.Background(), []string{"timly__list-items"})
+	got := withPromotedTool(ctx, "timly__list-items")
 
 	tools, _ := relevantToolsFromContext(got)
-	want := []string{"timly.list-items"}
+	want := []string{"timly__list-items"}
 	if !reflect.DeepEqual(tools, want) {
 		t.Errorf("relevant tools = %v, want %v (dedup failed)", tools, want)
 	}
@@ -525,7 +526,7 @@ func TestWithPromotedTool_NoRelevantToolsSet_ReturnsCtxUnchanged(t *testing.T) {
 	// non-nil singleton and flip the filter from "show all" to "show only
 	// this one tool".
 	ctx := context.Background()
-	got := withPromotedTool(ctx, "timly.show-item")
+	got := withPromotedTool(ctx, "timly__show-item")
 
 	if _, ok := relevantToolsFromContext(got); ok {
 		t.Error("withPromotedTool must not seed a relevant-tools list when none was set")
@@ -537,18 +538,18 @@ func TestWithPromotedTool_EmptyName_ReturnsCtxUnchanged(t *testing.T) {
 	// list with a blank entry. Caller responsibility, but we double-gate
 	// at the helper since the agent-loop trigger already pulls call.Args
 	// dynamically.
-	ctx := withRelevantTools(context.Background(), []string{"timly.list-items"})
+	ctx := withRelevantTools(context.Background(), []string{"timly__list-items"})
 	got := withPromotedTool(ctx, "")
 
 	tools, _ := relevantToolsFromContext(got)
-	if !reflect.DeepEqual(tools, []string{"timly.list-items"}) {
+	if !reflect.DeepEqual(tools, []string{"timly__list-items"}) {
 		t.Errorf("empty-name promotion mutated the list: %v", tools)
 	}
 }
 
 func TestBuildToolDefinitions_AfterWithPromotedTool_IncludesPromotedToolFullSchema(t *testing.T) {
 	// Composition: relevant-tools filter narrows to [A], then a
-	// _meta.get_tool_details promotion adds [B]. The rebuild driven from
+	// _meta__get_tool_details promotion adds [B]. The rebuild driven from
 	// the agent loop calls buildToolDefinitions with the post-promotion
 	// ctx; the resulting tools-array must contain BOTH A and B (with
 	// full schemas). This is the property the native-tools-mode LLM
@@ -561,20 +562,20 @@ func TestBuildToolDefinitions_AfterWithPromotedTool_IncludesPromotedToolFullSche
 		m:      map[string]bool{"tools-plugin": true},
 		strict: false,
 	})
-	ctx = withRelevantTools(ctx, []string{"tools-plugin.t1"})
+	ctx = withRelevantTools(ctx, []string{"tools-plugin__t1"})
 
 	before := orch.buildToolDefinitions(ctx)
-	if len(before) != 1 || before[0].Name != "tools-plugin.t1" {
-		t.Fatalf("pre-promotion tools = %+v, want exactly [tools-plugin.t1]", before)
+	if len(before) != 1 || before[0].Name != "tools-plugin__t1" {
+		t.Fatalf("pre-promotion tools = %+v, want exactly [tools-plugin__t1]", before)
 	}
 
-	ctx = withPromotedTool(ctx, "tools-plugin.t2")
+	ctx = withPromotedTool(ctx, "tools-plugin__t2")
 	after := orch.buildToolDefinitions(ctx)
 	names := make([]string, len(after))
 	for i, td := range after {
 		names[i] = td.Name
 	}
-	wantNames := map[string]bool{"tools-plugin.t1": true, "tools-plugin.t2": true}
+	wantNames := map[string]bool{"tools-plugin__t1": true, "tools-plugin__t2": true}
 	if len(names) != 2 {
 		t.Fatalf("post-promotion tools = %v, want exactly 2 entries", names)
 	}
@@ -593,7 +594,7 @@ func TestGetToolDetails_PromotionClearsDemotedFlag(t *testing.T) {
 	store := &fakeInjectionStateStore{
 		store: map[string]state.InjectionState{
 			"s1": {KnownTools: []state.KnownToolEntry{
-				{ToolName: "tools-plugin.t1", Tier: state.KnownToolTier3, LRURank: 1, Demoted: true},
+				{ToolName: "tools-plugin__t1", Tier: state.KnownToolTier3, LRURank: 1, Demoted: true},
 			}},
 		},
 	}
@@ -601,10 +602,10 @@ func TestGetToolDetails_PromotionClearsDemotedFlag(t *testing.T) {
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 
 	ctx := actor.WithSessionID(context.Background(), "s1")
-	_ = exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"name": "tools-plugin.t1"}})
+	_ = exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"name": "tools-plugin__t1"}})
 
 	for _, kt := range store.lastWritten.KnownTools {
-		if kt.ToolName == "tools-plugin.t1" {
+		if kt.ToolName == "tools-plugin__t1" {
 			if kt.Demoted {
 				t.Errorf("Demoted must clear on promotion, got Demoted=true")
 			}
@@ -624,12 +625,12 @@ func TestGetToolDetails_StoreReadFailureSkipsPromotionButReturnsDescription(t *t
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 
 	ctx := actor.WithSessionID(context.Background(), "s1")
-	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"name": "tools-plugin.t1"}})
+	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"name": "tools-plugin__t1"}})
 
 	if res.Error != "" {
 		t.Errorf("read failure must NOT bubble up to LLM, got error: %q", res.Error)
 	}
-	if !strings.Contains(res.Content, "Tool: tools-plugin.t1") {
+	if !strings.Contains(res.Content, "Tool: tools-plugin__t1") {
 		t.Errorf("description must still be returned, got: %q", res.Content)
 	}
 	if store.updateCalls != 0 {
@@ -649,11 +650,11 @@ func TestGetToolDetails_PromotionWriteFailureLogsAndContinues(t *testing.T) {
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 
 	ctx := actor.WithSessionID(context.Background(), "s1")
-	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"name": "tools-plugin.t1"}})
+	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"name": "tools-plugin__t1"}})
 	if res.Error != "" {
 		t.Errorf("write failure must NOT surface to LLM, got error: %q", res.Error)
 	}
-	if !strings.Contains(res.Content, "Tool: tools-plugin.t1") {
+	if !strings.Contains(res.Content, "Tool: tools-plugin__t1") {
 		t.Errorf("description must still render, got: %q", res.Content)
 	}
 	if store.updateCalls != 1 {
@@ -668,7 +669,7 @@ func TestGetToolDetails_PromotionDoesNotRegressLRURank(t *testing.T) {
 	store := &fakeInjectionStateStore{
 		store: map[string]state.InjectionState{
 			"s1": {KnownTools: []state.KnownToolEntry{
-				{ToolName: "tools-plugin.t1", Tier: state.KnownToolTier1, LRURank: 99},
+				{ToolName: "tools-plugin__t1", Tier: state.KnownToolTier1, LRURank: 99},
 			}},
 		},
 	}
@@ -676,10 +677,10 @@ func TestGetToolDetails_PromotionDoesNotRegressLRURank(t *testing.T) {
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 
 	ctx := actor.WithSessionID(context.Background(), "s1")
-	_ = exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"name": "tools-plugin.t1"}})
+	_ = exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"name": "tools-plugin__t1"}})
 
 	for _, kt := range store.lastWritten.KnownTools {
-		if kt.ToolName == "tools-plugin.t1" && kt.LRURank < 99 {
+		if kt.ToolName == "tools-plugin__t1" && kt.LRURank < 99 {
 			t.Errorf("LRURank regressed from 99 to %d on re-promotion", kt.LRURank)
 		}
 	}
@@ -692,11 +693,11 @@ func TestGetToolDetails_NoStoreWiredStillReturnsDescription(t *testing.T) {
 	orch := newOrchForMetaTests(t, nil, true)
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	ctx := actor.WithSessionID(context.Background(), "s1")
-	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"name": "tools-plugin.t1"}})
+	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"name": "tools-plugin__t1"}})
 	if res.Error != "" {
 		t.Errorf("no-store path must not error, got: %q", res.Error)
 	}
-	if !strings.Contains(res.Content, "Tool: tools-plugin.t1") {
+	if !strings.Contains(res.Content, "Tool: tools-plugin__t1") {
 		t.Errorf("description must still render, got: %q", res.Content)
 	}
 }

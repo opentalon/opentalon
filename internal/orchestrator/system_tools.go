@@ -31,7 +31,7 @@ func actionNameCandidates(plugin, action string) []string {
 // Tier 2 / Tier 3 entries surface in the system prompt with only a
 // one-line summary (Tier 2) or bare name (Tier 3), which is enough
 // for the LLM to know they EXIST but not enough to invoke them
-// safely. Calling _meta.get_tool_details(name="plugin.action")
+// safely. Calling _meta__get_tool_details(name="plugin__action")
 // returns the full description + parameter schema AND persists a
 // Tier-1 promotion in the session's KnownTools so the tool stays
 // front-and-center for the rest of the session.
@@ -60,7 +60,7 @@ func actionNameCandidates(plugin, action string) []string {
 const metaPluginName = "_meta"
 
 // metaGetToolDetails is the action name within the meta plugin. The
-// fully-qualified name LLMs see is "_meta.get_tool_details".
+// fully-qualified name LLMs see is "_meta__get_tool_details".
 const metaGetToolDetails = "get_tool_details"
 
 // getToolDetailsExecutor implements PluginExecutor for the meta-tool.
@@ -82,7 +82,7 @@ type getToolDetailsExecutor struct {
 func (e *getToolDetailsExecutor) Execute(ctx context.Context, call ToolCall) ToolResult {
 	name := strings.TrimSpace(call.Args["name"])
 	if name == "" {
-		return ToolResult{CallID: call.ID, Error: `missing "name" parameter (expected "plugin.action")`}
+		return ToolResult{CallID: call.ID, Error: `missing "name" parameter (expected "plugin__action")`}
 	}
 	plugin, action, err := parseToolName(name)
 	if err != nil {
@@ -116,8 +116,8 @@ func (e *getToolDetailsExecutor) Execute(ctx context.Context, call ToolCall) Too
 	if found == nil {
 		// Apply the same forgiving resolution as the execute path so a tool can be
 		// INSPECTED by every name it can be INVOKED by — notably a bridged MCP tool
-		// addressed as "<server>.<tool>" instead of the canonical
-		// "<server>.<server>__<tool>". Without this, get_tool_details rejects a
+		// addressed as "<server>__<tool>" instead of the canonical
+		// "<server>__<server>__<tool>". Without this, get_tool_details rejects a
 		// name execute would accept, so the LLM never sees the tool's parameters
 		// and falls back to a degraded call (e.g. a single id instead of a batch).
 		for _, candidate := range actionNameCandidates(plugin, action) {
@@ -125,7 +125,6 @@ func (e *getToolDetailsExecutor) Execute(ctx context.Context, call ToolCall) Too
 				if cap.Actions[i].Name == candidate {
 					found = &cap.Actions[i]
 					action = candidate
-					name = plugin + "." + action // canonical form for the visibility check below
 					break
 				}
 			}
@@ -153,6 +152,10 @@ func (e *getToolDetailsExecutor) Execute(ctx context.Context, call ToolCall) Too
 	// feeds — allowedToolsSet is the single source of truth for "what this
 	// session can see" across both the RAG-retrieval vector (preparer
 	// plugins consume the JSON form) and the direct-lookup vector here.
+	// Re-compose the canonical FQN from the resolved (plugin, action) so the
+	// visibility check and the promotion key match allowedToolsSet's keys
+	// regardless of the separator (or dropped MCP prefix) the LLM passed in.
+	name = toolFQN(plugin, action)
 	allowed := allowedToolsSet(ctx, e.orch)
 	if _, visible := allowed[name]; !visible {
 		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("action %q not found in plugin %q", action, plugin)}
@@ -175,7 +178,7 @@ func (e *getToolDetailsExecutor) Execute(ctx context.Context, call ToolCall) Too
 // expected to be re-parsed).
 func renderToolDescription(plugin string, a Action) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Tool: %s.%s\n\n", plugin, a.Name)
+	fmt.Fprintf(&sb, "Tool: %s\n\n", toolFQN(plugin, a.Name))
 	fmt.Fprintf(&sb, "Description:\n%s\n", a.Description)
 	if len(a.Parameters) == 0 {
 		sb.WriteString("\nParameters: (none)\n")
@@ -283,7 +286,7 @@ func (o *Orchestrator) recordRecentPromotion(sessionID, name string) {
 }
 
 // registerGetToolDetailsTool wires the meta-tool into the registry
-// so the LLM sees _meta.get_tool_details in its tools array and the
+// so the LLM sees _meta__get_tool_details in its tools array and the
 // Tier 2/3 hint text becomes actionable. Called from NewWithRules
 // when ToolTiersConfig.EnableGetToolDetails is true.
 func (o *Orchestrator) registerGetToolDetailsTool() {
@@ -304,7 +307,7 @@ func (o *Orchestrator) registerGetToolDetailsTool() {
 			ReadOnly: true,
 			Parameters: []Parameter{{
 				Name:        "name",
-				Description: `Fully-qualified tool name, e.g. "plugin.action".`,
+				Description: `Fully-qualified tool name, e.g. "plugin__action".`,
 				Required:    true,
 			}},
 		}},

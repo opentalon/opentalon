@@ -539,7 +539,7 @@ func (o *Orchestrator) listProfileToolNames(ctx context.Context, alwaysIncludeOn
 			if alwaysIncludeOnly && !action.AlwaysInclude {
 				continue
 			}
-			fqn := cap.Name + "." + action.Name
+			fqn := toolFQN(cap.Name, action.Name)
 			if preparerAction[fqn] || action.UserOnly {
 				continue
 			}
@@ -559,16 +559,16 @@ func (o *Orchestrator) listProfileToolNames(ctx context.Context, alwaysIncludeOn
 func preparerActionSet(preparers, guards []ContentPreparerEntry) map[string]bool {
 	out := make(map[string]bool, len(preparers)+len(guards))
 	for _, prep := range preparers {
-		out[prep.Plugin+"."+prep.Action] = true
+		out[toolFQN(prep.Plugin, prep.Action)] = true
 	}
 	for _, g := range guards {
-		out[g.Plugin+"."+g.Action] = true
+		out[toolFQN(g.Plugin, g.Action)] = true
 	}
 	return out
 }
 
 // promotedToolsThisTurn returns the set of tool fqns the LLM pulled
-// into Tier 1 via _meta.get_tool_details since the prior preparer
+// into Tier 1 via _meta__get_tool_details since the prior preparer
 // pass on this session. Drained — once returned, the recents cache
 // is cleared for that session so the next preparer pass doesn't
 // see them again. (The InjectionState entry written by

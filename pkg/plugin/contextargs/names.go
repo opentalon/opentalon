@@ -24,7 +24,7 @@ const SessionID = "session_id"
 const AllowedPlugins = "allowed_plugins"
 
 // AllowedTools is the sorted JSON array of fully-qualified tool names
-// ("<plugin>.<action>") the current session can invoke right now —
+// ("<plugin>__<action>") the current session can invoke right now —
 // profile-level plugin allowance + preparer-action exclusion +
 // UserOnly exclusion. Always emitted; "[]" is a legitimate value
 // meaning "the session can call zero tools" (fail-closed). Plugins

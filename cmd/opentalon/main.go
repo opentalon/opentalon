@@ -308,17 +308,20 @@ func main() {
 		memory, sessions = newInMemoryState()
 	}
 
-	// Build the resolver for /debug capture: trace_id is derived from the
+	// Build the resolver for raw-HTTP capture: trace_id is derived from the
 	// session key and stamped onto ctx by orchestrator.Run; logger.IsSession-
 	// Debug reflects whether the session has metadata["debug"]=true. When
 	// debugStore is nil (no state DB configured) we still build a sink
 	// adapter for completeness, but the resolver short-circuits anyway.
+	// AlwaysCapture promotes capture from per-session opt-in to every session,
+	// so the raw request/response going to the LLM endpoint is always on record.
 	var debugSink provider.DebugEventSink
 	var debugResolver provider.DebugContextResolver
 	if debugWriter != nil {
+		alwaysCapture := cfg.State.Debug.AlwaysCapture
 		debugSink = &providerDebugSink{writer: debugWriter}
 		debugResolver = func(ctx context.Context) (string, string, bool) {
-			if !logger.IsSessionDebug(ctx) {
+			if !alwaysCapture && !logger.IsSessionDebug(ctx) {
 				return "", "", false
 			}
 			return actor.SessionID(ctx), logger.TraceID(ctx), true
@@ -710,7 +713,8 @@ func main() {
 			Action: cfg.Orchestrator.Knowledge.Action,
 			Dir:    cfg.Orchestrator.Knowledge.Dir,
 		},
-		ShowToolCalls: cfg.Orchestrator.ShowToolCalls,
+		KnowledgePushEnabled: cfg.Orchestrator.Knowledge.PushEnabled,
+		ShowToolCalls:        cfg.Orchestrator.ShowToolCalls,
 		KnowledgeDedup: orchestrator.KnowledgeDedupConfig{
 			Enabled:                cfg.Orchestrator.Preparer.KnowledgeDedup.Enabled,
 			ReinjectScoreThreshold: cfg.Orchestrator.Preparer.KnowledgeDedup.ReinjectScoreThreshold,

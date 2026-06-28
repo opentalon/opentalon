@@ -126,7 +126,7 @@ func (o *Orchestrator) recordToolOutcome(ctx context.Context, sessionID string, 
 	if !o.toolTiers.Enabled || sessionID == "" {
 		return nil
 	}
-	fqn := call.Plugin + "." + call.Action
+	fqn := toolFQN(call.Plugin, call.Action)
 	st := o.toolErrorTracker.stateFor(sessionID)
 	turnCount, sessionCount, wasFailing := st.record(o.turnNumberForDedup(sessionID), fqn, result.Error == "")
 

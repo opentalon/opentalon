@@ -26,24 +26,24 @@ func TestRenderTier2Section_NameAndOneLinerPerEntry(t *testing.T) {
 		},
 	}, &fixedResultExecutor{content: ""})
 
-	d := &toolTierDecision{Tier2: []string{"p.a", "p.b"}}
+	d := &toolTierDecision{Tier2: []string{"p__a", "p__b"}}
 	got := renderTier2Section(d, registry)
 
 	if !strings.Contains(got, "## Tool catalog — name + one-line summary") {
 		t.Errorf("missing header, got: %q", got)
 	}
-	if !strings.Contains(got, "- p.a: First action description.") {
-		t.Errorf("missing first-line summary for p.a, got: %q", got)
+	if !strings.Contains(got, "- p__a: First action description.") {
+		t.Errorf("missing first-line summary for p__a, got: %q", got)
 	}
 	// Second paragraph must be dropped.
-	if !strings.Contains(got, "- p.b: Second action.") {
-		t.Errorf("missing first-line summary for p.b, got: %q", got)
+	if !strings.Contains(got, "- p__b: Second action.") {
+		t.Errorf("missing first-line summary for p__b, got: %q", got)
 	}
 	if strings.Contains(got, "second paragraph") {
 		t.Errorf("second paragraph must be stripped from Tier 2 summary, got: %q", got)
 	}
-	if !strings.Contains(got, "_meta.get_tool_details") {
-		t.Errorf("Tier 2 section must mention _meta.get_tool_details, got: %q", got)
+	if !strings.Contains(got, "_meta__get_tool_details") {
+		t.Errorf("Tier 2 section must mention _meta__get_tool_details, got: %q", got)
 	}
 }
 
@@ -52,12 +52,12 @@ func TestRenderTier2Section_FQNWithoutDescriptionStillListed(t *testing.T) {
 	// registry change between tier decision and prompt build) should
 	// still render as a bare name — no panic, no empty trailing colon.
 	registry := NewToolRegistry()
-	d := &toolTierDecision{Tier2: []string{"unknown.x"}}
+	d := &toolTierDecision{Tier2: []string{"unknown__x"}}
 	got := renderTier2Section(d, registry)
-	if !strings.Contains(got, "- unknown.x\n") {
+	if !strings.Contains(got, "- unknown__x\n") {
 		t.Errorf("missing-description fqn should render as bare name, got: %q", got)
 	}
-	if strings.Contains(got, "- unknown.x: \n") {
+	if strings.Contains(got, "- unknown__x: \n") {
 		t.Errorf("must not render empty trailing colon, got: %q", got)
 	}
 }
@@ -73,7 +73,7 @@ func TestRenderTier3Section_EmptyTierReturnsEmptyString(t *testing.T) {
 
 func TestRenderTier3Section_GroupsByPluginSorted(t *testing.T) {
 	d := &toolTierDecision{Tier3: []string{
-		"timly.list-items", "timly.show-item", "weather.forecast", "timly.create-ticket",
+		"timly__list-items", "timly__show-item", "weather__forecast", "timly__create-ticket",
 	}}
 	got := renderTier3Section(d)
 
@@ -101,7 +101,7 @@ func TestRenderTier3Section_SkipsMalformedFQNs(t *testing.T) {
 	// "bareName" without a plugin separator can't be parsed. Skipped
 	// silently — Tier 3 is best-effort context for the LLM, not a
 	// safety surface.
-	d := &toolTierDecision{Tier3: []string{"bareName", "p.a"}}
+	d := &toolTierDecision{Tier3: []string{"bareName", "p__a"}}
 	got := renderTier3Section(d)
 	if !strings.Contains(got, "- p: a") {
 		t.Errorf("valid entry missing, got: %q", got)
@@ -134,7 +134,7 @@ func TestToolTierDecisionContextRoundTrip(t *testing.T) {
 	if got := toolTierDecisionFromContext(ctx); got != nil {
 		t.Errorf("empty ctx must yield nil, got %+v", got)
 	}
-	d := &toolTierDecision{Tier1: []string{"a.x"}}
+	d := &toolTierDecision{Tier1: []string{"a__x"}}
 	ctx = withToolTierDecision(ctx, d)
 	got := toolTierDecisionFromContext(ctx)
 	if got != d {
@@ -143,7 +143,7 @@ func TestToolTierDecisionContextRoundTrip(t *testing.T) {
 }
 
 func TestGroupTier3ByPlugin(t *testing.T) {
-	got := groupTier3ByPlugin([]string{"a.x", "a.y", "b.z", "malformed"})
+	got := groupTier3ByPlugin([]string{"a__x", "a__y", "b__z", "malformed"})
 	if len(got["a"]) != 2 || got["a"][0] != "x" || got["a"][1] != "y" {
 		t.Errorf("plugin a should have [x, y], got %v", got["a"])
 	}

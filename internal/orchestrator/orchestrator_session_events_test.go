@@ -239,15 +239,15 @@ func TestOrchestrator_TurnStart_AvailableToolsNativeMode_Populated(t *testing.T)
 	for _, tr := range p.AvailableTools {
 		got[tr.Name] = tr.DescSHA256
 	}
-	if _, ok := got["gitlab.analyze_code"]; !ok {
-		t.Errorf("gitlab.analyze_code missing from AvailableTools; got: %v", got)
+	if _, ok := got["gitlab__analyze_code"]; !ok {
+		t.Errorf("gitlab__analyze_code missing from AvailableTools; got: %v", got)
 	}
-	if _, ok := got["jira.create_issue"]; !ok {
-		t.Errorf("jira.create_issue missing from AvailableTools; got: %v", got)
+	if _, ok := got["jira__create_issue"]; !ok {
+		t.Errorf("jira__create_issue missing from AvailableTools; got: %v", got)
 	}
 	wantDesc := sha256.Sum256([]byte("Analyze code for issues"))
-	if got["gitlab.analyze_code"] != hex.EncodeToString(wantDesc[:]) {
-		t.Errorf("gitlab.analyze_code desc_sha256 = %s, want %s", got["gitlab.analyze_code"], hex.EncodeToString(wantDesc[:]))
+	if got["gitlab__analyze_code"] != hex.EncodeToString(wantDesc[:]) {
+		t.Errorf("gitlab__analyze_code desc_sha256 = %s, want %s", got["gitlab__analyze_code"], hex.EncodeToString(wantDesc[:]))
 	}
 }
 
@@ -257,8 +257,8 @@ func TestOrchestrator_TurnStartFiresOnce_AcrossMultiRoundAgentLoop(t *testing.T)
 	// surrounding model_id/system_prompt/tool catalogue don't change
 	// mid-turn, so re-emitting would be noise.
 	llm := &fakeLLM{responses: []string{
-		"[tool] gitlab.analyze_code",
-		"[tool] jira.create_issue",
+		"[tool] gitlab__analyze_code",
+		"[tool] jira__create_issue",
 		"Done!",
 	}}
 	callNum := 0
@@ -722,8 +722,8 @@ func TestOrchestrator_ExecuteCall_EmitsExtractedAndResult_NativeMode(t *testing.
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
 			ID:   "call-1",
-			Name: "gitlab.analyze_code",
-			// gitlab.analyze_code declares no Parameters in the test fixture,
+			Name: "gitlab__analyze_code",
+			// gitlab__analyze_code declares no Parameters in the test fixture,
 			// so any args would trip rejectUnknownArgs. Leave empty for the
 			// happy-path assertion.
 			Arguments: map[string]string{},
@@ -752,7 +752,7 @@ func TestOrchestrator_ExecuteCall_EmitsExtractedAndResult_NativeMode(t *testing.
 		t.Errorf("CallID = %q, want call-1", got.CallID)
 	}
 	if got.Plugin != "gitlab" || got.Action != "analyze_code" {
-		t.Errorf("Plugin/Action = %q/%q, want gitlab/analyze_code", got.Plugin, got.Action)
+		t.Errorf("Plugin/Action = %q/%q, want gitlab__analyze_code", got.Plugin, got.Action)
 	}
 
 	results := findToolCallResultPayloads(t, sink.snapshot())
@@ -781,7 +781,7 @@ func TestOrchestrator_ExecuteCall_EmitsExtractedAndResult_TextMode(t *testing.T)
 				ID:     "call-text-1",
 				Plugin: "gitlab",
 				Action: "analyze_code",
-				// gitlab.analyze_code declares no Parameters; args would
+				// gitlab__analyze_code declares no Parameters; args would
 				// trip rejectUnknownArgs. Happy-path assertion uses none.
 				Args: map[string]string{},
 			}}
@@ -968,8 +968,8 @@ func TestOrchestrator_ExecuteCall_EmitsNotFound_UnknownPlugin(t *testing.T) {
 	if err := json.Unmarshal(notFound[0].Payload, &p); err != nil {
 		t.Fatal(err)
 	}
-	if p.RequestedName != "no-such-plugin.anything" {
-		t.Errorf("RequestedName = %q, want no-such-plugin.anything", p.RequestedName)
+	if p.RequestedName != "no-such-plugin__anything" {
+		t.Errorf("RequestedName = %q, want no-such-plugin__anything", p.RequestedName)
 	}
 	// A tool_call_result MUST NOT fire on the not-found path (no dispatch happened).
 	if len(findToolCallResultPayloads(t, evs)) != 0 {
@@ -1316,7 +1316,7 @@ func TestOrchestrator_ParseFailed_NotEmittedOnSuccessfulParse(t *testing.T) {
 	// entry → no event.
 	sink := &recordingEventSink{}
 	llm := &fakeLLM{responses: []string{
-		`[tool_call]{"tool": "gitlab.analyze_code", "args": {}}[/tool_call]`,
+		`[tool_call]{"tool": "gitlab__analyze_code", "args": {}}[/tool_call]`,
 		"summary after tool call",
 	}}
 	orch, sessID := setupOrchestratorWithSink(llm, DefaultParser, sink)
@@ -1545,8 +1545,8 @@ func TestOrchestrator_Planner_EmitsStepEventsOnPipelinePlan(t *testing.T) {
 		if p.StepKind != "tool" {
 			t.Errorf("step[%d].StepKind = %q, want tool", i, p.StepKind)
 		}
-		if p.Note != "gitlab.analyze_code" {
-			t.Errorf("step[%d].Note = %q, want gitlab.analyze_code", i, p.Note)
+		if p.Note != "gitlab__analyze_code" {
+			t.Errorf("step[%d].Note = %q, want gitlab__analyze_code", i, p.Note)
 		}
 	}
 }
@@ -2066,7 +2066,7 @@ func TestOrchestrator_Confirmation_ToolCallRequiresConfirmation_EmitsRequested(t
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
 			ID:        "tc-1",
-			Name:      "gitlab.analyze_code",
+			Name:      "gitlab__analyze_code",
 			Arguments: map[string]string{},
 		}},
 		textAfter: "summary",
@@ -2127,7 +2127,7 @@ func TestOrchestrator_Confirmation_ReadOnlyAction_SkipsPrompt(t *testing.T) {
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
 			ID:        "tc-readonly",
-			Name:      "gitlab.list_issues",
+			Name:      "gitlab__list_issues",
 			Arguments: map[string]string{},
 		}},
 		textAfter: "here are your issues",
@@ -2233,7 +2233,7 @@ func TestOrchestrator_Confirmation_NonReadOnlyAction_StillPrompts(t *testing.T) 
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
 			ID:        "tc-write",
-			Name:      "gitlab.create_issue",
+			Name:      "gitlab__create_issue",
 			Arguments: map[string]string{},
 		}},
 		textAfter: "done",
@@ -2338,7 +2338,7 @@ func TestParentID_ToolCallResultParentsExtracted(t *testing.T) {
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
 			ID:        "call-1",
-			Name:      "gitlab.analyze_code",
+			Name:      "gitlab__analyze_code",
 			Arguments: map[string]string{},
 		}},
 		textAfter: "done",
@@ -2409,7 +2409,7 @@ func TestParentID_ConfirmationResolvedParentsRequested_ToolCall(t *testing.T) {
 	sink := &recordingEventSink{}
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
-			ID: "tc-7", Name: "gitlab.analyze_code", Arguments: map[string]string{},
+			ID: "tc-7", Name: "gitlab__analyze_code", Arguments: map[string]string{},
 		}},
 		textAfter: "after-confirm-summary",
 	}
@@ -2524,7 +2524,7 @@ func TestParentID_ToolCallExtractedParentsLLMResponse(t *testing.T) {
 		sink: sink,
 		toolCalls: []provider.ToolCall{{
 			ID:        "tc-9",
-			Name:      "gitlab.analyze_code",
+			Name:      "gitlab__analyze_code",
 			Arguments: map[string]string{},
 		}},
 		textAfter: "done",
@@ -2556,7 +2556,7 @@ func TestParentID_EveryEventHasID(t *testing.T) {
 	sink := &recordingEventSink{}
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
-			ID: "x", Name: "gitlab.analyze_code", Arguments: map[string]string{},
+			ID: "x", Name: "gitlab__analyze_code", Arguments: map[string]string{},
 		}},
 		textAfter: "done",
 	}
@@ -2594,7 +2594,7 @@ func TestOrchestrator_PreparerPhase_EmitsRetrievalAndDecision(t *testing.T) {
 			{"term": "ticket", "content": "definition", "score": 0.71}
 		],
 		"tool_candidates": [
-			{"tool_name": "gitlab.analyze_code", "score": 0.88, "position_in_results": 0}
+			{"tool_name": "gitlab__analyze_code", "score": 0.88, "position_in_results": 0}
 		],
 		"retrieval_metrics": {
 			"knowledge": {"search_text_source": "enriched", "top_k": 5, "min_score": 0.45, "latency_ms": 142},
@@ -2697,7 +2697,7 @@ func TestOrchestrator_PreparerPhase_EmitsRetrievalAndDecision(t *testing.T) {
 	if err := json.Unmarshal(tr.Payload, &trPayload); err != nil {
 		t.Fatalf("unmarshal tool_retrieval payload: %v", err)
 	}
-	if len(trPayload.Hits) != 1 || trPayload.Hits[0].ToolName != "gitlab.analyze_code" {
+	if len(trPayload.Hits) != 1 || trPayload.Hits[0].ToolName != "gitlab__analyze_code" {
 		t.Errorf("tool_retrieval hits mismatch: %+v", trPayload.Hits)
 	}
 	if trPayload.LatencyMS != 98 || trPayload.TopK != 8 {
@@ -2728,7 +2728,7 @@ func TestOrchestrator_PreparerPhase_EmitsRetrievalAndDecision(t *testing.T) {
 		t.Errorf("preparer_decision Knowledge.InjectedBytes = %d, want %d",
 			pdPayload.Knowledge.InjectedBytes, len("body-a")+len("body-bb"))
 	}
-	if len(pdPayload.Tools.Tier1New) != 1 || pdPayload.Tools.Tier1New[0] != "gitlab.analyze_code" {
+	if len(pdPayload.Tools.Tier1New) != 1 || pdPayload.Tools.Tier1New[0] != "gitlab__analyze_code" {
 		t.Errorf("preparer_decision Tools.Tier1New = %v", pdPayload.Tools.Tier1New)
 	}
 }
@@ -2766,7 +2766,7 @@ func TestOrchestrator_PreparerPhase_LegacyPluginNoCandidates(t *testing.T) {
 	preparerJSON := `{
 		"send_to_llm": true,
 		"message": "do the thing",
-		"relevant_tools": ["gitlab.analyze_code", "jira.create_issue"]
+		"relevant_tools": ["gitlab__analyze_code", "jira__create_issue"]
 	}`
 
 	sink := &recordingEventSink{}
@@ -3551,15 +3551,15 @@ const preparerJSONForTierTests = `{
 		"send_to_llm": true,
 		"message": "user question",
 		"tool_candidates": [
-			{"tool_name": "tools-plugin.t1", "score": 0.95},
-			{"tool_name": "tools-plugin.t2", "score": 0.85},
-			{"tool_name": "tools-plugin.t3", "score": 0.75},
-			{"tool_name": "tools-plugin.t4", "score": 0.55}
+			{"tool_name": "tools-plugin__t1", "score": 0.95},
+			{"tool_name": "tools-plugin__t2", "score": 0.85},
+			{"tool_name": "tools-plugin__t3", "score": 0.75},
+			{"tool_name": "tools-plugin__t4", "score": 0.55}
 		]
 	}`
 
 // registerTierTestPlugins wires a preparer (rag-plugin.prepare) +
-// five callable tools (tools-plugin.t1..t5) into the registry. The
+// five callable tools (tools-plugin__t1..t5) into the registry. The
 // preparer JSON returns ranked candidates that name t1..t4 so a tier
 // decision can split them across Tier 1 / Tier 2 / Tier 3.
 func registerTierTestPlugins(t *testing.T, registry *ToolRegistry, prepJSON string) {
@@ -3628,7 +3628,7 @@ func TestOrchestrator_PreparerPhase_ToolTiersEnabledEmitsTieredBlock(t *testing.
 	if tb.Tier1SizeAfter != 2 {
 		t.Errorf("Tier1SizeAfter = %d, want 2", tb.Tier1SizeAfter)
 	}
-	wantT1New := []string{"tools-plugin.t1", "tools-plugin.t2"}
+	wantT1New := []string{"tools-plugin__t1", "tools-plugin__t2"}
 	gotT1New := append([]string(nil), tb.Tier1New...)
 	sort.Strings(gotT1New)
 	sort.Strings(wantT1New)
@@ -3704,8 +3704,8 @@ func TestOrchestrator_PreparerPhase_ToolTiersSecondTurnLRUCarriesOver(t *testing
 		"send_to_llm": true,
 		"message": "q",
 		"tool_candidates": [
-			{"tool_name": "tools-plugin.t1", "score": 0.9},
-			{"tool_name": "tools-plugin.t2", "score": 0.8}
+			{"tool_name": "tools-plugin__t1", "score": 0.9},
+			{"tool_name": "tools-plugin__t2", "score": 0.8}
 		]
 	}`)
 	memory := state.NewMemoryStore("")
@@ -3736,8 +3736,8 @@ func TestOrchestrator_PreparerPhase_ToolTiersSecondTurnLRUCarriesOver(t *testing
 		"send_to_llm": true,
 		"message": "q2",
 		"tool_candidates": [
-			{"tool_name": "tools-plugin.t3", "score": 0.9},
-			{"tool_name": "tools-plugin.t4", "score": 0.8}
+			{"tool_name": "tools-plugin__t3", "score": 0.9},
+			{"tool_name": "tools-plugin__t4", "score": 0.8}
 		]
 	}`)
 	// Re-create the orchestrator with the new registry but the SAME
@@ -3768,7 +3768,7 @@ func TestOrchestrator_PreparerPhase_ToolTiersSecondTurnLRUCarriesOver(t *testing
 	if err := json.Unmarshal(turn2.Payload, &p); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	wantEvicted := []string{"tools-plugin.t1", "tools-plugin.t2"}
+	wantEvicted := []string{"tools-plugin__t1", "tools-plugin__t2"}
 	gotEvicted := append([]string(nil), p.Tools.Tier1EvictedToTier3...)
 	sort.Strings(gotEvicted)
 	sort.Strings(wantEvicted)
@@ -3777,7 +3777,7 @@ func TestOrchestrator_PreparerPhase_ToolTiersSecondTurnLRUCarriesOver(t *testing
 	}
 	gotT1New := append([]string(nil), p.Tools.Tier1New...)
 	sort.Strings(gotT1New)
-	wantT1New := []string{"tools-plugin.t3", "tools-plugin.t4"}
+	wantT1New := []string{"tools-plugin__t3", "tools-plugin__t4"}
 	if !reflect.DeepEqual(gotT1New, wantT1New) {
 		t.Errorf("turn 2 Tier1New = %v, want %v", gotT1New, wantT1New)
 	}
@@ -3837,9 +3837,9 @@ func TestOrchestrator_PreparerPhase_ToolTiersSystemPromptHasTier2AndTier3Section
 	if !strings.Contains(sysMsg, "t4") || !strings.Contains(sysMsg, "t5") {
 		t.Errorf("Tier 3 missing t4 / t5, got:\n%s", sysMsg)
 	}
-	// Tier 2 has exactly one entry (Tier2Cap=1): tools-plugin.t3.
-	if !strings.Contains(sysMsg, "tools-plugin.t3") {
-		t.Errorf("Tier 2 must list tools-plugin.t3, got:\n%s", sysMsg)
+	// Tier 2 has exactly one entry (Tier2Cap=1): tools-plugin__t3.
+	if !strings.Contains(sysMsg, "tools-plugin__t3") {
+		t.Errorf("Tier 2 must list tools-plugin__t3, got:\n%s", sysMsg)
 	}
 }
 
@@ -3893,7 +3893,7 @@ func TestOrchestrator_PreparerPhase_ToolTiersWithDedupSingleStateWrite(t *testin
 			{"article_id": "kb_a", "content": "body", "content_sha256": "sha-a", "score": 0.9}
 		],
 		"tool_candidates": [
-			{"tool_name": "tools-plugin.t1", "score": 0.95}
+			{"tool_name": "tools-plugin__t1", "score": 0.95}
 		]
 	}`
 	sink := &recordingEventSink{}

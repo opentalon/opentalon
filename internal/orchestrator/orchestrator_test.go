@@ -364,7 +364,7 @@ func TestOrchestratorSessionHistoryGrows(t *testing.T) {
 func TestFormatToolCallMessageNoArgs(t *testing.T) {
 	call := ToolCall{ID: "1", Plugin: "gitlab", Action: "list_repos"}
 	got := formatToolCallMessage(call)
-	want := "[tool_call] gitlab.list_repos"
+	want := "[tool_call] gitlab__list_repos"
 	if got != want {
 		t.Errorf("formatToolCallMessage = %q, want %q", got, want)
 	}
@@ -674,7 +674,7 @@ func TestGuardMissingPluginBlocksByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Response, "Request blocked: guard nonexistent-guard.sanitize failed.") {
+	if !strings.Contains(result.Response, "Request blocked: guard nonexistent-guard__sanitize failed.") {
 		t.Errorf("Response = %q, want blocked response when guard plugin is missing", result.Response)
 	}
 	if llm.callCount != 0 {
@@ -715,7 +715,7 @@ func TestGuardErrorBlocksByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Response, "Request blocked: guard guard-plugin.sanitize failed.") {
+	if !strings.Contains(result.Response, "Request blocked: guard guard-plugin__sanitize failed.") {
 		t.Errorf("Response = %q, want blocked response when guard errors", result.Response)
 	}
 	if llm.callCount != 0 {
@@ -1128,7 +1128,7 @@ func TestPreparerErrorBlocksByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Response, "Request blocked: guard preparer-plugin.prepare failed.") {
+	if !strings.Contains(result.Response, "Request blocked: guard preparer-plugin__prepare failed.") {
 		t.Errorf("Response = %q, want blocked response", result.Response)
 	}
 	if llm.callCount != 0 {
@@ -1420,10 +1420,10 @@ func TestUserOnlyActionHiddenFromSystemPrompt(t *testing.T) {
 	orch := setupUserOnlyOrchestrator(&fakeParser{parseFn: func(string) []ToolCall { return nil }})
 	prompt := orch.buildSystemPrompt(context.Background(), "test", true)
 
-	if !strings.Contains(prompt, "tools.normal_action") {
+	if !strings.Contains(prompt, "tools__normal_action") {
 		t.Error("normal action should appear in system prompt")
 	}
-	if strings.Contains(prompt, "tools.privileged_action") {
+	if strings.Contains(prompt, "tools__privileged_action") {
 		t.Error("user_only action must not appear in system prompt")
 	}
 }
@@ -1451,7 +1451,7 @@ func TestServerInstructionsBeforeToolsInSystemPrompt(t *testing.T) {
 	}
 	// Server instructions must appear BEFORE tool definitions.
 	instrIdx := strings.Index(prompt, "Counting records")
-	toolIdx := strings.Index(prompt, "inventory.list-items")
+	toolIdx := strings.Index(prompt, "inventory__list-items")
 	if instrIdx >= toolIdx {
 		t.Errorf("server instructions (at %d) must appear before tools (at %d)", instrIdx, toolIdx)
 	}
@@ -2358,7 +2358,7 @@ func TestShowToolCallsDisabledDoesNotPrepend(t *testing.T) {
 
 func TestPreparerRelevantToolsFilterSystemPrompt(t *testing.T) {
 	// A preparer returns relevant_tools -> buildSystemPrompt only shows those tools.
-	ragJSON := `{"send_to_llm": true, "message": "enriched query", "relevant_tools": ["gitlab.analyze_code"]}`
+	ragJSON := `{"send_to_llm": true, "message": "enriched query", "relevant_tools": ["gitlab__analyze_code"]}`
 
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
@@ -2401,14 +2401,14 @@ func TestPreparerRelevantToolsFilterSystemPrompt(t *testing.T) {
 
 	systemPrompt := interceptLLM.requests[0].Messages[0].Content
 	// Should include gitlab.analyze_code (relevant)
-	if !strings.Contains(systemPrompt, "gitlab.analyze_code") {
-		t.Error("system prompt should contain gitlab.analyze_code (relevant tool)")
+	if !strings.Contains(systemPrompt, "gitlab__analyze_code") {
+		t.Error("system prompt should contain gitlab__analyze_code (relevant tool)")
 	}
 	// Should NOT include gitlab.create_pr or jira.create_issue (not in relevant_tools)
-	if strings.Contains(systemPrompt, "gitlab.create_pr") {
+	if strings.Contains(systemPrompt, "gitlab__create_pr") {
 		t.Error("system prompt should NOT contain gitlab.create_pr (not in relevant_tools)")
 	}
-	if strings.Contains(systemPrompt, "jira.create_issue") {
+	if strings.Contains(systemPrompt, "jira__create_issue") {
 		t.Error("system prompt should NOT contain jira.create_issue (not in relevant_tools)")
 	}
 }
@@ -2448,11 +2448,11 @@ func TestPreparerEmptyRelevantToolsShowsNone(t *testing.T) {
 		t.Errorf("Response = %q", result.Response)
 	}
 	systemPrompt := interceptLLM.requests[0].Messages[0].Content
-	if strings.Contains(systemPrompt, "gitlab.analyze_code") {
-		t.Error("system prompt should NOT contain gitlab.analyze_code when relevant_tools is empty []")
+	if strings.Contains(systemPrompt, "gitlab__analyze_code") {
+		t.Error("system prompt should NOT contain gitlab__analyze_code when relevant_tools is empty []")
 	}
-	if strings.Contains(systemPrompt, "jira.create_issue") {
-		t.Error("system prompt should NOT contain jira.create_issue when relevant_tools is empty []")
+	if strings.Contains(systemPrompt, "jira__create_issue") {
+		t.Error("system prompt should NOT contain jira__create_issue when relevant_tools is empty []")
 	}
 }
 
@@ -2578,7 +2578,7 @@ func TestPreparerInjectsAllowedTools(t *testing.T) {
 			t.Errorf("allowed_tools must not include the preparer action itself, got %v", fqns)
 		}
 	}
-	want := []string{"gitlab.analyze_code", "gitlab.list_projects"}
+	want := []string{"gitlab__analyze_code", "gitlab__list_projects"}
 	if len(fqns) != len(want) {
 		t.Fatalf("allowed_tools FQN count = %d, want %d (got %v)", len(fqns), len(want), fqns)
 	}
@@ -2709,7 +2709,7 @@ func TestResolveAllowedToolFQNs_filtering(t *testing.T) {
 		if err := json.Unmarshal([]byte(raw), &fqns); err != nil {
 			t.Fatalf("not JSON: %v (raw=%q)", err, raw)
 		}
-		want := []string{"gitlab.analyze_code"} // internal_panel UserOnly excluded
+		want := []string{"gitlab__analyze_code"} // internal_panel UserOnly excluded
 		if len(fqns) != len(want) || fqns[0] != want[0] {
 			t.Errorf("got %v, want %v", fqns, want)
 		}
@@ -2757,10 +2757,10 @@ func TestResolveAllowedToolFQNs_filtering(t *testing.T) {
 		for _, f := range fqns {
 			got[f] = true
 		}
-		if !got["gitlab.analyze_code"] || !got["jira.create_issue"] {
+		if !got["gitlab__analyze_code"] || !got["jira__create_issue"] {
 			t.Errorf("missing expected FQNs: got %v", fqns)
 		}
-		if got["gitlab.internal_panel"] {
+		if got["gitlab__internal_panel"] {
 			t.Errorf("UserOnly action leaked into FQNs: %v", fqns)
 		}
 		if got["rag-preparer.prepare"] {
@@ -3308,7 +3308,7 @@ func TestIngestKnowledgeDir(t *testing.T) {
 func TestPreparerRelevantToolsNoMatchSkipsAllHeaders(t *testing.T) {
 	// When relevant_tools contains names that don't match any registered action,
 	// all plugin headers are skipped from the system prompt.
-	ragJSON := `{"send_to_llm": true, "message": "query", "relevant_tools": ["nonexistent.action"]}`
+	ragJSON := `{"send_to_llm": true, "message": "query", "relevant_tools": ["nonexistent__action"]}`
 
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
@@ -3339,10 +3339,10 @@ func TestPreparerRelevantToolsNoMatchSkipsAllHeaders(t *testing.T) {
 
 	systemPrompt := interceptLLM.requests[0].Messages[0].Content
 	// No plugin actions should appear (nonexistent.action matches nothing).
-	if strings.Contains(systemPrompt, "gitlab.analyze_code") {
-		t.Error("system prompt should NOT contain gitlab.analyze_code when relevant_tools match nothing")
+	if strings.Contains(systemPrompt, "gitlab__analyze_code") {
+		t.Error("system prompt should NOT contain gitlab__analyze_code when relevant_tools match nothing")
 	}
-	if strings.Contains(systemPrompt, "jira.create_issue") {
+	if strings.Contains(systemPrompt, "jira__create_issue") {
 		t.Error("system prompt should NOT contain jira.create_issue when relevant_tools match nothing")
 	}
 	// Plugin headers (## gitlab, ## jira) should also be absent.
@@ -3548,7 +3548,7 @@ func TestBuildToolCallNudgeWithConcreteStep(t *testing.T) {
 		},
 	}
 	nudge := buildToolCallNudge(steps)
-	if !strings.Contains(nudge, `"tool": "inventory.inventory__list-person-types"`) {
+	if !strings.Contains(nudge, `"tool": "inventory__inventory__list-person-types"`) {
 		t.Errorf("nudge should contain concrete tool name, got: %s", nudge)
 	}
 	if !strings.Contains(nudge, "[tool_call]") {
@@ -3578,7 +3578,7 @@ func TestBuildToolCallNudgeWithArgs(t *testing.T) {
 		},
 	}
 	nudge := buildToolCallNudge(steps)
-	if !strings.Contains(nudge, `"inventory.inventory__list-items"`) {
+	if !strings.Contains(nudge, `"inventory__inventory__list-items"`) {
 		t.Errorf("nudge should contain tool name, got: %s", nudge)
 	}
 	if !strings.Contains(nudge, `"query"`) {

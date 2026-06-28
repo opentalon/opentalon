@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/opentalon/opentalon/pkg/toolfqn"
 )
 
 // toolCallJSON is the shape we expect inside [tool_call]...[/tool_call].
@@ -21,12 +23,12 @@ type toolCallJSON struct {
 // Format A (structured):
 //
 //	[tool_call]
-//	{"tool": "plugin.action", "args": {"key": "value"}}
+//	{"tool": "plugin__action", "args": {"key": "value"}}
 //	[/tool_call]
 //
 // Format B (inline, common LLM output):
 //
-//	[tool_call] plugin.action
+//	[tool_call] plugin__action
 //	{"key": "value", "count": 10}
 //	[/tool_call]    (closing tag optional)
 //
@@ -67,7 +69,7 @@ func (defaultParser) Parse(response string) []ToolCall {
 			continue
 		}
 
-		// Format A: {"tool": "plugin.action", "args": {...}}
+		// Format A: {"tool": "plugin__action", "args": {...}}
 		var block toolCallJSON
 		if err := json.Unmarshal([]byte(body), &block); err == nil && block.Tool != "" {
 			plugin, action, err := parseToolName(block.Tool)
@@ -84,8 +86,8 @@ func (defaultParser) Parse(response string) []ToolCall {
 			continue
 		}
 
-		// Format B: plugin.action\n{json_args}
-		// Format C: plugin.action(key=value, key=value)
+		// Format B: plugin__action\n{json_args}
+		// Format C: plugin__action(key=value, key=value)
 		if strings.HasPrefix(body, "{") {
 			// Body is a bare JSON object without a "tool" key — the LLM emitted
 			// just the args and dropped the tool name. Return a ToolCall with an
@@ -104,7 +106,7 @@ func (defaultParser) Parse(response string) []ToolCall {
 		}
 	}
 	// Fallback: the entire response is a bare JSON tool call without [tool_call] tags.
-	// LLMs sometimes emit {"tool": "plugin.action", "args": {...}} as plain text.
+	// LLMs sometimes emit {"tool": "plugin__action", "args": {...}} as plain text.
 	if len(calls) == 0 {
 		trimmed := strings.TrimSpace(response)
 		var block toolCallJSON
@@ -120,7 +122,7 @@ func (defaultParser) Parse(response string) []ToolCall {
 			}
 		}
 		// Fallback: parse Claude's native <function_calls> XML format.
-		// The LLM sometimes emits <invoke name="plugin.action"><parameter name="key">value</parameter></invoke>
+		// The LLM sometimes emits <invoke name="plugin__action"><parameter name="key">value</parameter></invoke>
 		// instead of [tool_call]. Parse it rather than rejecting it.
 		if xmlCalls := parseXMLFunctionCalls(response); len(xmlCalls) > 0 {
 			return xmlCalls
@@ -150,14 +152,14 @@ func (defaultParser) Parse(response string) []ToolCall {
 
 // parseInlineToolCall parses these formats:
 //
-//	plugin.action\n{json_args}           (Format B)
-//	plugin.action(key=value, key=value)  (Format C)
-//	plugin.action                        (no args)
+//	plugin__action\n{json_args}           (Format B)
+//	plugin__action(key=value, key=value)  (Format C)
+//	plugin__action                        (no args)
 func parseInlineToolCall(body string, callNum int) (ToolCall, bool) {
 	lines := strings.SplitN(body, "\n", 2)
 	firstLine := strings.TrimSpace(lines[0])
 
-	// Format C: plugin.action(key=value, key=value)
+	// Format C: plugin__action(key=value, key=value)
 	if paren := strings.IndexByte(firstLine, '('); paren > 0 {
 		toolName := firstLine[:paren]
 		plugin, action, err := parseToolName(toolName)
@@ -184,7 +186,7 @@ func parseInlineToolCall(body string, callNum int) (ToolCall, bool) {
 		}, true
 	}
 
-	// Format B: plugin.action\n{json_args} or just plugin.action
+	// Format B: plugin__action\n{json_args} or just plugin__action
 	plugin, action, err := parseToolName(firstLine)
 	if err != nil {
 		return ToolCall{}, false
@@ -271,7 +273,7 @@ func stripSurroundingQuotes(s string) string {
 // parseXMLFunctionCalls extracts tool calls from Claude's native XML format:
 //
 //	<function_calls>
-//	<invoke name="plugin.action">
+//	<invoke name="plugin__action">
 //	<parameter name="key">value</parameter>
 //	</invoke>
 //	</function_calls>
@@ -361,11 +363,13 @@ func extractInvokeBody(s string) (body string, advance int) {
 	}
 
 	bodyStart := gt + 1
-	// Find closing </invoke> (any namespace).
-	for _, close := range []string{"</invoke>", "</invoke>"} {
-		if end := strings.Index(s[bodyStart:], close); end >= 0 {
-			return s[bodyStart : bodyStart+end], bodyStart + end + len(close)
-		}
+	// Find the closing </invoke>. The old code looped over two byte-identical
+	// "</invoke>" literals (a no-op duplicate), so a single search is equivalent;
+	// namespaced invoke tags are normalized by findNextInvoke upstream, so by the
+	// time we get here the closer is always the plain form.
+	if end := strings.Index(s[bodyStart:], "</invoke>"); end >= 0 {
+		const closeTag = "</invoke>"
+		return s[bodyStart : bodyStart+end], bodyStart + end + len(closeTag)
 	}
 	// No closing tag — take everything after >.
 	return s[bodyStart:], len(s)
@@ -486,8 +490,8 @@ func containsToolCallMarker(s string) bool {
 // internalBlockTags lists the open/close tag pairs for internal protocol
 // blocks that must never be forwarded to channel users.
 //
-// The <function_calls> and <function_calls> pairs are Claude's native
-// function-call XML. Our prompt tells models to use [tool_call], but trained
+// The <function_calls> pair and its antml:-namespaced variant are Claude's
+// native function-call XML. Our prompt tells models to use [tool_call], but trained
 // behaviour occasionally leaks through in the reply; strip it so end users
 // don't see raw protocol tags.
 var internalBlockTags = [][2]string{
@@ -533,48 +537,27 @@ func stripTaggedBlocks(s, open, close string) string {
 	return sb.String()
 }
 
-// parseToolName splits "plugin.action" or "plugin__action" into ("plugin", "action").
-// Both parts must be valid identifiers: plugin allows [a-zA-Z0-9_.-],
-// action allows [a-zA-Z0-9_-]. This rejects natural-language fragments
-// that an LLM might accidentally emit inside [tool_call] blocks.
+// toolFQN composes a tool's fully-qualified name "<plugin><sep><action>" using
+// the canonical separator. It is the single in-package compose site so the
+// boundary character lives in exactly one place (pkg/toolfqn). It does not
+// validate: callers must pass a non-empty plugin and action (toolfqn.Split
+// rejects the degenerate forms Join would otherwise produce, e.g. "plugin__").
+func toolFQN(plugin, action string) string {
+	return toolfqn.Join(plugin, action)
+}
+
+// parseToolName decodes "plugin__action" (canonical) or the legacy "plugin.action"
+// into ("plugin", "action"). It delegates to toolfqn.Split, the single decoder,
+// which tries the legacy dot form first (split on the last '.') then the canonical
+// double-underscore (split on the first "__"). Both separators stay accepted on
+// input; only what the orchestrator emits is the canonical "__".
 //
-// The dot separator is preferred; double-underscore is a fallback because
-// LLMs trained on OpenAI-style function calling frequently emit names like
-// "jira__search_issues" instead of "jira.search_issues".
+// The double-underscore is canonical because LLM providers (OpenAI, Anthropic)
+// require a function name to match ^[a-zA-Z0-9_-]{1,64}$, which rejects the dot.
+// The dot is tolerated only for backward compatibility: dot-trained LLM output,
+// persisted scheduler jobs, and session-history rows composed before the switch.
+// An action name may itself contain "__" (e.g. the MCP-bridged "timly__create-item"),
+// so the first "__" is the unambiguous plugin/action boundary (no plugin contains "__").
 func parseToolName(s string) (plugin, action string, err error) {
-	// Preferred: split on last dot.
-	if dot := strings.LastIndex(s, "."); dot > 0 && dot < len(s)-1 {
-		plugin, action = s[:dot], s[dot+1:]
-		if isValidPluginName(plugin) && isValidActionName(action) {
-			return plugin, action, nil
-		}
-	}
-
-	// Fallback: split on first "__" (double underscore).
-	if dunder := strings.Index(s, "__"); dunder > 0 && dunder < len(s)-2 {
-		plugin, action = s[:dunder], s[dunder+2:]
-		if isValidPluginName(plugin) && isValidActionName(action) {
-			return plugin, action, nil
-		}
-	}
-
-	return "", "", fmt.Errorf("invalid tool name %q", s)
-}
-
-func isValidPluginName(s string) bool {
-	for _, c := range s {
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '-' && c != '.' {
-			return false
-		}
-	}
-	return true
-}
-
-func isValidActionName(s string) bool {
-	for _, c := range s {
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '-' {
-			return false
-		}
-	}
-	return true
+	return toolfqn.Split(s)
 }

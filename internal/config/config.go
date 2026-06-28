@@ -320,6 +320,7 @@ type KnowledgeConfig struct {
 	Action             string `yaml:"action"`                     // action name for single-article ingestion (e.g. "ingest")
 	Dir                string `yaml:"dir"`                        // optional directory of .md files to ingest at startup
 	RefreshInterval    string `yaml:"refresh_interval,omitempty"` // Go duration (e.g. "15m"); periodically re-fetch each plugin's upstream capabilities and re-sync the corpus so description/instruction/knowledge changes propagate without a restart. "" = default 15m, "0" = disabled.
+	PushEnabled        *bool  `yaml:"push_enabled,omitempty"`     // RAG knowledge PUSH: auto-inject retrieved article bodies into the user turn as [knowledge_context]. nil/true = push (legacy). false = pull-only: the system-prompt catalog (titles + slugs) and ask_knowledge stay, but no article body is auto-injected — the model fetches on demand.
 }
 
 type OrchestratorConfig struct {
@@ -430,8 +431,15 @@ type StateConfig struct {
 	SessionEvents SessionEventsConfig `yaml:"session_events,omitempty"`
 }
 
-// DebugConfig configures per-session deep debug capture (toggled by the
-// /debug command). Without an /debug-active session, this subsystem does
+// DebugConfig configures deep raw-HTTP capture of every LLM exchange into the
+// ai_debug_events table (the full request + response body that goes to / comes
+// from the provider endpoint). Capture is gated two ways:
+//   - per-session via the /debug command (opt-in, default), or
+//   - AlwaysCapture: persist EVERY session's raw traffic unconditionally — the
+//     "always see what really went to the API" mode. Pair it with a short
+//     RetentionDays (e.g. 7) so the table stays bounded.
+//
+// Without /debug-active sessions AND AlwaysCapture off, this subsystem does
 // nothing — the table stays empty and the writer goroutine is idle.
 //
 // Retention semantics, deliberately split into two fields rather than a
@@ -444,12 +452,12 @@ type StateConfig struct {
 //     meant "off".
 //
 // The async-writer buffer size is intentionally not configurable: 100 is
-// adequate for any realistic /debug load (opt-in per session, drained at
-// ~1k inserts/s by the worker), and a knob nobody will turn is just
-// surface area.
+// adequate for any realistic load (drained at ~1k inserts/s by the worker),
+// and a knob nobody will turn is just surface area.
 type DebugConfig struct {
 	RetentionDays     int  `yaml:"retention_days,omitempty"`     // default 30 when 0 or omitted
 	RetentionDisabled bool `yaml:"retention_disabled,omitempty"` // when true, never prune (overrides RetentionDays)
+	AlwaysCapture     bool `yaml:"always_capture,omitempty"`     // when true, persist raw HTTP for EVERY session, not only /debug-opted-in ones
 }
 
 // SessionEventsConfig configures the always-on structured session_events

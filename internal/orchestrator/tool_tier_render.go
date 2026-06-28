@@ -48,7 +48,7 @@ func toolTierDecisionFromContext(ctx context.Context) *toolTierDecision {
 }
 
 // renderTier2Section returns a markdown block listing Tier 2 tools
-// with one-line summaries. Each line: "- plugin.action: <summary>".
+// with one-line summaries. Each line: "- plugin__action: <summary>".
 // The summary is the first line of the action's description so a
 // multi-paragraph description (typically intended for the full
 // schema) doesn't bloat the system prompt. Returns an empty string
@@ -61,7 +61,7 @@ func renderTier2Section(decision *toolTierDecision, registry *ToolRegistry) stri
 	descByFQN := actionDescriptionMap(registry, decision.Tier2)
 	var sb strings.Builder
 	sb.WriteString("## Tool catalog — name + one-line summary\n")
-	sb.WriteString("Pick the tool(s) whose summary fits the request. The summary has NO parameters: you MUST call `_meta.get_tool_details(name=\"plugin.action\")` to read a tool's full description and parameters BEFORE invoking it — never guess parameters from a summary. When the summary makes the choice clear, fetch that one tool's details and proceed; when several could fit, fetch the top candidates' details and compare first.\n")
+	fmt.Fprintf(&sb, "Pick the tool(s) whose summary fits the request. The summary has NO parameters: you MUST call `%s(name=\"plugin__action\")` to read a tool's full description and parameters BEFORE invoking it — never guess parameters from a summary. When the summary makes the choice clear, fetch that one tool's details and proceed; when several could fit, fetch the top candidates' details and compare first.\n", toolFQN(metaPluginName, metaGetToolDetails))
 	for _, fqn := range decision.Tier2 {
 		summary := firstLine(descByFQN[fqn])
 		if summary == "" {
@@ -95,7 +95,7 @@ func renderTier3Section(decision *toolTierDecision) string {
 	plugins := sortedKeys(byPlugin)
 	var sb strings.Builder
 	sb.WriteString("## Other available tools (request details before use)\n")
-	sb.WriteString("These tools exist but their full schemas aren't loaded. Call `_meta.get_tool_details(name=\"plugin.action\")` to see parameters before invoking.\n")
+	fmt.Fprintf(&sb, "These tools exist but their full schemas aren't loaded. Call `%s(name=\"plugin__action\")` to see parameters before invoking.\n", toolFQN(metaPluginName, metaGetToolDetails))
 	for _, plugin := range plugins {
 		actions := byPlugin[plugin]
 		fmt.Fprintf(&sb, "- %s: %s\n", plugin, strings.Join(actions, ", "))
@@ -106,7 +106,7 @@ func renderTier3Section(decision *toolTierDecision) string {
 
 // groupTier3ByPlugin splits the Tier 3 fqn list into a
 // plugin→[action,…] map, sorting the actions within each group so
-// the output is stable. fqns that don't parse as plugin.action are
+// the output is stable. fqns that don't parse as plugin__action are
 // silently skipped — those would be a malformed input.
 func groupTier3ByPlugin(fqns []string) map[string][]string {
 	out := make(map[string][]string)
@@ -136,7 +136,7 @@ func actionDescriptionMap(registry *ToolRegistry, fqns []string) map[string]stri
 	out := make(map[string]string, len(fqns))
 	for _, cap := range registry.ListCapabilities() {
 		for _, a := range cap.Actions {
-			fqn := cap.Name + "." + a.Name
+			fqn := toolFQN(cap.Name, a.Name)
 			if want[fqn] {
 				out[fqn] = a.Description
 			}

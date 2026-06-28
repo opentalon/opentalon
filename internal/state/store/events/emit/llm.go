@@ -10,21 +10,25 @@ import (
 // LLMRequestArgs is metadata about an outbound LLM call — never the full
 // body. The body, when /debug is active, lives in ai_debug_events.
 type LLMRequestArgs struct {
-	ModelID      string
-	MessageCount int
-	HasTools     bool
-	MaxTokens    int
+	ModelID         string
+	MessageCount    int
+	HasTools        bool
+	MaxTokens       int
+	Reasoning       bool
+	ReasoningEffort string
 }
 
 // EmitLLMRequest writes one llm_request event. Emit immediately before
 // the provider HTTP call so the row predates llm_response chronologically.
 func EmitLLMRequest(ctx context.Context, sink Sink, args LLMRequestArgs) string {
 	return send(ctx, sink, events.TypeLLMRequest, events.LLMRequestPayload{
-		Header:       events.Header{V: events.LLMRequestVersion},
-		ModelID:      args.ModelID,
-		MessageCount: args.MessageCount,
-		HasTools:     args.HasTools,
-		MaxTokens:    args.MaxTokens,
+		Header:          events.Header{V: events.LLMRequestVersion},
+		ModelID:         args.ModelID,
+		MessageCount:    args.MessageCount,
+		HasTools:        args.HasTools,
+		MaxTokens:       args.MaxTokens,
+		Reasoning:       args.Reasoning,
+		ReasoningEffort: args.ReasoningEffort,
 	}, 0)
 }
 

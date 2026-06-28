@@ -56,6 +56,15 @@ type preparerAggregate struct {
 	// switches the whole turn to mode=legacy_fallback — dedup is
 	// skipped and the plugin's pr.Message passes through verbatim.
 	LegacyKnowledgePlugins []string
+
+	// KnowledgePushSuppressed is set when knowledge PUSH is disabled
+	// (orchestrator.knowledge.push_enabled: false). Retrieval still ran
+	// — so Knowledge holds the candidates — but the orchestrator stripped
+	// every [knowledge_context] block and injected nothing. It switches
+	// emitPreparerDecision / turnStartRefsFromAggregate to mode=pull_only
+	// so the event log reports the candidates as retrieved-not-injected
+	// instead of falsely claiming an injection that never shipped.
+	KnowledgePushSuppressed bool
 }
 
 // append pulls the candidate slices off one preparer's response into
@@ -210,6 +219,15 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 	var knowledgeBlock events.PreparerDecisionKnowledgeBlock
 	var mode string
 	switch {
+	case agg.KnowledgePushSuppressed:
+		// Pull-only: retrieval ran but nothing was injected (the content
+		// was stripped). Report the candidates so the consumer sees what
+		// a push would have surfaced, but leave Injected/InjectedBytes
+		// empty — the LLM received zero article bytes this turn.
+		mode = events.PreparerDecisionModePullOnly
+		knowledgeBlock = events.PreparerDecisionKnowledgeBlock{
+			CandidateIDs: knowledgeCandidateIDs(agg.Knowledge),
+		}
 	case o.knowledgeDedup.Enabled && len(agg.LegacyKnowledgePlugins) > 0:
 		// A plugin still uses the legacy [knowledge_context]-in-Message
 		// shape, so dedup can't decide on a per-candidate basis. Report
@@ -269,6 +287,9 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 // pre-Phase-4 turns stay byte-identical to the original shape.
 func turnStartRefsFromAggregate(agg preparerAggregate) (refs []events.KnowledgeRef, tier1Count, tier3Count int) {
 	switch {
+	case agg.KnowledgePushSuppressed:
+		// pull_only — nothing injected, so no injected-knowledge refs
+		// (the candidates surface on preparer_decision instead).
 	case agg.KnowledgeDedup != nil:
 		for _, c := range agg.KnowledgeDedup.Injected {
 			refs = append(refs, events.KnowledgeRef{

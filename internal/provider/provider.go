@@ -36,7 +36,7 @@ type ToolDefinition struct {
 // ToolCall represents a tool call returned by the LLM (native function calling).
 type ToolCall struct {
 	ID        string            `json:"id"`
-	Name      string            `json:"name"`      // "plugin.action"
+	Name      string            `json:"name"`      // "plugin__action"
 	Arguments map[string]string `json:"arguments"` // parsed args
 }
 

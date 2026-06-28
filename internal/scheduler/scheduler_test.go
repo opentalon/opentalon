@@ -100,6 +100,12 @@ func TestJobParseAction(t *testing.T) {
 		act    string
 		err    bool
 	}{
+		// Canonical "__" form — what the scheduler now emits and persists
+		// (remindMe writes reminder__say; create_job/remind_me schemas tell the
+		// LLM to use plugin__action). Must decode back to the same parts.
+		{"reminder__say", "reminder", "say", false},
+		{"timly__timly__create-item", "timly", "timly__create-item", false},
+		// Legacy dot form — still tolerated for jobs persisted before the switch.
 		{"content.check_violations", "content", "check_violations", false},
 		{"reports.generate", "reports", "generate", false},
 		{"invalid", "", "", true},
@@ -1227,8 +1233,8 @@ func TestToolRemindMeMessageShortcut(t *testing.T) {
 		t.Fatalf("expected 1 job, got %d", len(jobs))
 	}
 	j := jobs[0]
-	if j.Action != "reminder.say" {
-		t.Errorf("action = %q, want reminder.say", j.Action)
+	if j.Action != "reminder__say" {
+		t.Errorf("action = %q, want reminder__say", j.Action)
 	}
 	if j.Args["message"] != "you promised poems" {
 		t.Errorf("message arg = %q", j.Args["message"])

@@ -47,11 +47,11 @@ func setupSubprocessOrchestrator(llm LLMClient) *Orchestrator {
 
 func TestSubprocessBasicFork(t *testing.T) {
 	// LLM response sequence:
-	// 1. Parent calls _subprocess.run
+	// 1. Parent calls _subprocess__run
 	// 2. Subprocess LLM returns direct answer (no tool calls)
 	llm := &fakeLLM{responses: []string{
 		`[tool_call]
-{"tool": "_subprocess.run", "args": {"task": "What is the capital of France?"}}
+{"tool": "_subprocess__run", "args": {"task": "What is the capital of France?"}}
 [/tool_call]`,
 		// Subprocess LLM - direct answer
 		"The capital of France is Paris.",
@@ -73,17 +73,17 @@ func TestSubprocessBasicFork(t *testing.T) {
 
 func TestSubprocessWithToolCalls(t *testing.T) {
 	// LLM sequence:
-	// 1. Parent calls _subprocess.run with tools restriction
-	// 2. Subprocess LLM calls search.query
+	// 1. Parent calls _subprocess__run with tools restriction
+	// 2. Subprocess LLM calls search__query
 	// 3. Subprocess LLM returns answer
 	// 4. Parent LLM returns final answer
 	llm := &fakeLLM{responses: []string{
 		`[tool_call]
-{"tool": "_subprocess.run", "args": {"task": "Search for refund policy", "tools": "search.query"}}
+{"tool": "_subprocess__run", "args": {"task": "Search for refund policy", "tools": "search__query"}}
 [/tool_call]`,
 		// Subprocess LLM calls a tool
 		`[tool_call]
-{"tool": "search.query", "args": {"q": "refund policy"}}
+{"tool": "search__query", "args": {"q": "refund policy"}}
 [/tool_call]`,
 		// Subprocess LLM returns answer after getting tool result
 		"The refund policy allows returns within 30 days.",
@@ -123,7 +123,7 @@ func TestSubprocessIterationLimit(t *testing.T) {
 	llm := &fakeLLM{responses: make([]string, 20)}
 	for i := range llm.responses {
 		llm.responses[i] = fmt.Sprintf(`[tool_call]
-{"tool": "search.query", "args": {"q": "attempt %d"}}
+{"tool": "search__query", "args": {"q": "attempt %d"}}
 [/tool_call]`, i)
 	}
 
@@ -144,11 +144,11 @@ func TestSubprocessIterationLimit(t *testing.T) {
 }
 
 func TestSubprocessToolAllowlist(t *testing.T) {
-	// Subprocess tries to call math.calculate but only search.query is allowed.
+	// Subprocess tries to call math__calculate but only search__query is allowed.
 	llm := &fakeLLM{responses: []string{
 		// Subprocess calls disallowed tool
 		`[tool_call]
-{"tool": "math.calculate", "args": {"expr": "2+2"}}
+{"tool": "math__calculate", "args": {"expr": "2+2"}}
 [/tool_call]`,
 		// Then gives up
 		"I couldn't calculate that — the math tool is not available.",
@@ -158,7 +158,7 @@ func TestSubprocessToolAllowlist(t *testing.T) {
 
 	req := subprocessRequest{
 		Task:         "calculate 2+2",
-		AllowedTools: []string{"search.query"},
+		AllowedTools: []string{"search__query"},
 	}
 	result, err := orch.runSubprocess(context.Background(), req, 1)
 	if err != nil {
@@ -170,10 +170,10 @@ func TestSubprocessToolAllowlist(t *testing.T) {
 }
 
 func TestSubprocessBlocksRecursion(t *testing.T) {
-	// Subprocess tries to call _subprocess.run — should be blocked.
+	// Subprocess tries to call _subprocess__run — should be blocked.
 	llm := &fakeLLM{responses: []string{
 		`[tool_call]
-{"tool": "_subprocess.run", "args": {"task": "recursive task"}}
+{"tool": "_subprocess__run", "args": {"task": "recursive task"}}
 [/tool_call]`,
 		"I can't spawn subprocesses from here.",
 	}}
@@ -279,12 +279,12 @@ func TestParseSubprocessRequest(t *testing.T) {
 		},
 		{
 			name: "with tools",
-			args: map[string]string{"task": "search", "tools": "search.query, math.calculate"},
+			args: map[string]string{"task": "search", "tools": "search__query, math__calculate"},
 			check: func(t *testing.T, req subprocessRequest) {
 				if len(req.AllowedTools) != 2 {
 					t.Fatalf("expected 2 tools, got: %d", len(req.AllowedTools))
 				}
-				if req.AllowedTools[0] != "search.query" || req.AllowedTools[1] != "math.calculate" {
+				if req.AllowedTools[0] != "search__query" || req.AllowedTools[1] != "math__calculate" {
 					t.Errorf("wrong tools: %v", req.AllowedTools)
 				}
 			},
@@ -333,16 +333,16 @@ func TestIsSubprocessToolAllowed(t *testing.T) {
 
 	// No allowlist = everything except _subprocess
 	if !isSubprocessToolAllowed(ToolCall{Plugin: "search", Action: "query"}, noTools) {
-		t.Error("search.query should be allowed with no allowlist")
+		t.Error("search__query should be allowed with no allowlist")
 	}
 
 	// With allowlist
-	allowed := []string{"search.query"}
+	allowed := []string{"search__query"}
 	if !isSubprocessToolAllowed(ToolCall{Plugin: "search", Action: "query"}, allowed) {
-		t.Error("search.query should be in allowlist")
+		t.Error("search__query should be in allowlist")
 	}
 	if isSubprocessToolAllowed(ToolCall{Plugin: "math", Action: "calculate"}, allowed) {
-		t.Error("math.calculate should not be in allowlist")
+		t.Error("math__calculate should not be in allowlist")
 	}
 }
 
@@ -356,11 +356,11 @@ func TestSubprocessSystemPromptExcludesSubprocess(t *testing.T) {
 	if strings.Contains(prompt, "_subprocess") {
 		t.Error("subprocess system prompt should not contain _subprocess")
 	}
-	if !strings.Contains(prompt, "search.query") {
-		t.Error("subprocess system prompt should contain search.query")
+	if !strings.Contains(prompt, "search__query") {
+		t.Error("subprocess system prompt should contain search__query")
 	}
-	if !strings.Contains(prompt, "math.calculate") {
-		t.Error("subprocess system prompt should contain math.calculate")
+	if !strings.Contains(prompt, "math__calculate") {
+		t.Error("subprocess system prompt should contain math__calculate")
 	}
 }
 
@@ -369,14 +369,14 @@ func TestSubprocessSystemPromptRespectsAllowlist(t *testing.T) {
 
 	prompt := orch.buildSubprocessSystemPrompt(context.Background(), subprocessRequest{
 		Task:         "test",
-		AllowedTools: []string{"search.query"},
+		AllowedTools: []string{"search__query"},
 	})
 
-	if !strings.Contains(prompt, "search.query") {
-		t.Error("subprocess system prompt should contain search.query")
+	if !strings.Contains(prompt, "search__query") {
+		t.Error("subprocess system prompt should contain search__query")
 	}
-	if strings.Contains(prompt, "math.calculate") {
-		t.Error("subprocess system prompt should not contain math.calculate when not in allowlist")
+	if strings.Contains(prompt, "math__calculate") {
+		t.Error("subprocess system prompt should not contain math__calculate when not in allowlist")
 	}
 }
 
@@ -385,7 +385,7 @@ func TestSubprocessMaxIterationsCapped(t *testing.T) {
 	llm := &fakeLLM{responses: make([]string, 15)}
 	for i := range llm.responses {
 		llm.responses[i] = fmt.Sprintf(`[tool_call]
-{"tool": "search.query", "args": {"q": "attempt %d"}}
+{"tool": "search__query", "args": {"q": "attempt %d"}}
 [/tool_call]`, i)
 	}
 

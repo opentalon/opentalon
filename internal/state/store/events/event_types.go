@@ -134,10 +134,19 @@ const (
 //	injection verbatim; preparer_decision records the fall-through path
 //	for analytics. One deprecation warning per plugin per session is
 //	logged alongside.
+//
+// pull_only — knowledge PUSH is disabled (orchestrator.knowledge.
+//
+//	push_enabled: false). Retrieval still ran, so CandidateIDs report
+//	what a push WOULD have surfaced, but nothing was injected: Injected
+//	and InjectedBytes are empty/zero. Lets a session-log consumer tell
+//	push from pull at a glance (full/instrumentation_only carry a
+//	populated Injected list; pull_only never does).
 const (
 	PreparerDecisionModeInstrumentationOnly = "instrumentation_only"
 	PreparerDecisionModeFull                = "full"
 	PreparerDecisionModeLegacyFallback      = "legacy_fallback"
+	PreparerDecisionModePullOnly            = "pull_only"
 )
 
 // KnowledgeRetrievalSearchTextSource values for the search_text_source
@@ -267,10 +276,12 @@ const UserMessageVersion = 1
 // full request body lives in ai_debug_events when /debug is active).
 type LLMRequestPayload struct {
 	Header
-	ModelID      string `json:"model_id"`
-	MessageCount int    `json:"message_count"`
-	HasTools     bool   `json:"has_tools"`
-	MaxTokens    int    `json:"max_tokens,omitempty"`
+	ModelID         string `json:"model_id"`
+	MessageCount    int    `json:"message_count"`
+	HasTools        bool   `json:"has_tools"`
+	MaxTokens       int    `json:"max_tokens,omitempty"`
+	Reasoning       bool   `json:"reasoning,omitempty"`        // reasoning/chain-of-thought enabled for this call
+	ReasoningEffort string `json:"reasoning_effort,omitempty"` // effort actually sent on the wire ("low"/"medium"/"high"); empty = none
 }
 
 const LLMRequestVersion = 1

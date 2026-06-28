@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 )
 
@@ -226,14 +225,11 @@ func (r *ToolRegistry) IsActionReadOnly(plugin, action string) bool {
 	if !ok {
 		return false
 	}
-	candidates := []string{
-		action,
-		plugin + "__" + action,
-		strings.ReplaceAll(action, "_", "-"),
-		plugin + "__" + strings.ReplaceAll(action, "_", "-"),
-		strings.ReplaceAll(action, "-", "_"),
-		plugin + "__" + strings.ReplaceAll(action, "-", "_"),
-	}
+	// The bare action plus the forgiving normalizations shared with the
+	// execute / get_tool_details paths (actionNameCandidates) — one candidate
+	// generator so a tool resolves the SAME way whether it is gated, inspected,
+	// or invoked. The leading bare `action` covers the already-canonical name.
+	candidates := append([]string{action}, actionNameCandidates(plugin, action)...)
 	for _, name := range candidates {
 		for _, a := range cap.Actions {
 			if a.Name == name {

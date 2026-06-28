@@ -16,7 +16,7 @@ import (
 // orchestrator (its expert system) and returns the result the way
 // the LLM would see it.
 type HostCaller interface {
-	// RunAction asks the host to dispatch plugin.action(args) through
+	// RunAction asks the host to dispatch the named plugin action (plugin, action, args) through
 	// its normal executeCall path. Returns the action's text content
 	// (and any structured payload), or an error.
 	RunAction(ctx context.Context, plugin, action string, args map[string]string) (CallResult, error)

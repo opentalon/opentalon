@@ -154,7 +154,7 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 			if !isSubprocessToolAllowed(call, req.AllowedTools) {
 				tr := ToolResult{
 					CallID: call.ID,
-					Error:  fmt.Sprintf("tool %s.%s not allowed in this subprocess", call.Plugin, call.Action),
+					Error:  fmt.Sprintf("tool %s not allowed in this subprocess", toolFQN(call.Plugin, call.Action)),
 				}
 				messages = append(messages,
 					provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(call)},
@@ -198,10 +198,10 @@ func (o *Orchestrator) buildSubprocessSystemPrompt(ctx context.Context, req subp
 	// Don't list preparer/guard actions.
 	internalActions := make(map[string]bool)
 	for _, prep := range o.preparers {
-		internalActions[prep.Plugin+"."+prep.Action] = true
+		internalActions[toolFQN(prep.Plugin, prep.Action)] = true
 	}
 	for _, g := range o.guards {
-		internalActions[g.Plugin+"."+g.Action] = true
+		internalActions[toolFQN(g.Plugin, g.Action)] = true
 	}
 
 	allowedPlugins := o.resolveAllowedPlugins(ctx)
@@ -219,10 +219,10 @@ func (o *Orchestrator) buildSubprocessSystemPrompt(ctx context.Context, req subp
 
 		var visibleActions []Action
 		for _, action := range cap.Actions {
-			if internalActions[cap.Name+"."+action.Name] || action.UserOnly {
+			if internalActions[toolFQN(cap.Name, action.Name)] || action.UserOnly {
 				continue
 			}
-			if hasAllowlist && !allowSet[cap.Name+"."+action.Name] {
+			if hasAllowlist && !allowSet[toolFQN(cap.Name, action.Name)] {
 				continue
 			}
 			visibleActions = append(visibleActions, action)
@@ -234,7 +234,7 @@ func (o *Orchestrator) buildSubprocessSystemPrompt(ctx context.Context, req subp
 
 		fmt.Fprintf(&sb, "## %s\n%s\n", cap.Name, cap.Description)
 		for _, action := range visibleActions {
-			fmt.Fprintf(&sb, "- %s.%s: %s\n", cap.Name, action.Name, action.Description)
+			fmt.Fprintf(&sb, "- %s: %s\n", toolFQN(cap.Name, action.Name), action.Description)
 			for _, p := range action.Parameters {
 				reqMark := ""
 				if p.Required {
@@ -288,7 +288,7 @@ func isSubprocessToolAllowed(call ToolCall, allowedTools []string) bool {
 	if len(allowedTools) == 0 {
 		return true
 	}
-	key := call.Plugin + "." + call.Action
+	key := toolFQN(call.Plugin, call.Action)
 	for _, t := range allowedTools {
 		if t == key {
 			return true
