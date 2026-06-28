@@ -3268,38 +3268,45 @@ func uniqueKnowledgeArticles(blocks []parsedKCBlock) []string {
 // paths cannot drift — the reminder strings and their gating were previously
 // duplicated verbatim in both.
 func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Session, messages []provider.Message) []provider.Message {
-	if sess.Summary != "" {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "Previous conversation summary: " + sess.Summary,
-		})
-	}
 	// Sliding-window cutter (config-driven via o.contextMessages); emits
 	// messages_truncated when it fires.
 	convMessages := o.applySlidingWindow(ctx, sess.Messages)
+
+	// Single system block (provider-compliance rule #1): the leading message
+	// built by buildSystemPrompt is the ONLY role:system message in the array.
+	// The conversation summary and the format/don't-repeat reminders fold into
+	// it as suffixes instead of being emitted as separate mid-array system
+	// messages. Anthropic's Messages API has no role:system inside the messages
+	// array — it carries one top-level `system` field — so scattered system
+	// turns made the adapter silently keep only the last one and drop the real
+	// prompt (see provider/anthropic.go toAnthRequest). Folding here keeps both
+	// the OpenAI-compatible and native-Anthropic adapters fed from one block.
+	var systemSuffix strings.Builder
+	if sess.Summary != "" {
+		systemSuffix.WriteString("\n\nPrevious conversation summary: ")
+		systemSuffix.WriteString(sess.Summary)
+	}
+	// For weaker / OSS models, repeat the channel format hint — but only after a
+	// tool result exists, so it doesn't compete with the tool-calling
+	// instruction on the first round.
+	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
+		systemSuffix.WriteString("\n\n[IMPORTANT — output format reminder] ")
+		systemSuffix.WriteString(hint)
+	}
+	// Don't-repeat reminder, only with actual prior conversation. Wording is
+	// position-independent ("most recent message") because it now lives in the
+	// system block ahead of the conversation rather than as a trailing turn.
+	if len(convMessages) > 2 {
+		systemSuffix.WriteString("\n\n[IMPORTANT] Answer ONLY the user's most recent message. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.")
+	}
+	if systemSuffix.Len() > 0 && len(messages) > 0 && messages[0].Role == provider.RoleSystem {
+		messages[0].Content += systemSuffix.String()
+	}
+
 	// Strip [knowledge_context] from HISTORICAL user messages only (current turn
 	// kept verbatim so preparer-injected RAG reaches the LLM), and drop genuinely
 	// poisoned assistant turns via sanitizeHistory.
 	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
-
-	// For weaker / OSS models, repeat the channel format hint as a trailing
-	// system reminder — but only after a tool result exists, so it doesn't
-	// compete with the tool-calling instruction on the first round.
-	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "[IMPORTANT — output format reminder] " + hint,
-		})
-	}
-
-	// Don't-repeat reminder, only with actual prior conversation. Placed close to
-	// the generation point where the model is most likely to follow it.
-	if len(convMessages) > 2 {
-		messages = append(messages, provider.Message{
-			Role:    provider.RoleSystem,
-			Content: "[IMPORTANT] Answer ONLY the user's last message above. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.",
-		})
-	}
 
 	if o.contextWindow > 0 {
 		messages = trimToContextWindow(ctx, messages, o.contextWindow)
