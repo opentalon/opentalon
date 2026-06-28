@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
@@ -224,6 +225,10 @@ func TestOrchestrator_TurnStart_AvailableToolsTextMode_Empty(t *testing.T) {
 }
 
 func TestOrchestrator_TurnStart_AvailableToolsNativeMode_Populated(t *testing.T) {
+	// Native mode builds a tools array, so AvailableTools is non-empty. With
+	// nothing loaded, the array carries only the always-include core
+	// (load_tools); the registry's gitlab/jira tools are catalog-only until
+	// the LLM loads them, so they must NOT appear here.
 	sink := &recordingEventSink{}
 	llm := nativeToolsLLM{fakeLLM: &fakeLLM{responses: []string{"answer"}}}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
@@ -239,15 +244,15 @@ func TestOrchestrator_TurnStart_AvailableToolsNativeMode_Populated(t *testing.T)
 	for _, tr := range p.AvailableTools {
 		got[tr.Name] = tr.DescSHA256
 	}
-	if _, ok := got["gitlab__analyze_code"]; !ok {
-		t.Errorf("gitlab__analyze_code missing from AvailableTools; got: %v", got)
+	loadFQN := toolFQN(metaPluginName, metaLoadTools)
+	if _, ok := got[loadFQN]; !ok {
+		t.Errorf("%s missing from AvailableTools (native mode must build the always-include core); got: %v", loadFQN, got)
 	}
-	if _, ok := got["jira__create_issue"]; !ok {
-		t.Errorf("jira__create_issue missing from AvailableTools; got: %v", got)
+	if _, ok := got["gitlab__analyze_code"]; ok {
+		t.Errorf("catalog-only gitlab__analyze_code must NOT be in the native tools array until loaded; got: %v", got)
 	}
-	wantDesc := sha256.Sum256([]byte("Analyze code for issues"))
-	if got["gitlab__analyze_code"] != hex.EncodeToString(wantDesc[:]) {
-		t.Errorf("gitlab__analyze_code desc_sha256 = %s, want %s", got["gitlab__analyze_code"], hex.EncodeToString(wantDesc[:]))
+	if _, ok := got["jira__create_issue"]; ok {
+		t.Errorf("catalog-only jira__create_issue must NOT be in the native tools array until loaded; got: %v", got)
 	}
 }
 
@@ -3539,29 +3544,12 @@ func TestOrchestrator_MessagesTruncated_NotEmittedWhenWithinWindow(t *testing.T)
 	}
 }
 
-// --- RFC #249 Phase 4 (tool tiers) integration tests ---
+// --- Tool catalog + load_tools integration tests ---
 
-// preparerJSONWithTools returns a fake preparer Capabilities body that
-// surfaces tool_candidates so the tier decision has something to rank.
-// The plugin name "rag-plugin" + action "prepare" is preparer-only;
-// the candidates name a SEPARATE registry plugin's actions ("tools-
-// plugin.t1" etc.) so they're profile-allowed, non-user-only, and
-// non-preparer when the tier decision runs.
-const preparerJSONForTierTests = `{
-		"send_to_llm": true,
-		"message": "user question",
-		"tool_candidates": [
-			{"tool_name": "tools-plugin__t1", "score": 0.95},
-			{"tool_name": "tools-plugin__t2", "score": 0.85},
-			{"tool_name": "tools-plugin__t3", "score": 0.75},
-			{"tool_name": "tools-plugin__t4", "score": 0.55}
-		]
-	}`
-
-// registerTierTestPlugins wires a preparer (rag-plugin.prepare) +
-// five callable tools (tools-plugin__t1..t5) into the registry. The
-// preparer JSON returns ranked candidates that name t1..t4 so a tier
-// decision can split them across Tier 1 / Tier 2 / Tier 3.
+// registerTierTestPlugins wires a preparer (rag-plugin.prepare) + five
+// callable tools (tools-plugin__t1..t5) into the registry. The preparer
+// JSON is whatever the caller supplies; the tools are the catalog surface
+// the LLM discovers and loads via load_tools.
 func registerTierTestPlugins(t *testing.T, registry *ToolRegistry, prepJSON string) {
 	t.Helper()
 	if err := registry.Register(PluginCapability{
@@ -3584,347 +3572,154 @@ func registerTierTestPlugins(t *testing.T, registry *ToolRegistry, prepJSON stri
 	}
 }
 
-func TestOrchestrator_PreparerPhase_ToolTiersEnabledEmitsTieredBlock(t *testing.T) {
-	// RFC #249 Phase 4: with tool_tiers.enabled + a wired
-	// InjectionStateStore, the preparer_decision event's Tools block
-	// reports Tier 0/1/2/3 splits AND the cap snapshot, instead of the
-	// Phase-2 pass-through (all candidates in tier1_new).
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"final"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	tierStore := &fakeInjectionStateStore{}
-
+// newCatalogOrch builds a native-tools orchestrator over the tier test
+// plugins + a wired state store, so the catalog renders and load_tools can
+// persist sticky promotions.
+func newCatalogOrch(t *testing.T, store *fakeInjectionStateStore) *Orchestrator {
+	t.Helper()
 	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, preparerJSONForTierTests)
+	registerTierTestPlugins(t, registry, `{"send_to_llm": true, "message": "q"}`)
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1", "", "")
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
+	return NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
 		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(1)},
-		InjectionStateStore: tierStore,
+		InjectionStateStore: store,
 	})
-
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
-
-	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
-	if pd == nil {
-		t.Fatal("preparer_decision event missing")
-	}
-	var pdPayload events.PreparerDecisionPayload
-	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	tb := pdPayload.Tools
-	// Tier1Cap=2 + Tier2Cap=1 + 4 candidates + 1 non-candidate (t5):
-	//   Tier 1 = [t1, t2]; Tier 2 = [t3]; Tier 3 = [t4, t5].
-	if tb.Tier1Cap != 2 {
-		t.Errorf("Tier1Cap snapshot = %d, want 2", tb.Tier1Cap)
-	}
-	if tb.Tier1SizeAfter != 2 {
-		t.Errorf("Tier1SizeAfter = %d, want 2", tb.Tier1SizeAfter)
-	}
-	wantT1New := []string{"tools-plugin__t1", "tools-plugin__t2"}
-	gotT1New := append([]string(nil), tb.Tier1New...)
-	sort.Strings(gotT1New)
-	sort.Strings(wantT1New)
-	if !reflect.DeepEqual(gotT1New, wantT1New) {
-		t.Errorf("Tier1New = %v, want %v", gotT1New, wantT1New)
-	}
-	if tb.Tier3TotalVisible != 2 {
-		t.Errorf("Tier3TotalVisible = %d, want 2 (t4 + t5)", tb.Tier3TotalVisible)
-	}
-	if tierStore.updateCalls != 1 {
-		t.Errorf("UpdateInjectionState calls = %d, want 1", tierStore.updateCalls)
-	}
-	if len(tierStore.lastWritten.KnownTools) == 0 {
-		t.Errorf("KnownTools must be persisted, got empty")
-	}
 }
 
-func TestOrchestrator_PreparerPhase_ToolTiersDisabledStaysPassThrough(t *testing.T) {
-	// Regression guard: with the master switch off (and even when a
-	// store is wired), preparer_decision must keep the Phase-2
-	// pass-through Tools block — every candidate in tier1_new, no
-	// tier1_cap snapshot, no store writes.
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"final"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	tierStore := &fakeInjectionStateStore{}
+func TestToolCatalog_NativeMode_RendersCatalogAndKeepsToolsArraySmall(t *testing.T) {
+	// With native tools and nothing loaded, the tools array carries only the
+	// always-include core (load_tools); every other allowed tool surfaces in
+	// the system-prompt catalog with the load_tools nudge.
+	orch := newCatalogOrch(t, &fakeInjectionStateStore{})
+	ctx := actor.WithSessionID(context.Background(), "s1")
 
-	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, preparerJSONForTierTests)
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: false},
-		InjectionStateStore: tierStore,
-	})
-
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
-
-	pd := findEventByType(sink.snapshot(), events.TypePreparerDecision)
-	var pdPayload events.PreparerDecisionPayload
-	if err := json.Unmarshal(pd.Payload, &pdPayload); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if pdPayload.Tools.Tier1Cap != 0 {
-		t.Errorf("Tier1Cap must stay zero when tier logic disabled, got %d", pdPayload.Tools.Tier1Cap)
-	}
-	if len(pdPayload.Tools.Tier1New) != 4 {
-		t.Errorf("pass-through Tier1New len = %d, want 4 (all candidates)", len(pdPayload.Tools.Tier1New))
-	}
-	if tierStore.updateCalls != 0 {
-		t.Errorf("disabled tier_tiers must not write state, got %d update calls", tierStore.updateCalls)
-	}
-}
-
-func TestOrchestrator_PreparerPhase_ToolTiersSecondTurnLRUCarriesOver(t *testing.T) {
-	// Two-turn LRU sanity: turn 1 establishes t1/t2 as Tier 1. Turn 2
-	// sees DIFFERENT candidates (t3/t4) and Tier1Cap=2 — but t1/t2's
-	// LRURank from turn 1 still falls below currentTurn=2, so t3/t4
-	// take Tier 1 and t1/t2 land in Tier1EvictedToTier3.
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"final-1", "final-2"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	tierStore := &fakeInjectionStateStore{}
-
-	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, `{
-		"send_to_llm": true,
-		"message": "q",
-		"tool_candidates": [
-			{"tool_name": "tools-plugin__t1", "score": 0.9},
-			{"tool_name": "tools-plugin__t2", "score": 0.8}
-		]
-	}`)
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(1)},
-		InjectionStateStore: tierStore,
-	})
-
-	// Turn 1: t1/t2 enter Tier 1.
-	if _, err := orch.Run(context.Background(), "s1", "first"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Swap the preparer to return t3/t4 instead.
-	t1Caps := registry.ListCapabilities()
-	for _, cap := range t1Caps {
-		if cap.Name == "rag-plugin" {
-			_, _ = registry.GetExecutor(cap.Name) // sanity: it's registered
-		}
-	}
-	registry2 := NewToolRegistry()
-	registerTierTestPlugins(t, registry2, `{
-		"send_to_llm": true,
-		"message": "q2",
-		"tool_candidates": [
-			{"tool_name": "tools-plugin__t3", "score": 0.9},
-			{"tool_name": "tools-plugin__t4", "score": 0.8}
-		]
-	}`)
-	// Re-create the orchestrator with the new registry but the SAME
-	// store (so turn 2 reads turn 1's KnownTools).
-	orch2 := NewWithRules(llm, parser, registry2, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(1)},
-		InjectionStateStore: tierStore,
-	})
-	if _, err := orch2.Run(context.Background(), "s1", "second"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Find the LAST preparer_decision (turn 2's).
-	evs := sink.snapshot()
-	var turn2 *emit.Event
-	for i := range evs {
-		if evs[i].EventType == events.TypePreparerDecision {
-			ev := evs[i]
-			turn2 = &ev
-		}
-	}
-	if turn2 == nil {
-		t.Fatal("turn 2 preparer_decision missing")
-	}
-	var p events.PreparerDecisionPayload
-	if err := json.Unmarshal(turn2.Payload, &p); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	wantEvicted := []string{"tools-plugin__t1", "tools-plugin__t2"}
-	gotEvicted := append([]string(nil), p.Tools.Tier1EvictedToTier3...)
-	sort.Strings(gotEvicted)
-	sort.Strings(wantEvicted)
-	if !reflect.DeepEqual(gotEvicted, wantEvicted) {
-		t.Errorf("turn 2 Tier1EvictedToTier3 = %v, want %v", gotEvicted, wantEvicted)
-	}
-	gotT1New := append([]string(nil), p.Tools.Tier1New...)
-	sort.Strings(gotT1New)
-	wantT1New := []string{"tools-plugin__t3", "tools-plugin__t4"}
-	if !reflect.DeepEqual(gotT1New, wantT1New) {
-		t.Errorf("turn 2 Tier1New = %v, want %v", gotT1New, wantT1New)
-	}
-}
-
-func TestOrchestrator_PreparerPhase_ToolTiersSystemPromptHasTier2AndTier3Sections(t *testing.T) {
-	// RFC #249 Phase 4 D3: with tier decision active, the system
-	// prompt sent to the LLM must include "## Available tools —
-	// summary tier" (Tier 2 name + 1-liner) and "## Other available
-	// tools" (Tier 3 names-only grouped). Tier 0+1 stay in the per-
-	// plugin sections (the existing relevant_tools narrowing handles
-	// them, now driven by Tier 0+1 names from the decision).
-	sink := &recordingEventSink{}
-	llm := &capturingLLM{responses: []string{"answer"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	tierStore := &fakeInjectionStateStore{}
-
-	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, preparerJSONForTierTests)
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(2), Tier2Cap: intPtr(1)},
-		InjectionStateStore: tierStore,
-	})
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(llm.requests) == 0 {
-		t.Fatal("LLM was not called")
-	}
-	var sysMsg string
-	for _, m := range llm.requests[0].Messages {
-		if m.Role == provider.RoleSystem {
-			sysMsg = m.Content
-		}
-	}
-	if sysMsg == "" {
-		t.Fatal("system message missing in LLM request")
-	}
+	sysMsg := orch.buildSystemPrompt(ctx, "ask", true)
 	if !strings.Contains(sysMsg, "## Tool catalog — name + one-line summary") {
-		t.Errorf("system prompt missing Tier 2 header, got:\n%s", sysMsg)
+		t.Errorf("system prompt missing catalog header, got:\n%s", sysMsg)
 	}
-	if !strings.Contains(sysMsg, "## Other available tools (request details before use)") {
-		t.Errorf("system prompt missing Tier 3 header, got:\n%s", sysMsg)
+	if !strings.Contains(sysMsg, "_meta__load_tools") {
+		t.Errorf("catalog nudge must reference load_tools, got:\n%s", sysMsg)
 	}
-	// Tier 3 includes t4 (overflow of Tier 1+2 caps) and t5 (never a
-	// candidate). Both must appear under the tools-plugin group.
-	if !strings.Contains(sysMsg, "tools-plugin:") {
-		t.Errorf("Tier 3 plugin group header missing, got:\n%s", sysMsg)
-	}
-	if !strings.Contains(sysMsg, "t4") || !strings.Contains(sysMsg, "t5") {
-		t.Errorf("Tier 3 missing t4 / t5, got:\n%s", sysMsg)
-	}
-	// Tier 2 has exactly one entry (Tier2Cap=1): tools-plugin__t3.
-	if !strings.Contains(sysMsg, "tools-plugin__t3") {
-		t.Errorf("Tier 2 must list tools-plugin__t3, got:\n%s", sysMsg)
-	}
-}
-
-func TestOrchestrator_PreparerPhase_ToolTiersDisabledNoTierSectionsInPrompt(t *testing.T) {
-	// Regression guard: with tier_tiers.enabled=false, the system
-	// prompt must NOT contain the Phase-4 "Available tools — summary
-	// tier" or "Other available tools (request details before use)"
-	// sections. The pre-Phase-4 prompt structure is fully preserved.
-	sink := &recordingEventSink{}
-	llm := &capturingLLM{responses: []string{"answer"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-
-	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, preparerJSONForTierTests)
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:        sink,
-		ContentPreparers: []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		ToolTiers:        ToolTiersConfig{Enabled: false},
-	})
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
-
-	var sysMsg string
-	for _, m := range llm.requests[0].Messages {
-		if m.Role == provider.RoleSystem {
-			sysMsg = m.Content
+	for _, fqn := range []string{"tools-plugin__t1", "tools-plugin__t2", "tools-plugin__t5"} {
+		if !strings.Contains(sysMsg, fqn) {
+			t.Errorf("catalog missing %s, got:\n%s", fqn, sysMsg)
 		}
 	}
-	if strings.Contains(sysMsg, "## Tool catalog — name + one-line summary") {
-		t.Errorf("Tier 2 section must NOT appear when tier logic off, got:\n%s", sysMsg)
-	}
-	if strings.Contains(sysMsg, "## Other available tools (request details before use)") {
-		t.Errorf("Tier 3 section must NOT appear when tier logic off, got:\n%s", sysMsg)
+
+	// Native tools array: only the always-include load_tools meta-tool.
+	tools := orch.buildToolDefinitions(ctx)
+	if len(tools) != 1 || tools[0].Name != toolFQN(metaPluginName, metaLoadTools) {
+		t.Errorf("tools array = %+v, want only the always-include load_tools meta-tool", tools)
 	}
 }
 
-func TestOrchestrator_PreparerPhase_ToolTiersWithDedupSingleStateWrite(t *testing.T) {
-	// When BOTH dedup and tier decisions run, the tier preparer merges
-	// its KnownTools delta into the dedup decision's UpdatedState so a
-	// single UpdateInjectionState call carries both — avoids one
-	// clobbering the other and keeps writes to one round-trip.
-	preparerJSON := `{
-		"send_to_llm": true,
-		"message": "q",
-		"knowledge_candidates": [
-			{"article_id": "kb_a", "content": "body", "content_sha256": "sha-a", "score": 0.9}
-		],
-		"tool_candidates": [
-			{"tool_name": "tools-plugin__t1", "score": 0.95}
-		]
-	}`
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"final"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	combinedStore := &fakeInjectionStateStore{}
+func TestToolCatalog_LoadedToolLeavesCatalogAndEntersToolsArray(t *testing.T) {
+	// After load_tools promotes a tool, it drops out of the catalog and into
+	// the native tools array with its full schema; the rest stay in the catalog.
+	store := &fakeInjectionStateStore{}
+	orch := newCatalogOrch(t, store)
+	exec, ok := orch.registry.GetExecutor(metaPluginName)
+	if !ok {
+		t.Fatal("load_tools executor missing")
+	}
+	ctx := actor.WithSessionID(context.Background(), "s1")
 
+	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": "tools-plugin__t1"}})
+	if res.Error != "" {
+		t.Fatalf("load_tools failed: %q", res.Error)
+	}
+
+	// Now t1 is sticky: tools array has load_tools + t1; catalog omits t1.
+	promoted := orch.promotedToolSet(ctx)
+	if !promoted["tools-plugin__t1"] {
+		t.Fatalf("promotedToolSet missing tools-plugin__t1, got %v", promoted)
+	}
+	tools := orch.buildToolDefinitions(ctx)
+	names := map[string]bool{}
+	for _, td := range tools {
+		names[td.Name] = true
+	}
+	if !names[toolFQN(metaPluginName, metaLoadTools)] || !names["tools-plugin__t1"] {
+		t.Errorf("tools array must contain load_tools + tools-plugin__t1, got %v", names)
+	}
+	if names["tools-plugin__t2"] {
+		t.Errorf("tools array must NOT contain the un-loaded tools-plugin__t2, got %v", names)
+	}
+
+	sysMsg := orch.buildSystemPrompt(ctx, "ask", true)
+	if strings.Contains(sysMsg, "- tools-plugin__t1:") {
+		t.Errorf("loaded tool must drop out of the catalog, still present:\n%s", sysMsg)
+	}
+	if !strings.Contains(sysMsg, "tools-plugin__t2") {
+		t.Errorf("un-loaded tools must remain in the catalog, missing t2:\n%s", sysMsg)
+	}
+}
+
+func TestToolCatalog_StickyCapKeepsMostRecentlyUsed(t *testing.T) {
+	// promotedToolSet caps the sticky set at maxStickyTools, keeping the
+	// highest-LRURank entries.
 	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, preparerJSON)
+	registerTierTestPlugins(t, registry, `{"send_to_llm": true, "message": "q"}`)
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1", "", "")
 
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:           sink,
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		KnowledgeDedup:      KnowledgeDedupConfig{Enabled: true},
-		ToolTiers:           ToolTiersConfig{Enabled: true, Tier1Cap: intPtr(3), Tier2Cap: intPtr(2)},
-		InjectionStateStore: combinedStore,
+	// Seed more than the cap; the lowest ranks must be dropped.
+	known := make([]state.KnownToolEntry, 0, maxStickyTools+5)
+	for i := 0; i < maxStickyTools+5; i++ {
+		known = append(known, state.KnownToolEntry{
+			ToolName: "p__a" + string(rune('A'+i%26)) + string(rune('0'+i/26)),
+			Tier:     state.KnownToolTier1,
+			LRURank:  i, // higher i = more recent
+		})
+	}
+	store := &fakeInjectionStateStore{store: map[string]state.InjectionState{"s1": {KnownTools: known}}}
+	orch := NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
+		InjectionStateStore: store,
 	})
-	if _, err := orch.Run(context.Background(), "s1", "ask"); err != nil {
-		t.Fatal(err)
-	}
+	ctx := actor.WithSessionID(context.Background(), "s1")
 
-	if combinedStore.updateCalls != 1 {
-		t.Errorf("UpdateInjectionState calls = %d, want 1 (dedup write carries tier delta)", combinedStore.updateCalls)
+	promoted := orch.promotedToolSet(ctx)
+	if len(promoted) != maxStickyTools {
+		t.Fatalf("sticky set size = %d, want cap %d", len(promoted), maxStickyTools)
 	}
-	if len(combinedStore.lastWritten.KnownKnowledge) != 1 {
-		t.Errorf("KnownKnowledge persisted len = %d, want 1", len(combinedStore.lastWritten.KnownKnowledge))
+	// The lowest-rank entry (i=0) must have been dropped; the highest (i=last) kept.
+	lowest := known[0].ToolName
+	highest := known[len(known)-1].ToolName
+	if promoted[lowest] {
+		t.Errorf("lowest-LRURank tool %q must be dropped past the cap", lowest)
 	}
-	if len(combinedStore.lastWritten.KnownTools) == 0 {
-		t.Errorf("KnownTools must also be persisted in the same write, got 0 entries")
+	if !promoted[highest] {
+		t.Errorf("highest-LRURank tool %q must be kept under the cap", highest)
+	}
+}
+
+func TestToolCatalog_DemotedToolNotSticky(t *testing.T) {
+	// A Demoted entry is excluded from the sticky set even if its LRURank is
+	// high — it falls back to the catalog.
+	registry := NewToolRegistry()
+	registerTierTestPlugins(t, registry, `{"send_to_llm": true, "message": "q"}`)
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "")
+	store := &fakeInjectionStateStore{store: map[string]state.InjectionState{
+		"s1": {KnownTools: []state.KnownToolEntry{
+			{ToolName: "tools-plugin__t1", Tier: state.KnownToolTier1, LRURank: 99, Demoted: true},
+			{ToolName: "tools-plugin__t2", Tier: state.KnownToolTier1, LRURank: 5},
+		}},
+	}}
+	orch := NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
+		InjectionStateStore: store,
+	})
+	ctx := actor.WithSessionID(context.Background(), "s1")
+
+	promoted := orch.promotedToolSet(ctx)
+	if promoted["tools-plugin__t1"] {
+		t.Errorf("Demoted tool must be excluded from the sticky set")
+	}
+	if !promoted["tools-plugin__t2"] {
+		t.Errorf("non-demoted tool must be in the sticky set")
 	}
 }

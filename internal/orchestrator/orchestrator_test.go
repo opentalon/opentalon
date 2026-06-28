@@ -2356,106 +2356,6 @@ func TestShowToolCallsDisabledDoesNotPrepend(t *testing.T) {
 
 // --- Knowledge-Augmented RAG tests (issue #97) ---
 
-func TestPreparerRelevantToolsFilterSystemPrompt(t *testing.T) {
-	// A preparer returns relevant_tools -> buildSystemPrompt only shows those tools.
-	ragJSON := `{"send_to_llm": true, "message": "enriched query", "relevant_tools": ["gitlab__analyze_code"]}`
-
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "rag-preparer", Description: "RAG",
-		Actions: []Action{{Name: "prepare", Description: "RAG prepare", Parameters: []Parameter{{Name: "text", Description: "User message"}}}},
-	}, &fixedResultExecutor{content: ragJSON})
-	_ = registry.Register(PluginCapability{
-		Name: "gitlab", Description: "GitLab integration",
-		Actions: []Action{
-			{Name: "analyze_code", Description: "Analyze code"},
-			{Name: "create_pr", Description: "Create PR"},
-		},
-	}, &echoExecutor{})
-	_ = registry.Register(PluginCapability{
-		Name: "jira", Description: "Jira integration",
-		Actions: []Action{{Name: "create_issue", Description: "Create issue"}},
-	}, &echoExecutor{})
-
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	interceptLLM := &capturingLLM{responses: []string{"done"}}
-	preparers := []ContentPreparerEntry{{Plugin: "rag-preparer", Action: "prepare"}}
-	orch := NewWithRules(interceptLLM, parser, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
-
-	result, err := orch.Run(context.Background(), "s1", "analyze my repo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Response != "done" {
-		t.Errorf("Response = %q", result.Response)
-	}
-
-	if len(interceptLLM.requests) == 0 {
-		t.Fatal("no requests captured")
-	}
-
-	systemPrompt := interceptLLM.requests[0].Messages[0].Content
-	// Should include gitlab.analyze_code (relevant)
-	if !strings.Contains(systemPrompt, "gitlab__analyze_code") {
-		t.Error("system prompt should contain gitlab__analyze_code (relevant tool)")
-	}
-	// Should NOT include gitlab.create_pr or jira.create_issue (not in relevant_tools)
-	if strings.Contains(systemPrompt, "gitlab__create_pr") {
-		t.Error("system prompt should NOT contain gitlab.create_pr (not in relevant_tools)")
-	}
-	if strings.Contains(systemPrompt, "jira__create_issue") {
-		t.Error("system prompt should NOT contain jira.create_issue (not in relevant_tools)")
-	}
-}
-
-func TestPreparerEmptyRelevantToolsShowsNone(t *testing.T) {
-	// When preparer returns empty relevant_tools [], no tools are shown.
-	// This means "preparer found nothing relevant" — LLM sees no tools.
-	ragJSON := `{"send_to_llm": true, "message": "unchanged", "relevant_tools": []}`
-
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "rag-preparer", Description: "RAG",
-		Actions: []Action{{Name: "prepare", Description: "RAG prepare", Parameters: []Parameter{{Name: "text", Description: "text"}}}},
-	}, &fixedResultExecutor{content: ragJSON})
-	_ = registry.Register(PluginCapability{
-		Name: "gitlab", Description: "GitLab",
-		Actions: []Action{{Name: "analyze_code", Description: "Analyze code"}},
-	}, &echoExecutor{})
-	_ = registry.Register(PluginCapability{
-		Name: "jira", Description: "Jira",
-		Actions: []Action{{Name: "create_issue", Description: "Create issue"}},
-	}, &echoExecutor{})
-
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	interceptLLM := &capturingLLM{responses: []string{"no tools"}}
-	preparers := []ContentPreparerEntry{{Plugin: "rag-preparer", Action: "prepare"}}
-	orch := NewWithRules(interceptLLM, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
-
-	result, err := orch.Run(context.Background(), "s1", "hello")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Response != "no tools" {
-		t.Errorf("Response = %q", result.Response)
-	}
-	systemPrompt := interceptLLM.requests[0].Messages[0].Content
-	if strings.Contains(systemPrompt, "gitlab__analyze_code") {
-		t.Error("system prompt should NOT contain gitlab__analyze_code when relevant_tools is empty []")
-	}
-	if strings.Contains(systemPrompt, "jira__create_issue") {
-		t.Error("system prompt should NOT contain jira__create_issue when relevant_tools is empty []")
-	}
-}
-
 // TestPreparerInjectsAllowedPlugins exercises the consolidated context-arg
 // injection path: when a preparer action declares allowed_plugins via
 // InjectContextArgs and a strict profile is present, the registered
@@ -3305,55 +3205,6 @@ func TestIngestKnowledgeDir(t *testing.T) {
 	}
 }
 
-func TestPreparerRelevantToolsNoMatchSkipsAllHeaders(t *testing.T) {
-	// When relevant_tools contains names that don't match any registered action,
-	// all plugin headers are skipped from the system prompt.
-	ragJSON := `{"send_to_llm": true, "message": "query", "relevant_tools": ["nonexistent__action"]}`
-
-	registry := NewToolRegistry()
-	_ = registry.Register(PluginCapability{
-		Name: "rag-preparer", Description: "RAG",
-		Actions: []Action{{Name: "prepare", Description: "RAG prepare", Parameters: []Parameter{{Name: "text", Description: "text"}}}},
-	}, &fixedResultExecutor{content: ragJSON})
-	_ = registry.Register(PluginCapability{
-		Name: "gitlab", Description: "GitLab integration",
-		Actions: []Action{{Name: "analyze_code", Description: "Analyze code"}},
-	}, &echoExecutor{})
-	_ = registry.Register(PluginCapability{
-		Name: "jira", Description: "Jira integration",
-		Actions: []Action{{Name: "create_issue", Description: "Create issue"}},
-	}, &echoExecutor{})
-
-	interceptLLM := &capturingLLM{responses: []string{"ok"}}
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	preparers := []ContentPreparerEntry{{Plugin: "rag-preparer", Action: "prepare"}}
-	orch := NewWithRules(interceptLLM, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{ContentPreparers: preparers})
-
-	_, err := orch.Run(context.Background(), "s1", "something irrelevant")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	systemPrompt := interceptLLM.requests[0].Messages[0].Content
-	// No plugin actions should appear (nonexistent.action matches nothing).
-	if strings.Contains(systemPrompt, "gitlab__analyze_code") {
-		t.Error("system prompt should NOT contain gitlab__analyze_code when relevant_tools match nothing")
-	}
-	if strings.Contains(systemPrompt, "jira__create_issue") {
-		t.Error("system prompt should NOT contain jira.create_issue when relevant_tools match nothing")
-	}
-	// Plugin headers (## gitlab, ## jira) should also be absent.
-	if strings.Contains(systemPrompt, "## gitlab") {
-		t.Error("system prompt should NOT contain ## gitlab header when no actions match")
-	}
-	if strings.Contains(systemPrompt, "## jira") {
-		t.Error("system prompt should NOT contain ## jira header when no actions match")
-	}
-}
-
 func TestIngestKnowledgeDirRecursive(t *testing.T) {
 	// Verify that subdirectories are scanned recursively.
 	dir := t.TempDir()
@@ -3390,40 +3241,6 @@ func TestIngestKnowledgeDirRecursive(t *testing.T) {
 
 	if ingestCount != 2 {
 		t.Errorf("expected 2 ingest calls (top + nested), got %d", ingestCount)
-	}
-}
-
-func TestRelevantToolsContextRoundTrip(t *testing.T) {
-	tools := []string{"gitlab.analyze_code", "jira.create_issue"}
-	ctx := withRelevantTools(context.Background(), tools)
-	got, ok := relevantToolsFromContext(ctx)
-	if !ok {
-		t.Fatal("expected relevantToolsFromContext to return ok=true")
-	}
-	if len(got) != 2 || got[0] != tools[0] || got[1] != tools[1] {
-		t.Errorf("round-trip failed: got %v, want %v", got, tools)
-	}
-}
-
-func TestRelevantToolsContextEmpty(t *testing.T) {
-	got, ok := relevantToolsFromContext(context.Background())
-	if ok {
-		t.Errorf("expected ok=false from empty context, got ok=true tools=%v", got)
-	}
-	if got != nil {
-		t.Errorf("expected nil from empty context, got %v", got)
-	}
-}
-
-func TestRelevantToolsContextExplicitEmpty(t *testing.T) {
-	// Preparer returned [] explicitly — should filter to empty, not show all.
-	ctx := withRelevantTools(context.Background(), []string{})
-	got, ok := relevantToolsFromContext(ctx)
-	if !ok {
-		t.Fatal("expected ok=true for explicitly set empty tools")
-	}
-	if len(got) != 0 {
-		t.Errorf("expected empty slice, got %v", got)
 	}
 }
 

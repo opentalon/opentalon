@@ -1043,44 +1043,10 @@ orchestrator:
 	}
 }
 
-func TestParsePreparerToolTiers(t *testing.T) {
-	// Same purpose as TestParsePreparerKnowledgeDedup but for the
-	// Phase-4 tier flags — verifies the operator-facing YAML keys
-	// match the Go struct tags, no more, no less. Default-normalization
-	// is exercised in internal/orchestrator/tool_tiers_config_test.go.
-	yaml := `
-orchestrator:
-  preparer:
-    tool_tiers:
-      enabled: true
-      tier1_cap: 12
-      tier2_cap: 18
-      enable_get_tool_details: true
-`
-	cfg, err := Parse([]byte(yaml))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := cfg.Orchestrator.Preparer.ToolTiers
-	if !got.Enabled {
-		t.Errorf("Enabled = false, want true")
-	}
-	if got.Tier1Cap == nil || *got.Tier1Cap != 12 {
-		t.Errorf("Tier1Cap = %v, want 12", got.Tier1Cap)
-	}
-	if got.Tier2Cap == nil || *got.Tier2Cap != 18 {
-		t.Errorf("Tier2Cap = %v, want 18", got.Tier2Cap)
-	}
-	if !got.EnableGetToolDetails {
-		t.Errorf("EnableGetToolDetails = false, want true")
-	}
-}
-
 func TestParsePreparerToolErrorHandling(t *testing.T) {
-	// Round-trips the Phase-4 tool-error YAML block. The orchestrator-
-	// side default-normalization is covered in
-	// internal/orchestrator/tool_tiers_config_test.go — here we only
-	// guard the YAML→struct mapping.
+	// Round-trips the Phase-4 tool-error YAML block — guards the
+	// YAML→struct mapping; orchestrator-side default-normalization is
+	// covered in the orchestrator package.
 	yaml := `
 orchestrator:
   preparer:
@@ -1101,11 +1067,10 @@ orchestrator:
 	}
 }
 
-func TestParsePreparerToolTiersAbsentLeavesZeroValues(t *testing.T) {
-	// Regression guard: an absent preparer.tool_tiers /
-	// preparer.tool_error_handling block must parse to zero values so
-	// the orchestrator's normalization step owns the RFC defaults
-	// uniformly across YAML-driven and test-authored opts.
+func TestParsePreparerToolErrorHandlingAbsentLeavesZeroValues(t *testing.T) {
+	// Regression guard: an absent preparer.tool_error_handling block must
+	// parse to zero values so the orchestrator's normalization step owns
+	// the RFC defaults uniformly across YAML-driven and test-authored opts.
 	yaml := `
 orchestrator:
   rules: []
@@ -1113,10 +1078,6 @@ orchestrator:
 	cfg, err := Parse([]byte(yaml))
 	if err != nil {
 		t.Fatal(err)
-	}
-	tt := cfg.Orchestrator.Preparer.ToolTiers
-	if tt.Enabled || tt.Tier1Cap != nil || tt.Tier2Cap != nil || tt.EnableGetToolDetails {
-		t.Errorf("absent tool_tiers block must parse to zero ToolTiersConfig (nil caps), got %+v", tt)
 	}
 	eh := cfg.Orchestrator.Preparer.ToolErrorHandling
 	if eh.LoopCapPerTurn != 0 || eh.StickyDemotionThreshold != 0 {

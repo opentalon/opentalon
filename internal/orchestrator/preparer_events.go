@@ -40,15 +40,6 @@ type preparerAggregate struct {
 	// (config disabled, no store wired, or no knowledge candidates).
 	KnowledgeDedup *knowledgeDedupDecision
 
-	// ToolTier, when non-nil, drives the Phase-4 tier-aware Tools
-	// block of preparer_decision. Nil means tier logic didn't run
-	// (config disabled or no store wired) — emitPreparerDecision then
-	// falls back to the Phase-2 pass-through (every candidate name in
-	// tools.tier1_new). The decision also feeds the system-prompt
-	// renderer (D3) and persists KnownTools via the dedup persist when
-	// both ran in the same turn.
-	ToolTier *toolTierDecision
-
 	// LegacyKnowledgePlugins lists plugin names whose response carried
 	// a legacy [knowledge_context] injection (pr.Message contains the
 	// envelope) without the structured KnowledgeCandidates that Phase 3
@@ -191,8 +182,9 @@ func (o *Orchestrator) emitPreparerTranslations(ctx context.Context, pr preparer
 //     "top_k_force"; cap-exceeded entries land in Skipped.
 //
 // In both modes Tools.Tier1New surfaces every ToolCandidate plus any
-// legacy relevant_tools fallback list so the event stays meaningful
-// while Phase 4's tier logic is off.
+// legacy relevant_tools fallback list, recording what RAG retrieved (it
+// no longer drives the LLM's tools array, which is selected by the
+// always-include + sticky model).
 //
 // Returns the emitted event id so the caller can chain it as
 // TurnStartPayload.PreparerDecisionID — empty when no event was
@@ -281,10 +273,10 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 //     structured handle, so no ref list can be assembled without
 //     re-parsing.
 //
-// Tier counts mirror agg.ToolTier when Phase 4 ran (counts of the
-// Tier1 / Tier3 slices respectively); zero when it didn't. Zero
-// values are omitted from the emitted payload by `omitempty` so
-// pre-Phase-4 turns stay byte-identical to the original shape.
+// The tier counts are retained in the return signature (and the turn_start
+// payload) for schema stability, but always zero now that tool discovery
+// is the registry-sourced catalog rather than a per-turn tier decision;
+// `omitempty` keeps them out of the emitted payload.
 func turnStartRefsFromAggregate(agg preparerAggregate) (refs []events.KnowledgeRef, tier1Count, tier3Count int) {
 	switch {
 	case agg.KnowledgePushSuppressed:
@@ -306,39 +298,18 @@ func turnStartRefsFromAggregate(agg preparerAggregate) (refs []events.KnowledgeR
 			})
 		}
 	}
-	if agg.ToolTier != nil {
-		tier1Count = len(agg.ToolTier.Tier1)
-		tier3Count = len(agg.ToolTier.Tier3)
-	}
 	return refs, tier1Count, tier3Count
 }
 
 // buildToolsBlock returns the preparer_decision.tools payload for the
-// current aggregate. With ToolTier set (Phase 4 enabled + ran), each
-// tier bucket is reported separately + the LRU/eviction telemetry
-// + the get_tool_details promotion list. Without ToolTier (Phase 2 /
-// Phase 3 fall-through), every candidate appears in tier1_new — the
-// instrumentation_only behaviour Phase 2 introduced.
+// current aggregate. Every retrieved tool candidate (plus any legacy
+// relevant_tools fallback) appears in tier1_new — the instrumentation
+// signal that records what RAG surfaced. The tools array the LLM actually
+// gets is now selected by the always-include + sticky model, not by this
+// retrieval, so the other tier buckets stay empty.
 func buildToolsBlock(agg preparerAggregate) events.PreparerDecisionToolsBlock {
-	if agg.ToolTier == nil {
-		return events.PreparerDecisionToolsBlock{
-			Tier1New: toolCandidateNames(agg.Tools, agg.LegacyRelevantTools),
-		}
-	}
-	d := agg.ToolTier
 	return events.PreparerDecisionToolsBlock{
-		Tier0Count:                len(d.Tier0),
-		Tier1New:                  d.Tier1New,
-		Tier1Carried:              d.Tier1Carried,
-		Tier1EvictedToTier3:       d.Tier1EvictedToTier3,
-		Tier1DemotedSticky:        d.Tier1DemotedSticky,
-		Tier1SizeAfter:            d.Tier1SizeAfter,
-		Tier1Cap:                  d.Tier1Cap,
-		Tier2Tools:                d.Tier2,
-		Tier2SizeAfter:            len(d.Tier2),
-		Tier2Cap:                  d.Tier2Cap,
-		Tier3TotalVisible:         len(d.Tier3),
-		PromotedViaGetToolDetails: d.PromotedViaGetToolDetails,
+		Tier1New: toolCandidateNames(agg.Tools, agg.LegacyRelevantTools),
 	}
 }
 

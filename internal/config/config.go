@@ -335,16 +335,15 @@ type OrchestratorConfig struct {
 	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`       // knowledge-augmented RAG configuration
 	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`      // subprocess (sub-agent) support
 	ShowToolCalls         string                       `yaml:"show_tool_calls,omitempty"` // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	Preparer              PreparerOrchestratorConfig   `yaml:"preparer,omitempty"`        // RFC #249 preparer-phase behaviour (knowledge dedup, tool tiers, error handling)
+	Preparer              PreparerOrchestratorConfig   `yaml:"preparer,omitempty"`        // RFC #249 preparer-phase behaviour (knowledge dedup, tool error handling)
 }
 
 // PreparerOrchestratorConfig groups the RFC #249 preparer-phase
-// behaviour flags. Each pillar (knowledge dedup, tool tiers, tool
-// error handling) is independently togglable so phases can be
-// A/B-tested in production without coupled rollout risk.
+// behaviour flags. Each pillar (knowledge dedup, tool error handling)
+// is independently togglable so phases can be A/B-tested in production
+// without coupled rollout risk.
 type PreparerOrchestratorConfig struct {
 	KnowledgeDedup    KnowledgeDedupConfig    `yaml:"knowledge_dedup,omitempty"`
-	ToolTiers         ToolTiersConfig         `yaml:"tool_tiers,omitempty"`
 	ToolErrorHandling ToolErrorHandlingConfig `yaml:"tool_error_handling,omitempty"`
 }
 
@@ -368,26 +367,6 @@ type KnowledgeDedupConfig struct {
 	ReinjectScoreThreshold float64 `yaml:"reinject_score_threshold,omitempty"` // default 0.85 when zero
 	ReinjectTopKForce      int     `yaml:"reinject_top_k_force,omitempty"`     // default 3 when zero
 	CapPerTurn             int     `yaml:"cap_per_turn,omitempty"`             // default 5 when zero
-}
-
-// ToolTiersConfig configures the per-turn three-tier tool visibility
-// model (RFC #249 Phase 4). Tier 0 holds always_include actions plus
-// the get_tool_details meta-tool with full schemas; Tier 1 holds the
-// RAG-top-K relevant tools (also with full schemas) capped at Tier1Cap
-// with LRU eviction; Tier 2 surfaces the next slice as name + one-line
-// summary in the system prompt; Tier 3 fans out the remaining tools as
-// names-only grouped by plugin. The get_tool_details meta-tool promotes
-// any Tier 2/3 tool back into Tier 1 on demand.
-//
-// EnableGetToolDetails toggles the meta-tool independently of the
-// master Enabled flag so a deployment can ship the tier rendering
-// without yet exposing the LLM-driven promotion path. Setting it true
-// implies Enabled=true at the orchestrator (see runtime normalization).
-type ToolTiersConfig struct {
-	Enabled              bool `yaml:"enabled"`                           // master switch; default false
-	Tier1Cap             *int `yaml:"tier1_cap,omitempty"`               // max Tier-1 tools with full schemas; nil → default 10, explicit 0 → empty Tier 1 (catalog-mode)
-	Tier2Cap             *int `yaml:"tier2_cap,omitempty"`               // max Tier-2 tools surfaced as name + 1-line summary; nil → default 15, explicit 0 → empty Tier 2
-	EnableGetToolDetails bool `yaml:"enable_get_tool_details,omitempty"` // expose the get_tool_details meta-tool for Tier-3→Tier-1 promotion; default false
 }
 
 // ToolErrorHandlingConfig configures the runaway-tool-failure

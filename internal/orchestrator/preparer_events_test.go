@@ -18,8 +18,8 @@ import (
 //   - legacy_fallback mode (any legacy plugin returned a pre-rendered block) → empty (no structured handle)
 //   - no preparer ran (aggregate empty) → nothing
 //
-// Plus the tier-count derivation: zero when ToolTier is nil (Phase 4
-// off), len(Tier1) / len(Tier3) when set.
+// The tier counts are always zero now that tool discovery is the
+// registry-sourced catalog rather than a per-turn tier decision.
 func TestTurnStartRefsFromAggregate(t *testing.T) {
 	candA := KnowledgeCandidate{ArticleID: "kb_a", ContentSHA256: "sha_a"}
 	candB := KnowledgeCandidate{ArticleID: "kb_b", ContentSHA256: "sha_b"}
@@ -67,17 +67,6 @@ func TestTurnStartRefsFromAggregate(t *testing.T) {
 		{
 			name: "no preparer ran — empty aggregate yields no refs",
 			agg:  preparerAggregate{},
-		},
-		{
-			name: "tier counts surface when ToolTier is set",
-			agg: preparerAggregate{
-				ToolTier: &toolTierDecision{
-					Tier1: []string{"t1", "t2", "t3"},
-					Tier3: []string{"t4", "t5"},
-				},
-			},
-			wantTier1Count: 3,
-			wantTier3Count: 2,
 		},
 	}
 	for _, tc := range tests {

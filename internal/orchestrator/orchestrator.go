@@ -160,29 +160,6 @@ type InjectionStateStore interface {
 	UpdateInjectionState(ctx context.Context, sessionID string, st state.InjectionState) error
 }
 
-// ToolTiersConfig is the runtime form of the RFC #249 Phase 4 tool-tier
-// visibility flags. The tier caps are *int so an unset cap (nil) can be
-// distinguished from an explicit 0: nil resolves to the RFC default at
-// decision time (see tierCap), while an explicit 0 is honored — e.g.
-// catalog-mode sets Tier1Cap=0 for an empty Tier 1 (every tool surfaces
-// as a one-line catalog entry, fetched on demand via get_tool_details).
-// Enabled is the master switch — when false the orchestrator falls back
-// to the pre-Phase-4 behaviour (all RAG-matched tools land in `tools`
-// with full schemas) and the Tier-2/Tier-3 system-prompt sections are
-// suppressed.
-//
-// EnableGetToolDetails activates the meta-tool that lets the LLM
-// promote a Tier-2/Tier-3 tool back to Tier 1 on demand. Setting it
-// true with Enabled=false would expose a tool no one can use, so the
-// normalization step in NewWithRules upgrades Enabled to true in that
-// case (matching the operator-friendly intent of the YAML flag).
-type ToolTiersConfig struct {
-	Enabled              bool
-	Tier1Cap             *int // max Tier-1 tools (full schemas in `tools`); nil → default 10, explicit 0 → empty Tier 1 (catalog-mode)
-	Tier2Cap             *int // max Tier-2 tools (name + 1-line summary in system prompt); nil → default 15, explicit 0 → empty Tier 2
-	EnableGetToolDetails bool // expose the LLM-driven promotion meta-tool; default false
-}
-
 // ToolErrorHandlingConfig is the runtime form of the RFC #249 Phase 4
 // tool-failure protections. Zero values normalize to the RFC defaults
 // in NewWithRules. LoopCapPerTurn governs the in-loop "Tool X failed N
@@ -233,7 +210,6 @@ type OrchestratorOpts struct {
 	ShowToolCalls           string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 	KnowledgeDedup          KnowledgeDedupConfig    // RFC #249 Phase 3 dedup flags; zero value disables (= instrumentation_only mode)
 	InjectionStateStore     InjectionStateStore     // optional; required only when KnowledgeDedup.Enabled is true
-	ToolTiers               ToolTiersConfig         // RFC #249 Phase 4 three-tier tool visibility flags; zero value disables (= pre-Phase-4 single-tier behaviour)
 	ToolErrorHandling       ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; zero value normalizes to RFC defaults
 	ChannelSender           ChannelSender           // optional; when set, maybeGenerateTitle pushes the generated title to the originating channel as a session.title frame
 }
@@ -295,7 +271,7 @@ type Orchestrator struct {
 	// preparers + guards, computed once in NewWithRules from the
 	// preparers/guards slices above (both append-once at construction).
 	// Reads happen on every Run (system prompt assembly, native tool
-	// definitions, palette computation) and every _meta__get_tool_details
+	// definitions, palette computation) and every _meta__load_tools
 	// call — rebuilding the map per read is wasted work that scales
 	// linearly with the LLM's appetite for meta-tool lookups.
 	preparerActions         map[string]bool
@@ -316,13 +292,11 @@ type Orchestrator struct {
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
 	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
 	pendingConfirmationIDs  map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
-	// recentToolPromotions holds tool names the LLM pulled in via
-	// _meta__get_tool_details since the last preparer pass on each
-	// session. persistToolPromotion appends; promotedToolsThisTurn
-	// returns + clears. In-memory only — across orchestrator restart
-	// the LRU rank persisted to InjectionState still puts the tool
-	// in Tier 1, just without the promoted_via_get_tool_details
-	// provenance flag on the next preparer_decision.
+	// recentToolPromotions holds tool names the LLM loaded via
+	// _meta__load_tools since the last preparer pass on each session.
+	// persistToolPromotion appends. In-memory only — the durable sticky
+	// placement lives in InjectionState (LRURank), so this cache is just
+	// provenance for any consumer that wants the per-pass load list.
 	recentToolPromotionsMu sync.Mutex
 	recentToolPromotions   map[string][]string
 	pipelineConfig         pipeline.PipelineConfig
@@ -344,9 +318,8 @@ type Orchestrator struct {
 	showToolCalls          string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 	knowledgeDedup         KnowledgeDedupConfig    // RFC #249 Phase 3 dedup flags; Enabled=false skips dedup logic and InjectionStateStore reads
 	injectionStateStore    InjectionStateStore     // optional; nil = dedup decision logic short-circuits to instrumentation_only mode
-	toolTiers              ToolTiersConfig         // RFC #249 Phase 4 tier-visibility flags; Enabled=false short-circuits to pre-Phase-4 single-tier behaviour
 	toolErrorHandling      ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; thresholds always carry RFC defaults after NewWithRules
-	toolErrorTracker       *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by toolTiers.Enabled
+	toolErrorTracker       *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by injectionStateStore
 	channelSender          ChannelSender           // optional; nil = title generation persists silently, no live push to clients
 	// titleMuxes serializes per-session title-generation goroutines
 	// without blocking the foreground Run path. Summarization shares the
@@ -408,10 +381,10 @@ func resolveAllowedPluginNames(ctx context.Context, o *Orchestrator) string {
 //   - resolveAllowedToolFQNs (JSON-array form for the `allowed_tools`
 //     ContextArgProvider; preparer plugins use it to constrain RAG
 //     retrieval to the session's actual tool surface)
-//   - _meta__get_tool_details action-level visibility gate (rejects
-//     description lookups for actions the session cannot invoke, so the
-//     meta-tool cannot be used to enumerate tool schemas the
-//     manifest-filtering layer is hiding)
+//   - _meta__load_tools action-level visibility gate (rejects load
+//     requests for actions the session cannot invoke, so the meta-tool
+//     cannot be used to enumerate tool schemas the manifest-filtering
+//     layer is hiding)
 //
 // Both consumers MUST share the set so the "what is this session allowed
 // to see" answer is identical across the RAG-retrieval and direct-lookup
@@ -424,6 +397,13 @@ func allowedToolsSet(ctx context.Context, o *Orchestrator) map[string]struct{} {
 	set := make(map[string]struct{})
 	for _, cap := range o.registry.ListCapabilities() {
 		if !o.pluginAllowed(cap, allowedPlugins) {
+			continue
+		}
+		// The orchestrator-owned _meta plugin (load_tools) is host-internal
+		// and always present in the tools array — it is not a session-callable
+		// business tool, so it stays out of the palette that constrains RAG
+		// retrieval.
+		if cap.Name == metaPluginName {
 			continue
 		}
 		for _, action := range cap.Actions {
@@ -563,29 +543,8 @@ func NewWithRules(
 		dedupCfg.CapPerTurn = 5
 	}
 
-	// Normalize ToolTiers + ToolErrorHandling to RFC #249 Phase 4
-	// defaults, same precedent as KnowledgeDedup above. Enabled stays
-	// false by default. EnableGetToolDetails carries an extra rule:
-	// turning the meta-tool on with the master switch still off would
-	// register a Tier-0 tool no one can use, so we upgrade Enabled to
-	// true in that case — keeps the YAML surface obvious for operators
-	// who only set the meta-tool flag.
-	tierCfg := opts.ToolTiers
-	// Tier caps are *int so an unset cap (nil) is distinguishable from an
-	// explicit 0: nil normalizes to the RFC default here, while an
-	// explicit value — including 0 for catalog-mode's empty Tier 1 — is
-	// honored as-is.
-	if tierCfg.Tier1Cap == nil {
-		d := defaultTier1Cap
-		tierCfg.Tier1Cap = &d
-	}
-	if tierCfg.Tier2Cap == nil {
-		d := defaultTier2Cap
-		tierCfg.Tier2Cap = &d
-	}
-	if tierCfg.EnableGetToolDetails {
-		tierCfg.Enabled = true
-	}
+	// Normalize ToolErrorHandling to RFC #249 Phase 4 defaults, same
+	// precedent as KnowledgeDedup above.
 	errCfg := opts.ToolErrorHandling
 	if errCfg.LoopCapPerTurn == 0 {
 		errCfg.LoopCapPerTurn = 2
@@ -642,7 +601,6 @@ func NewWithRules(
 		showToolCalls:           opts.ShowToolCalls,
 		knowledgeDedup:          dedupCfg,
 		injectionStateStore:     opts.InjectionStateStore,
-		toolTiers:               tierCfg,
 		toolErrorHandling:       errCfg,
 		toolErrorTracker:        newToolErrorTracker(),
 		channelSender:           opts.ChannelSender,
@@ -652,16 +610,12 @@ func NewWithRules(
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
 
-	// Register the orchestrator-owned get_tool_details meta-tool when
-	// ToolTiersConfig.EnableGetToolDetails is set. AlwaysInclude on
-	// the registered action pins it into Tier 0 so the LLM always
-	// has a path back to full schemas for Tier-2/3 entries. The
-	// runtime normalization above also flips toolTiers.Enabled=true
-	// when this flag is on, so the rest of the tier pipeline (which
-	// the meta-tool depends on) is always coherent.
-	if o.toolTiers.EnableGetToolDetails {
-		o.registerGetToolDetailsTool()
-	}
+	// Register the orchestrator-owned load_tools meta-tool unconditionally
+	// — it is the core discovery mechanism that turns the system-prompt
+	// tool catalog into an actionable load step. AlwaysInclude on the
+	// registered action pins it into the always-present core set so the
+	// LLM always has a path to load catalog tools.
+	o.registerLoadToolsTool()
 
 	// Register the built-in _subprocess plugin when enabled.
 	o.subprocessConfig = opts.Subprocess
@@ -1465,10 +1419,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	ctx = withReplyLanguageDirective(ctx, o.replyLanguageDirective(content))
 
 	// Run content preparers before the first LLM call (config-driven).
-	// relevantTools stays nil when no preparer returns a tools list.
-	// An explicit empty slice means "preparer found nothing relevant" →
-	// filter to empty (LLM sees no tools except those the plugin always
-	// includes, such as ask_knowledge).
+	// Preparers no longer narrow the LLM's tool set — tools come from the
+	// registry-fed catalog and load_tools (see tool_catalog.go), so a
+	// preparer's relevant-tools output (if any) is ignored. Preparers still
+	// inject knowledge context, run guards, and parse slash-commands.
 	// STT preparers are skipped here — they already ran in runSTTPreparers above.
 	//
 	// Enrich the content sent to preparers with the last user message from
@@ -1507,8 +1461,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if searchText != content {
 			searchSource = events.SearchTextSourceEnriched
 		}
-		var relevantTools []string
-		relevantToolsSet := false
 		var prepAgg preparerAggregate
 		for _, prep := range o.preparers {
 			if prep.STT {
@@ -1522,12 +1474,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				return outcome.Blocked, nil
 			}
 			content = outcome.Content
-			// Last preparer that returns relevant_tools wins.
-			// Distinguish nil (no tools field) from [] (explicitly empty).
-			if outcome.RelevantTools != nil {
-				relevantTools = outcome.RelevantTools
-				relevantToolsSet = true
-			}
+			// A preparer's relevant_tools no longer narrows the LLM's tools
+			// array — discovery is the registry-sourced catalog + load_tools.
+			// The list is still accumulated into prepAgg (preparerAggregate.
+			// append) so the preparer_decision event keeps reporting what RAG
+			// retrieved.
 			// RFC #249 Phase 2 instrumentation: publish per-corpus
 			// retrieval events for this preparer, then accumulate the
 			// candidate slices for the composite preparer_decision
@@ -1590,19 +1541,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				content = o.prepareDedupDecision(ctx, sessionID, content, &prepAgg)
 			}
 		}
-		// RFC #249 Phase 4 tier decision: same activation contract as
-		// dedup (skip on legacy_fallback so the LLM sees the plugin's
-		// raw injection; skip without a state store so LRU has nowhere
-		// to persist). When both dedup and tier run, prepareToolTier-
-		// Decision merges its KnownTools delta into the dedup
-		// decision's UpdatedState — the dedup persist then writes both
-		// in one round-trip.
-		tierActive := !legacyFallback &&
-			o.toolTiers.Enabled &&
-			o.injectionStateStore != nil
-		if tierActive {
-			o.prepareToolTierDecision(ctx, sessionID, &prepAgg)
-		}
 		decisionID := o.emitPreparerDecision(ctx, prepAgg)
 		if decisionID != "" {
 			refs, tier1Count, tier3Count := turnStartRefsFromAggregate(prepAgg)
@@ -1616,26 +1554,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if dedupActive {
 			o.persistDedupDecision(ctx, sessionID, &prepAgg)
 		}
-		if tierActive {
-			o.persistToolTierDecision(ctx, sessionID, &prepAgg)
-		}
-		// RFC #249 Phase 4: when the tier decision ran, override the
-		// relevant_tools narrowing to Tier 0 + Tier 1 so buildToolDefinitions
-		// + the per-plugin loop in buildSystemPrompt only surface those.
-		// Tier 2 + Tier 3 are added as separate system-prompt sections
-		// (D3 renderers) so the LLM still sees them — at lower per-tool
-		// token cost. The full decision is stashed in ctx so
-		// buildSystemPrompt can pull the Tier 2/3 names without
-		// re-deriving them.
-		if tierActive && prepAgg.ToolTier != nil {
-			relevantTools = append(append([]string(nil), prepAgg.ToolTier.Tier0...), prepAgg.ToolTier.Tier1...)
-			relevantToolsSet = true
-			ctx = withToolTierDecision(ctx, prepAgg.ToolTier)
-		}
-		// Store relevant tools in context so buildSystemPrompt and planner can filter.
-		if relevantToolsSet {
-			ctx = withRelevantTools(ctx, relevantTools)
-		}
 	}
 
 	if timing != nil {
@@ -1647,8 +1565,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	singleStepSeeded := toolCallSeeded
 	if o.planner != nil && !toolCallSeeded {
 		log.Debug("planner running", "session", sessionID, "message", content)
-		rtTools, rtSet := relevantToolsFromContext(ctx)
-		plannerCaps := filterCapabilitiesByRelevantTools(o.registry.ListCapabilities(), rtTools, rtSet)
+		// The planner sees the full capability set — discovery is no longer
+		// RAG-narrowed; the LLM loads what it needs from the system-prompt
+		// catalog via load_tools.
+		plannerCaps := o.registry.ListCapabilities()
 		// Build conversation context from session history so the planner
 		// understands follow-up messages (e.g. "Item" after being asked
 		// "which type of object?").
@@ -2498,36 +2418,26 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
 			}
 
-			// Same-turn promotion completion for _meta__get_tool_details.
-			// The executor (system_tools.go) already persists a Tier-1
-			// KnownToolEntry so the NEXT turn's preparer puts the tool
-			// in the LLM's tools array. Without the rebuild below the
-			// promotion would not take effect IN THE CURRENT TURN for
-			// native-tools-mode providers — the per-Run cachedTools
-			// snapshot built before the loop would still drive every
-			// subsequent round's `req.Tools`, leaving the LLM with the
-			// same Tier-3-name-only entry it just looked up.
+			// Same-turn load completion for _meta__load_tools. The executor
+			// (system_tools.go) already persisted a sticky KnownToolEntry for
+			// each loaded tool, so a fresh buildToolDefinitions picks them up
+			// via promotedToolSet and puts their full schemas into the tools
+			// array for the rest of THIS turn. Without the rebuild below the
+			// load would only take effect on the NEXT request for native-
+			// tools-mode providers — the per-Run cachedTools snapshot built
+			// before the loop would still drive every subsequent round's
+			// `req.Tools`, leaving the LLM with the same catalog-only entry it
+			// just loaded.
 			//
-			// Gated on:
-			//   * native-tools mode (text-mode LLMs read the description
-			//     directly out of tool_call_result; cachedTools is
-			//     irrelevant on that path)
-			//   * successful meta-tool result (failed lookups don't
-			//     promote anything)
-			//   * non-empty "name" arg (executor already rejects empty,
-			//     but we double-gate to keep the rebuild path tight)
-			//
-			// withPromotedTool is a no-op when no relevant-tools list is
-			// set (no preparer ran) — buildToolDefinitions already
-			// exposes every allowed tool in that mode.
+			// Gated on native-tools mode (text-mode LLMs list the loaded tools
+			// inline in the system prompt on the next round; cachedTools is
+			// irrelevant on that path) and a successful result (a failed batch
+			// promoted nothing).
 			if nativeMode && toolResult.Error == "" &&
-				call.Plugin == metaPluginName && call.Action == metaGetToolDetails {
-				if promoted := strings.TrimSpace(call.Args["name"]); promoted != "" {
-					ctx = withPromotedTool(ctx, promoted)
-					cachedTools = o.buildToolDefinitions(ctx)
-					log.Debug("cachedTools refreshed after _meta__get_tool_details promotion",
-						"tool", promoted, "tools_count", len(cachedTools))
-				}
+				call.Plugin == metaPluginName && call.Action == metaLoadTools {
+				cachedTools = o.buildToolDefinitions(ctx)
+				log.Debug("cachedTools refreshed after _meta__load_tools",
+					"tools_count", len(cachedTools))
 			}
 			// RFC #249 Phase 4 D5: update the consecutive-error counters,
 			// inject the "Tool X failed N times" nudge into the next LLM
@@ -2598,16 +2508,16 @@ func (o *Orchestrator) supportsNativeTools() bool {
 }
 
 // buildToolDefinitions converts the visible plugin actions into provider.ToolDefinition
-// for native function calling. Only includes actions visible to the current profile.
+// for native function calling. The tools array carries only the small
+// native set: the always-include core (load_tools + any AlwaysInclude
+// action) plus the tools the session has loaded via load_tools (sticky,
+// capped at maxStickyTools). Every other allowed tool is discoverable via
+// the system-prompt catalog, not here. Profile / preparer / UserOnly
+// filters still apply.
 func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.ToolDefinition {
 	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
 	preparerAction := o.preparerActions
-
-	relevantToolSet := make(map[string]bool)
-	rtTools, relevantToolsActive := relevantToolsFromContext(ctx)
-	for _, t := range rtTools {
-		relevantToolSet[t] = true
-	}
+	promoted := o.promotedToolSet(ctx)
 
 	var tools []provider.ToolDefinition
 	for _, cap := range o.registry.ListCapabilities() {
@@ -2621,8 +2531,11 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 				slog.Debug("tool registration: action skipped (internal/user-only)", "tool", fqn)
 				continue
 			}
-			if relevantToolsActive && !relevantToolSet[fqn] {
-				slog.Debug("tool registration: action skipped (RAG filter)", "tool", fqn)
+			// Only the native set lands in the tools array: always-include
+			// core + the session's loaded (sticky) tools. The rest stay in
+			// the catalog until the LLM loads them via load_tools.
+			if !action.AlwaysInclude && !promoted[fqn] {
+				slog.Debug("tool registration: action skipped (catalog-only, not loaded)", "tool", fqn)
 				continue
 			}
 			// Build JSON Schema for parameters.
@@ -3651,22 +3564,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	// Resolve the set of plugins allowed for the current profile group (if any).
 	allowedPlugins := o.resolveAllowedPlugins(ctx)
 
-	// Build a set of relevant tools from the preparer (RAG) for filtering.
-	// When a preparer ran (relevantToolsActive=true), only tools in the set
-	// are shown — an empty set means "preparer found nothing relevant".
-	// When no preparer ran (relevantToolsActive=false), all tools are shown.
-	relevantToolSet := make(map[string]bool)
-	rtTools, relevantToolsActive := relevantToolsFromContext(ctx)
-	for _, t := range rtTools {
-		relevantToolSet[t] = true
-	}
-
 	caps := o.registry.ListCapabilities()
-
-	// When relevantToolsActive, collect plugin names that have actions but none
-	// matched — these go into a compact "discoverable plugins" section so the
-	// LLM knows they exist and can use ask_knowledge to find their actions.
-	var discoverablePlugins []string
 
 	for _, cap := range caps {
 		if !o.pluginAllowed(cap, allowedPlugins) {
@@ -3681,33 +3579,16 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		slog.Debug("plugin included in system prompt", "plugin", cap.Name,
 			"system_prompt_addition_len", len(cap.SystemPromptAddition))
 
-		// Filter actions: exclude preparer/guard actions, user-only, and
-		// (when RAG is active) actions not in the relevant set.
+		// Filter actions: exclude preparer/guard actions and user-only.
+		// Tool discovery is no longer RAG-narrowed — every allowed action
+		// is reachable, either inline (non-native mode) or via the catalog
+		// + load_tools (native mode).
 		var visibleActions []Action
-		hasNonInternalActions := false
 		for _, action := range cap.Actions {
 			if preparerAction[toolFQN(cap.Name, action.Name)] || action.UserOnly {
 				continue
 			}
-			hasNonInternalActions = true
-			if relevantToolsActive && !relevantToolSet[toolFQN(cap.Name, action.Name)] {
-				continue
-			}
 			visibleActions = append(visibleActions, action)
-		}
-
-		// When RAG is active and no actions matched, add to discoverable list
-		// so the LLM knows the plugin exists and can query ask_knowledge.
-		// Preserve server instructions even when actions are filtered out —
-		// they are plugin-level guidance the LLM needs regardless of which
-		// specific actions are visible.
-		if relevantToolsActive && len(visibleActions) == 0 && hasNonInternalActions {
-			discoverablePlugins = append(discoverablePlugins, cap.Name)
-			if includeServerInstructions && cap.SystemPromptAddition != "" {
-				fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n\n",
-					cap.Name, cap.SystemPromptAddition, cap.Name)
-			}
-			continue
 		}
 
 		// Skip plugin header entirely if no actions are visible after filtering.
@@ -3722,9 +3603,10 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		if includeServerInstructions && cap.SystemPromptAddition != "" {
 			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n", cap.Name, cap.SystemPromptAddition, cap.Name)
 		}
-		// In native tool mode, tool definitions are sent via req.Tools —
-		// don't duplicate them in the system prompt text. This saves ~50k
-		// tokens on accounts with many tools (e.g. 71 MCP tools).
+		// In native tool mode, tool definitions are sent via req.Tools (the
+		// native set) and the catalog (everything else) — don't duplicate
+		// them in the system prompt text here. This saves ~50k tokens on
+		// accounts with many tools (e.g. 71 MCP tools).
 		if !o.supportsNativeTools() {
 			for _, action := range visibleActions {
 				fmt.Fprintf(&sb, "- %s: %s\n", toolFQN(cap.Name, action.Name), action.Description)
@@ -3740,34 +3622,14 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		sb.WriteString("\n")
 	}
 
-	// RFC #249 Phase 4: when a tier decision is active, render Tier 2
-	// (name + 1-liner) and Tier 3 (names grouped by plugin) sections.
-	// These supersede the pre-Phase-4 discoverable-plugins block — Tier 3
-	// is the same idea but per-action rather than per-plugin, and the
-	// nudge points at get_tool_details (D4) instead of ask_knowledge.
-	tierDecision := toolTierDecisionFromContext(ctx)
-	if tierDecision != nil {
-		sb.WriteString(renderTier2Section(tierDecision, o.registry))
-		sb.WriteString(renderTier3Section(tierDecision))
-	} else if len(discoverablePlugins) > 0 {
-		// Pre-Phase-4 path: RAG filtering active but no tier decision.
-		// List plugins that have actions but none matched the current
-		// query so the LLM can fall back to ask_knowledge discovery.
-		// Use alias names when available since those are what the LLM
-		// should call.
-		sb.WriteString("## Other available plugins\n")
-		fmt.Fprintf(&sb, "These plugins have tools but none matched your current request. Use %s to discover their actions.\n",
-			toolFQN("weaviate", "ask_knowledge"))
-		for _, name := range discoverablePlugins {
-			if aliases := o.registry.AliasesFor(name); len(aliases) > 0 {
-				for _, alias := range aliases {
-					fmt.Fprintf(&sb, "- %s\n", alias)
-				}
-			} else {
-				fmt.Fprintf(&sb, "- %s\n", name)
-			}
-		}
-		sb.WriteString("\n")
+	// Native mode: render the tool catalog — a one-line summary of every
+	// allowed tool not already in the native tools array (i.e. not
+	// always-include core and not yet loaded). The LLM loads what it needs
+	// via load_tools. Sourced directly from the registry, no RAG/tier
+	// decision. Non-native mode lists every action inline above, so no
+	// catalog is needed.
+	if o.supportsNativeTools() {
+		sb.WriteString(o.renderToolCatalog(o.promotedToolSet(ctx), allowedPlugins))
 	}
 
 	if o.subprocessConfig.Enabled {
@@ -4675,65 +4537,6 @@ func turnStartContextFromContext(ctx context.Context) (turnStartContext, bool) {
 	return v, ok
 }
 
-// relevantToolsKey is the context key for tool filtering from preparer responses.
-type relevantToolsKey struct{}
-
-// relevantToolsResult wraps the tool list so we can distinguish
-// "preparer not called" (nil wrapper) from "preparer returned empty" (non-nil, empty list).
-type relevantToolsResult struct {
-	tools []string
-}
-
-// withRelevantTools stores the relevant tool list from a preparer response in ctx.
-// An empty slice means "preparer found nothing relevant" — the filter will exclude
-// all tools. Pass nil to indicate no preparer ran (show all tools).
-func withRelevantTools(ctx context.Context, tools []string) context.Context {
-	return context.WithValue(ctx, relevantToolsKey{}, &relevantToolsResult{tools: tools})
-}
-
-// relevantToolsFromContext returns (tools, true) when a preparer set the list
-// (even if empty), or (nil, false) when no preparer ran.
-func relevantToolsFromContext(ctx context.Context) ([]string, bool) {
-	r, ok := ctx.Value(relevantToolsKey{}).(*relevantToolsResult)
-	if !ok || r == nil {
-		return nil, false
-	}
-	return r.tools, true
-}
-
-// withPromotedTool augments the relevant-tools list on ctx with toolName.
-// Idempotent: a name already in the list returns ctx unchanged. When no
-// relevant-tools list is set (no preparer ran for this turn), returns ctx
-// unchanged because buildToolDefinitions already exposes every tool in
-// that mode — there's nothing to promote.
-//
-// Used by the agent-loop's `_meta__get_tool_details` follow-through to put
-// the just-inspected tool into the SAME turn's tools array on the next
-// LLM round. Without it the promotion only takes effect next user turn
-// via the InjectionState LRU rank; the contract on get_tool_details's
-// description ("promotes the tool back to the LLM's tools array for the
-// rest of the session") needs the same-turn step too for native-tools
-// mode, where the cached tools array is what the LLM API gets verbatim
-// on every round.
-func withPromotedTool(ctx context.Context, toolName string) context.Context {
-	if toolName == "" {
-		return ctx
-	}
-	existing, ok := relevantToolsFromContext(ctx)
-	if !ok {
-		return ctx
-	}
-	for _, t := range existing {
-		if t == toolName {
-			return ctx
-		}
-	}
-	updated := make([]string, len(existing)+1)
-	copy(updated, existing)
-	updated[len(existing)] = toolName
-	return withRelevantTools(ctx, updated)
-}
-
 type searchQueryKey struct{}
 
 // withSearchQuery stores an enriched search query in the context so the RAG
@@ -4748,35 +4551,6 @@ func withSearchQuery(ctx context.Context, query string) context.Context {
 func SearchQueryFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(searchQueryKey{}).(string)
 	return v
-}
-
-// filterCapabilitiesByRelevantTools returns only the capabilities and actions
-// that match the relevant tools list (format "plugin__action"). When set is
-// false (no preparer ran), all capabilities are returned unchanged. When set
-// is true but the list is empty, no actions pass the filter.
-func filterCapabilitiesByRelevantTools(caps []PluginCapability, relevantTools []string, isSet bool) []PluginCapability {
-	if !isSet {
-		return caps
-	}
-	set := make(map[string]bool, len(relevantTools))
-	for _, t := range relevantTools {
-		set[t] = true
-	}
-	var filtered []PluginCapability
-	for _, cap := range caps {
-		var actions []Action
-		for _, a := range cap.Actions {
-			if set[toolFQN(cap.Name, a.Name)] {
-				actions = append(actions, a)
-			}
-		}
-		if len(actions) > 0 || cap.SystemPromptAddition != "" {
-			fc := cap
-			fc.Actions = actions
-			filtered = append(filtered, fc)
-		}
-	}
-	return filtered
 }
 
 // allowedPluginsKey is the context key for the per-Run allowed-plugin cache.
@@ -4939,13 +4713,12 @@ func (o *Orchestrator) resolveAllowedPlugins(ctx context.Context) cachedAllowedP
 func (o *Orchestrator) pluginAllowed(cap PluginCapability, allowed cachedAllowedPlugins) bool {
 	if cap.Name == metaPluginName {
 		// `_meta` is orchestrator-owned (host-internal namespace) — every
-		// profile that has the meta-tool registered (i.e. tool_tiers config
-		// enables get_tool_details) should be able to call it. The profile /
-		// WhoAmI plugin-list gate is for external plugins and a customer's
-		// WhoAmI response never lists `_meta` because it isn't a plugin the
-		// customer owns. Special-casing here so an LLM-driven
-		// `_meta__get_tool_details` call doesn't get refused for a profile
-		// that legitimately registered the meta-tool via config.
+		// profile can call its meta-tools (load_tools is always registered).
+		// The profile / WhoAmI plugin-list gate is for external plugins and a
+		// customer's WhoAmI response never lists `_meta` because it isn't a
+		// plugin the customer owns. Special-casing here so an LLM-driven
+		// `_meta__load_tools` call doesn't get refused for a profile that
+		// otherwise has a restricted plugin allowlist.
 		return true
 	}
 	if allowed.m == nil {
@@ -5451,7 +5224,7 @@ func (o *Orchestrator) SyncActions(ctx context.Context) {
 	// upserts still work, orphans just linger (the previous behavior).
 	keep := make([]string, 0, len(caps))
 	for _, cap := range caps {
-		if cap.Name == o.syncActionsPlugin {
+		if cap.Name == o.syncActionsPlugin || cap.Name == metaPluginName {
 			continue
 		}
 		keep = append(keep, cap.Name)
@@ -5510,7 +5283,10 @@ func (o *Orchestrator) SyncPluginActions(ctx context.Context, pluginName string)
 func (o *Orchestrator) syncPluginCapability(ctx context.Context, cap PluginCapability, keepPlugins []string) error {
 	// Skip all actions from the sync plugin so it doesn't index its own
 	// internal actions (sync_actions, ingest, etc.) into the vector store.
-	if cap.Name == o.syncActionsPlugin {
+	// Also skip the orchestrator-owned _meta plugin (load_tools): it is
+	// host-internal, always present in the tools array, and never RAG-
+	// discovered, so it has no place in the retrieval corpus.
+	if cap.Name == o.syncActionsPlugin || cap.Name == metaPluginName {
 		return nil
 	}
 	entries := make([]syncActionEntry, 0, len(cap.Actions))

@@ -118,12 +118,12 @@ func (t *toolErrorTracker) stateFor(sessionID string) *sessionErrorState {
 //     (sticky_demotion_threshold tripped this call) or
 //     Demoted=false self-heal (success on a previously-failing tool)
 //
-// Tracking is gated by ToolTiersConfig.Enabled so deployments that
-// haven't opted into the tier model don't also pay for the tracker.
-// The cost is trivial (two integer increments + a map lookup per
-// tool call), but coupling stays clear.
+// The Demoted flag lives in InjectionState, so the demotion side of the
+// tracker only does durable work when a state store is wired; the loop-cap
+// nudge works without one. The per-turn counter cost is trivial (two
+// integer increments + a map lookup per tool call).
 func (o *Orchestrator) recordToolOutcome(ctx context.Context, sessionID string, call ToolCall, result ToolResult) *provider.Message {
-	if !o.toolTiers.Enabled || sessionID == "" {
+	if sessionID == "" {
 		return nil
 	}
 	fqn := toolFQN(call.Plugin, call.Action)
@@ -151,10 +151,9 @@ func (o *Orchestrator) recordToolOutcome(ctx context.Context, sessionID string, 
 }
 
 // markDemotedFlag flips KnownToolEntry.Demoted=true for fqn. If the
-// entry doesn't exist yet (the tool was never RAG-matched / Tier-1-
-// resident), the function still inserts a tier="tier3" + Demoted=true
-// row so the next turn's tier decision sees the flag. Same
-// defensive copy + warn-and-continue contract as
+// entry doesn't exist yet (the tool was never loaded), the function still
+// inserts a tier="tier3" + Demoted=true row so the next request's sticky
+// set excludes it. Same defensive copy + warn-and-continue contract as
 // persistToolPromotion.
 func (o *Orchestrator) markDemotedFlag(ctx context.Context, sessionID, fqn string) {
 	o.updateToolDemotion(ctx, sessionID, fqn, true)

@@ -434,7 +434,7 @@ func TestParseToolName(t *testing.T) {
 		// canonical "__" form round-trips, including MCP-bridged actions whose
 		// action part itself contains "__" (split on the FIRST "__").
 		{"timly__timly__create-item", "timly", "timly__create-item", false},
-		{"_meta__get_tool_details", "_meta", "get_tool_details", false},
+		{"_meta__load_tools", "_meta", "load_tools", false},
 		{"weaviate__ask_knowledge", "weaviate", "ask_knowledge", false},
 		// the legacy dot form is still decoded first when a name carries a dot,
 		// so a dotted alias whose action contains "__" disambiguates by the dot.

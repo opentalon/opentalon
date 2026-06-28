@@ -18,7 +18,6 @@ func newOrchForErrorTrackingTests(t *testing.T, store *fakeInjectionStateStore) 
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1", "", "")
 	opts := OrchestratorOpts{
-		ToolTiers: ToolTiersConfig{Enabled: true},
 		ToolErrorHandling: ToolErrorHandlingConfig{
 			LoopCapPerTurn:          2,
 			StickyDemotionThreshold: 3,
@@ -95,19 +94,15 @@ func TestRecordToolOutcome_DifferentToolsCountIndependently(t *testing.T) {
 	}
 }
 
-func TestRecordToolOutcome_TierLogicOffShortCircuits(t *testing.T) {
-	registry := NewToolRegistry()
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
-		ToolTiers: ToolTiersConfig{Enabled: false},
-	})
-	ctx := actor.WithSessionID(context.Background(), "s1")
+func TestRecordToolOutcome_EmptySessionShortCircuits(t *testing.T) {
+	// Without a session id the tracker has nowhere to key counters, so it
+	// short-circuits — no warning is ever emitted.
+	orch := newOrchForErrorTrackingTests(t, nil)
+	ctx := context.Background()
 	for i := 0; i < 5; i++ {
-		w := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
+		w := orch.recordToolOutcome(ctx, "", sampleCall(), errorResult())
 		if w != nil {
-			t.Errorf("tier-off must short-circuit tracking, got warning iter %d: %+v", i, w)
+			t.Errorf("empty session must short-circuit tracking, got warning iter %d: %+v", i, w)
 		}
 	}
 }
@@ -174,7 +169,6 @@ func TestRecordToolOutcome_NewTurnResetsTurnCounter(t *testing.T) {
 	sessions := state.NewSessionStore("")
 	sessions.Create("s1", "", "")
 	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
-		ToolTiers: ToolTiersConfig{Enabled: true},
 		ToolErrorHandling: ToolErrorHandlingConfig{
 			LoopCapPerTurn:          2,
 			StickyDemotionThreshold: 99,

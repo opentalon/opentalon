@@ -263,11 +263,11 @@ func TestPluginAllowed_MetaPluginAlwaysAllowed(t *testing.T) {
 	// the profile / WhoAmI gate. The customer's WhoAmI response never
 	// lists `_meta` because it isn't a plugin they own — it's
 	// host-internal. Without this special-case the LLM sees the
-	// meta-tool in the prompt (AlwaysInclude=true pins it to Tier 0),
-	// tries to call it on the LLM-driven path, and the call gets
-	// refused with "plugin '_meta' is not available for this profile" —
-	// breaking the get_tool_details promotion contract for every
-	// non-permissive profile.
+	// meta-tool in the prompt (AlwaysInclude=true keeps it in the native
+	// tools array), tries to call it on the LLM-driven path, and the call
+	// gets refused with "plugin '_meta' is not available for this profile" —
+	// breaking the load_tools discovery contract for every non-permissive
+	// profile.
 	o := newFilterOrch(buildFilterRegistry(), nil)
 	metaCap := PluginCapability{Name: metaPluginName}
 
