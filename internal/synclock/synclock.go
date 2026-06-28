@@ -1,6 +1,6 @@
 // Package synclock provides distributed locking for startup knowledge sync
 // in multi-pod deployments. When cluster mode is enabled, only one pod runs
-// the initial SyncActions/SyncGlossary/IngestKnowledgeDir sequence; the
+// the initial SyncActions/IngestKnowledgeDir sequence; the
 // others wait for completion and skip.
 package synclock
 

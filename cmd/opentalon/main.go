@@ -707,7 +707,6 @@ func main() {
 		PromptSnapshotStore:     sessionEventStore, // direct/sync store; intentionally not async-buffered so a consumer reading a turn_start event can resolve its sha256 references without racing the writer. nil when state DB is not configured
 		SyncActionsPlugin:       cfg.Orchestrator.Knowledge.SyncPlugin,
 		SyncActionsAction:       cfg.Orchestrator.Knowledge.SyncAction,
-		SyncGlossaryAction:      cfg.Orchestrator.Knowledge.SyncGlossaryAction,
 		Knowledge: orchestrator.KnowledgeConfig{
 			Plugin: cfg.Orchestrator.Knowledge.Plugin,
 			Action: cfg.Orchestrator.Knowledge.Action,
@@ -770,7 +769,7 @@ func main() {
 	}
 
 	// Build sync locker: cluster mode uses Redis so only one pod runs
-	// SyncActions/SyncGlossary/IngestKnowledgeDir; single-instance uses noop.
+	// SyncActions/IngestKnowledgeDir; single-instance uses noop.
 	var slocker synclock.Locker
 	if cfg.Cluster.Enabled && sharedRedis != nil {
 		slocker = synclock.NewRedis(sharedRedis)
@@ -787,7 +786,7 @@ func main() {
 	// checks, audit logging, arg validation, and plugin-allowed filtering.
 	// If the sync or ingest plugin ever declares AuditLog=true, those calls
 	// will not be logged — acceptable for host-initiated startup work.
-	slog.Info("startup: syncing plugin actions and glossary to vector store", "component", "startup")
+	slog.Info("startup: syncing plugin actions and knowledge to vector store", "component", "startup")
 	acquired, err := slocker.AcquireOrWait(ctx)
 	if err != nil {
 		slog.Error("startup: sync lock failed, proceeding with local sync", "component", "startup", "error", err)
@@ -795,7 +794,6 @@ func main() {
 	}
 	if acquired {
 		orch.SyncActions(ctx)
-		orch.SyncGlossary(ctx)
 		orch.IngestKnowledgeDir(ctx)
 		slocker.ReleaseDone(ctx)
 		slog.Info("startup: sync complete (leader), orchestrator ready", "component", "startup")
