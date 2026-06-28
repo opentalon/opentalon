@@ -442,13 +442,7 @@ func TestEmitPreparerDecision_NestedBlocksRoundTrip(t *testing.T) {
 			InjectedBytes: 1024,
 		},
 		Tools: events.PreparerDecisionToolsBlock{
-			Tier0Count:                2,
-			Tier1New:                  []string{"timly__list-items"},
-			Tier1Carried:              []string{"timly__show-item"},
-			Tier1SizeAfter:            8,
-			Tier1Cap:                  10,
-			Tier3TotalVisible:         47,
-			PromotedViaGetToolDetails: []string{"timly__schedule-item"},
+			Tier1New: []string{"timly__list-items"},
 		},
 	})
 
@@ -474,11 +468,8 @@ func TestEmitPreparerDecision_NestedBlocksRoundTrip(t *testing.T) {
 	if p.Knowledge.InjectedBytes != 1024 {
 		t.Errorf("Knowledge.InjectedBytes = %d", p.Knowledge.InjectedBytes)
 	}
-	if p.Tools.Tier1Cap != 10 || p.Tools.Tier1SizeAfter != 8 || p.Tools.Tier3TotalVisible != 47 {
-		t.Errorf("Tools tier counts = %+v", p.Tools)
-	}
-	if len(p.Tools.PromotedViaGetToolDetails) != 1 || p.Tools.PromotedViaGetToolDetails[0] != "timly__schedule-item" {
-		t.Errorf("Tools.PromotedViaGetToolDetails = %v", p.Tools.PromotedViaGetToolDetails)
+	if len(p.Tools.Tier1New) != 1 || p.Tools.Tier1New[0] != "timly__list-items" {
+		t.Errorf("Tools.Tier1New = %v", p.Tools.Tier1New)
 	}
 }
 
@@ -538,7 +529,6 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 		{"PreparerDecision", func(c context.Context, s Sink) {
 			EmitPreparerDecision(c, s, PreparerDecisionArgs{Mode: events.PreparerDecisionModeInstrumentationOnly})
 		}, events.TypePreparerDecision, events.PreparerDecisionVersion},
-		{"DriftDetected", func(c context.Context, s Sink) { EmitDriftDetected(c, s, DriftDetectedArgs{}) }, events.TypeDriftDetected, events.DriftDetectedVersion},
 		{"MessagesTruncated", func(c context.Context, s Sink) { EmitMessagesTruncated(c, s, MessagesTruncatedArgs{}) }, events.TypeMessagesTruncated, events.MessagesTruncatedVersion},
 		{"SummarizationTriggered", func(c context.Context, s Sink) { EmitSummarizationTriggered(c, s, SummarizationTriggeredArgs{}) }, events.TypeSummarizationTriggered, events.SummarizationTriggeredVersion},
 		{"SummarizationCompleted", func(c context.Context, s Sink) { EmitSummarizationCompleted(c, s, SummarizationCompletedArgs{}) }, events.TypeSummarizationCompleted, events.SummarizationCompletedVersion},
@@ -557,10 +547,10 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 		{"Error", func(c context.Context, s Sink) { EmitError(c, s, "where", "msg") }, events.TypeError, events.ErrorVersion},
 	}
 
-	// All 29 event types must be exercised — keep this in lockstep with
+	// All event types must be exercised — keep this in lockstep with
 	// the constants in event_types.go. If you add a new event type and
 	// this count drops below it, add a row above.
-	const wantCases = 29
+	const wantCases = 28
 	if len(cases) != wantCases {
 		t.Fatalf("len(cases) = %d, want %d — keep TestAllEmitHelpers in sync with event_types.go", len(cases), wantCases)
 	}
@@ -808,19 +798,6 @@ func TestEmit_SanitizesAllFreeTextFields(t *testing.T) {
 					t.Fatalf("unmarshal: %v", err)
 				}
 				return v.Query
-			},
-		},
-		{
-			"DriftDetected.ReconciliationAction",
-			func(c context.Context, s Sink) {
-				EmitDriftDetected(c, s, DriftDetectedArgs{ReconciliationAction: invalidUTF8Raw})
-			},
-			func(t *testing.T, p []byte) string {
-				var v events.DriftDetectedPayload
-				if err := json.Unmarshal(p, &v); err != nil {
-					t.Fatalf("unmarshal: %v", err)
-				}
-				return v.ReconciliationAction
 			},
 		},
 		{
@@ -1293,19 +1270,6 @@ func TestAllEmitHelpers_PopulateDistinctiveField(t *testing.T) {
 				_ = json.Unmarshal(p, &v)
 				if v.Mode != events.PreparerDecisionModeInstrumentationOnly {
 					t.Errorf("Mode = %q, want %q", v.Mode, events.PreparerDecisionModeInstrumentationOnly)
-				}
-			},
-		},
-		{
-			"DriftDetected.ReconciliationAction",
-			func(c context.Context, s Sink) {
-				EmitDriftDetected(c, s, DriftDetectedArgs{ReconciliationAction: "removed_x_from_state"})
-			},
-			func(t *testing.T, p []byte) {
-				var v events.DriftDetectedPayload
-				_ = json.Unmarshal(p, &v)
-				if v.ReconciliationAction != "removed_x_from_state" {
-					t.Errorf("ReconciliationAction = %q", v.ReconciliationAction)
 				}
 			},
 		},

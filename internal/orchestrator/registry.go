@@ -3,8 +3,18 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sync"
 )
+
+// fqnCharsetRe is the tool-name charset every LLM provider (OpenAI,
+// Anthropic) requires for a function name: ^[a-zA-Z0-9_-]{1,64}$. A
+// plugin or MCP-server name containing a dot would compose a syntactically
+// plausible FQN (toolfqn.Split tolerates "." for the legacy form) yet be
+// rejected by the provider as an opaque 400. Validating the composed FQN
+// at registration — the single registration choke point — turns that into
+// a clear, fail-loud error up front. See provider/anthropic.go's header.
+var fqnCharsetRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 type PluginExecutor interface {
 	Execute(ctx context.Context, call ToolCall) ToolResult
@@ -52,6 +62,17 @@ func (r *ToolRegistry) Register(cap PluginCapability, exec PluginExecutor) error
 
 	if _, exists := r.plugins[cap.Name]; exists {
 		return fmt.Errorf("plugin %q already registered", cap.Name)
+	}
+	// Reject any action whose composed FQN won't pass the provider tool-name
+	// charset, so a dotted plugin/action name fails here with a clear error
+	// rather than as an opaque Anthropic 400 at call time.
+	for _, a := range cap.Actions {
+		fqn := toolFQN(cap.Name, a.Name)
+		if !fqnCharsetRe.MatchString(fqn) {
+			return fmt.Errorf(
+				"plugin %q action %q composes invalid tool name %q: must match %s",
+				cap.Name, a.Name, fqn, fqnCharsetRe.String())
+		}
 	}
 	r.plugins[cap.Name] = cap
 	r.executors[cap.Name] = exec
@@ -226,7 +247,7 @@ func (r *ToolRegistry) IsActionReadOnly(plugin, action string) bool {
 		return false
 	}
 	// The bare action plus the forgiving normalizations shared with the
-	// execute / get_tool_details paths (actionNameCandidates) — one candidate
+	// execute / load_tools paths (actionNameCandidates) — one candidate
 	// generator so a tool resolves the SAME way whether it is gated, inspected,
 	// or invoked. The leading bare `action` covers the already-canonical name.
 	candidates := append([]string{action}, actionNameCandidates(plugin, action)...)

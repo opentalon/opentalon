@@ -44,8 +44,7 @@ const (
 	// Preparer-phase retrieval + decision events (RFC #249).
 	// Emitted children of user_message: each RAG retrieval becomes one
 	// *_retrieval event, then preparer_decision is the composite outcome
-	// the orchestrator landed on. drift_detected (Phase 3+) fires
-	// alongside the preparer pass; messages_truncated fires from
+	// the orchestrator landed on. messages_truncated fires from
 	// buildMessages inside the agent loop and parents to turn_start
 	// (it can fire more than once per turn when the cutter applies on
 	// successive iterations as the conversation grows during tool
@@ -54,7 +53,6 @@ const (
 	TypeGlossaryRetrieval  = "glossary_retrieval"
 	TypeToolRetrieval      = "tool_retrieval"
 	TypePreparerDecision   = "preparer_decision"
-	TypeDriftDetected      = "drift_detected"
 	TypeMessagesTruncated  = "messages_truncated"
 
 	TypeSummarizationTriggered = "summarization_triggered"
@@ -119,13 +117,6 @@ const (
 //
 //	actual orchestrator decision for this turn.
 //
-// legacy_fallback — plugin returned only the legacy `message` field
-//
-//	(no structured candidates). The orchestrator forwards the plugin's
-//	injection verbatim; preparer_decision records the fall-through path
-//	for analytics. One deprecation warning per plugin per session is
-//	logged alongside.
-//
 // pull_only — knowledge is pull-only: retrieval still ran, so
 //
 //	CandidateIDs report what was retrieved, but nothing was auto-injected:
@@ -136,7 +127,6 @@ const (
 const (
 	PreparerDecisionModeInstrumentationOnly = "instrumentation_only"
 	PreparerDecisionModeFull                = "full"
-	PreparerDecisionModeLegacyFallback      = "legacy_fallback"
 	PreparerDecisionModePullOnly            = "pull_only"
 )
 
@@ -275,7 +265,12 @@ type LLMRequestPayload struct {
 	ReasoningEffort string `json:"reasoning_effort,omitempty"` // effort actually sent on the wire ("low"/"medium"/"high"); empty = none
 }
 
-const LLMRequestVersion = 1
+// LLMRequestVersion bumped to 2 when the payload gained reasoning /
+// reasoning_effort. Both are omitempty, so v=1 rows decode cleanly (the
+// fields are simply absent) — the bump follows the package's "evolve =>
+// bump" convention (mirrors ToolRetrievalVersion) rather than signalling a
+// breaking change.
+const LLMRequestVersion = 2
 
 // LLMResponsePayload — captured at provider edge BEFORE the orchestrator
 // parses native tool calls or interprets text-based tool-call syntax.
@@ -447,44 +442,10 @@ type PreparerDecisionKnowledgeBlock struct {
 	InjectedBytes         int                             `json:"injected_bytes,omitempty"`
 }
 
-// PreparerDecisionReason values for PreparerDecisionInjectedItem.Reason
-// and PreparerDecisionSkippedItem.Reason. The "injected" group lists
-// the reasons a candidate ended up in the LLM-visible KC block; the
-// "skipped" group lists why a candidate didn't make it. Define one
-// constant per wire-format string so producers / consumers / docs all
-// agree, mirroring the PreparerDecisionMode* constants above.
-const (
-	// PreparerDecisionReasonInstrumentationOnly is the catch-all reason
-	// used during Phase 2 (and any later turn where dedup decision logic
-	// is disabled): every candidate is reported as if newly injected.
-	PreparerDecisionReasonInstrumentationOnly = "instrumentation_only"
-
-	// PreparerDecisionReasonNew — content_sha not yet known to the session.
-	PreparerDecisionReasonNew = "new"
-
-	// PreparerDecisionReasonScoreOverride — known SHA, but the
-	// current-turn score exceeded reinject_score_threshold.
-	PreparerDecisionReasonScoreOverride = "score_override"
-
-	// PreparerDecisionReasonTopKForce — known SHA, but the candidate's
-	// rank in the current retrieval is within reinject_top_k_force.
-	PreparerDecisionReasonTopKForce = "top_k_force"
-
-	// PreparerDecisionReasonAlreadyKnown — content_sha already in
-	// known_knowledge and none of the override paths fired. The LLM
-	// already saw this body in an earlier turn.
-	PreparerDecisionReasonAlreadyKnown = "content_sha_already_known"
-
-	// PreparerDecisionReasonCapExceeded — candidate WOULD have injected
-	// but cap_per_turn was already hit. Signal of per-turn budget
-	// pressure rather than dedup state.
-	PreparerDecisionReasonCapExceeded = "cap_exceeded"
-)
-
 // PreparerDecisionInjectedItem records one injected knowledge article and
-// the reason it was selected. Reason is one of the
-// PreparerDecisionReason* constants above (the "injected" group plus
-// PreparerDecisionReasonInstrumentationOnly).
+// the reason it was selected. Reason is a free-form wire-format string
+// (e.g. "new", "score_override") describing why the candidate ended up in
+// the LLM-visible KC block.
 type PreparerDecisionInjectedItem struct {
 	ArticleID     string `json:"article_id"`
 	ContentSHA256 string `json:"content_sha256,omitempty"`
@@ -492,9 +453,8 @@ type PreparerDecisionInjectedItem struct {
 }
 
 // PreparerDecisionSkippedItem records one candidate skipped by dedup.
-// Reason is one of the PreparerDecisionReason* constants in the
-// "skipped" group (AlreadyKnown / CapExceeded). Future skip paths
-// (e.g. "demoted") extend that group above.
+// Reason is a free-form wire-format string (e.g. "content_sha_already_known",
+// "cap_exceeded") describing why the candidate didn't make it.
 type PreparerDecisionSkippedItem struct {
 	ArticleID string `json:"article_id"`
 	Reason    string `json:"reason"`
@@ -506,58 +466,26 @@ type PreparerDecisionScoreOverride struct {
 	Threshold    float64 `json:"threshold"`
 }
 
+// PreparerDecisionToolsBlock records what tool RAG retrieved this turn.
+// Tier1New carries every retrieved tool candidate (the instrumentation
+// signal); tool discovery is now the registry catalog + load_tools sticky
+// model, so retrieval no longer drives the LLM's tools array and the old
+// per-tier bookkeeping fields are gone.
 type PreparerDecisionToolsBlock struct {
-	Tier0Count          int      `json:"tier0_count,omitempty"`
-	Tier1New            []string `json:"tier1_new,omitempty"`
-	Tier1Carried        []string `json:"tier1_carried,omitempty"`
-	Tier1EvictedToTier3 []string `json:"tier1_evicted_to_tier3,omitempty"`
-	Tier1DemotedSticky  []string `json:"tier1_demoted_sticky,omitempty"`
-	Tier1SizeAfter      int      `json:"tier1_size_after,omitempty"`
-	Tier1Cap            int      `json:"tier1_cap,omitempty"`
-	// Tier 2 is reseeded from RAG candidates every turn (no LRU
-	// carry / new distinction), so a single slice + size + cap is the
-	// full payload. Names emitted so consumers can verify the
-	// system-prompt render against what the orchestrator decided.
-	Tier2Tools                []string `json:"tier2_tools,omitempty"`
-	Tier2SizeAfter            int      `json:"tier2_size_after,omitempty"`
-	Tier2Cap                  int      `json:"tier2_cap,omitempty"`
-	Tier3TotalVisible         int      `json:"tier3_total_visible,omitempty"`
-	PromotedViaGetToolDetails []string `json:"promoted_via_get_tool_details,omitempty"`
+	Tier1New []string `json:"tier1_new,omitempty"`
 }
 
 const PreparerDecisionVersion = 1
-
-// DriftDetectedPayload — emitted at the start of a preparer pass when
-// the in-state known-knowledge set and the actual visible-message scan
-// disagree. State is then rewritten to match the scan, and
-// ReconciliationAction describes what changed. RFC #249.
-//
-// Not emitted in Phase 2 (the dedup state doesn't exist yet); the
-// payload struct is defined now so Phase 3 can wire it without a schema
-// change.
-type DriftDetectedPayload struct {
-	Header
-	StateBelievedKnown   []string `json:"state_believed_known,omitempty"`
-	ActuallyVisible      []string `json:"actually_visible,omitempty"`
-	MissingFromVisible   []string `json:"missing_from_visible,omitempty"`
-	ExtrasInVisible      []string `json:"extras_in_visible,omitempty"`
-	ReconciliationAction string   `json:"reconciliation_action,omitempty"`
-}
-
-const DriftDetectedVersion = 1
 
 // MessagesTruncatedPayload — emitted when the sliding-window cutter
 // drops messages from the assembled LLM input. DroppedSeqRange is
 // [from, to] inclusive, indexed into sess.Messages (position-based,
 // since the in-memory provider.Message slice does not carry a seq
-// column). Phase 3 will populate ReleasedKnowledgeIDs / Remaining* once
-// the dedup state exists; in Phase 2 they stay empty/zero.
+// column).
 type MessagesTruncatedPayload struct {
 	Header
-	DroppedSeqRange              []int    `json:"dropped_seq_range,omitempty"` // [from, to] inclusive
-	DroppedCount                 int      `json:"dropped_count"`
-	ReleasedKnowledgeIDs         []string `json:"released_knowledge_ids,omitempty"`
-	RemainingKnownKnowledgeCount int      `json:"remaining_known_knowledge_count,omitempty"`
+	DroppedSeqRange []int `json:"dropped_seq_range,omitempty"` // [from, to] inclusive
+	DroppedCount    int   `json:"dropped_count"`
 }
 
 const MessagesTruncatedVersion = 1
@@ -576,15 +504,6 @@ type SummarizationCompletedPayload struct {
 	SummaryTruncated bool   `json:"summary_truncated,omitempty"`
 	KeptMessages     int    `json:"kept_messages"`
 	LatencyMS        int64  `json:"latency_ms,omitempty"`
-	// ReleasedKnowledgeIDs — article_ids whose [knowledge_context]
-	// blocks were inside the summarized-and-replaced range. The next
-	// preparer pass's reconciliation will drop them from
-	// known_knowledge anyway (visible-message scan is authoritative);
-	// the field exists so consumers correlating with InjectionState
-	// can render the release in-place without diffing two
-	// reconciliation snapshots. Empty when summarization replaced no
-	// messages carrying KC blocks.
-	ReleasedKnowledgeIDs []string `json:"released_knowledge_ids,omitempty"`
 }
 
 const SummarizationCompletedVersion = 1

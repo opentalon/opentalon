@@ -591,3 +591,108 @@ func TestToAnthMessageAssistantToolUse(t *testing.T) {
 		t.Errorf("input[limit] = %q", input["limit"])
 	}
 }
+
+// TestAnthropicMultipleToolUseBlocks verifies that a response carrying more
+// than one tool_use block parses into multiple ToolCalls, preserving each
+// block's id, name, and flattened arguments in order.
+func TestAnthropicMultipleToolUseBlocks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := anthResponse{
+			ID:         "msg_multi",
+			Model:      "claude-sonnet-4-20250514",
+			StopReason: "tool_use",
+			Content: []anthContentBlock{
+				{Type: "text", Text: "Running both."},
+				{
+					Type:  "tool_use",
+					ID:    "toolu_a",
+					Name:  "timly__timly__list-items",
+					Input: json.RawMessage(`{"limit":3}`),
+				},
+				{
+					Type:  "tool_use",
+					ID:    "toolu_b",
+					Name:  "timly__timly__show-item",
+					Input: json.RawMessage(`{"id":"42"}`),
+				},
+			},
+			Usage: anthUsage{InputTokens: 9, OutputTokens: 14},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewAnthropicProvider("anthropic", server.URL, "key", nil)
+	resp, err := p.Complete(context.Background(), &CompletionRequest{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []Message{{Role: RoleUser, Content: "do both"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.ToolCalls) != 2 {
+		t.Fatalf("tool_calls = %d, want 2", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].ID != "toolu_a" || resp.ToolCalls[0].Name != "timly__timly__list-items" {
+		t.Errorf("tool_calls[0] = %+v", resp.ToolCalls[0])
+	}
+	if resp.ToolCalls[0].Arguments["limit"] != "3" {
+		t.Errorf("tool_calls[0].args[limit] = %q, want 3", resp.ToolCalls[0].Arguments["limit"])
+	}
+	if resp.ToolCalls[1].ID != "toolu_b" || resp.ToolCalls[1].Name != "timly__timly__show-item" {
+		t.Errorf("tool_calls[1] = %+v", resp.ToolCalls[1])
+	}
+	if resp.ToolCalls[1].Arguments["id"] != "42" {
+		t.Errorf("tool_calls[1].args[id] = %q, want 42", resp.ToolCalls[1].Arguments["id"])
+	}
+}
+
+// TestAnthropicThinkingBlockExtraction verifies that a thinking content block
+// carries its text in the `thinking` field (not `text`) and is captured by
+// extractContent. Regression guard for reading the wrong field.
+func TestAnthropicThinkingBlockExtraction(t *testing.T) {
+	content, thinking, calls := (&AnthropicProvider{}).extractContent([]anthContentBlock{
+		{Type: "thinking", Thinking: "step-by-step reasoning"},
+		{Type: "text", Text: "final answer"},
+	})
+	if thinking != "step-by-step reasoning" {
+		t.Errorf("thinking = %q, want %q (must read the thinking field, not text)", thinking, "step-by-step reasoning")
+	}
+	if content != "final answer" {
+		t.Errorf("content = %q, want %q", content, "final answer")
+	}
+	if len(calls) != 0 {
+		t.Errorf("tool_calls = %d, want 0", len(calls))
+	}
+}
+
+// TestAnthropicConcatenatesSystemMessages verifies the defense-in-depth in
+// toAnthRequest: multiple RoleSystem messages are joined (not last-wins) so a
+// stray mid-array system message cannot silently clobber the real prompt.
+func TestAnthropicConcatenatesSystemMessages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req anthRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.System != "Real prompt.\n\nStray nudge." {
+			t.Errorf("system = %q, want both system messages concatenated", req.System)
+		}
+		resp := anthResponse{ID: "m", Content: []anthContentBlock{{Type: "text", Text: "ok"}}}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewAnthropicProvider("anthropic", server.URL, "key", nil)
+	_, err := p.Complete(context.Background(), &CompletionRequest{
+		Model: "claude-sonnet-4-20250514",
+		Messages: []Message{
+			{Role: RoleSystem, Content: "Real prompt."},
+			{Role: RoleUser, Content: "hi"},
+			{Role: RoleSystem, Content: "Stray nudge."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

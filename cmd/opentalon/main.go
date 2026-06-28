@@ -238,11 +238,11 @@ func main() {
 	var sessionEventStore *store.SessionEventStore
 	var sessionEventWriter *store.SessionEventWriter
 	var sessionEventsRetentionCancel context.CancelFunc
-	// injectionStateStore is the orchestrator-side handle for the
-	// RFC #249 Phase 3 dedup helpers — the DB-backed SessionStore
-	// satisfies it, the in-memory fallback does not. Stays nil when
-	// the state DB is unavailable; dedup decision logic short-circuits
-	// to instrumentation_only in that case.
+	// injectionStateStore persists load_tools sticky promotion (the
+	// per-session KnownTools set) across turns — the DB-backed SessionStore
+	// satisfies it, the in-memory fallback does not. Stays nil when the
+	// state DB is unavailable; load_tools promotion is then best-effort and
+	// does not survive past the request.
 	var injectionStateStore orchestrator.InjectionStateStore
 	if dataDir != "" || cfg.State.DB.Driver == "postgres" {
 		db, err := store.Open(cfg.State.DB, dataDir)

@@ -343,18 +343,17 @@ type PreparerOrchestratorConfig struct {
 }
 
 // ToolErrorHandlingConfig configures the runaway-tool-failure
-// protections from RFC #249 Phase 4. LoopCapPerTurn bounds how many
-// consecutive identical-tool errors the orchestrator tolerates in a
-// single turn before injecting a system message nudging the LLM toward
-// a different approach. StickyDemotionThreshold tracks consecutive
-// errors across the whole session and flips the tool's Demoted bit in
-// known_tools when the count crosses; a subsequent successful call
-// clears the flag (self-healing). Both fields default to the RFC
-// values via runtime normalization when zero so tests can leave the
-// struct empty.
+// protections. LoopCapPerTurn bounds how many consecutive identical-tool
+// errors the orchestrator tolerates in a single turn before injecting a
+// nudge message steering the LLM toward a different approach.
+// StickyDemotionThreshold tracks consecutive errors across the whole
+// session and flips the tool's Demoted bit in known_tools when the count
+// crosses; a subsequent successful call clears the flag (self-healing).
+// Both fields are opt-in: a zero/unset value turns that protection OFF —
+// no default is substituted.
 type ToolErrorHandlingConfig struct {
-	LoopCapPerTurn          int `yaml:"loop_cap_per_turn,omitempty"`         // consecutive identical-tool errors per turn before system-msg injection; default 2 when zero
-	StickyDemotionThreshold int `yaml:"sticky_demotion_threshold,omitempty"` // consecutive session-level errors before known_tools demotion; default 3 when zero
+	LoopCapPerTurn          int `yaml:"loop_cap_per_turn,omitempty"`         // consecutive identical-tool errors per turn before nudge injection; <= 0 disables
+	StickyDemotionThreshold int `yaml:"sticky_demotion_threshold,omitempty"` // consecutive session-level errors before known_tools demotion; <= 0 disables
 }
 
 // PipelineOrchestratorConfig enables structured multi-step pipeline execution.

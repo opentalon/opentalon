@@ -10,28 +10,30 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
-// RFC #249 Phase 4 D5: tool error tracking + sticky demotion.
+// Tool error tracking + sticky demotion.
 //
-// Two protections against runaway tool-failure loops:
+// Two protections against runaway tool-failure loops. Both are opt-in:
+// a zero/unset threshold turns that protection off.
 //
-//   - Loop-cap per tool per turn: at LoopCapPerTurn (default 2)
-//     consecutive identical-tool errors in the same turn, the
-//     orchestrator injects a system message — "Tool X failed N
-//     times in this turn — consider a different approach." — into
-//     the next LLM call so the LLM stops slamming the same broken
-//     tool.
+//   - Loop-cap per tool per turn: at LoopCapPerTurn consecutive
+//     identical-tool errors in the same turn, the orchestrator injects a
+//     nudge — "Tool X failed N times in this turn — consider a different
+//     approach." — into the next LLM call so the LLM stops slamming the
+//     same broken tool. (Carried as a RoleUser "[system]" message, not a
+//     RoleSystem one — see recordToolOutcome.)
 //   - Session-level sticky demotion: at StickyDemotionThreshold
-//     (default 3) consecutive errors for a tool across the entire
-//     session, the orchestrator flips Demoted=true on the tool's
-//     KnownToolEntry so the next turn's tier decision prefers it
-//     for eviction. RAG can still re-promote on a higher score —
-//     demotion is a soft penalty, not a permanent block.
+//     consecutive errors for a tool across the entire session, the
+//     orchestrator flips Demoted=true on the tool's KnownToolEntry. There
+//     are no tiers: promotedToolSet selects the sticky set on Demoted +
+//     LRURank, so a Demoted tool is the preferred eviction target when
+//     the sticky cap is exceeded. A later load_tools call re-promotes it
+//     (and clears Demoted) — demotion is a soft penalty, not a block.
 //
-// Self-healing (RFC): "any successful invocation clears the demoted
-// flag." We reset BOTH the per-turn and per-session counters on
-// success AND flip Demoted=false in KnownTools (best-effort: a
-// transient store failure logs and continues, same robustness
-// contract as Phase-3 write paths).
+// Self-healing: any successful invocation clears the demoted flag. We
+// reset BOTH the per-turn and per-session counters on success AND flip
+// Demoted=false in KnownTools (best-effort: a transient store failure
+// logs and continues, same robustness contract as the load_tools write
+// path).
 //
 // State location: in-memory sync.Map keyed by sessionID. Counters
 // are NOT persisted — a process restart resets them. The persisted
@@ -135,14 +137,20 @@ func (o *Orchestrator) recordToolOutcome(ctx context.Context, sessionID string, 
 		return nil
 	}
 
-	if sessionCount >= o.toolErrorHandling.StickyDemotionThreshold && o.injectionStateStore != nil {
+	if o.toolErrorHandling.StickyDemotionThreshold > 0 &&
+		sessionCount >= o.toolErrorHandling.StickyDemotionThreshold && o.injectionStateStore != nil {
 		o.markDemotedFlag(ctx, sessionID, fqn)
 	}
 
-	if turnCount >= o.toolErrorHandling.LoopCapPerTurn {
+	if o.toolErrorHandling.LoopCapPerTurn > 0 && turnCount >= o.toolErrorHandling.LoopCapPerTurn {
+		// Carried back to the agent loop as a transient RoleUser message with
+		// the "[system]" textual prefix the other retry nudges use. NOT a
+		// RoleSystem message: the native Anthropic adapter folds every
+		// RoleSystem message into the request's single `system` field, so a
+		// nudge appended mid-array would contaminate the real system prompt.
 		return &provider.Message{
-			Role:    provider.RoleSystem,
-			Content: fmt.Sprintf("Tool %s failed %d times in this turn — consider a different approach.", fqn, turnCount),
+			Role:    provider.RoleUser,
+			Content: fmt.Sprintf("[system] Tool %s failed %d times in this turn — consider a different approach.", fqn, turnCount),
 		}
 	}
 	return nil
@@ -150,8 +158,8 @@ func (o *Orchestrator) recordToolOutcome(ctx context.Context, sessionID string, 
 
 // markDemotedFlag flips KnownToolEntry.Demoted=true for fqn. If the
 // entry doesn't exist yet (the tool was never loaded), the function still
-// inserts a tier="tier3" + Demoted=true row so the next request's sticky
-// set excludes it. Same defensive copy + warn-and-continue contract as
+// inserts a Demoted=true row so the next request's sticky set prefers it
+// for eviction. Same defensive copy + warn-and-continue contract as
 // persistToolPromotion.
 func (o *Orchestrator) markDemotedFlag(ctx context.Context, sessionID, fqn string) {
 	o.updateToolDemotion(ctx, sessionID, fqn, true)
@@ -197,7 +205,6 @@ func (o *Orchestrator) updateToolDemotion(ctx context.Context, sessionID, fqn st
 		// demotion to clear).
 		updated.KnownTools = append(updated.KnownTools, state.KnownToolEntry{
 			ToolName: fqn,
-			Tier:     state.KnownToolTier3,
 			Demoted:  true,
 		})
 		changed = true

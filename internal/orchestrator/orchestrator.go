@@ -145,15 +145,15 @@ type InjectionStateStore interface {
 	UpdateInjectionState(ctx context.Context, sessionID string, st state.InjectionState) error
 }
 
-// ToolErrorHandlingConfig is the runtime form of the RFC #249 Phase 4
-// tool-failure protections. Zero values normalize to the RFC defaults
-// in NewWithRules. LoopCapPerTurn governs the in-loop "Tool X failed N
-// times" system-message injection; StickyDemotionThreshold governs the
-// session-level demotion flag in known_tools. Successful invocations
-// reset both counters (self-healing).
+// ToolErrorHandlingConfig is the runtime form of the tool-failure
+// protections. Both fields are opt-in: a zero/unset value turns that
+// protection OFF (no default is substituted). LoopCapPerTurn governs the
+// in-loop "Tool X failed N times" nudge injection; StickyDemotionThreshold
+// governs the session-level demotion flag in known_tools. Successful
+// invocations reset both counters (self-healing).
 type ToolErrorHandlingConfig struct {
-	LoopCapPerTurn          int // consecutive identical-tool errors per turn before system-msg injection; default 2
-	StickyDemotionThreshold int // consecutive session-level errors before known_tools demotion; default 3
+	LoopCapPerTurn          int // consecutive identical-tool errors per turn before nudge injection; <= 0 disables
+	StickyDemotionThreshold int // consecutive session-level errors before known_tools demotion; <= 0 disables
 }
 
 // OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check, no summarization).
@@ -192,7 +192,7 @@ type OrchestratorOpts struct {
 	OnStreamChunk           StreamChunkCallback     // optional; when set and LLM supports streaming, final answers are streamed
 	ShowToolCalls           string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 	InjectionStateStore     InjectionStateStore     // optional; persists known_tools sticky tiers across turns (load_tools promotion)
-	ToolErrorHandling       ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; zero value normalizes to RFC defaults
+	ToolErrorHandling       ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
 	ChannelSender           ChannelSender           // optional; when set, maybeGenerateTitle pushes the generated title to the originating channel as a session.title frame
 }
 
@@ -274,32 +274,25 @@ type Orchestrator struct {
 	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
 	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
 	pendingConfirmationIDs  map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
-	// recentToolPromotions holds tool names the LLM loaded via
-	// _meta__load_tools since the last preparer pass on each session.
-	// persistToolPromotion appends. In-memory only — the durable sticky
-	// placement lives in InjectionState (LRURank), so this cache is just
-	// provenance for any consumer that wants the per-pass load list.
-	recentToolPromotionsMu sync.Mutex
-	recentToolPromotions   map[string][]string
-	pipelineConfig         pipeline.PipelineConfig
-	confirmationPlugin     string                  // optional; plugin for confirmation strategy
-	confirmationAction     string                  // optional; action name for confirmation check
-	contextWindow          int                     // model context window in tokens; 0 = no trimming
-	groupPluginLookup      GroupPluginLookup       // optional; nil = no group-based filtering
-	usageRecorder          UsageRecorder           // optional; nil = no usage tracking
-	pluginCallObserver     PluginCallObserver      // optional; nil = no plugin call observation
-	eventSink              emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
-	snapshotStore          PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
-	syncActionsPlugin      string                  // optional; plugin name for action sync
-	syncActionsAction      string                  // optional; action name for action sync
-	knowledge              KnowledgeConfig         // optional; knowledge directory ingestion
-	subprocessConfig       SubprocessConfig        // optional; subprocess (sub-agent) support
-	onStreamChunk          StreamChunkCallback     // optional; when set, final answers stream to caller
-	showToolCalls          string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	injectionStateStore    InjectionStateStore     // optional; nil = load_tools sticky promotions don't persist across turns
-	toolErrorHandling      ToolErrorHandlingConfig // RFC #249 Phase 4 tool-failure protections; thresholds always carry RFC defaults after NewWithRules
-	toolErrorTracker       *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by injectionStateStore
-	channelSender          ChannelSender           // optional; nil = title generation persists silently, no live push to clients
+	pipelineConfig          pipeline.PipelineConfig
+	confirmationPlugin      string                  // optional; plugin for confirmation strategy
+	confirmationAction      string                  // optional; action name for confirmation check
+	contextWindow           int                     // model context window in tokens; 0 = no trimming
+	groupPluginLookup       GroupPluginLookup       // optional; nil = no group-based filtering
+	usageRecorder           UsageRecorder           // optional; nil = no usage tracking
+	pluginCallObserver      PluginCallObserver      // optional; nil = no plugin call observation
+	eventSink               emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
+	snapshotStore           PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
+	syncActionsPlugin       string                  // optional; plugin name for action sync
+	syncActionsAction       string                  // optional; action name for action sync
+	knowledge               KnowledgeConfig         // optional; knowledge directory ingestion
+	subprocessConfig        SubprocessConfig        // optional; subprocess (sub-agent) support
+	onStreamChunk           StreamChunkCallback     // optional; when set, final answers stream to caller
+	showToolCalls           string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	injectionStateStore     InjectionStateStore     // optional; nil = load_tools sticky promotions don't persist across turns
+	toolErrorHandling       ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
+	toolErrorTracker        *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by injectionStateStore
+	channelSender           ChannelSender           // optional; nil = title generation persists silently, no live push to clients
 	// titleMuxes serializes per-session title-generation goroutines
 	// without blocking the foreground Run path. Summarization shares the
 	// sessionMux because it triggers after many turns and tolerates one
@@ -501,16 +494,11 @@ func NewWithRules(
 		eventSink = emit.NoOpSink{}
 	}
 
-	// Normalize ToolErrorHandling to RFC #249 Phase 4 defaults so callers
-	// that build OrchestratorOpts in code (mostly tests) don't have to
-	// repeat the canonical numbers.
+	// ToolErrorHandling is opt-in: a zero/unset threshold means that
+	// protection is OFF (recordToolOutcome guards on `> 0`). Passed through
+	// as-is — we do NOT substitute a default for zero, so an operator who
+	// omits the config gets neither the loop-cap nudge nor sticky demotion.
 	errCfg := opts.ToolErrorHandling
-	if errCfg.LoopCapPerTurn == 0 {
-		errCfg.LoopCapPerTurn = 2
-	}
-	if errCfg.StickyDemotionThreshold == 0 {
-		errCfg.StickyDemotionThreshold = 3
-	}
 
 	o := &Orchestrator{
 		sessionMuxes:            make(map[string]*sessionMutex),
@@ -541,7 +529,6 @@ func NewWithRules(
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
 		pendingToolCalls:        make(map[string]*ToolCall),
 		pendingConfirmationIDs:  make(map[string]string),
-		recentToolPromotions:    make(map[string][]string),
 		pipelineConfig:          pipelineCfg,
 		confirmationPlugin:      opts.ConfirmationPlugin,
 		confirmationAction:      opts.ConfirmationAction,
@@ -818,23 +805,22 @@ func (o *Orchestrator) runSTTPreparer(ctx context.Context, prep ContentPreparerE
 }
 
 // preparerOutcome is the result of one preparer pass. Content / Blocked
-// / RelevantTools drive what the orchestrator does next; Response holds
-// the parsed plugin JSON so callers can read the RFC #249 candidate
-// fields and emit retrieval events without re-deserializing. For Lua
-// preparers (no plugin protocol) Response stays zero-valued — its
-// KnowledgeCandidates / GlossaryCandidates / ToolCandidates slices are
-// nil and downstream emit logic short-circuits accordingly.
+// drive what the orchestrator does next; Response holds the parsed plugin
+// JSON so callers can read the RFC #249 candidate fields and emit
+// retrieval events without re-deserializing. For Lua preparers (no plugin
+// protocol) Response stays zero-valued — its KnowledgeCandidates /
+// GlossaryCandidates / ToolCandidates slices are nil and downstream emit
+// logic short-circuits accordingly.
 type preparerOutcome struct {
-	Content       string
-	Blocked       *RunResult
-	RelevantTools []string
-	Response      preparerResponse
+	Content  string
+	Blocked  *RunResult
+	Response preparerResponse
 }
 
 // blockedPreparerOutcome is the shorthand for "this preparer's output
 // halted the run" — used by the early-exit paths in runSinglePreparer
-// so Content stays in sync with the input and RelevantTools / Response
-// stay zero-valued.
+// so Content stays in sync with the input and Response stays
+// zero-valued.
 func blockedPreparerOutcome(content string, blocked *RunResult) preparerOutcome {
 	return preparerOutcome{Content: content, Blocked: blocked}
 }
@@ -934,9 +920,9 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 		return preparerOutcome{Blocked: &RunResult{Response: msg}, Response: pr}, nil
 	}
 	if pr.Message != "" {
-		return preparerOutcome{Content: pr.Message, RelevantTools: pr.RelevantTools, Response: pr}, nil
+		return preparerOutcome{Content: pr.Message, Response: pr}, nil
 	}
-	return preparerOutcome{Content: toolResult.Content, RelevantTools: pr.RelevantTools, Response: pr}, nil
+	return preparerOutcome{Content: toolResult.Content, Response: pr}, nil
 }
 
 // applyShowToolCalls prepends tool call details to result.Response based on show_tool_calls mode.
@@ -1424,12 +1410,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		content = stripKnowledgeContext(content)
 		decisionID := o.emitPreparerDecision(ctx, prepAgg)
 		if decisionID != "" {
-			refs, tier1Count, tier3Count := turnStartRefsFromAggregate(prepAgg)
+			// Knowledge is pull-only and tool discovery is the registry
+			// catalog, so there are no auto-injected article refs and no
+			// per-turn tier counts to back-reference — the retrieved
+			// candidates surface on preparer_decision instead. The
+			// turn_start payload keeps the fields for schema stability;
+			// omitempty drops the zero values.
 			ctx = withTurnStartContext(ctx, turnStartContext{
 				PreparerDecisionID: decisionID,
-				InjectedKnowledge:  refs,
-				Tier1Count:         tier1Count,
-				Tier3Count:         tier3Count,
 			})
 		}
 	}
@@ -3208,53 +3196,12 @@ func (o *Orchestrator) applySlidingWindow(ctx context.Context, msgs []provider.M
 	// Don't cut between a tool-call and its result — advance the boundary past
 	// any leading orphaned results so the kept slice stays a valid transcript.
 	dropped = firstNonOrphanIndex(msgs, dropped)
-	// RFC #249 Pillar C: scan the dropped slice for [knowledge_context]
-	// blocks so consumers can correlate the cut with InjectionState
-	// release without re-reconciling. Visible-message scan is the same
-	// data source the next preparer pass uses for lazy reconciliation,
-	// so the two numbers stay in lockstep without a DB read here.
-	released := releasedKnowledgeIDs(msgs[:dropped])
-	remaining := len(uniqueKnowledgeArticles(scanVisibleKnowledgeBlocks(msgs[dropped:])))
 	emit.EmitMessagesTruncated(ctx, o.eventSink, emit.MessagesTruncatedArgs{
-		DroppedSeqFrom:               0,
-		DroppedSeqTo:                 dropped - 1,
-		DroppedCount:                 dropped,
-		ReleasedKnowledgeIDs:         released,
-		RemainingKnownKnowledgeCount: remaining,
+		DroppedSeqFrom: 0,
+		DroppedSeqTo:   dropped - 1,
+		DroppedCount:   dropped,
 	})
 	return msgs[dropped:]
-}
-
-// releasedKnowledgeIDs returns the deduplicated article_ids whose
-// [knowledge_context] blocks live in the given message slice. Empty
-// when the slice carries no KC-bearing user messages or every block
-// is the legacy untagged shape (where ArticleID is unknown).
-// Used by both the sliding-window cutter and the summarization
-// trim — both replace the message slice with a stand-in, releasing
-// every KC reference inside the replaced range.
-func releasedKnowledgeIDs(messages []provider.Message) []string {
-	return uniqueKnowledgeArticles(scanVisibleKnowledgeBlocks(messages))
-}
-
-// uniqueKnowledgeArticles collapses a parsedKCBlock slice to its
-// distinct article_ids in first-seen order. Blocks without an
-// article_id (legacy untagged form) are skipped — they cannot be
-// correlated with InjectionState anyway. Returns nil when nothing
-// to report so the emitted payload omits the field cleanly.
-func uniqueKnowledgeArticles(blocks []parsedKCBlock) []string {
-	if len(blocks) == 0 {
-		return nil
-	}
-	seen := make(map[string]bool, len(blocks))
-	var out []string
-	for _, b := range blocks {
-		if b.ArticleID == "" || seen[b.ArticleID] {
-			continue
-		}
-		seen[b.ArticleID] = true
-		out = append(out, b.ArticleID)
-	}
-	return out
 }
 
 // appendConversation appends the message tail shared by buildMessages and
@@ -3532,9 +3479,11 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		fmt.Fprintf(&sb, "The user's name is %s. Address them by name where it feels natural; do not force it into every message.\n\n", p.Name)
 	}
 
-	// Reply-language directive last, so it is the most recent instruction the
-	// model reads before the conversation. Empty unless detection was confident
-	// (see replyLanguageDirective).
+	// Reply-language directive, appended at the end of buildSystemPrompt's
+	// own output. Note it is no longer the very last thing in the system
+	// block: appendConversation folds the conversation-summary and the
+	// format/don't-repeat reminders onto messages[0] AFTER this. Empty
+	// unless detection was confident (see replyLanguageDirective).
 	if dir := replyLanguageDirectiveFromContext(ctx); dir != "" {
 		sb.WriteString(dir)
 	}
@@ -4249,10 +4198,9 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 		return
 	}
 	emit.EmitSummarizationCompleted(summCtx, o.eventSink, emit.SummarizationCompletedArgs{
-		Summary:              newSummary,
-		KeptMessages:         len(keepMessages),
-		LatencyMS:            time.Since(summarizeStart).Milliseconds(),
-		ReleasedKnowledgeIDs: releasedKnowledgeIDs(toSummarize),
+		Summary:      newSummary,
+		KeptMessages: len(keepMessages),
+		LatencyMS:    time.Since(summarizeStart).Milliseconds(),
 	})
 }
 
@@ -4401,11 +4349,11 @@ type turnStartContextKey struct{}
 
 // turnStartContext carries the preparer-phase references the next
 // turn_start event quotes. PreparerDecisionID may be "" when no
-// preparer_decision event was emitted (no signal in the aggregate);
-// in that case InjectedKnowledge / Tier1Count / Tier3Count are also
-// zero values and the turn_start payload omits all four under
-// `omitempty`. See turnStartRefsFromAggregate for the per-mode
-// derivation.
+// preparer_decision event was emitted (no signal in the aggregate).
+// Knowledge is pull-only and tool discovery is the registry catalog, so
+// InjectedKnowledge / Tier1Count / Tier3Count are always zero values now
+// (the retrieved candidates surface on preparer_decision instead); they
+// remain on the payload for schema stability and `omitempty` drops them.
 type turnStartContext struct {
 	PreparerDecisionID string
 	InjectedKnowledge  []events.KnowledgeRef
@@ -4660,16 +4608,17 @@ func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.Completi
 
 // capabilitiesToPlannerInfo converts orchestrator PluginCapability to pipeline CapabilityInfo.
 // appendStrippingHistoricalKC appends session messages to dst, stripping
-// [knowledge_context] blocks from historical user messages but preserving
-// the current turn's user message intact so preparer-injected RAG content
-// reaches the LLM. The current turn is identified as the last user message
-// in the slice.
+// [knowledge_context] blocks from historical user messages. The current
+// turn (the last user message in the slice) is exempted from the strip,
+// but that exemption is now a no-op for KC: knowledge is pull-only, so
+// the orchestrator already strips [knowledge_context] from the current
+// turn upstream (before the message is stored) — there is nothing left to
+// strip here. The exemption is kept harmless rather than removed so the
+// per-message dedup pass below still runs over the current turn unchanged.
 //
-// Historical strip is still applied because past-turn [knowledge_context]
-// blocks would otherwise accumulate across turns and bloat the context
-// window. Server-instruction articles never appear here in the first place
-// — the weaviate-plugin filters them out via filterOutMCPItems before
-// injection.
+// Historical strip is still applied as a fail-safe: any stray past-turn
+// [knowledge_context] block would otherwise accumulate across turns and
+// bloat the context window.
 //
 // Also deduplicates knowledge article plugin outputs: when ask_knowledge
 // returns the same MCP server instructions block repeatedly (~5KB each),
@@ -5087,8 +5036,9 @@ func renderKnowledgeCatalog(entries []knowledgeCatalogEntry, anchor string) stri
 }
 
 // SyncActions iterates all registered plugin capabilities and calls the configured
-// sync_actions plugin to upsert them into the vector store. This enables retrieval-based
-// tool filtering by the RAG preparer. Safe to call at startup; errors are logged, not returned.
+// sync_actions plugin to upsert them into the vector store. This ships each plugin's
+// server-instructions text and knowledge articles into the store so ask_knowledge can
+// retrieve them on demand. Safe to call at startup; errors are logged, not returned.
 func (o *Orchestrator) SyncActions(ctx context.Context) {
 	if o.syncActionsPlugin == "" || o.syncActionsAction == "" {
 		return

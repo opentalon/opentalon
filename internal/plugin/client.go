@@ -267,16 +267,6 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 			ReadOnly:          a.ReadOnly,
 		}
 	}
-	glossary := make([]orchestrator.GlossaryEntry, len(pb.Glossary))
-	for i, g := range pb.Glossary {
-		glossary[i] = orchestrator.GlossaryEntry{
-			Term:       g.Term,
-			Definition: g.Definition,
-			Category:   g.Category,
-			Tags:       g.Tags,
-			Synonyms:   g.Synonyms,
-		}
-	}
 	knowledge := make([]orchestrator.KnowledgeArticle, len(pb.KnowledgeArticles))
 	for i, k := range pb.KnowledgeArticles {
 		knowledge[i] = orchestrator.KnowledgeArticle{
@@ -291,7 +281,6 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 		Description:          pb.Description,
 		Actions:              actions,
 		SystemPromptAddition: pb.SystemPromptAddition,
-		Glossary:             glossary,
 		KnowledgeArticles:    knowledge,
 		SupportsCallbacks:    pb.SupportsCallbacks,
 	}

@@ -1,26 +1,17 @@
 package orchestrator
 
-import (
-	"strings"
-
-	"github.com/opentalon/opentalon/internal/provider"
-)
+import "strings"
 
 // [knowledge_context] block parsing and stripping.
 //
 // Knowledge is pull-only: the model discovers articles from the
 // system-prompt catalog (titles + slugs) and fetches bodies on demand
 // via the ask_knowledge tool. The orchestrator never auto-injects
-// retrieved article bodies into the user turn. These helpers exist as a
-// fail-safe and for bookkeeping:
-//
-//   - stripKnowledgeContext removes any stray
-//     `[knowledge_context]…[/knowledge_context]` envelope (legacy or
-//     tagged form) from messages so nothing leaks into the LLM turn or
-//     the stored history.
-//   - scanVisibleKnowledgeBlocks / the parser feed the
-//     truncation/summarization events that report which article ids
-//     dropped out of the context window.
+// retrieved article bodies into the user turn. stripKnowledgeContext
+// remains as a fail-safe: it removes any stray
+// `[knowledge_context]…[/knowledge_context]` envelope (legacy or tagged
+// form) from messages so nothing leaks into the LLM turn or the stored
+// history.
 //
 // Some opening tags carry optional `id="..."` and `sha="..."`
 // attributes; the parser recognizes both the tagged and the bare
@@ -102,22 +93,6 @@ func parseKnowledgeContextBlocks(s string) []parsedKCBlock {
 		cursor = bodyEnd + len(kcCloseTag)
 	}
 	return blocks
-}
-
-// scanVisibleKnowledgeBlocks walks the user-role messages and returns
-// every parsed [knowledge_context] block. Blocks without an `id` and
-// `sha` attribute (legacy untagged form) are still returned so callers
-// can count them. Used by the truncation/summarization events to report
-// which article ids dropped out of the context window.
-func scanVisibleKnowledgeBlocks(messages []provider.Message) []parsedKCBlock {
-	var out []parsedKCBlock
-	for _, m := range messages {
-		if m.Role != provider.RoleUser || m.Content == "" {
-			continue
-		}
-		out = append(out, parseKnowledgeContextBlocks(m.Content)...)
-	}
-	return out
 }
 
 // stripKnowledgeContext removes every [knowledge_context]…[/knowledge_context]

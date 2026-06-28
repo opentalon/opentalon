@@ -16,10 +16,6 @@ import (
 //     injected, which tools tier-promoted, etc.). Always emitted exactly
 //     once per turn; the Mode field discriminates Phase-2 instrumentation
 //     from Phase-3+ dedup behaviour.
-//   - drift_detected — emitted at the start of a preparer pass when the
-//     session's known-knowledge state and the actual visible message
-//     stream disagree (Phase 3+ only; helper exists now so the wiring
-//     site can land alongside the dedup logic without a schema bump).
 //   - messages_truncated — emitted when the sliding-window cutter drops
 //     messages from the LLM-bound message slice.
 //
@@ -163,45 +159,14 @@ func EmitPreparerDecision(ctx context.Context, sink Sink, args PreparerDecisionA
 	}, 0)
 }
 
-// DriftDetectedArgs describes one drift between the in-state known-
-// knowledge set and the actual visible-message scan. ReconciliationAction
-// is free-form so future paths can record what they did without a schema
-// bump — see RFC #249 §Pillar A for the vocabulary today.
-//
-// Helper is defined now so Phase 3's reconciliation code can land
-// without a follow-up schema change; Phase 2 has no caller.
-type DriftDetectedArgs struct {
-	StateBelievedKnown   []string
-	ActuallyVisible      []string
-	MissingFromVisible   []string
-	ExtrasInVisible      []string
-	ReconciliationAction string
-}
-
-// EmitDriftDetected writes one drift_detected event.
-func EmitDriftDetected(ctx context.Context, sink Sink, args DriftDetectedArgs) string {
-	return send(ctx, sink, events.TypeDriftDetected, events.DriftDetectedPayload{
-		Header:               events.Header{V: events.DriftDetectedVersion},
-		StateBelievedKnown:   args.StateBelievedKnown,
-		ActuallyVisible:      args.ActuallyVisible,
-		MissingFromVisible:   args.MissingFromVisible,
-		ExtrasInVisible:      args.ExtrasInVisible,
-		ReconciliationAction: events.SanitizeUTF8(args.ReconciliationAction),
-	}, 0)
-}
-
 // MessagesTruncatedArgs describes one sliding-window cutter pass.
 // DroppedSeqRange is [from, to] inclusive indexed into sess.Messages
 // (position-based, since the in-memory message slice does not carry a
-// seq column). ReleasedKnowledgeIDs / RemainingKnownKnowledgeCount stay
-// empty/zero in Phase 2 — the dedup state that would populate them
-// arrives with Phase 3.
+// seq column).
 type MessagesTruncatedArgs struct {
-	DroppedSeqFrom               int
-	DroppedSeqTo                 int
-	DroppedCount                 int
-	ReleasedKnowledgeIDs         []string
-	RemainingKnownKnowledgeCount int
+	DroppedSeqFrom int
+	DroppedSeqTo   int
+	DroppedCount   int
 }
 
 // EmitMessagesTruncated writes one messages_truncated event. Callers
@@ -213,10 +178,8 @@ func EmitMessagesTruncated(ctx context.Context, sink Sink, args MessagesTruncate
 		seqRange = []int{args.DroppedSeqFrom, args.DroppedSeqTo}
 	}
 	return send(ctx, sink, events.TypeMessagesTruncated, events.MessagesTruncatedPayload{
-		Header:                       events.Header{V: events.MessagesTruncatedVersion},
-		DroppedSeqRange:              seqRange,
-		DroppedCount:                 args.DroppedCount,
-		ReleasedKnowledgeIDs:         args.ReleasedKnowledgeIDs,
-		RemainingKnownKnowledgeCount: args.RemainingKnownKnowledgeCount,
+		Header:          events.Header{V: events.MessagesTruncatedVersion},
+		DroppedSeqRange: seqRange,
+		DroppedCount:    args.DroppedCount,
 	}, 0)
 }

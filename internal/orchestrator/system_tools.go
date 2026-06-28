@@ -218,9 +218,9 @@ func splitToolNames(raw string) []string {
 // persistToolPromotion upserts a sticky entry for the named tool in the
 // session's KnownTools so future requests keep the tool in the native
 // tools array. Existing entries get LRURank refreshed to the current
-// turn (so they win the sticky-cap sort), Demoted cleared, and the tier
-// marked tier1 — an explicit load_tools call is a strong relevance
-// signal. Missing entries are appended.
+// turn (so they win the sticky-cap sort) and Demoted cleared — an
+// explicit load_tools call is a strong relevance signal. Missing entries
+// are appended.
 //
 // KnownTools is defensively copied before mutation: stores may return
 // slices that share the backing array with their
@@ -250,7 +250,6 @@ func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name
 		if updated.KnownTools[i].ToolName != name {
 			continue
 		}
-		updated.KnownTools[i].Tier = state.KnownToolTier1
 		if turn > updated.KnownTools[i].LRURank {
 			updated.KnownTools[i].LRURank = turn
 		}
@@ -261,7 +260,6 @@ func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name
 	if !found {
 		updated.KnownTools = append(updated.KnownTools, state.KnownToolEntry{
 			ToolName: name,
-			Tier:     state.KnownToolTier1,
 			LRURank:  turn,
 		})
 	}
@@ -270,23 +268,6 @@ func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name
 			"component", "orchestrator", "session", sessionID, "tool", name, "error", err)
 		return
 	}
-	o.recordRecentPromotion(sessionID, name)
-}
-
-// recordRecentPromotion appends a tool name to the per-session
-// recents cache. Duplicate names within the same window are
-// deduplicated — if the LLM loads the same tool twice in one turn
-// (unlikely but possible), the recents cache surfaces it once.
-func (o *Orchestrator) recordRecentPromotion(sessionID, name string) {
-	o.recentToolPromotionsMu.Lock()
-	defer o.recentToolPromotionsMu.Unlock()
-	existing := o.recentToolPromotions[sessionID]
-	for _, n := range existing {
-		if n == name {
-			return
-		}
-	}
-	o.recentToolPromotions[sessionID] = append(existing, name)
 }
 
 // registerLoadToolsTool wires the meta-tool into the registry so the LLM

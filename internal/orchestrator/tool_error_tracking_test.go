@@ -134,7 +134,7 @@ func TestRecordToolOutcome_SuccessAfterDemotionSelfHeals(t *testing.T) {
 	store := &fakeInjectionStateStore{
 		store: map[string]state.InjectionState{
 			"s1": {KnownTools: []state.KnownToolEntry{
-				{ToolName: "p__a", Tier: state.KnownToolTier3, Demoted: true},
+				{ToolName: "p__a", Demoted: true},
 			}},
 		},
 	}

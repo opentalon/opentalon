@@ -427,9 +427,6 @@ func TestLoadTools_PromotionPersistsStickyEntry(t *testing.T) {
 	if found == nil {
 		t.Fatalf("loaded tool missing from KnownTools, got %+v", store.lastWritten.KnownTools)
 	}
-	if found.Tier != state.KnownToolTier1 {
-		t.Errorf("Tier = %q, want %q", found.Tier, state.KnownToolTier1)
-	}
 	if found.LRURank < 1 {
 		t.Errorf("LRURank = %d, want >= 1", found.LRURank)
 	}
@@ -441,7 +438,7 @@ func TestLoadTools_PromotionClearsDemotedFlag(t *testing.T) {
 	store := &fakeInjectionStateStore{
 		store: map[string]state.InjectionState{
 			"s1": {KnownTools: []state.KnownToolEntry{
-				{ToolName: "tools-plugin__t1", Tier: state.KnownToolTier3, LRURank: 1, Demoted: true},
+				{ToolName: "tools-plugin__t1", LRURank: 1, Demoted: true},
 			}},
 		},
 	}
@@ -455,9 +452,6 @@ func TestLoadTools_PromotionClearsDemotedFlag(t *testing.T) {
 		if kt.ToolName == "tools-plugin__t1" {
 			if kt.Demoted {
 				t.Errorf("Demoted must clear on load, got Demoted=true")
-			}
-			if kt.Tier != state.KnownToolTier1 {
-				t.Errorf("Tier must upgrade to tier1, got %q", kt.Tier)
 			}
 		}
 	}
@@ -482,12 +476,12 @@ func TestLoadTools_StoreReadFailureStillReportsLoaded(t *testing.T) {
 }
 
 func TestLoadTools_PromotionDoesNotRegressLRURank(t *testing.T) {
-	// Existing tier1 entry at LRURank >= currentTurn must not have its rank
+	// Existing sticky entry at LRURank >= currentTurn must not have its rank
 	// decreased on a re-load (guards the upward-only bump in persistToolPromotion).
 	store := &fakeInjectionStateStore{
 		store: map[string]state.InjectionState{
 			"s1": {KnownTools: []state.KnownToolEntry{
-				{ToolName: "tools-plugin__t1", Tier: state.KnownToolTier1, LRURank: 99},
+				{ToolName: "tools-plugin__t1", LRURank: 99},
 			}},
 		},
 	}

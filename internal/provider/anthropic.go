@@ -16,9 +16,11 @@ import (
 
 // Tool names are passed to Anthropic verbatim. The orchestrator's tool
 // registry composes fully-qualified names with the "__" separator (see
-// pkg/toolfqn), e.g. "timly__timly__list-items" or "_meta__load_tools",
-// which already satisfy Anthropic's tool-name pattern
-// `^[a-zA-Z0-9_-]{1,128}$` — no wire encoding needed.
+// pkg/toolfqn), e.g. "timly__timly__list-items" or "_meta__load_tools".
+// No wire encoding is needed because the composed FQN charset
+// `^[a-zA-Z0-9_-]{1,64}$` — Anthropic's tool-name pattern — is now
+// ENFORCED at registration (see ToolRegistry.Register), so any name that
+// would fail at the API is rejected up front with a clear error instead.
 
 const (
 	anthropicDefaultBaseURL = "https://api.anthropic.com"
@@ -162,9 +164,12 @@ type anthResponse struct {
 }
 
 type anthContentBlock struct {
-	Type   string           `json:"type"`
-	Text   string           `json:"text,omitempty"`
-	Source *anthImageSource `json:"source,omitempty"`
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+	// Thinking blocks carry their text in a dedicated `thinking` field, not
+	// `text` — extractContent reads this for the "thinking" case.
+	Thinking string           `json:"thinking,omitempty"`
+	Source   *anthImageSource `json:"source,omitempty"`
 	// tool_use (assistant emits to invoke a tool)
 	ID    string          `json:"id,omitempty"`
 	Name  string          `json:"name,omitempty"`
@@ -227,6 +232,10 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		MessageCount: len(anthReq.Messages),
 		HasTools:     len(anthReq.Tools) > 0,
 		MaxTokens:    anthReq.MaxTokens,
+		// Thinking != nil means reasoning is on for this turn. Anthropic has
+		// no per-effort string knob on this path (budget is a token count,
+		// not low/medium/high), so ReasoningEffort stays empty.
+		Reasoning: anthReq.Thinking != nil,
 	})
 
 	start := time.Now()
@@ -342,12 +351,17 @@ func (p *AnthropicProvider) Stream(_ context.Context, _ *CompletionRequest) (Res
 }
 
 func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, error) {
-	var system string
+	// Anthropic carries the system prompt in a single top-level `system`
+	// field, not as a message. Concatenate every RoleSystem message (joined
+	// by a blank line) rather than last-wins overwriting: the normal case is
+	// one leading system message, but a stray mid-array system message (e.g.
+	// a transient nudge) must not silently clobber the real prompt.
+	var systemParts []string
 	msgs := make([]anthMessage, 0, len(req.Messages))
 
 	for _, m := range req.Messages {
 		if m.Role == RoleSystem {
-			system = m.Content
+			systemParts = append(systemParts, m.Content)
 			continue
 		}
 		msg, err := p.toAnthMessage(m)
@@ -356,6 +370,7 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		}
 		msgs = append(msgs, msg)
 	}
+	system := joinStrings(systemParts)
 
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
@@ -549,7 +564,7 @@ func (p *AnthropicProvider) extractContent(blocks []anthContentBlock) (content, 
 		case "text":
 			textParts = append(textParts, b.Text)
 		case "thinking":
-			thinkParts = append(thinkParts, b.Text)
+			thinkParts = append(thinkParts, b.Thinking)
 		case "tool_use":
 			toolCalls = append(toolCalls, anthToolUseToToolCall(b))
 		}

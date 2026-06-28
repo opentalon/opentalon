@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1655,63 +1654,6 @@ func TestOrchestrator_Summarization_EmitsTriggeredAndCompleted(t *testing.T) {
 	}
 }
 
-func TestOrchestrator_Summarization_PopulatesReleasedKnowledgeIDs(t *testing.T) {
-	// When summarization replaces a message range that carried tagged
-	// [knowledge_context] blocks, summarization_completed lists the
-	// released article_ids so consumers correlate with InjectionState
-	// without diffing two reconciliation snapshots.
-	sink := &recordingEventSink{}
-	registry := NewToolRegistry()
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("sess", "", "")
-	kc := func(id, sha string) string {
-		return "[knowledge_context id=\"" + id + "\" sha=\"" + sha + "\"]body[/knowledge_context]\n\nuser text"
-	}
-	// 10 seeded; SummarizeAfterMessages=5, MaxMessagesAfterSummary=3 →
-	// kept = last 3, summarized-away = first 7. Seed two KC-bearing
-	// user messages in the first half (will be summarized away) plus
-	// a duplicate article_id to verify dedup.
-	toSummarize := []provider.Message{
-		{Role: provider.RoleUser, Content: kc("kb_a", "sha_a1")},
-		{Role: provider.RoleAssistant, Content: "answer-a"},
-		{Role: provider.RoleUser, Content: kc("kb_b", "sha_b1")},
-		{Role: provider.RoleAssistant, Content: "answer-b"},
-		{Role: provider.RoleUser, Content: kc("kb_a", "sha_a2")}, // duplicate article_id
-		{Role: provider.RoleAssistant, Content: "answer-a2"},
-		{Role: provider.RoleUser, Content: "plain text"},
-	}
-	keep := []provider.Message{
-		{Role: provider.RoleUser, Content: kc("kb_c", "sha_c1")},
-		{Role: provider.RoleAssistant, Content: "answer-c"},
-		{Role: provider.RoleUser, Content: "tail"},
-	}
-	for _, m := range append(toSummarize, keep...) {
-		_ = sessions.AddMessage("sess", m)
-	}
-
-	llm := &fakeLLM{responses: []string{"summary of older turns"}}
-	orch := NewWithRules(llm, DefaultParser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:               sink,
-		SummarizeAfterMessages:  5,
-		MaxMessagesAfterSummary: 3,
-	})
-
-	orch.maybeSummarizeSession(context.Background(), "sess")
-
-	comp := findPayloadsByType(t, sink.snapshot(), events.TypeSummarizationCompleted)
-	if len(comp) != 1 {
-		t.Fatalf("summarization_completed count = %d, want 1", len(comp))
-	}
-	var cp events.SummarizationCompletedPayload
-	_ = json.Unmarshal(comp[0], &cp)
-	want := []string{"kb_a", "kb_b"}
-	if !reflect.DeepEqual(cp.ReleasedKnowledgeIDs, want) {
-		t.Errorf("ReleasedKnowledgeIDs = %v, want %v (dedup of kb_a + kb_b in summarized range; kb_c is in kept and must not appear)",
-			cp.ReleasedKnowledgeIDs, want)
-	}
-}
-
 func TestOrchestrator_Summarization_NoCompletedOnLLMError(t *testing.T) {
 	// LLM errors on summarization → triggered fires, completed does not.
 	// Consumer-side analytics counts "triggered minus completed" as failure rate.
@@ -2918,10 +2860,7 @@ func TestOrchestrator_MessagesTruncated_EmittedWhenSlidingWindowCuts(t *testing.
 	// Sliding window: when sess.Messages exceeds ContextMessages, the
 	// orchestrator drops the oldest N entries and emits one
 	// messages_truncated event carrying the dropped index range and
-	// count. With no [knowledge_context] blocks in the dropped slice,
-	// ReleasedKnowledgeIDs stays nil and RemainingKnownKnowledgeCount
-	// stays 0 — both omitted under `omitempty`. The KC-bearing case is
-	// covered by TestOrchestrator_MessagesTruncated_PopulatesReleasedKnowledgeIDs.
+	// count.
 	sink := &recordingEventSink{}
 	llm := &fakeLLM{responses: []string{"answer"}}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
@@ -2962,75 +2901,6 @@ func TestOrchestrator_MessagesTruncated_EmittedWhenSlidingWindowCuts(t *testing.
 	}
 	if len(p.DroppedSeqRange) != 2 || p.DroppedSeqRange[0] != 0 || p.DroppedSeqRange[1] != 8 {
 		t.Errorf("DroppedSeqRange = %v, want [0, 8]", p.DroppedSeqRange)
-	}
-}
-
-func TestOrchestrator_MessagesTruncated_PopulatesReleasedKnowledgeIDs(t *testing.T) {
-	// When the sliding-window cutter drops messages that carry tagged
-	// [knowledge_context id="..." sha="..."] blocks, the emitted
-	// messages_truncated event lists the released article_ids (deduped,
-	// in-order) and the remaining KC-bearing article count among the
-	// kept messages. RFC #249 Pillar C — consumers correlate with
-	// InjectionState without re-reconciling.
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"answer"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-
-	registry := NewToolRegistry()
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
-
-	// Seed: 8 messages. Run() adds 1 current-turn user message before
-	// applySlidingWindow fires → 9 total. ContextMessages=4 → drop the
-	// first 5 (indices 0..4), keep the last 4 (indices 5..8). Place two
-	// distinct + one duplicate article_id in the dropped range; one
-	// fresh article_id in the kept range.
-	kc := func(id, sha string) string {
-		return "[knowledge_context id=\"" + id + "\" sha=\"" + sha + "\"]body[/knowledge_context]\n\nuser text"
-	}
-	seed := []provider.Message{
-		{Role: provider.RoleUser, Content: kc("kb_a", "sha_a1")}, // 0 dropped
-		{Role: provider.RoleAssistant, Content: "answer-1"},      // 1 dropped
-		{Role: provider.RoleUser, Content: kc("kb_b", "sha_b1")}, // 2 dropped
-		{Role: provider.RoleUser, Content: kc("kb_a", "sha_a2")}, // 3 dropped — duplicate article_id
-		{Role: provider.RoleAssistant, Content: "answer-b"},      // 4 dropped
-		{Role: provider.RoleUser, Content: kc("kb_c", "sha_c1")}, // 5 kept
-		{Role: provider.RoleAssistant, Content: "answer-c"},      // 6 kept
-		{Role: provider.RoleUser, Content: "plain follow-up"},    // 7 kept
-		// index 8 is the "next message" Run() prepends — kept, no KC
-	}
-	for _, m := range seed {
-		_ = sessions.AddMessage("s1", m)
-	}
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:       sink,
-		ContextMessages: 4,
-	})
-
-	if _, err := orch.Run(context.Background(), "s1", "next message"); err != nil {
-		t.Fatal(err)
-	}
-
-	mt := findEventByType(sink.snapshot(), events.TypeMessagesTruncated)
-	if mt == nil {
-		t.Fatal("messages_truncated event not emitted")
-	}
-	var p events.MessagesTruncatedPayload
-	if err := json.Unmarshal(mt.Payload, &p); err != nil {
-		t.Fatalf("unmarshal messages_truncated payload: %v", err)
-	}
-	want := []string{"kb_a", "kb_b"}
-	if !reflect.DeepEqual(p.ReleasedKnowledgeIDs, want) {
-		t.Errorf("ReleasedKnowledgeIDs = %v, want %v (dedup of kb_a + kb_b in dropped range)",
-			p.ReleasedKnowledgeIDs, want)
-	}
-	// Kept slice has one KC-bearing message (kb_c); the current-turn
-	// user message added by Run is plain — remaining = 1.
-	if p.RemainingKnownKnowledgeCount != 1 {
-		t.Errorf("RemainingKnownKnowledgeCount = %d, want 1 (kb_c in kept range)",
-			p.RemainingKnownKnowledgeCount)
 	}
 }
 
@@ -3188,7 +3058,6 @@ func TestToolCatalog_StickyCapKeepsMostRecentlyUsed(t *testing.T) {
 	for i := 0; i < maxStickyTools+5; i++ {
 		known = append(known, state.KnownToolEntry{
 			ToolName: "p__a" + string(rune('A'+i%26)) + string(rune('0'+i/26)),
-			Tier:     state.KnownToolTier1,
 			LRURank:  i, // higher i = more recent
 		})
 	}
@@ -3223,8 +3092,8 @@ func TestToolCatalog_DemotedToolNotSticky(t *testing.T) {
 	sessions.Create("s1", "", "")
 	store := &fakeInjectionStateStore{store: map[string]state.InjectionState{
 		"s1": {KnownTools: []state.KnownToolEntry{
-			{ToolName: "tools-plugin__t1", Tier: state.KnownToolTier1, LRURank: 99, Demoted: true},
-			{ToolName: "tools-plugin__t2", Tier: state.KnownToolTier1, LRURank: 5},
+			{ToolName: "tools-plugin__t1", LRURank: 99, Demoted: true},
+			{ToolName: "tools-plugin__t2", LRURank: 5},
 		}},
 	}}
 	orch := NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{

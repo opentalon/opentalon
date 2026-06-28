@@ -142,20 +142,6 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 	})
 }
 
-// turnStartRefsFromAggregate extracts the Pillar-C fields the
-// turn_start event references back from the preparer aggregate: the
-// injected-knowledge ref list and the tier1/tier3 counts.
-//
-// Knowledge is pull-only, so nothing is auto-injected — the ref list is
-// always empty (the retrieved candidates surface on preparer_decision
-// instead). The tier counts are retained in the return signature (and
-// the turn_start payload) for schema stability, but always zero now that
-// tool discovery is the registry-sourced catalog rather than a per-turn
-// tier decision; `omitempty` keeps them out of the emitted payload.
-func turnStartRefsFromAggregate(agg preparerAggregate) (refs []events.KnowledgeRef, tier1Count, tier3Count int) {
-	return nil, 0, 0
-}
-
 // buildToolsBlock returns the preparer_decision.tools payload for the
 // current aggregate. Every retrieved tool candidate (plus any legacy
 // relevant_tools fallback) appears in tier1_new — the instrumentation

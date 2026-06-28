@@ -46,8 +46,8 @@ func TestInjectionState_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	want := state.InjectionState{
 		KnownTools: []state.KnownToolEntry{
-			{ToolName: "weaviate__list-items", Tier: state.KnownToolTier1, LRURank: 3},
-			{ToolName: "weaviate__get-item", Tier: state.KnownToolTier1, LRURank: 1},
+			{ToolName: "weaviate__list-items", LRURank: 3},
+			{ToolName: "weaviate__get-item", LRURank: 1},
 		},
 	}
 	if err := s.UpdateInjectionState(ctx, id, want); err != nil {
@@ -68,11 +68,11 @@ func TestInjectionState_RoundTrip(t *testing.T) {
 func TestInjectionState_OverwritesPreviousState(t *testing.T) {
 	s, id := freshSessionStore(t)
 	ctx := context.Background()
-	first := state.InjectionState{KnownTools: []state.KnownToolEntry{{ToolName: "tool_a", Tier: state.KnownToolTier1}}}
+	first := state.InjectionState{KnownTools: []state.KnownToolEntry{{ToolName: "tool_a"}}}
 	if err := s.UpdateInjectionState(ctx, id, first); err != nil {
 		t.Fatalf("UpdateInjectionState first: %v", err)
 	}
-	second := state.InjectionState{KnownTools: []state.KnownToolEntry{{ToolName: "tool_b", Tier: state.KnownToolTier1}}}
+	second := state.InjectionState{KnownTools: []state.KnownToolEntry{{ToolName: "tool_b"}}}
 	if err := s.UpdateInjectionState(ctx, id, second); err != nil {
 		t.Fatalf("UpdateInjectionState second: %v", err)
 	}
@@ -87,14 +87,14 @@ func TestInjectionState_OverwritesPreviousState(t *testing.T) {
 
 func TestInjectionState_PreservesToolFields(t *testing.T) {
 	// Round-trip guarantee: a row written with KnownTools entries
-	// preserves every field (tier, lru_rank, demoted) through
+	// preserves every field (lru_rank, demoted) through
 	// GetInjectionState.
 	s, id := freshSessionStore(t)
 	ctx := context.Background()
 	want := state.InjectionState{
 		KnownTools: []state.KnownToolEntry{
-			{ToolName: "timly__list-items", Tier: state.KnownToolTier1, LRURank: 5, Demoted: false},
-			{ToolName: "timly__broken-action", Tier: state.KnownToolTier3, LRURank: 2, Demoted: true},
+			{ToolName: "timly__list-items", LRURank: 5, Demoted: false},
+			{ToolName: "timly__broken-action", LRURank: 2, Demoted: true},
 		},
 	}
 	if err := s.UpdateInjectionState(ctx, id, want); err != nil {
