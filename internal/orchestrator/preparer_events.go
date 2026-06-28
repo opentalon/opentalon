@@ -101,29 +101,6 @@ func (o *Orchestrator) emitPreparerRetrievals(ctx context.Context, query string,
 	}
 }
 
-// emitPreparerTranslations fires one `translation` event per entry in
-// pr.TranslatorEvents. The plugin's translator is the source of truth for
-// what counted as a call worth recording (typically: translator enabled
-// AND input text non-empty AND not skipped_disabled); the orchestrator's
-// only job here is the audit-row write. opentalon/opentalon#256.
-func (o *Orchestrator) emitPreparerTranslations(ctx context.Context, pr preparerResponse) {
-	if o.eventSink == nil || len(pr.TranslatorEvents) == 0 {
-		return
-	}
-	for _, te := range pr.TranslatorEvents {
-		emit.EmitTranslation(ctx, o.eventSink, emit.TranslationArgs{
-			Callsite:             te.Callsite,
-			Outcome:              te.Outcome,
-			SourceLangDetected:   te.SourceLangDetected,
-			SourceLangConfidence: te.SourceLangConfidence,
-			TargetLang:           te.TargetLang,
-			InputText:            te.InputText,
-			OutputText:           te.OutputText,
-			DurationMS:           te.DurationMS,
-		})
-	}
-}
-
 // emitPreparerDecision publishes the composite preparer-pass outcome
 // once per user turn. Knowledge is pull-only: retrieval still ran (the
 // candidates are reported under Knowledge.CandidateIDs so the consumer

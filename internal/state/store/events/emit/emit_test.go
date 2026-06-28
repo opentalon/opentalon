@@ -535,13 +535,6 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 		{"ToolRetrieval", func(c context.Context, s Sink) { EmitToolRetrieval(c, s, ToolRetrievalArgs{}) }, events.TypeToolRetrieval, events.ToolRetrievalVersion},
 		{"KnowledgeRetrieval", func(c context.Context, s Sink) { EmitKnowledgeRetrieval(c, s, KnowledgeRetrievalArgs{}) }, events.TypeKnowledgeRetrieval, events.KnowledgeRetrievalVersion},
 		{"GlossaryRetrieval", func(c context.Context, s Sink) { EmitGlossaryRetrieval(c, s, GlossaryRetrievalArgs{}) }, events.TypeGlossaryRetrieval, events.GlossaryRetrievalVersion},
-		{"Translation", func(c context.Context, s Sink) {
-			EmitTranslation(c, s, TranslationArgs{
-				Callsite:   events.TranslationCallsiteSearch,
-				Outcome:    events.TranslationOutcomeTranslated,
-				TargetLang: "en",
-			})
-		}, events.TypeTranslation, events.TranslationVersion},
 		{"PreparerDecision", func(c context.Context, s Sink) {
 			EmitPreparerDecision(c, s, PreparerDecisionArgs{Mode: events.PreparerDecisionModeInstrumentationOnly})
 		}, events.TypePreparerDecision, events.PreparerDecisionVersion},
@@ -564,10 +557,10 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 		{"Error", func(c context.Context, s Sink) { EmitError(c, s, "where", "msg") }, events.TypeError, events.ErrorVersion},
 	}
 
-	// All 30 event types must be exercised — keep this in lockstep with
+	// All 29 event types must be exercised — keep this in lockstep with
 	// the constants in event_types.go. If you add a new event type and
 	// this count drops below it, add a row above.
-	const wantCases = 30
+	const wantCases = 29
 	if len(cases) != wantCases {
 		t.Fatalf("len(cases) = %d, want %d — keep TestAllEmitHelpers in sync with event_types.go", len(cases), wantCases)
 	}
@@ -815,44 +808,6 @@ func TestEmit_SanitizesAllFreeTextFields(t *testing.T) {
 					t.Fatalf("unmarshal: %v", err)
 				}
 				return v.Query
-			},
-		},
-		{
-			"Translation.InputText",
-			func(c context.Context, s Sink) {
-				EmitTranslation(c, s, TranslationArgs{
-					Callsite:   events.TranslationCallsiteSearch,
-					Outcome:    events.TranslationOutcomeTranslated,
-					TargetLang: "en",
-					InputText:  invalidUTF8Raw,
-					OutputText: "valid output",
-				})
-			},
-			func(t *testing.T, p []byte) string {
-				var v events.TranslationPayload
-				if err := json.Unmarshal(p, &v); err != nil {
-					t.Fatalf("unmarshal: %v", err)
-				}
-				return v.InputExcerpt
-			},
-		},
-		{
-			"Translation.OutputText",
-			func(c context.Context, s Sink) {
-				EmitTranslation(c, s, TranslationArgs{
-					Callsite:   events.TranslationCallsiteSearch,
-					Outcome:    events.TranslationOutcomeTranslated,
-					TargetLang: "en",
-					InputText:  "valid input",
-					OutputText: invalidUTF8Raw,
-				})
-			},
-			func(t *testing.T, p []byte) string {
-				var v events.TranslationPayload
-				if err := json.Unmarshal(p, &v); err != nil {
-					t.Fatalf("unmarshal: %v", err)
-				}
-				return v.OutputExcerpt
 			},
 		},
 		{
