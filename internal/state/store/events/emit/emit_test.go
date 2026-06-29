@@ -535,6 +535,7 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 		{"ModelSwitch", func(c context.Context, s Sink) { EmitModelSwitch(c, s, ModelSwitchArgs{}) }, events.TypeModelSwitch, events.ModelSwitchVersion},
 		{"ConfirmationRequested", func(c context.Context, s Sink) { EmitConfirmationRequested(c, s, ConfirmationRequestedArgs{}) }, events.TypeConfirmationRequested, events.ConfirmationRequestedVersion},
 		{"ConfirmationResolved", func(c context.Context, s Sink) { EmitConfirmationResolved(c, s, ConfirmationResolvedArgs{}) }, events.TypeConfirmationResolved, events.ConfirmationResolvedVersion},
+		{"ConfirmationClassificationInvoked", func(c context.Context, s Sink) { EmitConfirmationClassificationInvoked(c, s) }, events.TypeConfirmationClassificationInvoked, events.ConfirmationClassificationInvokedVersion},
 		{"Retry", func(c context.Context, s Sink) { EmitRetry(c, s, RetryArgs{Phase: "p"}) }, events.TypeRetry, events.RetryVersion},
 		{"ToolCallExtracted", func(c context.Context, s Sink) {
 			EmitToolCallExtracted(c, s, ToolCallExtractedArgs{CallID: "c", Mode: ToolCallModeNative})
@@ -550,7 +551,7 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 	// All event types must be exercised — keep this in lockstep with
 	// the constants in event_types.go. If you add a new event type and
 	// this count drops below it, add a row above.
-	const wantCases = 28
+	const wantCases = 29
 	if len(cases) != wantCases {
 		t.Fatalf("len(cases) = %d, want %d — keep TestAllEmitHelpers in sync with event_types.go", len(cases), wantCases)
 	}
@@ -1385,5 +1386,29 @@ func TestAllEmitHelpers_PopulateDistinctiveField(t *testing.T) {
 			tc.emit(context.Background(), sink)
 			tc.assert(t, sink.snapshot()[0].Payload)
 		})
+	}
+}
+
+// v2 of confirmation_resolved added resolved_by + reason as omitempty: an
+// empty-field payload must omit both keys on the wire (so a v1 consumer reading
+// the row is unaffected), and a v1 blob (no such keys) must still decode cleanly.
+func TestConfirmationResolvedPayload_V2OmitemptyBackCompat(t *testing.T) {
+	b, err := json.Marshal(events.ConfirmationResolvedPayload{
+		Header: events.Header{V: events.ConfirmationResolvedVersion},
+		Choice: "approve",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(b); strings.Contains(s, "resolved_by") || strings.Contains(s, "reason") {
+		t.Errorf("empty resolved_by/reason must be omitted from the wire; got %s", s)
+	}
+
+	var v events.ConfirmationResolvedPayload
+	if err := json.Unmarshal([]byte(`{"v":1,"choice":"reject"}`), &v); err != nil {
+		t.Fatalf("a v1 payload (no resolved_by/reason) must still decode: %v", err)
+	}
+	if v.V != 1 || v.Choice != "reject" || v.ResolvedBy != "" || v.Reason != "" {
+		t.Errorf("decoded v1 = %+v, want V=1 choice=reject with empty resolved_by/reason", v)
 	}
 }

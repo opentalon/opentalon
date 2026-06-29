@@ -175,25 +175,32 @@ type OrchestratorOpts struct {
 	SessionTitlesEnabled    bool                          // master switch for first-turn title generation; default false so tests that don't allocate the extra LLM response don't deadlock on a shared fake. Production (main.go) sets true.
 	PipelineEnabled         bool                          // when true, create Planner from llm
 	PlanTimeout             time.Duration                 // max time for planner LLM call; 0 = default 15s
-	PipelineConfig          pipeline.PipelineConfig
-	ConfirmationPlugin      string                  // optional; plugin name for confirmation strategy (e.g. "planner")
-	ConfirmationAction      string                  // optional; action name (e.g. "check_confirmation")
-	ContextWindow           int                     // model context window in tokens; 0 = no trimming
-	MaxConcurrentSessions   int                     // max sessions running in parallel; default 1 (sequential)
-	GroupPluginLookup       GroupPluginLookup       // optional; when set, filters tool list by profile group
-	UsageRecorder           UsageRecorder           // optional; when set, records LLM usage after each run
-	PluginCallObserver      PluginCallObserver      // optional; when set, notified after each plugin/tool call
-	EventSink               emit.Sink               // optional; nil defaults to emit.NoOpSink (helpers run unconditionally, the no-op sink discards them)
-	PromptSnapshotStore     PromptSnapshotUpserter  // optional; when set, system prompt + server instructions + tool descriptions are persisted by sha256 so turn_start hashes resolve to content
-	SyncActionsPlugin       string                  // optional; plugin name for action sync (e.g. "weaviate")
-	SyncActionsAction       string                  // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
-	Knowledge               KnowledgeConfig         // optional; knowledge directory ingestion
-	Subprocess              SubprocessConfig        // optional; subprocess (sub-agent) support
-	OnStreamChunk           StreamChunkCallback     // optional; when set and LLM supports streaming, final answers are streamed
-	ShowToolCalls           string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	InjectionStateStore     InjectionStateStore     // optional; persists known_tools sticky tiers across turns (load_tools promotion)
-	ToolErrorHandling       ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
-	ChannelSender           ChannelSender           // optional; when set, maybeGenerateTitle pushes the generated title to the originating channel as a session.title frame
+	// ConfirmationClassifierEnabled turns on the free-text confirmation
+	// classifier (approve/amend/reject of a pending confirmation reply).
+	// It is INDEPENDENT of PipelineEnabled by design: the classifier uses a
+	// separate Planner handle (o.classifier) so enabling it does NOT activate
+	// the server-side single-step execution path that o.planner gates. Default
+	// off → ship dark, flip in a watched window, instant revert.
+	ConfirmationClassifierEnabled bool
+	PipelineConfig                pipeline.PipelineConfig
+	ConfirmationPlugin            string                  // optional; plugin name for confirmation strategy (e.g. "planner")
+	ConfirmationAction            string                  // optional; action name (e.g. "check_confirmation")
+	ContextWindow                 int                     // model context window in tokens; 0 = no trimming
+	MaxConcurrentSessions         int                     // max sessions running in parallel; default 1 (sequential)
+	GroupPluginLookup             GroupPluginLookup       // optional; when set, filters tool list by profile group
+	UsageRecorder                 UsageRecorder           // optional; when set, records LLM usage after each run
+	PluginCallObserver            PluginCallObserver      // optional; when set, notified after each plugin/tool call
+	EventSink                     emit.Sink               // optional; nil defaults to emit.NoOpSink (helpers run unconditionally, the no-op sink discards them)
+	PromptSnapshotStore           PromptSnapshotUpserter  // optional; when set, system prompt + server instructions + tool descriptions are persisted by sha256 so turn_start hashes resolve to content
+	SyncActionsPlugin             string                  // optional; plugin name for action sync (e.g. "weaviate")
+	SyncActionsAction             string                  // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
+	Knowledge                     KnowledgeConfig         // optional; knowledge directory ingestion
+	Subprocess                    SubprocessConfig        // optional; subprocess (sub-agent) support
+	OnStreamChunk                 StreamChunkCallback     // optional; when set and LLM supports streaming, final answers are streamed
+	ShowToolCalls                 string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	InjectionStateStore           InjectionStateStore     // optional; persists known_tools sticky tiers across turns (load_tools promotion)
+	ToolErrorHandling             ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
+	ChannelSender                 ChannelSender           // optional; when set, maybeGenerateTitle pushes the generated title to the originating channel as a session.title frame
 }
 
 // ChannelSender pushes an OutboundMessage onto the channel that owns the
@@ -270,29 +277,35 @@ type Orchestrator struct {
 	sessionTitlePrompt      string                        // system prompt for the title-generation pass; defaulted to prompts.SessionTitle in NewWithRules
 	sessionTitlesEnabled    bool                          // master switch; when false maybeGenerateTitle returns immediately and the Run-defer spawn is a cheap no-op
 	planner                 *pipeline.Planner             // nil = pipeline disabled
-	pendingMu               sync.Mutex                    // guards pendingPipelines, pendingToolCalls, pendingConfirmationIDs
-	pendingPipelines        map[string]*pipeline.Pipeline // sessionID -> pending pipeline
-	pendingToolCalls        map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
-	pendingConfirmationIDs  map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
-	pipelineConfig          pipeline.PipelineConfig
-	confirmationPlugin      string                  // optional; plugin for confirmation strategy
-	confirmationAction      string                  // optional; action name for confirmation check
-	contextWindow           int                     // model context window in tokens; 0 = no trimming
-	groupPluginLookup       GroupPluginLookup       // optional; nil = no group-based filtering
-	usageRecorder           UsageRecorder           // optional; nil = no usage tracking
-	pluginCallObserver      PluginCallObserver      // optional; nil = no plugin call observation
-	eventSink               emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
-	snapshotStore           PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
-	syncActionsPlugin       string                  // optional; plugin name for action sync
-	syncActionsAction       string                  // optional; action name for action sync
-	knowledge               KnowledgeConfig         // optional; knowledge directory ingestion
-	subprocessConfig        SubprocessConfig        // optional; subprocess (sub-agent) support
-	onStreamChunk           StreamChunkCallback     // optional; when set, final answers stream to caller
-	showToolCalls           string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	injectionStateStore     InjectionStateStore     // optional; nil = load_tools sticky promotions don't persist across turns
-	toolErrorHandling       ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
-	toolErrorTracker        *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by injectionStateStore
-	channelSender           ChannelSender           // optional; nil = title generation persists silently, no live push to clients
+	// classifier is a Planner used ONLY for ClassifyConfirmation (free-text
+	// confirmation replies). It is deliberately separate from planner: sharing
+	// the planner handle would also switch on the server-side single-step
+	// execution path (gated on planner != nil), which has its own confirmation
+	// gate but is otherwise dead in prod. nil = classifier disabled.
+	classifier             *pipeline.Planner
+	pendingMu              sync.Mutex                    // guards pendingPipelines, pendingToolCalls, pendingConfirmationIDs
+	pendingPipelines       map[string]*pipeline.Pipeline // sessionID -> pending pipeline
+	pendingToolCalls       map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
+	pendingConfirmationIDs map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
+	pipelineConfig         pipeline.PipelineConfig
+	confirmationPlugin     string                  // optional; plugin for confirmation strategy
+	confirmationAction     string                  // optional; action name for confirmation check
+	contextWindow          int                     // model context window in tokens; 0 = no trimming
+	groupPluginLookup      GroupPluginLookup       // optional; nil = no group-based filtering
+	usageRecorder          UsageRecorder           // optional; nil = no usage tracking
+	pluginCallObserver     PluginCallObserver      // optional; nil = no plugin call observation
+	eventSink              emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
+	snapshotStore          PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
+	syncActionsPlugin      string                  // optional; plugin name for action sync
+	syncActionsAction      string                  // optional; action name for action sync
+	knowledge              KnowledgeConfig         // optional; knowledge directory ingestion
+	subprocessConfig       SubprocessConfig        // optional; subprocess (sub-agent) support
+	onStreamChunk          StreamChunkCallback     // optional; when set, final answers stream to caller
+	showToolCalls          string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	injectionStateStore    InjectionStateStore     // optional; nil = load_tools sticky promotions don't persist across turns
+	toolErrorHandling      ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
+	toolErrorTracker       *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by injectionStateStore
+	channelSender          ChannelSender           // optional; nil = title generation persists silently, no live push to clients
 	// titleMuxes serializes per-session title-generation goroutines
 	// without blocking the foreground Run path. Summarization shares the
 	// sessionMux because it triggers after many turns and tolerates one
@@ -470,6 +483,15 @@ func NewWithRules(
 	if opts.PipelineEnabled {
 		planner = pipeline.NewPlanner(&plannerLLMAdapter{llm: llm}, opts.PlanTimeout)
 	}
+	// Confirmation classifier: a SEPARATE Planner used only for
+	// ClassifyConfirmation, with a short dedicated timeout. Kept distinct from
+	// `planner` so enabling it can never activate the single-step execution
+	// path. Requires the confirmation plugin/action to be configured — without
+	// a confirmation gate there is nothing to classify replies for.
+	var classifier *pipeline.Planner
+	if opts.ConfirmationClassifierEnabled && opts.ConfirmationPlugin != "" && opts.ConfirmationAction != "" {
+		classifier = pipeline.NewPlanner(&plannerLLMAdapter{llm: llm}, pipeline.DefaultConfirmationClassifierTimeout)
+	}
 	pipelineCfg := opts.PipelineConfig
 	if pipelineCfg.MaxStepRetries == 0 && pipelineCfg.StepTimeout == 0 {
 		pipelineCfg = pipeline.DefaultConfig()
@@ -526,6 +548,7 @@ func NewWithRules(
 		sessionTitlePrompt:      opts.SessionTitlePrompt,
 		sessionTitlesEnabled:    opts.SessionTitlesEnabled,
 		planner:                 planner,
+		classifier:              classifier,
 		pendingPipelines:        make(map[string]*pipeline.Pipeline),
 		pendingToolCalls:        make(map[string]*ToolCall),
 		pendingConfirmationIDs:  make(map[string]string),
@@ -1169,22 +1192,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if pendingPipelineConfID != "" {
 			resolvedCtx = emit.WithParent(ctx, pendingPipelineConfID)
 		}
-		var decision pipeline.ConfirmationDecision
-		if o.planner != nil {
-			d, classErr := o.planner.ClassifyConfirmation(ctx, userMessage)
-			if classErr != nil {
-				log.Warn("confirmation classification failed, falling back to keyword match", "error", classErr)
-				decision = pipeline.ParseConfirmation(userMessage)
-			} else {
-				decision = d
-			}
-		} else {
-			decision = pipeline.ParseConfirmation(userMessage)
-		}
+		// Pipelines are two-way (approve / cancel): the single-call amend
+		// re-plan does not apply to a multi-step plan, so anything that isn't a
+		// clean approve cancels. classifyConfirmationReply still gives us the
+		// button bypass, the LLM classifier, and "im Zweifel reject" in one place.
+		decision, reason, resolvedBy := o.classifyConfirmationReply(ctx, userMessage, "pipeline_plan", map[string]string{"steps": fmt.Sprintf("%d", len(p.Steps))})
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
 		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
-		if decision == pipeline.Approved {
-			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: "approve"})
+		if decision == pipeline.DecisionApprove {
+			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionApprove, ResolvedBy: resolvedBy})
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
 			res, err := o.executePipeline(ctx, sessionID, p)
 			if err == nil && res != nil {
@@ -1195,8 +1211,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			return res, err
 		}
-		emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: "reject"})
-		resp := "Pipeline cancelled."
+		emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionReject, ResolvedBy: resolvedBy, Reason: reason})
+		resp := events.SanitizeUTF8(strings.TrimSpace(reason))
+		if resp == "" {
+			resp = "Pipeline cancelled."
+		}
 		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
 		log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
 		return &RunResult{
@@ -1226,8 +1245,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// request that started the pending state.
 		pendingCall, pendingCallConfID = loadPendingToolCall(sessions, sessionID)
 	}
+	var pendingMetaClearErr error
 	if pendingCall != nil {
-		_ = sessions.SetMetadata(sessionID, "pending_tool_call", "")
+		// Clear the persisted pending call up front. If this fails we MUST NOT
+		// continue down the approve/amend paths (which keep the turn running):
+		// a leftover row could be resurrected by loadPendingToolCall on a later
+		// turn or another instance. The decision logic below forces reject when
+		// this errored.
+		pendingMetaClearErr = sessions.SetMetadata(sessionID, "pending_tool_call", "")
 	}
 	toolCallConfirmed := false
 	if tc := pendingCall; tc != nil {
@@ -1238,33 +1263,25 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if pendingCallConfID != "" {
 			resolvedCtx = emit.WithParent(ctx, pendingCallConfID)
 		}
-		var decision pipeline.ConfirmationDecision
-		// Prefer explicit frontend signal (metadata["confirmation"]) over
-		// LLM-based or text-based classification — faster and deterministic.
-		switch explicit := actor.ConfirmationDecision(ctx); explicit {
-		case "approve":
-			decision = pipeline.Approved
-		case "reject":
-			decision = pipeline.Rejected
-		default:
-			if o.planner != nil {
-				d, classErr := o.planner.ClassifyConfirmation(ctx, userMessage)
-				if classErr != nil {
-					decision = pipeline.ParseConfirmation(userMessage)
-				} else {
-					decision = d
-				}
-			} else {
-				decision = pipeline.ParseConfirmation(userMessage)
-			}
+		decision, reason, resolvedBy := o.classifyConfirmationReply(ctx, userMessage, tc.Action, tc.Args)
+		// Safety override: if we couldn't clear the persisted pending call, do
+		// not run the approve/amend paths (which continue the turn and could let
+		// the stale row be resurrected). Force a reject this turn.
+		if pendingMetaClearErr != nil {
+			log.Error("failed to clear pending_tool_call; forcing reject to avoid resurrecting a stale call", "error", pendingMetaClearErr)
+			decision = pipeline.DecisionReject
+			reason = confirmationUninterpretableReply
+			resolvedBy = resolvedByFallback
 		}
-		if decision == pipeline.Approved {
+		switch decision {
+		case pipeline.DecisionApprove:
 			// Only record the user's approval in session — rejections are
 			// kept out so the LLM doesn't avoid re-calling the tool later.
 			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{
-				Choice:     "approve",
+				Choice:     pipeline.DecisionApprove,
 				ToolCallID: tc.ID,
+				ResolvedBy: resolvedBy,
 			})
 			log.Debug("tool call confirmed, executing", "plugin", tc.Plugin, "action", tc.Action)
 			result := o.executeCall(ctx, *tc)
@@ -1288,11 +1305,43 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// and user-message addition — jump straight to the agent loop so the
 			// LLM summarizes the result for the user.
 			toolCallConfirmed = true
-		} else {
+
+		case pipeline.DecisionAmend:
+			// The user replied with a correction, not a yes/no. The pending call
+			// is already torn down (in-memory maps + persisted metadata cleared
+			// above). Do NOT execute and do NOT roll back: fall through to the
+			// normal turn so the planner / agent loop re-plans from history + the
+			// correction and raises a FRESH confirmation with corrected args.
+			// The correction is added to history exactly once by the normal path
+			// (the user-message AddMessage further below), so we don't add it here.
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{
-				Choice:     "reject",
+				Choice:     pipeline.DecisionAmend,
 				ToolCallID: tc.ID,
+				ResolvedBy: resolvedBy,
+				Reason:     reason,
 			})
+			log.Debug("tool call amended, re-planning", "plugin", tc.Plugin, "action", tc.Action, "reason", reason)
+			// No return and toolCallConfirmed stays false → execution continues
+			// into the normal turn below.
+
+		default: // pipeline.DecisionReject
+			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{
+				Choice:     pipeline.DecisionReject,
+				ToolCallID: tc.ID,
+				ResolvedBy: resolvedBy,
+				Reason:     reason,
+			})
+			// Best-effort re-clear of the persisted pending call: if the earlier
+			// clear errored (forcing this reject), retrying here avoids a
+			// resurrect-and-re-reject loop on the next turn once the transient
+			// fault clears. Idempotent when it already succeeded. If the retry
+			// ALSO fails, log it — the session may resurrect-and-reject next turn,
+			// which is safe (never executes a write) but otherwise silent.
+			if pendingMetaClearErr != nil {
+				if e := sessions.SetMetadata(sessionID, "pending_tool_call", ""); e != nil {
+					log.Warn("pending_tool_call re-clear still failing; session may resurrect-and-reject next turn", "error", e)
+				}
+			}
 			// Rollback session to before this Run — remove the user message
 			// and any tool calls/results that were added during the
 			// confirmation attempt. Without this, the LLM sees prior tool
@@ -1300,8 +1349,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if s, _ := sessions.Get(sessionID); s != nil && msgCountAtStart < len(s.Messages) {
 				_ = sessions.SetSummary(sessionID, s.Summary, s.Messages[:msgCountAtStart])
 			}
+			// Prefer the classifier's one-sentence reason so the user learns why
+			// it was cancelled; fall back to the generic line. Sanitized to match
+			// the event copy (the reason is model-authored free text).
+			resp := events.SanitizeUTF8(strings.TrimSpace(reason))
+			if resp == "" {
+				resp = "OK, action cancelled."
+			}
 			return &RunResult{
-				Response: "OK, action cancelled.",
+				Response: resp,
 				Metadata: map[string]string{
 					"type":   "system",
 					"action": "confirmation_rejected",
@@ -1657,6 +1713,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					Plugin: step.Command.Plugin,
 					Action: step.Command.Action,
 					Args:   pipelineArgsToWire(step.Command.Args),
+				}
+				// UNIFORM GATE: a single-step privileged write must confirm just
+				// like the agent-loop path (same helper). Without this the
+				// server-side single-step path would execute a write — including
+				// an amend re-plan's corrected write — with no consent. Read-only
+				// / bypass calls fall straight through to execution.
+				if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, call, userMessage); raised {
+					return rr, nil
 				}
 				toolResult := o.executeCall(ctx, call)
 				if toolResult.Error == "" {
@@ -2206,66 +2270,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// planner-narration round-trip per call). The flag originates
 			// from the plugin's manifest (for MCP-sourced tools, propagated
 			// from `annotations.readOnlyHint`).
-			if o.confirmationPlugin != "" && o.confirmationAction != "" &&
-				!calls[i].ConfirmationBypass &&
-				!o.registry.IsActionReadOnly(calls[i].Plugin, calls[i].Action) {
-				confResult := o.checkConfirmationPlugin(ctx, []*pipeline.Step{{
-					ID:      calls[i].ID,
-					Name:    calls[i].Action,
-					Command: &pipeline.PluginCommand{Plugin: calls[i].Plugin, Action: calls[i].Action},
-				}})
-				if confResult.RequiresConfirmation {
-					log.Info("tool call requires confirmation", "plugin", calls[i].Plugin, "action", calls[i].Action)
-					pending := calls[i]
-					// Build a confirmation message describing what will be done.
-					// Narrate with the main LLM so it (a) speaks the user's language
-					// and (b) makes the EFFECT explicit — for a batch / scope_token
-					// call the count + example records live in the preceding tool
-					// result, not in the opaque args. Independent of the pipeline
-					// planner, so it works without pipeline mode.
-					var confirmMsg string
-					var recentMsgs []provider.Message
-					if s, gerr := sessions.Get(sessionID); gerr == nil && s != nil {
-						recentMsgs = s.Messages
-					}
-					confirmMsg = o.narrateConfirmation(ctx, recentMsgs, calls[i], userMessage)
-					if confirmMsg == "" {
-						confirmMsg = fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", calls[i].Action)
-						for k, v := range calls[i].Args {
-							confirmMsg += fmt.Sprintf("- %s: %s\n", k, v)
-						}
-						confirmMsg += "\nWould you like me to proceed?"
-					}
-					// Store the confirmation message so the session has context
-					// for the next turn (approval or follow-up questions). On
-					// rejection, the rollback (msgCountAtStart) removes it.
-					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg})
-					confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
-						Prompt:     confirmMsg,
-						Choices:    []string{"approve", "reject"},
-						ToolCallID: calls[i].ID,
-					})
-					o.pendingMu.Lock()
-					o.pendingToolCalls[sessionID] = &pending
-					if confID != "" {
-						o.pendingConfirmationIDs[sessionID] = confID
-					}
-					o.pendingMu.Unlock()
-					// Also persist to session metadata so pending calls survive
-					// restarts and work across multiple instances. The
-					// confirmation_requested event id is embedded in the
-					// serialized form so the parent_id linkage survives
-					// pod restarts and multi-instance failover.
-					savePendingToolCall(sessions, sessionID, &pending, confID)
-					return &RunResult{
-						Response: confirmMsg,
-						Metadata: map[string]string{
-							"type":        "confirmation",
-							"prompt_type": "tool_confirmation",
-							"options":     "approve,reject",
-						},
-					}, nil
-				}
+			// Same gate as the server-side single-step path (shared helper) so
+			// the two sites can't drift. Narrates the prompt in the user's
+			// language, stores + persists the pending call, and returns the
+			// confirmation; read-only / bypass calls fall through to execution.
+			if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, calls[i], userMessage); raised {
+				return rr, nil
 			}
 
 			if timing != nil {
@@ -2541,6 +2551,132 @@ func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCal
 		return sw.OnChunk
 	}
 	return o.onStreamChunk
+}
+
+// confirmationUninterpretableReply is the deterministic, language-neutral reply
+// used when no classifier is available or the classifier call fails — the
+// "im Zweifel reject" branch. (When the classifier itself returns reject, its
+// own one-sentence reason is preferred over this template.)
+const confirmationUninterpretableReply = "I couldn't reliably interpret your reply, so I cancelled the pending action to be safe. Please tell me again — confirm, change, or cancel?"
+
+// Confirmation resolution provenance (confirmation_resolved.resolved_by).
+const (
+	resolvedByFrontendButton = "frontend_button"
+	resolvedByClassifier     = "classifier"
+	resolvedByFallback       = "fallback"
+)
+
+// classifyConfirmationReply resolves a free-text reply to a pending confirmation
+// into a decision (approve/amend/reject). Priority: explicit frontend button
+// signal (deterministic) > LLM classifier > restrictive reject fallback. The
+// "im Zweifel reject" rule lives here, in one place. It returns the decision,
+// a one-sentence reason (for the user-facing reject reply / observability), and
+// how it was resolved (for confirmation_resolved.resolved_by).
+func (o *Orchestrator) classifyConfirmationReply(
+	ctx context.Context, userMessage, action string, args map[string]string,
+) (decision, reason, resolvedBy string) {
+	// 1. Deterministic structured signal from a confirmation button. Normalize
+	//    case and surrounding whitespace so a button reply approves regardless of
+	//    how a client happened to case it, mirroring the classifier-side
+	//    normalization in Planner.ClassifyConfirmation.
+	switch explicit := strings.ToLower(strings.TrimSpace(actor.ConfirmationDecision(ctx))); explicit {
+	case pipeline.DecisionApprove:
+		return pipeline.DecisionApprove, "", resolvedByFrontendButton
+	case pipeline.DecisionReject:
+		return pipeline.DecisionReject, "", resolvedByFrontendButton
+	}
+	// 2. No classifier configured → reject (safe default), never word-match.
+	if o.classifier == nil {
+		return pipeline.DecisionReject, confirmationUninterpretableReply, resolvedByFallback
+	}
+	// 3. LLM classifier. Emit a parent sentinel first so the classifier's
+	//    nested llm_request/llm_response are visible+grouped in the nerd-log.
+	classifyCtx := ctx
+	if invokedID := emit.EmitConfirmationClassificationInvoked(ctx, o.eventSink); invokedID != "" {
+		classifyCtx = emit.WithParent(ctx, invokedID)
+	}
+	res, err := o.classifier.ClassifyConfirmation(classifyCtx, userMessage, action, args)
+	if err != nil {
+		logger.FromContext(ctx).Warn("confirmation classification failed; rejecting (im Zweifel reject)", "error", err)
+		return pipeline.DecisionReject, confirmationUninterpretableReply, resolvedByFallback
+	}
+	// 4. Hardening: a self-contradicting "approve" that also flags a requested
+	//    change is downgraded to amend — never execute frozen args when the
+	//    user actually asked for something different.
+	if res.Decision == pipeline.DecisionApprove && res.RequestsChange {
+		return pipeline.DecisionAmend, res.Reason, resolvedByClassifier
+	}
+	return res.Decision, res.Reason, resolvedByClassifier
+}
+
+// maybeRequireConfirmation raises a confirmation_requested for a privileged
+// write call and records the pending state, mirroring the agent-loop gate. It is
+// the single place that decides "does this call need confirmation?" and is used
+// by BOTH the agent loop and the server-side single-step path so the two can
+// never drift into a write-without-consent gap. Returns (runResult, true) when a
+// confirmation was raised — the caller must return it and NOT execute the call;
+// (nil, false) when the call is exempt (read-only / bypass / no plugin) and the
+// caller should proceed to execute.
+func (o *Orchestrator) maybeRequireConfirmation(
+	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
+) (*RunResult, bool) {
+	if o.confirmationPlugin == "" || o.confirmationAction == "" ||
+		call.ConfirmationBypass ||
+		o.registry.IsActionReadOnly(call.Plugin, call.Action) {
+		return nil, false
+	}
+	confResult := o.checkConfirmationPlugin(ctx, []*pipeline.Step{{
+		ID:      call.ID,
+		Name:    call.Action,
+		Command: &pipeline.PluginCommand{Plugin: call.Plugin, Action: call.Action},
+	}})
+	if !confResult.RequiresConfirmation {
+		return nil, false
+	}
+	log := logger.FromContext(ctx)
+	log.Info("tool call requires confirmation", "plugin", call.Plugin, "action", call.Action)
+
+	// Narrate with the main LLM so the prompt is in the user's language and the
+	// effect (e.g. batch count) is explicit; fall back to a static template.
+	var recentMsgs []provider.Message
+	if s, gerr := sessions.Get(sessionID); gerr == nil && s != nil {
+		recentMsgs = s.Messages
+	}
+	confirmMsg := o.narrateConfirmation(ctx, recentMsgs, call, userMessage)
+	if confirmMsg == "" {
+		confirmMsg = fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", call.Action)
+		for k, v := range call.Args {
+			confirmMsg += fmt.Sprintf("- %s: %s\n", k, v)
+		}
+		confirmMsg += "\nWould you like me to proceed?"
+	}
+	// Store the prompt so the next turn has context for the reply/amend.
+	_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg})
+	// Buttons are deterministic approve/reject only; amend is a free-text-classifier
+	// outcome with no button by design, so the Choices set stays two-way.
+	confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
+		Prompt:     confirmMsg,
+		Choices:    []string{"approve", "reject"},
+		ToolCallID: call.ID,
+	})
+	pending := call
+	o.pendingMu.Lock()
+	o.pendingToolCalls[sessionID] = &pending
+	if confID != "" {
+		o.pendingConfirmationIDs[sessionID] = confID
+	}
+	o.pendingMu.Unlock()
+	// Persist so the pending call survives restarts / multi-instance failover;
+	// the confirmation_requested id rides along to preserve parent linkage.
+	savePendingToolCall(sessions, sessionID, &pending, confID)
+	return &RunResult{
+		Response: confirmMsg,
+		Metadata: map[string]string{
+			"type":        "confirmation",
+			"prompt_type": "tool_confirmation",
+			"options":     "approve,reject",
+		},
+	}, true
 }
 
 // confirmationNarratePrompt steers the pre-write confirmation: it must be in the
@@ -4599,7 +4735,11 @@ func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.Completi
 	for i, m := range req.Messages {
 		msgs[i] = provider.Message{Role: provider.Role(m.Role), Content: m.Content}
 	}
-	resp, err := a.llm.Complete(ctx, &provider.CompletionRequest{Messages: msgs})
+	resp, err := a.llm.Complete(ctx, &provider.CompletionRequest{
+		Messages:        msgs,
+		MaxTokens:       req.MaxTokens,
+		ReasoningEffort: req.ReasoningEffort,
+	})
 	if err != nil {
 		return nil, err
 	}

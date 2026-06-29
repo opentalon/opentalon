@@ -124,10 +124,13 @@ func EmitConfirmationRequested(ctx context.Context, sink Sink, args Confirmation
 	}, 0)
 }
 
-// ConfirmationResolvedArgs records the user/frontend response.
+// ConfirmationResolvedArgs records the user/frontend response. ResolvedBy and
+// Reason are optional observability fields (see ConfirmationResolvedPayload).
 type ConfirmationResolvedArgs struct {
 	Choice     string
 	ToolCallID string
+	ResolvedBy string
+	Reason     string
 }
 
 // EmitConfirmationResolved writes one confirmation_resolved event.
@@ -136,6 +139,18 @@ func EmitConfirmationResolved(ctx context.Context, sink Sink, args ConfirmationR
 		Header:     events.Header{V: events.ConfirmationResolvedVersion},
 		Choice:     args.Choice,
 		ToolCallID: args.ToolCallID,
+		ResolvedBy: args.ResolvedBy,
+		Reason:     events.SanitizeUTF8(args.Reason),
+	}, 0)
+}
+
+// EmitConfirmationClassificationInvoked writes one
+// confirmation_classification_invoked sentinel and returns its event id so the
+// caller can wrap ctx with emit.WithParent — scoping the classifier's nested
+// llm_request/llm_response under it (mirrors EmitSessionTitleInvoked).
+func EmitConfirmationClassificationInvoked(ctx context.Context, sink Sink) string {
+	return send(ctx, sink, events.TypeConfirmationClassificationInvoked, events.ConfirmationClassificationInvokedPayload{
+		Header: events.Header{V: events.ConfirmationClassificationInvokedVersion},
 	}, 0)
 }
 

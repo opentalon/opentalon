@@ -364,6 +364,13 @@ type PipelineOrchestratorConfig struct {
 	PlanTimeout        string `yaml:"plan_timeout"`        // Go duration, default "15s"; max time for planner LLM call
 	ConfirmationPlugin string `yaml:"confirmation_plugin"` // plugin name for confirmation strategy (e.g. "planner")
 	ConfirmationAction string `yaml:"confirmation_action"` // action name (e.g. "check_confirmation")
+	// ConfirmationClassifierEnabled turns on the free-text confirmation
+	// classifier (approve/amend/reject of a typed reply to a pending
+	// confirmation). Default false → ship dark; flip in a watched window.
+	// Independent of Enabled: it uses a separate classifier handle and does
+	// NOT activate server-side pipeline execution. Requires
+	// confirmation_plugin/confirmation_action to be set.
+	ConfirmationClassifierEnabled bool `yaml:"confirmation_classifier_enabled"` // default false
 }
 
 // SubprocessOrchestratorConfig enables subprocess (sub-agent) forking from the main agent loop.

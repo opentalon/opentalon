@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakePlannerLLM struct {
@@ -347,51 +348,124 @@ func TestNarratePlanIncludesStepNamesInPrompt(t *testing.T) {
 	}
 }
 
-func TestClassifyConfirmationApproved(t *testing.T) {
-	llm := &fakePlannerLLM{response: `{"approved": true}`}
+// blockingPlannerLLM blocks until the context is cancelled, so a test can
+// exercise the classifier's dedicated timeout.
+type blockingPlannerLLM struct{}
+
+func (b *blockingPlannerLLM) Complete(ctx context.Context, _ *CompletionRequest) (*CompletionResponse, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestClassifyConfirmationApprove(t *testing.T) {
+	llm := &fakePlannerLLM{response: `{"decision": "approve"}`}
 	planner := NewPlanner(llm, 0)
-	d, err := planner.ClassifyConfirmation(context.Background(), "yes please go ahead")
+	got, err := planner.ClassifyConfirmation(context.Background(), "yes please go ahead", "create_ticket", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d != Approved {
-		t.Errorf("ClassifyConfirmation = %d, want Approved", d)
+	if got.Decision != DecisionApprove {
+		t.Errorf("Decision = %q, want %q", got.Decision, DecisionApprove)
 	}
 }
 
-func TestClassifyConfirmationRejected(t *testing.T) {
-	llm := &fakePlannerLLM{response: `{"approved": false}`}
+func TestClassifyConfirmationReject(t *testing.T) {
+	llm := &fakePlannerLLM{response: `{"decision": "reject", "reason": "user cancelled"}`}
 	planner := NewPlanner(llm, 0)
-	d, err := planner.ClassifyConfirmation(context.Background(), "no thanks cancel it")
+	got, err := planner.ClassifyConfirmation(context.Background(), "no thanks cancel it", "create_ticket", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d != Rejected {
-		t.Errorf("ClassifyConfirmation = %d, want Rejected", d)
+	if got.Decision != DecisionReject {
+		t.Errorf("Decision = %q, want %q", got.Decision, DecisionReject)
+	}
+	if got.Reason != "user cancelled" {
+		t.Errorf("Reason = %q, want it carried through", got.Reason)
+	}
+}
+
+func TestClassifyConfirmationAmend(t *testing.T) {
+	llm := &fakePlannerLLM{response: `{"decision": "amend", "requests_change": true, "reason": "assign to Hans Meier"}`}
+	planner := NewPlanner(llm, 0)
+	got, err := planner.ClassifyConfirmation(context.Background(), "bitte auf Hans Meier zuweisen", "create_ticket",
+		map[string]string{"assignee_id": "131349"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Decision != DecisionAmend {
+		t.Errorf("Decision = %q, want %q", got.Decision, DecisionAmend)
+	}
+	if got.Reason == "" {
+		t.Error("amend should carry a non-empty reason")
+	}
+}
+
+// A reply that both consents AND asks for a change must classify as amend,
+// never approve-with-frozen-args. Documents the mixed-reply contract.
+func TestClassifyConfirmationMixedReply(t *testing.T) {
+	llm := &fakePlannerLLM{response: `{"decision": "amend", "requests_change": true}`}
+	planner := NewPlanner(llm, 0)
+	got, err := planner.ClassifyConfirmation(context.Background(), "yes, but assign it to Hans", "create_ticket", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Decision != DecisionAmend {
+		t.Errorf("Decision = %q, want %q (mixed reply must amend)", got.Decision, DecisionAmend)
 	}
 }
 
 func TestClassifyConfirmationMarkdownWrapped(t *testing.T) {
-	llm := &fakePlannerLLM{response: "```json\n{\"approved\": true}\n```"}
+	llm := &fakePlannerLLM{response: "```json\n{\"decision\": \"approve\"}\n```"}
 	planner := NewPlanner(llm, 0)
-	d, err := planner.ClassifyConfirmation(context.Background(), "sure go for it")
+	got, err := planner.ClassifyConfirmation(context.Background(), "sure go for it", "create_ticket", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d != Approved {
-		t.Errorf("ClassifyConfirmation = %d, want Approved", d)
+	if got.Decision != DecisionApprove {
+		t.Errorf("Decision = %q, want %q", got.Decision, DecisionApprove)
+	}
+}
+
+// Any unrecognized decision value falls to the restrictive reject default.
+func TestClassifyConfirmationRestrictiveDefault(t *testing.T) {
+	llm := &fakePlannerLLM{response: `{"decision": "maybe"}`}
+	planner := NewPlanner(llm, 0)
+	got, err := planner.ClassifyConfirmation(context.Background(), "hmm", "create_ticket", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Decision != DecisionReject {
+		t.Errorf("Decision = %q, want %q for an unrecognized value", got.Decision, DecisionReject)
 	}
 }
 
 func TestClassifyConfirmationMalformedJSON(t *testing.T) {
 	llm := &fakePlannerLLM{response: "I cannot determine that"}
 	planner := NewPlanner(llm, 0)
-	d, err := planner.ClassifyConfirmation(context.Background(), "sure")
+	got, err := planner.ClassifyConfirmation(context.Background(), "sure", "create_ticket", nil)
 	if err == nil {
 		t.Error("expected error on malformed JSON")
 	}
-	if d != Rejected {
-		t.Errorf("ClassifyConfirmation = %d, want Rejected on error", d)
+	if got.Decision != DecisionReject {
+		t.Errorf("Decision = %q, want %q on parse error", got.Decision, DecisionReject)
+	}
+}
+
+// A hung classifier must resolve to reject within the dedicated short timeout,
+// not hang on the (larger) plan budget.
+func TestClassifyConfirmationTimeout(t *testing.T) {
+	planner := NewPlanner(&blockingPlannerLLM{}, 50*time.Millisecond)
+	start := time.Now()
+	got, err := planner.ClassifyConfirmation(context.Background(), "anything", "create_ticket", nil)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Error("expected a timeout error")
+	}
+	if got.Decision != DecisionReject {
+		t.Errorf("Decision = %q, want %q on timeout", got.Decision, DecisionReject)
+	}
+	if elapsed > time.Second {
+		t.Errorf("classify took %s, want it bounded by the short classifier timeout", elapsed)
 	}
 }
 
