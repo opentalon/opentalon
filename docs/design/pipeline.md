@@ -94,7 +94,7 @@ Phase 1 is fully implemented and tested. Below is a component-by-component break
 | `internal/pipeline/step.go` | Done | Step, StepState, StepResult |
 | `internal/pipeline/command.go` | Done | PluginCommand (only command type for Phase 1) |
 | `internal/pipeline/context.go` | Done | PipelineContext with thread-safe Set/Get/Merge |
-| `internal/pipeline/confirmation.go` | Done | ParseConfirmation — binary approve/reject |
+| `internal/pipeline/confirmation.go` | Done | Decision vocabulary constants (approve/amend/reject); free-text replies classified by the LLM (Planner.ClassifyConfirmation), no keyword matching |
 | `internal/pipeline/planner.go` | Done | Planner with LLM decomposition, JSON parsing, markdown fence handling |
 | `internal/pipeline/executor.go` | Done | Executor with retry, backoff, FailFast, dependency skipping |
 | `internal/pipeline/context_test.go` | Done | 4 tests |

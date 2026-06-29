@@ -680,33 +680,34 @@ func main() {
 	}
 
 	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, orchestrator.OrchestratorOpts{
-		CustomRules:             cfg.Orchestrator.Rules,
-		ContentPreparers:        contentPreparers,
-		ResponseFormatters:      responseFormatters,
-		LuaScriptPaths:          luaScriptPaths,
-		PermissionChecker:       permChecker,
-		PermissionPluginName:    permPluginName,
-		RuntimePromptPath:       runtimePromptPath,
-		ContextMessages:         cfg.State.Session.ContextMessages, // 0 = all messages; >0 = send only last N messages to LLM
-		SummarizeAfterMessages:  cfg.State.Session.SummarizeAfter,  // 0 (default) = off; set to e.g. 10 to enable LLM summarization
-		MaxMessagesAfterSummary: defaultInt(cfg.State.Session.MaxMessagesAfterSummary, 5),
-		SummarizePrompt:         cfg.State.Session.SummarizePrompt,
-		SummarizeUpdatePrompt:   cfg.State.Session.SummarizeUpdatePrompt,
-		SessionTitlePrompt:      cfg.State.Session.SessionTitlePrompt,
-		PipelineEnabled:         cfg.Orchestrator.Pipeline.Enabled,
-		PlanTimeout:             planTimeout,
-		PipelineConfig:          pipelineCfg,
-		ConfirmationPlugin:      cfg.Orchestrator.Pipeline.ConfirmationPlugin,
-		ConfirmationAction:      cfg.Orchestrator.Pipeline.ConfirmationAction,
-		ContextWindow:           contextWindow,
-		MaxConcurrentSessions:   cfg.Orchestrator.MaxConcurrentSessions,
-		GroupPluginLookup:       groupPluginStore,
-		UsageRecorder:           usageRecorder,
-		PluginCallObserver:      pluginObserver,
-		EventSink:               sessionSink,       // async-buffered via SessionEventWriter
-		PromptSnapshotStore:     sessionEventStore, // direct/sync store; intentionally not async-buffered so a consumer reading a turn_start event can resolve its sha256 references without racing the writer. nil when state DB is not configured
-		SyncActionsPlugin:       cfg.Orchestrator.Knowledge.SyncPlugin,
-		SyncActionsAction:       cfg.Orchestrator.Knowledge.SyncAction,
+		CustomRules:                   cfg.Orchestrator.Rules,
+		ContentPreparers:              contentPreparers,
+		ResponseFormatters:            responseFormatters,
+		LuaScriptPaths:                luaScriptPaths,
+		PermissionChecker:             permChecker,
+		PermissionPluginName:          permPluginName,
+		RuntimePromptPath:             runtimePromptPath,
+		ContextMessages:               cfg.State.Session.ContextMessages, // 0 = all messages; >0 = send only last N messages to LLM
+		SummarizeAfterMessages:        cfg.State.Session.SummarizeAfter,  // 0 (default) = off; set to e.g. 10 to enable LLM summarization
+		MaxMessagesAfterSummary:       defaultInt(cfg.State.Session.MaxMessagesAfterSummary, 5),
+		SummarizePrompt:               cfg.State.Session.SummarizePrompt,
+		SummarizeUpdatePrompt:         cfg.State.Session.SummarizeUpdatePrompt,
+		SessionTitlePrompt:            cfg.State.Session.SessionTitlePrompt,
+		PipelineEnabled:               cfg.Orchestrator.Pipeline.Enabled,
+		PlanTimeout:                   planTimeout,
+		PipelineConfig:                pipelineCfg,
+		ConfirmationPlugin:            cfg.Orchestrator.Pipeline.ConfirmationPlugin,
+		ConfirmationAction:            cfg.Orchestrator.Pipeline.ConfirmationAction,
+		ConfirmationClassifierEnabled: cfg.Orchestrator.Pipeline.ConfirmationClassifierEnabled,
+		ContextWindow:                 contextWindow,
+		MaxConcurrentSessions:         cfg.Orchestrator.MaxConcurrentSessions,
+		GroupPluginLookup:             groupPluginStore,
+		UsageRecorder:                 usageRecorder,
+		PluginCallObserver:            pluginObserver,
+		EventSink:                     sessionSink,       // async-buffered via SessionEventWriter
+		PromptSnapshotStore:           sessionEventStore, // direct/sync store; intentionally not async-buffered so a consumer reading a turn_start event can resolve its sha256 references without racing the writer. nil when state DB is not configured
+		SyncActionsPlugin:             cfg.Orchestrator.Knowledge.SyncPlugin,
+		SyncActionsAction:             cfg.Orchestrator.Knowledge.SyncAction,
 		Knowledge: orchestrator.KnowledgeConfig{
 			Plugin: cfg.Orchestrator.Knowledge.Plugin,
 			Action: cfg.Orchestrator.Knowledge.Action,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,8 +18,13 @@ type LLMClient interface {
 }
 
 // CompletionRequest mirrors provider.CompletionRequest for planner use.
+// MaxTokens and ReasoningEffort are optional (zero = provider default) and let
+// short, latency-sensitive calls (e.g. confirmation classification) cap output
+// and dial reasoning down instead of inheriting the agent loop's large defaults.
 type CompletionRequest struct {
-	Messages []Message
+	Messages        []Message
+	MaxTokens       int
+	ReasoningEffort string // "low" | "medium" | "high"; "" = provider default
 }
 
 // CompletionResponse mirrors provider.CompletionResponse.
@@ -95,6 +101,21 @@ type planStepJSON struct {
 // DefaultPlanTimeout is the maximum time the planner waits for an LLM response
 // when no custom timeout is configured.
 const DefaultPlanTimeout = 15 * time.Second
+
+// DefaultConfirmationClassifierTimeout bounds the confirmation classifier's LLM
+// call. Independent of DefaultPlanTimeout: a reply to a pending confirmation must
+// resolve reasonably fast, and "classifier unavailable -> reject" should never
+// hang on the (larger) multi-step plan budget. Sized as a safety net above the
+// expected sub-second/low-reasoning latency, with headroom for a slow reasoning
+// model on a latency-variable shared endpoint so a transient blip doesn't turn a
+// genuine correction into a reject.
+const DefaultConfirmationClassifierTimeout = 15 * time.Second
+
+// confirmationClassifyMaxTokens caps the classifier's output. The reply itself is
+// a tiny JSON object; the headroom exists for a reasoning model that emits
+// reasoning tokens BEFORE the JSON (so do not shrink this to the JSON size) and
+// so a misbehaving model can't run away and stall the call.
+const confirmationClassifyMaxTokens = 1024
 
 // Plan asks the LLM whether the user's message requires a multi-step pipeline or a direct action.
 // conversationContext is an optional summary of prior turns so the planner understands
@@ -377,30 +398,134 @@ func (p *Planner) NarrateToolCall(ctx context.Context, action string, args map[s
 	return resp.Content, nil
 }
 
-// ClassifyConfirmation asks the LLM whether the user approved or rejected the plan.
-// Returns Rejected on parse failure.
-func (p *Planner) ClassifyConfirmation(ctx context.Context, userReply string) (ConfirmationDecision, error) {
-	prompt := fmt.Sprintf(
-		"The user was shown a multi-step task plan and asked to confirm. They replied: %q\nDid they approve? Respond ONLY with valid JSON: {\"approved\": true} or {\"approved\": false}",
-		userReply,
-	)
+// ConfirmationClassification is the structured result of interpreting a
+// free-text reply to a pending tool-call confirmation. Reason is a one-sentence
+// explanation in the user's language, surfaced to the user on reject.
+// RequestsChange is the model's own flag that the reply asks for a change; it is
+// used as a deterministic guard so a self-contradicting "approve" that also
+// requests a change is treated as an amend, never executed with frozen args.
+type ConfirmationClassification struct {
+	Decision       string // DecisionApprove | DecisionAmend | DecisionReject
+	RequestsChange bool
+	Reason         string
+}
+
+// ClassifyConfirmation interprets a free-text reply to a pending tool-call
+// confirmation into approve / amend / reject. It is RESTRICTIVE: "approve" only
+// for unambiguous consent with no requested change; any doubt, ambiguity, mixed
+// reply, parse failure, or LLM error resolves to "reject" (with a reason for the
+// explanatory user reply). It never returns "amend" on error.
+//
+// The call is bounded by the planner's own timeout (the confirmation classifier
+// is constructed with a short dedicated budget) so "classifier unavailable ->
+// reject" stays snappy regardless of the multi-step plan timeout.
+func (p *Planner) ClassifyConfirmation(
+	ctx context.Context,
+	userReply, pendingAction string,
+	pendingArgs map[string]string,
+) (ConfirmationClassification, error) {
+	ctx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+
+	prompt := fmt.Sprintf(confirmationClassifyPrompt, pendingAction, formatPendingArgs(pendingArgs), userReply)
+	// Keep this call FAST: it is a tiny 3-way classification, not a reasoning
+	// task. Inheriting the agent loop's large max_tokens + full reasoning makes a
+	// reasoning model think for many seconds and blow the short classifier
+	// timeout. Cap output and dial reasoning to low.
 	resp, err := p.llm.Complete(ctx, &CompletionRequest{
-		Messages: []Message{
-			{Role: "user", Content: prompt},
-		},
+		Messages:        []Message{{Role: "user", Content: prompt}},
+		MaxTokens:       confirmationClassifyMaxTokens,
+		ReasoningEffort: "low",
 	})
 	if err != nil {
-		return Rejected, err
+		return ConfirmationClassification{Decision: DecisionReject, Reason: "classifier unavailable"}, err
 	}
-	jsonStr := extractJSON(resp.Content)
 	var result struct {
-		Approved bool `json:"approved"`
+		Decision       string `json:"decision"`
+		RequestsChange bool   `json:"requests_change"`
+		Reason         string `json:"reason"`
 	}
-	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		return Rejected, fmt.Errorf("classify confirmation parse: %w", err)
+	if err := json.Unmarshal([]byte(extractJSON(resp.Content)), &result); err != nil {
+		return ConfirmationClassification{Decision: DecisionReject, Reason: "could not understand the reply"},
+			fmt.Errorf("classify confirmation parse: %w", err)
 	}
-	if result.Approved {
-		return Approved, nil
+	decision := strings.ToLower(strings.TrimSpace(result.Decision))
+	switch decision {
+	case DecisionApprove, DecisionAmend, DecisionReject:
+		// recognized
+	default:
+		decision = DecisionReject // restrictive default for any unexpected value
+		if result.Reason == "" {
+			result.Reason = "could not classify the reply"
+		}
 	}
-	return Rejected, nil
+	return ConfirmationClassification{
+		Decision:       decision,
+		RequestsChange: result.RequestsChange,
+		Reason:         result.Reason,
+	}, nil
+}
+
+// confirmationClassifyPrompt is filled with (pendingAction, pendingArgs, userReply).
+// It must stay language-agnostic — no keyword lists — and bias every ambiguity to reject.
+const confirmationClassifyPrompt = `An action is pending the user's confirmation and has NOT been executed.
+
+Pending action: %q
+Pending arguments:
+%s
+
+The user replied (in any language):
+%q
+
+Classify the reply into EXACTLY one decision:
+
+- "approve": the user clearly and unambiguously consents to the pending action
+  EXACTLY AS PROPOSED, with no new information and no requested change
+  (e.g. "yes", "ja", "go ahead", "ok do it").
+
+- "amend": the user gives a clear new instruction or correction that changes the
+  action (e.g. "assign it to Hans Meier instead", "no, use category B",
+  "make the title X"). Also choose "amend" for a MIXED reply that consents AND
+  asks for a change (e.g. "yes, but assign it to Hans") — the change must win.
+
+- "reject": the user cancels (e.g. "no", "nein", "cancel", "stop"), OR the reply
+  is ambiguous, unrelated, a question, or you are not confident which applies.
+
+RULES:
+- Be restrictive. If in ANY doubt, choose "reject".
+- "approve" ONLY for unambiguous consent with NO requested change.
+- A reply that contains BOTH consent and a change is "amend", never "approve".
+- Set "requests_change" to true whenever the reply asks for ANY change to the
+  pending action or its arguments, even if you also chose "approve".
+- Do not execute or describe anything — only classify.
+- Keep "reason" to ONE short plain sentence with no double quotes and no line
+  breaks; if unsure, use an empty string. Never sacrifice a correct decision to
+  compose prose — the decision matters, the reason is optional.
+
+Respond ONLY with valid JSON, no prose:
+{"decision":"approve|amend|reject","requests_change":true|false,"reason":"<one short sentence in the user's language explaining the classification; shown to the user on reject>"}`
+
+// formatPendingArgs renders the pending action's arguments as a stable,
+// human-readable list (sorted keys, one "- key: value" per line) for the
+// classify prompt. Using a sorted list instead of fmt's default map rendering
+// keeps the prompt deterministic run-to-run (Go randomizes map iteration order)
+// and free of Go-internal "map[...]" syntax that a small model would have to
+// parse. Returns "(none)" when there are no arguments.
+func formatPendingArgs(args map[string]string) string {
+	if len(args) == 0 {
+		return "(none)"
+	}
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		fmt.Fprintf(&b, "- %s: %s", k, args[k])
+	}
+	return b.String()
 }

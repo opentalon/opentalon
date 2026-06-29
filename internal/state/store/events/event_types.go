@@ -62,7 +62,13 @@ const (
 	TypeModelSwitch            = "model_switch"
 	TypeConfirmationRequested  = "confirmation_requested"
 	TypeConfirmationResolved   = "confirmation_resolved"
-	TypeRetry                  = "retry"
+	// confirmation_classification_invoked is the parent sentinel for the
+	// free-text confirmation classifier's LLM call, mirroring
+	// session_title_invoked: the provider-emitted llm_request/llm_response
+	// for the classify call nest under it so the call is visible (and its
+	// tokens/cost reachable) in the nerd-mode event log.
+	TypeConfirmationClassificationInvoked = "confirmation_classification_invoked"
+	TypeRetry                             = "retry"
 
 	// Tool calls.
 	TypeToolCallExtracted = "tool_call_extracted"
@@ -563,9 +569,27 @@ type ConfirmationResolvedPayload struct {
 	Header
 	Choice     string `json:"choice"`
 	ToolCallID string `json:"tool_call_id,omitempty"`
+	// ResolvedBy records how the choice was decided: "frontend_button"
+	// (deterministic structured signal), "classifier" (LLM free-text
+	// classification), or "fallback" (classifier unavailable -> reject).
+	ResolvedBy string `json:"resolved_by,omitempty"`
+	// Reason is the classifier's one-sentence explanation, surfaced to the
+	// user on reject and useful for diagnosing amend/reject distribution.
+	Reason string `json:"reason,omitempty"`
 }
 
-const ConfirmationResolvedVersion = 1
+// ConfirmationResolvedVersion is 2: v2 adds resolved_by + reason (both
+// omitempty, so v1 consumers reading older rows are unaffected).
+const ConfirmationResolvedVersion = 2
+
+// ConfirmationClassificationInvokedPayload is the sentinel emitted just before
+// the free-text confirmation classifier's LLM call so the nested
+// llm_request/llm_response land under it (see TypeConfirmationClassificationInvoked).
+type ConfirmationClassificationInvokedPayload struct {
+	Header
+}
+
+const ConfirmationClassificationInvokedVersion = 1
 
 type RetryPayload struct {
 	Header

@@ -1894,7 +1894,9 @@ func TestOrchestrator_Confirmation_PipelineApproved_EmitsResolved(t *testing.T) 
 	orch.pendingPipelines[sessID] = pipeline.NewPipeline(nil, pipeline.PipelineConfig{})
 	orch.pendingMu.Unlock()
 
-	if _, err := orch.Run(context.Background(), sessID, "yes"); err != nil {
+	// Approve via the deterministic frontend button signal (metadata["confirmation"]).
+	ctx := actor.WithConfirmationDecision(context.Background(), "approve")
+	if _, err := orch.Run(ctx, sessID, "yes"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1949,7 +1951,9 @@ func TestOrchestrator_Confirmation_ToolCallApproved_EmitsResolved(t *testing.T) 
 	orch.pendingToolCalls[sessID] = pending
 	orch.pendingMu.Unlock()
 
-	if _, err := orch.Run(context.Background(), sessID, "yes"); err != nil {
+	// Approve via the deterministic frontend button signal (metadata["confirmation"]).
+	ctx := actor.WithConfirmationDecision(context.Background(), "approve")
+	if _, err := orch.Run(ctx, sessID, "yes"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3107,5 +3111,378 @@ func TestToolCatalog_DemotedToolNotSticky(t *testing.T) {
 	}
 	if !promoted["tools-plugin__t2"] {
 		t.Errorf("non-demoted tool must be in the sticky set")
+	}
+}
+
+// ── three-way confirmation (approve / amend / reject) ───────────────────────
+
+// setupClassifierOrchestrator builds an orchestrator with the free-text
+// confirmation classifier enabled (o.classifier != nil) but the pipeline
+// planner disabled — mirroring prod, where an amend re-plan goes through the
+// agent loop rather than Block B.
+func setupClassifierOrchestrator(llm LLMClient, parser ToolCallParser, sink emit.Sink) (*Orchestrator, string) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "gitlab",
+		Actions: []Action{{Name: "analyze_code", Description: "Analyze code"}},
+	}, &echoExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("test-session", "", "")
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:                     sink,
+		ConfirmationClassifierEnabled: true,
+		ConfirmationPlugin:            "conf",
+		ConfirmationAction:            "check",
+	})
+	return orch, "test-session"
+}
+
+func countEventType(evs []emit.Event, t string) int {
+	n := 0
+	for _, e := range evs {
+		if e.EventType == t {
+			n++
+		}
+	}
+	return n
+}
+
+// A free-text correction to a pending confirmation must be classified as amend:
+// the pending call is NOT executed, the turn re-enters the normal loop to
+// re-plan, and a confirmation_resolved{amend} is recorded.
+func TestOrchestrator_PendingToolCall_Amended(t *testing.T) {
+	sink := &recordingEventSink{}
+	// responses[0] → classifier returns amend; responses[1] → agent-loop answer.
+	llm := &fakeLLM{responses: []string{
+		`{"decision":"amend","requests_change":true,"reason":"assign to Hans Meier"}`,
+		"Sure — re-planning with Hans Meier as assignee.",
+	}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
+
+	orch.pendingMu.Lock()
+	orch.pendingToolCalls[sessID] = &ToolCall{
+		ID: "pending-amend", Plugin: "gitlab", Action: "analyze_code",
+		Args: map[string]string{"assignee_id": "131349"},
+	}
+	orch.pendingMu.Unlock()
+
+	result, err := orch.Run(context.Background(), sessID, "bitte auf Hans Meier zuweisen")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := findConfirmationResolvedPayloads(t, sink.snapshot())
+	if len(got) != 1 {
+		t.Fatalf("confirmation_resolved count = %d, want 1", len(got))
+	}
+	if got[0].Choice != "amend" {
+		t.Errorf("Choice = %q, want amend", got[0].Choice)
+	}
+	if got[0].ResolvedBy != "classifier" {
+		t.Errorf("ResolvedBy = %q, want classifier", got[0].ResolvedBy)
+	}
+	if got[0].ToolCallID != "pending-amend" {
+		t.Errorf("ToolCallID = %q, want pending-amend", got[0].ToolCallID)
+	}
+	// The pending write must NOT have executed on amend.
+	if len(result.ToolCalls) != 0 {
+		t.Errorf("expected pending tool NOT to execute on amend, got %d tool calls", len(result.ToolCalls))
+	}
+	// The turn must re-enter the normal loop (turn_start fires there, not on the
+	// early-exit confirmation paths).
+	if countEventType(sink.snapshot(), events.TypeTurnStart) == 0 {
+		t.Error("expected turn_start — amend should re-enter the agent loop")
+	}
+	// Pending state cleared so a later turn / instance can't resurrect it.
+	orch.pendingMu.Lock()
+	defer orch.pendingMu.Unlock()
+	if orch.pendingToolCalls[sessID] != nil {
+		t.Error("expected pending tool call cleared after amend")
+	}
+}
+
+// On reject, the user-facing response carries the classifier's reason rather
+// than the generic cancellation line.
+func TestOrchestrator_PendingToolCall_RejectedWithReason(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{`{"decision":"reject","reason":"You asked to cancel, so I stopped."}`}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
+
+	orch.pendingMu.Lock()
+	orch.pendingToolCalls[sessID] = &ToolCall{ID: "pending-rej", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}
+	orch.pendingMu.Unlock()
+
+	result, err := orch.Run(context.Background(), sessID, "nein, lass es")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "You asked to cancel, so I stopped." {
+		t.Errorf("Response = %q, want the classifier's reason", result.Response)
+	}
+	got := findConfirmationResolvedPayloads(t, sink.snapshot())
+	if len(got) != 1 || got[0].Choice != "reject" {
+		t.Fatalf("want one reject resolved, got %+v", got)
+	}
+	if got[0].Reason == "" {
+		t.Error("reject resolved event should carry the reason")
+	}
+	if got[0].ResolvedBy != "classifier" {
+		t.Errorf("ResolvedBy = %q, want classifier", got[0].ResolvedBy)
+	}
+}
+
+// Defense-in-depth: a single-step privileged write produced by the planner's
+// server-side path must pause for confirmation, not execute — the same gate the
+// agent loop uses. Guards the amend re-plan against a write-without-consent gap.
+func TestSingleStepPipeline_PrivilegedWrite_RequiresConfirmation(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{
+		`{"type":"pipeline","steps":[{"id":"1","name":"Analyze","plugin":"gitlab","action":"analyze_code"}]}`,
+		"Shall I proceed?",
+	}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{Name: "gitlab", Actions: []Action{{Name: "analyze_code"}}}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{Name: "conf", Actions: []Action{{Name: "check"}}}, confirmingExecutor{})
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("sess", "", "")
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
+		EventSink:          sink,
+		PipelineEnabled:    true,
+		ConfirmationPlugin: "conf",
+		ConfirmationAction: "check",
+	})
+
+	result, err := orch.Run(context.Background(), "sess", "analyze myrepo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(findConfirmationRequestedPayloads(t, sink.snapshot())); n != 1 {
+		t.Fatalf("confirmation_requested count = %d, want 1 (single-step write must gate)", n)
+	}
+	if result.Metadata["type"] != "confirmation" {
+		t.Errorf("Metadata type = %q, want confirmation", result.Metadata["type"])
+	}
+	orch.pendingMu.Lock()
+	defer orch.pendingMu.Unlock()
+	if orch.pendingToolCalls["sess"] == nil {
+		t.Error("expected the single-step write stored as a pending tool call (not executed)")
+	}
+}
+
+// Regression guard: enabling the confirmation classifier must build a SEPARATE
+// classifier handle and must NOT activate the planner (which would switch on the
+// server-side single-step execution path). Also pins the "requires plugin/action"
+// and "flag off → no classifier" conditions.
+func TestOrchestrator_ClassifierIsolatedFromPlanner(t *testing.T) {
+	llm := &fakeLLM{}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	mk := func(opts OrchestratorOpts) *Orchestrator {
+		return NewWithRules(llm, parser, NewToolRegistry(), state.NewMemoryStore(""), state.NewSessionStore(""), opts)
+	}
+
+	// Enabled + plugin/action set, pipeline OFF → classifier built, planner nil.
+	on := mk(OrchestratorOpts{ConfirmationClassifierEnabled: true, ConfirmationPlugin: "conf", ConfirmationAction: "check"})
+	if on.classifier == nil {
+		t.Error("classifier should be built when enabled with plugin/action set")
+	}
+	if on.planner != nil {
+		t.Error("planner must stay nil — building the classifier must NOT activate the single-step path")
+	}
+
+	// Enabled but no plugin/action → nothing to classify for → no classifier.
+	noPlugin := mk(OrchestratorOpts{ConfirmationClassifierEnabled: true})
+	if noPlugin.classifier != nil {
+		t.Error("classifier must not be built without confirmation plugin/action")
+	}
+
+	// Flag off (default) even with plugin/action set → no classifier.
+	off := mk(OrchestratorOpts{ConfirmationPlugin: "conf", ConfirmationAction: "check"})
+	if off.classifier != nil {
+		t.Error("classifier must stay off when the flag is off")
+	}
+}
+
+// The orchestrator-level self-contradiction guard: a classifier result of
+// decision=approve WITH requests_change=true must be coerced to amend, so the
+// frozen pending args are never executed when the user actually asked for a
+// change. The planner does not coerce — this guard is the only line of defense.
+func TestOrchestrator_PendingToolCall_ApproveWithChange_CoercedToAmend(t *testing.T) {
+	sink := &recordingEventSink{}
+	// Self-contradicting classifier output. responses[1] is the re-plan answer the
+	// agent loop produces after the coerced amend falls through.
+	llm := &fakeLLM{responses: []string{
+		`{"decision":"approve","requests_change":true,"reason":"you also asked to change the assignee"}`,
+		"Re-planning with the requested change.",
+	}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
+
+	orch.pendingMu.Lock()
+	orch.pendingToolCalls[sessID] = &ToolCall{
+		ID: "pending-coerce", Plugin: "gitlab", Action: "analyze_code",
+		Args: map[string]string{"assignee_id": "131349"},
+	}
+	orch.pendingMu.Unlock()
+
+	result, err := orch.Run(context.Background(), sessID, "ja, aber an Hans Meier")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := findConfirmationResolvedPayloads(t, sink.snapshot())
+	if len(got) != 1 || got[0].Choice != "amend" {
+		t.Fatalf("want one amend resolved (approve+requests_change coerced), got %+v", got)
+	}
+	if got[0].ResolvedBy != "classifier" {
+		t.Errorf("ResolvedBy = %q, want classifier", got[0].ResolvedBy)
+	}
+	// The frozen pending args must NOT have executed.
+	if len(result.ToolCalls) != 0 {
+		t.Errorf("expected pending tool NOT to execute on coerced amend, got %d tool calls", len(result.ToolCalls))
+	}
+}
+
+// A classifier LLM error / garbage reply must fail closed: resolve to reject via
+// the "fallback" path (never a free-text approve) and surface the safe cancel
+// message — verified end-to-end through Run, not just at the planner.
+func TestOrchestrator_PendingToolCall_ClassifierError_FallsBackToReject(t *testing.T) {
+	sink := &recordingEventSink{}
+	// Non-JSON classifier output → ClassifyConfirmation returns an error.
+	llm := &fakeLLM{responses: []string{"I'm not sure what you mean."}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
+
+	orch.pendingMu.Lock()
+	orch.pendingToolCalls[sessID] = &ToolCall{ID: "pending-err", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}
+	orch.pendingMu.Unlock()
+
+	result, err := orch.Run(context.Background(), sessID, "asdf qwer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != confirmationUninterpretableReply {
+		t.Errorf("Response = %q, want the safe uninterpretable-reply line", result.Response)
+	}
+	got := findConfirmationResolvedPayloads(t, sink.snapshot())
+	if len(got) != 1 || got[0].Choice != "reject" {
+		t.Fatalf("want one reject resolved, got %+v", got)
+	}
+	if got[0].ResolvedBy != "fallback" {
+		t.Errorf("ResolvedBy = %q, want fallback", got[0].ResolvedBy)
+	}
+	if len(result.ToolCalls) != 0 {
+		t.Errorf("expected NO execution on classifier error, got %d tool calls", len(result.ToolCalls))
+	}
+}
+
+// A classifier (NOT a button) decision=approve must execute the pending write and
+// record resolved_by="classifier". All other approve tests use the deterministic
+// button bypass, so this is the only coverage of the classifier-approve-executes
+// path.
+func TestOrchestrator_PendingToolCall_ClassifierApprove_Executes(t *testing.T) {
+	sink := &recordingEventSink{}
+	// responses[0] → classifier approves; responses[1] → agent-loop summary.
+	llm := &fakeLLM{responses: []string{
+		`{"decision":"approve","requests_change":false}`,
+		"Done — analyzed the code.",
+	}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
+
+	orch.pendingMu.Lock()
+	orch.pendingToolCalls[sessID] = &ToolCall{ID: "pending-ok", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}
+	orch.pendingMu.Unlock()
+
+	if _, err := orch.Run(context.Background(), sessID, "ja, bitte ausführen"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findConfirmationResolvedPayloads(t, sink.snapshot())
+	if len(got) != 1 || got[0].Choice != "approve" {
+		t.Fatalf("want one approve resolved, got %+v", got)
+	}
+	if got[0].ResolvedBy != "classifier" {
+		t.Errorf("ResolvedBy = %q, want classifier (not frontend_button)", got[0].ResolvedBy)
+	}
+	// The pending write must have executed via the classifier-approve path. That
+	// path runs executeCall OUTSIDE the agent loop (so no tool_call_result event),
+	// but records the tool result into session history — assert the echo result is
+	// there.
+	sess, err := orch.sessions.Get(sessID)
+	if err != nil || sess == nil {
+		t.Fatalf("get session: %v", err)
+	}
+	executed := false
+	for _, m := range sess.Messages {
+		if strings.Contains(m.Content, "executed gitlab.analyze_code") {
+			executed = true
+		}
+	}
+	if !executed {
+		t.Error("expected the pending tool to execute (echo result in session history) on classifier approve")
+	}
+}
+
+// parentCapturingLLM records the emit parent-event-id carried on the context of
+// each Complete call, so a test can assert the classifier's LLM call runs under
+// the confirmation_classification_invoked sentinel (the nerd-log nesting).
+type parentCapturingLLM struct {
+	responses []string
+	callCount int
+	parents   []string
+}
+
+func (f *parentCapturingLLM) Complete(ctx context.Context, _ *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	f.parents = append(f.parents, emit.ParentID(ctx))
+	if f.callCount >= len(f.responses) {
+		return nil, errors.New("no more responses")
+	}
+	resp := f.responses[f.callCount]
+	f.callCount++
+	return &provider.CompletionResponse{Content: resp}, nil
+}
+
+// The classifier's LLM call must run UNDER the confirmation_classification_invoked
+// sentinel so the nested llm_request/llm_response group beneath it in the event
+// log — the central goal of the classifier observability. Guards the
+// emit.WithParent wiring: a dropped WithParent would still emit the sentinel but
+// orphan the nested call (parent_id = NULL), and this test would catch it.
+func TestOrchestrator_ClassifierSpan_NestsUnderInvoked(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &parentCapturingLLM{responses: []string{`{"decision":"reject","reason":"cancelled"}`}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
+
+	orch.pendingMu.Lock()
+	orch.pendingToolCalls[sessID] = &ToolCall{ID: "pending-nest", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}
+	orch.pendingMu.Unlock()
+
+	if _, err := orch.Run(context.Background(), sessID, "nein"); err != nil {
+		t.Fatal(err)
+	}
+
+	var invokedID string
+	for _, e := range sink.snapshot() {
+		if e.EventType == events.TypeConfirmationClassificationInvoked {
+			invokedID = e.ID
+		}
+	}
+	if invokedID == "" {
+		t.Fatal("confirmation_classification_invoked not emitted / empty event_id")
+	}
+	nested := false
+	for _, p := range llm.parents {
+		if p == invokedID {
+			nested = true
+		}
+	}
+	if !nested {
+		t.Errorf("no classifier LLM call ran under the invoked sentinel; parents=%v want one == %q", llm.parents, invokedID)
 	}
 }

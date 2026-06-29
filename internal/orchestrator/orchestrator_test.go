@@ -1014,8 +1014,9 @@ func TestPipelineConfirmation_Yes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Second call: user confirms
-	result, err := orch.Run(context.Background(), sessID, "yes")
+	// Second call: user confirms via the deterministic frontend button signal.
+	ctx := actor.WithConfirmationDecision(context.Background(), "approve")
+	result, err := orch.Run(ctx, sessID, "yes")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1028,6 +1029,35 @@ func TestPipelineConfirmation_Yes(t *testing.T) {
 	// Pending pipeline should be cleared
 	if orch.pendingPipelines[sessID] != nil {
 		t.Error("expected pending pipeline to be cleared after execution")
+	}
+}
+
+// TestClassifyConfirmationReply_ButtonDecisionNormalizesCase pins the deterministic
+// button bypass to be insensitive to case and surrounding whitespace, mirroring the
+// classifier-side normalization. With the classifier nil, a case-sensitive switch
+// would let a mixed-case button approve fall through to the reject fallback — a
+// legitimate approval silently stops working. This guards against that regression.
+func TestClassifyConfirmationReply_ButtonDecisionNormalizesCase(t *testing.T) {
+	o := &Orchestrator{} // classifier nil: the button bypass must resolve before the nil-guard
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"approve", pipeline.DecisionApprove},
+		{" Approve ", pipeline.DecisionApprove},
+		{"APPROVE", pipeline.DecisionApprove},
+		{"reject", pipeline.DecisionReject},
+		{"\tReject\n", pipeline.DecisionReject},
+	}
+	for _, tc := range cases {
+		ctx := actor.WithConfirmationDecision(context.Background(), tc.in)
+		got, _, resolvedBy := o.classifyConfirmationReply(ctx, "free text the LLM would have to read", "create_issue", nil)
+		if got != tc.want {
+			t.Errorf("decision for %q = %q, want %q", tc.in, got, tc.want)
+		}
+		if resolvedBy != resolvedByFrontendButton {
+			t.Errorf("resolvedBy for %q = %q, want %q (button bypass, not fallback)", tc.in, resolvedBy, resolvedByFrontendButton)
+		}
 	}
 }
 
