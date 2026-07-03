@@ -2426,15 +2426,23 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 					required = append(required, p.Name)
 				}
 			}
+			// JSON Schema requires `required` to be an array when present. A nil
+			// []string here marshals to `"required": null`, which strict providers
+			// (Mistral) reject with 400 "Invalid tool schema: None is not of type
+			// 'array'". Omit the key entirely when no parameter is required —
+			// leniently-parsing providers (OVH gpt-oss) accept both forms.
+			params := map[string]interface{}{
+				"type":                 "object",
+				"properties":           properties,
+				"additionalProperties": false,
+			}
+			if len(required) > 0 {
+				params["required"] = required
+			}
 			tools = append(tools, provider.ToolDefinition{
 				Name:        fqn,
 				Description: action.Description,
-				Parameters: map[string]interface{}{
-					"type":                 "object",
-					"properties":           properties,
-					"required":             required,
-					"additionalProperties": false,
-				},
+				Parameters:  params,
 			})
 			slog.Debug("tool registration: registered", "tool", fqn, "params", len(action.Parameters))
 		}
