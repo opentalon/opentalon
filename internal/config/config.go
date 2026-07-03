@@ -471,6 +471,18 @@ type ProviderConfig struct {
 	APIKey  string            `yaml:"api_key"`
 	API     string            `yaml:"api"`
 	Models  []ModelDefinition `yaml:"models"`
+	Retry   RetryConfig       `yaml:"retry"` // optional; transient-failure (429/5xx) retry tuning
+}
+
+// RetryConfig tunes per-provider retry on transient LLM failures (429 rate
+// limits, transient 5xx, transport errors). All fields optional; zero/empty =
+// built-in defaults (4 attempts, 1s base, 20s per-wait cap, 30s total cap).
+// Delays are Go duration strings ("1s", "500ms", "20s").
+type RetryConfig struct {
+	MaxAttempts  int    `yaml:"max_attempts"`
+	BaseDelay    string `yaml:"base_delay"`
+	MaxDelay     string `yaml:"max_delay"`
+	MaxTotalWait string `yaml:"max_total_wait"`
 }
 
 type ModelDefinition struct {

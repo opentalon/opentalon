@@ -31,6 +31,7 @@ type ProviderConfig struct {
 	DebugSink    DebugEventSink
 	DebugResolve DebugContextResolver
 	EventSink    emit.Sink
+	Retry        RetryPolicy // transient-failure retry; zero fields -> DefaultRetryPolicy
 }
 
 // FromConfig creates a Provider from a config entry. The api field
@@ -50,12 +51,14 @@ func FromConfig(cfg ProviderConfig) (Provider, error) {
 		if cfg.EventSink != nil {
 			opts = append(opts, WithOpenAISessionEventSink(cfg.EventSink))
 		}
+		opts = append(opts, WithOpenAIRetryPolicy(cfg.Retry))
 		return NewOpenAIProvider(cfg.ID, cfg.BaseURL, cfg.APIKey, cfg.Models, opts...), nil
 	case APIAnthropic:
 		opts := []AnthropicOption{}
 		if cfg.EventSink != nil {
 			opts = append(opts, WithAnthropicSessionEventSink(cfg.EventSink))
 		}
+		opts = append(opts, WithAnthropicRetryPolicy(cfg.Retry))
 		return NewAnthropicProvider(cfg.ID, cfg.BaseURL, cfg.APIKey, cfg.Models, opts...), nil
 	default:
 		return nil, fmt.Errorf("unknown api type %q for provider %q (supported: %s, %s)",

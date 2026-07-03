@@ -34,6 +34,7 @@ type OpenAIProvider struct {
 	debugSink    DebugEventSink       // optional; nil disables persistent debug capture
 	debugResolve DebugContextResolver // optional; returns (sessionID, traceID, enabled?) for this ctx
 	eventSink    emit.Sink            // structured session event sink; always non-nil (NoOpSink default)
+	retry        RetryPolicy          // transient-failure retry policy (DefaultRetryPolicy unless configured)
 }
 
 // OpenAIOption configures an OpenAIProvider.
@@ -77,6 +78,12 @@ func WithOpenAISessionEventSink(s emit.Sink) OpenAIOption {
 	}
 }
 
+// WithOpenAIRetryPolicy sets the transient-failure retry policy. Zero-valued
+// fields fall back to DefaultRetryPolicy, so a partial config is safe.
+func WithOpenAIRetryPolicy(rp RetryPolicy) OpenAIOption {
+	return func(p *OpenAIProvider) { p.retry = rp.withDefaults() }
+}
+
 // resolveDebug returns capture metadata for ctx. When any wiring is missing
 // or the session has not opted in, ok is false and the caller skips capture
 // before any body work — keeping the LLM hot path zero-cost for non-debug
@@ -102,10 +109,14 @@ func NewOpenAIProvider(id, baseURL, apiKey string, models []ModelInfo, opts ...O
 		models:    models,
 		client:    &http.Client{Timeout: 120 * time.Second},
 		eventSink: emit.NoOpSink{},
+		retry:     DefaultRetryPolicy(),
 	}
 	for _, o := range opts {
 		o(p)
 	}
+	// Retry lives in the transport, so it is transparent to Complete/Stream and
+	// applies to whatever client the options ended up setting.
+	p.client = withRetry(p.client, p.retry, p.eventSink)
 	return p
 }
 
@@ -663,7 +674,9 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 	})
 
 	// Use a client without timeout for streaming; context handles cancellation.
-	streamClient := &http.Client{}
+	// Same retry transport as the non-streaming client — a 429/5xx before the
+	// stream opens is retried; a 200 is returned untouched so SSE flows.
+	streamClient := withRetry(&http.Client{}, p.retry, p.eventSink)
 	start := time.Now()
 	httpResp, err := streamClient.Do(httpReq)
 	if err != nil {

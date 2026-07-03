@@ -170,7 +170,9 @@ func TestOpenAIComplete_EmitsRefusedOnContentFilter(t *testing.T) {
 
 func TestOpenAIComplete_EmitsErrorOnNonOKStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
+		// 400 is a PERMANENT error (no retry) — asserts the immediate
+		// request+error event pair. 5xx/429 are retried (see openai_retry_test.go).
+		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":{"message":"upstream timeout","type":"server_error"}}`))
 	}))
 	defer server.Close()
@@ -182,7 +184,7 @@ func TestOpenAIComplete_EmitsErrorOnNonOKStatus(t *testing.T) {
 		Messages: []Message{{Role: RoleUser, Content: "x"}},
 	})
 	if err == nil {
-		t.Fatal("Complete must error on 502")
+		t.Fatal("Complete must error on 400")
 	}
 
 	got := sink.snapshot()
@@ -194,8 +196,8 @@ func TestOpenAIComplete_EmitsErrorOnNonOKStatus(t *testing.T) {
 	}
 	var p2 events.LLMErrorPayload
 	_ = json.Unmarshal(got[1].Payload, &p2)
-	if p2.StatusCode != 502 {
-		t.Errorf("StatusCode = %d, want 502", p2.StatusCode)
+	if p2.StatusCode != 400 {
+		t.Errorf("StatusCode = %d, want 400", p2.StatusCode)
 	}
 	if !strings.Contains(p2.ResponseBodyExcerpt, "upstream timeout") {
 		t.Errorf("ResponseBodyExcerpt = %q, want substring 'upstream timeout'", p2.ResponseBodyExcerpt)
@@ -313,11 +315,12 @@ func TestOpenAIComplete_EmitsErrorOnAPIErrorIn200Body(t *testing.T) {
 func TestOpenAIComplete_EmitsErrorOnTransportFailure(t *testing.T) {
 	// Server is created and immediately closed: any subsequent request
 	// hits a dead listener, triggering a transport-level error.
+	// fastRetry: transport errors are retried; don't wait real backoff.
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	server.Close()
 
 	sink := &recordingEventSink{}
-	p := NewOpenAIProvider("openai", server.URL, "test-key", nil, WithOpenAISessionEventSink(sink))
+	p := NewOpenAIProvider("openai", server.URL, "test-key", nil, WithOpenAISessionEventSink(sink), fastRetry())
 	_, err := p.Complete(context.Background(), &CompletionRequest{
 		Model:    "gpt-4o",
 		Messages: []Message{{Role: RoleUser, Content: "x"}},
@@ -326,15 +329,18 @@ func TestOpenAIComplete_EmitsErrorOnTransportFailure(t *testing.T) {
 		t.Fatal("Complete must error on transport failure")
 	}
 
+	// Transport errors are retried: llm_request, a retry event per re-attempt,
+	// then the terminal llm_error.
 	got := sink.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("got %d events, want 2 (request + transport error)", len(got))
+	if len(got) < 2 || got[0].EventType != events.TypeLLMRequest {
+		t.Fatalf("events = %v, want llm_request first then a terminal error", sink.types())
 	}
-	if got[1].EventType != events.TypeLLMError {
-		t.Errorf("events[1] = %q, want %q", got[1].EventType, events.TypeLLMError)
+	last := got[len(got)-1]
+	if last.EventType != events.TypeLLMError {
+		t.Fatalf("last event = %q, want %q; all=%v", last.EventType, events.TypeLLMError, sink.types())
 	}
 	var p2 events.LLMErrorPayload
-	_ = json.Unmarshal(got[1].Payload, &p2)
+	_ = json.Unmarshal(last.Payload, &p2)
 	if p2.Phase != phaseChatTransport {
 		t.Errorf("Phase = %q, want %q (transport phase must be distinct from http_status phase)",
 			p2.Phase, phaseChatTransport)
@@ -550,12 +556,12 @@ func TestOpenAIStream_EmitsRequestThenResponseOnClose(t *testing.T) {
 func TestOpenAIStream_EmitsErrorOnTransportFailure(t *testing.T) {
 	// Mirror of the Complete-side transport-failure test for the stream
 	// path. Distinct phase label so analytics can group transport
-	// failures by call type.
+	// failures by call type. fastRetry: don't wait real backoff.
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	server.Close()
 
 	sink := &recordingEventSink{}
-	p := NewOpenAIProvider("openai", server.URL, "test-key", nil, WithOpenAISessionEventSink(sink))
+	p := NewOpenAIProvider("openai", server.URL, "test-key", nil, WithOpenAISessionEventSink(sink), fastRetry())
 	_, err := p.Stream(context.Background(), &CompletionRequest{
 		Model:    "gpt-4o",
 		Messages: []Message{{Role: RoleUser, Content: "x"}},
@@ -564,12 +570,17 @@ func TestOpenAIStream_EmitsErrorOnTransportFailure(t *testing.T) {
 		t.Fatal("Stream must error on transport failure")
 	}
 
+	// Retried: llm_request, retry events, then the terminal llm_error.
 	got := sink.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("got %d events, want 2 (llm_request + stream transport error); types=%v", len(got), sink.types())
+	if len(got) < 2 || got[0].EventType != events.TypeLLMRequest {
+		t.Fatalf("events = %v, want llm_request first then a terminal error", sink.types())
+	}
+	last := got[len(got)-1]
+	if last.EventType != events.TypeLLMError {
+		t.Fatalf("last event = %q, want %q; all=%v", last.EventType, events.TypeLLMError, sink.types())
 	}
 	var perr events.LLMErrorPayload
-	_ = json.Unmarshal(got[1].Payload, &perr)
+	_ = json.Unmarshal(last.Payload, &perr)
 	if perr.Phase != phaseStreamTransport {
 		t.Errorf("Phase = %q, want %q", perr.Phase, phaseStreamTransport)
 	}
@@ -611,7 +622,9 @@ func TestOpenAIStream_EmitsRefusedOnContentFilter(t *testing.T) {
 
 func TestOpenAIStream_EmitsErrorOnHTTPStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		// 400 is a PERMANENT error (no retry) — asserts the immediate
+		// stream-side status error. 5xx/429 are retried (see openai_retry_test.go).
+		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":"boom"}`))
 	}))
 	defer server.Close()
@@ -623,7 +636,7 @@ func TestOpenAIStream_EmitsErrorOnHTTPStatus(t *testing.T) {
 		Messages: []Message{{Role: RoleUser, Content: "x"}},
 	})
 	if err == nil {
-		t.Fatal("Stream must error on 500")
+		t.Fatal("Stream must error on 400")
 	}
 
 	got := sink.snapshot()
@@ -639,7 +652,7 @@ func TestOpenAIStream_EmitsErrorOnHTTPStatus(t *testing.T) {
 		t.Errorf("Phase = %q, want %q (stream-side status error must be distinct from chat.http_status)",
 			perr.Phase, phaseStreamHTTPStatus)
 	}
-	if perr.StatusCode != 500 {
+	if perr.StatusCode != 400 {
 		t.Errorf("StatusCode = %d", perr.StatusCode)
 	}
 }
