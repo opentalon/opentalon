@@ -313,14 +313,14 @@ func TestOpenAIComplete_EmitsErrorOnAPIErrorIn200Body(t *testing.T) {
 }
 
 func TestOpenAIComplete_EmitsErrorOnTransportFailure(t *testing.T) {
-	shrinkDelays(t) // transport errors are retried; don't wait real backoff
 	// Server is created and immediately closed: any subsequent request
 	// hits a dead listener, triggering a transport-level error.
+	// fastRetry: transport errors are retried; don't wait real backoff.
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	server.Close()
 
 	sink := &recordingEventSink{}
-	p := NewOpenAIProvider("openai", server.URL, "test-key", nil, WithOpenAISessionEventSink(sink))
+	p := NewOpenAIProvider("openai", server.URL, "test-key", nil, WithOpenAISessionEventSink(sink), fastRetry())
 	_, err := p.Complete(context.Background(), &CompletionRequest{
 		Model:    "gpt-4o",
 		Messages: []Message{{Role: RoleUser, Content: "x"}},
@@ -554,15 +554,14 @@ func TestOpenAIStream_EmitsRequestThenResponseOnClose(t *testing.T) {
 }
 
 func TestOpenAIStream_EmitsErrorOnTransportFailure(t *testing.T) {
-	shrinkDelays(t) // transport errors are retried; don't wait real backoff
 	// Mirror of the Complete-side transport-failure test for the stream
 	// path. Distinct phase label so analytics can group transport
-	// failures by call type.
+	// failures by call type. fastRetry: don't wait real backoff.
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	server.Close()
 
 	sink := &recordingEventSink{}
-	p := NewOpenAIProvider("openai", server.URL, "test-key", nil, WithOpenAISessionEventSink(sink))
+	p := NewOpenAIProvider("openai", server.URL, "test-key", nil, WithOpenAISessionEventSink(sink), fastRetry())
 	_, err := p.Stream(context.Background(), &CompletionRequest{
 		Model:    "gpt-4o",
 		Messages: []Message{{Role: RoleUser, Content: "x"}},

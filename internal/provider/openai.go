@@ -34,6 +34,7 @@ type OpenAIProvider struct {
 	debugSink    DebugEventSink       // optional; nil disables persistent debug capture
 	debugResolve DebugContextResolver // optional; returns (sessionID, traceID, enabled?) for this ctx
 	eventSink    emit.Sink            // structured session event sink; always non-nil (NoOpSink default)
+	retry        RetryPolicy          // transient-failure retry policy (DefaultRetryPolicy unless configured)
 }
 
 // OpenAIOption configures an OpenAIProvider.
@@ -77,6 +78,12 @@ func WithOpenAISessionEventSink(s emit.Sink) OpenAIOption {
 	}
 }
 
+// WithOpenAIRetryPolicy sets the transient-failure retry policy. Zero-valued
+// fields fall back to DefaultRetryPolicy, so a partial config is safe.
+func WithOpenAIRetryPolicy(rp RetryPolicy) OpenAIOption {
+	return func(p *OpenAIProvider) { p.retry = rp.withDefaults() }
+}
+
 // resolveDebug returns capture metadata for ctx. When any wiring is missing
 // or the session has not opted in, ok is false and the caller skips capture
 // before any body work — keeping the LLM hot path zero-cost for non-debug
@@ -102,10 +109,14 @@ func NewOpenAIProvider(id, baseURL, apiKey string, models []ModelInfo, opts ...O
 		models:    models,
 		client:    &http.Client{Timeout: 120 * time.Second},
 		eventSink: emit.NoOpSink{},
+		retry:     DefaultRetryPolicy(),
 	}
 	for _, o := range opts {
 		o(p)
 	}
+	// Retry lives in the transport, so it is transparent to Complete/Stream and
+	// applies to whatever client the options ended up setting.
+	p.client = withRetry(p.client, p.retry, p.eventSink)
 	return p
 }
 
@@ -374,110 +385,6 @@ func (a *streamAccumulator) append(line string) {
 	a.buf = append(a.buf, '\n')
 }
 
-// maxLLMAttempts is the total tries for one LLM HTTP call (1 initial +
-// retries). Small on purpose so an interactive turn never hangs: with the
-// delays below the worst-case added wait stays bounded.
-const maxLLMAttempts = 4
-
-// Backoff bounds. Vars (not consts) purely so tests can shrink them; not
-// meant to be reconfigured at runtime.
-var (
-	baseRetryDelay = 1 * time.Second
-	maxRetryDelay  = 20 * time.Second
-)
-
-// isRetryableStatus reports whether an HTTP status is worth retrying: 429
-// (rate limit — the Mistral Scale-tier beta case) and transient 5xx. Other
-// 4xx (bad request, auth, unsupported param) are permanent and must fail fast.
-func isRetryableStatus(code int) bool {
-	switch code {
-	case http.StatusTooManyRequests,
-		http.StatusInternalServerError,
-		http.StatusBadGateway,
-		http.StatusServiceUnavailable,
-		http.StatusGatewayTimeout:
-		return true
-	default:
-		return false
-	}
-}
-
-// retryDelay is the wait before the next attempt: honour a Retry-After header
-// (delta-seconds) when the server sends one, else exponential backoff with a
-// small deterministic jitter — both capped at maxRetryDelay.
-func retryDelay(resp *http.Response, attempt int) time.Duration {
-	if resp != nil {
-		if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
-			if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 {
-				return capDelay(time.Duration(secs) * time.Second)
-			}
-		}
-	}
-	return capDelay(baseRetryDelay<<(attempt-1)) + time.Duration(attempt*50)*time.Millisecond
-}
-
-func capDelay(d time.Duration) time.Duration {
-	if d > maxRetryDelay {
-		return maxRetryDelay
-	}
-	return d
-}
-
-// drainSnippet reads a short prefix of an error body (for the retry log) and
-// closes it, so the connection can be reused for the next attempt.
-func drainSnippet(resp *http.Response) string {
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-	_ = resp.Body.Close()
-	return strings.TrimSpace(string(b))
-}
-
-// doWithRetry POSTs `body` to the completions endpoint, retrying on 429 /
-// transient 5xx / transport errors with Retry-After-aware backoff until it
-// succeeds, exhausts maxLLMAttempts, or ctx is cancelled. The request is
-// rebuilt each attempt (the body reader is single-use). It returns the final
-// response with its body UNREAD, so callers keep their existing success /
-// error handling; each re-attempt emits a retry session-event for analytics.
-func (p *OpenAIProvider) doWithRetry(ctx context.Context, client *http.Client, body []byte, phase string) (*http.Response, error) {
-	var lastErr error
-	for attempt := 1; attempt <= maxLLMAttempts; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-			p.baseURL+openAICompletionsPath, bytes.NewReader(body))
-		if err != nil {
-			return nil, fmt.Errorf("create request: %w", err)
-		}
-		p.setHeaders(req)
-
-		resp, err := client.Do(req)
-		switch {
-		case err != nil:
-			lastErr = err // transport error — transient, retry
-		case !isRetryableStatus(resp.StatusCode):
-			return resp, nil // success or permanent error — caller handles it
-		case attempt == maxLLMAttempts:
-			return resp, nil // retries exhausted — caller reads body + emits error
-		default:
-			lastErr = fmt.Errorf("status %d: %s", resp.StatusCode, drainSnippet(resp))
-		}
-
-		if attempt == maxLLMAttempts || ctx.Err() != nil {
-			break
-		}
-		emit.EmitRetry(ctx, p.eventSink, emit.RetryArgs{Phase: phase, Attempt: attempt, LastError: lastErr.Error()})
-		delay := retryDelay(resp, attempt)
-		slog.WarnContext(ctx, "llm call retry",
-			"phase", phase, "attempt", attempt, "delay", delay.String(), "err", lastErr.Error())
-		select {
-		case <-time.After(delay):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("llm call failed after %d attempts", maxLLMAttempts)
-	}
-	return nil, lastErr
-}
-
 // Complete sends a non-streaming completion request.
 func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
 	oaiReq, err := p.toOAIRequest(req)
@@ -505,6 +412,13 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 		"body_bytes", len(body),
 	)
 
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		p.baseURL+openAICompletionsPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	p.setHeaders(httpReq)
+
 	// Raw HTTP capture: emitted as a slog event for live tailing and (when
 	// /debug capture is wired + this session opted in) persisted to the
 	// ai_debug_events table. Tagged "openai raw http" + direction so a
@@ -525,7 +439,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	})
 
 	start := time.Now()
-	httpResp, err := p.doWithRetry(ctx, p.client, body, phaseChatHTTPStatus)
+	httpResp, err := p.client.Do(httpReq)
 	if err != nil {
 		p.captureRawHTTP(ctx, "error", 0, nil, err)
 		emit.EmitLLMError(ctx, p.eventSink, emit.LLMErrorArgs{
@@ -739,6 +653,13 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		p.baseURL+openAICompletionsPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	p.setHeaders(httpReq)
+
 	// Request is captured the same way as in the non-streaming path; the
 	// streaming response is captured at end-of-stream by the accumulator
 	// inside oaiResponseStream.
@@ -753,9 +674,11 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 	})
 
 	// Use a client without timeout for streaming; context handles cancellation.
-	streamClient := &http.Client{}
+	// Same retry transport as the non-streaming client — a 429/5xx before the
+	// stream opens is retried; a 200 is returned untouched so SSE flows.
+	streamClient := withRetry(&http.Client{}, p.retry, p.eventSink)
 	start := time.Now()
-	httpResp, err := p.doWithRetry(ctx, streamClient, body, phaseStreamHTTPStatus)
+	httpResp, err := streamClient.Do(httpReq)
 	if err != nil {
 		p.captureRawHTTP(ctx, "error", 0, nil, err)
 		emit.EmitLLMError(ctx, p.eventSink, emit.LLMErrorArgs{

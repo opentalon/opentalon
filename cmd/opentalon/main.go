@@ -1498,12 +1498,32 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 		DebugSink:    debugSink,
 		DebugResolve: debugResolve,
 		EventSink:    eventSink,
+		Retry: provider.RetryPolicy{
+			MaxAttempts:  pc.Retry.MaxAttempts,
+			BaseDelay:    parseDurationOrZero(pc.Retry.BaseDelay),
+			MaxDelay:     parseDurationOrZero(pc.Retry.MaxDelay),
+			MaxTotalWait: parseDurationOrZero(pc.Retry.MaxTotalWait),
+		},
 	}
 	prov, err := provider.FromConfig(provCfg)
 	if err != nil {
 		return nil, "", err
 	}
 	return prov, modelID, nil
+}
+
+// parseDurationOrZero parses a Go duration string, returning 0 (which the
+// provider maps to its default) on empty or invalid input.
+func parseDurationOrZero(s string) time.Duration {
+	if s == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		slog.Warn("invalid retry duration in config; falling back to default", "value", s, "error", err)
+		return 0
+	}
+	return d
 }
 
 func defaultInt(v, fallback int) int {

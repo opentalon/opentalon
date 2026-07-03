@@ -157,12 +157,13 @@ func TestOpenAI_Complete_CapturesNon200ResponseBody(t *testing.T) {
 }
 
 func TestOpenAI_Complete_CapturesTransportError(t *testing.T) {
-	shrinkDelays(t) // transport errors are retried; don't wait real backoff
 	// Hand the provider a deliberately broken URL so client.Do fails.
+	// fastRetry: transport errors are retried; don't wait real backoff.
 	sink := &recordingSink{}
 	p := NewOpenAIProvider("openai", "http://127.0.0.1:1", "k", nil,
 		WithOpenAIDebugSink(sink),
 		WithOpenAIDebugResolver(alwaysOnResolver("s", "t")),
+		fastRetry(),
 	)
 
 	_, err := p.Complete(context.Background(), &CompletionRequest{Model: "x", Messages: []Message{{Role: RoleUser, Content: "h"}}})

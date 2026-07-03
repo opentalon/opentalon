@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+// fastRetry keeps the retry behaviour but with negligible waits so retry
+// tests run in milliseconds.
+func fastRetry() OpenAIOption {
+	return WithOpenAIRetryPolicy(RetryPolicy{
+		MaxAttempts:  4,
+		BaseDelay:    time.Millisecond,
+		MaxDelay:     5 * time.Millisecond,
+		MaxTotalWait: time.Second,
+	})
+}
+
 func TestIsRetryableStatus(t *testing.T) {
 	retryable := []int{429, 500, 502, 503, 504}
 	permanent := []int{200, 201, 400, 401, 403, 404, 422}
@@ -26,36 +37,34 @@ func TestIsRetryableStatus(t *testing.T) {
 }
 
 func TestRetryDelay(t *testing.T) {
+	base, maxD := time.Second, 20*time.Second
 	// Retry-After (delta-seconds) is honoured verbatim (within the cap).
 	h := http.Header{}
 	h.Set("Retry-After", "5")
-	if got := retryDelay(&http.Response{Header: h}, 1); got != 5*time.Second {
+	if got := retryDelay(&http.Response{Header: h}, 1, base, maxD); got != 5*time.Second {
 		t.Errorf("Retry-After: got %v, want 5s", got)
 	}
 	// A Retry-After above the cap is clamped.
 	h2 := http.Header{}
 	h2.Set("Retry-After", "600")
-	if got := retryDelay(&http.Response{Header: h2}, 1); got != maxRetryDelay {
-		t.Errorf("Retry-After cap: got %v, want %v", got, maxRetryDelay)
+	if got := retryDelay(&http.Response{Header: h2}, 1, base, maxD); got != maxD {
+		t.Errorf("Retry-After cap: got %v, want %v", got, maxD)
 	}
-	// No response -> exponential backoff, attempt 1 ~= baseRetryDelay (+jitter).
-	d1 := retryDelay(nil, 1)
-	if d1 < baseRetryDelay || d1 >= baseRetryDelay+100*time.Millisecond {
-		t.Errorf("attempt 1 backoff = %v, want ~%v", d1, baseRetryDelay)
+	// No response -> exponential backoff, attempt 1 ~= base (+jitter).
+	d1 := retryDelay(nil, 1, base, maxD)
+	if d1 < base || d1 >= base+100*time.Millisecond {
+		t.Errorf("attempt 1 backoff = %v, want ~%v", d1, base)
 	}
-	// Large attempt -> capped at maxRetryDelay (+ small jitter).
-	dBig := retryDelay(nil, 20)
-	if dBig < maxRetryDelay || dBig > maxRetryDelay+2*time.Second {
-		t.Errorf("capped backoff = %v, want ~%v", dBig, maxRetryDelay)
+	// Doubling: attempt 3 ~= 4s (+jitter).
+	d3 := retryDelay(nil, 3, base, maxD)
+	if d3 < 4*time.Second || d3 >= 4*time.Second+200*time.Millisecond {
+		t.Errorf("attempt 3 backoff = %v, want ~4s", d3)
 	}
-}
-
-// shrinkDelays makes the backoff negligible for fast tests.
-func shrinkDelays(t *testing.T) {
-	t.Helper()
-	ob, om := baseRetryDelay, maxRetryDelay
-	baseRetryDelay, maxRetryDelay = time.Millisecond, 5*time.Millisecond
-	t.Cleanup(func() { baseRetryDelay, maxRetryDelay = ob, om })
+	// Large attempt -> capped at maxD (+ small jitter).
+	dBig := retryDelay(nil, 20, base, maxD)
+	if dBig < maxD || dBig > maxD+2*time.Second {
+		t.Errorf("capped backoff = %v, want ~%v", dBig, maxD)
+	}
 }
 
 func okBody() []byte {
@@ -76,7 +85,6 @@ func doComplete(p *OpenAIProvider) (*CompletionResponse, error) {
 
 // A 429 must not fail the turn: it retries and succeeds once the window clears.
 func TestComplete_RetriesThenSucceeds(t *testing.T) {
-	shrinkDelays(t)
 	var n int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if atomic.AddInt32(&n, 1) == 1 {
@@ -89,7 +97,7 @@ func TestComplete_RetriesThenSucceeds(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := doComplete(NewOpenAIProvider("openai", srv.URL, "k", nil))
+	resp, err := doComplete(NewOpenAIProvider("openai", srv.URL, "k", nil, fastRetry()))
 	if err != nil {
 		t.Fatalf("expected success after retry, got %v", err)
 	}
@@ -103,7 +111,6 @@ func TestComplete_RetriesThenSucceeds(t *testing.T) {
 
 // A permanent 4xx (e.g. a bad-schema 400) must fail fast — no retries.
 func TestComplete_NoRetryOn400(t *testing.T) {
-	shrinkDelays(t)
 	var n int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&n, 1)
@@ -112,7 +119,7 @@ func TestComplete_NoRetryOn400(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := doComplete(NewOpenAIProvider("openai", srv.URL, "k", nil)); err == nil {
+	if _, err := doComplete(NewOpenAIProvider("openai", srv.URL, "k", nil, fastRetry())); err == nil {
 		t.Fatal("expected error on 400")
 	}
 	if got := atomic.LoadInt32(&n); got != 1 {
@@ -122,7 +129,6 @@ func TestComplete_NoRetryOn400(t *testing.T) {
 
 // Persistent 429 exhausts the attempt budget and then surfaces the error.
 func TestComplete_ExhaustsRetries(t *testing.T) {
-	shrinkDelays(t)
 	var n int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&n, 1)
@@ -131,10 +137,44 @@ func TestComplete_ExhaustsRetries(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := doComplete(NewOpenAIProvider("openai", srv.URL, "k", nil)); err == nil {
+	if _, err := doComplete(NewOpenAIProvider("openai", srv.URL, "k", nil, fastRetry())); err == nil {
 		t.Fatal("expected error after exhausting retries")
 	}
-	if got := atomic.LoadInt32(&n); got != maxLLMAttempts {
-		t.Errorf("request count = %d, want %d", got, maxLLMAttempts)
+	if got := atomic.LoadInt32(&n); got != 4 { // fastRetry MaxAttempts
+		t.Errorf("request count = %d, want 4", got)
+	}
+}
+
+// A tiny total-wait budget stops retrying early even with attempts remaining.
+func TestComplete_TotalWaitBudget(t *testing.T) {
+	var n int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&n, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"message":"unavailable"}`))
+	}))
+	defer srv.Close()
+
+	// base 10ms, but total budget 5ms -> the first wait already exceeds it,
+	// so it gives up after the initial attempt (no retry sleep fits).
+	p := NewOpenAIProvider("openai", srv.URL, "k", nil, WithOpenAIRetryPolicy(RetryPolicy{
+		MaxAttempts: 4, BaseDelay: 10 * time.Millisecond, MaxDelay: time.Second, MaxTotalWait: 5 * time.Millisecond,
+	}))
+	if _, err := doComplete(p); err == nil {
+		t.Fatal("expected error")
+	}
+	if got := atomic.LoadInt32(&n); got != 1 {
+		t.Errorf("request count = %d, want 1 (total-wait budget blocks any retry)", got)
+	}
+}
+
+func TestRetryPolicyWithDefaults(t *testing.T) {
+	got := RetryPolicy{MaxAttempts: 7}.withDefaults() // only attempts set
+	d := DefaultRetryPolicy()
+	if got.MaxAttempts != 7 {
+		t.Errorf("MaxAttempts = %d, want 7 (explicit kept)", got.MaxAttempts)
+	}
+	if got.BaseDelay != d.BaseDelay || got.MaxDelay != d.MaxDelay || got.MaxTotalWait != d.MaxTotalWait {
+		t.Errorf("zero fields not defaulted: %+v", got)
 	}
 }

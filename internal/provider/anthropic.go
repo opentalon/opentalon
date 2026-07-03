@@ -54,7 +54,8 @@ type AnthropicProvider struct {
 	apiKey    string
 	models    []ModelInfo
 	client    *http.Client
-	eventSink emit.Sink // structured session-event sink; nil disables emission
+	eventSink emit.Sink   // structured session-event sink; nil disables emission
+	retry     RetryPolicy // transient-failure retry policy (DefaultRetryPolicy unless configured)
 }
 
 // AnthropicOption configures an AnthropicProvider.
@@ -76,6 +77,12 @@ func WithAnthropicSessionEventSink(s emit.Sink) AnthropicOption {
 	return func(p *AnthropicProvider) { p.eventSink = s }
 }
 
+// WithAnthropicRetryPolicy sets the transient-failure retry policy. Zero-valued
+// fields fall back to DefaultRetryPolicy, so a partial config is safe.
+func WithAnthropicRetryPolicy(rp RetryPolicy) AnthropicOption {
+	return func(p *AnthropicProvider) { p.retry = rp.withDefaults() }
+}
+
 // NewAnthropicProvider creates a provider for the Anthropic API.
 func NewAnthropicProvider(id, baseURL, apiKey string, models []ModelInfo, opts ...AnthropicOption) *AnthropicProvider {
 	if baseURL == "" {
@@ -87,10 +94,14 @@ func NewAnthropicProvider(id, baseURL, apiKey string, models []ModelInfo, opts .
 		apiKey:  apiKey,
 		models:  models,
 		client:  &http.Client{Timeout: 120 * time.Second},
+		retry:   DefaultRetryPolicy(),
 	}
 	for _, o := range opts {
 		o(p)
 	}
+	// Retry lives in the transport (see withRetry) — provider-agnostic and
+	// transparent to Complete.
+	p.client = withRetry(p.client, p.retry, p.eventSink)
 	return p
 }
 
