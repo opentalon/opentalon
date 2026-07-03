@@ -175,7 +175,7 @@ type oaiToolFunction struct {
 type oaiMessage struct {
 	Role             string        `json:"role"`
 	Content          oaiContent    `json:"content"`
-	ReasoningContent string        `json:"reasoning_content,omitempty"` // reasoning models return thinking here
+	ReasoningContent oaiContent    `json:"reasoning_content,omitempty"` // reasoning models return thinking here (string or array-of-parts)
 	ToolCalls        []oaiToolCall `json:"tool_calls,omitempty"`        // native tool calls from LLM
 	ToolCallID       string        `json:"tool_call_id,omitempty"`      // for role=tool messages
 }
@@ -494,7 +494,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 			slog.DebugContext(ctx, "openai reasoning response",
 				"model", oaiResp.Model,
 				"reasoning_len", len(msg.ReasoningContent),
-				"reasoning", msg.ReasoningContent,
+				"reasoning", string(msg.ReasoningContent),
 				"content_len", len(content),
 			)
 		}
