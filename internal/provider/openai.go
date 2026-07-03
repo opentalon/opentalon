@@ -174,10 +174,60 @@ type oaiToolFunction struct {
 
 type oaiMessage struct {
 	Role             string        `json:"role"`
-	Content          string        `json:"content"`
-	ReasoningContent string        `json:"reasoning_content,omitempty"` // reasoning models return thinking here
+	Content          oaiContent    `json:"content"`
+	ReasoningContent oaiContent    `json:"reasoning_content,omitempty"` // reasoning models return thinking here (string or array-of-parts)
 	ToolCalls        []oaiToolCall `json:"tool_calls,omitempty"`        // native tool calls from LLM
 	ToolCallID       string        `json:"tool_call_id,omitempty"`      // for role=tool messages
+}
+
+// oaiContent is a message content field that tolerates both content shapes the
+// OpenAI-compatible providers return. gpt-oss/OVH and OpenAI send a plain JSON
+// string; Mistral (with reasoning on) sends an ARRAY of content-part blocks,
+// e.g. [{"type":"thinking",...},{"type":"text","text":"..."}]. A plain
+// `string` field fails to unmarshal the array form ("cannot unmarshal array
+// into Go struct field ... content of type string"). This type unmarshals
+// either shape into a plain string — concatenating the "text" parts and
+// dropping "thinking" parts (chain-of-thought we neither replay nor surface
+// here) — and always marshals back to a JSON string so request bodies stay in
+// the canonical string form the whole codebase assumes.
+type oaiContent string
+
+func (c oaiContent) MarshalJSON() ([]byte, error) {
+	return json.Marshal(string(c))
+}
+
+func (c *oaiContent) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		*c = ""
+		return nil
+	}
+	switch trimmed[0] {
+	case '"': // plain string form
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return err
+		}
+		*c = oaiContent(s)
+	case '[': // array-of-parts form (Mistral with reasoning)
+		var parts []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(trimmed, &parts); err != nil {
+			return err
+		}
+		var sb strings.Builder
+		for _, p := range parts {
+			if p.Type == "text" {
+				sb.WriteString(p.Text)
+			}
+		}
+		*c = oaiContent(sb.String())
+	default:
+		return fmt.Errorf("oaiContent: unexpected JSON token %q", trimmed[0])
+	}
+	return nil
 }
 
 type oaiToolCall struct {
@@ -233,8 +283,8 @@ type oaiStreamChoice struct {
 }
 
 type oaiStreamDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role    string     `json:"role,omitempty"`
+	Content oaiContent `json:"content,omitempty"` // tolerate string OR array-of-parts (see oaiContent)
 }
 
 // oaiResponseStream implements ResponseStream over an SSE connection.
@@ -437,14 +487,14 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	var toolCalls []ToolCall
 	if len(oaiResp.Choices) > 0 {
 		msg := oaiResp.Choices[0].Message
-		content = msg.Content
+		content = string(msg.Content)
 
 		// Log reasoning content when present.
 		if msg.ReasoningContent != "" {
 			slog.DebugContext(ctx, "openai reasoning response",
 				"model", oaiResp.Model,
 				"reasoning_len", len(msg.ReasoningContent),
-				"reasoning", msg.ReasoningContent,
+				"reasoning", string(msg.ReasoningContent),
 				"content_len", len(content),
 			)
 		}
@@ -707,7 +757,7 @@ func (s *oaiResponseStream) Recv() (StreamChunk, error) {
 			if chunk.Choices[0].FinishReason != nil {
 				s.finishReason = *chunk.Choices[0].FinishReason
 			}
-			s.contentBuf.WriteString(chunk.Choices[0].Delta.Content)
+			s.contentBuf.WriteString(string(chunk.Choices[0].Delta.Content))
 		}
 
 		// Usage-only chunk (sent as the final chunk when stream_options.include_usage is true).
@@ -723,7 +773,7 @@ func (s *oaiResponseStream) Recv() (StreamChunk, error) {
 		}
 
 		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-			sc := StreamChunk{Content: chunk.Choices[0].Delta.Content, Model: chunk.Model}
+			sc := StreamChunk{Content: string(chunk.Choices[0].Delta.Content), Model: chunk.Model}
 			if chunk.Usage != nil {
 				sc.Usage = Usage{
 					InputTokens:  chunk.Usage.PromptTokens,
@@ -837,7 +887,7 @@ func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error
 		if m.Role == RoleAssistant && m.Content == "" && len(m.ToolCalls) == 0 {
 			continue
 		}
-		oMsg := oaiMessage{Role: string(m.Role), Content: m.Content}
+		oMsg := oaiMessage{Role: string(m.Role), Content: oaiContent(m.Content)}
 		// Native tool calling: pass tool_call_id for tool result messages.
 		if m.Role == RoleTool && m.ToolCallID != "" {
 			oMsg.ToolCallID = m.ToolCallID
