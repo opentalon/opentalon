@@ -2111,16 +2111,25 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		var calls []ToolCall
 		nativeToolCalls := len(resp.ToolCalls) > 0
 		if nativeToolCalls {
-			for _, tc := range resp.ToolCalls {
+			for idx, tc := range resp.ToolCalls {
 				plugin, action, _ := parseToolName(tc.Name)
+				id := tc.ID
+				if id == "" {
+					// Some providers omit the tool-call id. Synthesize a stable
+					// one (mirroring the text parser's scheme) so every
+					// downstream handle — the tool-result pairing that echoes it
+					// back to the provider, and the confirmation-prompt dedup key
+					// the chat client renders from it — always has a value.
+					id = fmt.Sprintf("call-%d", idx+1)
+				}
 				calls = append(calls, ToolCall{
-					ID:      tc.ID,
+					ID:      id,
 					Plugin:  plugin,
 					Action:  action,
 					Args:    tc.Arguments,
 					FromLLM: true,
 				})
-				log.Debug("native tool call", "id", tc.ID, "name", tc.Name, "args", tc.Arguments)
+				log.Debug("native tool call", "id", id, "name", tc.Name, "args", tc.Arguments)
 			}
 			log.Info("native tool calls received", "round", i+1, "count", len(calls))
 		} else {
