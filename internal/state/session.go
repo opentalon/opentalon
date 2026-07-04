@@ -94,6 +94,14 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	return nil
 }
 
+// AddMessageWithMetadata mirrors the persistent store's signature. Per-message
+// metadata is presentation state read only from the transcript (the DB-backed
+// store), so the in-memory store — which never round-trips through a reader —
+// simply drops it and behaves like AddMessage.
+func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, _ map[string]string) error {
+	return s.AddMessage(id, msg)
+}
+
 func (s *SessionStore) SetModel(id string, model provider.ModelRef) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

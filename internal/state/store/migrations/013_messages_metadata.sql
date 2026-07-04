@@ -1,0 +1,25 @@
+-- Per-message metadata: a small JSON map of UI/orchestration markers that the
+-- transcript reader (api-plugin) surfaces to chat clients, but which the LLM
+-- never sees. The first use is tool-confirmation persistence: an assistant
+-- prompt row that asks "proceed?" carries {prompt_type, tool_call_id | pipeline_id,
+-- options}, and the user's approving reply row carries {prompt_type:
+-- confirmation_response, action}. Without this column those markers live only
+-- in the transient live frame, so a browser reload rebuilds the transcript
+-- from role+content alone and cannot redraw the Approve/Reject buttons.
+--
+-- Loaded messages fed to the model (SessionStore.loadMessages) deliberately
+-- ignore this column — it is presentation state, not conversation content.
+--
+-- Schema portability: TEXT-only (a JSON-encoded map, mirroring how tool_calls
+-- is stored in migration 008). No jsonb / generated columns, so the same
+-- migration runs on SQLite and PostgreSQL. NULL = no metadata; readers treat
+-- NULL and '{}' identically. Messages written before this migration, and every
+-- ordinary chat turn after it, leave the column NULL.
+--
+-- Deploy order: the api-plugin transcript reader SELECTs this column by name.
+-- Core applies migrations at startup before it loads plugins, so within one
+-- pod the column always exists by the time the api-plugin serves a request.
+-- The only way to hit "no such column" is to point an api-plugin build that
+-- reads metadata at a database an OLDER core (pre-013) still owns — so ship
+-- core-with-013 first if the two ever move independently.
+ALTER TABLE messages ADD COLUMN metadata TEXT;

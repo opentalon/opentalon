@@ -947,6 +947,9 @@ func main() {
 		HasAction:     toolRegistry.HasAction,
 		Verifier:      profileVerifier,
 		LimitChecker:  usageStore,
+		// Read-only re-emit of a still-pending tool confirmation on a resume
+		// handshake, so a reconnected client redraws its Approve/Reject buttons.
+		PendingConfirmation: orch.PendingConfirmationFrame,
 	})
 
 	reg := channel.NewRegistry(handler)

@@ -53,6 +53,18 @@ func (c *cachedSessionStore) AddMessage(id string, msg provider.Message) error {
 	return nil
 }
 
+func (c *cachedSessionStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
+	if err := c.inner.AddMessageWithMetadata(id, msg, metadata); err != nil {
+		return err
+	}
+	// Cache the message like AddMessage does — the metadata is transcript-only
+	// state that nothing reads back through this cache, so it is not held here.
+	if s, ok := c.cache[id]; ok {
+		s.Messages = append(s.Messages, msg)
+	}
+	return nil
+}
+
 func (c *cachedSessionStore) SetModel(id string, model provider.ModelRef) error {
 	if err := c.inner.SetModel(id, model); err != nil {
 		return err

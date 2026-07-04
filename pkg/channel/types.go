@@ -244,6 +244,22 @@ type CreateSessionFunc func(sessionKey, entityID, groupID string)
 // or reshaping that prefix in handler.go would re-open this surface.
 const ResumeIntentMetadataKey = "resume_intent"
 
+// ControlMetadataKey marks an inbound message as an out-of-band control signal
+// rather than user chat input. The value names the specific control (see
+// ControlResumeHello). Control messages never run the LLM: the handler routes
+// them to a dedicated path and they bypass the debouncer. Content is empty, so
+// they must be injected into the core inbox directly (a channel's normal read
+// loop, which drops empty frames, is not the path for them).
+const ControlMetadataKey = "control"
+
+// ControlResumeHello is the ControlMetadataKey value a channel sends once,
+// immediately after a client reconnects to an existing conversation, so the
+// core can re-emit any still-pending tool-confirmation prompt and the reloaded
+// UI can redraw its Approve/Reject buttons without waiting for the user to type.
+// It carries ResumeIntentMetadataKey="true" (it is a resume) and the profile
+// token so the handler can scope the session and validate it exists.
+const ControlResumeHello = "resume_hello"
+
 // MessageHandler is called when an inbound message arrives. The implementation
 // feeds the message to the orchestrator and returns the response.
 type MessageHandler func(ctx context.Context, sessionKey string, msg InboundMessage) (OutboundMessage, error)

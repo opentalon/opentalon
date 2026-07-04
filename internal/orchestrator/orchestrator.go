@@ -239,6 +239,12 @@ type SessionStoreInterface interface {
 	Get(id string) (*state.Session, error)
 	Create(id, entityID, groupID string) *state.Session
 	AddMessage(id string, msg provider.Message) error
+	// AddMessageWithMetadata is AddMessage plus a small JSON map persisted on
+	// the message row and surfaced only by the transcript reader (never fed to
+	// the LLM). Used to mark tool-confirmation prompts and their replies so a
+	// reloaded client can redraw the Approve/Reject UI. A nil map behaves like
+	// AddMessage.
+	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
 	SetModel(id string, model provider.ModelRef) error
 	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op
 	SetTitle(id, title string) error                                         // upsert the short LLM-generated session label; missing id is a no-op
@@ -1239,7 +1245,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// button bypass, the LLM classifier, and "im Zweifel reject" in one place.
 		decision, reason, resolvedBy := o.classifyConfirmationReply(ctx, userMessage, "pipeline_plan", map[string]string{"steps": fmt.Sprintf("%d", len(p.Steps))})
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
-		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
+		_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, confirmationReplyMetadata(decision))
 		if decision == pipeline.DecisionApprove {
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionApprove, ResolvedBy: resolvedBy})
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
@@ -1319,8 +1325,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		switch decision {
 		case pipeline.DecisionApprove:
 			// Only record the user's approval in session — rejections are
-			// kept out so the LLM doesn't avoid re-calling the tool later.
-			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage})
+			// kept out so the LLM doesn't avoid re-calling the tool later. Mark
+			// the reply so a reloaded transcript can pair it with the answered
+			// prompt and show the Approve button as the pressed one.
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, confirmationReplyMetadata(pipeline.DecisionApprove))
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{
 				Choice:     pipeline.DecisionApprove,
 				ToolCallID: tc.ID,
@@ -1420,6 +1428,26 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				},
 			}, nil
 		}
+	}
+
+	// Expired confirmation: a deterministic button decision arrived (an
+	// Approve/Reject click sets actor.ConfirmationDecision), but nothing is
+	// pending — the pod restarted and lost an in-memory pipeline, or the call
+	// was already resolved/cleared. Block A returns for any pending pipeline and
+	// Block A2 for any pending tool call, so reaching here with a decision set
+	// means the prompt is gone. Tell the client instead of letting the literal
+	// "approve" fall through as a normal chat turn; add no history rows (mirrors
+	// the reject rule) so the transcript stays clean.
+	if pendingCall == nil && actor.ConfirmationDecision(ctx) != "" {
+		log.Info("confirmation decision with nothing pending — prompt expired",
+			"session", sessionID, "decision", actor.ConfirmationDecision(ctx))
+		return &RunResult{
+			Response: "This confirmation is no longer active. Please try your request again.",
+			Metadata: map[string]string{
+				"type":   "system",
+				"action": "confirmation_expired",
+			},
+		}, nil
 	}
 
 	content := userMessage
@@ -1701,7 +1729,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				} else {
 					planText = narrated
 				}
-				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
+				pipelineMeta := pipelineConfirmationFrameMetadata(p.ID)
+				_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText}, pipelineMeta)
 				log.Debug("pipeline stored, awaiting confirmation for write steps",
 					"pipeline_id", p.ID, "session", sessionID, "write_steps", len(writeSteps))
 				confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
@@ -1716,12 +1745,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				o.pendingMu.Unlock()
 				return &RunResult{
 					Response: planText,
-					Metadata: map[string]string{
-						"type":        "confirmation",
-						"prompt_type": "confirmation",
-						"pipeline_id": p.ID,
-						"options":     "approve,reject",
-					},
+					Metadata: pipelineMeta,
 				}, nil
 			}
 			// ConfirmBeforeStep == 0: confirm entire pipeline (original behavior).
@@ -1733,7 +1757,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			} else {
 				planText = narrated
 			}
-			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText})
+			pipelineMeta := pipelineConfirmationFrameMetadata(p.ID)
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText}, pipelineMeta)
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
 			confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
 				Prompt:  planText,
@@ -1747,12 +1772,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			o.pendingMu.Unlock()
 			return &RunResult{
 				Response: planText,
-				Metadata: map[string]string{
-					"type":        "confirmation",
-					"prompt_type": "confirmation",
-					"pipeline_id": p.ID,
-					"options":     "approve,reject",
-				},
+				Metadata: pipelineMeta,
 			}, nil
 		}
 		// Single-step pipeline: execute the tool call server-side and seed the
@@ -2690,6 +2710,95 @@ func (o *Orchestrator) classifyConfirmationReply(
 	return res.Decision, res.Reason, resolvedByClassifier
 }
 
+// toolConfirmationFrameMetadata builds the metadata attached to a tool-call
+// confirmation prompt. The SAME map is used two ways: on the live RunResult
+// frame the client turns into Approve/Reject buttons, and (persisted via
+// AddMessageWithMetadata) on the prompt's message row so a browser reload — or
+// a resume re-emit — rebuilds the identical UI from the transcript instead of
+// bare text. tool_call_id is the dedup key a client uses to recognise the same
+// prompt across the live frame, the history rebuild, and the resume re-emit.
+func toolConfirmationFrameMetadata(toolCallID string) map[string]string {
+	m := map[string]string{
+		"type":        "confirmation",
+		"prompt_type": "tool_confirmation",
+		"options":     "approve,reject",
+	}
+	if toolCallID != "" {
+		m["tool_call_id"] = toolCallID
+	}
+	return m
+}
+
+// pipelineConfirmationFrameMetadata is toolConfirmationFrameMetadata for a
+// multi-step plan: the client keys the prompt on pipeline_id. pendingPipelines
+// is in-memory only, so after a pod restart this id refers to nothing — a
+// reloaded client must render such a row as already-resolved, never clickable
+// (the live re-emit is the only trustworthy "still active" signal).
+func pipelineConfirmationFrameMetadata(pipelineID string) map[string]string {
+	return map[string]string{
+		"type":        "confirmation",
+		"prompt_type": "confirmation",
+		"pipeline_id": pipelineID,
+		"options":     "approve,reject",
+	}
+}
+
+// confirmationReplyMetadata marks a user reply row that resolved a pending
+// confirmation. It lets a reloaded client pair the answered prompt with its
+// reply structurally — by prompt_type/action, not by comparing localized button
+// labels — and highlight the chosen action. action is the decision string
+// ("approve"/"reject"). Single tool calls persist only approve replies (rejects
+// are deliberately kept out of history); pipelines persist both outcomes.
+func confirmationReplyMetadata(action string) map[string]string {
+	return map[string]string{
+		"prompt_type": "confirmation_response",
+		"action":      action,
+	}
+}
+
+// PendingConfirmationFrame reports whether the session currently has a tool call
+// (or pipeline plan) awaiting the user's approval and, if so, returns the prompt
+// text plus the confirmation-frame metadata to re-emit. It is READ-ONLY: it
+// never consumes or clears pending state — the decision still flows through
+// Run's Block A/A2. The channel handler calls it on a resume handshake so a
+// reconnected client can redraw the Approve/Reject buttons.
+//
+// Why the transcript alone is not enough: pending state lives in this pod's
+// memory (or the persisted pending_tool_call blob), so after a restart a
+// transcript prompt can reference a call nothing can act on. This method answers
+// from the authoritative live state — a client should treat its result, not the
+// transcript, as the only signal to render *active* buttons; history rebuilds
+// answered rows only.
+func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content string, metadata map[string]string, ok bool) {
+	o.pendingMu.Lock()
+	pendingCall := o.pendingToolCalls[sessionID]
+	pendingPrompt := o.pendingConfirmationPrompts[sessionID]
+	pendingPipeline := o.pendingPipelines[sessionID]
+	o.pendingMu.Unlock()
+
+	// Tool call: in-memory fast path, else the persisted blob (survives restart
+	// / failover), which carries the approved-intent prompt it was stored with.
+	if pendingCall == nil {
+		loadedCall, _, loadedPrompt := loadPendingToolCall(o.sessions, sessionID)
+		pendingCall = loadedCall
+		if pendingPrompt == "" {
+			pendingPrompt = loadedPrompt
+		}
+	}
+	if pendingCall != nil {
+		return pendingPrompt, toolConfirmationFrameMetadata(pendingCall.ID), true
+	}
+
+	// Pipeline plan: in-memory only (no persistence), so this covers a live
+	// reconnect but not a post-restart resume. Prompt text is re-derived
+	// deterministically (no LLM); the client dedupes by pipeline_id, so a slight
+	// wording difference from the narrated history bubble is harmless.
+	if pendingPipeline != nil {
+		return pendingPipeline.FormatForConfirmation(), pipelineConfirmationFrameMetadata(pendingPipeline.ID), true
+	}
+	return "", nil, false
+}
+
 // maybeRequireConfirmation raises a confirmation_requested for a privileged
 // write call and records the pending state, mirroring the agent-loop gate. It is
 // the single place that decides "does this call need confirmation?" and is used
@@ -2752,8 +2861,12 @@ func (o *Orchestrator) maybeRequireConfirmation(
 		}
 		confirmMsg += "\nWould you like me to proceed?"
 	}
-	// Store the prompt so the next turn has context for the reply/amend.
-	_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg})
+	// Store the prompt so the next turn has context for the reply/amend, and
+	// persist the confirmation-frame metadata on that row so a reloaded client
+	// rebuilds the Approve/Reject buttons from the transcript (the live frame's
+	// metadata below is transient). Same map, so reload and live path match.
+	frameMeta := toolConfirmationFrameMetadata(call.ID)
+	_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg}, frameMeta)
 	// Buttons are deterministic approve/reject only; amend is a free-text-classifier
 	// outcome with no button by design, so the Choices set stays two-way.
 	confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
@@ -2777,11 +2890,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg)
 	return &RunResult{
 		Response: confirmMsg,
-		Metadata: map[string]string{
-			"type":        "confirmation",
-			"prompt_type": "tool_confirmation",
-			"options":     "approve,reject",
-		},
+		Metadata: frameMeta,
 	}, true
 }
 
