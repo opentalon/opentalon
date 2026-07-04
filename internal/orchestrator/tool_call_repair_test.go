@@ -67,11 +67,15 @@ func TestRepairedArgsPreserveSubstance(t *testing.T) {
 			want:     true,
 		},
 		{
-			name:     "nested JSON-string key rename passes",
+			// Repair triggers only on TOP-LEVEL argument-name rejections, so
+			// a legitimate repair never renames keys inside a nested payload
+			// — and allowing it would blind the binding check to sibling
+			// swaps inside the payload.
+			name:     "nested JSON-string key rename fails",
 			action:   declAction("tasks"),
 			original: map[string]string{"tasks": `[{"name":"check pressure","qty":"5"}]`},
 			repaired: map[string]string{"tasks": `[{"task_name":"check pressure","quantity":5}]`},
-			want:     true,
+			want:     false,
 		},
 		{
 			name:     "restructure of unknown keys into nesting passes",
@@ -208,6 +212,33 @@ func TestRepairedArgsPreserveSubstance(t *testing.T) {
 			repaired: map[string]string{"item_ids": "[2,7]"},
 			want:     false,
 		},
+		// Sibling-value swaps INSIDE a kept key's nested payload: the
+		// multiset is identical, so only the key-aware nested rendering of
+		// the binding check catches the inversion.
+		{
+			name:     "nested sibling-value swap on a kept key fails",
+			action:   declAction("transfer"),
+			original: map[string]string{"transfer": `{"from_org_unit":5,"to_org_unit":9}`},
+			repaired: map[string]string{"transfer": `{"from_org_unit":9,"to_org_unit":5}`},
+			want:     false,
+		},
+		{
+			name:     "array-of-objects sibling swap fails",
+			action:   declAction("tasks"),
+			original: map[string]string{"tasks": `[{"id":1,"qty":2}]`},
+			repaired: map[string]string{"tasks": `[{"id":2,"qty":1}]`},
+			want:     false,
+		},
+		// Delimiter collision: without quoted string leaves, '["a,b"]' and
+		// '["a","b"]' both render '[a,b]' and this swap between the kept
+		// declared key and a renamed unknown key would pass.
+		{
+			name:     "delimiter-collision swap between kept and renamed key fails",
+			action:   declAction("names", "renamed_labels"),
+			original: map[string]string{"names": `["a,b"]`, "labels": `["a","b"]`},
+			repaired: map[string]string{"names": `["a","b"]`, "renamed_labels": `["a,b"]`},
+			want:     false,
+		},
 		// Empty containers are values: adding or dropping one is a
 		// substance change (on update-style APIs an empty array means
 		// "clear this collection").
@@ -333,9 +364,9 @@ func misnamedArgParser(args map[string]string) *fakeParser {
 // ----- Part 1: pre-confirmation argument validation -----
 
 // A privileged call with unknown argument names must NOT cost the user an
-// approval: the gate skips, executeCall rejects with the usual
-// tool_call_args_invalid (exactly once — no double emit), and the error flows
-// back so the model corrects silently.
+// approval when the repair phase is enabled: the gate skips, executeCall
+// rejects with the usual tool_call_args_invalid (exactly once — no double
+// emit), and the error flows back so the model corrects silently.
 func TestConfirmation_InvalidArgsSkipGate(t *testing.T) {
 	sink := &recordingEventSink{}
 	llm := &fakeLLM{responses: []string{
@@ -347,6 +378,7 @@ func TestConfirmation_InvalidArgsSkipGate(t *testing.T) {
 	orch, sessID := setupRepairOrchestrator(llm, parser, sink, exec, OrchestratorOpts{
 		ConfirmationPlugin: "conf",
 		ConfirmationAction: "check",
+		Repair:             RepairConfig{Enabled: true},
 	})
 	_ = orch.registry.Register(PluginCapability{Name: "conf", Actions: []Action{{Name: "check"}}}, confirmingExecutor{})
 
@@ -390,6 +422,38 @@ func TestConfirmation_ValidArgsStillRaiseGate(t *testing.T) {
 	}
 	if n := countEventType(sink.snapshot(), events.TypeConfirmationRequested); n != 1 {
 		t.Errorf("confirmation_requested count = %d, want 1", n)
+	}
+	if result.Metadata["type"] != "confirmation" {
+		t.Errorf("Metadata type = %q, want confirmation", result.Metadata["type"])
+	}
+	if len(exec.snapshot()) != 0 {
+		t.Error("the call must pause at the gate, not execute")
+	}
+}
+
+// Ships-dark promise: with repair disabled the pre-confirmation unknown-args
+// validation must not run — a write call with unknown argument names raises
+// a confirmation exactly as it did before the repair feature existed.
+func TestConfirmation_RepairDisabled_UnknownArgsStillRaiseGate(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{
+		"[tool_call] update the item",
+		"Shall I update item 42?", // confirmation narration
+	}}
+	parser := misnamedArgParser(map[string]string{"item_id": "42", "user_id": "131349"})
+	exec := &recordingExecutor{}
+	orch, sessID := setupRepairOrchestrator(llm, parser, sink, exec, OrchestratorOpts{
+		ConfirmationPlugin: "conf",
+		ConfirmationAction: "check",
+	})
+	_ = orch.registry.Register(PluginCapability{Name: "conf", Actions: []Action{{Name: "check"}}}, confirmingExecutor{})
+
+	result, err := orch.Run(context.Background(), sessID, "set user 131349 on item 42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := countEventType(sink.snapshot(), events.TypeConfirmationRequested); n != 1 {
+		t.Errorf("confirmation_requested count = %d, want 1 — repair disabled must leave the gate untouched", n)
 	}
 	if result.Metadata["type"] != "confirmation" {
 		t.Errorf("Metadata type = %q, want confirmation", result.Metadata["type"])
@@ -862,14 +926,19 @@ func TestRepair_ApprovedCall_RepairedWithoutReconfirmation(t *testing.T) {
 	})
 
 	approvedPrompt := "Set user 131349 as responsible for item 7 — proceed?"
-	orch.pendingMu.Lock()
-	orch.pendingToolCalls[sessID] = &ToolCall{
+	// Persist the pending call the way maybeRequireConfirmation does and let
+	// Run's metadata fallback restore it (pod restart / failover path).
+	// FromLLM must survive the roundtrip: without it the restored call would
+	// skip executeCall's unknown-args validation and run with the misnamed
+	// argument instead of entering repair.
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{
 		ID: "pending-1", Plugin: "inventory", Action: "update-item",
 		Args:    map[string]string{"item_id": "7", "user_id": "131349"},
 		FromLLM: true,
+	}, "", approvedPrompt)
+	if restored, _, prompt := loadPendingToolCall(orch.sessions, sessID); restored == nil || !restored.FromLLM || prompt != approvedPrompt {
+		t.Fatal("pending-call roundtrip must preserve FromLLM and the approved prompt")
 	}
-	orch.pendingConfirmationPrompts[sessID] = approvedPrompt
-	orch.pendingMu.Unlock()
 
 	result, err := orch.Run(context.Background(), sessID, "yes, go ahead")
 	if err != nil {

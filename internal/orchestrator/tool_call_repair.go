@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/big"
 	"sort"
 	"strconv"
@@ -42,9 +43,14 @@ import (
 // leaf-value multiset must be unchanged (empty arrays/objects count as
 // values), and a value may only move away from its key when that key was
 // NOT a declared parameter (i.e. an unknown key being renamed) — keys that
-// keep their name keep their exact value, including array order. The
-// corrector also may not switch to a different plugin or action: the
-// corrected call keeps both.
+// keep their name keep their exact value, including array order and
+// nested structure (repair only ever triggers on rejectUnknownArgs, which
+// validates TOP-LEVEL argument names, so a legitimate shape repair never
+// needs to rename keys inside a nested payload). The only residual trust
+// left with the corrector prompt is values relocated away from
+// renamed-away unknown top-level keys, which stay covered by the multiset
+// check alone. The corrector also may not switch to a different plugin or
+// action: the corrected call keeps both.
 //
 // Only failures that provably happened before dispatch are repairable,
 // keyed on the typed ToolResult.ArgsInvalid flag set by executeCall's
@@ -101,14 +107,17 @@ func (o *Orchestrator) resolveAction(pluginName, actionName string) *Action {
 	return nil
 }
 
-// repairNeedsFreshApproval reports whether re-executing the failed call
-// would require a user approval: the confirmation gate is configured, the
+// callRequiresConfirmation reports whether executing the call would
+// require a user approval: the confirmation gate is configured, the
 // action is not read-only, and the confirmation plugin requires
-// confirmation for it. Mirrors maybeRequireConfirmation's decision (minus
-// the pre-gate argument validation that let the call through unconfirmed
-// in the first place). checkConfirmationPlugin fails safe — a plugin error
-// reads as "requires confirmation", which here means "do not repair".
-func (o *Orchestrator) repairNeedsFreshApproval(ctx context.Context, call ToolCall) bool {
+// confirmation for it. This is the shared head of the confirmation
+// decision — maybeRequireConfirmation delegates here (after its own
+// ConfirmationBypass check and the repair-gated unknown-args skip), and
+// the repair phase's consent boundary asks it whether re-executing a
+// failed call would need an approval that was never granted.
+// checkConfirmationPlugin fails safe — a plugin error reads as "requires
+// confirmation", which for repair means "do not repair".
+func (o *Orchestrator) callRequiresConfirmation(ctx context.Context, call ToolCall) bool {
 	if o.confirmationPlugin == "" || o.confirmationAction == "" ||
 		o.registry.IsActionReadOnly(call.Plugin, call.Action) {
 		return false
@@ -148,7 +157,7 @@ func (o *Orchestrator) maybeRepairToolCall(
 	// pre-confirmation validation skip the gate — falling back here sends
 	// the error to the model, whose corrected re-plan goes through the
 	// normal gate.
-	if !approved && o.repairNeedsFreshApproval(ctx, call) {
+	if !approved && o.callRequiresConfirmation(ctx, call) {
 		log.Info("tool call repair: call requires a confirmation that was never granted; falling back to normal error flow",
 			"plugin", call.Plugin, "action", call.Action)
 		return call, failed, false
@@ -166,11 +175,11 @@ func (o *Orchestrator) maybeRepairToolCall(
 		}
 		repairCtx := ctx
 		if invokedID := emit.EmitToolCallRepairInvoked(invokeCtx, o.eventSink, emit.ToolCallRepairInvokedArgs{
-			CallID:  call.ID,
-			Plugin:  call.Plugin,
-			Action:  call.Action,
-			Attempt: attempt,
-			Error:   lastResult.Error,
+			CallID:          call.ID,
+			Plugin:          call.Plugin,
+			Action:          call.Action,
+			Attempt:         attempt,
+			ValidationError: lastResult.Error,
 		}); invokedID != "" {
 			repairCtx = emit.WithParent(ctx, invokedID)
 		}
@@ -289,15 +298,16 @@ func renderActionDefinition(pluginName string, action *Action) string {
 //     was NOT a declared parameter (an unknown key being renamed — the
 //     only thing a shape repair legitimately renames). Every original key
 //     that is declared, or that also appears in the repaired args, must
-//     keep its exact value (canonicalArgValue, array order preserved) —
-//     otherwise a corrector could swap values between fields (from/to,
-//     item/user) and invert the call's meaning while the multiset stays
-//     identical.
+//     keep its exact value (canonicalArgValue: array order preserved,
+//     nested key names and pairings included) — otherwise a corrector
+//     could swap values between fields (from/to, item/user), including
+//     siblings inside a nested payload, and invert the call's meaning
+//     while the multiset stays identical.
 //
-// Values relocated from renamed unknown keys remain covered only by the
-// multiset check (their destination is by definition unknowable
-// mechanically); that is the residual trust placed in the corrector
-// prompt.
+// Values relocated from renamed unknown TOP-LEVEL keys remain covered
+// only by the multiset check (their destination is by definition
+// unknowable mechanically); that is the residual trust placed in the
+// corrector prompt.
 func repairedArgsPreserveSubstance(action *Action, original, repaired map[string]string) bool {
 	if !sameArgLeafValues(original, repaired) {
 		return false
@@ -331,17 +341,7 @@ func repairedArgsPreserveSubstance(action *Action, original, repaired map[string
 // large ids); plain strings that are not valid JSON compare verbatim — a
 // "007"-style identifier is a value, not a number spelling.
 func sameArgLeafValues(original, repaired map[string]string) bool {
-	a := argLeafValues(original)
-	b := argLeafValues(repaired)
-	if len(a) != len(b) {
-		return false
-	}
-	for leaf, count := range a {
-		if b[leaf] != count {
-			return false
-		}
-	}
-	return true
+	return maps.Equal(argLeafValues(original), argLeafValues(repaired))
 }
 
 // argLeafValues collects the canonical-form multiset of scalar leaves across
@@ -416,13 +416,15 @@ func collectLeafValues(v any, counts map[string]int) {
 }
 
 // canonicalArgValue renders one wire arg value in a structural canonical
-// form for the per-key binding check: scalars via canonicalLeaf, arrays
-// keep element order, nested map values compare as a sorted set (key names
-// inside nested payloads may legitimately be renamed by a shape repair).
-// Equal values always render identically; a delimiter collision between
-// structure characters and string content could at worst make two
-// DIFFERENT values render alike, and that case is already rejected by the
-// global leaf-multiset check.
+// form for the per-key binding check: scalars via canonicalLeaf (string
+// leaves strconv.Quote'd so string content can never alias structure
+// characters — '["a,b"]' and '["a","b"]' render differently), arrays keep
+// element order, nested maps render as sorted quotedKey:value pairs —
+// nested key names and their value pairings are part of a kept key's
+// substance. Repair only ever triggers on rejectUnknownArgs, which
+// validates TOP-LEVEL argument names, so a legitimate shape repair never
+// needs to rename keys inside a nested payload; a corrector that does is
+// rejected and the error falls back to the normal flow.
 func canonicalArgValue(wire string) string {
 	return canonicalizeParsed(parseArgValue(wire))
 }
@@ -434,8 +436,8 @@ func canonicalizeParsed(v any) string {
 			return "{}"
 		}
 		parts := make([]string, 0, len(t))
-		for _, child := range t {
-			parts = append(parts, canonicalizeParsed(child))
+		for key, child := range t {
+			parts = append(parts, strconv.Quote(key)+":"+canonicalizeParsed(child))
 		}
 		sort.Strings(parts)
 		return "{" + strings.Join(parts, ",") + "}"
@@ -452,7 +454,7 @@ func canonicalizeParsed(v any) string {
 		nested := parseArgValue(t)
 		if s, isStr := nested.(string); isStr {
 			if s == t {
-				return canonicalLeaf(t)
+				return strconv.Quote(t)
 			}
 			return canonicalizeParsed(s)
 		}
@@ -462,14 +464,13 @@ func canonicalizeParsed(v any) string {
 	}
 }
 
-// canonicalLeaf renders one scalar in canonical form. Typed JSON numbers
-// collapse across spellings (json.Number "5.0", float64 5, and "5" all
-// render "5") because the original args are wire strings that decode to
-// json.Number while repaired args arrive typed from the corrector's JSON —
-// that type flip is form, not substance. Plain strings that are NOT valid
-// JSON render verbatim: JSON has no way to spell "007" or "+49…" as a
-// number, so a corrector turning them into 7 / 49… changed the value, and
-// the guard must see that.
+// canonicalLeaf renders one scalar in canonical form. JSON numbers
+// collapse across spellings (json.Number "5.0" and "5" both render "5")
+// because the corrector's typed JSON is converted back to wire strings
+// before the guard runs — a respelling on that round-trip is form, not
+// substance. Plain strings that are NOT valid JSON render verbatim: JSON
+// has no way to spell "007" or "+49…" as a number, so a corrector turning
+// them into 7 / 49… changed the value, and the guard must see that.
 func canonicalLeaf(v any) string {
 	switch t := v.(type) {
 	case nil:
@@ -478,8 +479,6 @@ func canonicalLeaf(v any) string {
 		return strconv.FormatBool(t)
 	case json.Number:
 		return canonicalNumber(string(t))
-	case float64:
-		return canonicalNumber(formatFloat(t))
 	case string:
 		return t
 	default:

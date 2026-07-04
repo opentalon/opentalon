@@ -122,21 +122,22 @@ func EmitToolCallArgsInvalid(ctx context.Context, sink Sink, args ToolCallArgsIn
 }
 
 // ToolCallRepairInvokedArgs marks one corrector side-call of the repair
-// phase. Attempt is 1-based within the per-call repair budget; Error is
-// the failed attempt's error text (sanitized + excerpted here).
+// phase. Attempt is 1-based within the per-call repair budget;
+// ValidationError is the failed attempt's error text (sanitized +
+// excerpted here).
 type ToolCallRepairInvokedArgs struct {
-	CallID  string
-	Plugin  string
-	Action  string
-	Attempt int
-	Error   string
+	CallID          string
+	Plugin          string
+	Action          string
+	Attempt         int
+	ValidationError string
 }
 
 // EmitToolCallRepairInvoked writes one tool_call_repair_invoked event.
 // Returns the generated event id so the repair loop can stamp it as the
 // parent of the corrector's llm_request/llm_response via WithParent.
 func EmitToolCallRepairInvoked(ctx context.Context, sink Sink, args ToolCallRepairInvokedArgs) string {
-	sanitized := events.SanitizeUTF8(args.Error)
+	sanitized := events.SanitizeUTF8(args.ValidationError)
 	excerpt, _ := events.Excerpt(sanitized)
 	return send(ctx, sink, events.TypeToolCallRepairInvoked, events.ToolCallRepairInvokedPayload{
 		Header:          events.Header{V: events.ToolCallRepairInvokedVersion},

@@ -2339,6 +2339,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			pluginStart := time.Now()
 			toolResult := o.executeCall(ctx, calls[i])
+			// Captured before the repair block so the "plugin call" log line
+			// times the plugin, not the corrector side-call — repair logs its
+			// own per-attempt timing.
+			pluginDuration := time.Since(pluginStart)
 			call := calls[i]
 			// Repair phase: give a failed call to the corrector side-call
 			// BEFORE the error is recorded into session history. Agent-loop
@@ -2354,7 +2358,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if repaired {
 				call, toolResult = repairedCall, repairedResult
 			}
-			pluginDuration := time.Since(pluginStart)
 			result.ToolCalls = append(result.ToolCalls, call)
 			result.Results = append(result.Results, toolResult)
 			totalToolCalls++
@@ -2698,9 +2701,7 @@ func (o *Orchestrator) classifyConfirmationReply(
 func (o *Orchestrator) maybeRequireConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
 ) (*RunResult, bool) {
-	if o.confirmationPlugin == "" || o.confirmationAction == "" ||
-		call.ConfirmationBypass ||
-		o.registry.IsActionReadOnly(call.Plugin, call.Action) {
+	if call.ConfirmationBypass {
 		return nil, false
 	}
 	// Validate argument names BEFORE narrating and storing the pending call.
@@ -2714,9 +2715,13 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	//
 	// This skip makes an UNAPPROVED privileged write reach executeCall; the
 	// repair phase honors that boundary — maybeRepairToolCall re-checks the
-	// confirmation decision and never re-executes an unapproved call that
-	// would require one, so the corrected re-plan always re-enters this gate.
-	if call.FromLLM && len(call.Args) > 0 {
+	// confirmation decision (callRequiresConfirmation) and never re-executes
+	// an unapproved call that would require one, so the corrected re-plan
+	// always re-enters this gate.
+	//
+	// Gated on o.repairer != nil so orchestrator.repair.enabled=false leaves
+	// this gate exactly as it was before the repair feature existed.
+	if o.repairer != nil && call.FromLLM && len(call.Args) > 0 {
 		if action := o.resolveAction(call.Plugin, call.Action); action != nil {
 			if err := rejectUnknownArgs(call, action); err != nil {
 				logger.FromContext(ctx).Debug("skipping confirmation for call with unknown args; executeCall will reject it",
@@ -2725,12 +2730,9 @@ func (o *Orchestrator) maybeRequireConfirmation(
 			}
 		}
 	}
-	confResult := o.checkConfirmationPlugin(ctx, []*pipeline.Step{{
-		ID:      call.ID,
-		Name:    call.Action,
-		Command: &pipeline.PluginCommand{Plugin: call.Plugin, Action: call.Action},
-	}})
-	if !confResult.RequiresConfirmation {
+	// Shared head with the repair phase's consent boundary: gate configured,
+	// action not read-only, confirmation plugin says yes.
+	if !o.callRequiresConfirmation(ctx, call) {
 		return nil, false
 	}
 	log := logger.FromContext(ctx)
@@ -4526,6 +4528,10 @@ type pendingToolCallMeta struct {
 	// user approves. Persisted so a post-approval repair on another
 	// instance can still hand the corrector the approved intent.
 	Prompt string `json:"prompt,omitempty"`
+	// FromLLM marks the call as LLM-originated so a restored call still
+	// passes executeCall's unknown-args validation. Rows persisted before
+	// this field unmarshal to false — exactly how they were restored then.
+	FromLLM bool `json:"from_llm,omitempty"`
 }
 
 func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID, prompt string) {
@@ -4536,6 +4542,7 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 		Args:                    tc.Args,
 		ConfirmationRequestedID: confirmationRequestedID,
 		Prompt:                  prompt,
+		FromLLM:                 tc.FromLLM,
 	}
 	data, err := json.Marshal(meta)
 	if err != nil {
@@ -4561,7 +4568,7 @@ func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*Too
 	if json.Unmarshal([]byte(raw), &meta) != nil {
 		return nil, "", ""
 	}
-	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args}, meta.ConfirmationRequestedID, meta.Prompt
+	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args, FromLLM: meta.FromLLM}, meta.ConfirmationRequestedID, meta.Prompt
 }
 
 // toolCallSignature builds a deterministic string from a set of tool calls
