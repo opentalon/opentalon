@@ -35,6 +35,15 @@ import (
 // logs and continues, same robustness contract as the load_tools write
 // path).
 //
+// Repair interaction (tool_call_repair.go): a repaired success resets the
+// consecutive-error counters exactly like a normal success, but every
+// corrector invocation bumps a SEPARATE per-tool repair counter
+// (recordRepairAttempt) that feeds the same sticky-demotion threshold and
+// only resets on a clean, unrepaired success — so a tool whose schema
+// chronically misleads the planner (every call fails pre-dispatch, gets
+// repaired, succeeds) still gets demoted instead of looking healthy while
+// costing one corrector LLM call per invocation.
+//
 // State location: in-memory sync.Map keyed by sessionID. Counters
 // are NOT persisted — a process restart resets them. The persisted
 // artifact is only the Demoted flag (which lives in
@@ -45,16 +54,18 @@ import (
 // the agent loop is sequential — but possible across overlapping
 // sessions sharing the same Orchestrator) don't race.
 type sessionErrorState struct {
-	mu            sync.Mutex
-	currentTurn   int
-	turnErrors    map[string]int // toolFQN → consecutive errors in currentTurn
-	sessionErrors map[string]int // toolFQN → consecutive errors across session
+	mu             sync.Mutex
+	currentTurn    int
+	turnErrors     map[string]int // toolFQN → consecutive errors in currentTurn
+	sessionErrors  map[string]int // toolFQN → consecutive errors across session
+	sessionRepairs map[string]int // toolFQN → corrector invocations since the last clean (unrepaired) success
 }
 
 func newSessionErrorState() *sessionErrorState {
 	return &sessionErrorState{
-		turnErrors:    make(map[string]int),
-		sessionErrors: make(map[string]int),
+		turnErrors:     make(map[string]int),
+		sessionErrors:  make(map[string]int),
+		sessionRepairs: make(map[string]int),
 	}
 }
 
@@ -70,7 +81,11 @@ func newSessionErrorState() *sessionErrorState {
 // concurrent caller, even though the current agent loop is
 // sequential per session: future architectures (parallel sub-agents,
 // concurrent tool dispatch) shouldn't break the counter semantics.
-func (s *sessionErrorState) record(turn int, fqn string, success bool) (turnCount, sessionCount int, wasFailing bool) {
+// repaired qualifies a success: a repaired success resets the error
+// counters like any success but does NOT reset the separate repair
+// counter — only a clean, unrepaired success proves the tool's schema and
+// the planner agree again.
+func (s *sessionErrorState) record(turn int, fqn string, success, repaired bool) (turnCount, sessionCount int, wasFailing bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if turn != s.currentTurn {
@@ -81,11 +96,24 @@ func (s *sessionErrorState) record(turn int, fqn string, success bool) (turnCoun
 		wasFailing = s.sessionErrors[fqn] > 0
 		delete(s.turnErrors, fqn)
 		delete(s.sessionErrors, fqn)
+		if !repaired {
+			delete(s.sessionRepairs, fqn)
+		}
 		return 0, 0, wasFailing
 	}
 	s.turnErrors[fqn]++
 	s.sessionErrors[fqn]++
 	return s.turnErrors[fqn], s.sessionErrors[fqn], false
+}
+
+// recordRepairAttempt bumps the separate per-tool repair counter (one bump
+// per corrector invocation) and returns the new count. Reset only by a
+// clean, unrepaired success in record.
+func (s *sessionErrorState) recordRepairAttempt(fqn string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessionRepairs[fqn]++
+	return s.sessionRepairs[fqn]
 }
 
 // toolErrorTracker holds per-session counter state in a sync.Map keyed
@@ -111,7 +139,10 @@ func (t *toolErrorTracker) stateFor(sessionID string) *sessionErrorState {
 }
 
 // recordToolOutcome is called after every executeCall in the agent
-// loop. Updates the in-memory counters and returns:
+// loop. repaired marks a result that came out of the repair phase
+// (tool_call_repair.go) — a repaired success resets the error counters but
+// keeps the separate repair counter accumulating. Updates the in-memory
+// counters and returns:
 //   - a system message to inject into the next LLM iteration when
 //     the loop_cap_per_turn threshold trips, otherwise nil
 //   - whether the caller should persist a Demoted=true flip
@@ -122,13 +153,13 @@ func (t *toolErrorTracker) stateFor(sessionID string) *sessionErrorState {
 // tracker only does durable work when a state store is wired; the loop-cap
 // nudge works without one. The per-turn counter cost is trivial (two
 // integer increments + a map lookup per tool call).
-func (o *Orchestrator) recordToolOutcome(ctx context.Context, sessionID string, call ToolCall, result ToolResult) *provider.Message {
+func (o *Orchestrator) recordToolOutcome(ctx context.Context, sessionID string, call ToolCall, result ToolResult, repaired bool) *provider.Message {
 	if sessionID == "" {
 		return nil
 	}
 	fqn := toolFQN(call.Plugin, call.Action)
 	st := o.toolErrorTracker.stateFor(sessionID)
-	turnCount, sessionCount, wasFailing := st.record(o.sessionTurnNumber(sessionID), fqn, result.Error == "")
+	turnCount, sessionCount, wasFailing := st.record(o.sessionTurnNumber(sessionID), fqn, result.Error == "", repaired)
 
 	if result.Error == "" {
 		if wasFailing && o.injectionStateStore != nil {
@@ -154,6 +185,25 @@ func (o *Orchestrator) recordToolOutcome(ctx context.Context, sessionID string, 
 		}
 	}
 	return nil
+}
+
+// recordRepairAttempt feeds one corrector invocation of the repair phase
+// into the separate per-tool repair counter. When the count crosses
+// StickyDemotionThreshold the tool is demoted exactly like consecutive
+// hard errors would demote it — a tool that only ever works via repair is
+// not healthy, it is expensive. Reset by a clean, unrepaired success
+// (record); no loop-cap nudge, because a repaired call did succeed and
+// telling the LLM it "failed" would be false.
+func (o *Orchestrator) recordRepairAttempt(ctx context.Context, sessionID string, call ToolCall) {
+	if sessionID == "" {
+		return
+	}
+	fqn := toolFQN(call.Plugin, call.Action)
+	n := o.toolErrorTracker.stateFor(sessionID).recordRepairAttempt(fqn)
+	if o.toolErrorHandling.StickyDemotionThreshold > 0 &&
+		n >= o.toolErrorHandling.StickyDemotionThreshold && o.injectionStateStore != nil {
+		o.markDemotedFlag(ctx, sessionID, fqn)
+	}
 }
 
 // markDemotedFlag flips KnownToolEntry.Demoted=true for fqn. If the

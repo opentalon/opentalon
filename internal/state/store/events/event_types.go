@@ -73,6 +73,16 @@ const (
 	// Tool calls.
 	TypeToolCallExtracted = "tool_call_extracted"
 	TypeToolCallResult    = "tool_call_result"
+	// tool_call_repair_invoked is the parent sentinel for one corrector
+	// side-call of the tool-call repair phase, mirroring the role of
+	// confirmation_classification_invoked: the corrector's nested
+	// llm_request/llm_response land under it. Parented to the failed
+	// attempt's tool_call_result (or tool_call_args_invalid) event.
+	// tool_call_repaired fires after a corrected call was re-executed —
+	// status "ok" when it succeeded, "error" when it was dispatched and
+	// failed.
+	TypeToolCallRepairInvoked = "tool_call_repair_invoked"
+	TypeToolCallRepaired      = "tool_call_repaired"
 
 	// Failure modes (always UI-visible — each its own type for clean analytics).
 	TypeToolCallParseFailed = "tool_call_parse_failed"
@@ -643,6 +653,40 @@ type ToolCallResultPayload struct {
 }
 
 const ToolCallResultVersion = 1
+
+// ToolCallRepairInvokedPayload — emitted when the repair phase hands a
+// failed tool call to the corrector side-call. Attempt is 1-based within
+// the per-call repair budget. ValidationError carries the (excerpted)
+// error text of the failed attempt that triggered this corrector call.
+type ToolCallRepairInvokedPayload struct {
+	Header
+	CallID          string `json:"call_id"`
+	Plugin          string `json:"plugin"`
+	Action          string `json:"action"`
+	Attempt         int    `json:"attempt"`
+	ValidationError string `json:"validation_error"`
+}
+
+const ToolCallRepairInvokedVersion = 1
+
+// ToolCallRepairedPayload — emitted after a corrected call was
+// re-executed: Status "ok" when the re-execution succeeded, "error" when
+// the corrected call was dispatched and failed (repairs rejected before
+// re-execution — guard, abort, corrector failure — surface only as
+// tool_call_repair_invoked events / the normal error flow). Arguments
+// are the corrected args the re-execution ran with; Attempt is the
+// 1-based repair attempt that produced the outcome.
+type ToolCallRepairedPayload struct {
+	Header
+	CallID    string            `json:"call_id"`
+	Plugin    string            `json:"plugin"`
+	Action    string            `json:"action"`
+	Attempt   int               `json:"attempt"`
+	Arguments map[string]string `json:"arguments,omitempty"`
+	Status    string            `json:"status"`
+}
+
+const ToolCallRepairedVersion = 1
 
 // ToolCallParseFailedPayload — text-based tool-call syntax that the
 // orchestrator's parser could not interpret. Carries the exact substring

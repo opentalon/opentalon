@@ -543,6 +543,12 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 		{"ToolCallResult", func(c context.Context, s Sink) { EmitToolCallResult(c, s, ToolCallResultArgs{CallID: "c"}) }, events.TypeToolCallResult, events.ToolCallResultVersion},
 		{"ToolCallParseFailed", func(c context.Context, s Sink) { EmitToolCallParseFailed(c, s, ToolCallParseFailedArgs{}) }, events.TypeToolCallParseFailed, events.ToolCallParseFailedVersion},
 		{"ToolCallArgsInvalid", func(c context.Context, s Sink) { EmitToolCallArgsInvalid(c, s, ToolCallArgsInvalidArgs{}) }, events.TypeToolCallArgsInvalid, events.ToolCallArgsInvalidVersion},
+		{"ToolCallRepairInvoked", func(c context.Context, s Sink) {
+			EmitToolCallRepairInvoked(c, s, ToolCallRepairInvokedArgs{CallID: "c", Attempt: 1})
+		}, events.TypeToolCallRepairInvoked, events.ToolCallRepairInvokedVersion},
+		{"ToolCallRepaired", func(c context.Context, s Sink) {
+			EmitToolCallRepaired(c, s, ToolCallRepairedArgs{CallID: "c", Attempt: 1, Status: "ok"})
+		}, events.TypeToolCallRepaired, events.ToolCallRepairedVersion},
 		{"ToolCallNotFound", func(c context.Context, s Sink) { EmitToolCallNotFound(c, s, "x") }, events.TypeToolCallNotFound, events.ToolCallNotFoundVersion},
 		{"ScoreComputed", func(c context.Context, s Sink) { EmitScoreComputed(c, s, ScoreComputedArgs{}) }, events.TypeScoreComputed, events.ScoreComputedVersion},
 		{"Error", func(c context.Context, s Sink) { EmitError(c, s, "where", "msg") }, events.TypeError, events.ErrorVersion},
@@ -551,7 +557,7 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 	// All event types must be exercised — keep this in lockstep with
 	// the constants in event_types.go. If you add a new event type and
 	// this count drops below it, add a row above.
-	const wantCases = 29
+	const wantCases = 31
 	if len(cases) != wantCases {
 		t.Fatalf("len(cases) = %d, want %d — keep TestAllEmitHelpers in sync with event_types.go", len(cases), wantCases)
 	}

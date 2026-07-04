@@ -121,6 +121,58 @@ func EmitToolCallArgsInvalid(ctx context.Context, sink Sink, args ToolCallArgsIn
 	}, 0)
 }
 
+// ToolCallRepairInvokedArgs marks one corrector side-call of the repair
+// phase. Attempt is 1-based within the per-call repair budget; Error is
+// the failed attempt's error text (sanitized + excerpted here).
+type ToolCallRepairInvokedArgs struct {
+	CallID  string
+	Plugin  string
+	Action  string
+	Attempt int
+	Error   string
+}
+
+// EmitToolCallRepairInvoked writes one tool_call_repair_invoked event.
+// Returns the generated event id so the repair loop can stamp it as the
+// parent of the corrector's llm_request/llm_response via WithParent.
+func EmitToolCallRepairInvoked(ctx context.Context, sink Sink, args ToolCallRepairInvokedArgs) string {
+	sanitized := events.SanitizeUTF8(args.Error)
+	excerpt, _ := events.Excerpt(sanitized)
+	return send(ctx, sink, events.TypeToolCallRepairInvoked, events.ToolCallRepairInvokedPayload{
+		Header:          events.Header{V: events.ToolCallRepairInvokedVersion},
+		CallID:          args.CallID,
+		Plugin:          args.Plugin,
+		Action:          args.Action,
+		Attempt:         args.Attempt,
+		ValidationError: excerpt,
+	}, 0)
+}
+
+// ToolCallRepairedArgs records the outcome of a repaired re-execution:
+// Status "ok" when the corrected call succeeded, "error" when it was
+// dispatched and failed. Arguments are the corrected args it ran with.
+type ToolCallRepairedArgs struct {
+	CallID    string
+	Plugin    string
+	Action    string
+	Attempt   int
+	Arguments map[string]string
+	Status    string
+}
+
+// EmitToolCallRepaired writes one tool_call_repaired event.
+func EmitToolCallRepaired(ctx context.Context, sink Sink, args ToolCallRepairedArgs) string {
+	return send(ctx, sink, events.TypeToolCallRepaired, events.ToolCallRepairedPayload{
+		Header:    events.Header{V: events.ToolCallRepairedVersion},
+		CallID:    args.CallID,
+		Plugin:    args.Plugin,
+		Action:    args.Action,
+		Attempt:   args.Attempt,
+		Arguments: args.Arguments,
+		Status:    args.Status,
+	}, 0)
+}
+
 // EmitToolCallNotFound writes one tool_call_not_found event when the
 // LLM names a plugin/action the dispatcher does not know about.
 func EmitToolCallNotFound(ctx context.Context, sink Sink, requestedName string) string {
