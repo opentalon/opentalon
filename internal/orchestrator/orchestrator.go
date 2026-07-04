@@ -201,6 +201,22 @@ type OrchestratorOpts struct {
 	InjectionStateStore           InjectionStateStore     // optional; persists known_tools sticky tiers across turns (load_tools promotion)
 	ToolErrorHandling             ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
 	ChannelSender                 ChannelSender           // optional; when set, maybeGenerateTitle pushes the generated title to the originating channel as a session.title frame
+	Repair                        RepairConfig            // post-failure tool-call repair phase; default off
+}
+
+// RepairConfig tunes the post-failure tool-call repair phase (see
+// tool_call_repair.go). Enabled is the master switch (default false → ship
+// dark). Model optionally routes the corrector side-call to a dedicated —
+// typically stronger — model; empty keeps the deployment default. Prompt
+// overrides the built-in corrector instructions. MaxAttempts bounds repair
+// attempts per failed call (<= 0 → default 2); Timeout bounds each corrector
+// LLM call (<= 0 → pipeline.DefaultRepairTimeout).
+type RepairConfig struct {
+	Enabled     bool
+	Model       string
+	Prompt      string
+	MaxAttempts int
+	Timeout     time.Duration
 }
 
 // ChannelSender pushes an OutboundMessage onto the channel that owns the
@@ -282,30 +298,37 @@ type Orchestrator struct {
 	// the planner handle would also switch on the server-side single-step
 	// execution path (gated on planner != nil), which has its own confirmation
 	// gate but is otherwise dead in prod. nil = classifier disabled.
-	classifier             *pipeline.Planner
-	pendingMu              sync.Mutex                    // guards pendingPipelines, pendingToolCalls, pendingConfirmationIDs
-	pendingPipelines       map[string]*pipeline.Pipeline // sessionID -> pending pipeline
-	pendingToolCalls       map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
-	pendingConfirmationIDs map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
-	pipelineConfig         pipeline.PipelineConfig
-	confirmationPlugin     string                  // optional; plugin for confirmation strategy
-	confirmationAction     string                  // optional; action name for confirmation check
-	contextWindow          int                     // model context window in tokens; 0 = no trimming
-	groupPluginLookup      GroupPluginLookup       // optional; nil = no group-based filtering
-	usageRecorder          UsageRecorder           // optional; nil = no usage tracking
-	pluginCallObserver     PluginCallObserver      // optional; nil = no plugin call observation
-	eventSink              emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
-	snapshotStore          PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
-	syncActionsPlugin      string                  // optional; plugin name for action sync
-	syncActionsAction      string                  // optional; action name for action sync
-	knowledge              KnowledgeConfig         // optional; knowledge directory ingestion
-	subprocessConfig       SubprocessConfig        // optional; subprocess (sub-agent) support
-	onStreamChunk          StreamChunkCallback     // optional; when set, final answers stream to caller
-	showToolCalls          string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	injectionStateStore    InjectionStateStore     // optional; nil = load_tools sticky promotions don't persist across turns
-	toolErrorHandling      ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
-	toolErrorTracker       *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by injectionStateStore
-	channelSender          ChannelSender           // optional; nil = title generation persists silently, no live push to clients
+	classifier *pipeline.Planner
+	// repairer is a Planner used ONLY for RepairToolCall (the post-failure
+	// tool-call corrector). Separate handle for the same reason classifier
+	// is: enabling repair must never activate the single-step execution
+	// path that o.planner gates. nil = repair disabled.
+	repairer                   *pipeline.Planner
+	repairConfig               RepairConfig                  // normalized in NewWithRules (MaxAttempts default applied)
+	pendingMu                  sync.Mutex                    // guards pendingPipelines, pendingToolCalls, pendingConfirmationIDs, pendingConfirmationPrompts
+	pendingPipelines           map[string]*pipeline.Pipeline // sessionID -> pending pipeline
+	pendingToolCalls           map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
+	pendingConfirmationIDs     map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
+	pendingConfirmationPrompts map[string]string             // sessionID -> user-facing confirmation prompt of the pending tool call; fed to the repair corrector as the approved intent
+	pipelineConfig             pipeline.PipelineConfig
+	confirmationPlugin         string                  // optional; plugin for confirmation strategy
+	confirmationAction         string                  // optional; action name for confirmation check
+	contextWindow              int                     // model context window in tokens; 0 = no trimming
+	groupPluginLookup          GroupPluginLookup       // optional; nil = no group-based filtering
+	usageRecorder              UsageRecorder           // optional; nil = no usage tracking
+	pluginCallObserver         PluginCallObserver      // optional; nil = no plugin call observation
+	eventSink                  emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
+	snapshotStore              PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
+	syncActionsPlugin          string                  // optional; plugin name for action sync
+	syncActionsAction          string                  // optional; action name for action sync
+	knowledge                  KnowledgeConfig         // optional; knowledge directory ingestion
+	subprocessConfig           SubprocessConfig        // optional; subprocess (sub-agent) support
+	onStreamChunk              StreamChunkCallback     // optional; when set, final answers stream to caller
+	showToolCalls              string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	injectionStateStore        InjectionStateStore     // optional; nil = load_tools sticky promotions don't persist across turns
+	toolErrorHandling          ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
+	toolErrorTracker           *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by injectionStateStore
+	channelSender              ChannelSender           // optional; nil = title generation persists silently, no live push to clients
 	// titleMuxes serializes per-session title-generation goroutines
 	// without blocking the foreground Run path. Summarization shares the
 	// sessionMux because it triggers after many turns and tolerates one
@@ -492,6 +515,21 @@ func NewWithRules(
 	if opts.ConfirmationClassifierEnabled && opts.ConfirmationPlugin != "" && opts.ConfirmationAction != "" {
 		classifier = pipeline.NewPlanner(&plannerLLMAdapter{llm: llm}, pipeline.DefaultConfirmationClassifierTimeout)
 	}
+	// Tool-call repair corrector: another SEPARATE Planner, used only for
+	// RepairToolCall, with its own timeout and (optionally) its own model.
+	// Same isolation rationale as the classifier above.
+	repairCfg := opts.Repair
+	if repairCfg.MaxAttempts <= 0 {
+		repairCfg.MaxAttempts = defaultRepairMaxAttempts
+	}
+	var repairer *pipeline.Planner
+	if repairCfg.Enabled {
+		timeout := repairCfg.Timeout
+		if timeout <= 0 {
+			timeout = pipeline.DefaultRepairTimeout
+		}
+		repairer = pipeline.NewPlanner(&plannerLLMAdapter{llm: llm}, timeout)
+	}
 	pipelineCfg := opts.PipelineConfig
 	if pipelineCfg.MaxStepRetries == 0 && pipelineCfg.StepTimeout == 0 {
 		pipelineCfg = pipeline.DefaultConfig()
@@ -523,55 +561,58 @@ func NewWithRules(
 	errCfg := opts.ToolErrorHandling
 
 	o := &Orchestrator{
-		sessionMuxes:            make(map[string]*sessionMutex),
-		semaphore:               semaphore,
-		llm:                     llm,
-		parser:                  parser,
-		registry:                registry,
-		memory:                  memory,
-		sessions:                sessions,
-		guard:                   NewGuard(),
-		rules:                   NewRulesConfig(opts.CustomRules),
-		preparers:               preparers,
-		formatters:              opts.ResponseFormatters,
-		guards:                  guards,
-		preparerActions:         preparerActionSet(preparers, guards),
-		luaScriptPaths:          opts.LuaScriptPaths,
-		permissionChecker:       opts.PermissionChecker,
-		permissionPluginName:    opts.PermissionPluginName,
-		runtimePromptPath:       opts.RuntimePromptPath,
-		contextMessages:         opts.ContextMessages,
-		summarizeAfterMessages:  opts.SummarizeAfterMessages,
-		maxMessagesAfterSummary: opts.MaxMessagesAfterSummary,
-		summarizePrompt:         opts.SummarizePrompt,
-		summarizeUpdatePrompt:   opts.SummarizeUpdatePrompt,
-		sessionTitlePrompt:      opts.SessionTitlePrompt,
-		sessionTitlesEnabled:    opts.SessionTitlesEnabled,
-		planner:                 planner,
-		classifier:              classifier,
-		pendingPipelines:        make(map[string]*pipeline.Pipeline),
-		pendingToolCalls:        make(map[string]*ToolCall),
-		pendingConfirmationIDs:  make(map[string]string),
-		pipelineConfig:          pipelineCfg,
-		confirmationPlugin:      opts.ConfirmationPlugin,
-		confirmationAction:      opts.ConfirmationAction,
-		contextWindow:           opts.ContextWindow,
-		groupPluginLookup:       opts.GroupPluginLookup,
-		usageRecorder:           opts.UsageRecorder,
-		pluginCallObserver:      opts.PluginCallObserver,
-		eventSink:               eventSink,
-		snapshotStore:           opts.PromptSnapshotStore,
-		syncActionsPlugin:       opts.SyncActionsPlugin,
-		syncActionsAction:       opts.SyncActionsAction,
-		knowledge:               opts.Knowledge,
-		onStreamChunk:           opts.OnStreamChunk,
-		showToolCalls:           opts.ShowToolCalls,
-		injectionStateStore:     opts.InjectionStateStore,
-		toolErrorHandling:       errCfg,
-		toolErrorTracker:        newToolErrorTracker(),
-		channelSender:           opts.ChannelSender,
-		titleMuxes:              make(map[string]*sessionMutex),
-		langDetector:            buildReplyLanguageDetector(),
+		sessionMuxes:               make(map[string]*sessionMutex),
+		semaphore:                  semaphore,
+		llm:                        llm,
+		parser:                     parser,
+		registry:                   registry,
+		memory:                     memory,
+		sessions:                   sessions,
+		guard:                      NewGuard(),
+		rules:                      NewRulesConfig(opts.CustomRules),
+		preparers:                  preparers,
+		formatters:                 opts.ResponseFormatters,
+		guards:                     guards,
+		preparerActions:            preparerActionSet(preparers, guards),
+		luaScriptPaths:             opts.LuaScriptPaths,
+		permissionChecker:          opts.PermissionChecker,
+		permissionPluginName:       opts.PermissionPluginName,
+		runtimePromptPath:          opts.RuntimePromptPath,
+		contextMessages:            opts.ContextMessages,
+		summarizeAfterMessages:     opts.SummarizeAfterMessages,
+		maxMessagesAfterSummary:    opts.MaxMessagesAfterSummary,
+		summarizePrompt:            opts.SummarizePrompt,
+		summarizeUpdatePrompt:      opts.SummarizeUpdatePrompt,
+		sessionTitlePrompt:         opts.SessionTitlePrompt,
+		sessionTitlesEnabled:       opts.SessionTitlesEnabled,
+		planner:                    planner,
+		classifier:                 classifier,
+		repairer:                   repairer,
+		repairConfig:               repairCfg,
+		pendingPipelines:           make(map[string]*pipeline.Pipeline),
+		pendingToolCalls:           make(map[string]*ToolCall),
+		pendingConfirmationIDs:     make(map[string]string),
+		pendingConfirmationPrompts: make(map[string]string),
+		pipelineConfig:             pipelineCfg,
+		confirmationPlugin:         opts.ConfirmationPlugin,
+		confirmationAction:         opts.ConfirmationAction,
+		contextWindow:              opts.ContextWindow,
+		groupPluginLookup:          opts.GroupPluginLookup,
+		usageRecorder:              opts.UsageRecorder,
+		pluginCallObserver:         opts.PluginCallObserver,
+		eventSink:                  eventSink,
+		snapshotStore:              opts.PromptSnapshotStore,
+		syncActionsPlugin:          opts.SyncActionsPlugin,
+		syncActionsAction:          opts.SyncActionsAction,
+		knowledge:                  opts.Knowledge,
+		onStreamChunk:              opts.OnStreamChunk,
+		showToolCalls:              opts.ShowToolCalls,
+		injectionStateStore:        opts.InjectionStateStore,
+		toolErrorHandling:          errCfg,
+		toolErrorTracker:           newToolErrorTracker(),
+		channelSender:              opts.ChannelSender,
+		titleMuxes:                 make(map[string]*sessionMutex),
+		langDetector:               buildReplyLanguageDetector(),
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
@@ -1233,9 +1274,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	o.pendingMu.Lock()
 	pendingCall := o.pendingToolCalls[sessionID]
 	pendingCallConfID := o.pendingConfirmationIDs[sessionID]
+	pendingCallPrompt := o.pendingConfirmationPrompts[sessionID]
 	if pendingCall != nil {
 		delete(o.pendingToolCalls, sessionID)
 		delete(o.pendingConfirmationIDs, sessionID)
+		delete(o.pendingConfirmationPrompts, sessionID)
 	}
 	o.pendingMu.Unlock()
 	if pendingCall == nil {
@@ -1243,7 +1286,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// the call AND the original confirmation_requested event id from
 		// session metadata so the resolved event still links to the
 		// request that started the pending state.
-		pendingCall, pendingCallConfID = loadPendingToolCall(sessions, sessionID)
+		pendingCall, pendingCallConfID, pendingCallPrompt = loadPendingToolCall(sessions, sessionID)
 	}
 	var pendingMetaClearErr error
 	if pendingCall != nil {
@@ -1285,20 +1328,33 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			})
 			log.Debug("tool call confirmed, executing", "plugin", tc.Plugin, "action", tc.Action)
 			result := o.executeCall(ctx, *tc)
+			// Repair phase: a failed approved call gets a bounded corrector
+			// loop INSIDE the already-granted approval before the error is
+			// recorded into session history — the user is never re-asked to
+			// approve a shape correction of the same intent. This is the one
+			// call site where a real approval exists, so approved=true here
+			// is what licenses the repaired call's ConfirmationBypass. When
+			// the loop replaces the pair, history gets either the repaired
+			// success or — if the corrected call was dispatched and failed —
+			// the corrected call plus its real error.
+			execCall := *tc
+			if repairedCall, repairedResult, replaced := o.maybeRepairToolCall(ctx, sessionID, execCall, result, pendingCallPrompt, true); replaced {
+				execCall, result = repairedCall, repairedResult
+			}
 			// Record in session history.
-			tr := ToolResult{CallID: tc.ID, Content: result.Content, StructuredContent: result.StructuredContent, Error: result.Error}
+			tr := ToolResult{CallID: execCall.ID, Content: result.Content, StructuredContent: result.StructuredContent, Error: result.Error}
 			if o.supportsNativeTools() {
 				_ = sessions.AddMessage(sessionID, provider.Message{
 					Role: provider.RoleAssistant,
 					ToolCalls: []provider.ToolCall{{
-						ID: tc.ID, Name: toolFQN(tc.Plugin, tc.Action), Arguments: tc.Args,
+						ID: execCall.ID, Name: toolFQN(execCall.Plugin, execCall.Action), Arguments: execCall.Args,
 					}},
 				})
 				_ = sessions.AddMessage(sessionID, provider.Message{
-					Role: provider.RoleTool, Content: nativeToolContent(tr), ToolCallID: tc.ID,
+					Role: provider.RoleTool, Content: nativeToolContent(tr), ToolCallID: execCall.ID,
 				})
 			} else {
-				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(*tc)})
+				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(execCall)})
 				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)})
 			}
 			// The tool result is now in session history. Skip preparers, planner,
@@ -2283,8 +2339,25 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			pluginStart := time.Now()
 			toolResult := o.executeCall(ctx, calls[i])
+			// Captured before the repair block so the "plugin call" log line
+			// times the plugin, not the corrector side-call — repair logs its
+			// own per-attempt timing.
 			pluginDuration := time.Since(pluginStart)
 			call := calls[i]
+			// Repair phase: give a failed call to the corrector side-call
+			// BEFORE the error is recorded into session history. Agent-loop
+			// calls carry NO user approval (approved=false) — a call can
+			// reach this point with unknown args precisely because the
+			// pre-confirmation validation in maybeRequireConfirmation skips
+			// the gate for them, so maybeRepairToolCall re-checks the
+			// confirmation decision and refuses to re-execute anything that
+			// would have required an approval. When the loop replaces the
+			// pair, the corrected call + its result feed history, error
+			// tracking, and observers below.
+			repairedCall, repairedResult, repaired := o.maybeRepairToolCall(ctx, sessionID, call, toolResult, "", false)
+			if repaired {
+				call, toolResult = repairedCall, repairedResult
+			}
 			result.ToolCalls = append(result.ToolCalls, call)
 			result.Results = append(result.Results, toolResult)
 			totalToolCalls++
@@ -2320,7 +2393,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// iteration when LoopCapPerTurn trips, and flip the Demoted
 			// flag in known_tools when StickyDemotionThreshold trips
 			// (cleared again on the next successful invocation).
-			if warning := o.recordToolOutcome(ctx, sessionID, call, toolResult); warning != nil {
+			if warning := o.recordToolOutcome(ctx, sessionID, call, toolResult, repaired); warning != nil {
 				transientMessages = append(transientMessages, *warning)
 			}
 			if o.pluginCallObserver != nil {
@@ -2628,17 +2701,38 @@ func (o *Orchestrator) classifyConfirmationReply(
 func (o *Orchestrator) maybeRequireConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
 ) (*RunResult, bool) {
-	if o.confirmationPlugin == "" || o.confirmationAction == "" ||
-		call.ConfirmationBypass ||
-		o.registry.IsActionReadOnly(call.Plugin, call.Action) {
+	if call.ConfirmationBypass {
 		return nil, false
 	}
-	confResult := o.checkConfirmationPlugin(ctx, []*pipeline.Step{{
-		ID:      call.ID,
-		Name:    call.Action,
-		Command: &pipeline.PluginCommand{Plugin: call.Plugin, Action: call.Action},
-	}})
-	if !confResult.RequiresConfirmation {
+	// Validate argument names BEFORE narrating and storing the pending call.
+	// A call that executeCall's rejectUnknownArgs would refuse anyway must
+	// not cost the user an approval: skip the gate and let the caller
+	// proceed to executeCall, which rejects it with the usual
+	// tool_call_args_invalid event + error ToolResult so the model corrects
+	// silently. Emission stays in executeCall — no double-emit. Same
+	// call.FromLLM guard as executeCall (internal callers may legitimately
+	// use undeclared arg names).
+	//
+	// This skip makes an UNAPPROVED privileged write reach executeCall; the
+	// repair phase honors that boundary — maybeRepairToolCall re-checks the
+	// confirmation decision (callRequiresConfirmation) and never re-executes
+	// an unapproved call that would require one, so the corrected re-plan
+	// always re-enters this gate.
+	//
+	// Gated on o.repairer != nil so orchestrator.repair.enabled=false leaves
+	// this gate exactly as it was before the repair feature existed.
+	if o.repairer != nil && call.FromLLM && len(call.Args) > 0 {
+		if action := o.resolveAction(call.Plugin, call.Action); action != nil {
+			if err := rejectUnknownArgs(call, action); err != nil {
+				logger.FromContext(ctx).Debug("skipping confirmation for call with unknown args; executeCall will reject it",
+					"plugin", call.Plugin, "action", call.Action, "error", err.Error())
+				return nil, false
+			}
+		}
+	}
+	// Shared head with the repair phase's consent boundary: gate configured,
+	// action not read-only, confirmation plugin says yes.
+	if !o.callRequiresConfirmation(ctx, call) {
 		return nil, false
 	}
 	log := logger.FromContext(ctx)
@@ -2673,10 +2767,14 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	if confID != "" {
 		o.pendingConfirmationIDs[sessionID] = confID
 	}
+	// The prompt is what the user actually approves — kept alongside the
+	// pending call so a post-approval repair can hand the corrector the
+	// approved intent without the session history.
+	o.pendingConfirmationPrompts[sessionID] = confirmMsg
 	o.pendingMu.Unlock()
 	// Persist so the pending call survives restarts / multi-instance failover;
 	// the confirmation_requested id rides along to preserve parent linkage.
-	savePendingToolCall(sessions, sessionID, &pending, confID)
+	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg)
 	return &RunResult{
 		Response: confirmMsg,
 		Metadata: map[string]string{
@@ -3949,13 +4047,16 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	if call.FromLLM && action != nil && len(call.Args) > 0 {
 		if err := rejectUnknownArgs(call, action); err != nil {
 			slog.Warn("BLOCKED LLM call with unknown args", "plugin", call.Plugin, "action", call.Action, "error", err.Error())
-			emit.EmitToolCallArgsInvalid(ctx, o.eventSink, emit.ToolCallArgsInvalidArgs{
+			invalidID := emit.EmitToolCallArgsInvalid(ctx, o.eventSink, emit.ToolCallArgsInvalidArgs{
 				CallID:          call.ID,
 				Plugin:          call.Plugin,
 				Action:          call.Action,
 				ValidationError: err.Error(),
 			})
-			return ToolResult{CallID: call.ID, Error: err.Error()}
+			// ArgsInvalid is the typed pre-dispatch marker the repair phase
+			// keys on: this early return is the one failure that provably
+			// never reached the tool.
+			return ToolResult{CallID: call.ID, Error: err.Error(), EventID: invalidID, ArgsInvalid: true}
 		}
 	}
 	if action != nil {
@@ -4010,7 +4111,9 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 			respBody = result.Error
 			structBody = ""
 		}
-		emit.EmitToolCallResult(ctx, o.eventSink, emit.ToolCallResultArgs{
+		// The event id rides back on the result (ToolResult.EventID) so the
+		// repair phase can parent tool_call_repair_invoked onto this event.
+		result.EventID = emit.EmitToolCallResult(ctx, o.eventSink, emit.ToolCallResultArgs{
 			CallID:     call.ID,
 			Status:     status,
 			Response:   respBody,
@@ -4421,15 +4524,25 @@ type pendingToolCallMeta struct {
 	Action                  string            `json:"action"`
 	Args                    map[string]string `json:"args,omitempty"`
 	ConfirmationRequestedID string            `json:"confirmation_requested_id,omitempty"`
+	// Prompt is the user-facing confirmation question — the intent the
+	// user approves. Persisted so a post-approval repair on another
+	// instance can still hand the corrector the approved intent.
+	Prompt string `json:"prompt,omitempty"`
+	// FromLLM marks the call as LLM-originated so a restored call still
+	// passes executeCall's unknown-args validation. Rows persisted before
+	// this field unmarshal to false — exactly how they were restored then.
+	FromLLM bool `json:"from_llm,omitempty"`
 }
 
-func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID string) {
+func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID, prompt string) {
 	meta := pendingToolCallMeta{
 		ID:                      tc.ID,
 		Plugin:                  tc.Plugin,
 		Action:                  tc.Action,
 		Args:                    tc.Args,
 		ConfirmationRequestedID: confirmationRequestedID,
+		Prompt:                  prompt,
+		FromLLM:                 tc.FromLLM,
 	}
 	data, err := json.Marshal(meta)
 	if err != nil {
@@ -4439,22 +4552,23 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 }
 
 // loadPendingToolCall restores the pending tool call from session metadata.
-// Returns the ToolCall and the confirmation_requested event id (empty when
-// the persisted row predates the field or no event was captured).
-func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string) {
+// Returns the ToolCall, the confirmation_requested event id, and the
+// confirmation prompt (either string empty when the persisted row predates
+// the field or nothing was captured).
+func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string, string) {
 	sess, err := sessions.Get(sessionID)
 	if err != nil || sess == nil {
-		return nil, ""
+		return nil, "", ""
 	}
 	raw := sess.Metadata["pending_tool_call"]
 	if raw == "" {
-		return nil, ""
+		return nil, "", ""
 	}
 	var meta pendingToolCallMeta
 	if json.Unmarshal([]byte(raw), &meta) != nil {
-		return nil, ""
+		return nil, "", ""
 	}
-	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args}, meta.ConfirmationRequestedID
+	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args, FromLLM: meta.FromLLM}, meta.ConfirmationRequestedID, meta.Prompt
 }
 
 // toolCallSignature builds a deterministic string from a set of tool calls
@@ -4744,6 +4858,7 @@ func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.Completi
 		msgs[i] = provider.Message{Role: provider.Role(m.Role), Content: m.Content}
 	}
 	resp, err := a.llm.Complete(ctx, &provider.CompletionRequest{
+		Model:           req.Model,
 		Messages:        msgs,
 		MaxTokens:       req.MaxTokens,
 		ReasoningEffort: req.ReasoningEffort,

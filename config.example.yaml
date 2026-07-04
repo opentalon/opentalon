@@ -115,6 +115,26 @@ orchestrator:
   #   tool_error_handling:
   #     loop_cap_per_turn: 2                 # consecutive identical-tool errors per turn before the "tool X failed N times" nudge; <= 0 disables
   #     sticky_demotion_threshold: 3         # consecutive session-level errors before known_tools demotion (self-healed on success); <= 0 disables
+  # Post-failure tool-call repair: when a tool call fails the core's own
+  # pre-dispatch argument validation (unknown argument names — the tool
+  # provably never ran), a one-shot corrector LLM side-call repairs the SHAPE
+  # of the call — rename/restructure only, a mechanical guard rejects any
+  # changed value — and re-executes it under the SAME user approval instead
+  # of asking again. Calls that would need a confirmation nobody granted are
+  # never repaired. Recommended pairing: run sessions on a fast, cheap model
+  # and set `model` to a stronger tier that fires only on failures and sees a
+  # tiny focused prompt.
+  # repair:
+  #   enabled: true
+  #   model: ""              # corrector model id; empty = deployment default model.
+  #                          # Must be a bare model id served by the same (primary)
+  #                          # provider as the session model — NOT the "provider/model"
+  #                          # routing form. Ids missing from the models list are
+  #                          # warned about at startup.
+  #   max_attempts: 2        # corrector + re-execution rounds per failed call (default 2)
+  #   timeout: "10s"         # per corrector call (default "10s")
+  #   # prompt: |            # optional override of the built-in corrector instructions;
+  #   #   ...                # must keep the {"repaired_args": ...} / {"abort": ...} JSON contract
 
 channels:
   console:

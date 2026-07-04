@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -351,6 +352,27 @@ func main() {
 	modelMap := make(map[string]provider.ModelInfo)
 	for _, m := range prov.Models() {
 		modelMap[m.ID] = m
+	}
+
+	// Surface a repair.model misconfiguration at startup instead of at the
+	// first repairable failure: the corrector side-call goes through the
+	// same single provider as the session model, so its id must be a bare
+	// model id that provider serves — the "provider/model" routing form is
+	// sent to the API verbatim and 4xxes on every corrector call, leaving
+	// the repair phase enabled but permanently dead. Warn rather than fail:
+	// endpoints may serve models beyond the configured list (though such
+	// models record usage at zero cost, since cost lookup misses).
+	if cfg.Orchestrator.Repair.Enabled && cfg.Orchestrator.Repair.Model != "" {
+		if _, ok := modelMap[cfg.Orchestrator.Repair.Model]; !ok {
+			configured := make([]string, 0, len(modelMap))
+			for id := range modelMap {
+				configured = append(configured, id)
+			}
+			sort.Strings(configured)
+			slog.Warn("repair.model is not in the configured models list; corrector calls will fail unless the primary provider serves it (use a bare model id, not the provider/model routing form)",
+				"model", cfg.Orchestrator.Repair.Model,
+				"configured_models", strings.Join(configured, ", "))
+		}
 	}
 
 	// LLM client that sets default model when orchestrator doesn't
@@ -726,6 +748,13 @@ func main() {
 		},
 		ChannelSender:        notifier.SendToSession,
 		SessionTitlesEnabled: true,
+		Repair: orchestrator.RepairConfig{
+			Enabled:     cfg.Orchestrator.Repair.Enabled,
+			Model:       cfg.Orchestrator.Repair.Model,
+			Prompt:      cfg.Orchestrator.Repair.Prompt,
+			MaxAttempts: cfg.Orchestrator.Repair.MaxAttempts,
+			Timeout:     parseDurationOrZero(cfg.Orchestrator.Repair.Timeout),
+		},
 		Subprocess: orchestrator.SubprocessConfig{
 			Enabled:       cfg.Orchestrator.Subprocess.Enabled,
 			MaxDepth:      cfg.Orchestrator.Subprocess.MaxDepth,
@@ -1513,14 +1542,14 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 }
 
 // parseDurationOrZero parses a Go duration string, returning 0 (which the
-// provider maps to its default) on empty or invalid input.
+// consumer maps to its default) on empty or invalid input.
 func parseDurationOrZero(s string) time.Duration {
 	if s == "" {
 		return 0
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		slog.Warn("invalid retry duration in config; falling back to default", "value", s, "error", err)
+		slog.Warn("invalid duration in config; falling back to default", "value", s, "error", err)
 		return 0
 	}
 	return d

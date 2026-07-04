@@ -36,7 +36,7 @@ func sampleCall() ToolCall    { return ToolCall{Plugin: "p", Action: "a"} }
 func TestRecordToolOutcome_FirstErrorBelowLoopCapEmitsNoWarning(t *testing.T) {
 	orch := newOrchForErrorTrackingTests(t, nil)
 	ctx := actor.WithSessionID(context.Background(), "s1")
-	warning := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
+	warning := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false)
 	if warning != nil {
 		t.Errorf("first error (count=1, cap=2) must NOT emit warning, got %+v", warning)
 	}
@@ -45,8 +45,8 @@ func TestRecordToolOutcome_FirstErrorBelowLoopCapEmitsNoWarning(t *testing.T) {
 func TestRecordToolOutcome_AtLoopCapEmitsWarning(t *testing.T) {
 	orch := newOrchForErrorTrackingTests(t, nil)
 	ctx := actor.WithSessionID(context.Background(), "s1")
-	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult()) // count=1
-	warning := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
+	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false) // count=1
+	warning := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false)
 	if warning == nil {
 		t.Fatal("second error (count=2, cap=2) must emit a warning")
 	}
@@ -64,9 +64,9 @@ func TestRecordToolOutcome_AdditionalErrorsAboveCapKeepEmittingWithUpdatedCount(
 	// growing failure trail and doesn't miss the nudge.
 	orch := newOrchForErrorTrackingTests(t, nil)
 	ctx := actor.WithSessionID(context.Background(), "s1")
-	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
-	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
-	w := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
+	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false)
+	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false)
+	w := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false)
 	if w == nil || !strings.Contains(w.Content, "failed 3 times") {
 		t.Errorf("third error must re-warn with count=3, got %+v", w)
 	}
@@ -75,10 +75,10 @@ func TestRecordToolOutcome_AdditionalErrorsAboveCapKeepEmittingWithUpdatedCount(
 func TestRecordToolOutcome_SuccessResetsCounters(t *testing.T) {
 	orch := newOrchForErrorTrackingTests(t, nil)
 	ctx := actor.WithSessionID(context.Background(), "s1")
-	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
-	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), okResult())
+	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false)
+	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), okResult(), false)
 	// Counter reset — next error must NOT immediately re-trip the warning.
-	w := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
+	w := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false)
 	if w != nil {
 		t.Errorf("post-success error (count=1) must NOT re-trip warning, got %+v", w)
 	}
@@ -87,8 +87,8 @@ func TestRecordToolOutcome_SuccessResetsCounters(t *testing.T) {
 func TestRecordToolOutcome_DifferentToolsCountIndependently(t *testing.T) {
 	orch := newOrchForErrorTrackingTests(t, nil)
 	ctx := actor.WithSessionID(context.Background(), "s1")
-	_ = orch.recordToolOutcome(ctx, "s1", ToolCall{Plugin: "p", Action: "a"}, errorResult())
-	w := orch.recordToolOutcome(ctx, "s1", ToolCall{Plugin: "p", Action: "b"}, errorResult())
+	_ = orch.recordToolOutcome(ctx, "s1", ToolCall{Plugin: "p", Action: "a"}, errorResult(), false)
+	w := orch.recordToolOutcome(ctx, "s1", ToolCall{Plugin: "p", Action: "b"}, errorResult(), false)
 	if w != nil {
 		t.Errorf("p.b first-error must NOT re-trip warning (independent counter), got %+v", w)
 	}
@@ -100,7 +100,7 @@ func TestRecordToolOutcome_EmptySessionShortCircuits(t *testing.T) {
 	orch := newOrchForErrorTrackingTests(t, nil)
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
-		w := orch.recordToolOutcome(ctx, "", sampleCall(), errorResult())
+		w := orch.recordToolOutcome(ctx, "", sampleCall(), errorResult(), false)
 		if w != nil {
 			t.Errorf("empty session must short-circuit tracking, got warning iter %d: %+v", i, w)
 		}
@@ -113,7 +113,7 @@ func TestRecordToolOutcome_StickyDemotionFlipsDemotedFlag(t *testing.T) {
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
 	for i := 0; i < 3; i++ { // threshold=3
-		_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
+		_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false)
 	}
 	// After 3rd error: sticky-demotion threshold trips, write should fire.
 	if store.updateCalls == 0 {
@@ -127,6 +127,54 @@ func TestRecordToolOutcome_StickyDemotionFlipsDemotedFlag(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("p__a must be Demoted=true after threshold, got %+v", store.lastWritten.KnownTools)
+	}
+}
+
+// Repair attempts feed the sticky-demotion threshold through their own
+// counter: a tool that only ever works via the repair phase (every call
+// fails pre-dispatch, gets repaired, succeeds) must still get demoted —
+// the repaired successes reset the error counters, so without the
+// separate counter the tool would look permanently healthy.
+func TestRecordRepairAttempt_ChronicRepairTripsDemotion(t *testing.T) {
+	store := &fakeInjectionStateStore{}
+	orch := newOrchForErrorTrackingTests(t, store)
+	ctx := actor.WithSessionID(context.Background(), "s1")
+
+	for i := 0; i < 3; i++ { // threshold=3
+		orch.recordRepairAttempt(ctx, "s1", sampleCall())
+		// The repaired call succeeded: error counters reset, repair
+		// counter must survive.
+		_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), okResult(), true)
+	}
+	if store.updateCalls == 0 {
+		t.Fatal("chronic repair must persist a demotion via UpdateInjectionState")
+	}
+	found := false
+	for _, kt := range store.lastWritten.KnownTools {
+		if kt.ToolName == "p__a" && kt.Demoted {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("p__a must be Demoted=true after repair threshold, got %+v", store.lastWritten.KnownTools)
+	}
+}
+
+// A clean, unrepaired success resets the repair counter — the tool's
+// schema and the planner demonstrably agree again.
+func TestRecordRepairAttempt_CleanSuccessResetsRepairCounter(t *testing.T) {
+	orch := newOrchForErrorTrackingTests(t, nil)
+	ctx := actor.WithSessionID(context.Background(), "s1")
+
+	orch.recordRepairAttempt(ctx, "s1", sampleCall())
+	orch.recordRepairAttempt(ctx, "s1", sampleCall())
+	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), okResult(), false) // clean success
+
+	st := orch.toolErrorTracker.stateFor("s1")
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if n := st.sessionRepairs["p__a"]; n != 0 {
+		t.Errorf("repair counter after clean success = %d, want 0", n)
 	}
 }
 
@@ -146,8 +194,8 @@ func TestRecordToolOutcome_SuccessAfterDemotionSelfHeals(t *testing.T) {
 	// the failure that demoted it before the process restart). For
 	// this test the simulated demotion came from a prior session
 	// state load + an error this turn.
-	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
-	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), okResult())
+	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false)
+	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), okResult(), false)
 
 	// The clear write should have fired and reset Demoted.
 	if store.updateCalls < 1 {
@@ -177,7 +225,7 @@ func TestRecordToolOutcome_NewTurnResetsTurnCounter(t *testing.T) {
 
 	// Turn 1: one error
 	ctx := actor.WithSessionID(context.Background(), "s1")
-	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
+	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false)
 
 	// Simulate next turn by adding a user message — sessionTurnNumber
 	// counts user messages + 1, so this bumps the orchestrator's view
@@ -185,7 +233,7 @@ func TestRecordToolOutcome_NewTurnResetsTurnCounter(t *testing.T) {
 	_ = sessions.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "next"})
 
 	// Turn 2 (now): first error — turn counter reset, so no warning yet.
-	w := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
+	w := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false)
 	if w != nil {
 		t.Errorf("first error of a new turn must NOT warn (turn counter reset), got %+v", w)
 	}
@@ -201,7 +249,7 @@ func TestRecordToolOutcome_StoreWriteFailureDoesNotBubble(t *testing.T) {
 	orch := newOrchForErrorTrackingTests(t, store)
 	ctx := actor.WithSessionID(context.Background(), "s1")
 	for i := 0; i < 3; i++ { // hit sticky threshold
-		_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult())
+		_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false)
 	}
 	// No panic, no crash. Test passes if we got here.
 }
@@ -215,7 +263,7 @@ func TestRecordToolOutcome_FirstCallSuccessNoClearWrite(t *testing.T) {
 	orch := newOrchForErrorTrackingTests(t, store)
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
-	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), okResult())
+	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), okResult(), false)
 
 	if store.updateCalls != 0 {
 		t.Errorf("first-call success on a clean session must not write state, got %d update calls", store.updateCalls)
@@ -226,7 +274,7 @@ func TestRecordToolOutcome_NoSessionIDShortCircuits(t *testing.T) {
 	// An empty session id means we can't address a tracker. Skip
 	// quietly rather than synthesizing an "anonymous" bucket.
 	orch := newOrchForErrorTrackingTests(t, nil)
-	w := orch.recordToolOutcome(context.Background(), "", sampleCall(), errorResult())
+	w := orch.recordToolOutcome(context.Background(), "", sampleCall(), errorResult(), false)
 	if w != nil {
 		t.Errorf("empty sessionID must short-circuit, got %+v", w)
 	}

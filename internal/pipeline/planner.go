@@ -21,7 +21,11 @@ type LLMClient interface {
 // MaxTokens and ReasoningEffort are optional (zero = provider default) and let
 // short, latency-sensitive calls (e.g. confirmation classification) cap output
 // and dial reasoning down instead of inheriting the agent loop's large defaults.
+// Model is optional: "" keeps the deployment default (the host's model-default
+// wrapper fills it in); a non-empty id routes the side-call to that model
+// (e.g. a stronger corrector model for tool-call repair).
 type CompletionRequest struct {
+	Model           string
 	Messages        []Message
 	MaxTokens       int
 	ReasoningEffort string // "low" | "medium" | "high"; "" = provider default

@@ -334,6 +334,26 @@ type OrchestratorConfig struct {
 	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`      // subprocess (sub-agent) support
 	ShowToolCalls         string                       `yaml:"show_tool_calls,omitempty"` // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 	Preparer              PreparerOrchestratorConfig   `yaml:"preparer,omitempty"`        // RFC #249 preparer-phase behaviour (tool error handling)
+	Repair                RepairOrchestratorConfig     `yaml:"repair,omitempty"`          // post-failure tool-call repair phase; default off
+}
+
+// RepairOrchestratorConfig configures the post-failure tool-call repair
+// phase: when a tool call fails the core's pre-dispatch argument validation
+// (unknown argument names — the tool provably never ran), a one-shot
+// corrector LLM side-call repairs the SHAPE of the call (never its values)
+// and the corrected call re-executes under the same user approval instead of
+// burning a fresh confirmation. Model is the recommended knob for
+// cheap-session-model deployments: point it at a stronger tier that fires
+// only on failures and sees a few-KB focused prompt; empty = the deployment
+// default model. It must be a bare model id served by the same (primary)
+// provider as the session model — not the "provider/model" routing form;
+// unknown ids are warned about at startup.
+type RepairOrchestratorConfig struct {
+	Enabled     bool   `yaml:"enabled"`                // default false
+	Model       string `yaml:"model,omitempty"`        // bare corrector model id on the primary provider; empty = deployment default model
+	Prompt      string `yaml:"prompt,omitempty"`       // optional override of the built-in corrector instructions (must keep the JSON output contract)
+	MaxAttempts int    `yaml:"max_attempts,omitempty"` // repair attempts per failed call; default 2
+	Timeout     string `yaml:"timeout,omitempty"`      // Go duration for each corrector call; default "10s"
 }
 
 // PreparerOrchestratorConfig groups the RFC #249 preparer-phase

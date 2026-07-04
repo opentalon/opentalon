@@ -78,6 +78,20 @@ type ToolResult struct {
 	// underlying plugin doesn't produce one.
 	StructuredContent string `yaml:"structured_content,omitempty"`
 	Error             string `yaml:"error,omitempty"`
+	// EventID is the session-event id of the tool_call_result (or
+	// tool_call_args_invalid) event executeCall emitted for this result
+	// (empty for internal calls or when no event sink is configured).
+	// The repair phase stamps it as parent_id on tool_call_repair_invoked
+	// so a repair span links back to the failed attempt — mirroring
+	// provider.CompletionResponse.EventID for llm_response.
+	EventID string `yaml:"-"`
+	// ArgsInvalid marks a pre-dispatch argument-validation rejection
+	// (executeCall's rejectUnknownArgs path): the tool provably never ran.
+	// The repair phase keys on this typed flag — never on error-text
+	// matching, which plugin-authored errors emitted after a partial
+	// mutation could spoof — because a same-approval re-execution is only
+	// safe when the failed attempt cannot have mutated anything.
+	ArgsInvalid bool `yaml:"-"`
 }
 
 type WorkflowStep struct {
