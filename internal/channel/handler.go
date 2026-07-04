@@ -41,6 +41,13 @@ type HandlerConfig struct {
 	HasAction     pkg.HasActionFunc
 	Verifier      ProfileVerifier // nil disables profile verification
 	LimitChecker  LimitChecker    // nil disables token spend enforcement
+	// PendingConfirmation, when set, is consulted on a resume_hello control
+	// message: if the (scoped) session still has a tool call awaiting the
+	// user's approval, it returns the prompt text plus the confirmation-frame
+	// metadata to re-emit so the reconnected client can redraw the buttons.
+	// ok=false means nothing is pending. Read-only — it MUST NOT consume or
+	// mutate pending state. nil disables confirmation re-emit on resume.
+	PendingConfirmation func(sessionKey string) (content string, metadata map[string]string, ok bool)
 }
 
 // NewMessageHandler returns a MessageHandler that: ensures session, verifies profile token (if
@@ -97,8 +104,11 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			p.ChannelID = msg.ChannelID
 			ctx = profile.WithProfile(ctx, p)
 
-			// Enforce per-profile token spend limit when configured.
-			if cfg.LimitChecker != nil && p.Limit > 0 && p.LimitWindow > 0 {
+			// Enforce per-profile token spend limit when configured. Control
+			// messages (e.g. a resume handshake) do no LLM work, so they must
+			// not be blocked by an exhausted budget — a reconnecting client
+			// still needs to see a pending confirmation.
+			if cfg.LimitChecker != nil && p.Limit > 0 && p.LimitWindow > 0 && msg.Metadata[pkg.ControlMetadataKey] == "" {
 				since := time.Now().Add(-p.LimitWindow)
 				used, lerr := cfg.LimitChecker.TotalTokensSince(ctx, p.EntityID, since)
 				if lerr != nil {
@@ -156,6 +166,27 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		} else {
 			cfg.CreateSession(sessionKey, entityID, groupID)
 		}
+
+		// Resume handshake: a reconnecting client sends one control frame right
+		// after the socket opens, before the user types. The session was just
+		// re-validated above; now, if a tool confirmation is still awaiting the
+		// user's decision, re-emit its prompt so the reconnected UI redraws the
+		// Approve/Reject buttons instead of showing a dead transcript. No LLM
+		// runs. Nothing pending → an empty frame the registry drops.
+		if msg.Metadata[pkg.ControlMetadataKey] == pkg.ControlResumeHello {
+			if cfg.PendingConfirmation != nil {
+				if content, meta, ok := cfg.PendingConfirmation(sessionKey); ok {
+					return pkg.OutboundMessage{
+						ConversationID: msg.ConversationID,
+						ThreadID:       msg.ThreadID,
+						Content:        content,
+						Metadata:       meta,
+					}, nil
+				}
+			}
+			return pkg.OutboundMessage{}, nil
+		}
+
 		content := msg.Content
 		// Content preparers register by channel KIND ("slack", "console")
 		// not by instance. Two Slack bots in one process share the same

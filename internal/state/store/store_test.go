@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,8 +27,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 12 {
-		t.Errorf("schema_version = %d, want 12", v)
+	if v != 13 {
+		t.Errorf("schema_version = %d, want 13", v)
 	}
 
 	// Re-open: idempotent, no error
@@ -40,8 +41,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version (second open): %v", err)
 	}
-	if v != 12 {
-		t.Errorf("schema_version after re-open = %d, want 12", v)
+	if v != 13 {
+		t.Errorf("schema_version after re-open = %d, want 13", v)
 	}
 }
 
@@ -264,6 +265,77 @@ func TestSessionStore_NativeToolCallsRoundTrip(t *testing.T) {
 	}
 	if toolCallID.Valid {
 		t.Errorf("assistant-turn tool_call_id = %q, want NULL", toolCallID.String)
+	}
+}
+
+func TestSessionStore_MessageMetadataRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DBConfig{}, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	sessStore := NewSessionStore(db, 0, 0)
+	sessStore.Create("s1", "", "")
+
+	// Plain turn via AddMessage — metadata column must be NULL.
+	if err := sessStore.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "hi"}); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+	// Confirmation prompt via AddMessageWithMetadata — metadata persisted.
+	promptMeta := map[string]string{"prompt_type": "tool_confirmation", "tool_call_id": "call_42", "options": "approve,reject"}
+	if err := sessStore.AddMessageWithMetadata("s1",
+		provider.Message{Role: provider.RoleAssistant, Content: "Proceed?"}, promptMeta); err != nil {
+		t.Fatalf("AddMessageWithMetadata: %v", err)
+	}
+	// Empty metadata map must persist as NULL (not "{}"), like tool_calls.
+	if err := sessStore.AddMessageWithMetadata("s1",
+		provider.Message{Role: provider.RoleUser, Content: "later"}, map[string]string{}); err != nil {
+		t.Fatalf("AddMessageWithMetadata empty: %v", err)
+	}
+
+	// loadMessages (via Get) deliberately ignores metadata — the LLM view is
+	// unchanged, all three messages present with correct content.
+	sess, err := sessStore.Get("s1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(sess.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want 3", len(sess.Messages))
+	}
+	if sess.Messages[1].Content != "Proceed?" {
+		t.Errorf("prompt content = %q", sess.Messages[1].Content)
+	}
+
+	// Direct SQL: plain turn (seq 1) and empty-map turn (seq 3) are NULL; the
+	// confirmation prompt (seq 2) carries the exact JSON we stored.
+	readMeta := func(seq int) sql.NullString {
+		var m sql.NullString
+		if err := db.SQLDB().QueryRow(
+			db.Dialect().Rebind(`SELECT metadata FROM messages WHERE session_id = ? AND seq = ?`),
+			"s1", seq,
+		).Scan(&m); err != nil {
+			t.Fatalf("read metadata seq %d: %v", seq, err)
+		}
+		return m
+	}
+	if m := readMeta(1); m.Valid {
+		t.Errorf("plain-turn metadata = %q, want NULL", m.String)
+	}
+	if m := readMeta(3); m.Valid {
+		t.Errorf("empty-map metadata = %q, want NULL", m.String)
+	}
+	m := readMeta(2)
+	if !m.Valid {
+		t.Fatal("confirmation-prompt metadata = NULL, want JSON")
+	}
+	var got map[string]string
+	if err := json.Unmarshal([]byte(m.String), &got); err != nil {
+		t.Fatalf("unmarshal metadata: %v (raw %q)", err, m.String)
+	}
+	if got["prompt_type"] != "tool_confirmation" || got["tool_call_id"] != "call_42" || got["options"] != "approve,reject" {
+		t.Errorf("metadata round-trip mismatch: %+v", got)
 	}
 }
 

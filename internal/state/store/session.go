@@ -26,6 +26,21 @@ func toolCallsAsNullString(calls []provider.ToolCall) (sql.NullString, error) {
 	return sql.NullString{String: string(b), Valid: true}, nil
 }
 
+// metadataAsNullString marshals a non-empty per-message metadata map into JSON;
+// an empty/nil map persists as SQL NULL (not "{}") so an ordinary chat turn's
+// row stays byte-identical to the pre-013 shape and readers can cheaply filter
+// for rows that actually carry metadata.
+func metadataAsNullString(metadata map[string]string) (sql.NullString, error) {
+	if len(metadata) == 0 {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(metadata)
+	if err != nil {
+		return sql.NullString{}, fmt.Errorf("marshal metadata: %w", err)
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
 // SessionStore is the database-backed session store.
 type SessionStore struct {
 	db          *DB
@@ -111,6 +126,16 @@ func (s *SessionStore) Create(id, entityID, groupID string) *state.Session {
 // AddMessage inserts a message into the messages table and updates the session timestamp.
 // All statements run in a single transaction to reduce network roundtrips to PostgreSQL.
 func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
+	return s.AddMessageWithMetadata(id, msg, nil)
+}
+
+// AddMessageWithMetadata is AddMessage plus a small JSON map persisted in the
+// messages.metadata column (migration 013). The metadata is presentation/UI
+// state (e.g. tool-confirmation markers) surfaced by the transcript reader; it
+// is deliberately NOT loaded back into the session's Messages (loadMessages
+// ignores the column), so it never reaches the LLM. A nil/empty map persists as
+// SQL NULL, leaving ordinary chat turns byte-identical to the pre-013 shape.
+func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
 	ctx := context.Background()
 	d := s.db.Dialect()
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -120,6 +145,10 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 		return err
 	}
 	toolCallID := sql.NullString{String: msg.ToolCallID, Valid: msg.ToolCallID != ""}
+	metadataJSON, err := metadataAsNullString(metadata)
+	if err != nil {
+		return err
+	}
 
 	tx, err := s.db.SQLDB().BeginTx(ctx, nil)
 	if err != nil {
@@ -130,9 +159,9 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	// Atomically assign next seq in a single statement to avoid race conditions
 	// between concurrent AddMessage calls.
 	if _, err := tx.ExecContext(ctx,
-		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, created_at)
-		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
-		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, now, id); err != nil {
+		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, metadata, created_at)
+		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
+		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, metadataJSON, now, id); err != nil {
 		return fmt.Errorf("add message insert: %w", err)
 	}
 

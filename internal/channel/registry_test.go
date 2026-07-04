@@ -316,6 +316,48 @@ func TestRegistryDispatch(t *testing.T) {
 	}
 }
 
+func TestRegistryDispatch_EmptyResponseNotSent(t *testing.T) {
+	// A handler that returns a zero-value OutboundMessage (e.g. a resume
+	// handshake with nothing pending) must produce NO frame — otherwise the
+	// client sees a blank/"(No response)" bubble. A follow-up real message must
+	// still be delivered, proving the drop is scoped to empty responses only.
+	emptyThenEcho := func(_ context.Context, _ string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
+		if msg.Content == "" {
+			return pkg.OutboundMessage{}, nil
+		}
+		return pkg.OutboundMessage{ConversationID: msg.ConversationID, Content: "echo: " + msg.Content}, nil
+	}
+	reg := NewRegistry(emptyThenEcho)
+	defer reg.StopAll()
+
+	ch := newMockChannel("discord")
+	_ = reg.Register(ch)
+
+	// Empty-content control-style message: must NOT be sent.
+	ch.pushMessage(pkg.InboundMessage{ConversationID: "room1", Metadata: map[string]string{pkg.ControlMetadataKey: pkg.ControlResumeHello}})
+	// Real message afterwards: must be delivered.
+	ch.pushMessage(pkg.InboundMessage{ConversationID: "room1", Content: "hi"})
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := ch.sentMessages()
+		for _, s := range sent {
+			if s.Content == "" {
+				t.Fatalf("an empty response was sent: %+v", sent)
+			}
+		}
+		if len(sent) == 1 && sent[0].Content == "echo: hi" {
+			return // only the real message was delivered
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out; sent=%+v", sent)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestRegistryStopAll(t *testing.T) {
 	reg := NewRegistry(echoHandler)
 

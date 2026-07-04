@@ -57,9 +57,10 @@ func (d *sessionDebouncer) stop() {
 // Returns true if the message was debounced, false if it should be dispatched
 // immediately (e.g. confirmation signals).
 func (d *sessionDebouncer) submit(sessionKey string, msg pkg.InboundMessage) bool {
-	// Skip debounce for confirmation signals and typing indicators —
-	// these must be processed immediately.
-	if msg.Metadata["confirmation"] != "" || msg.Metadata["_typing"] == "true" {
+	// Skip debounce for confirmation signals, typing indicators, and control
+	// messages (e.g. a resume handshake) — these must be processed immediately
+	// and never merged with a user's chat text.
+	if msg.Metadata["confirmation"] != "" || msg.Metadata["_typing"] == "true" || msg.Metadata[pkg.ControlMetadataKey] != "" {
 		return false
 	}
 

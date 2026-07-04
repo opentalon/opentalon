@@ -333,6 +333,125 @@ func TestHandler_ResumeIntentTrue_ResumeFails_InfraError_EmitsInternalError(t *t
 	}
 }
 
+func TestHandler_ResumeHello_PendingConfirmation_ReEmitsPromptFrame(t *testing.T) {
+	// A resume handshake with a still-pending confirmation must re-emit the
+	// prompt frame (content + confirmation metadata) so the reconnected client
+	// redraws its Approve/Reject buttons. The Runner must NOT run.
+	cfg := baseHandlerConfig()
+	cfg.Runner = &failRunner{t}
+	cfg.PendingConfirmation = func(_ string) (string, map[string]string, bool) {
+		return "Proceed with deleting 3 items?",
+			map[string]string{"type": "confirmation", "prompt_type": "tool_confirmation", "tool_call_id": "call_9"}, true
+	}
+	h := NewMessageHandler(cfg)
+	msg := pkg.InboundMessage{
+		ChannelID:      "websocket",
+		ConversationID: "abc",
+		Metadata:       map[string]string{pkg.ControlMetadataKey: pkg.ControlResumeHello, pkg.ResumeIntentMetadataKey: "true"},
+	}
+	out, err := h(context.Background(), "websocket:abc", msg)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if out.Content != "Proceed with deleting 3 items?" {
+		t.Errorf("Content = %q, want the re-emitted prompt", out.Content)
+	}
+	if out.Metadata["prompt_type"] != "tool_confirmation" || out.Metadata["tool_call_id"] != "call_9" {
+		t.Errorf("re-emit metadata mismatch: %+v", out.Metadata)
+	}
+	// The hello's own control/resume flags must not leak back to the client.
+	if _, ok := out.Metadata[pkg.ControlMetadataKey]; ok {
+		t.Errorf("control key leaked into re-emit frame: %+v", out.Metadata)
+	}
+}
+
+func TestHandler_ResumeHello_NothingPending_ReturnsEmptyFrame(t *testing.T) {
+	// A resume handshake with nothing pending must return a zero-value frame
+	// (which the registry drops) — never a Runner turn, never a stray bubble.
+	cfg := baseHandlerConfig()
+	cfg.Runner = &failRunner{t}
+	cfg.PendingConfirmation = func(_ string) (string, map[string]string, bool) { return "", nil, false }
+	h := NewMessageHandler(cfg)
+	msg := pkg.InboundMessage{
+		ChannelID:      "websocket",
+		ConversationID: "abc",
+		Metadata:       map[string]string{pkg.ControlMetadataKey: pkg.ControlResumeHello, pkg.ResumeIntentMetadataKey: "true"},
+	}
+	out, err := h(context.Background(), "websocket:abc", msg)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if out.Content != "" || len(out.Metadata) != 0 || len(out.Files) != 0 {
+		t.Errorf("expected zero-value frame for nothing-pending hello, got %+v", out)
+	}
+}
+
+func TestHandler_ResumeHello_ResumeFails_NotFound_EmitsSessionExpired(t *testing.T) {
+	// A hello for a session that no longer exists still takes the strict resume
+	// path, so a dead conversation is reported at reconnect — not on the first
+	// keystroke. PendingConfirmation must not even be consulted.
+	pendingConsulted := false
+	cfg := baseHandlerConfig()
+	cfg.Runner = &failRunner{t}
+	cfg.ResumeSession = func(_ string) error {
+		return fmt.Errorf("session gone: %w", state.ErrSessionNotFound)
+	}
+	cfg.PendingConfirmation = func(_ string) (string, map[string]string, bool) {
+		pendingConsulted = true
+		return "", nil, false
+	}
+	h := NewMessageHandler(cfg)
+	msg := pkg.InboundMessage{
+		ChannelID:      "websocket",
+		ConversationID: "gone",
+		Metadata:       map[string]string{pkg.ControlMetadataKey: pkg.ControlResumeHello, pkg.ResumeIntentMetadataKey: "true"},
+	}
+	out, _ := h(context.Background(), "websocket:gone", msg)
+	if got := out.Metadata["error_code"]; got != "session_expired" {
+		t.Errorf("error_code = %q, want session_expired", got)
+	}
+	if pendingConsulted {
+		t.Error("PendingConfirmation must not be consulted when resume fails")
+	}
+}
+
+func TestHandler_ResumeHello_SkipsTokenLimit(t *testing.T) {
+	// A control message does no LLM work, so an exhausted token budget must not
+	// block the confirmation re-emit — otherwise a user who hit their limit
+	// mid-approval could never resolve the pending write on reconnect.
+	cfg := baseHandlerConfig()
+	cfg.Runner = &failRunner{t}
+	cfg.Verifier = &stubVerifier{p: &profile.Profile{EntityID: "e1", Limit: 100, LimitWindow: time.Hour}}
+	cfg.LimitChecker = &stubLimitChecker{total: 1_000} // way over the limit
+	cfg.PendingConfirmation = func(_ string) (string, map[string]string, bool) {
+		return "Proceed?", map[string]string{"prompt_type": "tool_confirmation"}, true
+	}
+	h := NewMessageHandler(cfg)
+	msg := pkg.InboundMessage{
+		ChannelID:      "websocket",
+		ConversationID: "abc",
+		Metadata: map[string]string{
+			"profile_token": "tok", pkg.ControlMetadataKey: pkg.ControlResumeHello, pkg.ResumeIntentMetadataKey: "true",
+		},
+	}
+	out, _ := h(context.Background(), "websocket:abc", msg)
+	if got := out.Metadata["error_code"]; got == "token_limit_exceeded" {
+		t.Fatal("resume hello was blocked by the token limit; control messages must skip it")
+	}
+	if out.Metadata["prompt_type"] != "tool_confirmation" {
+		t.Errorf("expected the confirmation re-emit despite over-limit, got %+v", out.Metadata)
+	}
+}
+
+// failRunner fails the test if the LLM Runner is invoked. Used by control-path
+// tests to prove no LLM turn runs.
+type failRunner struct{ t *testing.T }
+
+func (r *failRunner) Run(_ context.Context, _ string, _ string, _ ...pkg.FileAttachment) (string, string, map[string]string, error) {
+	r.t.Fatal("Runner.Run must not be called on a control message")
+	return "", "", nil, nil
+}
+
 func TestHandler_NewMessageHandler_PanicsOnNilResumeSession(t *testing.T) {
 	// Boot-time misconfiguration must surface immediately at construction,
 	// not as a nil-deref under the first inbound message. The strict-session

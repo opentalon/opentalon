@@ -267,6 +267,15 @@ func (r *Registry) handleMessage(ch pkg.Channel, m pkg.InboundMessage) {
 		return
 	}
 
+	// A fully empty response is a deliberate "nothing to deliver" signal —
+	// e.g. a resume handshake with no pending confirmation. Sending it would
+	// push a blank frame (and channels that substitute "(No response)" would
+	// show a stray bubble), so drop it. Any real reply carries content, files,
+	// or metadata; typing indicators take a separate path.
+	if resp.Content == "" && len(resp.Files) == 0 && len(resp.Metadata) == 0 {
+		return
+	}
+
 	// Streaming delivered content progressively, but the final
 	// handler response may differ (tool-call blocks stripped,
 	// Lua formatting applied). Update the streamed message

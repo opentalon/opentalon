@@ -45,6 +45,10 @@ func (s *stubSessionStore) AddMessage(id string, msg provider.Message) error {
 	return nil
 }
 
+func (s *stubSessionStore) AddMessageWithMetadata(id string, msg provider.Message, _ map[string]string) error {
+	return s.AddMessage(id, msg)
+}
+
 func (s *stubSessionStore) SetModel(id string, model provider.ModelRef) error {
 	sess := s.sessions[id]
 	if sess == nil {
