@@ -378,10 +378,13 @@ func main() {
 	// LLM client that sets default model when orchestrator doesn't
 	llm := &defaultModelClient{provider: prov, model: defaultModel, models: modelMap}
 
-	// Look up context window for the default model.
-	var contextWindow int
+	// Look up context window and output budget for the default model. The
+	// output budget (max_tokens) is reserved from the window on every trim so
+	// prompt + completion cannot exceed the model's context length.
+	var contextWindow, maxOutputTokens int
 	if m, ok := modelMap[defaultModel]; ok {
 		contextWindow = m.ContextWindow
+		maxOutputTokens = m.MaxTokens
 	}
 
 	// Sessions created on first message per channel (session key from channel ID)
@@ -722,6 +725,7 @@ func main() {
 		ConfirmationAction:            cfg.Orchestrator.Pipeline.ConfirmationAction,
 		ConfirmationClassifierEnabled: cfg.Orchestrator.Pipeline.ConfirmationClassifierEnabled,
 		ContextWindow:                 contextWindow,
+		MaxOutputTokens:               maxOutputTokens,
 		MaxConcurrentSessions:         cfg.Orchestrator.MaxConcurrentSessions,
 		GroupPluginLookup:             groupPluginStore,
 		UsageRecorder:                 usageRecorder,

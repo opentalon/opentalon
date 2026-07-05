@@ -1213,7 +1213,7 @@ func TestTrimToContextWindow_NoTrimNeeded(t *testing.T) {
 		{Role: provider.RoleAssistant, Content: "hi there"},
 	}
 	// All messages are tiny, context window is huge — no trimming.
-	result := trimToContextWindow(context.Background(), msgs, 100000)
+	result := trimToContextWindow(context.Background(), msgs, 100000, 0)
 	if len(result) != 3 {
 		t.Fatalf("expected 3 messages, got %d", len(result))
 	}
@@ -1234,7 +1234,7 @@ func TestTrimToContextWindow_DropsOldConversation(t *testing.T) {
 		{Role: provider.RoleUser, Content: strings.Repeat("e", 400)},
 	}
 
-	result := trimToContextWindow(context.Background(), msgs, 400)
+	result := trimToContextWindow(context.Background(), msgs, 400, 0)
 
 	// System message must be preserved.
 	if result[0].Role != provider.RoleSystem {
@@ -1259,7 +1259,7 @@ func TestTrimToContextWindow_PreservesSystemMessages(t *testing.T) {
 		{Role: provider.RoleUser, Content: strings.Repeat("c", 400)},
 	}
 
-	result := trimToContextWindow(context.Background(), msgs, 2000)
+	result := trimToContextWindow(context.Background(), msgs, 2000, 0)
 
 	// Both system messages should be preserved.
 	systemCount := 0
@@ -1281,7 +1281,7 @@ func TestTrimToContextWindow_ZeroWindow(t *testing.T) {
 		{Role: provider.RoleSystem, Content: "sys"},
 		{Role: provider.RoleUser, Content: "hi"},
 	}
-	result := trimToContextWindow(context.Background(), msgs, 999999)
+	result := trimToContextWindow(context.Background(), msgs, 999999, 0)
 	if len(result) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(result))
 	}
@@ -1331,7 +1331,7 @@ func TestTrimToContextWindow_DoesNotOrphanToolResult(t *testing.T) {
 		{Role: provider.RoleUser, Content: big("e")},
 	}
 
-	result := trimToContextWindow(context.Background(), msgs, 400) // maxInput ≈ 360 tokens
+	result := trimToContextWindow(context.Background(), msgs, 400, 0) // maxInput ≈ 360 tokens
 
 	// The orphaned result (its tool-call was dropped) must not survive.
 	for i, m := range result {
@@ -1344,6 +1344,72 @@ func TestTrimToContextWindow_DoesNotOrphanToolResult(t *testing.T) {
 		t.Errorf("first message should be system, got %s", result[0].Role)
 	}
 	if result[len(result)-1].Content != big("e") {
+		t.Error("most recent user message must be kept")
+	}
+}
+
+func TestInputTokenBudget(t *testing.T) {
+	// Unknown output budget (0) → historical flat 10% reserve.
+	if got := inputTokenBudget(100000, 0); got != 90000 {
+		t.Errorf("fallback budget = %d, want 90000", got)
+	}
+	// Known output budget → window - max_tokens - 5% margin.
+	// 131072 - 32768 - 6553 = 91751.
+	if got := inputTokenBudget(131072, 32768); got != 91751 {
+		t.Errorf("budget = %d, want 91751", got)
+	}
+	// The core invariant this change enforces: reserving the output budget must
+	// leave room for it — trimmed input + full output can never exceed the
+	// window. The old flat-10% reserve (117964) violated this for a 32768
+	// output budget (117964 + 32768 = 150732 > 131072).
+	if got := inputTokenBudget(131072, 32768); got+32768 > 131072 {
+		t.Errorf("budget %d + output 32768 exceeds window 131072", got)
+	}
+	// Zero / negative window → no budget.
+	if got := inputTokenBudget(0, 32768); got != 0 {
+		t.Errorf("zero window budget = %d, want 0", got)
+	}
+	// A large-but-valid output budget (>70% of window, which tripped the old
+	// 25% floor) must still satisfy the invariant: budget + output <= window.
+	if got := inputTokenBudget(1000, 800); got != 150 {
+		t.Errorf("budget(1000,800) = %d, want 150", got)
+	}
+	if got := inputTokenBudget(1000, 800); got+800 > 1000 {
+		t.Errorf("budget %d + output 800 exceeds window 1000", got)
+	}
+	// Misconfig (max_tokens >= window): budget clamps to 0, never negative.
+	if got := inputTokenBudget(1000, 2000); got != 0 {
+		t.Errorf("misconfig budget = %d, want 0", got)
+	}
+}
+
+func TestTrimToContextWindow_OutputReserveTrimsEarlier(t *testing.T) {
+	// Assembled input is ~600 estimated tokens (6 × ~100). Window is 1000.
+	//   - Fallback reserve (max_tokens=0 → 900 budget): 600 fits, no trim.
+	//   - Output reserve (max_tokens=400 → 1000-400-50 = 550 budget): must trim.
+	// This proves the reserve tightens the usable input as intended.
+	mk := func(c string) string { return strings.Repeat(c, 400) } // ~100 tokens each
+	msgs := []provider.Message{
+		{Role: provider.RoleSystem, Content: mk("s")},
+		{Role: provider.RoleUser, Content: mk("a")},
+		{Role: provider.RoleAssistant, Content: mk("b")},
+		{Role: provider.RoleUser, Content: mk("c")},
+		{Role: provider.RoleAssistant, Content: mk("d")},
+		{Role: provider.RoleUser, Content: mk("e")},
+	}
+
+	if got := trimToContextWindow(context.Background(), msgs, 1000, 0); len(got) != len(msgs) {
+		t.Fatalf("fallback reserve: expected no trim, got %d of %d", len(got), len(msgs))
+	}
+
+	got := trimToContextWindow(context.Background(), msgs, 1000, 400)
+	if len(got) >= len(msgs) {
+		t.Fatalf("output reserve: expected trim, got %d of %d", len(got), len(msgs))
+	}
+	if got[0].Role != provider.RoleSystem {
+		t.Error("system message must be preserved")
+	}
+	if got[len(got)-1].Content != mk("e") {
 		t.Error("most recent user message must be kept")
 	}
 }

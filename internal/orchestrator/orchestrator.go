@@ -186,6 +186,7 @@ type OrchestratorOpts struct {
 	ConfirmationPlugin            string                  // optional; plugin name for confirmation strategy (e.g. "planner")
 	ConfirmationAction            string                  // optional; action name (e.g. "check_confirmation")
 	ContextWindow                 int                     // model context window in tokens; 0 = no trimming
+	MaxOutputTokens               int                     // default model's per-call output budget (max_tokens); reserved from the window when trimming so prompt + completion cannot exceed the context length. 0 = fall back to a flat 10% reserve
 	MaxConcurrentSessions         int                     // max sessions running in parallel; default 1 (sequential)
 	GroupPluginLookup             GroupPluginLookup       // optional; when set, filters tool list by profile group
 	UsageRecorder                 UsageRecorder           // optional; when set, records LLM usage after each run
@@ -320,6 +321,7 @@ type Orchestrator struct {
 	confirmationPlugin         string                  // optional; plugin for confirmation strategy
 	confirmationAction         string                  // optional; action name for confirmation check
 	contextWindow              int                     // model context window in tokens; 0 = no trimming
+	maxOutputTokens            int                     // reserved output budget (max_tokens) subtracted from the window when trimming; 0 = flat 10% reserve
 	groupPluginLookup          GroupPluginLookup       // optional; nil = no group-based filtering
 	usageRecorder              UsageRecorder           // optional; nil = no usage tracking
 	pluginCallObserver         PluginCallObserver      // optional; nil = no plugin call observation
@@ -603,6 +605,7 @@ func NewWithRules(
 		confirmationPlugin:         opts.ConfirmationPlugin,
 		confirmationAction:         opts.ConfirmationAction,
 		contextWindow:              opts.ContextWindow,
+		maxOutputTokens:            opts.MaxOutputTokens,
 		groupPluginLookup:          opts.GroupPluginLookup,
 		usageRecorder:              opts.UsageRecorder,
 		pluginCallObserver:         opts.PluginCallObserver,
@@ -3613,7 +3616,7 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
 
 	if o.contextWindow > 0 {
-		messages = trimToContextWindow(ctx, messages, o.contextWindow)
+		messages = trimToContextWindow(ctx, messages, o.contextWindow, o.maxOutputTokens)
 	}
 
 	return messages
@@ -3658,11 +3661,48 @@ func estimateTokens(s string) int {
 	return len(s) / 4
 }
 
+// inputTokenBudget returns the maximum estimated input tokens the assembled
+// message list may occupy, given the model's context window and its per-call
+// output budget (max_tokens).
+//
+// The provider's hard ceiling is the context window and it applies to
+// prompt + completion combined: an OpenAI-compatible endpoint rejects a
+// request once prompt_tokens + max_tokens exceeds the model's context length.
+// Reasoning models (e.g. gpt-oss) additionally emit their chain-of-thought
+// INTO that same max_tokens budget, so the whole output budget can genuinely
+// be consumed. We therefore reserve the full output budget — not a flat 10% —
+// plus a small safety margin, because estimateTokens (chars/4) under-counts
+// structured JSON and non-Latin text and ignores per-message framing the
+// provider still charges for.
+//
+// When maxOutputTokens is unknown (0) we fall back to the historical 10%
+// reserve. When max_tokens (plus margin) alone fills the window — a
+// misconfiguration, since max_tokens should be a fraction of the window — the
+// budget clamps to 0 rather than a positive floor: any positive floor plus
+// that output budget would exceed the window and re-admit the very overflow
+// this reserve exists to prevent. The trim loop still keeps the system prompt
+// and the most recent message, so a 0 budget cannot strand it.
+func inputTokenBudget(contextWindow, maxOutputTokens int) int {
+	if contextWindow <= 0 {
+		return 0
+	}
+	if maxOutputTokens <= 0 {
+		return contextWindow * 9 / 10
+	}
+	margin := contextWindow / 20 // 5% headroom for estimator under-count + framing
+	budget := contextWindow - maxOutputTokens - margin
+	if budget < 0 {
+		return 0
+	}
+	return budget
+}
+
 // trimToContextWindow drops the oldest conversation messages (preserving
 // system messages at the front) until the estimated token count fits within
-// the model's context window. Reserves 10% of the window for the response.
-func trimToContextWindow(ctx context.Context, messages []provider.Message, contextWindow int) []provider.Message {
-	maxInputTokens := contextWindow * 9 / 10 // reserve 10% for output
+// the model's usable input budget (the context window minus the reserved
+// output budget; see inputTokenBudget).
+func trimToContextWindow(ctx context.Context, messages []provider.Message, contextWindow, maxOutputTokens int) []provider.Message {
+	maxInputTokens := inputTokenBudget(contextWindow, maxOutputTokens)
 
 	total := 0
 	for _, m := range messages {
