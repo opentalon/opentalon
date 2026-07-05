@@ -1471,7 +1471,18 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// (post-STT, before any [knowledge_context] is injected by preparers,
 	// whose retrieved text may be in another language). The directive rides
 	// ctx into the per-variant buildSystemPrompt calls so detection runs once.
-	ctx = withReplyLanguageDirective(ctx, o.replyLanguageDirective(content))
+	//
+	// When the current message is too short to detect (a bare approval on the
+	// confirm→execute→summarise path, an "ok", a numeric reply), fall back to
+	// the request being fulfilled — the last user message from BEFORE this turn
+	// — so e.g. an approved mutation is summarised in the language the user
+	// asked in, not the model default. msgCountAtStart excludes this turn's own
+	// rows (the approval reply + tool result just added above).
+	priorMessages := []provider.Message(nil)
+	if sess, _ := sessions.Get(sessionID); sess != nil && msgCountAtStart <= len(sess.Messages) {
+		priorMessages = sess.Messages[:msgCountAtStart]
+	}
+	ctx = withReplyLanguageDirective(ctx, o.replyLanguageDirectiveWithHistory(content, priorMessages))
 
 	// Run content preparers before the first LLM call (config-driven).
 	// Preparers no longer narrow the LLM's tool set — tools come from the

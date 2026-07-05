@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"strings"
 	"testing"
+
+	"github.com/opentalon/opentalon/internal/provider"
 )
 
 func newDetectorOrchestrator() *Orchestrator {
@@ -81,5 +83,56 @@ func TestReplyLanguageDirective_NilDetectorSafe(t *testing.T) {
 	o := &Orchestrator{} // no detector wired
 	if got := o.replyLanguageDirective("Can you show me how to create a ticket?"); got != "" {
 		t.Errorf("nil detector should yield empty directive, got %q", got)
+	}
+}
+
+// TestReplyLanguageDirectiveWithHistory_ApprovalInheritsRequest is the
+// regression guard for the confirm→approve→summarise drift: a bare "y" approval
+// carries no language signal, so the summary must inherit the language of the
+// request it fulfils (here English) instead of dropping the pin and letting the
+// model default to another language.
+func TestReplyLanguageDirectiveWithHistory_ApprovalInheritsRequest(t *testing.T) {
+	o := newDetectorOrchestrator()
+	history := []provider.Message{
+		{Role: provider.RoleUser, Content: "Please create a ticket to repair the drill at the Hamburg warehouse."},
+		{Role: provider.RoleAssistant, Content: "I'm about to create that ticket. Shall I proceed?"},
+	}
+	if got := o.replyLanguageDirectiveWithHistory("y", history); !strings.Contains(got, "Reply in English.") {
+		t.Errorf("bare approval should inherit English from the request, got %q", got)
+	}
+}
+
+// A short non-approval follow-up ("ok") after a German request must also inherit
+// German — the fallback is general, not approval-specific.
+func TestReplyLanguageDirectiveWithHistory_ShortReplyInheritsGerman(t *testing.T) {
+	o := newDetectorOrchestrator()
+	history := []provider.Message{
+		{Role: provider.RoleUser, Content: "Bitte lege ein neues Ticket für die defekte Bohrmaschine an."},
+	}
+	if got := o.replyLanguageDirectiveWithHistory("ok", history); !strings.Contains(got, "Reply in German.") {
+		t.Errorf("short reply should inherit German from the request, got %q", got)
+	}
+}
+
+// A detectable current message wins over history: a genuine mid-conversation
+// switch must NOT be overridden by the earlier language.
+func TestReplyLanguageDirectiveWithHistory_CurrentWins(t *testing.T) {
+	o := newDetectorOrchestrator()
+	history := []provider.Message{
+		{Role: provider.RoleUser, Content: "How many items do we have in total?"},
+	}
+	got := o.replyLanguageDirectiveWithHistory("Kannst du mir bitte alle defekten Geräte im Lager auflisten?", history)
+	if !strings.Contains(got, "Reply in German.") {
+		t.Errorf("a detectable current message must win over history, got %q", got)
+	}
+}
+
+// No detectable signal anywhere (short current message, no usable history) must
+// still yield an empty directive — the standing rule then applies, as before.
+func TestReplyLanguageDirectiveWithHistory_NoSignal(t *testing.T) {
+	o := newDetectorOrchestrator()
+	history := []provider.Message{{Role: provider.RoleUser, Content: "ok"}}
+	if got := o.replyLanguageDirectiveWithHistory("y", history); got != "" {
+		t.Errorf("no detectable signal should yield empty directive, got %q", got)
 	}
 }

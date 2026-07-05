@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/opentalon/opentalon/internal/provider"
 	lingua "github.com/pemistahl/lingua-go"
 )
 
@@ -100,4 +101,31 @@ func (o *Orchestrator) replyLanguageDirective(userMessage string) string {
 	name := values[0].Language().String()
 	return fmt.Sprintf("## Reply language\nReply in %s. Use %s for your entire reply, regardless of the language of any "+
 		"retrieved context or earlier messages. Technical terms (field, tool and status names) stay in English.\n\n", name, name)
+}
+
+// replyLanguageDirectiveWithHistory returns the reply-language directive for the
+// current message, falling back to recent history when the current message is
+// too short or ambiguous to detect on its own.
+//
+// A bare approval ("y", a tapped Approve button), an "ok", or a numeric reply
+// carries no language signal, so replyLanguageDirective returns "" for it and
+// the turn loses its language pin — the model then answers in whatever it
+// defaults to. This is the confirm→approve→summarise path: the summary turn is
+// driven by the approval reply, not by the request it fulfils, so an approved
+// mutation would be summarised in the model's default language instead of the
+// one the user asked in. Fall back to the most recent earlier user message that
+// IS detectable so the reply stays in the user's language.
+//
+// priorHistory must EXCLUDE the current turn's own rows (pass
+// sess.Messages[:msgCountAtStart]); otherwise a just-added tool result or the
+// approval reply itself could be mistaken for the request. A detectable current
+// message always wins, so a genuine mid-conversation language switch is honoured.
+func (o *Orchestrator) replyLanguageDirectiveWithHistory(current string, priorHistory []provider.Message) string {
+	if directive := o.replyLanguageDirective(current); directive != "" {
+		return directive
+	}
+	if prev := lastUserMessage(priorHistory); prev != "" {
+		return o.replyLanguageDirective(prev)
+	}
+	return ""
 }
