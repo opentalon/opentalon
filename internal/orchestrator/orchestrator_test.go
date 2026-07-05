@@ -1369,9 +1369,17 @@ func TestInputTokenBudget(t *testing.T) {
 	if got := inputTokenBudget(0, 32768); got != 0 {
 		t.Errorf("zero window budget = %d, want 0", got)
 	}
-	// Pathological config (max_tokens >= window) floors at 25%, never negative.
-	if got := inputTokenBudget(1000, 2000); got != 250 {
-		t.Errorf("floored budget = %d, want 250", got)
+	// A large-but-valid output budget (>70% of window, which tripped the old
+	// 25% floor) must still satisfy the invariant: budget + output <= window.
+	if got := inputTokenBudget(1000, 800); got != 150 {
+		t.Errorf("budget(1000,800) = %d, want 150", got)
+	}
+	if got := inputTokenBudget(1000, 800); got+800 > 1000 {
+		t.Errorf("budget %d + output 800 exceeds window 1000", got)
+	}
+	// Misconfig (max_tokens >= window): budget clamps to 0, never negative.
+	if got := inputTokenBudget(1000, 2000); got != 0 {
+		t.Errorf("misconfig budget = %d, want 0", got)
 	}
 }
 

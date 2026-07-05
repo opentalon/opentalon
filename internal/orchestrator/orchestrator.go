@@ -3676,9 +3676,12 @@ func estimateTokens(s string) int {
 // provider still charges for.
 //
 // When maxOutputTokens is unknown (0) we fall back to the historical 10%
-// reserve. A pathological config (max_tokens at or above the window) is
-// floored at 25% of the window so usable input can never collapse to nothing
-// and strand the trim loop.
+// reserve. When max_tokens (plus margin) alone fills the window — a
+// misconfiguration, since max_tokens should be a fraction of the window — the
+// budget clamps to 0 rather than a positive floor: any positive floor plus
+// that output budget would exceed the window and re-admit the very overflow
+// this reserve exists to prevent. The trim loop still keeps the system prompt
+// and the most recent message, so a 0 budget cannot strand it.
 func inputTokenBudget(contextWindow, maxOutputTokens int) int {
 	if contextWindow <= 0 {
 		return 0
@@ -3688,8 +3691,8 @@ func inputTokenBudget(contextWindow, maxOutputTokens int) int {
 	}
 	margin := contextWindow / 20 // 5% headroom for estimator under-count + framing
 	budget := contextWindow - maxOutputTokens - margin
-	if floor := contextWindow / 4; budget < floor {
-		return floor
+	if budget < 0 {
+		return 0
 	}
 	return budget
 }
