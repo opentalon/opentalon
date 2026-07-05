@@ -13,15 +13,51 @@ import (
 
 // actionNameCandidates returns the forgiving normalizations of an LLM-supplied
 // action name (underscore<->hyphen, and the dropped "<plugin>__" prefix that a
-// bridged MCP server's tools carry). The execute path and load_tools both
-// try these, so a tool resolves the SAME way whether it is loaded or invoked.
+// bridged MCP server's tools carry). The execute path, load_tools, the
+// read-only gate and the repair phase all try these, so a tool resolves the
+// SAME way whether it is loaded, invoked, gated, or repaired.
+//
+// The "_"<->"-" toggling is SEPARATOR-SAFE: it is applied only within each
+// "__"-delimited segment, never across the "__" plugin/action separator a
+// bridged MCP action name embeds (e.g. "timly__list-persons", whose canonical
+// FQN is "timly__timly__list-persons"). A whole-string ReplaceAll would rewrite
+// that separator too — turning a model-emitted "timly__list_persons" into
+// "timly--list-persons", which matches no registered name — so a read-only tool
+// would miss its flag and fall through to a needless confirmation prompt.
+// Segment-wise toggling yields "timly__list-persons" and resolves. Because it
+// only swaps the two intra-name separator characters, it can never rewrite one
+// tool's name into a different tool's.
 func actionNameCandidates(plugin, action string) []string {
+	out := make([]string, 0, 6)
+	seen := make(map[string]bool, 6)
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	for _, variant := range separatorSafeToggles(action) {
+		add(variant)
+		add(plugin + "__" + variant)
+	}
+	return out
+}
+
+// separatorSafeToggles returns name plus its "_"<->"-" toggled forms, swapping
+// the two characters only within "__"-delimited segments so the "__" separator
+// itself is preserved (see actionNameCandidates for why that matters).
+func separatorSafeToggles(name string) []string {
+	segments := strings.Split(name, "__")
+	hyphenated := make([]string, len(segments))
+	underscored := make([]string, len(segments))
+	for i, segment := range segments {
+		hyphenated[i] = strings.ReplaceAll(segment, "_", "-")
+		underscored[i] = strings.ReplaceAll(segment, "-", "_")
+	}
 	return []string{
-		strings.ReplaceAll(action, "_", "-"),
-		plugin + "__" + action,
-		plugin + "__" + strings.ReplaceAll(action, "_", "-"),
-		strings.ReplaceAll(action, "-", "_"),
-		plugin + "__" + strings.ReplaceAll(action, "-", "_"),
+		name,
+		strings.Join(hyphenated, "__"),
+		strings.Join(underscored, "__"),
 	}
 }
 
