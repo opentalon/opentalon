@@ -240,7 +240,7 @@ type MemoryStoreInterface interface {
 // SessionStoreInterface is the session store (in-memory or SQLite).
 type SessionStoreInterface interface {
 	Get(id string) (*state.Session, error)
-	Create(id, entityID, groupID string) *state.Session
+	Create(id, entityID, groupID, kind string) *state.Session
 	AddMessage(id string, msg provider.Message) error
 	// AddMessageWithMetadata is AddMessage plus a small JSON map persisted on
 	// the message row and surfaced only by the transcript reader (never fed to
@@ -1947,7 +1947,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// the just-finished turn's assistant message already committed. Self-
 	// gates on `Title=="" AND >=1 assistant message` so the cost on
 	// every subsequent Run is one Get() against the inner store.
-	defer func() { go o.maybeGenerateTitle(context.Background(), sessionID) }()
+	// Skip background title generation for system runs: a programmatic,
+	// single-turn call needs no human-facing title, and system sessions are
+	// excluded from the chat-session picker anyway.
+	if p := profile.FromContext(ctx); p == nil || p.Kind != "system" {
+		defer func() { go o.maybeGenerateTitle(context.Background(), sessionID) }()
+	}
 
 	result := &RunResult{}
 

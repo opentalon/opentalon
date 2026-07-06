@@ -12,7 +12,7 @@ func newConfirmationTestOrchestrator(t *testing.T) (*Orchestrator, string) {
 	t.Helper()
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
+	sessions.Create("s1", "", "", "")
 	orch := NewWithRules(&fakeLLM{responses: []string{"unused"}},
 		&fakeParser{parseFn: func(string) []ToolCall { return nil }},
 		NewToolRegistry(), memory, sessions, OrchestratorOpts{})

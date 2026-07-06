@@ -22,7 +22,7 @@ func freshSessionStore(t *testing.T) (*SessionStore, string) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	s := NewSessionStore(db, 0, 0)
-	sess := s.Create("sess-injection-test", "ent-1", "grp-1")
+	sess := s.Create("sess-injection-test", "ent-1", "grp-1", "chat")
 	if sess == nil {
 		t.Fatal("Create returned nil session")
 	}

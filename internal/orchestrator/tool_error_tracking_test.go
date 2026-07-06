@@ -16,7 +16,7 @@ func newOrchForErrorTrackingTests(t *testing.T, store *fakeInjectionStateStore) 
 	registry := NewToolRegistry()
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
+	sessions.Create("s1", "", "", "")
 	opts := OrchestratorOpts{
 		ToolErrorHandling: ToolErrorHandlingConfig{
 			LoopCapPerTurn:          2,
@@ -215,7 +215,7 @@ func TestRecordToolOutcome_NewTurnResetsTurnCounter(t *testing.T) {
 	registry := NewToolRegistry()
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
+	sessions.Create("s1", "", "", "")
 	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
 		ToolErrorHandling: ToolErrorHandlingConfig{
 			LoopCapPerTurn:          2,

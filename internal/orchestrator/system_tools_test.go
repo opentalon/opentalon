@@ -67,7 +67,7 @@ func newOrchForMetaTests(t *testing.T, store *fakeInjectionStateStore) *Orchestr
 	}, &fixedResultExecutor{content: "result"})
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
+	sessions.Create("s1", "", "", "")
 	opts := OrchestratorOpts{}
 	if store != nil {
 		opts.InjectionStateStore = store
@@ -233,7 +233,7 @@ func TestLoadTools_ResolvesBridgedMCPBareName(t *testing.T) {
 	}
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
+	sessions.Create("s1", "", "", "")
 	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
 		InjectionStateStore: &fakeInjectionStateStore{},
 	})
@@ -295,7 +295,7 @@ func TestLoadTools_FilteredByUserOnlyActionFails(t *testing.T) {
 	}, &fixedResultExecutor{content: "result"})
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
+	sessions.Create("s1", "", "", "")
 	store := &fakeInjectionStateStore{}
 	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
 		InjectionStateStore: store,
@@ -330,7 +330,7 @@ func TestLoadTools_FilteredByPreparerActionFails(t *testing.T) {
 	}, &fixedResultExecutor{content: "result"})
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
+	sessions.Create("s1", "", "", "")
 	store := &fakeInjectionStateStore{}
 	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
 		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag", Action: "prepare"}},

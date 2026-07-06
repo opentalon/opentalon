@@ -108,7 +108,7 @@ func TestExecutor_ClearSession_PreservesIdentity(t *testing.T) {
 	e := NewExecutor(reg, sessions, "", nil, "")
 
 	const sid = "sess-clear-id"
-	sess := sessions.Create(sid, "ent-X", "grp-Y")
+	sess := sessions.Create(sid, "ent-X", "grp-Y", "")
 	sess.Metadata["debug"] = "true"
 	_ = sessions.SetModel(sid, "anthropic/claude-sonnet-4")
 	_ = sessions.AddMessage(sid, provider.Message{Role: provider.RoleUser, Content: "Hello"})

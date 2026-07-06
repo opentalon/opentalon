@@ -84,6 +84,10 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			return errorFrame(msg, "We couldn't verify your account info right now. Please try again in a moment.", "enrichment_failed"), nil
 		}
 
+		// interaction_kind for a session minted on this connection; a verified
+		// profile may override it below (a system invocation sets "system").
+		interactionKind := "chat"
+
 		// Profile verification: required when verifier is configured.
 		if cfg.Verifier != nil {
 			token := msg.Metadata["profile_token"]
@@ -122,6 +126,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			// Scope session to entity so profiles cannot access each other's history.
 			entityID = p.EntityID
 			groupID = p.Group
+			interactionKind = p.Kind
 			sessionKey = p.EntityID + ":" + sessionKey
 			// Use entity ID as actor for memory scoping and permission checks.
 			ctx = actor.WithActor(ctx, p.EntityID)
@@ -169,7 +174,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 				return errorFrame(msg, "Something went wrong loading your conversation. Please try again.", "internal_error"), nil
 			}
 		} else {
-			cfg.CreateSession(sessionKey, entityID, groupID)
+			cfg.CreateSession(sessionKey, entityID, groupID, interactionKind)
 		}
 
 		// Resume handshake: a reconnecting client sends one control frame right

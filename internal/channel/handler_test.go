@@ -48,7 +48,7 @@ func (e *echoRunner) Run(_ context.Context, _ string, content string, _ ...pkg.F
 func baseHandlerConfig() HandlerConfig {
 	return HandlerConfig{
 		ResumeSession: func(_ string) error { return nil },
-		CreateSession: func(_, _, _ string) {},
+		CreateSession: func(_, _, _, _ string) {},
 		Runner:        &echoRunner{},
 		RunAction: func(_ context.Context, _, _ string, _ map[string]string) (string, error) {
 			return "", errors.New("no actions")
@@ -256,7 +256,7 @@ func (r *sessionRecorder) resumeFunc() pkg.ResumeSessionFunc {
 }
 
 func (r *sessionRecorder) createFunc() pkg.CreateSessionFunc {
-	return func(key, _, _ string) {
+	return func(key, _, _, _ string) {
 		r.creates = append(r.creates, key)
 	}
 }
@@ -503,7 +503,7 @@ func TestHandler_NewMessageHandler_PanicsOnNilResumeSession(t *testing.T) {
 	}()
 	NewMessageHandler(HandlerConfig{
 		ResumeSession: nil,
-		CreateSession: func(_, _, _ string) {},
+		CreateSession: func(_, _, _, _ string) {},
 		Runner:        &echoRunner{},
 	})
 }
@@ -529,7 +529,7 @@ func TestHandler_NewMessageHandler_PanicsOnNilRunner(t *testing.T) {
 	}()
 	NewMessageHandler(HandlerConfig{
 		ResumeSession: func(_ string) error { return nil },
-		CreateSession: func(_, _, _ string) {},
+		CreateSession: func(_, _, _, _ string) {},
 		Runner:        nil,
 	})
 }

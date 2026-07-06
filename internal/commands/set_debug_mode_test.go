@@ -17,7 +17,7 @@ func (f counterFunc) CountForSession(_ context.Context, _ string) (int64, error)
 func newDebugTestExecutor(t *testing.T) (*Executor, *state.SessionStore) {
 	t.Helper()
 	sessions := state.NewSessionStore("")
-	sessions.Create("sess-1", "", "")
+	sessions.Create("sess-1", "", "", "")
 	registry := orchestrator.NewToolRegistry()
 	exec := NewExecutor(registry, sessions, t.TempDir(), nil, "")
 	if err := registry.Register(Capability(), exec); err != nil {

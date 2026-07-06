@@ -222,13 +222,14 @@ type ContentPreparer func(ctx context.Context, content string, runAction RunActi
 type ResumeSessionFunc func(sessionKey string) error
 
 // CreateSessionFunc registers (or returns) a session row for sessionKey,
-// entityID, groupID. Idempotent: an existing session is returned untouched,
-// never wiped. The handler calls Create on messages NOT flagged with
-// resume_intent — i.e. the channel did not have a client-supplied id and
-// just minted one for this connection. Splitting Resume/Create replaces the
-// previous EnsureSessionFunc which conflated the two paths and silently
-// auto-created on any cache miss.
-type CreateSessionFunc func(sessionKey, entityID, groupID string)
+// entityID, groupID, kind. kind is the session's interaction_kind ("chat" |
+// "system"); an empty kind is stored as "chat". Idempotent: an existing
+// session is returned untouched, never wiped. The handler calls Create on
+// messages NOT flagged with resume_intent — i.e. the channel did not have a
+// client-supplied id and just minted one for this connection. Splitting
+// Resume/Create replaces the previous EnsureSessionFunc which conflated the
+// two paths and silently auto-created on any cache miss.
+type CreateSessionFunc func(sessionKey, entityID, groupID, kind string)
 
 // ResumeIntentMetadataKey is the InboundMessage metadata key channels set
 // to "true" when the conversation_id on the message came from the client
