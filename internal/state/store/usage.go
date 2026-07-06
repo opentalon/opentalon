@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -10,16 +11,18 @@ import (
 
 // UsageRecord captures LLM usage statistics for one orchestrator run.
 type UsageRecord struct {
-	EntityID     string
-	GroupID      string
-	ChannelID    string
-	SessionID    string
-	ModelID      string
-	InputTokens  int
-	OutputTokens int
-	ToolCalls    int
-	InputCost    float64
-	OutputCost   float64
+	EntityID        string
+	GroupID         string
+	ChannelID       string
+	SessionID       string
+	ModelID         string
+	InteractionKind string // "chat" | "system"; empty is stored as "chat"
+	SystemSource    string // per-feature label for system runs; empty stored as NULL
+	InputTokens     int
+	OutputTokens    int
+	ToolCalls       int
+	InputCost       float64
+	OutputCost      float64
 }
 
 // UsageStore records LLM usage statistics per profile.
@@ -52,13 +55,20 @@ func (s *UsageStore) TotalTokensSince(ctx context.Context, entityID string, sinc
 func (s *UsageStore) Record(ctx context.Context, r UsageRecord) error {
 	id := "usg_" + uuid.New().String()
 	now := time.Now().UTC().Format(time.RFC3339)
+	kind := r.InteractionKind
+	if kind == "" {
+		kind = "chat"
+	}
+	source := sql.NullString{String: r.SystemSource, Valid: r.SystemSource != ""}
 	_, err := s.db.SQLDB().ExecContext(ctx, s.db.Dialect().Rebind(`
 		INSERT INTO profile_usage
 		  (id, entity_id, group_id, channel_id, session_id, model_id,
+		   interaction_kind, system_source,
 		   input_tokens, output_tokens, tool_calls,
 		   input_cost, output_cost, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		id, r.EntityID, r.GroupID, r.ChannelID, r.SessionID, r.ModelID,
+		kind, source,
 		r.InputTokens, r.OutputTokens, r.ToolCalls,
 		r.InputCost, r.OutputCost, now)
 	if err != nil {

@@ -29,4 +29,6 @@ type Profile struct {
 	LimitWindow  time.Duration               // rolling window for Limit (0 = unlimited)
 	BudgetTokens int                         // reasoning budget tokens from WhoAmI (0 = provider default)
 	Credentials  map[string]CredentialHeader // per-MCP-server credentials from WhoAmI, keyed by server name
+	Kind         string                      // interaction kind: "chat" (human) | "system" (backend-originated); empty ⇒ "chat"
+	SystemSource string                      // per-feature label for system runs (e.g. "csv_mapping", "job_notify"); empty for chat
 }

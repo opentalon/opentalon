@@ -105,8 +105,10 @@ type GroupPluginLookup interface {
 }
 
 // UsageRecorder records LLM usage statistics after an orchestrator run.
+// interactionKind is the run's kind ("chat" | "system"); systemSource is an
+// optional per-feature label for system runs. Both come from the run's Profile.
 type UsageRecorder interface {
-	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int)
+	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int)
 }
 
 // PromptSnapshotUpserter persists content-addressed prompt bodies so a
@@ -1965,7 +1967,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if o.usageRecorder != nil {
 			if p := profile.FromContext(ctx); p != nil {
 				o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group,
-					p.ChannelID, sessionID, modelUsed,
+					p.ChannelID, sessionID, modelUsed, p.Kind, p.SystemSource,
 					totalInputTokens, totalOutputTokens, totalToolCalls)
 			}
 		}
