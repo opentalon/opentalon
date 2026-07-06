@@ -24,6 +24,11 @@ type Message struct {
 	Files      []MessageFile `json:"files,omitempty"`
 	ToolCallID string        `json:"tool_call_id,omitempty"` // for role=tool messages (native function calling)
 	ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`   // for role=assistant messages with native tool calls
+	// Visibility "hidden" marks a message that IS fed to the model (it rides in
+	// role+content) but is dropped from the user-facing transcript — the inverse
+	// of the per-message metadata column. Empty means visible. Applies to
+	// role=user injected turns only; an assistant reply is always visible.
+	Visibility string `json:"visibility,omitempty"`
 }
 
 // ToolDefinition describes a tool the LLM can call (native function calling).

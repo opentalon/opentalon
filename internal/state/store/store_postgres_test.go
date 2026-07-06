@@ -55,8 +55,8 @@ func TestPostgres_OpenAndMigrations(t *testing.T) {
 	if err := db.SQLDB().QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 14 {
-		t.Errorf("schema_version = %d, want 14", v)
+	if v != 15 {
+		t.Errorf("schema_version = %d, want 15", v)
 	}
 }
 
