@@ -532,6 +532,22 @@ type RoutingConfig struct {
 	Fallbacks []string          `yaml:"fallbacks"`
 	Pin       map[string]string `yaml:"pin"`
 	Affinity  AffinityConfig    `yaml:"affinity"`
+	Health    HealthCheckConfig `yaml:"health"`
+}
+
+// HealthCheckConfig tunes the health-gated fallback that prefers routing.primary
+// while its endpoint is reachable and switches to routing.fallbacks otherwise.
+// It is only used when routing.fallbacks is non-empty. All fields are optional;
+// zero/empty values use the defaults: probe base_url+"/models" every 10s with a
+// 3s timeout, and switch back to the primary after 3 consecutive healthy probes.
+// The primary trips to the fallbacks immediately on a failed probe or a live
+// request error, but only recovers after RecoverAfter consecutive healthy probes
+// (hysteresis, to avoid flapping when the primary is intermittently available).
+type HealthCheckConfig struct {
+	Path         string `yaml:"path"`          // probe path relative to base_url; default "/models"
+	Interval     string `yaml:"interval"`      // probe interval (Go duration); default "10s"
+	Timeout      string `yaml:"timeout"`       // per-probe timeout (Go duration); default "3s"
+	RecoverAfter int    `yaml:"recover_after"` // consecutive healthy probes before switching back; default 3
 }
 
 type AffinityConfig struct {

@@ -1463,14 +1463,60 @@ func runClean(configPath, category string) {
 }
 
 // buildProvider returns a provider and the default model ID from config.
+// buildProvider builds the LLM provider from config. When routing.fallbacks is
+// empty it returns the single primary provider (unchanged behavior). Otherwise
+// it builds the primary plus each fallback and wraps them in a health-gated
+// provider that prefers the primary while its endpoint is reachable and falls
+// back — with recovery hysteresis — to the fallbacks otherwise.
 func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver, eventSink emit.Sink) (provider.Provider, string, error) {
+	prov, modelID, primaryPC, err := buildProviderRef(cfg, cfg.Routing.Primary, debugSink, debugResolve, eventSink)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(cfg.Routing.Fallbacks) == 0 {
+		return prov, modelID, nil
+	}
+
+	entries := make([]provider.ProviderEntry, 0, 1+len(cfg.Routing.Fallbacks))
+	entries = append(entries, provider.ProviderEntry{Prov: prov, Model: modelID})
+	for _, ref := range cfg.Routing.Fallbacks {
+		fp, fModel, _, ferr := buildProviderRef(cfg, ref, debugSink, debugResolve, eventSink)
+		if ferr != nil {
+			return nil, "", fmt.Errorf("routing fallback %q: %w", ref, ferr)
+		}
+		entries = append(entries, provider.ProviderEntry{Prov: fp, Model: fModel})
+	}
+
+	probePath := cfg.Routing.Health.Path
+	if probePath == "" {
+		probePath = "/models"
+	}
+	probeURL := strings.TrimRight(primaryPC.BaseURL, "/") + probePath
+	probe := provider.NewHTTPHealthProbe(probeURL, primaryPC.APIKey, nil)
+	gate := provider.HealthGateConfig{
+		Interval:     parseDurationOrZero(cfg.Routing.Health.Interval),
+		Timeout:      parseDurationOrZero(cfg.Routing.Health.Timeout),
+		RecoverAfter: cfg.Routing.Health.RecoverAfter,
+	}
+	slog.Info("llm routing: health-gated fallback enabled",
+		"primary", cfg.Routing.Primary,
+		"fallbacks", cfg.Routing.Fallbacks,
+		"health_probe", probeURL)
+	return provider.NewHealthGatedProvider(context.Background(), entries, probe, gate, slog.Default()), modelID, nil
+}
+
+// buildProviderRef builds a single provider from a "providerID" or
+// "providerID/modelID" routing ref. An empty ref selects the first configured
+// provider. It returns the provider, the resolved model id, and the provider's
+// config entry (used by the caller to wire the health probe against its endpoint).
+func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver, eventSink emit.Sink) (provider.Provider, string, config.ProviderConfig, error) {
 	providerID := ""
 	modelID := ""
 
-	if cfg.Routing.Primary != "" {
-		parts := strings.SplitN(cfg.Routing.Primary, "/", 2)
+	if ref != "" {
+		parts := strings.SplitN(ref, "/", 2)
+		providerID = parts[0]
 		if len(parts) == 2 {
-			providerID = parts[0]
 			modelID = parts[1]
 		}
 	}
@@ -1481,21 +1527,21 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 		}
 	}
 	if providerID == "" {
-		return nil, "", fmt.Errorf("no provider configured in models.providers")
+		return nil, "", config.ProviderConfig{}, fmt.Errorf("no provider configured in models.providers")
 	}
 
 	pc, ok := cfg.Models.Providers[providerID]
 	if !ok {
-		return nil, "", fmt.Errorf("provider %q not found", providerID)
+		return nil, "", config.ProviderConfig{}, fmt.Errorf("provider %q not found", providerID)
 	}
 
 	if modelID == "" {
 		if len(pc.Models) > 0 {
 			modelID = pc.Models[0].ID
 		} else {
-			for ref := range cfg.Models.Catalog {
-				if strings.HasPrefix(ref, providerID+"/") {
-					modelID = strings.TrimPrefix(ref, providerID+"/")
+			for r := range cfg.Models.Catalog {
+				if strings.HasPrefix(r, providerID+"/") {
+					modelID = strings.TrimPrefix(r, providerID+"/")
 					break
 				}
 			}
@@ -1543,9 +1589,9 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 	}
 	prov, err := provider.FromConfig(provCfg)
 	if err != nil {
-		return nil, "", err
+		return nil, "", config.ProviderConfig{}, err
 	}
-	return prov, modelID, nil
+	return prov, modelID, pc, nil
 }
 
 // parseDurationOrZero parses a Go duration string, returning 0 (which the
