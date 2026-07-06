@@ -37,12 +37,17 @@ func NewUsageStore(db *DB) *UsageStore {
 
 // TotalTokensSince returns the sum of input + output tokens for entityID
 // recorded on or after since. Used to enforce per-profile token limits.
+//
+// Only interaction_kind='chat' runs count: a programmatic system run
+// (interaction_kind='system') is attributed to the same entity for cost
+// visibility but must not consume the interactive chat budget. The
+// (entity_id, interaction_kind, created_at) index covers this predicate.
 func (s *UsageStore) TotalTokensSince(ctx context.Context, entityID string, since time.Time) (int, error) {
 	sinceStr := since.UTC().Format(time.RFC3339)
 	row := s.db.SQLDB().QueryRowContext(ctx, s.db.Dialect().Rebind(`
 		SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
 		FROM profile_usage
-		WHERE entity_id = ? AND created_at >= ?`),
+		WHERE entity_id = ? AND created_at >= ? AND interaction_kind = 'chat'`),
 		entityID, sinceStr)
 	var total int
 	if err := row.Scan(&total); err != nil {
