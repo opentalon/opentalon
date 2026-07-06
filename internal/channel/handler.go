@@ -150,6 +150,14 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			ctx = actor.WithConfirmationDecision(ctx, cd)
 		}
 
+		// Carry a per-message visibility ("hidden") so the orchestrator stamps
+		// it on the stored user turn: a hidden turn is fed to the model but
+		// dropped from the user-facing transcript (e.g. a system status note
+		// injected by a backend job).
+		if vis := msg.Metadata["visibility"]; vis != "" {
+			ctx = actor.WithVisibility(ctx, vis)
+		}
+
 		// Route by resume intent: client-supplied conv-id → strict Resume
 		// (error frame if the session is gone); channel-minted conv-id →
 		// idempotent Create. This replaces the legacy EnsureSession

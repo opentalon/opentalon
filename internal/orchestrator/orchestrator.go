@@ -1704,13 +1704,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if !confResult.RequiresConfirmation {
 				// All read-only — execute pipeline directly.
 				log.Info("pipeline confirmation skipped by plugin", "steps", len(planResult.Steps))
-				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
 				p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
 				return o.executePipeline(ctx, sessionID, p)
 			}
 			// Partial execution: run read prefix before the first write step,
 			// then pause for confirmation with real data.
-			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
 			if confResult.ConfirmBeforeStep > 0 {
 				// Execute read steps directly (not through executePipeline which
 				// enters the LLM agent loop). Collect their context so the write
@@ -1861,7 +1861,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				toolResult := o.executeCall(ctx, call)
 				if toolResult.Error == "" {
 					// Seed session: user message, assistant tool call, tool result.
-					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
 					if o.supportsNativeTools() {
 						// Native format: assistant with tool_calls + tool result with tool_call_id.
 						_ = sessions.AddMessage(sessionID, provider.Message{
@@ -1930,9 +1930,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 
 		if err := sessions.AddMessage(sessionID, provider.Message{
-			Role:    provider.RoleUser,
-			Content: content,
-			Files:   files,
+			Role:       provider.RoleUser,
+			Content:    content,
+			Files:      files,
+			Visibility: actor.Visibility(ctx),
 		}); err != nil {
 			return nil, fmt.Errorf("adding user message: %w", err)
 		}
