@@ -259,7 +259,7 @@ func NewHTTPHealthProbe(probeURL, apiKey string, client *http.Client) HealthProb
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		_, _ = io.Copy(io.Discard, resp.Body)
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return fmt.Errorf("health probe %s returned status %d", probeURL, resp.StatusCode)
