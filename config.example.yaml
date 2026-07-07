@@ -35,8 +35,50 @@ models:
 
 routing:
   primary: deepseek/deepseek-chat
+  # When fallbacks is non-empty, core prefers `primary` while its endpoint is
+  # reachable and automatically switches to the fallbacks (in order) otherwise.
+  # It trips to a fallback immediately on a failed health probe or a live request
+  # error, and only switches back after `health.recover_after` consecutive healthy
+  # probes (hysteresis — avoids flapping when the primary is intermittently up).
   fallbacks:
     - deepseek/deepseek-reasoner
+  # health:                    # optional; tunes the health-gated fallback above
+  #   path: "/models"          # probe path relative to the primary's base_url (default "/models")
+  #   interval: "10s"          # how often to probe the primary (default "10s")
+  #   timeout: "3s"            # per-probe timeout (default "3s")
+  #   recover_after: 3         # consecutive healthy probes before switching back (default 3)
+
+# --- Example: self-hosted (dedicated) primary + public (shared) fallback -------
+# A self-hosted vLLM endpoint (flat hourly cost -> set token cost to 0) preferred
+# over a metered public endpoint, with automatic health-gated failover. Give each
+# endpoint its OWN model id so usage is recorded against the right cost.
+#
+# models:
+#   providers:
+#     vllm-dedicated:                       # self-hosted vLLM (OpenAI-compatible)
+#       base_url: "${VLLM_DEDICATED_URL}"   # e.g. https://<app-id>.app.gra.ai.cloud.ovh.net/v1
+#       api_key: "${VLLM_DEDICATED_KEY}"
+#       api: openai-completions
+#       models:
+#         - id: gpt-oss-120b
+#           name: GPT OSS 120B (self-hosted)
+#           reasoning: true
+#           context_window: 32768
+#           cost: { input: 0, output: 0 }   # flat hourly billing, not per token
+#     ovh-shared:                           # public OVH AI endpoint (metered)
+#       base_url: "${OVH_AI_URL}"
+#       api_key: "${OVH_AI_KEY}"
+#       api: openai-completions
+#       models:
+#         - id: gpt-oss-120b-ovh
+#           name: GPT OSS 120B (OVH shared)
+#           reasoning: true
+#           context_window: 32768
+#           cost: { input: 0.0, output: 0.0 }
+# routing:
+#   primary: vllm-dedicated/gpt-oss-120b
+#   fallbacks:
+#     - ovh-shared/gpt-oss-120b-ovh
 
 orchestrator:
   rules: []
