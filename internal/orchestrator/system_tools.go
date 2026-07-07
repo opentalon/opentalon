@@ -318,6 +318,9 @@ func (o *Orchestrator) registerLoadToolsTool() {
 		Actions: []Action{{
 			Name: metaLoadTools,
 			Description: "Load one or more tools listed in the system prompt's tool catalog into your available tools so you can call them. " +
+				"Use this ONLY for tools that appear in the catalog. Any tool already present in your available tools list " +
+				"(e.g. a list-* tool you can already see) is ready to call DIRECTLY — never pass an already-available tool to " +
+				"load_tools; loading a tool you already have wastes a full step and returns nothing new. " +
 				"The catalog shows each tool's name and a one-line summary; that summary has NO parameters. " +
 				`Call load_tools(names="plugin__action,plugin__action2") with the catalog names you need, ` +
 				"then call those tools on your NEXT step (their full parameter schemas appear in your tools then). " +

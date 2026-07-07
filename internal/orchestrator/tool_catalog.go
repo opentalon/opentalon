@@ -115,7 +115,8 @@ func (o *Orchestrator) renderToolCatalog(promoted map[string]bool, allowedPlugin
 
 	var sb strings.Builder
 	sb.WriteString("## Tool catalog — name + one-line summary\n")
-	fmt.Fprintf(&sb, "These tools are available but not yet loaded. Each line is a name + a one-line summary with NO parameters. "+
+	fmt.Fprintf(&sb, "These tools are available but not yet loaded — they are separate from the tools already in your available tools list, "+
+		"which you call directly without loading. Each line is a name + a one-line summary with NO parameters. "+
 		"Pick the tool(s) whose summary fits the request and call `%s(names=\"plugin__action,plugin__action2\")` to load their full schemas, "+
 		"then call them on your next step. Never guess parameters from a summary.\n",
 		toolFQN(metaPluginName, metaLoadTools))
