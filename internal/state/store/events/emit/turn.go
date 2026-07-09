@@ -61,3 +61,30 @@ func EmitUserMessage(ctx context.Context, sink Sink, content string) string {
 		ContentLength: len(sanitized),
 	}, 0)
 }
+
+// TurnFinishedArgs is the terminal snapshot of one orchestrator turn. See
+// events.TurnFinishedPayload for the field semantics; the orchestrator
+// derives these from the RunResult on every Run return path.
+type TurnFinishedArgs struct {
+	Outcome         string
+	MessageProduced bool
+	ResponseLength  int
+	ToolCallCount   int
+	LatencyMS       int64
+}
+
+// EmitTurnFinished writes the turn_finished event that closes the turn
+// opened by EmitUserMessage. The orchestrator registers it as a deferred
+// emit right after user_message so it fires on every return path — normal
+// answer, pending confirmation, pipeline cancel, and error alike. The row
+// duration column mirrors LatencyMS so latency queries index it directly.
+func EmitTurnFinished(ctx context.Context, sink Sink, args TurnFinishedArgs) string {
+	return send(ctx, sink, events.TypeTurnFinished, events.TurnFinishedPayload{
+		Header:          events.Header{V: events.TurnFinishedVersion},
+		Outcome:         args.Outcome,
+		MessageProduced: args.MessageProduced,
+		ResponseLength:  args.ResponseLength,
+		ToolCallCount:   args.ToolCallCount,
+		LatencyMS:       args.LatencyMS,
+	}, args.LatencyMS)
+}

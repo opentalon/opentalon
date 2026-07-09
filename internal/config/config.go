@@ -29,6 +29,31 @@ type Config struct {
 	Cluster         ClusterConfig            `yaml:"cluster,omitempty"`
 	PluginExec      PluginExecConfig         `yaml:"plugin_exec,omitempty"`
 	Health          HealthConfig             `yaml:"health,omitempty"`
+	EventWebhook    *EventWebhookConfig      `yaml:"event_webhook,omitempty"`
+}
+
+// EventWebhookConfig forwards persisted session-event types to an
+// out-of-process consumer over HTTP. Absent (nil) disables it. This is the
+// generic push counterpart to the api-plugin's since_seq pull: a consumer
+// that wants low-latency notifications (e.g. a UI activity indicator that
+// must survive a page reload) subscribes to the event types it cares about
+// instead of polling.
+//
+// Delivery is best-effort and at-least-once; events carry the producer-
+// generated event id (stable across this push and the pull endpoint) so a
+// consumer dedups on it, and a dropped push never corrupts consumer state
+// because the pull endpoint stays the source of truth. Header values
+// support ${ENV_VAR} expansion so the shared secret is an env reference,
+// not a literal in the config file. EventTypes is validated against the
+// known event types at startup, so a typo fails the boot instead of
+// silently forwarding nothing.
+type EventWebhookConfig struct {
+	URL        string            `yaml:"url"`
+	EventTypes []string          `yaml:"event_types"`
+	Headers    map[string]string `yaml:"headers,omitempty"`
+	TimeoutMS  int               `yaml:"timeout_ms,omitempty"`
+	BufferSize int               `yaml:"buffer_size,omitempty"`
+	MaxRetries int               `yaml:"max_retries,omitempty"`
 }
 
 // MetricsConfig enables a Prometheus /metrics HTTP endpoint.
@@ -614,6 +639,16 @@ func expandEnvInProviders(cfg *Config) {
 	}
 }
 
+func expandEnvInEventWebhook(cfg *Config) {
+	if cfg.EventWebhook == nil {
+		return
+	}
+	cfg.EventWebhook.URL = expandEnv(cfg.EventWebhook.URL)
+	for k, v := range cfg.EventWebhook.Headers {
+		cfg.EventWebhook.Headers[k] = expandEnv(v)
+	}
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -633,6 +668,7 @@ func Parse(data []byte) (*Config, error) {
 	expandEnvInBootstrap(&cfg)
 	expandEnvInRedis(&cfg)
 	expandEnvInRequestPackages(&cfg)
+	expandEnvInEventWebhook(&cfg)
 	cfg.Cluster.DedupTTL = expandEnv(cfg.Cluster.DedupTTL)
 	cfg.Metrics.Addr = expandEnv(cfg.Metrics.Addr)
 	if cfg.Metrics.Enabled && cfg.Metrics.Addr == "" {

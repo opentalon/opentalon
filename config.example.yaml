@@ -389,3 +389,20 @@ log:
 # gRPC health probes (always enabled, used by Kubernetes liveness/readiness).
 # health:
 #   addr: ":8086"  # grpc.health.v1.Health service
+
+# Event webhook (optional): push selected session-event types to an out-of-process
+# HTTP consumer, as the low-latency counterpart to the api-plugin since_seq pull.
+# Omit the whole block to disable. A bad url or an unknown event_type fails boot.
+# Delivery is best-effort/at-least-once: events carry a stable id for consumer-side
+# dedup, and a permanently-dropped push is reconciled by the pull endpoint.
+# event_webhook:
+#   url: "http://consumer.internal/events"   # required; https recommended off-cluster
+#   # Only these event types are forwarded; everything else is not marshalled.
+#   event_types: [turn_finished]
+#   # Static headers added to every request. Values support ${ENV_VAR} expansion,
+#   # so the auth secret stays out of the file (never commit a literal token).
+#   headers:
+#     X-Webhook-Token: "${WEBHOOK_TOKEN}"
+#   timeout_ms: 5000     # per-request timeout (default 5000)
+#   buffer_size: 1000    # bounded queue; full → drop + throttled warn (default 1000)
+#   max_retries: 2       # retries beyond the first, on network/5xx/429 only (default 2)
