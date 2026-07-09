@@ -248,7 +248,7 @@ type SessionStoreInterface interface {
 	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
 	SetModel(id string, model provider.ModelRef) error
 	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op
-	SetTitle(id, title string) error                                         // upsert the short LLM-generated session label; missing id is a no-op
+	SetTitle(id, title string) error                                         // fill the short session label ONLY while empty; never overwrites a title set elsewhere; missing id is a no-op
 	SetMetadata(id, key, value string) error                                 // upsert a single metadata key; empty value removes it
 	// ClearMessages drops Messages and Summary; preserves EntityID, GroupID,
 	// ActiveModel, Metadata, and CreatedAt; bumps UpdatedAt. The audit log
@@ -4441,6 +4441,11 @@ func (o *Orchestrator) maybeGenerateTitle(ctx context.Context, sessionID string)
 	if err != nil {
 		return
 	}
+	// Cheap early-out: a title already exists — auto-generated on a prior run, or
+	// set through another path (e.g. a user rename via the REST API). The
+	// authoritative race guard is the conditional write in SessionStore.SetTitle
+	// (which matches only a NULL or empty title); this check only saves a wasted
+	// title-generation LLM call in the common case.
 	if sess.Title != "" {
 		return
 	}

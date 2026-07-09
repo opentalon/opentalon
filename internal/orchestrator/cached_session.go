@@ -96,7 +96,11 @@ func (c *cachedSessionStore) SetTitle(id, title string) error {
 	if err := c.inner.SetTitle(id, title); err != nil {
 		return err
 	}
-	if s, ok := c.cache[id]; ok {
+	// inner.SetTitle only fills an empty title — it never overwrites (see
+	// SessionStore.SetTitle). Mirror that here: update the cached copy only when
+	// it was still empty. An unconditional cache write would let the cache hold a
+	// title the DB rejected, diverging the two for the rest of the request.
+	if s, ok := c.cache[id]; ok && s.Title == "" {
 		s.Title = title
 	}
 	return nil

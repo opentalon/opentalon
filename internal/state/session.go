@@ -139,16 +139,20 @@ func (s *SessionStore) SetMetadata(id, key, value string) error {
 	return nil
 }
 
-// SetTitle persists the short LLM-generated label for the session. Called
-// once per session by Orchestrator.maybeGenerateTitle after the first
-// assistant turn. No-op when the session is unknown so callers don't have
-// to special-case races against Delete().
+// SetTitle fills the session's short label, but ONLY while it is still empty —
+// auto-labelling (Orchestrator.maybeGenerateTitle) is a one-shot fill that must
+// never overwrite a title set through another path. Matches the DB-backed
+// store's guarded UPDATE (which matches only a NULL or empty title). No-op when
+// the session is unknown so callers don't have to special-case races against Delete().
 func (s *SessionStore) SetTitle(id, title string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	sess, ok := s.sessions[id]
 	if !ok {
+		return nil
+	}
+	if sess.Title != "" {
 		return nil
 	}
 	sess.Title = title
