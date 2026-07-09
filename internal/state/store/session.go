@@ -237,13 +237,19 @@ func (s *SessionStore) SetMetadata(id, key, value string) error {
 	return tx.Commit()
 }
 
-// SetTitle persists the short LLM-generated label for the session. Called
-// once per session by Orchestrator.maybeGenerateTitle after the first
-// assistant turn. Missing id is a no-op (race against Delete).
+// SetTitle fills the session's short label, but ONLY while it is still empty:
+// the UPDATE matches only a NULL or empty title. Auto-labelling
+// (Orchestrator.maybeGenerateTitle) is a one-shot fill that runs once after the
+// first assistant turn — it must never overwrite a title set through another
+// path (e.g. a rename via a REST endpoint reading the same sessions table),
+// even if that rename lands during the title-generation LLM call. The
+// conditional WHERE closes that race at the DB level: the auto write only ever
+// wins an empty slot, the other (unconditional) writer always wins. Missing id
+// is a no-op (race against Delete).
 func (s *SessionStore) SetTitle(id, title string) error {
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.SQLDB().Exec(
-		s.db.Dialect().Rebind(`UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?`),
+		s.db.Dialect().Rebind(`UPDATE sessions SET title = ?, updated_at = ? WHERE id = ? AND (title IS NULL OR title = '')`),
 		title, updatedAt, id)
 	if err != nil {
 		return fmt.Errorf("set title: %w", err)

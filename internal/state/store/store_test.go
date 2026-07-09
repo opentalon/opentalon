@@ -152,6 +152,52 @@ func TestSessionStore_MaxMessagesTrim(t *testing.T) {
 	}
 }
 
+// SetTitle is a one-shot fill: it labels an empty session but must never
+// overwrite an existing title. This protects a title set through another path
+// (e.g. a user rename via the REST API) from being clobbered by the async
+// auto-label write, even if that write lands afterwards.
+func TestSessionStore_SetTitleOnlyFillsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DBConfig{}, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	sessStore := NewSessionStore(db, 0, 0)
+	sessStore.Create("s1", "", "")
+
+	// Fills the empty slot.
+	if err := sessStore.SetTitle("s1", "first title"); err != nil {
+		t.Fatalf("SetTitle (fill): %v", err)
+	}
+	if sess, _ := sessStore.Get("s1"); sess.Title != "first title" {
+		t.Fatalf("Title after fill = %q, want %q", sess.Title, "first title")
+	}
+
+	// A second SetTitle on a non-empty title is a no-op — the existing title wins.
+	if err := sessStore.SetTitle("s1", "clobber"); err != nil {
+		t.Fatalf("SetTitle (no-overwrite): %v", err)
+	}
+	if sess, _ := sessStore.Get("s1"); sess.Title != "first title" {
+		t.Errorf("Title after second SetTitle = %q, want it unchanged (%q)", sess.Title, "first title")
+	}
+
+	// A blank title (empty string, not just NULL) also counts as "no title yet",
+	// so the guard still lets the auto-label fill it. Force '' via a raw write to
+	// exercise the title = '' disjunct (Create only ever writes NULL).
+	if _, err = db.SQLDB().Exec(
+		db.Dialect().Rebind(`UPDATE sessions SET title = '' WHERE id = ?`), "s1"); err != nil {
+		t.Fatalf("blank-title raw write: %v", err)
+	}
+	if err := sessStore.SetTitle("s1", "refilled"); err != nil {
+		t.Fatalf("SetTitle (refill blank): %v", err)
+	}
+	if sess, _ := sessStore.Get("s1"); sess.Title != "refilled" {
+		t.Errorf("Title after refilling a blank = %q, want %q", sess.Title, "refilled")
+	}
+}
+
 func TestSessionStore_SetSummaryRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(config.DBConfig{}, dir)
