@@ -93,8 +93,79 @@ const (
 	TypeError               = "error"
 
 	// Closing.
+	// turn_finished is the turn's terminal bracket, paired with the
+	// user_message that opened it. The orchestrator emits it via a deferred
+	// call so it fires on EVERY Run return path (normal answer, pending
+	// confirmation, pipeline cancel, error) — see EmitTurnFinished. It is
+	// the single event a consumer can watch to know "the assistant is done
+	// with this turn" without reconstructing turn boundaries from the
+	// interior event stream.
+	TypeTurnFinished  = "turn_finished"
 	TypeScoreComputed = "score_computed"
 )
+
+// AllEventTypes is the canonical list of every Type* constant above. It is
+// the single source of truth for "is this a real event type", used to
+// validate operator-supplied event-type filters (e.g. an event_webhook
+// subscription list) at startup so a typo fails loudly at boot instead of
+// silently matching nothing.
+//
+// Keep this in sync with the const block above — adding a Type* constant
+// means adding it here. TestAllEventTypesRegistered parses this file's AST
+// and fails if the two ever drift, so the sync is enforced, not trusted.
+var AllEventTypes = []string{
+	TypeTurnStart,
+	TypeUserMessage,
+	TypeLLMRequest,
+	TypeLLMResponse,
+	TypePlannerInvoked,
+	TypePlannerRequest,
+	TypePlannerResponse,
+	TypePlannerStep,
+	TypeKnowledgeRetrieval,
+	TypeGlossaryRetrieval,
+	TypeToolRetrieval,
+	TypePreparerDecision,
+	TypeMessagesTruncated,
+	TypeSummarizationTriggered,
+	TypeSummarizationCompleted,
+	TypeSessionTitleInvoked,
+	TypeSessionTitleGenerated,
+	TypeModelSwitch,
+	TypeConfirmationRequested,
+	TypeConfirmationResolved,
+	TypeConfirmationClassificationInvoked,
+	TypeRetry,
+	TypeToolCallExtracted,
+	TypeToolCallResult,
+	TypeToolCallRepairInvoked,
+	TypeToolCallRepaired,
+	TypeToolCallParseFailed,
+	TypeToolCallArgsInvalid,
+	TypeToolCallNotFound,
+	TypeLLMRefused,
+	TypeLLMError,
+	TypeError,
+	TypeTurnFinished,
+	TypeScoreComputed,
+}
+
+// knownEventTypes is the set form of AllEventTypes, built once.
+var knownEventTypes = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(AllEventTypes))
+	for _, t := range AllEventTypes {
+		m[t] = struct{}{}
+	}
+	return m
+}()
+
+// IsKnownEventType reports whether t is one of the canonical event types
+// in AllEventTypes. Consumers validating an operator-supplied type filter
+// use it to reject typos at configuration time.
+func IsKnownEventType(t string) bool {
+	_, ok := knownEventTypes[t]
+	return ok
+}
 
 // PromptSnapshotKind values for prompt_snapshots.kind. knowledge_article
 // is added by RFC #249: per-turn-injected knowledge bodies are stored
@@ -268,6 +339,39 @@ type UserMessagePayload struct {
 }
 
 const UserMessageVersion = 1
+
+// TurnFinishedPayload — emitted once per orchestrator turn, closing the
+// bracket opened by user_message. The orchestrator registers it as a
+// deferred emit right after user_message, so it fires on every Run return
+// path (see EmitTurnFinished).
+//
+// Outcome is the turn's terminal reason:
+//   - "answered"              — the turn produced a normal assistant reply.
+//   - "awaiting_confirmation" — the turn paused for an explicit user yes/no
+//     (RunResult.Metadata["type"] == "confirmation").
+//   - "error"                 — Run returned a non-nil error.
+//
+// MessageProduced is true when the turn yielded an assistant-visible
+// message (non-empty response), letting a consumer bump an unread counter
+// without re-reading the transcript. Consumers dedup on the event id,
+// which is stable across this event and the api-plugin pull endpoint.
+type TurnFinishedPayload struct {
+	Header
+	Outcome         string `json:"outcome"`
+	MessageProduced bool   `json:"message_produced"`
+	ResponseLength  int    `json:"response_length,omitempty"`
+	ToolCallCount   int    `json:"tool_call_count,omitempty"`
+	LatencyMS       int64  `json:"latency_ms,omitempty"`
+}
+
+const TurnFinishedVersion = 1
+
+// Turn outcome values for TurnFinishedPayload.Outcome.
+const (
+	TurnOutcomeAnswered             = "answered"
+	TurnOutcomeAwaitingConfirmation = "awaiting_confirmation"
+	TurnOutcomeError                = "error"
+)
 
 // LLMRequestPayload — metadata about the request, not the full body (the
 // full request body lives in ai_debug_events when /debug is active).

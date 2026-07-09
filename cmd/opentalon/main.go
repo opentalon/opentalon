@@ -25,6 +25,7 @@ import (
 	"github.com/opentalon/opentalon/internal/commands"
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/dedup"
+	"github.com/opentalon/opentalon/internal/eventwebhook"
 	"github.com/opentalon/opentalon/internal/health"
 	"github.com/opentalon/opentalon/internal/logger"
 	"github.com/opentalon/opentalon/internal/metrics"
@@ -239,6 +240,7 @@ func main() {
 	var sessionEventStore *store.SessionEventStore
 	var sessionEventWriter *store.SessionEventWriter
 	var sessionEventsRetentionCancel context.CancelFunc
+	var eventWebhookSink *eventwebhook.Sink
 	// injectionStateStore persists load_tools sticky promotion (the
 	// per-session KnownTools set) across turns — the DB-backed SessionStore
 	// satisfies it, the in-memory fallback does not. Stays nil when the
@@ -336,6 +338,34 @@ func main() {
 	var sessionSink emit.Sink = emit.NoOpSink{}
 	if sessionEventWriter != nil {
 		sessionSink = &sessionSinkAdapter{writer: sessionEventWriter}
+	}
+
+	// Optional out-of-process event webhook: tee the same event stream to a
+	// configured HTTP consumer (a best-effort, low-latency push alongside the
+	// durable writer + the api-plugin's since_seq pull). Built here, before
+	// sessionSink is handed to both the provider and the orchestrator below,
+	// so every producer delivers through the tee. A misconfigured webhook
+	// (bad URL, unknown event type) fails the boot loudly rather than
+	// silently forwarding nothing — same fail-fast as the provider build.
+	if cfg.EventWebhook != nil {
+		ws, werr := eventwebhook.New(eventwebhook.Options{
+			URL:        cfg.EventWebhook.URL,
+			EventTypes: cfg.EventWebhook.EventTypes,
+			Headers:    cfg.EventWebhook.Headers,
+			Timeout:    time.Duration(cfg.EventWebhook.TimeoutMS) * time.Millisecond,
+			BufferSize: cfg.EventWebhook.BufferSize,
+			MaxRetries: cfg.EventWebhook.MaxRetries,
+		})
+		if werr != nil {
+			fmt.Fprintf(os.Stderr, "Error building event webhook: %v\n", werr)
+			os.Exit(1) //nolint:gocritic // matches the other main()-level fatal config paths
+		}
+		eventWebhookSink = ws
+		// context.Background so a graceful Stop can still flush in-flight
+		// events after the application context is cancelled (mirrors the
+		// session-event writer's Start).
+		eventWebhookSink.Start(context.Background())
+		sessionSink = emit.MultiSink{sessionSink, eventWebhookSink}
 	}
 
 	// Build LLM provider and default model from config. The debug sink
@@ -1061,10 +1091,9 @@ func main() {
 	if debugRetentionCancel != nil {
 		debugRetentionCancel()
 	}
-	// Same bounded-flush dance for the always-on structured event log.
-	if sessionEventWriter != nil {
-		sessionEventWriter.Stop(5 * time.Second)
-	}
+	// Cancel the structured-event retention loop now; the writer itself is
+	// stopped further below — after the producers — so a turn's final events
+	// still land instead of being dropped (or racing the buffer close).
 	if sessionEventsRetentionCancel != nil {
 		sessionEventsRetentionCancel()
 	}
@@ -1088,6 +1117,20 @@ func main() {
 	if dispatcher != nil && dispatchCancel != nil {
 		dispatchCancel()
 		dispatcher.Wait()
+	}
+
+	// Event sinks (structured-event writer + event webhook) are stopped LAST —
+	// after every producer that can Emit has finished: channelManager.StopAll
+	// joins the in-flight WebSocket turns (registry wg.Wait), dispatcher.Wait
+	// joins the redis-queued Runs. A turn draining in this window fires its
+	// deferred turn_finished; stopping the sinks any earlier would drop that
+	// final event and risk an Emit racing the channel close. Bounded flush so
+	// shutdown never blocks forever.
+	if sessionEventWriter != nil {
+		sessionEventWriter.Stop(5 * time.Second)
+	}
+	if eventWebhookSink != nil {
+		eventWebhookSink.Stop(5 * time.Second)
 	}
 }
 

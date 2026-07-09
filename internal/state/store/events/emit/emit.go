@@ -84,6 +84,31 @@ type NoOpSink struct{}
 // Emit satisfies Sink.
 func (NoOpSink) Emit(context.Context, Event) {}
 
+// MultiSink fans one event out to several sinks in registration order. It
+// adds no buffering of its own — each child's Emit must honour the Sink
+// contract and not block (the production children are async buffered
+// writers that drop on overflow). Used to tee the single event stream to
+// both the persistent writer and an out-of-process consumer (the event
+// webhook) without either sink knowing the other exists.
+//
+// A nil child is skipped, so callers can compose without nil-guarding.
+// Note: MultiSink is not itself a NoOpSink, so wrapping the store adapter
+// in one forfeits send()'s pre-marshal NoOpSink short-circuit — that is
+// fine, since a MultiSink is only constructed when a real second consumer
+// (a configured webhook) is present and the payload has to be marshalled
+// for it regardless.
+type MultiSink []Sink
+
+// Emit forwards evt to every non-nil child sink.
+func (m MultiSink) Emit(ctx context.Context, evt Event) {
+	for _, s := range m {
+		if s == nil {
+			continue
+		}
+		s.Emit(ctx, evt)
+	}
+}
+
 // ----- parent-event context carrier -----
 
 type parentEventIDKey struct{}

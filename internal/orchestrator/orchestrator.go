@@ -1149,7 +1149,33 @@ func (o *Orchestrator) releaseSessionLock(sessionID string, sm *sessionMutex) {
 	sm.mu.Unlock()
 }
 
-func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, files ...provider.MessageFile) (*RunResult, error) {
+// turnFinishedArgs derives the terminal turn_finished payload from a Run
+// outcome. Outcome is "error" when Run returned an error, else
+// "awaiting_confirmation" when the turn paused for an explicit user yes/no
+// (the RunResult.Metadata["type"] == "confirmation" contract shared by the
+// tool-call and pipeline confirmation paths), else "answered". The message
+// fields are read straight off the RunResult so a consumer can drive an
+// unread indicator without re-reading the transcript.
+func turnFinishedArgs(result *RunResult, runErr error, startedAt time.Time) emit.TurnFinishedArgs {
+	args := emit.TurnFinishedArgs{
+		Outcome:   events.TurnOutcomeAnswered,
+		LatencyMS: time.Since(startedAt).Milliseconds(),
+	}
+	switch {
+	case runErr != nil:
+		args.Outcome = events.TurnOutcomeError
+	case result != nil && result.Metadata["type"] == "confirmation":
+		args.Outcome = events.TurnOutcomeAwaitingConfirmation
+	}
+	if result != nil {
+		args.MessageProduced = strings.TrimSpace(result.Response) != ""
+		args.ResponseLength = len(result.Response)
+		args.ToolCallCount = len(result.ToolCalls)
+	}
+	return args
+}
+
+func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, files ...provider.MessageFile) (runResult *RunResult, runErr error) {
 	// Lock ordering (must always be acquired in this sequence to prevent deadlock):
 	//   1. semaphore      – global concurrency cap
 	//   2. sessionMuxes   – per-session serialization (via acquireSessionLock)
@@ -1195,6 +1221,24 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// rely on per RFC #249.
 	userMessageID := emit.EmitUserMessage(ctx, o.eventSink, userMessage)
 	ctx = emit.WithParent(ctx, userMessageID)
+
+	// turn_finished closes the bracket opened by user_message on EVERY
+	// return path below — the normal agent-loop answer, the pending-
+	// confirmation and pipeline-cancel early exits, and every error path.
+	// A deferred emit is the only placement that covers all ~20 returns
+	// without threading the emit through each one (and without missing the
+	// pipeline early-exits the way a bottom-of-function call would).
+	//
+	// finishCtx is pinned to the turn root here so turn_finished parents to
+	// user_message — a sibling of turn_start — rather than to whatever
+	// deeper parent (a confirmation id, a tool result) ctx has been rebased
+	// onto by the time the function returns. turnStartedAt is captured
+	// before any turn work so LatencyMS spans the whole turn.
+	turnStartedAt := time.Now()
+	finishCtx := ctx
+	defer func() {
+		emit.EmitTurnFinished(finishCtx, o.eventSink, turnFinishedArgs(runResult, runErr, turnStartedAt))
+	}()
 
 	// Per-session deep debug: enabled by the set_debug_mode command, which
 	// stores debug=true in session metadata. With the flag set, the slog
