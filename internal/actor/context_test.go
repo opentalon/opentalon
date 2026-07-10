@@ -45,3 +45,18 @@ func TestWithConversationID_ConversationID(t *testing.T) {
 		t.Errorf("WithConversationID(_, \"\") should not overwrite; ConversationID = %q", ConversationID(ctx))
 	}
 }
+
+func TestWithGroupID_GroupID(t *testing.T) {
+	ctx := context.Background()
+	if GroupID(ctx) != "" {
+		t.Errorf("GroupID(background) = %q; want \"\"", GroupID(ctx))
+	}
+	ctx = WithGroupID(ctx, "acct-42")
+	if got := GroupID(ctx); got != "acct-42" {
+		t.Errorf("GroupID(WithGroupID(_, \"acct-42\")) = %q; want acct-42", got)
+	}
+	ctx = WithGroupID(ctx, "")
+	if GroupID(ctx) != "acct-42" {
+		t.Errorf("WithGroupID(_, \"\") should not overwrite; GroupID = %q", GroupID(ctx))
+	}
+}

@@ -56,6 +56,7 @@ func TestNilSinkIsSilentNoop(t *testing.T) {
 func TestSendPopulatesContextFields(t *testing.T) {
 	sink := &fakeSink{}
 	ctx := actor.WithSessionID(context.Background(), "sess-abc")
+	ctx = actor.WithGroupID(ctx, "acct-42")
 	ctx = WithParent(ctx, "parent-evt-1")
 
 	EmitUserMessage(ctx, sink, "hello")
@@ -66,6 +67,9 @@ func TestSendPopulatesContextFields(t *testing.T) {
 	}
 	if got[0].SessionID != "sess-abc" {
 		t.Errorf("SessionID = %q, want %q (must be sourced from actor.SessionID)", got[0].SessionID, "sess-abc")
+	}
+	if got[0].GroupID != "acct-42" {
+		t.Errorf("GroupID = %q, want %q (must be sourced from actor.GroupID)", got[0].GroupID, "acct-42")
 	}
 	if got[0].ParentID != "parent-evt-1" {
 		t.Errorf("ParentID = %q, want %q (must be sourced from emit.ParentID)", got[0].ParentID, "parent-evt-1")

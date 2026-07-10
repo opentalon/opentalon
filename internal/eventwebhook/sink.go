@@ -239,6 +239,7 @@ func (s *Sink) post(ctx context.Context, body []byte) (int, error) {
 type envelope struct {
 	ID         string          `json:"id"`
 	SessionID  string          `json:"session_id"`
+	GroupID    string          `json:"group_id,omitempty"`
 	EventType  string          `json:"event_type"`
 	ParentID   string          `json:"parent_id,omitempty"`
 	DurationMS int64           `json:"duration_ms,omitempty"`
@@ -249,6 +250,7 @@ func toEnvelope(evt emit.Event) envelope {
 	return envelope{
 		ID:         evt.ID,
 		SessionID:  evt.SessionID,
+		GroupID:    evt.GroupID,
 		EventType:  evt.EventType,
 		ParentID:   evt.ParentID,
 		DurationMS: evt.DurationMS,

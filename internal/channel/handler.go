@@ -134,6 +134,11 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		// else creating deferred work) can deliver results back to this chat.
 		ctx = actor.WithConversationID(ctx, msg.ConversationID)
 
+		// Carry the resolved group (account) id so emitted session events can be
+		// scoped per-account by an out-of-process consumer. No-op without a
+		// profile system (groupID stays empty).
+		ctx = actor.WithGroupID(ctx, groupID)
+
 		// Pass explicit confirmation decision from frontend metadata so
 		// the orchestrator can bypass LLM-based classification.
 		if cd := msg.Metadata["confirmation"]; cd != "" {
