@@ -63,6 +63,7 @@ import (
 type Event struct {
 	ID         string
 	SessionID  string
+	GroupID    string
 	EventType  string
 	ParentID   string
 	DurationMS int64
@@ -187,6 +188,7 @@ func send(ctx context.Context, sink Sink, eventType string, payload any, duratio
 	sink.Emit(ctx, Event{
 		ID:         id,
 		SessionID:  actor.SessionID(ctx),
+		GroupID:    actor.GroupID(ctx),
 		EventType:  eventType,
 		ParentID:   ParentID(ctx),
 		DurationMS: durationMS,

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/state"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
@@ -104,6 +105,44 @@ func TestHandler_VerifierSuccess(t *testing.T) {
 	out := callHandler(h, map[string]string{"profile_token": "tok"})
 	if out.Content != "echo: hello" {
 		t.Errorf("Content = %q, want %q", out.Content, "echo: hello")
+	}
+}
+
+// captureRunner records the context it is handed so a test can assert what
+// the handler stamped onto it before dispatch.
+type captureRunner struct{ ctx context.Context }
+
+func (c *captureRunner) Run(ctx context.Context, _ string, content string, _ ...pkg.FileAttachment) (string, string, map[string]string, error) {
+	c.ctx = ctx
+	return "echo: " + content, "", nil, nil
+}
+
+// TestHandler_StampsGroupIDFromProfile pins the load-bearing seam that the
+// per-account event tagging depends on: a profile-verified turn must carry the
+// profile's Group both on the context handed to the Runner (the exact ctx the
+// emit helpers read actor.GroupID from to stamp group_id onto every session
+// event and the event-webhook envelope) AND on the CreateSession call. Without
+// this, dropping the WithGroupID wiring in the handler would leave the
+// per-hop tests (context/emit/sink) green while every real event shipped an
+// empty group_id.
+func TestHandler_StampsGroupIDFromProfile(t *testing.T) {
+	runner := &captureRunner{}
+	var createdGroup string
+	cfg := baseHandlerConfig()
+	cfg.Runner = runner
+	cfg.Verifier = &stubVerifier{p: &profile.Profile{EntityID: "u1", Group: "g1"}}
+	cfg.CreateSession = func(_, _, group string) { createdGroup = group }
+	h := NewMessageHandler(cfg)
+
+	out := callHandler(h, map[string]string{"profile_token": "tok"})
+	if out.Content != "echo: hello" {
+		t.Fatalf("Content = %q, want %q", out.Content, "echo: hello")
+	}
+	if got := actor.GroupID(runner.ctx); got != "g1" {
+		t.Errorf("actor.GroupID(dispatch ctx) = %q, want g1 (profile group must reach the emit choke point)", got)
+	}
+	if createdGroup != "g1" {
+		t.Errorf("CreateSession group = %q, want g1", createdGroup)
 	}
 }
 

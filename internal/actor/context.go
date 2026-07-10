@@ -6,6 +6,7 @@ type contextKey struct{}
 type sessionKey struct{}
 type conversationKey struct{}
 type confirmationKey struct{}
+type groupKey struct{}
 
 // WithActor returns a context that carries the given actor ID (e.g. channel_id:sender_id).
 // Use Actor(ctx) to retrieve it. When the request has no actor, do not call WithActor.
@@ -67,6 +68,34 @@ func ConversationID(ctx context.Context) string {
 		return ""
 	}
 	v := ctx.Value(conversationKey{})
+	if v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// WithGroupID returns a context that carries the caller's group id — the
+// tenant/account scope the actor belongs to, as resolved by the profile
+// verifier (Profile.Group). It sits alongside the actor id: the actor
+// identifies who is talking, the group identifies which account they are
+// acting in. Emitted session events carry it so an out-of-process consumer
+// can scope per-account state (e.g. a UI activity indicator) without having
+// to re-resolve the actor's account itself. When empty, the original context
+// is returned unchanged.
+func WithGroupID(ctx context.Context, groupID string) context.Context {
+	if groupID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, groupKey{}, groupID)
+}
+
+// GroupID returns the group id from the context, or empty string if not set.
+func GroupID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v := ctx.Value(groupKey{})
 	if v == nil {
 		return ""
 	}

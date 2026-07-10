@@ -64,7 +64,7 @@ func TestSink_DeliversSubscribedAndSkipsRest(t *testing.T) {
 
 	// Subscribed.
 	s.Emit(context.Background(), emit.Event{
-		ID: "evt-1", SessionID: "e:c:conv", EventType: events.TypeTurnFinished,
+		ID: "evt-1", SessionID: "e:c:conv", GroupID: "acct-42", EventType: events.TypeTurnFinished,
 		Payload: json.RawMessage(`{"v":1,"outcome":"answered"}`),
 	})
 	// Not subscribed — must be filtered out, never delivered.
@@ -80,6 +80,9 @@ func TestSink_DeliversSubscribedAndSkipsRest(t *testing.T) {
 		}
 		if env.SessionID != "e:c:conv" {
 			t.Errorf("session_id = %q, want e:c:conv", env.SessionID)
+		}
+		if env.GroupID != "acct-42" {
+			t.Errorf("group_id = %q, want acct-42", env.GroupID)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("subscribed event not delivered within timeout")
