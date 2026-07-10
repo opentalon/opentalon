@@ -551,9 +551,10 @@ func main() {
 		set := requestpkg.Set{PluginName: inl.Plugin, Description: inl.Description, AllowedGroups: inl.AllowedGroups}
 		if inl.MCP != nil {
 			set.MCP = &requestpkg.MCPServerConfig{
-				Server:  inl.MCP.Server,
-				URL:     inl.MCP.URL,
-				Headers: inl.MCP.Headers,
+				Server:         inl.MCP.Server,
+				URL:            inl.MCP.URL,
+				Headers:        inl.MCP.Headers,
+				ContextHeaders: inl.MCP.ContextHeaders,
 			}
 		}
 		for _, p := range inl.Packages {

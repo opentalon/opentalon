@@ -30,6 +30,9 @@ func injectMCPServers(entries []plugin.PluginEntry, servers []requestpkg.MCPServ
 			if len(s.Headers) > 0 {
 				srv["headers"] = s.Headers
 			}
+			if len(s.ContextHeaders) > 0 {
+				srv["context_headers"] = s.ContextHeaders
+			}
 			inlineServers[j] = srv
 		}
 		if entries[i].Config == nil {
