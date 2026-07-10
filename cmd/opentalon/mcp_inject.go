@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"path/filepath"
 
+	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/plugin"
 	"github.com/opentalon/opentalon/pkg/requestpkg"
 )
@@ -30,6 +31,9 @@ func injectMCPServers(entries []plugin.PluginEntry, servers []requestpkg.MCPServ
 			if len(s.Headers) > 0 {
 				srv["headers"] = s.Headers
 			}
+			if len(s.ContextHeaders) > 0 {
+				srv["context_headers"] = s.ContextHeaders
+			}
 			inlineServers[j] = srv
 		}
 		if entries[i].Config == nil {
@@ -54,4 +58,19 @@ func injectMCPServers(entries []plugin.PluginEntry, servers []requestpkg.MCPServ
 	}
 	slog.Warn("MCP skill configs found but no 'mcp' plugin entry in config", "component", "mcp")
 	return false
+}
+
+// mcpConfigFromInline converts an inline skill MCP config into the request-pkg
+// shape handed to plugins, carrying every field (including ContextHeaders).
+// Returns nil for a nil input.
+func mcpConfigFromInline(inl *config.MCPServerConfigInl) *requestpkg.MCPServerConfig {
+	if inl == nil {
+		return nil
+	}
+	return &requestpkg.MCPServerConfig{
+		Server:         inl.Server,
+		URL:            inl.URL,
+		Headers:        inl.Headers,
+		ContextHeaders: inl.ContextHeaders,
+	}
 }

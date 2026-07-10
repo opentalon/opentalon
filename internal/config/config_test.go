@@ -103,6 +103,36 @@ func TestParseConfig(t *testing.T) {
 	}
 }
 
+// Guards the MCPServerConfigInl `context_headers` yaml tag end-to-end through
+// Parse: a tag typo would leave ContextHeaders nil and silently break the
+// inline-skill delivery path.
+func TestParseConfig_InlineMCPContextHeaders(t *testing.T) {
+	yamlDoc := `
+request_packages:
+  inline:
+    - plugin: support
+      mcp:
+        server: example
+        url: http://localhost:9000/mcp
+        context_headers:
+          session_id: X-Session-Id
+`
+	cfg, err := Parse([]byte(yamlDoc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.RequestPackages.Inline) != 1 {
+		t.Fatalf("inline sets = %d, want 1", len(cfg.RequestPackages.Inline))
+	}
+	mcp := cfg.RequestPackages.Inline[0].MCP
+	if mcp == nil {
+		t.Fatal("inline MCP is nil (context_headers yaml tag broken?)")
+	}
+	if mcp.ContextHeaders["session_id"] != "X-Session-Id" {
+		t.Errorf("context_headers = %v, want session_id -> X-Session-Id", mcp.ContextHeaders)
+	}
+}
+
 func TestParseCatalog(t *testing.T) {
 	cfg, err := Parse([]byte(testYAML))
 	if err != nil {

@@ -549,13 +549,7 @@ func main() {
 	}
 	for _, inl := range cfg.RequestPackages.Inline {
 		set := requestpkg.Set{PluginName: inl.Plugin, Description: inl.Description, AllowedGroups: inl.AllowedGroups}
-		if inl.MCP != nil {
-			set.MCP = &requestpkg.MCPServerConfig{
-				Server:  inl.MCP.Server,
-				URL:     inl.MCP.URL,
-				Headers: inl.MCP.Headers,
-			}
-		}
+		set.MCP = mcpConfigFromInline(inl.MCP)
 		for _, p := range inl.Packages {
 			params := make([]requestpkg.ParamDefinition, len(p.Parameters))
 			for i, q := range p.Parameters {
