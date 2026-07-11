@@ -142,7 +142,7 @@ func (o *Orchestrator) replyLanguageDirectiveWithHistory(current string, priorHi
 func (o *Orchestrator) replyLanguageDirectiveForHidden(priorHistory []provider.Message) string {
 	for i := len(priorHistory) - 1; i >= 0; i-- {
 		m := priorHistory[i]
-		if m.Role != provider.RoleUser || m.Visibility == provider.VisibilityHidden {
+		if !isVisibleUserMessage(m) { // skip assistant/tool rows and hidden system notes
 			continue
 		}
 		if directive := o.replyLanguageDirective(stripKnowledgeContext(m.Content)); directive != "" {

@@ -439,7 +439,7 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 	name := jsonString(raw[v.cfg.NameField])
 	kind := jsonString(raw[v.cfg.KindField])
 	if kind == "" {
-		kind = "chat"
+		kind = KindChat // absent ⇒ chat; track the constant, not a bare literal
 	}
 	systemSource := jsonString(raw[v.cfg.SystemSourceField])
 

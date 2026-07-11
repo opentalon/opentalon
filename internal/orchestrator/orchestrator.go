@@ -1543,7 +1543,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// so detecting on its text would answer the conversation in the note's
 	// language. Derive the reply language from the visible history instead.
 	var replyLangDirective string
-	if actor.Visibility(ctx) == provider.VisibilityHidden {
+	if hidden { // computed once at the confirmation-skip guard above
 		replyLangDirective = o.replyLanguageDirectiveForHidden(priorMessages)
 	} else {
 		replyLangDirective = o.replyLanguageDirectiveWithHistory(content, priorMessages)
@@ -5230,13 +5230,27 @@ func deduplicateKnowledgeOutput(m provider.Message, seen map[uint64]bool) provid
 	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files}
 }
 
-// lastUserMessage returns the most recent user message from the session,
+// isVisibleUserMessage reports whether m is the user's own visible turn: a real
+// user message, not a hidden system-injected note. Hidden notes (e.g. a
+// background job's completion status delivered via the inject path) are stored
+// as role=user but are model-only. Every derivation of "what the user actually
+// said" — reply-language detection, planner intent, RAG query enrichment — must
+// exclude them through this one predicate, or a machine-authored (often English)
+// note would be mistaken for the user's words. Only the model-facing prompt
+// includes hidden turns.
+func isVisibleUserMessage(m provider.Message) bool {
+	return m.Role == provider.RoleUser && m.Visibility != provider.VisibilityHidden
+}
+
+// lastUserMessage returns the most recent VISIBLE user message from the session,
 // stripping knowledge context. Used to enrich short follow-up messages
-// (e.g. "Item") with the prior intent ("Create some arbitrary test object")
-// so RAG semantic search matches the right tools.
+// (e.g. "Item") with the prior intent ("Create some arbitrary test object") so
+// RAG semantic search matches the right tools, and as the reply-language
+// fallback for a signal-less current turn. Hidden system-injected notes are
+// skipped (see isVisibleUserMessage) so they never stand in for the user's words.
 func lastUserMessage(messages []provider.Message) string {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == provider.RoleUser {
+		if isVisibleUserMessage(messages[i]) {
 			text := stripKnowledgeContext(messages[i].Content)
 			if text != "" {
 				return text
@@ -5267,7 +5281,11 @@ func buildPlannerConversationContext(sess *state.Session) string {
 	// Walk backwards to find the last few user/assistant exchanges.
 	for i := len(sess.Messages) - 1; i >= 0 && len(parts) < 6; i-- {
 		m := sess.Messages[i]
-		if m.Role != provider.RoleUser && m.Role != provider.RoleAssistant {
+		// Keep visible user turns and assistant turns; skip tool results, system
+		// messages, and hidden system-injected notes (stored as role=user but not
+		// the user's own words — see isVisibleUserMessage). Assistant turns are
+		// always visible.
+		if m.Role != provider.RoleAssistant && !isVisibleUserMessage(m) {
 			continue
 		}
 		text := m.Content

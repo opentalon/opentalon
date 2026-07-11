@@ -114,6 +114,27 @@ func TestReplyLanguageDirectiveWithHistory_ShortReplyInheritsGerman(t *testing.T
 	}
 }
 
+// TestReplyLanguageDirectiveWithHistory_SkipsHiddenNote is the regression guard
+// for the VISIBLE path (the gap that let the lastUserMessage bug through): a
+// hidden [system] note is stored as a role=user row, so the fallback for a
+// signal-less visible reply must skip it and follow the earlier visible German
+// request — otherwise the user's own turn is answered in the note's language.
+func TestReplyLanguageDirectiveWithHistory_SkipsHiddenNote(t *testing.T) {
+	o := newDetectorOrchestrator()
+	history := []provider.Message{
+		{Role: provider.RoleUser, Content: "Bitte lege ein neues Ticket für die defekte Bohrmaschine an."},
+		{Role: provider.RoleAssistant, Content: "Der Batch-Job läuft, ich melde mich."},
+		{Role: provider.RoleUser, Visibility: provider.VisibilityHidden,
+			Content: "[system] Automated update on the background job. Outcome: completed, 42 items updated."},
+		{Role: provider.RoleAssistant, Content: "Fertig, 42 Artikel aktualisiert."},
+	}
+	// "ok danke" (< replyLanguageMinChars) carries no signal → fallback must land
+	// on the German request, skipping the English hidden note between them.
+	if got := o.replyLanguageDirectiveWithHistory("ok danke", history); !strings.Contains(got, "Reply in German.") {
+		t.Errorf("visible fallback must skip the hidden English note and inherit German, got %q", got)
+	}
+}
+
 // A detectable current message wins over history: a genuine mid-conversation
 // switch must NOT be overridden by the earlier language.
 func TestReplyLanguageDirectiveWithHistory_CurrentWins(t *testing.T) {
