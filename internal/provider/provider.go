@@ -31,6 +31,11 @@ type Message struct {
 	Visibility string `json:"visibility,omitempty"`
 }
 
+// VisibilityHidden is the Message.Visibility value marking a turn that is fed
+// to the model but dropped from the user-facing transcript — a system-injected
+// turn such as a background-job status note. Empty visibility means visible.
+const VisibilityHidden = "hidden"
+
 // ToolDefinition describes a tool the LLM can call (native function calling).
 type ToolDefinition struct {
 	Name        string                 `json:"name"`

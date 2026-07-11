@@ -136,3 +136,52 @@ func TestReplyLanguageDirectiveWithHistory_NoSignal(t *testing.T) {
 		t.Errorf("no detectable signal should yield empty directive, got %q", got)
 	}
 }
+
+// TestReplyLanguageDirectiveForHidden_FollowsVisibleConversation is the guard
+// for the system-inject case: a hidden background-job status note (often an
+// English facts line) must NOT pin the reply language to itself. The reply must
+// follow the visible conversation — here German — walking back past the bare
+// approval to the German request.
+func TestReplyLanguageDirectiveForHidden_FollowsVisibleConversation(t *testing.T) {
+	o := newDetectorOrchestrator()
+	history := []provider.Message{
+		{Role: provider.RoleUser, Content: "Bitte nummeriere alle Türen der Reihe nach durch."},
+		{Role: provider.RoleAssistant, Content: "Das würde 20 Türen umbenennen. Fortfahren?"},
+		{Role: provider.RoleUser, Content: "Genehmigen"}, // short approval, carries no signal
+		{Role: provider.RoleAssistant, Content: "Der Batch-Job wurde erstellt."},
+	}
+	if got := o.replyLanguageDirectiveForHidden(history); !strings.Contains(got, "Reply in German.") {
+		t.Errorf("hidden turn should follow the visible German conversation, got %q", got)
+	}
+}
+
+// An earlier hidden turn (a previous notify, in English) must itself be skipped
+// as a language signal, so a later hidden turn still resolves to the visible
+// user's language.
+func TestReplyLanguageDirectiveForHidden_SkipsEarlierHiddenTurn(t *testing.T) {
+	o := newDetectorOrchestrator()
+	history := []provider.Message{
+		{Role: provider.RoleUser, Content: "Bitte lege ein Ticket für die defekte Bohrmaschine an."},
+		{Role: provider.RoleAssistant, Content: "Erledigt."},
+		{Role: provider.RoleUser, Visibility: provider.VisibilityHidden,
+			Content: "[system] Automated update on the background job. Outcome: completed."},
+		{Role: provider.RoleAssistant, Content: "Ihr Ticket wurde erstellt."},
+	}
+	if got := o.replyLanguageDirectiveForHidden(history); !strings.Contains(got, "Reply in German.") {
+		t.Errorf("earlier hidden English turn must be skipped, got %q", got)
+	}
+}
+
+// No confidently detectable visible user message → no pin, so the caller leaves
+// the turn unpinned and the standing rule (plus the note's own locale hint)
+// applies. This is the "fall back to the Timly language setting" path.
+func TestReplyLanguageDirectiveForHidden_NoDetectableHistory(t *testing.T) {
+	o := newDetectorOrchestrator()
+	history := []provider.Message{
+		{Role: provider.RoleUser, Content: "ok"},
+		{Role: provider.RoleAssistant, Content: "..."},
+	}
+	if got := o.replyLanguageDirectiveForHidden(history); got != "" {
+		t.Errorf("undetectable history should leave the turn unpinned, got %q", got)
+	}
+}

@@ -1530,7 +1530,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	if sess, _ := sessions.Get(sessionID); sess != nil && msgCountAtStart <= len(sess.Messages) {
 		priorMessages = sess.Messages[:msgCountAtStart]
 	}
-	ctx = withReplyLanguageDirective(ctx, o.replyLanguageDirectiveWithHistory(content, priorMessages))
+	// A hidden (system-injected) turn — e.g. a background-job status note pushed
+	// in via the inject path — carries no signal about the user's own language,
+	// so detecting on its text would answer the conversation in the note's
+	// language. Derive the reply language from the visible history instead.
+	var replyLangDirective string
+	if actor.Visibility(ctx) == provider.VisibilityHidden {
+		replyLangDirective = o.replyLanguageDirectiveForHidden(priorMessages)
+	} else {
+		replyLangDirective = o.replyLanguageDirectiveWithHistory(content, priorMessages)
+	}
+	ctx = withReplyLanguageDirective(ctx, replyLangDirective)
 
 	// Run content preparers before the first LLM call (config-driven).
 	// Preparers no longer narrow the LLM's tool set — tools come from the

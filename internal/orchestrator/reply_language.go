@@ -129,3 +129,25 @@ func (o *Orchestrator) replyLanguageDirectiveWithHistory(current string, priorHi
 	}
 	return ""
 }
+
+// replyLanguageDirectiveForHidden returns the reply-language directive for a
+// hidden (system-injected) turn — a background-job status note delivered via
+// the inject path. Its text is not the user's own words (it is often an English
+// facts line), so detecting on it would answer a German conversation in English.
+// Instead walk back to the most recent VISIBLE user message that is long enough
+// to detect confidently, skipping bare approvals and any earlier hidden turns.
+// Returns "" when no visible user message is confidently detectable, so the
+// caller leaves the turn unpinned and the standing language rule (plus any
+// locale hint the injected note itself carries) applies.
+func (o *Orchestrator) replyLanguageDirectiveForHidden(priorHistory []provider.Message) string {
+	for i := len(priorHistory) - 1; i >= 0; i-- {
+		m := priorHistory[i]
+		if m.Role != provider.RoleUser || m.Visibility == provider.VisibilityHidden {
+			continue
+		}
+		if directive := o.replyLanguageDirective(stripKnowledgeContext(m.Content)); directive != "" {
+			return directive
+		}
+	}
+	return ""
+}
