@@ -112,8 +112,12 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			// Enforce per-profile token spend limit when configured. Control
 			// messages (e.g. a resume handshake) do no LLM work, so they must
 			// not be blocked by an exhausted budget — a reconnecting client
-			// still needs to see a pending confirmation.
-			if cfg.LimitChecker != nil && p.Limit > 0 && p.LimitWindow > 0 && msg.Metadata[pkg.ControlMetadataKey] == "" {
+			// still needs to see a pending confirmation. System invocations are
+			// excluded symmetrically with the record side (TotalTokensSince only
+			// sums chat runs), so a job-completion note is never blocked by, and
+			// never counts against, the customer's interactive budget.
+			if cfg.LimitChecker != nil && p.Limit > 0 && p.LimitWindow > 0 &&
+				p.Kind != profile.KindSystem && msg.Metadata[pkg.ControlMetadataKey] == "" {
 				since := time.Now().Add(-p.LimitWindow)
 				used, lerr := cfg.LimitChecker.TotalTokensSince(ctx, p.EntityID, since)
 				if lerr != nil {

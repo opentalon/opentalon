@@ -221,6 +221,19 @@ func TestHandler_LimitExceeded(t *testing.T) {
 	}
 }
 
+// TestHandler_LimitNotAppliedToSystemRun: a system invocation is outside the
+// chat budget on BOTH sides — it is excluded from TotalTokensSince and must not
+// be blocked by an exhausted budget either, so a job-completion note still lands.
+func TestHandler_LimitNotAppliedToSystemRun(t *testing.T) {
+	p := &profile.Profile{EntityID: "u1", Kind: profile.KindSystem, Limit: 1000, LimitWindow: time.Hour}
+	checker := &stubLimitChecker{total: 5000} // way over the limit
+	h := newTestHandler(&stubVerifier{p: p}, checker)
+	out := callHandler(h, map[string]string{"profile_token": "tok"})
+	if strings.Contains(out.Content, "token limit reached") {
+		t.Errorf("system run was blocked by the chat budget: %q", out.Content)
+	}
+}
+
 func TestHandler_LimitNotYetExceeded(t *testing.T) {
 	p := &profile.Profile{EntityID: "u1", Limit: 1000, LimitWindow: time.Hour}
 	checker := &stubLimitChecker{total: 999} // one under
