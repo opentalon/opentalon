@@ -132,6 +132,49 @@ func TestSessionStore_PersistAndGet(t *testing.T) {
 	}
 }
 
+// TestSessionStore_MessageVisibilityRoundTrip: a hidden message's visibility is
+// persisted and read back by loadMessages, so the model-only/transcript-hidden
+// distinction survives a store reopen (a pod restart). Without the round-trip a
+// hidden system note would resurface as a visible transcript row.
+func TestSessionStore_MessageVisibilityRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DBConfig{}, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	sessStore := NewSessionStore(db, 0, 0)
+	sessStore.Create("s1", "", "", "")
+	// A hidden (system-injected) user turn, then a normal visible assistant reply.
+	if err := sessStore.AddMessageWithMetadata("s1",
+		provider.Message{Role: provider.RoleUser, Content: "[system] job done", Visibility: provider.VisibilityHidden}, nil); err != nil {
+		t.Fatalf("AddMessageWithMetadata hidden: %v", err)
+	}
+	if err := sessStore.AddMessage("s1",
+		provider.Message{Role: provider.RoleAssistant, Content: "Your job finished."}); err != nil {
+		t.Fatalf("AddMessage visible: %v", err)
+	}
+
+	// Re-open so the messages are read back from the DB via loadMessages.
+	_ = db.Close()
+	db2, _ := Open(config.DBConfig{}, dir)
+	defer func() { _ = db2.Close() }()
+	sess, err := NewSessionStore(db2, 0, 0).Get("s1")
+	if err != nil {
+		t.Fatalf("Get after reopen: %v", err)
+	}
+	if len(sess.Messages) != 2 {
+		t.Fatalf("len(Messages) = %d, want 2", len(sess.Messages))
+	}
+	if sess.Messages[0].Visibility != provider.VisibilityHidden {
+		t.Errorf("hidden turn Visibility = %q, want %q after reopen", sess.Messages[0].Visibility, provider.VisibilityHidden)
+	}
+	if sess.Messages[1].Visibility != "" {
+		t.Errorf("visible reply Visibility = %q, want empty", sess.Messages[1].Visibility)
+	}
+}
+
 func TestSessionStore_MaxMessagesTrim(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(config.DBConfig{}, dir)
@@ -564,6 +607,51 @@ func TestUsageStore_TotalTokensSince(t *testing.T) {
 	// 500+300 + 200+100 = 1100
 	if total != 1100 {
 		t.Errorf("TotalTokensSince = %d, want 1100", total)
+	}
+}
+
+// TestUsageStore_TotalTokensSince_ExcludesSystemRuns guards the spend-limit
+// boundary: system-invoked runs (interaction_kind='system') are still recorded
+// for attribution, but MUST NOT count against the customer's interactive chat
+// token budget. Dropping the `AND interaction_kind='chat'` predicate would let
+// the system tokens through and still pass every other test — this is the one
+// that fails.
+func TestUsageStore_TotalTokensSince_ExcludesSystemRuns(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DBConfig{}, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	usage := NewUsageStore(db)
+	ctx := context.Background()
+	now := time.Now()
+
+	// A human chat run: counts toward the budget.
+	if err := usage.Record(ctx, UsageRecord{
+		EntityID: "entity-1", GroupID: "g1", ChannelID: "websocket",
+		SessionID: "s1", ModelID: "m1", InputTokens: 400, OutputTokens: 100,
+		InteractionKind: "chat",
+	}); err != nil {
+		t.Fatalf("Record chat: %v", err)
+	}
+	// A system-invoked run (e.g. a job-completion notify): recorded, but must
+	// NOT count toward the interactive budget.
+	if err := usage.Record(ctx, UsageRecord{
+		EntityID: "entity-1", GroupID: "g1", ChannelID: "websocket",
+		SessionID: "s1", ModelID: "m1", InputTokens: 900, OutputTokens: 900,
+		InteractionKind: "system", SystemSource: "job_notify",
+	}); err != nil {
+		t.Fatalf("Record system: %v", err)
+	}
+
+	total, err := usage.TotalTokensSince(ctx, "entity-1", now.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("TotalTokensSince: %v", err)
+	}
+	if total != 500 {
+		t.Errorf("TotalTokensSince = %d, want 500 (chat only; system run excluded)", total)
 	}
 }
 

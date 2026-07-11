@@ -299,7 +299,9 @@ GROUP BY entity_id
 ORDER BY SUM(input_tokens) DESC;
 ```
 
-Fields: `id`, `entity_id`, `group_id`, `channel_id`, `session_id`, `model_id`, `input_tokens`, `output_tokens`, `tool_calls`, `input_cost`, `output_cost`, `created_at`.
+Fields: `id`, `entity_id`, `group_id`, `channel_id`, `session_id`, `model_id`, `input_tokens`, `output_tokens`, `tool_calls`, `input_cost`, `output_cost`, `interaction_kind`, `system_source`, `created_at`.
+
+`interaction_kind` is `chat` (a human turn) or `system` (a backend-originated run, e.g. a job-completion note); `system_source` is a per-feature label for system runs (e.g. `job_notify`), NULL for chat. The interactive spend-limit query (see `TotalTokensSince`) counts only `interaction_kind = 'chat'`, so system runs are attributed but never charged against the customer's chat budget.
 
 `input_cost` and `output_cost` are computed from the model's configured price per million tokens (set in `models.providers.<id>.models[].cost`). They will be zero if the model has no cost configured or if no model was recorded.
 
