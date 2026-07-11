@@ -10,6 +10,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
@@ -143,6 +144,42 @@ func TestHandler_StampsGroupIDFromProfile(t *testing.T) {
 	}
 	if createdGroup != "g1" {
 		t.Errorf("CreateSession group = %q, want g1", createdGroup)
+	}
+}
+
+// TestHandler_HonorsHiddenVisibilityForSystemProfile: a WhoAmI-verified system
+// invocation (e.g. a job-completion inject) may mark its turn hidden — fed to
+// the model but kept out of the audited transcript — so the visibility must
+// reach the dispatch ctx the orchestrator stamps from.
+func TestHandler_HonorsHiddenVisibilityForSystemProfile(t *testing.T) {
+	runner := &captureRunner{}
+	cfg := baseHandlerConfig()
+	cfg.Runner = runner
+	cfg.Verifier = &stubVerifier{p: &profile.Profile{EntityID: "u1", Kind: profile.KindSystem}}
+	h := NewMessageHandler(cfg)
+
+	callHandler(h, map[string]string{"profile_token": "tok", "visibility": provider.VisibilityHidden})
+
+	if got := actor.Visibility(runner.ctx); got != provider.VisibilityHidden {
+		t.Errorf("actor.Visibility(dispatch ctx) = %q, want %q for a system turn", got, provider.VisibilityHidden)
+	}
+}
+
+// TestHandler_IgnoresClientVisibilityForChatProfile is the security regression
+// guard: an ordinary chat client that sets visibility=hidden must NOT get its
+// turn hidden — otherwise it could feed model-directed content while keeping it
+// out of the audited transcript. Hiding is gated on the verified system kind.
+func TestHandler_IgnoresClientVisibilityForChatProfile(t *testing.T) {
+	runner := &captureRunner{}
+	cfg := baseHandlerConfig()
+	cfg.Runner = runner
+	cfg.Verifier = &stubVerifier{p: &profile.Profile{EntityID: "u1", Kind: profile.KindChat}}
+	h := NewMessageHandler(cfg)
+
+	callHandler(h, map[string]string{"profile_token": "tok", "visibility": provider.VisibilityHidden})
+
+	if got := actor.Visibility(runner.ctx); got != "" {
+		t.Errorf("actor.Visibility(dispatch ctx) = %q, want empty (a chat client must not hide its own turn)", got)
 	}
 }
 

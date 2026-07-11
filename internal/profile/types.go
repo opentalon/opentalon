@@ -32,3 +32,11 @@ type Profile struct {
 	Kind         string                      // interaction kind: "chat" (human) | "system" (backend-originated); empty ⇒ "chat"
 	SystemSource string                      // per-feature label for system runs (e.g. "csv_mapping", "job_notify"); empty for chat
 }
+
+// Interaction kinds carried on Profile.Kind (and stamped onto sessions +
+// profile_usage). "chat" is a human-driven turn; "system" is a backend-
+// originated invocation (e.g. a job-completion note). Empty is treated as chat.
+const (
+	KindChat   = "chat"
+	KindSystem = "system"
+)

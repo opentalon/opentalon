@@ -1273,15 +1273,23 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	if timing != nil {
 		timing.begin("confirmation_check")
 	}
+	// A hidden (system-injected) turn — a background-job status note delivered
+	// via /inject — is NOT a confirmation reply: its text is automated, not the
+	// user's approve/reject. Skip confirmation resolution entirely for it, so a
+	// pending confirmation is left intact for the real user and the note is never
+	// classified as a decision (which could silently cancel — or worst case
+	// approve — the user's pending action). It falls through to a normal
+	// model-only turn.
+	hidden := actor.Visibility(ctx) == provider.VisibilityHidden
 	o.pendingMu.Lock()
 	pendingPipeline := o.pendingPipelines[sessionID]
 	pendingPipelineConfID := o.pendingConfirmationIDs[sessionID]
-	if pendingPipeline != nil {
+	if pendingPipeline != nil && !hidden {
 		delete(o.pendingPipelines, sessionID)
 		delete(o.pendingConfirmationIDs, sessionID)
 	}
 	o.pendingMu.Unlock()
-	if p := pendingPipeline; p != nil {
+	if p := pendingPipeline; p != nil && !hidden {
 		// Parent the resolved event onto the original confirmation_requested
 		// so analytics can pair the two across turns. Empty id (no sink at
 		// request time, or pre-instrumentation pending state) leaves the
@@ -1332,13 +1340,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	pendingCall := o.pendingToolCalls[sessionID]
 	pendingCallConfID := o.pendingConfirmationIDs[sessionID]
 	pendingCallPrompt := o.pendingConfirmationPrompts[sessionID]
-	if pendingCall != nil {
+	if pendingCall != nil && !hidden {
 		delete(o.pendingToolCalls, sessionID)
 		delete(o.pendingConfirmationIDs, sessionID)
 		delete(o.pendingConfirmationPrompts, sessionID)
 	}
 	o.pendingMu.Unlock()
-	if pendingCall == nil {
+	if pendingCall == nil && !hidden {
 		// Fallback: in-memory state lost (pod restart, failover). Recover
 		// the call AND the original confirmation_requested event id from
 		// session metadata so the resolved event still links to the
@@ -1346,7 +1354,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		pendingCall, pendingCallConfID, pendingCallPrompt = loadPendingToolCall(sessions, sessionID)
 	}
 	var pendingMetaClearErr error
-	if pendingCall != nil {
+	if pendingCall != nil && !hidden {
 		// Clear the persisted pending call up front. If this fails we MUST NOT
 		// continue down the approve/amend paths (which keep the turn running):
 		// a leftover row could be resurrected by loadPendingToolCall on a later
@@ -1355,7 +1363,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		pendingMetaClearErr = sessions.SetMetadata(sessionID, "pending_tool_call", "")
 	}
 	toolCallConfirmed := false
-	if tc := pendingCall; tc != nil {
+	if tc := pendingCall; tc != nil && !hidden {
 		// Parent the resolved event onto the matching confirmation_requested
 		// (potentially from a prior turn or even a prior pod). Empty id is
 		// the legacy/pre-instrumentation path — leave the turn_start parent.
@@ -1963,7 +1971,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// Skip background title generation for system runs: a programmatic,
 	// single-turn call needs no human-facing title, and system sessions are
 	// excluded from the chat-session picker anyway.
-	if p := profile.FromContext(ctx); p == nil || p.Kind != "system" {
+	if p := profile.FromContext(ctx); p == nil || p.Kind != profile.KindSystem {
 		defer func() { go o.maybeGenerateTitle(context.Background(), sessionID) }()
 	}
 

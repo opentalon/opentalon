@@ -10,6 +10,7 @@ import (
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/logger"
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
@@ -86,7 +87,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 
 		// interaction_kind for a session minted on this connection; a verified
 		// profile may override it below (a system invocation sets "system").
-		interactionKind := "chat"
+		interactionKind := profile.KindChat
 
 		// Profile verification: required when verifier is configured.
 		if cfg.Verifier != nil {
@@ -153,9 +154,12 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		// Carry a per-message visibility ("hidden") so the orchestrator stamps
 		// it on the stored user turn: a hidden turn is fed to the model but
 		// dropped from the user-facing transcript (e.g. a system status note
-		// injected by a backend job).
-		if vis := msg.Metadata["visibility"]; vis != "" {
-			ctx = actor.WithVisibility(ctx, vis)
+		// injected by a backend job). Hiding a turn from the audited transcript
+		// is a privileged capability — honor it ONLY for a WhoAmI-verified
+		// system invocation, and only for the canonical value, so an ordinary
+		// chat client cannot smuggle model-directed content past the transcript.
+		if interactionKind == profile.KindSystem && msg.Metadata["visibility"] == provider.VisibilityHidden {
+			ctx = actor.WithVisibility(ctx, provider.VisibilityHidden)
 		}
 
 		// Route by resume intent: client-supplied conv-id → strict Resume

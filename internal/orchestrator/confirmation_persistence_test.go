@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
 
@@ -71,6 +72,31 @@ func TestPendingConfirmationFrame_ToolCallInMemory(t *testing.T) {
 	orch.pendingMu.Unlock()
 	if !stillPending {
 		t.Error("PendingConfirmationFrame consumed the pending state; it must be read-only")
+	}
+}
+
+// TestRun_HiddenTurnDoesNotResolvePendingConfirmation is the regression guard
+// for the confirmation-hijack fix: a hidden (system-injected) turn — e.g. a
+// job-completion note pushed in via /inject while the user has a write action
+// pending — must NOT be classified as the user's approve/reject. The pending
+// confirmation must survive, intact, for the real user's next turn.
+func TestRun_HiddenTurnDoesNotResolvePendingConfirmation(t *testing.T) {
+	orch, sid := newConfirmationTestOrchestrator(t)
+	orch.pendingMu.Lock()
+	orch.pendingToolCalls[sid] = &ToolCall{ID: "call_9", Plugin: "timly", Action: "delete-item"}
+	orch.pendingConfirmationPrompts[sid] = "Proceed with deleting 3 items?"
+	orch.pendingMu.Unlock()
+
+	ctx := actor.WithVisibility(context.Background(), provider.VisibilityHidden)
+	if _, err := orch.Run(ctx, sid, "[system] Your background job finished."); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	orch.pendingMu.Lock()
+	stillPending := orch.pendingToolCalls[sid] != nil
+	orch.pendingMu.Unlock()
+	if !stillPending {
+		t.Error("a hidden turn consumed the pending confirmation; it must leave it intact for the real user")
 	}
 }
 
