@@ -165,7 +165,7 @@ func TestSessionStore_SetTitleOnlyFillsEmpty(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	sessStore := NewSessionStore(db, 0, 0)
-	sessStore.Create("s1", "", "")
+	sessStore.Create("s1", "", "", "")
 
 	// Fills the empty slot.
 	if err := sessStore.SetTitle("s1", "first title"); err != nil {

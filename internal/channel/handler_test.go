@@ -131,7 +131,7 @@ func TestHandler_StampsGroupIDFromProfile(t *testing.T) {
 	cfg := baseHandlerConfig()
 	cfg.Runner = runner
 	cfg.Verifier = &stubVerifier{p: &profile.Profile{EntityID: "u1", Group: "g1"}}
-	cfg.CreateSession = func(_, _, group string) { createdGroup = group }
+	cfg.CreateSession = func(_, _, group, _ string) { createdGroup = group }
 	h := NewMessageHandler(cfg)
 
 	out := callHandler(h, map[string]string{"profile_token": "tok"})
