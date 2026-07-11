@@ -459,12 +459,14 @@ func resolveAllowedToolFQNs(ctx context.Context, o *Orchestrator) string {
 }
 
 // defaultContextArgProviders returns built-in providers for orchestrator-managed
-// arguments: opaque identifiers (session_id) and per-session allowlists derived
-// from the profile (allowed_plugins, allowed_tools). No session messages,
-// conversation text, or other sensitive user content is exposed via this mechanism.
+// arguments: opaque identifiers (session_id, conversation_id) and per-session
+// allowlists derived from the profile (allowed_plugins, allowed_tools). No session
+// messages, conversation text, or other sensitive user content is exposed via this
+// mechanism.
 func defaultContextArgProviders(o *Orchestrator, custom map[string]ContextArgProvider) map[string]ContextArgProvider {
 	builtin := map[string]ContextArgProvider{
-		contextargs.SessionID: func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
+		contextargs.SessionID:      func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
+		contextargs.ConversationID: func(ctx context.Context, _ string) string { return actor.ConversationID(ctx) },
 		contextargs.AllowedPlugins: func(ctx context.Context, _ string) string {
 			return resolveAllowedPluginNames(ctx, o)
 		},
