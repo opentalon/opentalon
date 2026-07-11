@@ -37,7 +37,7 @@ func TestBuildToolDefinitions_RequiredKeyShape(t *testing.T) {
 	}
 
 	sessions := state.NewSessionStore("")
-	sessions.Create("s1", "", "")
+	sessions.Create("s1", "", "", "")
 	orch := NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry,
 		state.NewMemoryStore(""), sessions, OrchestratorOpts{})
 	ctx := actor.WithSessionID(context.Background(), "s1")

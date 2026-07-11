@@ -55,15 +55,15 @@ func TestPostgres_OpenAndMigrations(t *testing.T) {
 	if err := db.SQLDB().QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 2 {
-		t.Errorf("schema_version = %d, want 2", v)
+	if v != 15 {
+		t.Errorf("schema_version = %d, want 15", v)
 	}
 }
 
 func TestPostgres_AddMessageConcurrent(t *testing.T) {
 	db := pgDB(t)
 	store := NewSessionStore(db, 0, 0)
-	store.Create("concurrent-test", "", "")
+	store.Create("concurrent-test", "", "", "")
 
 	const n = 10
 	var wg sync.WaitGroup
@@ -100,7 +100,7 @@ func TestPostgres_AddMessageConcurrent(t *testing.T) {
 func TestPostgres_NativeToolCallsRoundTrip(t *testing.T) {
 	db := pgDB(t)
 	store := NewSessionStore(db, 0, 0)
-	store.Create("tool-call-test", "", "")
+	store.Create("tool-call-test", "", "", "")
 
 	calls := []provider.ToolCall{{
 		ID: "call_pg_1", Name: "tickets.show", Arguments: map[string]string{"id": "42"},
@@ -131,7 +131,7 @@ func TestPostgres_NativeToolCallsRoundTrip(t *testing.T) {
 	}
 
 	// Empty slice must persist as NULL on Postgres as well (no "[]" sentinel).
-	store.Create("empty-tool-calls", "", "")
+	store.Create("empty-tool-calls", "", "", "")
 	if err := store.AddMessage("empty-tool-calls", provider.Message{
 		Role: provider.RoleAssistant, Content: "no tools", ToolCalls: []provider.ToolCall{},
 	}); err != nil {

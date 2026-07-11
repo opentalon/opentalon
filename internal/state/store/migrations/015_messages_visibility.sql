@@ -1,0 +1,20 @@
+-- Per-message visibility: "hidden" marks a message that IS fed to the model
+-- (it rides in role + content, which loadMessages reads) but is dropped from
+-- the user-facing transcript. It is the inverse of the metadata column
+-- (migration 013), which is shown to the user and hidden from the model.
+--
+-- First use: a system-injected status note. A background job posts a hidden
+-- "[system] ..." turn into an existing chat session so the model reports the
+-- outcome to the user in its own words, without the raw trigger appearing in
+-- the transcript. Invariant: visibility='hidden' applies to role=user injected
+-- turns only; the assistant's reply is always visible.
+--
+-- Portability: TEXT only, nullable (NULL = visible). Existing rows and every
+-- ordinary chat turn leave it NULL.
+--
+-- Deploy order: the api-plugin transcript reader filters on this column by name
+-- (reader-aware: hidden from customers, shown to staff via include_hidden).
+-- Core applies migrations at startup before it loads plugins, so ship
+-- core-with-015 before any api-plugin build that SELECTs the column (same rule
+-- as migrations 013 and 014).
+ALTER TABLE messages ADD COLUMN visibility TEXT;

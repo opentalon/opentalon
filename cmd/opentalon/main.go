@@ -963,8 +963,8 @@ func main() {
 	// Fresh mint: delegates to the underlying store, which is idempotent
 	// in both the DB-backed (INSERT-on-conflict returns existing row) and
 	// the in-memory variant (Create returns existing pointer when present).
-	createSession := func(sessionKey, entityID, groupID string) {
-		sessions.Create(sessionKey, entityID, groupID)
+	createSession := func(sessionKey, entityID, groupID, kind string) {
+		sessions.Create(sessionKey, entityID, groupID, kind)
 	}
 	runner := &channelRunner{orch: orch}
 	handler := channel.NewMessageHandler(channel.HandlerConfig{
@@ -1208,7 +1208,7 @@ type usageRecorderAdapter struct {
 	collector *metrics.Collector
 }
 
-func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int) {
+func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int) {
 	if a.store == nil && a.collector == nil {
 		return
 	}
@@ -1225,16 +1225,18 @@ func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupI
 	}
 	if a.store != nil {
 		if err := a.store.Record(ctx, store.UsageRecord{
-			EntityID:     entityID,
-			GroupID:      groupID,
-			ChannelID:    channelID,
-			SessionID:    sessionID,
-			ModelID:      modelID,
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			ToolCalls:    toolCalls,
-			InputCost:    inputCostUSD,
-			OutputCost:   outputCostUSD,
+			EntityID:        entityID,
+			GroupID:         groupID,
+			ChannelID:       channelID,
+			SessionID:       sessionID,
+			ModelID:         modelID,
+			InteractionKind: interactionKind,
+			SystemSource:    systemSource,
+			InputTokens:     inputTokens,
+			OutputTokens:    outputTokens,
+			ToolCalls:       toolCalls,
+			InputCost:       inputCostUSD,
+			OutputCost:      outputCostUSD,
 		}); err != nil {
 			slog.Warn("usage record failed", "entity", entityID, "error", err)
 		}

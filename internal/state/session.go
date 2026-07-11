@@ -50,7 +50,7 @@ func NewSessionStore(dir string) *SessionStore {
 // store's on-conflict behaviour (see store/session.go Create) and removes
 // a silent-data-loss footgun that surfaced when channels routed a stale
 // conversation_id into the create path instead of the load path.
-func (s *SessionStore) Create(id, _, _ string) *Session {
+func (s *SessionStore) Create(id, _, _, _ string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

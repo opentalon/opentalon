@@ -49,6 +49,8 @@ type VerifierConfig struct {
 	CredentialsField  string            // optional JSON field for per-MCP-server credential headers; default "credentials"
 	NameField         string            // optional JSON field for user display name; default "name"
 	BudgetTokensField string            // optional JSON field for reasoning budget tokens; default "budget_tokens"
+	KindField         string            // optional JSON field for interaction kind ("chat"|"system"); default "kind"; absent ⇒ "chat"
+	SystemSourceField string            // optional JSON field for per-feature system label; default "system_source"
 	ExtraHeaders      map[string]string // static headers sent on every WhoAmI call; ${ENV_VAR} expanded once at construction
 	// MetadataHeaders maps an inbound metadata key to an outbound HTTP header
 	// name. For each entry, Verify reads metadata[key] from its caller and
@@ -127,6 +129,12 @@ func (c *VerifierConfig) setDefaults() {
 	}
 	if c.BudgetTokensField == "" {
 		c.BudgetTokensField = "budget_tokens"
+	}
+	if c.KindField == "" {
+		c.KindField = "kind"
+	}
+	if c.SystemSourceField == "" {
+		c.SystemSourceField = "system_source"
 	}
 	// Expand env vars in ExtraHeaders once at construction time so values are
 	// immutable for the verifier's lifetime and can't drift mid-run. Also guard
@@ -429,6 +437,11 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 	model := jsonString(raw[v.cfg.ModelField])
 	channelTypeResp := jsonString(raw[v.cfg.ChannelTypeField])
 	name := jsonString(raw[v.cfg.NameField])
+	kind := jsonString(raw[v.cfg.KindField])
+	if kind == "" {
+		kind = KindChat // absent ⇒ chat; track the constant, not a bare literal
+	}
+	systemSource := jsonString(raw[v.cfg.SystemSourceField])
 
 	var limit int
 	if lraw, ok := raw[v.cfg.LimitField]; ok {
@@ -472,6 +485,8 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 		LimitWindow:  limitWindow,
 		BudgetTokens: budgetTokens,
 		Credentials:  credentials,
+		Kind:         kind,
+		SystemSource: systemSource,
 	}
 	slog.DebugContext(ctx, "whoami profile resolved",
 		"entity_id", p.EntityID,

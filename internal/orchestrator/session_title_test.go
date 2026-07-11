@@ -55,7 +55,7 @@ func titleTestOrch(t *testing.T, sessionMessages []provider.Message, llmResponse
 	registry := NewToolRegistry()
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("sess", "", "")
+	sessions.Create("sess", "", "", "")
 	for _, m := range sessionMessages {
 		_ = sessions.AddMessage("sess", m)
 	}
@@ -242,7 +242,7 @@ func TestMaybeGenerateTitle_NoChannelSender_StillPersists(t *testing.T) {
 	registry := NewToolRegistry()
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("sess", "", "")
+	sessions.Create("sess", "", "", "")
 	_ = sessions.AddMessage("sess", provider.Message{Role: provider.RoleUser, Content: "Hi"})
 	_ = sessions.AddMessage("sess", provider.Message{Role: provider.RoleAssistant, Content: "Hello."})
 	llm := &fakeLLM{responses: []string{"Brief greeting"}}
@@ -269,7 +269,7 @@ func TestMaybeGenerateTitle_LLMError_NoTitlePersisted(t *testing.T) {
 	registry := NewToolRegistry()
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("sess", "", "")
+	sessions.Create("sess", "", "", "")
 	_ = sessions.AddMessage("sess", provider.Message{Role: provider.RoleUser, Content: "Q"})
 	_ = sessions.AddMessage("sess", provider.Message{Role: provider.RoleAssistant, Content: "A"})
 	orch := NewWithRules(&erroringLLM{err: errors.New("upstream timeout")},

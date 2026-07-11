@@ -7,6 +7,7 @@ type sessionKey struct{}
 type conversationKey struct{}
 type confirmationKey struct{}
 type groupKey struct{}
+type visibilityKey struct{}
 
 // WithActor returns a context that carries the given actor ID (e.g. channel_id:sender_id).
 // Use Actor(ctx) to retrieve it. When the request has no actor, do not call WithActor.
@@ -121,6 +122,31 @@ func ConfirmationDecision(ctx context.Context) string {
 		return ""
 	}
 	v := ctx.Value(confirmationKey{})
+	if v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// WithVisibility attaches a per-message visibility ("hidden") to the context so
+// the orchestrator can stamp it on the inbound user turn before persisting. A
+// hidden turn is fed to the model but dropped from the user-facing transcript;
+// it is set from a channel's inbound metadata["visibility"].
+func WithVisibility(ctx context.Context, visibility string) context.Context {
+	if visibility == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, visibilityKey{}, visibility)
+}
+
+// Visibility returns the per-message visibility from the context, or empty
+// string if not set.
+func Visibility(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v := ctx.Value(visibilityKey{})
 	if v == nil {
 		return ""
 	}

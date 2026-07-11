@@ -10,6 +10,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
@@ -48,7 +49,7 @@ func (e *echoRunner) Run(_ context.Context, _ string, content string, _ ...pkg.F
 func baseHandlerConfig() HandlerConfig {
 	return HandlerConfig{
 		ResumeSession: func(_ string) error { return nil },
-		CreateSession: func(_, _, _ string) {},
+		CreateSession: func(_, _, _, _ string) {},
 		Runner:        &echoRunner{},
 		RunAction: func(_ context.Context, _, _ string, _ map[string]string) (string, error) {
 			return "", errors.New("no actions")
@@ -131,7 +132,7 @@ func TestHandler_StampsGroupIDFromProfile(t *testing.T) {
 	cfg := baseHandlerConfig()
 	cfg.Runner = runner
 	cfg.Verifier = &stubVerifier{p: &profile.Profile{EntityID: "u1", Group: "g1"}}
-	cfg.CreateSession = func(_, _, group string) { createdGroup = group }
+	cfg.CreateSession = func(_, _, group, _ string) { createdGroup = group }
 	h := NewMessageHandler(cfg)
 
 	out := callHandler(h, map[string]string{"profile_token": "tok"})
@@ -143,6 +144,42 @@ func TestHandler_StampsGroupIDFromProfile(t *testing.T) {
 	}
 	if createdGroup != "g1" {
 		t.Errorf("CreateSession group = %q, want g1", createdGroup)
+	}
+}
+
+// TestHandler_HonorsHiddenVisibilityForSystemProfile: a WhoAmI-verified system
+// invocation (e.g. a job-completion inject) may mark its turn hidden — fed to
+// the model but kept out of the audited transcript — so the visibility must
+// reach the dispatch ctx the orchestrator stamps from.
+func TestHandler_HonorsHiddenVisibilityForSystemProfile(t *testing.T) {
+	runner := &captureRunner{}
+	cfg := baseHandlerConfig()
+	cfg.Runner = runner
+	cfg.Verifier = &stubVerifier{p: &profile.Profile{EntityID: "u1", Kind: profile.KindSystem}}
+	h := NewMessageHandler(cfg)
+
+	callHandler(h, map[string]string{"profile_token": "tok", "visibility": provider.VisibilityHidden})
+
+	if got := actor.Visibility(runner.ctx); got != provider.VisibilityHidden {
+		t.Errorf("actor.Visibility(dispatch ctx) = %q, want %q for a system turn", got, provider.VisibilityHidden)
+	}
+}
+
+// TestHandler_IgnoresClientVisibilityForChatProfile is the security regression
+// guard: an ordinary chat client that sets visibility=hidden must NOT get its
+// turn hidden — otherwise it could feed model-directed content while keeping it
+// out of the audited transcript. Hiding is gated on the verified system kind.
+func TestHandler_IgnoresClientVisibilityForChatProfile(t *testing.T) {
+	runner := &captureRunner{}
+	cfg := baseHandlerConfig()
+	cfg.Runner = runner
+	cfg.Verifier = &stubVerifier{p: &profile.Profile{EntityID: "u1", Kind: profile.KindChat}}
+	h := NewMessageHandler(cfg)
+
+	callHandler(h, map[string]string{"profile_token": "tok", "visibility": provider.VisibilityHidden})
+
+	if got := actor.Visibility(runner.ctx); got != "" {
+		t.Errorf("actor.Visibility(dispatch ctx) = %q, want empty (a chat client must not hide its own turn)", got)
 	}
 }
 
@@ -181,6 +218,19 @@ func TestHandler_LimitExceeded(t *testing.T) {
 	out := callHandler(h, map[string]string{"profile_token": "tok"})
 	if !strings.Contains(out.Content, "token limit reached") {
 		t.Errorf("Content = %q, want limit-exceeded message", out.Content)
+	}
+}
+
+// TestHandler_LimitNotAppliedToSystemRun: a system invocation is outside the
+// chat budget on BOTH sides — it is excluded from TotalTokensSince and must not
+// be blocked by an exhausted budget either, so a job-completion note still lands.
+func TestHandler_LimitNotAppliedToSystemRun(t *testing.T) {
+	p := &profile.Profile{EntityID: "u1", Kind: profile.KindSystem, Limit: 1000, LimitWindow: time.Hour}
+	checker := &stubLimitChecker{total: 5000} // way over the limit
+	h := newTestHandler(&stubVerifier{p: p}, checker)
+	out := callHandler(h, map[string]string{"profile_token": "tok"})
+	if strings.Contains(out.Content, "token limit reached") {
+		t.Errorf("system run was blocked by the chat budget: %q", out.Content)
 	}
 }
 
@@ -256,7 +306,7 @@ func (r *sessionRecorder) resumeFunc() pkg.ResumeSessionFunc {
 }
 
 func (r *sessionRecorder) createFunc() pkg.CreateSessionFunc {
-	return func(key, _, _ string) {
+	return func(key, _, _, _ string) {
 		r.creates = append(r.creates, key)
 	}
 }
@@ -503,7 +553,7 @@ func TestHandler_NewMessageHandler_PanicsOnNilResumeSession(t *testing.T) {
 	}()
 	NewMessageHandler(HandlerConfig{
 		ResumeSession: nil,
-		CreateSession: func(_, _, _ string) {},
+		CreateSession: func(_, _, _, _ string) {},
 		Runner:        &echoRunner{},
 	})
 }
@@ -529,7 +579,7 @@ func TestHandler_NewMessageHandler_PanicsOnNilRunner(t *testing.T) {
 	}()
 	NewMessageHandler(HandlerConfig{
 		ResumeSession: func(_ string) error { return nil },
-		CreateSession: func(_, _, _ string) {},
+		CreateSession: func(_, _, _, _ string) {},
 		Runner:        nil,
 	})
 }

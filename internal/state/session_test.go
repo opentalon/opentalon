@@ -9,7 +9,7 @@ import (
 
 func TestSessionCreate(t *testing.T) {
 	store := NewSessionStore("")
-	sess := store.Create("sess1", "", "")
+	sess := store.Create("sess1", "", "", "")
 
 	if sess.ID != "sess1" {
 		t.Errorf("ID = %q, want sess1", sess.ID)
@@ -27,10 +27,10 @@ func TestSessionCreateIdempotent(t *testing.T) {
 	// overwrite it. Channels with stale conversation_ids must never silently
 	// wipe live message history.
 	store := NewSessionStore("")
-	first := store.Create("sess1", "", "")
+	first := store.Create("sess1", "", "", "")
 	_ = store.AddMessage("sess1", provider.Message{Role: provider.RoleUser, Content: "alive"})
 
-	again := store.Create("sess1", "", "")
+	again := store.Create("sess1", "", "", "")
 	if again != first {
 		t.Errorf("Create returned a different pointer on second call; expected idempotent reuse")
 	}
@@ -56,7 +56,7 @@ func TestSessionGetNotFound(t *testing.T) {
 
 func TestSessionAddMessage(t *testing.T) {
 	store := NewSessionStore("")
-	store.Create("sess1", "", "")
+	store.Create("sess1", "", "", "")
 
 	err := store.AddMessage("sess1", provider.Message{
 		Role:    provider.RoleUser,
@@ -85,7 +85,7 @@ func TestSessionAddMessageNotFound(t *testing.T) {
 
 func TestSessionSetModel(t *testing.T) {
 	store := NewSessionStore("")
-	store.Create("sess1", "", "")
+	store.Create("sess1", "", "", "")
 
 	err := store.SetModel("sess1", "anthropic/claude-sonnet-4")
 	if err != nil {
@@ -100,7 +100,7 @@ func TestSessionSetModel(t *testing.T) {
 
 func TestSessionDelete(t *testing.T) {
 	store := NewSessionStore("")
-	store.Create("sess1", "", "")
+	store.Create("sess1", "", "", "")
 	if err := store.Delete("sess1"); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestSessionDelete(t *testing.T) {
 
 func TestSessionClearMessagesPreservesIdentity(t *testing.T) {
 	store := NewSessionStore("")
-	sess := store.Create("sess1", "", "")
+	sess := store.Create("sess1", "", "", "")
 	sess.Metadata["debug"] = "true"
 	_ = store.SetModel("sess1", "anthropic/claude-sonnet-4")
 	_ = store.AddMessage("sess1", provider.Message{Role: provider.RoleUser, Content: "Hello"})
@@ -155,9 +155,9 @@ func TestSessionClearMessagesUnknownSessionIsNoOp(t *testing.T) {
 
 func TestSessionList(t *testing.T) {
 	store := NewSessionStore("")
-	store.Create("a", "", "")
-	store.Create("b", "", "")
-	store.Create("c", "", "")
+	store.Create("a", "", "", "")
+	store.Create("b", "", "", "")
+	store.Create("c", "", "", "")
 
 	list := store.List()
 	if len(list) != 3 {
@@ -168,7 +168,7 @@ func TestSessionList(t *testing.T) {
 func TestSessionPersistence(t *testing.T) {
 	dir := t.TempDir()
 	store := NewSessionStore(dir)
-	store.Create("sess1", "", "")
+	store.Create("sess1", "", "", "")
 	_ = store.AddMessage("sess1", provider.Message{Role: provider.RoleUser, Content: "Hello"})
 	_ = store.AddMessage("sess1", provider.Message{Role: provider.RoleAssistant, Content: "Hi there"})
 	_ = store.SetModel("sess1", "anthropic/claude-haiku-4")
@@ -199,7 +199,7 @@ func TestSessionPersistence(t *testing.T) {
 
 func TestSessionUpdatedAtChanges(t *testing.T) {
 	store := NewSessionStore("")
-	sess := store.Create("sess1", "", "")
+	sess := store.Create("sess1", "", "", "")
 	created := sess.UpdatedAt
 
 	_ = store.AddMessage("sess1", provider.Message{Content: "msg"})
@@ -236,7 +236,7 @@ func TestSessionLoadNonexistent(t *testing.T) {
 
 func TestSessionMetadata(t *testing.T) {
 	store := NewSessionStore("")
-	sess := store.Create("sess1", "", "")
+	sess := store.Create("sess1", "", "", "")
 	sess.Metadata["user_id"] = "u123"
 	sess.Metadata["mode"] = "debug"
 
@@ -248,7 +248,7 @@ func TestSessionMetadata(t *testing.T) {
 
 func TestSessionMultipleMessages(t *testing.T) {
 	store := NewSessionStore("")
-	store.Create("sess1", "", "")
+	store.Create("sess1", "", "", "")
 	for i := 0; i < 50; i++ {
 		_ = store.AddMessage("sess1", provider.Message{
 			Role:    provider.RoleUser,

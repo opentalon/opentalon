@@ -47,6 +47,55 @@ func TestVerifier_Success(t *testing.T) {
 	}
 }
 
+// TestVerifier_ParsesInteractionKind: a WhoAmI response carrying kind +
+// system_source populates Profile.Kind/SystemSource, which drive usage
+// attribution (system runs recorded separately from the chat budget) and the
+// hidden-visibility gate.
+func TestVerifier_ParsesInteractionKind(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"entity_id":     "user-1",
+			"kind":          "system",
+			"system_source": "job_notify",
+		})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{URL: srv.URL, CacheTTL: 100 * time.Millisecond}, &stubGroupSaver{saved: map[string][]string{}}, nil)
+	p, err := v.Verify(context.Background(), "tok", "", nil)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if p.Kind != "system" {
+		t.Errorf("Kind = %q, want system", p.Kind)
+	}
+	if p.SystemSource != "job_notify" {
+		t.Errorf("SystemSource = %q, want job_notify", p.SystemSource)
+	}
+}
+
+// TestVerifier_DefaultsKindToChat: an absent kind must default to "chat" so a
+// legacy WhoAmI server (or a normal chat token) is never misclassified as a
+// system run and dropped from the chat token budget.
+func TestVerifier_DefaultsKindToChat(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"entity_id": "user-1"})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{URL: srv.URL, CacheTTL: 100 * time.Millisecond}, &stubGroupSaver{saved: map[string][]string{}}, nil)
+	p, err := v.Verify(context.Background(), "tok", "", nil)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if p.Kind != "chat" {
+		t.Errorf("Kind = %q, want chat (absent kind defaults to chat)", p.Kind)
+	}
+	if p.SystemSource != "" {
+		t.Errorf("SystemSource = %q, want empty", p.SystemSource)
+	}
+}
+
 func TestVerifier_CacheHit(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

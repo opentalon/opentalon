@@ -14,7 +14,19 @@ package contextargs
 
 // SessionID is the opaque session identifier carried in the request
 // context. Resolves to the empty string when called outside a session.
+// It is the PACKED session key (channelID:conversationID[:threadID]),
+// not the bare conversation id — see ConversationID when a consumer needs
+// the client-round-trippable id.
 const SessionID = "session_id"
+
+// ConversationID is the bare, client-round-trippable conversation id (the
+// value a channel echoes back as ?conversation_id=), distinct from the
+// packed SessionID key. A consumer that must address the exact same
+// conversation the browser holds — e.g. delivering an out-of-band message
+// back into a live chat session — needs this raw id, because the packed
+// SessionID would be re-prefixed with the entity and miss on resume.
+// Resolves to the empty string when called outside a conversation.
+const ConversationID = "conversation_id"
 
 // AllowedPlugins is the sorted JSON array of plugin names the current
 // profile permits. Plugins may use it as a coarse pre-filter (e.g.

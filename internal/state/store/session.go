@@ -97,11 +97,14 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 }
 
 // Create inserts a new session. If id already exists (e.g. race), returns existing session from DB.
-func (s *SessionStore) Create(id, entityID, groupID string) *state.Session {
+func (s *SessionStore) Create(id, entityID, groupID, kind string) *state.Session {
 	now := time.Now().UTC().Format(time.RFC3339)
+	if kind == "" {
+		kind = "chat"
+	}
 	_, err := s.db.SQLDB().Exec(
-		s.db.Dialect().Rebind(`INSERT INTO sessions (id, summary, active_model, metadata, entity_id, group_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
-		id, "", "", "{}", entityID, groupID, now, now)
+		s.db.Dialect().Rebind(`INSERT INTO sessions (id, summary, active_model, metadata, entity_id, group_id, interaction_kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		id, "", "", "{}", entityID, groupID, kind, now, now)
 	if err != nil {
 		if existing, e := s.Get(id); e == nil {
 			return existing
@@ -145,6 +148,7 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 		return err
 	}
 	toolCallID := sql.NullString{String: msg.ToolCallID, Valid: msg.ToolCallID != ""}
+	visibility := sql.NullString{String: msg.Visibility, Valid: msg.Visibility != ""}
 	metadataJSON, err := metadataAsNullString(metadata)
 	if err != nil {
 		return err
@@ -159,9 +163,9 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	// Atomically assign next seq in a single statement to avoid race conditions
 	// between concurrent AddMessage calls.
 	if _, err := tx.ExecContext(ctx,
-		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, metadata, created_at)
-		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
-		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, metadataJSON, now, id); err != nil {
+		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, metadata, visibility, created_at)
+		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
+		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, metadataJSON, visibility, now, id); err != nil {
 		return fmt.Errorf("add message insert: %w", err)
 	}
 
@@ -282,9 +286,10 @@ func (s *SessionStore) SetSummary(id string, summary string, messages []provider
 			return err
 		}
 		toolCallID := sql.NullString{String: msg.ToolCallID, Valid: msg.ToolCallID != ""}
+		visibility := sql.NullString{String: msg.Visibility, Valid: msg.Visibility != ""}
 		if _, err := tx.ExecContext(ctx,
-			d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`),
-			id, i+1, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, now); err != nil {
+			d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, visibility, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+			id, i+1, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, visibility, now); err != nil {
 			return fmt.Errorf("set summary insert: %w", err)
 		}
 	}
@@ -372,7 +377,7 @@ func (s *SessionStore) PruneIdleSessions() error {
 // loadMessages reads all messages for a session from the messages table, ordered by seq.
 func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error) {
 	rows, err := s.db.SQLDB().Query(
-		s.db.Dialect().Rebind(`SELECT role, content, tool_calls, tool_call_id FROM messages WHERE session_id = ? ORDER BY seq`),
+		s.db.Dialect().Rebind(`SELECT role, content, tool_calls, tool_call_id, visibility FROM messages WHERE session_id = ? ORDER BY seq`),
 		sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load messages: %w", err)
@@ -382,14 +387,15 @@ func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error
 	var messages []provider.Message
 	for rows.Next() {
 		var role, content string
-		var toolCallsJSON, toolCallID sql.NullString
-		if err := rows.Scan(&role, &content, &toolCallsJSON, &toolCallID); err != nil {
+		var toolCallsJSON, toolCallID, visibility sql.NullString
+		if err := rows.Scan(&role, &content, &toolCallsJSON, &toolCallID, &visibility); err != nil {
 			return nil, fmt.Errorf("load messages scan: %w", err)
 		}
 		msg := provider.Message{
 			Role:       provider.Role(role),
 			Content:    content,
 			ToolCallID: toolCallID.String, // zero value "" when NULL — safe
+			Visibility: visibility.String, // "" when NULL = visible
 		}
 		if toolCallsJSON.Valid {
 			if err := json.Unmarshal([]byte(toolCallsJSON.String), &msg.ToolCalls); err != nil {

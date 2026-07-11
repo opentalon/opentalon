@@ -344,7 +344,7 @@ func setupRepairOrchestrator(llm LLMClient, parser ToolCallParser, sink emit.Sin
 	}, exec)
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
-	sessions.Create("test-session", "", "")
+	sessions.Create("test-session", "", "", "")
 	opts.EventSink = sink
 	orch := NewWithRules(llm, parser, registry, memory, sessions, opts)
 	return orch, "test-session"

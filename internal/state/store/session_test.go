@@ -20,7 +20,7 @@ func TestSessionStore_ClearMessagesPreservesIdentityAndEvents(t *testing.T) {
 	store := NewSessionStore(db, 0, 0)
 
 	const sid = "sess-clear"
-	store.Create(sid, "entity-X", "group-Y")
+	store.Create(sid, "entity-X", "group-Y", "")
 
 	if err := store.AddMessage(sid, provider.Message{Role: provider.RoleUser, Content: "first"}); err != nil {
 		t.Fatalf("AddMessage[1]: %v", err)
@@ -149,7 +149,7 @@ func TestSessionStore_ClearMessagesIsIdempotent(t *testing.T) {
 	store := NewSessionStore(db, 0, 0)
 
 	const sid = "sess-empty"
-	store.Create(sid, "entity-X", "group-Y")
+	store.Create(sid, "entity-X", "group-Y", "")
 
 	if err := store.ClearMessages(sid); err != nil {
 		t.Fatalf("first ClearMessages: %v", err)

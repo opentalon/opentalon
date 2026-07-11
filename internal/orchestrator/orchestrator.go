@@ -105,8 +105,10 @@ type GroupPluginLookup interface {
 }
 
 // UsageRecorder records LLM usage statistics after an orchestrator run.
+// interactionKind is the run's kind ("chat" | "system"); systemSource is an
+// optional per-feature label for system runs. Both come from the run's Profile.
 type UsageRecorder interface {
-	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID string, inputTokens, outputTokens, toolCalls int)
+	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int)
 }
 
 // PromptSnapshotUpserter persists content-addressed prompt bodies so a
@@ -238,7 +240,7 @@ type MemoryStoreInterface interface {
 // SessionStoreInterface is the session store (in-memory or SQLite).
 type SessionStoreInterface interface {
 	Get(id string) (*state.Session, error)
-	Create(id, entityID, groupID string) *state.Session
+	Create(id, entityID, groupID, kind string) *state.Session
 	AddMessage(id string, msg provider.Message) error
 	// AddMessageWithMetadata is AddMessage plus a small JSON map persisted on
 	// the message row and surfaced only by the transcript reader (never fed to
@@ -457,12 +459,14 @@ func resolveAllowedToolFQNs(ctx context.Context, o *Orchestrator) string {
 }
 
 // defaultContextArgProviders returns built-in providers for orchestrator-managed
-// arguments: opaque identifiers (session_id) and per-session allowlists derived
-// from the profile (allowed_plugins, allowed_tools). No session messages,
-// conversation text, or other sensitive user content is exposed via this mechanism.
+// arguments: opaque identifiers (session_id, conversation_id) and per-session
+// allowlists derived from the profile (allowed_plugins, allowed_tools). No session
+// messages, conversation text, or other sensitive user content is exposed via this
+// mechanism.
 func defaultContextArgProviders(o *Orchestrator, custom map[string]ContextArgProvider) map[string]ContextArgProvider {
 	builtin := map[string]ContextArgProvider{
-		contextargs.SessionID: func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
+		contextargs.SessionID:      func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
+		contextargs.ConversationID: func(ctx context.Context, _ string) string { return actor.ConversationID(ctx) },
 		contextargs.AllowedPlugins: func(ctx context.Context, _ string) string {
 			return resolveAllowedPluginNames(ctx, o)
 		},
@@ -1269,15 +1273,23 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	if timing != nil {
 		timing.begin("confirmation_check")
 	}
+	// A hidden (system-injected) turn — a background-job status note delivered
+	// via /inject — is NOT a confirmation reply: its text is automated, not the
+	// user's approve/reject. Skip confirmation resolution entirely for it, so a
+	// pending confirmation is left intact for the real user and the note is never
+	// classified as a decision (which could silently cancel — or worst case
+	// approve — the user's pending action). It falls through to a normal
+	// model-only turn.
+	hidden := actor.Visibility(ctx) == provider.VisibilityHidden
 	o.pendingMu.Lock()
 	pendingPipeline := o.pendingPipelines[sessionID]
 	pendingPipelineConfID := o.pendingConfirmationIDs[sessionID]
-	if pendingPipeline != nil {
+	if pendingPipeline != nil && !hidden {
 		delete(o.pendingPipelines, sessionID)
 		delete(o.pendingConfirmationIDs, sessionID)
 	}
 	o.pendingMu.Unlock()
-	if p := pendingPipeline; p != nil {
+	if p := pendingPipeline; p != nil && !hidden {
 		// Parent the resolved event onto the original confirmation_requested
 		// so analytics can pair the two across turns. Empty id (no sink at
 		// request time, or pre-instrumentation pending state) leaves the
@@ -1328,13 +1340,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	pendingCall := o.pendingToolCalls[sessionID]
 	pendingCallConfID := o.pendingConfirmationIDs[sessionID]
 	pendingCallPrompt := o.pendingConfirmationPrompts[sessionID]
-	if pendingCall != nil {
+	if pendingCall != nil && !hidden {
 		delete(o.pendingToolCalls, sessionID)
 		delete(o.pendingConfirmationIDs, sessionID)
 		delete(o.pendingConfirmationPrompts, sessionID)
 	}
 	o.pendingMu.Unlock()
-	if pendingCall == nil {
+	if pendingCall == nil && !hidden {
 		// Fallback: in-memory state lost (pod restart, failover). Recover
 		// the call AND the original confirmation_requested event id from
 		// session metadata so the resolved event still links to the
@@ -1342,7 +1354,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		pendingCall, pendingCallConfID, pendingCallPrompt = loadPendingToolCall(sessions, sessionID)
 	}
 	var pendingMetaClearErr error
-	if pendingCall != nil {
+	if pendingCall != nil && !hidden {
 		// Clear the persisted pending call up front. If this fails we MUST NOT
 		// continue down the approve/amend paths (which keep the turn running):
 		// a leftover row could be resurrected by loadPendingToolCall on a later
@@ -1351,7 +1363,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		pendingMetaClearErr = sessions.SetMetadata(sessionID, "pending_tool_call", "")
 	}
 	toolCallConfirmed := false
-	if tc := pendingCall; tc != nil {
+	if tc := pendingCall; tc != nil && !hidden {
 		// Parent the resolved event onto the matching confirmation_requested
 		// (potentially from a prior turn or even a prior pod). Empty id is
 		// the legacy/pre-instrumentation path — leave the turn_start parent.
@@ -1526,7 +1538,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	if sess, _ := sessions.Get(sessionID); sess != nil && msgCountAtStart <= len(sess.Messages) {
 		priorMessages = sess.Messages[:msgCountAtStart]
 	}
-	ctx = withReplyLanguageDirective(ctx, o.replyLanguageDirectiveWithHistory(content, priorMessages))
+	// A hidden (system-injected) turn — e.g. a background-job status note pushed
+	// in via the inject path — carries no signal about the user's own language,
+	// so detecting on its text would answer the conversation in the note's
+	// language. Derive the reply language from the visible history instead.
+	var replyLangDirective string
+	if hidden { // computed once at the confirmation-skip guard above
+		replyLangDirective = o.replyLanguageDirectiveForHidden(priorMessages)
+	} else {
+		replyLangDirective = o.replyLanguageDirectiveWithHistory(content, priorMessages)
+	}
+	ctx = withReplyLanguageDirective(ctx, replyLangDirective)
 
 	// Run content preparers before the first LLM call (config-driven).
 	// Preparers no longer narrow the LLM's tool set — tools come from the
@@ -1702,13 +1724,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if !confResult.RequiresConfirmation {
 				// All read-only — execute pipeline directly.
 				log.Info("pipeline confirmation skipped by plugin", "steps", len(planResult.Steps))
-				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
 				p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
 				return o.executePipeline(ctx, sessionID, p)
 			}
 			// Partial execution: run read prefix before the first write step,
 			// then pause for confirmation with real data.
-			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
 			if confResult.ConfirmBeforeStep > 0 {
 				// Execute read steps directly (not through executePipeline which
 				// enters the LLM agent loop). Collect their context so the write
@@ -1859,7 +1881,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				toolResult := o.executeCall(ctx, call)
 				if toolResult.Error == "" {
 					// Seed session: user message, assistant tool call, tool result.
-					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content})
+					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
 					if o.supportsNativeTools() {
 						// Native format: assistant with tool_calls + tool result with tool_call_id.
 						_ = sessions.AddMessage(sessionID, provider.Message{
@@ -1928,9 +1950,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 
 		if err := sessions.AddMessage(sessionID, provider.Message{
-			Role:    provider.RoleUser,
-			Content: content,
-			Files:   files,
+			Role:       provider.RoleUser,
+			Content:    content,
+			Files:      files,
+			Visibility: actor.Visibility(ctx),
 		}); err != nil {
 			return nil, fmt.Errorf("adding user message: %w", err)
 		}
@@ -1945,7 +1968,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// the just-finished turn's assistant message already committed. Self-
 	// gates on `Title=="" AND >=1 assistant message` so the cost on
 	// every subsequent Run is one Get() against the inner store.
-	defer func() { go o.maybeGenerateTitle(context.Background(), sessionID) }()
+	// Skip background title generation for system runs: a programmatic,
+	// single-turn call needs no human-facing title, and system sessions are
+	// excluded from the chat-session picker anyway.
+	if p := profile.FromContext(ctx); p == nil || p.Kind != profile.KindSystem {
+		defer func() { go o.maybeGenerateTitle(context.Background(), sessionID) }()
+	}
 
 	result := &RunResult{}
 
@@ -1965,7 +1993,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if o.usageRecorder != nil {
 			if p := profile.FromContext(ctx); p != nil {
 				o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group,
-					p.ChannelID, sessionID, modelUsed,
+					p.ChannelID, sessionID, modelUsed, p.Kind, p.SystemSource,
 					totalInputTokens, totalOutputTokens, totalToolCalls)
 			}
 		}
@@ -5202,13 +5230,27 @@ func deduplicateKnowledgeOutput(m provider.Message, seen map[uint64]bool) provid
 	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files}
 }
 
-// lastUserMessage returns the most recent user message from the session,
+// isVisibleUserMessage reports whether m is the user's own visible turn: a real
+// user message, not a hidden system-injected note. Hidden notes (e.g. a
+// background job's completion status delivered via the inject path) are stored
+// as role=user but are model-only. Every derivation of "what the user actually
+// said" — reply-language detection, planner intent, RAG query enrichment — must
+// exclude them through this one predicate, or a machine-authored (often English)
+// note would be mistaken for the user's words. Only the model-facing prompt
+// includes hidden turns.
+func isVisibleUserMessage(m provider.Message) bool {
+	return m.Role == provider.RoleUser && m.Visibility != provider.VisibilityHidden
+}
+
+// lastUserMessage returns the most recent VISIBLE user message from the session,
 // stripping knowledge context. Used to enrich short follow-up messages
-// (e.g. "Item") with the prior intent ("Create some arbitrary test object")
-// so RAG semantic search matches the right tools.
+// (e.g. "Item") with the prior intent ("Create some arbitrary test object") so
+// RAG semantic search matches the right tools, and as the reply-language
+// fallback for a signal-less current turn. Hidden system-injected notes are
+// skipped (see isVisibleUserMessage) so they never stand in for the user's words.
 func lastUserMessage(messages []provider.Message) string {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == provider.RoleUser {
+		if isVisibleUserMessage(messages[i]) {
 			text := stripKnowledgeContext(messages[i].Content)
 			if text != "" {
 				return text
@@ -5239,7 +5281,11 @@ func buildPlannerConversationContext(sess *state.Session) string {
 	// Walk backwards to find the last few user/assistant exchanges.
 	for i := len(sess.Messages) - 1; i >= 0 && len(parts) < 6; i-- {
 		m := sess.Messages[i]
-		if m.Role != provider.RoleUser && m.Role != provider.RoleAssistant {
+		// Keep visible user turns and assistant turns; skip tool results, system
+		// messages, and hidden system-injected notes (stored as role=user but not
+		// the user's own words — see isVisibleUserMessage). Assistant turns are
+		// always visible.
+		if m.Role != provider.RoleAssistant && !isVisibleUserMessage(m) {
 			continue
 		}
 		text := m.Content

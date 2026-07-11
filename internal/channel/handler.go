@@ -10,6 +10,7 @@ import (
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/logger"
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
@@ -84,6 +85,10 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			return errorFrame(msg, "We couldn't verify your account info right now. Please try again in a moment.", "enrichment_failed"), nil
 		}
 
+		// interaction_kind for a session minted on this connection; a verified
+		// profile may override it below (a system invocation sets "system").
+		interactionKind := profile.KindChat
+
 		// Profile verification: required when verifier is configured.
 		if cfg.Verifier != nil {
 			token := msg.Metadata["profile_token"]
@@ -107,8 +112,12 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			// Enforce per-profile token spend limit when configured. Control
 			// messages (e.g. a resume handshake) do no LLM work, so they must
 			// not be blocked by an exhausted budget — a reconnecting client
-			// still needs to see a pending confirmation.
-			if cfg.LimitChecker != nil && p.Limit > 0 && p.LimitWindow > 0 && msg.Metadata[pkg.ControlMetadataKey] == "" {
+			// still needs to see a pending confirmation. System invocations are
+			// excluded symmetrically with the record side (TotalTokensSince only
+			// sums chat runs), so a job-completion note is never blocked by, and
+			// never counts against, the customer's interactive budget.
+			if cfg.LimitChecker != nil && p.Limit > 0 && p.LimitWindow > 0 &&
+				p.Kind != profile.KindSystem && msg.Metadata[pkg.ControlMetadataKey] == "" {
 				since := time.Now().Add(-p.LimitWindow)
 				used, lerr := cfg.LimitChecker.TotalTokensSince(ctx, p.EntityID, since)
 				if lerr != nil {
@@ -122,6 +131,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			// Scope session to entity so profiles cannot access each other's history.
 			entityID = p.EntityID
 			groupID = p.Group
+			interactionKind = p.Kind
 			sessionKey = p.EntityID + ":" + sessionKey
 			// Use entity ID as actor for memory scoping and permission checks.
 			ctx = actor.WithActor(ctx, p.EntityID)
@@ -143,6 +153,17 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		// the orchestrator can bypass LLM-based classification.
 		if cd := msg.Metadata["confirmation"]; cd != "" {
 			ctx = actor.WithConfirmationDecision(ctx, cd)
+		}
+
+		// Carry a per-message visibility ("hidden") so the orchestrator stamps
+		// it on the stored user turn: a hidden turn is fed to the model but
+		// dropped from the user-facing transcript (e.g. a system status note
+		// injected by a backend job). Hiding a turn from the audited transcript
+		// is a privileged capability — honor it ONLY for a WhoAmI-verified
+		// system invocation, and only for the canonical value, so an ordinary
+		// chat client cannot smuggle model-directed content past the transcript.
+		if interactionKind == profile.KindSystem && msg.Metadata["visibility"] == provider.VisibilityHidden {
+			ctx = actor.WithVisibility(ctx, provider.VisibilityHidden)
 		}
 
 		// Route by resume intent: client-supplied conv-id → strict Resume
@@ -169,7 +190,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 				return errorFrame(msg, "Something went wrong loading your conversation. Please try again.", "internal_error"), nil
 			}
 		} else {
-			cfg.CreateSession(sessionKey, entityID, groupID)
+			cfg.CreateSession(sessionKey, entityID, groupID, interactionKind)
 		}
 
 		// Resume handshake: a reconnecting client sends one control frame right
