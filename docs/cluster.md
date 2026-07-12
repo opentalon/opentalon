@@ -1,8 +1,13 @@
-# Cluster Mode (Multi-Pod Deduplication)
+# Cluster Mode (Multi-Pod Coordination)
 
 When running multiple OpenTalon pods (e.g. in Kubernetes with `replicas: 2+`), each pod connects independently to the channel plugin (e.g. Slack Socket Mode). Because Slack delivers every event to all open WebSocket connections from the same app, each pod receives every inbound message — which would result in duplicate responses.
 
-Setting `cluster.enabled: true` activates Redis-backed message deduplication. When a message arrives, each pod races to acquire a Redis lock (`SET NX EX`) keyed to the message's channel, conversation, and timestamp. Only the pod that wins the lock processes the message; the others silently skip it. If Redis is unreachable the lock attempt is logged as a warning and the message is processed anyway (fail-open), so a Redis outage never silences the bot.
+Setting `cluster.enabled: true` activates the Redis-backed multi-pod coordination:
+
+- **Message deduplication.** When a message arrives, each pod races to acquire a Redis lock (`SET NX EX`) keyed to the message's channel, conversation, and timestamp. Only the pod that wins the lock processes the message; the others silently skip it.
+- **Cross-pod session-turn lease.** Turns for the same session are serialized across pods via a Redis lease with a heartbeat, so two messages for one session landing on different pods cannot run (and mutate session state) concurrently.
+
+Both are fail-open: if Redis is unreachable the attempt is logged as a warning and processing continues without the lock, so a Redis outage never silences the bot. The full inbound pipeline (dedup → debounce → in-pod per-session mutex → cross-pod turn lease) is documented in `docs/concurrency.md`, together with the state-placement invariant that decides what may live in pod memory.
 
 ## Deployment scenarios
 
@@ -11,7 +16,7 @@ Pick the scenario that matches your scale and availability needs. All four are f
 | Scenario | Pods | State store | Redis | When to choose |
 |---|---|---|---|---|
 | **A. Single instance** | 1 | SQLite (file) | none | Dev, single-team deploys, single-region low-traffic |
-| **B. Multi-pod, shared state** | 2+ | Postgres | Standalone (dedup only) | Production HA, rolling upgrades, basic horizontal scaling |
+| **B. Multi-pod, shared state** | 2+ | Postgres | Standalone (dedup + turn lease) | Production HA, rolling upgrades, basic horizontal scaling |
 | **C. Multi-pod, HA Redis** | 2+ | Postgres | Sentinel | Regulated / SLA-bound environments where dedup must survive a Redis node loss |
 | **D. Autoscaled** | 2+ (HPA) | Postgres | Standalone or Sentinel | Bursty workloads (campaign-driven spikes, batch ingestion); pods are stateless, all state in shared stores |
 
@@ -28,7 +33,7 @@ state:
 
 ### B. Multi-pod, shared state
 
-Run 2+ pods behind the same channel registrations. Postgres provides shared sessions/memory; Redis provides per-message dedup so only one pod responds.
+Run 2+ pods behind the same channel registrations. Postgres provides shared sessions/memory; Redis provides per-message dedup (so only one pod responds) and the per-session turn lease (so turns for one session never run concurrently across pods).
 
 ```yaml
 redis:
@@ -46,7 +51,7 @@ This is the recommended baseline for production. Rolling upgrades work cleanly: 
 
 ### C. Multi-pod, HA Redis (Sentinel)
 
-For environments where a single Redis instance is unacceptable risk, point cluster mode at a Sentinel cluster. The dedup lock remains correct across Redis failovers.
+For environments where a single Redis instance is unacceptable risk, point cluster mode at a Sentinel cluster. The dedup lock and the session-turn lease remain correct across Redis failovers.
 
 ```yaml
 redis:
@@ -69,7 +74,7 @@ Combine with Postgres read replicas / managed HA Postgres for end-to-end HA.
 
 ### D. Autoscaled (HPA)
 
-Same config as scenario B or C; the difference is at the Kubernetes layer. Because all session/memory state lives in Postgres and dedup is centralized in Redis, pods are effectively stateless and can be added or removed freely under load.
+Same config as scenario B or C; the difference is at the Kubernetes layer. Because all session/memory state lives in Postgres and cross-pod coordination (dedup, session-turn lease) is centralized in Redis, pods are effectively stateless and can be added or removed freely under load.
 
 ```yaml
 # k8s HPA snippet
@@ -136,6 +141,15 @@ dedup:{channelID}:{conversationID}:{message_timestamp_nanoseconds}
 ```
 
 For Slack, `conversationID` is the Slack channel ID (e.g. `C0ABC1234`) and `message_timestamp` is the Slack event `ts`, which is unique per message per channel. The lock expires after `dedup_ttl` so Redis memory stays bounded.
+
+NEW Redis key families use the `opentalon:` prefix (e.g. the session-turn lease under `opentalon:session:turn:*`); the pre-existing `dedup:` and `enrich:` families keep their names — renaming live keys would break rolling upgrades.
+
+## Known per-pod state
+
+Two subsystems keep state outside the shared stores and are therefore per-pod; both log a startup warning in cluster mode:
+
+- **Scheduler / reminder jobs** persist to pod-local disk: a job is visible and delivered only on the pod that created it, and does not survive pod replacement.
+- **Pending pipeline plans** (multi-step plans awaiting user approval; off by default) are held in pod memory: a confirmation reply routed to another pod cannot resume the plan.
 
 ## Edge cases
 

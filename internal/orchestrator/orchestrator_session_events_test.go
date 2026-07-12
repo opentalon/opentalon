@@ -439,14 +439,12 @@ func TestOrchestrator_PendingToolCallRejected_EmitsUserMessageButNotTurnStart(t 
 	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
 
 	// Seed a pending tool call so Run takes the confirmation branch.
-	orch.pendingMu.Lock()
-	orch.pendingToolCalls[sessID] = &ToolCall{
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{
 		ID:     "call-1",
 		Plugin: "gitlab",
 		Action: "analyze_code",
 		Args:   map[string]string{"repo": "myrepo"},
-	}
-	orch.pendingMu.Unlock()
+	}, "", "")
 
 	result, err := orch.Run(context.Background(), sessID, "no")
 	if err != nil {
@@ -1891,7 +1889,7 @@ func TestOrchestrator_Confirmation_PipelineApproved_EmitsResolved(t *testing.T) 
 	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
 
 	orch.pendingMu.Lock()
-	orch.pendingPipelines[sessID] = pipeline.NewPipeline(nil, pipeline.PipelineConfig{})
+	orch.pendingPipelines[sessID] = pendingPipeline{plan: pipeline.NewPipeline(nil, pipeline.PipelineConfig{})}
 	orch.pendingMu.Unlock()
 
 	// Approve via the deterministic frontend button signal (metadata["confirmation"]).
@@ -1919,7 +1917,7 @@ func TestOrchestrator_Confirmation_PipelineRejected_EmitsResolved(t *testing.T) 
 	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
 
 	orch.pendingMu.Lock()
-	orch.pendingPipelines[sessID] = pipeline.NewPipeline(nil, pipeline.PipelineConfig{})
+	orch.pendingPipelines[sessID] = pendingPipeline{plan: pipeline.NewPipeline(nil, pipeline.PipelineConfig{})}
 	orch.pendingMu.Unlock()
 
 	if _, err := orch.Run(context.Background(), sessID, "no"); err != nil {
@@ -1947,9 +1945,7 @@ func TestOrchestrator_Confirmation_ToolCallApproved_EmitsResolved(t *testing.T) 
 		Action: "analyze_code",
 		Args:   map[string]string{},
 	}
-	orch.pendingMu.Lock()
-	orch.pendingToolCalls[sessID] = pending
-	orch.pendingMu.Unlock()
+	savePendingToolCall(orch.sessions, sessID, pending, "", "")
 
 	// Approve via the deterministic frontend button signal (metadata["confirmation"]).
 	ctx := actor.WithConfirmationDecision(context.Background(), "approve")
@@ -1981,9 +1977,7 @@ func TestOrchestrator_Confirmation_ToolCallRejected_EmitsResolved(t *testing.T) 
 		Action: "analyze_code",
 		Args:   map[string]string{},
 	}
-	orch.pendingMu.Lock()
-	orch.pendingToolCalls[sessID] = pending
-	orch.pendingMu.Unlock()
+	savePendingToolCall(orch.sessions, sessID, pending, "", "")
 
 	if _, err := orch.Run(context.Background(), sessID, "no"); err != nil {
 		t.Fatal(err)
@@ -2409,7 +2403,7 @@ func TestParentID_ConfirmationResolvedParentsRequested_Pipeline(t *testing.T) {
 	// Inject a pending pipeline + the matching confirmation_requested id
 	// directly so we don't have to run a full planner+confirmation turn
 	// first. The under-test linkage is the *resolved* side reading from
-	// pendingConfirmationIDs and stamping it as parent.
+	// the pending plan's stored confID and stamping it as parent.
 	sink := &recordingEventSink{}
 	llm := &fakeLLM{responses: []string{"done"}}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
@@ -2417,8 +2411,7 @@ func TestParentID_ConfirmationResolvedParentsRequested_Pipeline(t *testing.T) {
 
 	const fakeReqID = "00000000000000000000000000000001"
 	orch.pendingMu.Lock()
-	orch.pendingPipelines[sessID] = pipeline.NewPipeline(nil, pipeline.PipelineConfig{})
-	orch.pendingConfirmationIDs[sessID] = fakeReqID
+	orch.pendingPipelines[sessID] = pendingPipeline{plan: pipeline.NewPipeline(nil, pipeline.PipelineConfig{}), confID: fakeReqID}
 	orch.pendingMu.Unlock()
 
 	if _, err := orch.Run(context.Background(), sessID, "yes"); err != nil {
@@ -3161,12 +3154,10 @@ func TestOrchestrator_PendingToolCall_Amended(t *testing.T) {
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	orch.pendingMu.Lock()
-	orch.pendingToolCalls[sessID] = &ToolCall{
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{
 		ID: "pending-amend", Plugin: "gitlab", Action: "analyze_code",
 		Args: map[string]string{"assignee_id": "131349"},
-	}
-	orch.pendingMu.Unlock()
+	}, "", "")
 
 	result, err := orch.Run(context.Background(), sessID, "bitte auf Hans Meier zuweisen")
 	if err != nil {
@@ -3196,9 +3187,7 @@ func TestOrchestrator_PendingToolCall_Amended(t *testing.T) {
 		t.Error("expected turn_start — amend should re-enter the agent loop")
 	}
 	// Pending state cleared so a later turn / instance can't resurrect it.
-	orch.pendingMu.Lock()
-	defer orch.pendingMu.Unlock()
-	if orch.pendingToolCalls[sessID] != nil {
+	if pc, _, _ := loadPendingToolCall(orch.sessions, sessID); pc != nil {
 		t.Error("expected pending tool call cleared after amend")
 	}
 }
@@ -3211,9 +3200,7 @@ func TestOrchestrator_PendingToolCall_RejectedWithReason(t *testing.T) {
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	orch.pendingMu.Lock()
-	orch.pendingToolCalls[sessID] = &ToolCall{ID: "pending-rej", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}
-	orch.pendingMu.Unlock()
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-rej", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "")
 
 	result, err := orch.Run(context.Background(), sessID, "nein, lass es")
 	if err != nil {
@@ -3268,9 +3255,7 @@ func TestSingleStepPipeline_PrivilegedWrite_RequiresConfirmation(t *testing.T) {
 	if result.Metadata["type"] != "confirmation" {
 		t.Errorf("Metadata type = %q, want confirmation", result.Metadata["type"])
 	}
-	orch.pendingMu.Lock()
-	defer orch.pendingMu.Unlock()
-	if orch.pendingToolCalls["sess"] == nil {
+	if pc, _, _ := loadPendingToolCall(orch.sessions, "sess"); pc == nil {
 		t.Error("expected the single-step write stored as a pending tool call (not executed)")
 	}
 }
@@ -3323,12 +3308,10 @@ func TestOrchestrator_PendingToolCall_ApproveWithChange_CoercedToAmend(t *testin
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	orch.pendingMu.Lock()
-	orch.pendingToolCalls[sessID] = &ToolCall{
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{
 		ID: "pending-coerce", Plugin: "gitlab", Action: "analyze_code",
 		Args: map[string]string{"assignee_id": "131349"},
-	}
-	orch.pendingMu.Unlock()
+	}, "", "")
 
 	result, err := orch.Run(context.Background(), sessID, "ja, aber an Hans Meier")
 	if err != nil {
@@ -3358,9 +3341,7 @@ func TestOrchestrator_PendingToolCall_ClassifierError_FallsBackToReject(t *testi
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	orch.pendingMu.Lock()
-	orch.pendingToolCalls[sessID] = &ToolCall{ID: "pending-err", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}
-	orch.pendingMu.Unlock()
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-err", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "")
 
 	result, err := orch.Run(context.Background(), sessID, "asdf qwer")
 	if err != nil {
@@ -3395,9 +3376,7 @@ func TestOrchestrator_PendingToolCall_ClassifierApprove_Executes(t *testing.T) {
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	orch.pendingMu.Lock()
-	orch.pendingToolCalls[sessID] = &ToolCall{ID: "pending-ok", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}
-	orch.pendingMu.Unlock()
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-ok", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "")
 
 	if _, err := orch.Run(context.Background(), sessID, "ja, bitte ausführen"); err != nil {
 		t.Fatal(err)
@@ -3459,9 +3438,7 @@ func TestOrchestrator_ClassifierSpan_NestsUnderInvoked(t *testing.T) {
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	orch.pendingMu.Lock()
-	orch.pendingToolCalls[sessID] = &ToolCall{ID: "pending-nest", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}
-	orch.pendingMu.Unlock()
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-nest", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "")
 
 	if _, err := orch.Run(context.Background(), sessID, "nein"); err != nil {
 		t.Fatal(err)

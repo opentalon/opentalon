@@ -23,6 +23,7 @@ import (
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
+	"github.com/opentalon/opentalon/internal/sessionlock"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store/events"
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
@@ -205,6 +206,11 @@ type OrchestratorOpts struct {
 	ToolErrorHandling             ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
 	ChannelSender                 ChannelSender           // optional; when set, maybeGenerateTitle pushes the generated title to the originating channel as a session.title frame
 	Repair                        RepairConfig            // post-failure tool-call repair phase; default off
+	// SessionLocker is the cross-pod per-session turn lease. In multi-pod
+	// deployments the in-memory session mutex only serializes turns within
+	// one pod; the locker extends the "one turn at a time per session"
+	// invariant across pods. nil = sessionlock.Noop() (single-pod mode).
+	SessionLocker sessionlock.Locker
 }
 
 // RepairConfig tunes the post-failure tool-call repair phase (see
@@ -261,26 +267,68 @@ type SessionStoreInterface interface {
 	Delete(id string) error // remove session entirely (admin / retention; missing id no-op)
 }
 
-// sessionMutex is a per-session lock with reference counting for cleanup.
-type sessionMutex struct {
+// keyedMutex is a refcounted set of named mutexes: lock blocks until the
+// mutex for key is held; unlock releases it and reaps the map entry once no
+// goroutine holds or waits on it, so idle keys don't accumulate. The
+// orchestrator keeps two instances — sessionMuxes and titleMuxes — whose
+// lock DOMAINS are deliberately disjoint (see the titleMuxes field comment);
+// only the mechanics are shared.
+type keyedMutex struct {
+	mu      sync.Mutex // guards entries
+	entries map[string]*keyedMutexEntry
+}
+
+type keyedMutexEntry struct {
 	mu       sync.Mutex
-	refCount int // goroutines currently waiting or holding this lock
+	refCount int // goroutines currently waiting or holding this entry
+}
+
+func newKeyedMutex() *keyedMutex {
+	return &keyedMutex{entries: make(map[string]*keyedMutexEntry)}
+}
+
+func (k *keyedMutex) lock(key string) *keyedMutexEntry {
+	k.mu.Lock()
+	e, ok := k.entries[key]
+	if !ok {
+		e = &keyedMutexEntry{}
+		k.entries[key] = e
+	}
+	e.refCount++
+	k.mu.Unlock()
+
+	e.mu.Lock()
+	return e
+}
+
+func (k *keyedMutex) unlock(key string, e *keyedMutexEntry) {
+	k.mu.Lock()
+	e.refCount--
+	if e.refCount == 0 {
+		delete(k.entries, key)
+	}
+	k.mu.Unlock()
+
+	e.mu.Unlock()
 }
 
 type Orchestrator struct {
-	sessionMuxMu sync.Mutex               // guards sessionMuxes map
-	sessionMuxes map[string]*sessionMutex // per-session serialization
-	semaphore    chan struct{}            // nil = unlimited; cap = MaxConcurrentSessions
-	llm          LLMClient
-	parser       ToolCallParser
-	registry     *ToolRegistry
-	memory       MemoryStoreInterface
-	sessions     SessionStoreInterface
-	guard        *Guard
-	rules        *RulesConfig
-	preparers    []ContentPreparerEntry
-	formatters   []ResponseFormatterEntry // run after final response; text-in/text-out
-	guards       []ContentPreparerEntry   // subset of preparers with Guard:true; run before every LLM call
+	sessionMuxes *keyedMutex // per-session turn serialization within this pod
+	// sessionLocker extends per-session turn serialization across pods
+	// (sessionlock.Noop() in single-pod mode). Both locks are taken
+	// together via lockSessionTurn — see its lock-ordering contract.
+	sessionLocker sessionlock.Locker
+	semaphore     chan struct{} // nil = unlimited; cap = MaxConcurrentSessions
+	llm           LLMClient
+	parser        ToolCallParser
+	registry      *ToolRegistry
+	memory        MemoryStoreInterface
+	sessions      SessionStoreInterface
+	guard         *Guard
+	rules         *RulesConfig
+	preparers     []ContentPreparerEntry
+	formatters    []ResponseFormatterEntry // run after final response; text-in/text-out
+	guards        []ContentPreparerEntry   // subset of preparers with Guard:true; run before every LLM call
 	// preparerActions is the immutable "plugin__action" set of all
 	// preparers + guards, computed once in NewWithRules from the
 	// preparers/guards slices above (both append-once at construction).
@@ -312,43 +360,52 @@ type Orchestrator struct {
 	// tool-call corrector). Separate handle for the same reason classifier
 	// is: enabling repair must never activate the single-step execution
 	// path that o.planner gates. nil = repair disabled.
-	repairer                   *pipeline.Planner
-	repairConfig               RepairConfig                  // normalized in NewWithRules (MaxAttempts default applied)
-	pendingMu                  sync.Mutex                    // guards pendingPipelines, pendingToolCalls, pendingConfirmationIDs, pendingConfirmationPrompts
-	pendingPipelines           map[string]*pipeline.Pipeline // sessionID -> pending pipeline
-	pendingToolCalls           map[string]*ToolCall          // sessionID -> pending tool call awaiting confirmation
-	pendingConfirmationIDs     map[string]string             // sessionID -> session-event id of the confirmation_requested event; stamped as parent on the matching confirmation_resolved emit
-	pendingConfirmationPrompts map[string]string             // sessionID -> user-facing confirmation prompt of the pending tool call; fed to the repair corrector as the approved intent
-	pipelineConfig             pipeline.PipelineConfig
-	confirmationPlugin         string                  // optional; plugin for confirmation strategy
-	confirmationAction         string                  // optional; action name for confirmation check
-	contextWindow              int                     // model context window in tokens; 0 = no trimming
-	maxOutputTokens            int                     // reserved output budget (max_tokens) subtracted from the window when trimming; 0 = flat 10% reserve
-	groupPluginLookup          GroupPluginLookup       // optional; nil = no group-based filtering
-	usageRecorder              UsageRecorder           // optional; nil = no usage tracking
-	pluginCallObserver         PluginCallObserver      // optional; nil = no plugin call observation
-	eventSink                  emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
-	snapshotStore              PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
-	syncActionsPlugin          string                  // optional; plugin name for action sync
-	syncActionsAction          string                  // optional; action name for action sync
-	knowledge                  KnowledgeConfig         // optional; knowledge directory ingestion
-	subprocessConfig           SubprocessConfig        // optional; subprocess (sub-agent) support
-	onStreamChunk              StreamChunkCallback     // optional; when set, final answers stream to caller
-	showToolCalls              string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	injectionStateStore        InjectionStateStore     // optional; nil = load_tools sticky promotions don't persist across turns
-	toolErrorHandling          ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
-	toolErrorTracker           *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by injectionStateStore
-	channelSender              ChannelSender           // optional; nil = title generation persists silently, no live push to clients
+	repairer     *pipeline.Planner
+	repairConfig RepairConfig // normalized in NewWithRules (MaxAttempts default applied)
+	pendingMu    sync.Mutex   // guards pendingPipelines
+	// pendingPipelines holds, per session, a multi-step plan awaiting the
+	// user's approve/reject. In-memory only and therefore per-pod (see the
+	// state-placement invariant in docs/concurrency.md); pending single
+	// tool calls, by contrast, live exclusively in the persisted
+	// pending_tool_call session-metadata blob (savePendingToolCall /
+	// loadPendingToolCall), which survives restarts and is shared across
+	// pods — so no pod can act on a stale in-memory copy after another pod
+	// already resolved it.
+	pendingPipelines    map[string]pendingPipeline
+	pipelineConfig      pipeline.PipelineConfig
+	confirmationPlugin  string                  // optional; plugin for confirmation strategy
+	confirmationAction  string                  // optional; action name for confirmation check
+	contextWindow       int                     // model context window in tokens; 0 = no trimming
+	maxOutputTokens     int                     // reserved output budget (max_tokens) subtracted from the window when trimming; 0 = flat 10% reserve
+	groupPluginLookup   GroupPluginLookup       // optional; nil = no group-based filtering
+	usageRecorder       UsageRecorder           // optional; nil = no usage tracking
+	pluginCallObserver  PluginCallObserver      // optional; nil = no plugin call observation
+	eventSink           emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
+	snapshotStore       PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
+	syncActionsPlugin   string                  // optional; plugin name for action sync
+	syncActionsAction   string                  // optional; action name for action sync
+	knowledge           KnowledgeConfig         // optional; knowledge directory ingestion
+	subprocessConfig    SubprocessConfig        // optional; subprocess (sub-agent) support
+	onStreamChunk       StreamChunkCallback     // optional; when set, final answers stream to caller
+	showToolCalls       string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	injectionStateStore InjectionStateStore     // optional; nil = load_tools sticky promotions don't persist across turns
+	toolErrorHandling   ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
+	toolErrorTracker    *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by injectionStateStore
+	channelSender       ChannelSender           // optional; nil = title generation persists silently, no live push to clients
 	// titleMuxes serializes per-session title-generation goroutines
 	// without blocking the foreground Run path. Summarization shares the
 	// sessionMux because it triggers after many turns and tolerates one
 	// turn of latency on the next user message; title generation runs on
 	// every first turn and the user is most likely to follow up quickly,
-	// so the title goroutine must NOT hold sessionMux. The dedicated map
-	// keeps the no-duplicate-LLM-call guarantee (two channels racing on
-	// the same session both see Title=="" and would both call the LLM).
-	titleMuxMu sync.Mutex
-	titleMuxes map[string]*sessionMutex
+	// so the title goroutine must NOT hold sessionMux. The dedicated
+	// instance keeps the no-duplicate-LLM-call guarantee (two channels
+	// racing on the same session both see Title=="" and would both call
+	// the LLM) — per-pod only in cluster mode: two pods can still race and
+	// both spend an LLM call. SetTitle's fill-only-while-empty conditional
+	// write is the cross-pod correctness backstop (exactly one title wins,
+	// never a mid-session overwrite); the occasional duplicated title
+	// spend is accepted — a distributed title lock would be over-engineering.
+	titleMuxes *keyedMutex
 	// knowledgeCatalog is the rendered "## Available knowledge" section (anchor
 	// + slug/title list) shown in every system prompt so the model knows which
 	// articles it can pull via ask_knowledge. Served from cache on the hot path;
@@ -572,60 +629,63 @@ func NewWithRules(
 	// omits the config gets neither the loop-cap nudge nor sticky demotion.
 	errCfg := opts.ToolErrorHandling
 
+	sessionLocker := opts.SessionLocker
+	if sessionLocker == nil {
+		sessionLocker = sessionlock.Noop()
+	}
+
 	o := &Orchestrator{
-		sessionMuxes:               make(map[string]*sessionMutex),
-		semaphore:                  semaphore,
-		llm:                        llm,
-		parser:                     parser,
-		registry:                   registry,
-		memory:                     memory,
-		sessions:                   sessions,
-		guard:                      NewGuard(),
-		rules:                      NewRulesConfig(opts.CustomRules),
-		preparers:                  preparers,
-		formatters:                 opts.ResponseFormatters,
-		guards:                     guards,
-		preparerActions:            preparerActionSet(preparers, guards),
-		luaScriptPaths:             opts.LuaScriptPaths,
-		permissionChecker:          opts.PermissionChecker,
-		permissionPluginName:       opts.PermissionPluginName,
-		runtimePromptPath:          opts.RuntimePromptPath,
-		contextMessages:            opts.ContextMessages,
-		summarizeAfterMessages:     opts.SummarizeAfterMessages,
-		maxMessagesAfterSummary:    opts.MaxMessagesAfterSummary,
-		summarizePrompt:            opts.SummarizePrompt,
-		summarizeUpdatePrompt:      opts.SummarizeUpdatePrompt,
-		sessionTitlePrompt:         opts.SessionTitlePrompt,
-		sessionTitlesEnabled:       opts.SessionTitlesEnabled,
-		planner:                    planner,
-		classifier:                 classifier,
-		repairer:                   repairer,
-		repairConfig:               repairCfg,
-		pendingPipelines:           make(map[string]*pipeline.Pipeline),
-		pendingToolCalls:           make(map[string]*ToolCall),
-		pendingConfirmationIDs:     make(map[string]string),
-		pendingConfirmationPrompts: make(map[string]string),
-		pipelineConfig:             pipelineCfg,
-		confirmationPlugin:         opts.ConfirmationPlugin,
-		confirmationAction:         opts.ConfirmationAction,
-		contextWindow:              opts.ContextWindow,
-		maxOutputTokens:            opts.MaxOutputTokens,
-		groupPluginLookup:          opts.GroupPluginLookup,
-		usageRecorder:              opts.UsageRecorder,
-		pluginCallObserver:         opts.PluginCallObserver,
-		eventSink:                  eventSink,
-		snapshotStore:              opts.PromptSnapshotStore,
-		syncActionsPlugin:          opts.SyncActionsPlugin,
-		syncActionsAction:          opts.SyncActionsAction,
-		knowledge:                  opts.Knowledge,
-		onStreamChunk:              opts.OnStreamChunk,
-		showToolCalls:              opts.ShowToolCalls,
-		injectionStateStore:        opts.InjectionStateStore,
-		toolErrorHandling:          errCfg,
-		toolErrorTracker:           newToolErrorTracker(),
-		channelSender:              opts.ChannelSender,
-		titleMuxes:                 make(map[string]*sessionMutex),
-		langDetector:               buildReplyLanguageDetector(),
+		sessionMuxes:            newKeyedMutex(),
+		sessionLocker:           sessionLocker,
+		semaphore:               semaphore,
+		llm:                     llm,
+		parser:                  parser,
+		registry:                registry,
+		memory:                  memory,
+		sessions:                sessions,
+		guard:                   NewGuard(),
+		rules:                   NewRulesConfig(opts.CustomRules),
+		preparers:               preparers,
+		formatters:              opts.ResponseFormatters,
+		guards:                  guards,
+		preparerActions:         preparerActionSet(preparers, guards),
+		luaScriptPaths:          opts.LuaScriptPaths,
+		permissionChecker:       opts.PermissionChecker,
+		permissionPluginName:    opts.PermissionPluginName,
+		runtimePromptPath:       opts.RuntimePromptPath,
+		contextMessages:         opts.ContextMessages,
+		summarizeAfterMessages:  opts.SummarizeAfterMessages,
+		maxMessagesAfterSummary: opts.MaxMessagesAfterSummary,
+		summarizePrompt:         opts.SummarizePrompt,
+		summarizeUpdatePrompt:   opts.SummarizeUpdatePrompt,
+		sessionTitlePrompt:      opts.SessionTitlePrompt,
+		sessionTitlesEnabled:    opts.SessionTitlesEnabled,
+		planner:                 planner,
+		classifier:              classifier,
+		repairer:                repairer,
+		repairConfig:            repairCfg,
+		pendingPipelines:        make(map[string]pendingPipeline),
+		pipelineConfig:          pipelineCfg,
+		confirmationPlugin:      opts.ConfirmationPlugin,
+		confirmationAction:      opts.ConfirmationAction,
+		contextWindow:           opts.ContextWindow,
+		maxOutputTokens:         opts.MaxOutputTokens,
+		groupPluginLookup:       opts.GroupPluginLookup,
+		usageRecorder:           opts.UsageRecorder,
+		pluginCallObserver:      opts.PluginCallObserver,
+		eventSink:               eventSink,
+		snapshotStore:           opts.PromptSnapshotStore,
+		syncActionsPlugin:       opts.SyncActionsPlugin,
+		syncActionsAction:       opts.SyncActionsAction,
+		knowledge:               opts.Knowledge,
+		onStreamChunk:           opts.OnStreamChunk,
+		showToolCalls:           opts.ShowToolCalls,
+		injectionStateStore:     opts.InjectionStateStore,
+		toolErrorHandling:       errCfg,
+		toolErrorTracker:        newToolErrorTracker(),
+		channelSender:           opts.ChannelSender,
+		titleMuxes:              newKeyedMutex(),
+		langDetector:            buildReplyLanguageDetector(),
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
@@ -1096,61 +1156,36 @@ func (o *Orchestrator) formatResponse(ctx context.Context, result *RunResult) er
 	return nil
 }
 
-// acquireTitleLock returns the per-session title-generation mutex,
-// locked. Disjoint from acquireSessionLock — see the titleMuxes comment
-// on Orchestrator for the parallel-execution requirement.
-func (o *Orchestrator) acquireTitleLock(sessionID string) *sessionMutex {
-	o.titleMuxMu.Lock()
-	tm, ok := o.titleMuxes[sessionID]
-	if !ok {
-		tm = &sessionMutex{}
-		o.titleMuxes[sessionID] = tm
+// lockSessionTurn serializes a session's turn: the in-pod per-session mutex
+// first, then the cross-pod turn lease (a no-op locker in single-pod mode).
+// The returned unlock releases both in reverse order and must be called
+// exactly once when the turn's critical section ends. It is the ONLY place
+// that encodes this ordering — every session-state-mutating path (Run, the
+// background summarizer) must go through it rather than taking the locks
+// individually.
+//
+// Lock ordering (must always be acquired in this sequence to prevent deadlock):
+//  1. semaphore      – global concurrency cap (Run acquires it before calling this)
+//  2. sessionMuxes   – per-session serialization within this pod
+//  3. sessionLocker  – per-session serialization across pods (distributed turn lease)
+//  4. pendingMu      – pending-pipeline map
+//
+// Never acquire an earlier lock while holding a later one. The distributed
+// lease is acquired while HOLDING the in-pod mutex so at most one goroutine
+// per pod polls the distributed lock per session. When lease acquisition
+// fails (caller's ctx ended) the in-pod mutex is released before returning,
+// so an error never leaks a held lock.
+func (o *Orchestrator) lockSessionTurn(ctx context.Context, sessionID string) (unlock func(), err error) {
+	sm := o.sessionMuxes.lock(sessionID)
+	releaseTurnLease, err := o.sessionLocker.Lock(ctx, sessionID)
+	if err != nil {
+		o.sessionMuxes.unlock(sessionID, sm)
+		return nil, err
 	}
-	tm.refCount++
-	o.titleMuxMu.Unlock()
-
-	tm.mu.Lock()
-	return tm
-}
-
-// releaseTitleLock unlocks tm and reaps the map entry when no other
-// goroutine still references it. Mirrors releaseSessionLock.
-func (o *Orchestrator) releaseTitleLock(sessionID string, tm *sessionMutex) {
-	o.titleMuxMu.Lock()
-	tm.refCount--
-	if tm.refCount == 0 {
-		delete(o.titleMuxes, sessionID)
-	}
-	o.titleMuxMu.Unlock()
-
-	tm.mu.Unlock()
-}
-
-// acquireSessionLock returns the per-session mutex for sessionID, locked.
-func (o *Orchestrator) acquireSessionLock(sessionID string) *sessionMutex {
-	o.sessionMuxMu.Lock()
-	sm, ok := o.sessionMuxes[sessionID]
-	if !ok {
-		sm = &sessionMutex{}
-		o.sessionMuxes[sessionID] = sm
-	}
-	sm.refCount++
-	o.sessionMuxMu.Unlock()
-
-	sm.mu.Lock()
-	return sm
-}
-
-// releaseSessionLock unlocks sm and removes it from the map if no other goroutine holds a reference.
-func (o *Orchestrator) releaseSessionLock(sessionID string, sm *sessionMutex) {
-	o.sessionMuxMu.Lock()
-	sm.refCount--
-	if sm.refCount == 0 {
-		delete(o.sessionMuxes, sessionID)
-	}
-	o.sessionMuxMu.Unlock()
-
-	sm.mu.Unlock()
+	return func() {
+		releaseTurnLease()
+		o.sessionMuxes.unlock(sessionID, sm)
+	}, nil
 }
 
 // turnFinishedArgs derives the terminal turn_finished payload from a Run
@@ -1180,11 +1215,8 @@ func turnFinishedArgs(result *RunResult, runErr error, startedAt time.Time) emit
 }
 
 func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, files ...provider.MessageFile) (runResult *RunResult, runErr error) {
-	// Lock ordering (must always be acquired in this sequence to prevent deadlock):
-	//   1. semaphore      – global concurrency cap
-	//   2. sessionMuxes   – per-session serialization (via acquireSessionLock)
-	//   3. pendingMu      – pending-pipeline map
-	// Never acquire an earlier lock while holding a later one.
+	// Global concurrency cap. The per-session locks come next via
+	// lockSessionTurn — see its lock-ordering contract.
 	select {
 	case o.semaphore <- struct{}{}:
 		defer func() { <-o.semaphore }()
@@ -1192,9 +1224,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		return nil, ctx.Err()
 	}
 
-	// Per-session lock: serializes concurrent messages for the same session.
-	sm := o.acquireSessionLock(sessionID)
-	defer o.releaseSessionLock(sessionID, sm)
+	// Serialize this turn against every other turn for the session — both
+	// within this pod and across pods.
+	unlock, err := o.lockSessionTurn(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	// Request-scoped session cache: avoids redundant DB roundtrips for
 	// sessions.Get() on every agent loop iteration. The per-session lock
@@ -1282,21 +1318,19 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// model-only turn.
 	hidden := actor.Visibility(ctx) == provider.VisibilityHidden
 	o.pendingMu.Lock()
-	pendingPipeline := o.pendingPipelines[sessionID]
-	pendingPipelineConfID := o.pendingConfirmationIDs[sessionID]
-	if pendingPipeline != nil && !hidden {
+	pendingPlan := o.pendingPipelines[sessionID]
+	if pendingPlan.plan != nil && !hidden {
 		delete(o.pendingPipelines, sessionID)
-		delete(o.pendingConfirmationIDs, sessionID)
 	}
 	o.pendingMu.Unlock()
-	if p := pendingPipeline; p != nil && !hidden {
+	if p := pendingPlan.plan; p != nil && !hidden {
 		// Parent the resolved event onto the original confirmation_requested
 		// so analytics can pair the two across turns. Empty id (no sink at
 		// request time, or pre-instrumentation pending state) leaves the
 		// turn_start parent in place.
 		resolvedCtx := ctx
-		if pendingPipelineConfID != "" {
-			resolvedCtx = emit.WithParent(ctx, pendingPipelineConfID)
+		if pendingPlan.confID != "" {
+			resolvedCtx = emit.WithParent(ctx, pendingPlan.confID)
 		}
 		// Pipelines are two-way (approve / cancel): the single-call amend
 		// re-plan does not apply to a multi-step plan, so anything that isn't a
@@ -1333,28 +1367,20 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}, nil
 	}
 
-	// Block A2: Check for pending tool call confirmation.
-	// First check the in-memory map (fast path), then fall back to session
-	// metadata (survives restarts and multi-instance deployments).
-	o.pendingMu.Lock()
-	pendingCall := o.pendingToolCalls[sessionID]
-	pendingCallConfID := o.pendingConfirmationIDs[sessionID]
-	pendingCallPrompt := o.pendingConfirmationPrompts[sessionID]
-	if pendingCall != nil && !hidden {
-		delete(o.pendingToolCalls, sessionID)
-		delete(o.pendingConfirmationIDs, sessionID)
-		delete(o.pendingConfirmationPrompts, sessionID)
-	}
-	o.pendingMu.Unlock()
-	if pendingCall == nil && !hidden {
-		// Fallback: in-memory state lost (pod restart, failover). Recover
-		// the call AND the original confirmation_requested event id from
-		// session metadata so the resolved event still links to the
-		// request that started the pending state.
+	// Block A2: Check for pending tool call confirmation. The persisted
+	// pending_tool_call session-metadata blob is the single source of pending
+	// tool-call state: it survives restarts, is shared across pods, and
+	// carries the confirmation_requested event id so the resolved event
+	// still links to the request that started the pending state. (An
+	// in-memory copy would go stale when another pod resolves the call and
+	// could route a later message into a second execution.)
+	var pendingCall *ToolCall
+	var pendingCallConfID, pendingCallPrompt string
+	if !hidden {
 		pendingCall, pendingCallConfID, pendingCallPrompt = loadPendingToolCall(sessions, sessionID)
 	}
 	var pendingMetaClearErr error
-	if pendingCall != nil && !hidden {
+	if pendingCall != nil {
 		// Clear the persisted pending call up front. If this fails we MUST NOT
 		// continue down the approve/amend paths (which keep the turn running):
 		// a leftover row could be resurrected by loadPendingToolCall on a later
@@ -1363,7 +1389,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		pendingMetaClearErr = sessions.SetMetadata(sessionID, "pending_tool_call", "")
 	}
 	toolCallConfirmed := false
-	if tc := pendingCall; tc != nil && !hidden {
+	if tc := pendingCall; tc != nil {
 		// Parent the resolved event onto the matching confirmation_requested
 		// (potentially from a prior turn or even a prior pod). Empty id is
 		// the legacy/pre-instrumentation path — leave the turn_start parent.
@@ -1818,10 +1844,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					Choices: []string{"approve", "reject"},
 				})
 				o.pendingMu.Lock()
-				o.pendingPipelines[sessionID] = p
-				if confID != "" {
-					o.pendingConfirmationIDs[sessionID] = confID
-				}
+				o.pendingPipelines[sessionID] = pendingPipeline{plan: p, confID: confID}
 				o.pendingMu.Unlock()
 				return &RunResult{
 					Response: planText,
@@ -1845,10 +1868,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				Choices: []string{"approve", "reject"},
 			})
 			o.pendingMu.Lock()
-			o.pendingPipelines[sessionID] = p
-			if confID != "" {
-				o.pendingConfirmationIDs[sessionID] = confID
-			}
+			o.pendingPipelines[sessionID] = pendingPipeline{plan: p, confID: confID}
 			o.pendingMu.Unlock()
 			return &RunResult{
 				Response: planText,
@@ -2824,6 +2844,15 @@ func toolConfirmationFrameMetadata(toolCallID string) map[string]string {
 	return m
 }
 
+// pendingPipeline is a planned multi-step pipeline parked for the user's
+// approve/reject, together with the confirmation_requested event id it was
+// raised with (stamped as parent on the matching confirmation_resolved emit;
+// empty when no sink was attached at request time).
+type pendingPipeline struct {
+	plan   *pipeline.Pipeline
+	confID string
+}
+
 // pipelineConfirmationFrameMetadata is toolConfirmationFrameMetadata for a
 // multi-step plan: the client keys the prompt on pipeline_id. pendingPipelines
 // is in-memory only, so after a pod restart this id refers to nothing — a
@@ -2858,38 +2887,29 @@ func confirmationReplyMetadata(action string) map[string]string {
 // Run's Block A/A2. The channel handler calls it on a resume handshake so a
 // reconnected client can redraw the Approve/Reject buttons.
 //
-// Why the transcript alone is not enough: pending state lives in this pod's
-// memory (or the persisted pending_tool_call blob), so after a restart a
-// transcript prompt can reference a call nothing can act on. This method answers
-// from the authoritative live state — a client should treat its result, not the
-// transcript, as the only signal to render *active* buttons; history rebuilds
-// answered rows only.
+// Why the transcript alone is not enough: a pending pipeline lives in this
+// pod's memory and a pending tool call in the persisted pending_tool_call
+// blob, so after a restart a transcript prompt can reference a call nothing
+// can act on. This method answers from the authoritative live state — a
+// client should treat its result, not the transcript, as the only signal to
+// render *active* buttons; history rebuilds answered rows only.
 func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content string, metadata map[string]string, ok bool) {
-	o.pendingMu.Lock()
-	pendingCall := o.pendingToolCalls[sessionID]
-	pendingPrompt := o.pendingConfirmationPrompts[sessionID]
-	pendingPipeline := o.pendingPipelines[sessionID]
-	o.pendingMu.Unlock()
-
-	// Tool call: in-memory fast path, else the persisted blob (survives restart
-	// / failover), which carries the approved-intent prompt it was stored with.
-	if pendingCall == nil {
-		loadedCall, _, loadedPrompt := loadPendingToolCall(o.sessions, sessionID)
-		pendingCall = loadedCall
-		if pendingPrompt == "" {
-			pendingPrompt = loadedPrompt
-		}
-	}
-	if pendingCall != nil {
-		return pendingPrompt, toolConfirmationFrameMetadata(pendingCall.ID), true
+	// Tool call: the persisted blob is the single source of pending tool-call
+	// state (survives restart / failover, shared across pods) and carries the
+	// approved-intent prompt it was stored with.
+	if pendingCall, _, prompt := loadPendingToolCall(o.sessions, sessionID); pendingCall != nil {
+		return prompt, toolConfirmationFrameMetadata(pendingCall.ID), true
 	}
 
 	// Pipeline plan: in-memory only (no persistence), so this covers a live
 	// reconnect but not a post-restart resume. Prompt text is re-derived
 	// deterministically (no LLM); the client dedupes by pipeline_id, so a slight
 	// wording difference from the narrated history bubble is harmless.
-	if pendingPipeline != nil {
-		return pendingPipeline.FormatForConfirmation(), pipelineConfirmationFrameMetadata(pendingPipeline.ID), true
+	o.pendingMu.Lock()
+	pendingPlan := o.pendingPipelines[sessionID]
+	o.pendingMu.Unlock()
+	if p := pendingPlan.plan; p != nil {
+		return p.FormatForConfirmation(), pipelineConfirmationFrameMetadata(p.ID), true
 	}
 	return "", nil, false
 }
@@ -2969,19 +2989,12 @@ func (o *Orchestrator) maybeRequireConfirmation(
 		Choices:    []string{"approve", "reject"},
 		ToolCallID: call.ID,
 	})
+	// Persist the pending call — the single source of pending tool-call state,
+	// surviving restarts and shared across pods. The confirmation_requested id
+	// rides along to preserve parent linkage; the prompt is what the user
+	// actually approves, kept with the call so a post-approval repair can hand
+	// the corrector the approved intent without the session history.
 	pending := call
-	o.pendingMu.Lock()
-	o.pendingToolCalls[sessionID] = &pending
-	if confID != "" {
-		o.pendingConfirmationIDs[sessionID] = confID
-	}
-	// The prompt is what the user actually approves — kept alongside the
-	// pending call so a post-approval repair can hand the corrector the
-	// approved intent without the session history.
-	o.pendingConfirmationPrompts[sessionID] = confirmMsg
-	o.pendingMu.Unlock()
-	// Persist so the pending call survives restarts / multi-instance failover;
-	// the confirmation_requested id rides along to preserve parent linkage.
 	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg)
 	return &RunResult{
 		Response: confirmMsg,
@@ -4462,8 +4475,8 @@ func (o *Orchestrator) maybeGenerateTitle(ctx context.Context, sessionID string)
 	if !o.sessionTitlesEnabled || o.llm == nil {
 		return
 	}
-	tm := o.acquireTitleLock(sessionID)
-	defer o.releaseTitleLock(sessionID, tm)
+	tm := o.titleMuxes.lock(sessionID)
+	defer o.titleMuxes.unlock(sessionID, tm)
 
 	sess, err := o.sessions.Get(sessionID)
 	if err != nil {
@@ -4595,13 +4608,22 @@ func normalizeSessionTitle(raw string) string {
 }
 
 // maybeSummarizeSession runs summarization when the session has enough messages and config is set.
-// It acquires the per-session lock so it cannot race with a concurrent Run() on the same session.
+// It takes the same locks as Run (via lockSessionTurn): SetSummary rewrites the
+// session's message rows (delete + reinsert), so it must hold both the in-pod
+// mutex and the cross-pod turn lease — otherwise a concurrent turn on another
+// pod could commit messages that the reinsert then drops permanently.
 func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID string) {
 	if o.summarizeAfterMessages <= 0 || o.maxMessagesAfterSummary <= 0 {
 		return
 	}
-	sm := o.acquireSessionLock(sessionID)
-	defer o.releaseSessionLock(sessionID, sm)
+	unlock, err := o.lockSessionTurn(ctx, sessionID)
+	if err != nil {
+		// ctx ended while waiting for the turn lease. Never rewrite the
+		// message rows without the lock — skip; the next turn re-triggers.
+		slog.Warn("session summarization skipped: session turn lock not acquired", "error", err)
+		return
+	}
+	defer unlock()
 
 	sess, err := o.sessions.Get(sessionID)
 	if err != nil {
@@ -4757,13 +4779,13 @@ func formatToolCallMessage(call ToolCall) string {
 }
 
 // pendingToolCallMeta is the JSON-serializable form of a pending tool call
-// stored in session metadata so it survives restarts.
+// stored in session metadata — the single source of pending tool-call state,
+// surviving restarts and shared across pods.
 //
 // ConfirmationRequestedID carries the session-event id of the
 // confirmation_requested event that started this pending state, so the
-// matching confirmation_resolved event can be parented back to it even
-// across pod restarts or multi-instance failover where the in-memory
-// pendingConfirmationIDs map is empty.
+// matching confirmation_resolved event can be parented back to it on any
+// pod, even across restarts or failover.
 type pendingToolCallMeta struct {
 	ID                      string            `json:"id"`
 	Plugin                  string            `json:"plugin"`

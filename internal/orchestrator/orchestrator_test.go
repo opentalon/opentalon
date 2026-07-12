@@ -995,7 +995,7 @@ func TestPlannerReturnsPipeline_StoresPending(t *testing.T) {
 		t.Errorf("Response should ask for confirmation: %q", result.Response)
 	}
 	// Should have pending pipeline
-	if orch.pendingPipelines[sessID] == nil {
+	if orch.pendingPipelines[sessID].plan == nil {
 		t.Error("expected pending pipeline to be stored")
 	}
 }
@@ -1027,7 +1027,7 @@ func TestPipelineConfirmation_Yes(t *testing.T) {
 		t.Errorf("expected 2 tool calls, got %d", len(result.ToolCalls))
 	}
 	// Pending pipeline should be cleared
-	if orch.pendingPipelines[sessID] != nil {
+	if orch.pendingPipelines[sessID].plan != nil {
 		t.Error("expected pending pipeline to be cleared after execution")
 	}
 }
@@ -1078,7 +1078,7 @@ func TestPipelineConfirmation_No(t *testing.T) {
 	if !strings.Contains(result.Response, "cancelled") {
 		t.Errorf("Response = %q, want cancellation message", result.Response)
 	}
-	if orch.pendingPipelines[sessID] != nil {
+	if orch.pendingPipelines[sessID].plan != nil {
 		t.Error("expected pending pipeline to be cleared after rejection")
 	}
 }
@@ -1102,7 +1102,7 @@ func TestPipelineConfirmation_Unrelated(t *testing.T) {
 	if !strings.Contains(result.Response, "cancelled") {
 		t.Errorf("Response = %q, want cancellation message", result.Response)
 	}
-	if orch.pendingPipelines[sessID] != nil {
+	if orch.pendingPipelines[sessID].plan != nil {
 		t.Error("expected pending pipeline to be cleared")
 	}
 }

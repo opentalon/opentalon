@@ -372,9 +372,9 @@ func TestConcurrencySessionLockCleanup(t *testing.T) {
 	}
 	wg.Wait()
 
-	orch.sessionMuxMu.Lock()
-	remaining := len(orch.sessionMuxes)
-	orch.sessionMuxMu.Unlock()
+	orch.sessionMuxes.mu.Lock()
+	remaining := len(orch.sessionMuxes.entries)
+	orch.sessionMuxes.mu.Unlock()
 
 	if remaining != 0 {
 		t.Errorf("session mutex map has %d entries after all runs completed, want 0", remaining)
