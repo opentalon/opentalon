@@ -1299,17 +1299,30 @@ func (n *channelNotifier) SendToSession(ctx context.Context, sessionID string, m
 	}
 	channelID := parts[len(parts)-2]
 	conversationID := parts[len(parts)-1]
-	// Fallback: when from-right-2 doesn't name a registered channel
-	// (would happen if a thread-capable channel ever ships a non-empty
-	// threadID with a profile prefix), scan registered channels and
-	// match by `:<channelID>:` substring so we send to the right one
-	// instead of a fake channel named after the conversationID.
-	if _, ok := n.reg.Get(channelID); !ok {
+	if _, ok := n.reg.Get(channelID); ok {
+		// From-right-2 named a registered channel, so a 3+-part key has the
+		// profile-scoped shape "<entity>:<channel>:<conversation>" and
+		// parts[0] is the owner entity — stamp it (contract:
+		// chanpkg.OwnerEntityMetadataKey). The lookup gate matters: an
+		// anonymous threaded key "<channel>:<conversation>:<thread>" is also
+		// 3-part, but its parts[0] is a channel id, not an owner.
+		if len(parts) >= 3 {
+			msg.Metadata = chanpkg.StampOwnerEntity(msg.Metadata, parts[0])
+		}
+	} else {
+		// Fallback: from-right-2 doesn't name a registered channel (a
+		// thread-capable channel shipped a non-empty threadID). Scan
+		// registered channels and match by `:<channelID>:` substring so we
+		// send to the right one instead of a fake channel named after the
+		// conversationID. The search string gets a leading ":" so an
+		// anonymous threaded key, whose channel id sits at position 0,
+		// matches too. No owner stamp on this path: the key's leading
+		// segment is not reliably an entity here.
 		for _, ch := range n.reg.List() {
 			needle := ":" + ch.ID() + ":"
-			if idx := strings.Index(sessionID, needle); idx >= 0 {
+			if idx := strings.Index(":"+sessionID, needle); idx >= 0 {
 				channelID = ch.ID()
-				rest := sessionID[idx+len(needle):]
+				rest := sessionID[idx+len(needle)-1:]
 				if i := strings.Index(rest, ":"); i >= 0 {
 					conversationID = rest[:i]
 					if msg.ThreadID == "" {

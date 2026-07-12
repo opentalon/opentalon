@@ -261,6 +261,37 @@ const ControlMetadataKey = "control"
 // token so the handler can scope the session and validate it exists.
 const ControlResumeHello = "resume_hello"
 
+// OwnerEntityMetadataKey carries the conversation-owning entity on outbound
+// metadata. This is the authoritative statement of the contract:
+//
+//   - The core stamps it after identity resolution (see StampOwnerEntity)
+//     onto outbound metadata, so every frame derived from a verified inbound
+//     message names the resolved owner entity.
+//   - Multi-pod channels read it to gate cross-pod delivery: a frame fanned
+//     out to other pods is delivered only to connections belonging to the
+//     conversation owner.
+//   - An EMPTY or absent owner means deliver anyway. This fail-open is
+//     deliberate: under version skew (a core that does not stamp yet) frames
+//     degrade to the pre-gate behavior instead of being dropped.
+//   - Underscore-prefixed metadata keys are INTERNAL core-to-channel
+//     plumbing. Channels must strip them from client-facing frames — a
+//     client must never see them.
+const OwnerEntityMetadataKey = "_owner_entity"
+
+// StampOwnerEntity sets OwnerEntityMetadataKey=entity on meta (allocating the
+// map when nil) and returns it; a no-op returning meta unchanged when entity
+// is empty.
+func StampOwnerEntity(meta map[string]string, entity string) map[string]string {
+	if entity == "" {
+		return meta
+	}
+	if meta == nil {
+		meta = map[string]string{}
+	}
+	meta[OwnerEntityMetadataKey] = entity
+	return meta
+}
+
 // MessageHandler is called when an inbound message arrives. The implementation
 // feeds the message to the orchestrator and returns the response.
 type MessageHandler func(ctx context.Context, sessionKey string, msg InboundMessage) (OutboundMessage, error)
