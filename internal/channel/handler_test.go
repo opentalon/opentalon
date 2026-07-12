@@ -109,6 +109,48 @@ func TestHandler_VerifierSuccess(t *testing.T) {
 	}
 }
 
+// TestHandler_StampsOwnerEntityOnReply pins the seam a cross-pod channel
+// fan-out gates delivery on: a profile-verified turn's reply metadata must
+// carry the owning entity (an internal underscore key, stripped by channels
+// before the client frame), while profile_token stays stripped and an
+// anonymous turn carries no owner at all.
+func TestHandler_StampsOwnerEntityOnReply(t *testing.T) {
+	h := newTestHandler(&stubVerifier{p: &profile.Profile{EntityID: "u1", Group: "g1"}}, nil)
+	out := callHandler(h, map[string]string{"profile_token": "tok"})
+	if got := out.Metadata[pkg.OwnerEntityMetadataKey]; got != "u1" {
+		t.Errorf("reply Metadata[%s] = %q, want u1", pkg.OwnerEntityMetadataKey, got)
+	}
+	if _, ok := out.Metadata["profile_token"]; ok {
+		t.Error("reply must not echo profile_token")
+	}
+}
+
+func TestHandler_NoOwnerEntityWithoutProfile(t *testing.T) {
+	h := newTestHandler(nil, nil)
+	out := callHandler(h, nil)
+	if _, ok := out.Metadata[pkg.OwnerEntityMetadataKey]; ok {
+		t.Error("anonymous reply must not carry the owner-entity stamp")
+	}
+}
+
+// TestHandler_StampsOwnerEntityOnTokenLimitFrame pins the stamp-before-limit
+// ordering: the token-limit error frame is built from the inbound metadata via
+// safeMetadata, so the owner must already be stamped when the limit check
+// short-circuits — otherwise a cross-pod fan-out could not gate the frame to
+// the conversation owner.
+func TestHandler_StampsOwnerEntityOnTokenLimitFrame(t *testing.T) {
+	p := &profile.Profile{EntityID: "u1", Limit: 1000, LimitWindow: time.Hour}
+	checker := &stubLimitChecker{total: 1000} // at the limit
+	h := newTestHandler(&stubVerifier{p: p}, checker)
+	out := callHandler(h, map[string]string{"profile_token": "tok"})
+	if got := out.Metadata["error_code"]; got != "token_limit_exceeded" {
+		t.Fatalf("error_code = %q, want token_limit_exceeded", got)
+	}
+	if got := out.Metadata[pkg.OwnerEntityMetadataKey]; got != "u1" {
+		t.Errorf("limit frame Metadata[%s] = %q, want u1", pkg.OwnerEntityMetadataKey, got)
+	}
+}
+
 // captureRunner records the context it is handed so a test can assert what
 // the handler stamped onto it before dispatch.
 type captureRunner struct{ ctx context.Context }
@@ -451,6 +493,37 @@ func TestHandler_ResumeHello_PendingConfirmation_ReEmitsPromptFrame(t *testing.T
 	// The hello's own control/resume flags must not leak back to the client.
 	if _, ok := out.Metadata[pkg.ControlMetadataKey]; ok {
 		t.Errorf("control key leaked into re-emit frame: %+v", out.Metadata)
+	}
+}
+
+// TestHandler_ResumeHello_ReEmitCarriesOwnerEntity: the re-emitted confirmation
+// frame's metadata comes from the orchestrator, not from safeMetadata, so the
+// handler must stamp the owner explicitly — otherwise a cross-pod fan-out could
+// not deliver the redrawn Approve/Reject prompt to the owner's other tabs.
+func TestHandler_ResumeHello_ReEmitCarriesOwnerEntity(t *testing.T) {
+	cfg := baseHandlerConfig()
+	cfg.Runner = &failRunner{t}
+	cfg.Verifier = &stubVerifier{p: &profile.Profile{EntityID: "e1", Group: "g1"}}
+	cfg.PendingConfirmation = func(_ string) (string, map[string]string, bool) {
+		return "Proceed?", map[string]string{"type": "confirmation", "prompt_type": "tool_confirmation"}, true
+	}
+	h := NewMessageHandler(cfg)
+	msg := pkg.InboundMessage{
+		ChannelID:      "websocket",
+		ConversationID: "abc",
+		Metadata: map[string]string{
+			"profile_token": "tok", pkg.ControlMetadataKey: pkg.ControlResumeHello, pkg.ResumeIntentMetadataKey: "true",
+		},
+	}
+	out, err := h(context.Background(), "websocket:abc", msg)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if out.Content != "Proceed?" {
+		t.Fatalf("Content = %q, want the re-emitted prompt", out.Content)
+	}
+	if got := out.Metadata[pkg.OwnerEntityMetadataKey]; got != "e1" {
+		t.Errorf("re-emit Metadata[%s] = %q, want e1", pkg.OwnerEntityMetadataKey, got)
 	}
 }
 

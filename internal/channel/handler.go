@@ -109,6 +109,14 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			p.ChannelID = msg.ChannelID
 			ctx = profile.WithProfile(ctx, p)
 
+			// Stamp the resolved owner before any early return below, so every
+			// post-identity frame — the reply and every error frame (including
+			// token-limit) built from this metadata via safeMetadata — carries
+			// it. Contract: pkg.OwnerEntityMetadataKey. Typing keepalive frames
+			// are built separately in the registry and intentionally unstamped
+			// (no content; the empty-owner fallback delivers them).
+			msg.Metadata = pkg.StampOwnerEntity(msg.Metadata, p.EntityID)
+
 			// Enforce per-profile token spend limit when configured. Control
 			// messages (e.g. a resume handshake) do no LLM work, so they must
 			// not be blocked by an exhausted budget — a reconnecting client
@@ -202,6 +210,10 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		if msg.Metadata[pkg.ControlMetadataKey] == pkg.ControlResumeHello {
 			if cfg.PendingConfirmation != nil {
 				if content, meta, ok := cfg.PendingConfirmation(sessionKey); ok {
+					// This frame's metadata comes from the orchestrator, not
+					// from safeMetadata, so carry the owner stamp explicitly.
+					// Contract: pkg.OwnerEntityMetadataKey.
+					meta = pkg.StampOwnerEntity(meta, entityID)
 					return pkg.OutboundMessage{
 						ConversationID: msg.ConversationID,
 						ThreadID:       msg.ThreadID,
@@ -292,7 +304,11 @@ func errorResponse(msg pkg.InboundMessage, text string, meta ...map[string]strin
 	}
 }
 
-// safeMetadata returns a copy of m with sensitive keys removed.
+// safeMetadata returns a copy of m with the named sensitive keys removed.
+// Underscore-prefixed internal keys (like pkg.OwnerEntityMetadataKey) are
+// DELIBERATELY passed through: that pass-through is what propagates the
+// owner stamp from the inbound metadata to outbound frames. Channels strip
+// underscore-prefixed keys before a client ever sees a frame.
 func safeMetadata(m map[string]string) map[string]string {
 	if len(m) == 0 {
 		return m
