@@ -19,8 +19,11 @@ type MessageDeduplicator interface {
 
 // Registry manages channel lifecycle, dispatches inbound messages to
 // the orchestrator, and routes responses back to the originating channel.
-// Concurrency is enforced by the orchestrator (via its semaphore and per-session
-// locks); the registry simply forwards messages and lets the orchestrator block.
+// It owns the first two stages of the inbound pipeline — cross-pod message
+// dedup and per-conversation debounce — then hands off to the orchestrator,
+// which enforces the global concurrency cap and serializes turns per session
+// (in-pod mutex, then the cross-pod session-turn lease). The full pipeline is
+// documented in docs/concurrency.md.
 type Registry struct {
 	mu       sync.RWMutex
 	channels map[string]pkg.Channel

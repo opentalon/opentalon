@@ -47,34 +47,6 @@ func TestConfirmationFrameMetadata_KeyContract(t *testing.T) {
 	}
 }
 
-func TestPendingConfirmationFrame_ToolCallInMemory(t *testing.T) {
-	orch, sid := newConfirmationTestOrchestrator(t)
-	orch.pendingMu.Lock()
-	orch.pendingToolCalls[sid] = &ToolCall{ID: "call_9", Plugin: "timly", Action: "delete-item"}
-	orch.pendingConfirmationPrompts[sid] = "Proceed with deleting 3 items?"
-	orch.pendingMu.Unlock()
-
-	content, meta, ok := orch.PendingConfirmationFrame(sid)
-	if !ok {
-		t.Fatal("ok = false, want true for a pending tool call")
-	}
-	if content != "Proceed with deleting 3 items?" {
-		t.Errorf("content = %q, want the stored prompt", content)
-	}
-	if meta["prompt_type"] != "tool_confirmation" || meta["tool_call_id"] != "call_9" {
-		t.Errorf("metadata mismatch: %+v", meta)
-	}
-
-	// Read-only: the pending state must survive the lookup so Run's Block A2
-	// can still consume it when the decision arrives.
-	orch.pendingMu.Lock()
-	stillPending := orch.pendingToolCalls[sid] != nil
-	orch.pendingMu.Unlock()
-	if !stillPending {
-		t.Error("PendingConfirmationFrame consumed the pending state; it must be read-only")
-	}
-}
-
 // TestRun_HiddenTurnDoesNotResolvePendingConfirmation is the regression guard
 // for the confirmation-hijack fix: a hidden (system-injected) turn — e.g. a
 // job-completion note pushed in via /inject while the user has a write action
@@ -82,38 +54,38 @@ func TestPendingConfirmationFrame_ToolCallInMemory(t *testing.T) {
 // confirmation must survive, intact, for the real user's next turn.
 func TestRun_HiddenTurnDoesNotResolvePendingConfirmation(t *testing.T) {
 	orch, sid := newConfirmationTestOrchestrator(t)
-	orch.pendingMu.Lock()
-	orch.pendingToolCalls[sid] = &ToolCall{ID: "call_9", Plugin: "timly", Action: "delete-item"}
-	orch.pendingConfirmationPrompts[sid] = "Proceed with deleting 3 items?"
-	orch.pendingMu.Unlock()
+	savePendingToolCall(orch.sessions, sid, &ToolCall{ID: "call_9", Plugin: "timly", Action: "delete-item"}, "", "Proceed with deleting 3 items?")
 
 	ctx := actor.WithVisibility(context.Background(), provider.VisibilityHidden)
 	if _, err := orch.Run(ctx, sid, "[system] Your background job finished."); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	orch.pendingMu.Lock()
-	stillPending := orch.pendingToolCalls[sid] != nil
-	orch.pendingMu.Unlock()
-	if !stillPending {
+	if pc, _, _ := loadPendingToolCall(orch.sessions, sid); pc == nil {
 		t.Error("a hidden turn consumed the pending confirmation; it must leave it intact for the real user")
 	}
 }
 
 func TestPendingConfirmationFrame_ToolCallFromPersistedBlob(t *testing.T) {
 	orch, sid := newConfirmationTestOrchestrator(t)
-	// No in-memory state (simulating a pod restart) — only the persisted blob.
+	// The persisted blob is the single source of pending tool-call state.
 	savePendingToolCall(orch.sessions, sid, &ToolCall{ID: "call_restored", Plugin: "timly", Action: "delete-item"}, "", "Proceed after restart?")
 
 	content, meta, ok := orch.PendingConfirmationFrame(sid)
 	if !ok {
-		t.Fatal("ok = false, want true (persisted blob fallback)")
+		t.Fatal("ok = false, want true (persisted pending tool call)")
 	}
 	if content != "Proceed after restart?" {
 		t.Errorf("content = %q, want the persisted prompt", content)
 	}
 	if meta["tool_call_id"] != "call_restored" {
 		t.Errorf("tool_call_id = %q, want call_restored", meta["tool_call_id"])
+	}
+
+	// Read-only: the pending state must survive the lookup so Run's Block A2
+	// can still consume it when the decision arrives.
+	if pc, _, _ := loadPendingToolCall(orch.sessions, sid); pc == nil {
+		t.Error("PendingConfirmationFrame consumed the pending state; it must be read-only")
 	}
 }
 

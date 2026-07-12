@@ -39,6 +39,7 @@ import (
 	"github.com/opentalon/opentalon/internal/reminder"
 	"github.com/opentalon/opentalon/internal/requestpkg"
 	"github.com/opentalon/opentalon/internal/scheduler"
+	"github.com/opentalon/opentalon/internal/sessionlock"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store"
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
@@ -713,6 +714,50 @@ func main() {
 	// orch ← ChannelSender ← notifier ← reg ← handler ← orch cycle.
 	notifier := &channelNotifier{reg: nil}
 
+	// Build a single shared Redis client when cluster dedup, plugin exec, or both need it.
+	// Sharing one pool halves connection count compared to opening two clients to the same instance.
+	// Hoisted before the orchestrator so the session-turn lease can use it
+	// (and before sync so the sync lock can, too).
+	needsRedis := cfg.Cluster.Enabled || cfg.PluginExec.Enabled
+	var sharedRedis redis.UniversalClient
+	if needsRedis && (cfg.Redis.RedisURL != "" || len(cfg.Redis.Sentinels) > 0) {
+		var err error
+		sharedRedis, err = redisclient.New(
+			cfg.Redis.RedisURL,
+			cfg.Redis.MasterName,
+			cfg.Redis.Sentinels,
+			cfg.Redis.Password,
+			cfg.Redis.SentinelPassword,
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error connecting to Redis: %v\n", err)
+			os.Exit(1) //nolint:gocritic
+		}
+		defer func() { _ = sharedRedis.Close() }()
+	}
+	if cfg.Cluster.Enabled && sharedRedis == nil {
+		fmt.Fprintf(os.Stderr, "cluster.enabled requires redis.redis_url or redis.sentinels to be configured\n")
+		os.Exit(1) //nolint:gocritic
+	}
+
+	// Cross-pod session-turn lease: in cluster mode, turns for the same
+	// session are serialized across pods via Redis; single-instance mode
+	// relies on the orchestrator's in-memory per-session mutex alone.
+	var sessionLocker sessionlock.Locker
+	if cfg.Cluster.Enabled && sharedRedis != nil {
+		sessionLocker = sessionlock.NewRedis(sharedRedis)
+	} else {
+		sessionLocker = sessionlock.Noop()
+	}
+
+	// Pending pipeline plans (multi-step plans awaiting the user's approval)
+	// are held in pod memory only. That is fine on one pod, but with several
+	// pods a confirmation reply routed to a different pod cannot resume the
+	// plan. Surface the combination loudly instead of failing silently.
+	if cfg.Cluster.Enabled && cfg.Orchestrator.Pipeline.Enabled {
+		slog.Warn("cluster mode with orchestrator.pipeline.enabled: pending pipeline plans are per-pod in-memory state and are NOT multi-pod safe; a confirmation reply landing on another pod cannot resume the plan")
+	}
+
 	// Apply built-in prompt overrides from config before the orchestrator is
 	// built (NewWithRules reads the default/scheduling rules). Unknown keys are
 	// surfaced as a warning rather than a hard failure so a typo doesn't block
@@ -796,35 +841,11 @@ func main() {
 				return 60 * time.Second
 			}(),
 		},
+		SessionLocker: sessionLocker,
 	})
 
 	// Wire on-clear actions now that the orchestrator is available.
 	cmdExecutor.WithOnClear(onClearActions, orch.RunAction)
-
-	// Build a single shared Redis client when cluster dedup, plugin exec, or both need it.
-	// Sharing one pool halves connection count compared to opening two clients to the same instance.
-	// Hoisted before sync so the sync lock can use it.
-	needsRedis := cfg.Cluster.Enabled || cfg.PluginExec.Enabled
-	var sharedRedis redis.UniversalClient
-	if needsRedis && (cfg.Redis.RedisURL != "" || len(cfg.Redis.Sentinels) > 0) {
-		var err error
-		sharedRedis, err = redisclient.New(
-			cfg.Redis.RedisURL,
-			cfg.Redis.MasterName,
-			cfg.Redis.Sentinels,
-			cfg.Redis.Password,
-			cfg.Redis.SentinelPassword,
-		)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error connecting to Redis: %v\n", err)
-			os.Exit(1) //nolint:gocritic
-		}
-		defer func() { _ = sharedRedis.Close() }()
-	}
-	if cfg.Cluster.Enabled && sharedRedis == nil {
-		fmt.Fprintf(os.Stderr, "cluster.enabled requires redis.redis_url or redis.sentinels to be configured\n")
-		os.Exit(1) //nolint:gocritic
-	}
 
 	// Build sync locker: cluster mode uses Redis so only one pod runs
 	// SyncActions/IngestKnowledgeDir; single-instance uses noop.
@@ -922,6 +943,12 @@ func main() {
 	// Reuses the channelNotifier built above the orchestrator (shared
 	// late-bound *channel.Registry pointer); the title-push path and the
 	// scheduler's job-result path therefore go through the same adapter.
+	// Scheduler/reminder jobs persist to pod-local disk (dataDir), so in
+	// cluster mode a job created on one pod is delivered and visible only on
+	// that pod (and lost if the pod is replaced) — see docs/cluster.md.
+	if cfg.Cluster.Enabled {
+		slog.Warn("cluster mode: scheduler and reminder jobs persist to pod-local disk; each job is visible and delivered only on the pod that created it and does not survive pod replacement")
+	}
 	sched := scheduler.NewWithPolicy(orch, notifier, dataDir, cfg.Scheduler.Approvers, cfg.Scheduler.MaxJobsPerUser)
 	staticJobs := make([]scheduler.Job, 0, len(cfg.Scheduler.Jobs))
 	for _, jc := range cfg.Scheduler.Jobs {
