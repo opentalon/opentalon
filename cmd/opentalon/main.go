@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -367,6 +368,27 @@ func main() {
 		// session-event writer's Start).
 		eventWebhookSink.Start(context.Background())
 		sessionSink = emit.MultiSink{sessionSink, eventWebhookSink}
+		// Expose the sink's delivery counters on the existing /metrics
+		// endpoint: a webhook that silently stops delivering (worker death,
+		// endpoint failures, buffer overflow) is visible as a stalled
+		// delivered_total / climbing failed_total instead of requiring log
+		// archaeology across pods.
+		if metricsCollector != nil {
+			metricsCollector.MustRegister(
+				prometheus.NewCounterFunc(prometheus.CounterOpts{
+					Name: "opentalon_event_webhook_delivered_total",
+					Help: "Events successfully POSTed to the configured event webhook.",
+				}, func() float64 { return float64(ws.Delivered()) }),
+				prometheus.NewCounterFunc(prometheus.CounterOpts{
+					Name: "opentalon_event_webhook_failed_total",
+					Help: "Events whose webhook delivery was given up on (retries exhausted, non-retryable status, or marshal failure).",
+				}, func() float64 { return float64(ws.Failed()) }),
+				prometheus.NewCounterFunc(prometheus.CounterOpts{
+					Name: "opentalon_event_webhook_dropped_total",
+					Help: "Events dropped because the webhook delivery buffer was full.",
+				}, func() float64 { return float64(ws.Dropped()) }),
+			)
+		}
 	}
 
 	// Build LLM provider and default model from config. The debug sink

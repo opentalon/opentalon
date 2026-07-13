@@ -94,6 +94,27 @@ func TestSink_DeliversSubscribedAndSkipsRest(t *testing.T) {
 		t.Errorf("filtered event was delivered: %+v", env)
 	case <-time.After(150 * time.Millisecond):
 	}
+
+	// Counters reflect exactly one successful delivery and no failures.
+	waitCounter(t, "Delivered", s.Delivered, 1)
+	if got := s.Failed(); got != 0 {
+		t.Errorf("Failed() = %d, want 0", got)
+	}
+}
+
+// waitCounter polls a cumulative counter until it reaches want — the worker
+// bumps it just after the HTTP round-trip, so an immediate assert may race
+// the handler that unblocked the test.
+func waitCounter(t *testing.T, name string, read func() int64, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if read() == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("%s() = %d, want %d", name, read(), want)
 }
 
 func TestSink_RetriesOnServerError(t *testing.T) {
@@ -132,6 +153,40 @@ func TestSink_RetriesOnServerError(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatalf("did not succeed after retries; calls=%d", calls.Load())
+	}
+
+	// A retried-through delivery counts once as delivered, never as failed.
+	waitCounter(t, "Delivered", s.Delivered, 1)
+	if got := s.Failed(); got != 0 {
+		t.Errorf("Failed() = %d, want 0", got)
+	}
+}
+
+// TestSink_CountsGivenUpDeliveriesAsFailed pins the failure counter: a
+// non-retryable status (400) is given up immediately and must increment
+// Failed, not Delivered — the delivered/failed pair is what makes a dead
+// or rejected webhook visible on /metrics without log archaeology.
+func TestSink_CountsGivenUpDeliveriesAsFailed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	s, err := New(Options{URL: srv.URL, EventTypes: []string{events.TypeTurnFinished}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s.Start(context.Background())
+	defer drainStop(t, s)
+
+	s.Emit(context.Background(), emit.Event{
+		ID: "evt-1", EventType: events.TypeTurnFinished,
+		Payload: json.RawMessage(`{"v":1}`),
+	})
+
+	waitCounter(t, "Failed", s.Failed, 1)
+	if got := s.Delivered(); got != 0 {
+		t.Errorf("Delivered() = %d, want 0", got)
 	}
 }
 

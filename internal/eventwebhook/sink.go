@@ -32,6 +32,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,10 +70,12 @@ type Sink struct {
 	client     *http.Client
 	maxRetries int
 
-	ch       chan emit.Event
-	dropped  atomic.Int64
-	stopOnce sync.Once
-	done     chan struct{}
+	ch        chan emit.Event
+	delivered atomic.Int64
+	failed    atomic.Int64
+	dropped   atomic.Int64
+	stopOnce  sync.Once
+	done      chan struct{}
 }
 
 // New validates opts and constructs a Sink. It rejects an empty URL, an
@@ -156,7 +160,20 @@ func (s *Sink) Emit(_ context.Context, evt emit.Event) {
 // context.Background()) so a graceful Stop can flush in-flight events even
 // after the application context is cancelled — the per-request timeout
 // bounds each POST regardless.
+//
+// The startup line is deliberate observability, not noise: the sink's only
+// other output is failure warnings, so without it a webhook that was never
+// built (config absent) is indistinguishable from one that is healthy —
+// which turns a dead event feed into silent archaeology.
 func (s *Sink) Start(ctx context.Context) {
+	types := make([]string, 0, len(s.eventTypes))
+	for t := range s.eventTypes {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	slog.Info("event webhook enabled",
+		"url", s.url, "event_types", strings.Join(types, ","),
+		"buffer", cap(s.ch), "max_retries", s.maxRetries)
 	go s.run(ctx)
 }
 
@@ -176,6 +193,13 @@ func (s *Sink) Stop(flushTimeout time.Duration) {
 // Dropped returns the cumulative number of events dropped since start.
 func (s *Sink) Dropped() int64 { return s.dropped.Load() }
 
+// Delivered returns the cumulative number of events successfully POSTed.
+func (s *Sink) Delivered() int64 { return s.delivered.Load() }
+
+// Failed returns the cumulative number of events whose delivery was given
+// up on (retries exhausted, non-retryable status, or marshal failure).
+func (s *Sink) Failed() int64 { return s.failed.Load() }
+
 func (s *Sink) run(ctx context.Context) {
 	defer close(s.done)
 	for evt := range s.ch {
@@ -187,6 +211,7 @@ func (s *Sink) run(ctx context.Context) {
 func (s *Sink) deliver(ctx context.Context, evt emit.Event) {
 	body, err := json.Marshal(toEnvelope(evt))
 	if err != nil {
+		s.failed.Add(1)
 		slog.Warn("event webhook: envelope marshal failed",
 			"event_type", evt.EventType, "error", err)
 		return
@@ -195,10 +220,12 @@ func (s *Sink) deliver(ctx context.Context, evt emit.Event) {
 	for attempt := 0; ; attempt++ {
 		status, err := s.post(ctx, body)
 		if err == nil && status >= 200 && status < 300 {
+			s.delivered.Add(1)
 			return
 		}
 		retryable := err != nil || status >= 500 || status == http.StatusTooManyRequests
 		if !retryable || attempt >= s.maxRetries {
+			s.failed.Add(1)
 			slog.Warn("event webhook: delivery failed",
 				"event_type", evt.EventType,
 				"session_id", evt.SessionID,

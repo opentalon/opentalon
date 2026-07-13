@@ -129,3 +129,10 @@ func (c *Collector) ObservePluginCall(plugin, action string, failed bool, inputT
 func (c *Collector) Handler() http.Handler {
 	return promhttp.HandlerFor(c.reg, promhttp.HandlerOpts{})
 }
+
+// MustRegister adds collectors built outside this package (e.g. counter
+// funcs reading a subsystem's own atomic counters) to the same registry
+// the /metrics endpoint serves.
+func (c *Collector) MustRegister(cs ...prometheus.Collector) {
+	c.reg.MustRegister(cs...)
+}
