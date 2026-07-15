@@ -69,6 +69,55 @@ func (o *Orchestrator) promotedToolSet(ctx context.Context) map[string]bool {
 	return out
 }
 
+// toolIsNative reports whether an allowed action belongs to the native tools
+// array the model receives in native-tools mode: the always-include core plus
+// the tools promoted into the session's sticky set via _meta__load_tools. It
+// is the SINGLE predicate that defines the native set — buildToolDefinitions
+// uses it to decide what to send the model, and the tool-load gate
+// (callToUnloadedTool) uses it to decide what the model may call — so the tools
+// the model sees in full and the calls the gate admits can never diverge.
+//
+// Profile / preparer / UserOnly filtering is orthogonal to "is native" and is
+// applied separately by every caller (buildToolDefinitions here, the plugin +
+// user-only gates in executeCall), so it is deliberately NOT folded in.
+func toolIsNative(action Action, fqn string, promoted map[string]bool) bool {
+	return action.AlwaysInclude || promoted[fqn]
+}
+
+// callToUnloadedTool reports whether a model-originated call targets a tool the
+// model has not loaded — a native-mode catalog tool that is neither
+// always-include core nor promoted via _meta__load_tools. Such a call means the
+// model is inventing arguments from the catalog's one-line summary, which
+// carries no parameter schema. It is the shared decision behind the tool-load
+// gate, consulted by the two sites that MUST agree:
+//   - executeCall refuses the call (the enforcement point present on every
+//     dispatch path: agent loop, confirmation-resume, single-step);
+//   - maybeRequireConfirmation declines to raise an approval prompt for it — a
+//     call executeCall will refuse must not cost the user a confirmation, so an
+//     unloaded write never even reaches the approval question.
+//
+// Returns false (i.e. "the model may call it") for:
+//   - text mode — every allowed tool is listed in full inline in the system
+//     prompt, so nothing is "unloaded";
+//   - an unresolvable action — executeCall's not-found path owns that error, so
+//     this gate must not mask it with a misleading "load it first";
+//   - always-include core and already-loaded tools.
+//
+// The action name is resolved canonically (resolveAction applies the same
+// LLM-mangling normalizations as executeCall), so the AlwaysInclude flag and
+// the promoted-set lookup both key off the registered name regardless of
+// separator drift or a dropped MCP prefix in the model-supplied name.
+func (o *Orchestrator) callToUnloadedTool(ctx context.Context, call ToolCall) bool {
+	if !o.supportsNativeTools() {
+		return false
+	}
+	action := o.resolveAction(call.Plugin, call.Action)
+	if action == nil {
+		return false
+	}
+	return !toolIsNative(*action, toolFQN(call.Plugin, action.Name), o.promotedToolSet(ctx))
+}
+
 // catalogEntry is one row of the rendered tool catalog: the tool's
 // fully-qualified name and the one-line summary (first line of its
 // description).
@@ -115,10 +164,11 @@ func (o *Orchestrator) renderToolCatalog(promoted map[string]bool, allowedPlugin
 
 	var sb strings.Builder
 	sb.WriteString("## Tool catalog — name + one-line summary\n")
-	fmt.Fprintf(&sb, "These tools are available but not yet loaded — they are separate from the tools already in your available tools list, "+
-		"which you call directly without loading. Each line is a name + a one-line summary with NO parameters. "+
-		"Pick the tool(s) whose summary fits the request and call `%s(names=\"plugin__action,plugin__action2\")` to load their full schemas, "+
-		"then call them on your next step. Never guess parameters from a summary.\n",
+	fmt.Fprintf(&sb, "These tools are available but NOT yet loaded — they are separate from the tools already in your available tools list, "+
+		"which you call directly. Each line is a name + a one-line summary with NO parameter schema. "+
+		"You MUST call `%s(names=\"plugin__action,plugin__action2\")` to load a tool's full schema BEFORE you call it, "+
+		"then call it on your next step. Calling a catalog tool you have not loaded is REJECTED — you cannot see its "+
+		"parameters, so never guess them from the summary.\n",
 		toolFQN(metaPluginName, metaLoadTools))
 	for _, e := range entries {
 		if e.summary == "" {

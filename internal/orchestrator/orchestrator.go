@@ -2617,8 +2617,10 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 			}
 			// Only the native set lands in the tools array: always-include
 			// core + the session's loaded (sticky) tools. The rest stay in
-			// the catalog until the LLM loads them via load_tools.
-			if !action.AlwaysInclude && !promoted[fqn] {
+			// the catalog until the LLM loads them via load_tools. Same
+			// predicate the tool-load gate enforces (toolIsNative) so the array
+			// the model sees and the calls executeCall admits cannot diverge.
+			if !toolIsNative(action, fqn, promoted) {
 				slog.Debug("tool registration: action skipped (catalog-only, not loaded)", "tool", fqn)
 				continue
 			}
@@ -2926,6 +2928,19 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
 ) (*RunResult, bool) {
 	if call.ConfirmationBypass {
+		return nil, false
+	}
+	// A call to a tool the model has not loaded (a native-mode catalog tool)
+	// will be refused by executeCall with a "load it first" hint, so it must
+	// not cost the user an approval — skip the gate and let it fall through to
+	// that refusal. Same principle as the unknown-args skip below: the model
+	// corrects itself (here: loads the tool's schema and retries) without a
+	// prompt. This is why an unloaded write never reaches a confirmation
+	// request — the model must know the tool before the user is asked to
+	// approve running it.
+	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
+		logger.FromContext(ctx).Debug("skipping confirmation for unloaded catalog tool; executeCall will refuse it with a load_tools hint",
+			"plugin", call.Plugin, "action", call.Action)
 		return nil, false
 	}
 	// Validate argument names BEFORE narrating and storing the pending call.
@@ -4282,6 +4297,30 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		return o.emitRefusalResult(ctx, call,
 			fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
 			dispatchStart)
+	}
+	// Tool-load gate: in native-tools mode the model is given only the native
+	// tools array (always-include core + the tools it loaded via
+	// _meta__load_tools); every other allowed tool appears in the system-prompt
+	// catalog as a name + one-line summary with NO parameter schema. A call to a
+	// tool the model has not loaded means it is inventing arguments from that
+	// summary — refuse it and point at load_tools so the model loads the full
+	// schema and retries on its next step. This is the enforcement point of the
+	// invariant: a tool never executes unless its full description was in the
+	// model's context. Present on every dispatch path (agent loop,
+	// confirmation-resume, single-step), so the guarantee holds regardless of
+	// how the call arrived. Placed after the plugin / user-only gates (a hidden
+	// tool is refused for that stronger reason first) and before arg validation
+	// (loading the real schema is the actionable fix, not the guessed args).
+	// Text mode lists every tool in full inline, so callToUnloadedTool is a
+	// native-mode-only no-op there.
+	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
+		fqn := toolFQN(call.Plugin, call.Action)
+		loadTools := toolFQN(metaPluginName, metaLoadTools)
+		slog.Warn("BLOCKED LLM call to unloaded catalog tool", "plugin", call.Plugin, "action", call.Action, "load_tools", loadTools)
+		return o.emitRefusalResult(ctx, call, fmt.Sprintf(
+			"tool %q is not loaded: its parameters are not in your context, so you cannot call it yet. "+
+				"First call %s(names=%q), then call %s on your next step. Do not guess the parameters.",
+			fqn, loadTools, fqn, fqn), dispatchStart)
 	}
 	// Reject unknown args from LLM-originated calls. Without this, stray keys
 	// (e.g. Haiku emitting `message=` at top level instead of inside `args`)

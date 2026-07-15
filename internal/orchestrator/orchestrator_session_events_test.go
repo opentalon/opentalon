@@ -54,6 +54,19 @@ func (nativeToolsLLM) SupportsFeature(f provider.Feature) bool {
 	return f == provider.FeatureTools
 }
 
+// nativeAction returns an Action already in the model's native tools array
+// (AlwaysInclude=true) — the precondition for the model to call it in
+// native-tools mode. A native provider only emits calls for tools in its tools
+// array, and the tool-load gate enforces that: a native call to a catalog-only
+// (unloaded) tool is refused. Native-mode behaviour tests (event emission,
+// confirmation, parent linkage) that drive a tool call register it via
+// nativeAction so the call is admissible; the catalog / load_tools discovery
+// tests deliberately register plain (catalog-only) actions instead. Mirrors the
+// toolIsNative predicate that buildToolDefinitions and the gate share.
+func nativeAction(name string) Action {
+	return Action{Name: name, AlwaysInclude: true}
+}
+
 // recordingSnapshotStore captures UpsertPromptSnapshot calls.
 type recordingSnapshotStore struct {
 	mu      sync.Mutex
@@ -733,7 +746,18 @@ func TestOrchestrator_ExecuteCall_EmitsExtractedAndResult_NativeMode(t *testing.
 		textAfter: "analysis complete",
 	}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+	// Own registry with the called tool marked native (loaded), so the tool-load
+	// gate admits the native call. The shared fixture keeps gitlab catalog-only
+	// for the catalog / load_tools tests, so it can't be reused here.
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "gitlab",
+		Actions: []Action{nativeAction("analyze_code")},
+	}, &echoExecutor{})
+	sessions := state.NewSessionStore("")
+	sessions.Create("test-session", "", "", "")
+	orch := NewWithRules(llm, parser, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{EventSink: sink})
+	sessID := "test-session"
 
 	if _, err := orch.Run(context.Background(), sessID, "analyze main.go"); err != nil {
 		t.Fatal(err)
@@ -2021,7 +2045,7 @@ func TestOrchestrator_Confirmation_ToolCallRequiresConfirmation_EmitsRequested(t
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
 		Name:    "gitlab",
-		Actions: []Action{{Name: "analyze_code"}},
+		Actions: []Action{nativeAction("analyze_code")},
 	}, &echoExecutor{})
 	_ = registry.Register(PluginCapability{
 		Name:    "conf",
@@ -2190,7 +2214,9 @@ func TestOrchestrator_Confirmation_NonReadOnlyAction_StillPrompts(t *testing.T) 
 		Name: "gitlab",
 		Actions: []Action{
 			{Name: "list_issues", ReadOnly: true},
-			{Name: "create_issue"}, // ReadOnly=false (default)
+			// The called action: native (loaded) so the gate admits it, and
+			// ReadOnly=false (nativeAction leaves it unset) so it still confirms.
+			nativeAction("create_issue"),
 		},
 	}, &echoExecutor{})
 	_ = registry.Register(PluginCapability{
@@ -2363,7 +2389,7 @@ func TestParentID_ConfirmationResolvedParentsRequested_ToolCall(t *testing.T) {
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
 		Name:    "gitlab",
-		Actions: []Action{{Name: "analyze_code"}},
+		Actions: []Action{nativeAction("analyze_code")},
 	}, &echoExecutor{})
 	_ = registry.Register(PluginCapability{
 		Name:    "conf",
