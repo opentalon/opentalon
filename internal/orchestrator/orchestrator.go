@@ -2108,6 +2108,19 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// maximizes provider-side KV cache hits.
 		if nativeMode {
 			req.Tools = cachedTools
+			// Record exactly what the model is being sent this round so the
+			// tool-load gate (executeCall / maybeRequireConfirmation) can admit a
+			// call iff its tool was in this array — no per-call state re-read, and
+			// no divergence from what the model actually saw. cachedTools is
+			// rebuilt after a successful load_tools, so the next round's set
+			// widens accordingly; a tool loaded by an earlier call in THIS
+			// response is deliberately absent here, so calling it before its
+			// next-round schema arrives is refused.
+			sent := make(map[string]struct{}, len(cachedTools))
+			for _, td := range cachedTools {
+				sent[td.Name] = struct{}{}
+			}
+			ctx = withSentNativeTools(ctx, sent)
 			if i == 0 {
 				toolNames := make([]string, len(req.Tools))
 				for ti, td := range req.Tools {
@@ -4298,21 +4311,20 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 			fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
 			dispatchStart)
 	}
-	// Tool-load gate: in native-tools mode the model is given only the native
-	// tools array (always-include core + the tools it loaded via
-	// _meta__load_tools); every other allowed tool appears in the system-prompt
-	// catalog as a name + one-line summary with NO parameter schema. A call to a
-	// tool the model has not loaded means it is inventing arguments from that
-	// summary — refuse it and point at load_tools so the model loads the full
-	// schema and retries on its next step. This is the enforcement point of the
-	// invariant: a tool never executes unless its full description was in the
-	// model's context. Present on every dispatch path (agent loop,
-	// confirmation-resume, single-step), so the guarantee holds regardless of
-	// how the call arrived. Placed after the plugin / user-only gates (a hidden
-	// tool is refused for that stronger reason first) and before arg validation
-	// (loading the real schema is the actionable fix, not the guessed args).
-	// Text mode lists every tool in full inline, so callToUnloadedTool is a
-	// native-mode-only no-op there.
+	// Tool-load gate: when this request surfaced tools via the native array, the
+	// model was given only that array (always-include core + the tools it loaded
+	// via _meta__load_tools); every other allowed tool appears in the
+	// system-prompt catalog as a name + one-line summary with NO parameter
+	// schema. A call to a tool that was NOT in the sent array means the model is
+	// inventing arguments from that summary — refuse it and point at load_tools
+	// so it loads the full schema and retries on its next step. The gate keys off
+	// the set actually sent this request (recorded on ctx by the agent loop), so
+	// it fires exactly where "unloaded" is meaningful: it is a no-op for text
+	// mode and the sub-agent loop (both list every tool in full inline, no native
+	// array) and for host-constructed calls (FromLLM=false). Placed after the
+	// plugin / user-only gates (a hidden tool is refused for that stronger reason
+	// first) and before arg validation (loading the real schema is the actionable
+	// fix, not the guessed args).
 	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
 		fqn := toolFQN(call.Plugin, call.Action)
 		loadTools := toolFQN(metaPluginName, metaLoadTools)
@@ -4997,6 +5009,35 @@ func withExpectedTools(ctx context.Context, steps []*pipeline.Step) context.Cont
 func expectedToolsFromContext(ctx context.Context) []*pipeline.Step {
 	steps, _ := ctx.Value(expectedToolsKey{}).([]*pipeline.Step)
 	return steps
+}
+
+// sentNativeToolsKey carries the fully-qualified names of the tools that were
+// actually put in the native tools array for the current request. It is the
+// source of truth the tool-load gate checks against: a model-originated call is
+// admissible only if its tool was in this set.
+//
+// Presence of the value marks "this request surfaced tools via the native
+// array". The agent loop sets it per round when native tool calling is on;
+// text-mode requests, the sub-agent loop (which lists every tool in full inline
+// in its prompt, no native array), and any non-agent-loop caller never set it —
+// so the gate is a no-op there, exactly matching where "unloaded" is a
+// meaningful concept. Gating against the set actually sent (rather than
+// re-deriving loadedness from session state) keeps the array the model saw and
+// the calls the gate admits identical by construction, needs no per-call state
+// read, and cannot be thrown off by a mid-turn demotion / eviction / store blip.
+type sentNativeToolsKey struct{}
+
+func withSentNativeTools(ctx context.Context, fqns map[string]struct{}) context.Context {
+	return context.WithValue(ctx, sentNativeToolsKey{}, fqns)
+}
+
+// sentNativeToolsFromContext returns the native tool set sent this request and
+// true when the current request surfaced tools natively. ok == false means no
+// native array was sent (text mode, sub-agent, or a non-agent-loop caller), and
+// the gate must not fire.
+func sentNativeToolsFromContext(ctx context.Context) (map[string]struct{}, bool) {
+	fqns, ok := ctx.Value(sentNativeToolsKey{}).(map[string]struct{})
+	return fqns, ok
 }
 
 // buildToolCallNudge creates a retry nudge message that includes a concrete

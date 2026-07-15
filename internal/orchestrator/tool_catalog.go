@@ -71,51 +71,59 @@ func (o *Orchestrator) promotedToolSet(ctx context.Context) map[string]bool {
 
 // toolIsNative reports whether an allowed action belongs to the native tools
 // array the model receives in native-tools mode: the always-include core plus
-// the tools promoted into the session's sticky set via _meta__load_tools. It
-// is the SINGLE predicate that defines the native set — buildToolDefinitions
-// uses it to decide what to send the model, and the tool-load gate
-// (callToUnloadedTool) uses it to decide what the model may call — so the tools
-// the model sees in full and the calls the gate admits can never diverge.
+// the tools promoted into the session's sticky set via _meta__load_tools. It is
+// the SINGLE predicate that decides native-vs-catalog — buildToolDefinitions
+// uses it to pick what to SEND the model, and renderToolCatalog uses its
+// negation to list the rest as catalog entries — so a tool is in exactly one of
+// the two surfaces. The tool-load gate then checks the actual SENT set (recorded
+// on ctx, see sentNativeToolsKey), so what the model saw and what the gate
+// admits are identical by construction, with no re-derivation.
 //
 // Profile / preparer / UserOnly filtering is orthogonal to "is native" and is
-// applied separately by every caller (buildToolDefinitions here, the plugin +
-// user-only gates in executeCall), so it is deliberately NOT folded in.
+// applied separately by every caller (buildToolDefinitions, renderToolCatalog,
+// and the plugin + user-only gates in executeCall), so it is deliberately NOT
+// folded in.
 func toolIsNative(action Action, fqn string, promoted map[string]bool) bool {
 	return action.AlwaysInclude || promoted[fqn]
 }
 
-// callToUnloadedTool reports whether a model-originated call targets a tool the
-// model has not loaded — a native-mode catalog tool that is neither
-// always-include core nor promoted via _meta__load_tools. Such a call means the
-// model is inventing arguments from the catalog's one-line summary, which
-// carries no parameter schema. It is the shared decision behind the tool-load
-// gate, consulted by the two sites that MUST agree:
-//   - executeCall refuses the call (the enforcement point present on every
-//     dispatch path: agent loop, confirmation-resume, single-step);
+// callToUnloadedTool reports whether a model-originated call targets a tool that
+// was NOT in the native tools array sent to the model this request — a catalog
+// tool the model has not loaded via _meta__load_tools, so it is inventing
+// arguments from the catalog's one-line summary (which carries no parameter
+// schema). It is the shared decision behind the tool-load gate, consulted by the
+// two sites that MUST agree:
+//   - executeCall refuses the call (the enforcement point in the agent loop);
 //   - maybeRequireConfirmation declines to raise an approval prompt for it — a
 //     call executeCall will refuse must not cost the user a confirmation, so an
 //     unloaded write never even reaches the approval question.
 //
-// Returns false (i.e. "the model may call it") for:
-//   - text mode — every allowed tool is listed in full inline in the system
-//     prompt, so nothing is "unloaded";
-//   - an unresolvable action — executeCall's not-found path owns that error, so
-//     this gate must not mask it with a misleading "load it first";
-//   - always-include core and already-loaded tools.
+// It checks membership in the set actually sent this request (sentNativeTools on
+// ctx), not a fresh read of session state, so it cannot disagree with the array
+// the model saw: a tool that was sent stays admissible even if it is later
+// demoted or evicted mid-turn, and a tool loaded by an earlier call in the SAME
+// response is refused until its schema arrives on the next round. The action is
+// resolved canonically (resolveAction applies the same LLM-mangling
+// normalizations as executeCall), so the lookup keys off the registered name
+// regardless of separator drift or a dropped MCP prefix in the model's name.
 //
-// The action name is resolved canonically (resolveAction applies the same
-// LLM-mangling normalizations as executeCall), so the AlwaysInclude flag and
-// the promoted-set lookup both key off the registered name regardless of
-// separator drift or a dropped MCP prefix in the model-supplied name.
+// Returns false (i.e. "the model may call it") when:
+//   - no native array was sent for this request (text mode lists every tool in
+//     full inline; the sub-agent loop does the same; a non-agent-loop caller
+//     surfaced no tools) — nothing is "unloaded", so the gate is a no-op;
+//   - the action is unresolvable — executeCall's not-found path owns that error,
+//     so this gate must not mask it with a misleading "load it first".
 func (o *Orchestrator) callToUnloadedTool(ctx context.Context, call ToolCall) bool {
-	if !o.supportsNativeTools() {
+	sent, ok := sentNativeToolsFromContext(ctx)
+	if !ok {
 		return false
 	}
 	action := o.resolveAction(call.Plugin, call.Action)
 	if action == nil {
 		return false
 	}
-	return !toolIsNative(*action, toolFQN(call.Plugin, action.Name), o.promotedToolSet(ctx))
+	_, isNative := sent[toolFQN(call.Plugin, action.Name)]
+	return !isNative
 }
 
 // catalogEntry is one row of the rendered tool catalog: the tool's
@@ -151,7 +159,9 @@ func (o *Orchestrator) renderToolCatalog(promoted map[string]bool, allowedPlugin
 				continue
 			}
 			// Already in the native tools array — no catalog entry needed.
-			if action.AlwaysInclude || promoted[fqn] {
+			// Same predicate buildToolDefinitions sends by, so a tool is in
+			// exactly one of the two surfaces (native array or catalog).
+			if toolIsNative(action, fqn, promoted) {
 				continue
 			}
 			entries = append(entries, catalogEntry{fqn: fqn, summary: firstLine(action.Description)})
