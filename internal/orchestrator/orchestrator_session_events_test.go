@@ -54,6 +54,21 @@ func (nativeToolsLLM) SupportsFeature(f provider.Feature) bool {
 	return f == provider.FeatureTools
 }
 
+// native marks an Action as already in the model's native tools array
+// (AlwaysInclude=true) while preserving its other fields — the precondition for
+// the model to call it in native-tools mode. A native provider only emits calls
+// for tools in its array, and the tool-load gate enforces that: a call to a tool
+// absent from the sent array is refused. Native-mode behaviour tests (event
+// emission, confirmation, parent linkage) that drive a tool call register it via
+// native() so the call is admissible; the catalog / load_tools discovery tests
+// deliberately register plain (catalog-only) actions instead. It takes a full
+// Action (not just a name) so read-only or otherwise-flagged tools stay
+// expressible — a by-name helper would silently force ReadOnly=false.
+func native(a Action) Action {
+	a.AlwaysInclude = true
+	return a
+}
+
 // recordingSnapshotStore captures UpsertPromptSnapshot calls.
 type recordingSnapshotStore struct {
 	mu      sync.Mutex
@@ -94,6 +109,33 @@ func setupOrchestratorWithSink(llm LLMClient, parser ToolCallParser, sink emit.S
 		Name:        "jira",
 		Description: "Jira integration",
 		Actions:     []Action{{Name: "create_issue", Description: "Create a Jira issue"}},
+	}, &echoExecutor{})
+
+	memory := state.NewMemoryStore("")
+	sessions := state.NewSessionStore("")
+	sessions.Create("test-session", "", "", "")
+
+	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{EventSink: sink})
+	return orch, "test-session"
+}
+
+// setupOrchestratorWithSinkNative mirrors setupOrchestratorWithSink but marks the
+// gitlab/jira tools native (present in the sent tools array), so a Run-based test
+// whose model actually CALLS one of them is admitted by the tool-load gate. The
+// plain setupOrchestratorWithSink keeps them catalog-only for the catalog /
+// load_tools discovery tests, which assert they are NOT in the native array.
+func setupOrchestratorWithSinkNative(llm LLMClient, parser ToolCallParser, sink emit.Sink) (*Orchestrator, string) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:                 "gitlab",
+		Description:          "GitLab integration",
+		SystemPromptAddition: "Use gitlab to analyze code.",
+		Actions:              []Action{native(Action{Name: "analyze_code", Description: "Analyze code for issues"})},
+	}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{
+		Name:        "jira",
+		Description: "Jira integration",
+		Actions:     []Action{native(Action{Name: "create_issue", Description: "Create a Jira issue"})},
 	}, &echoExecutor{})
 
 	memory := state.NewMemoryStore("")
@@ -733,7 +775,7 @@ func TestOrchestrator_ExecuteCall_EmitsExtractedAndResult_NativeMode(t *testing.
 		textAfter: "analysis complete",
 	}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+	orch, sessID := setupOrchestratorWithSinkNative(llm, parser, sink)
 
 	if _, err := orch.Run(context.Background(), sessID, "analyze main.go"); err != nil {
 		t.Fatal(err)
@@ -2021,7 +2063,7 @@ func TestOrchestrator_Confirmation_ToolCallRequiresConfirmation_EmitsRequested(t
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
 		Name:    "gitlab",
-		Actions: []Action{{Name: "analyze_code"}},
+		Actions: []Action{native(Action{Name: "analyze_code"})},
 	}, &echoExecutor{})
 	_ = registry.Register(PluginCapability{
 		Name:    "conf",
@@ -2082,7 +2124,7 @@ func TestOrchestrator_Confirmation_ReadOnlyAction_SkipsPrompt(t *testing.T) {
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
 		Name:    "gitlab",
-		Actions: []Action{{Name: "list_issues", ReadOnly: true}},
+		Actions: []Action{native(Action{Name: "list_issues", ReadOnly: true})},
 	}, &echoExecutor{})
 	// A confirming executor backs the confirmation plugin — if the gate
 	// runs, it returns RequiresConfirmation=true and we'd see a
@@ -2139,7 +2181,7 @@ func TestOrchestrator_Confirmation_ReadOnlyAction_MatchesPrefixedManifestName(t 
 	// underlying capability.
 	_ = registry.Register(PluginCapability{
 		Name:    "mcp",
-		Actions: []Action{{Name: "timly__list-items", ReadOnly: true}},
+		Actions: []Action{native(Action{Name: "timly__list-items", ReadOnly: true})},
 	}, &echoExecutor{})
 	if err := registry.RegisterAlias("timly", "mcp"); err != nil {
 		t.Fatalf("RegisterAlias: %v", err)
@@ -2190,7 +2232,9 @@ func TestOrchestrator_Confirmation_NonReadOnlyAction_StillPrompts(t *testing.T) 
 		Name: "gitlab",
 		Actions: []Action{
 			{Name: "list_issues", ReadOnly: true},
-			{Name: "create_issue"}, // ReadOnly=false (default)
+			// The called action: native (in the sent array) so the gate admits it,
+			// and ReadOnly stays false so it still confirms.
+			native(Action{Name: "create_issue"}),
 		},
 	}, &echoExecutor{})
 	_ = registry.Register(PluginCapability{
@@ -2289,7 +2333,7 @@ func TestParentID_ToolCallResultParentsExtracted(t *testing.T) {
 		textAfter: "done",
 	}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+	orch, sessID := setupOrchestratorWithSinkNative(llm, parser, sink)
 	if _, err := orch.Run(context.Background(), sessID, "analyze"); err != nil {
 		t.Fatal(err)
 	}
@@ -2363,7 +2407,7 @@ func TestParentID_ConfirmationResolvedParentsRequested_ToolCall(t *testing.T) {
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
 		Name:    "gitlab",
-		Actions: []Action{{Name: "analyze_code"}},
+		Actions: []Action{native(Action{Name: "analyze_code"})},
 	}, &echoExecutor{})
 	_ = registry.Register(PluginCapability{
 		Name:    "conf",
@@ -2505,7 +2549,7 @@ func TestParentID_EveryEventHasID(t *testing.T) {
 		textAfter: "done",
 	}
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	orch, sessID := setupOrchestratorWithSink(llm, parser, sink)
+	orch, sessID := setupOrchestratorWithSinkNative(llm, parser, sink)
 	if _, err := orch.Run(context.Background(), sessID, "go"); err != nil {
 		t.Fatal(err)
 	}

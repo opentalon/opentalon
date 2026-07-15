@@ -89,6 +89,12 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	defer cancel()
 
 	ctx = withSubprocessDepth(ctx, depth)
+	// The sub-agent loop lists every allowed tool in full inline in its own
+	// prompt and sends NO native tools array, so the tool-load gate must be a
+	// no-op for its child calls. This ctx is derived from the caller's, which
+	// carries the caller's sent native set; neutralize it so the gate does not
+	// wrongly enforce the PARENT's array against the sub-agent's tools.
+	ctx = withoutSentNativeTools(ctx)
 
 	maxIter := req.MaxIterations
 	if maxIter <= 0 {

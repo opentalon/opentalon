@@ -2108,6 +2108,19 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// maximizes provider-side KV cache hits.
 		if nativeMode {
 			req.Tools = cachedTools
+			// Record exactly what the model is being sent this round so the
+			// tool-load gate (executeCall / maybeRequireConfirmation) can admit a
+			// call iff its tool was in this array — no per-call state re-read, and
+			// no divergence from what the model actually saw. cachedTools is
+			// rebuilt after a successful load_tools, so the next round's set
+			// widens accordingly; a tool loaded by an earlier call in THIS
+			// response is deliberately absent here, so calling it before its
+			// next-round schema arrives is refused.
+			sent := make(map[string]struct{}, len(cachedTools))
+			for _, td := range cachedTools {
+				sent[td.Name] = struct{}{}
+			}
+			ctx = withSentNativeTools(ctx, sent)
 			if i == 0 {
 				toolNames := make([]string, len(req.Tools))
 				for ti, td := range req.Tools {
@@ -2617,8 +2630,10 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 			}
 			// Only the native set lands in the tools array: always-include
 			// core + the session's loaded (sticky) tools. The rest stay in
-			// the catalog until the LLM loads them via load_tools.
-			if !action.AlwaysInclude && !promoted[fqn] {
+			// the catalog until the LLM loads them via load_tools. Same
+			// predicate the tool-load gate enforces (toolIsNative) so the array
+			// the model sees and the calls executeCall admits cannot diverge.
+			if !toolIsNative(action, fqn, promoted) {
 				slog.Debug("tool registration: action skipped (catalog-only, not loaded)", "tool", fqn)
 				continue
 			}
@@ -2926,6 +2941,19 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
 ) (*RunResult, bool) {
 	if call.ConfirmationBypass {
+		return nil, false
+	}
+	// A call to a tool the model has not loaded (a native-mode catalog tool)
+	// will be refused by executeCall with a "load it first" hint, so it must
+	// not cost the user an approval — skip the gate and let it fall through to
+	// that refusal. Same principle as the unknown-args skip below: the model
+	// corrects itself (here: loads the tool's schema and retries) without a
+	// prompt. This is why an unloaded write never reaches a confirmation
+	// request — the model must know the tool before the user is asked to
+	// approve running it.
+	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
+		logger.FromContext(ctx).Debug("skipping confirmation for unloaded catalog tool; executeCall will refuse it with a load_tools hint",
+			"plugin", call.Plugin, "action", call.Action)
 		return nil, false
 	}
 	// Validate argument names BEFORE narrating and storing the pending call.
@@ -4283,6 +4311,29 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 			fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
 			dispatchStart)
 	}
+	// Tool-load gate: when this request surfaced tools via the native array, the
+	// model was given only that array (always-include core + the tools it loaded
+	// via _meta__load_tools); every other allowed tool appears in the
+	// system-prompt catalog as a name + one-line summary with NO parameter
+	// schema. A call to a tool that was NOT in the sent array means the model is
+	// inventing arguments from that summary — refuse it and point at load_tools
+	// so it loads the full schema and retries on its next step. The gate keys off
+	// the set actually sent this request (recorded on ctx by the agent loop), so
+	// it fires exactly where "unloaded" is meaningful: it is a no-op for text
+	// mode and the sub-agent loop (both list every tool in full inline, no native
+	// array) and for host-constructed calls (FromLLM=false). Placed after the
+	// plugin / user-only gates (a hidden tool is refused for that stronger reason
+	// first) and before arg validation (loading the real schema is the actionable
+	// fix, not the guessed args).
+	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
+		fqn := toolFQN(call.Plugin, call.Action)
+		loadTools := toolFQN(metaPluginName, metaLoadTools)
+		slog.Warn("BLOCKED LLM call to unloaded catalog tool", "plugin", call.Plugin, "action", call.Action, "load_tools", loadTools)
+		return o.emitRefusalResult(ctx, call, fmt.Sprintf(
+			"tool %q is not loaded: its parameters are not in your context, so you cannot call it yet. "+
+				"First call %s(names=%q), then call %s on your next step. Do not guess the parameters.",
+			fqn, loadTools, fqn, fqn), dispatchStart)
+	}
 	// Reject unknown args from LLM-originated calls. Without this, stray keys
 	// (e.g. Haiku emitting `message=` at top level instead of inside `args`)
 	// are silently dropped; the call reaches the plugin with empty args and
@@ -4958,6 +5009,59 @@ func withExpectedTools(ctx context.Context, steps []*pipeline.Step) context.Cont
 func expectedToolsFromContext(ctx context.Context) []*pipeline.Step {
 	steps, _ := ctx.Value(expectedToolsKey{}).([]*pipeline.Step)
 	return steps
+}
+
+// sentNativeToolsKey carries the fully-qualified names of the tools that were
+// actually put in the native tools array for the current request. It is the
+// source of truth the tool-load gate checks against: a model-originated call is
+// admissible only if its tool was in this set.
+//
+// Presence of the value marks "this request surfaced tools via the native
+// array". The agent loop sets it per round when native tool calling is on;
+// text-mode requests, the sub-agent loop (which lists every tool in full inline
+// in its prompt, no native array), and any non-agent-loop caller never set it —
+// so the gate is a no-op there, exactly matching where "unloaded" is a
+// meaningful concept. Gating against the set actually sent (rather than
+// re-deriving loadedness from session state) keeps the array the model saw and
+// the calls the gate admits identical by construction, needs no per-call state
+// read, and cannot be thrown off by a mid-turn demotion / eviction / store blip.
+type sentNativeToolsKey struct{}
+
+// sentNativeToolsVal is the ctx payload for the native tool set. active
+// distinguishes three states that a bare map cannot: key ABSENT (no native
+// array in this scope — the default), active=true (a native array WAS sent;
+// fqns is it, possibly empty), and active=false (a nested scope explicitly has
+// NO native array and must neutralize an inherited parent value — see
+// withoutSentNativeTools). Collapsing "empty array sent" into "no array sent"
+// would be wrong: the former should refuse every tool, the latter none.
+type sentNativeToolsVal struct {
+	fqns   map[string]struct{}
+	active bool
+}
+
+func withSentNativeTools(ctx context.Context, fqns map[string]struct{}) context.Context {
+	return context.WithValue(ctx, sentNativeToolsKey{}, sentNativeToolsVal{fqns: fqns, active: true})
+}
+
+// withoutSentNativeTools marks the current scope as surfacing NO native array,
+// overriding any set inherited from a parent ctx. The sub-agent loop uses it:
+// it derives its ctx from the caller (which carries the caller's sent set) but
+// lists every tool in full inline in its own prompt with no native array, so
+// the tool-load gate must be a no-op inside it — not enforce the PARENT's set.
+func withoutSentNativeTools(ctx context.Context) context.Context {
+	return context.WithValue(ctx, sentNativeToolsKey{}, sentNativeToolsVal{active: false})
+}
+
+// sentNativeToolsFromContext returns the native tool set sent this request and
+// true when the current scope surfaced tools natively. ok == false means no
+// native array was sent (text mode, the sub-agent loop, or a non-agent-loop
+// caller), and the gate must not fire.
+func sentNativeToolsFromContext(ctx context.Context) (map[string]struct{}, bool) {
+	v, ok := ctx.Value(sentNativeToolsKey{}).(sentNativeToolsVal)
+	if !ok || !v.active {
+		return nil, false
+	}
+	return v.fqns, true
 }
 
 // buildToolCallNudge creates a retry nudge message that includes a concrete
