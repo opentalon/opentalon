@@ -166,6 +166,25 @@ func TestExecuteCall_NoNativeArraySent_NoGate(t *testing.T) {
 	}
 }
 
+// A scope that inherits a parent's sent set but explicitly marks itself as
+// surfacing no native array (withoutSentNativeTools — what the sub-agent loop
+// does) neutralizes the gate: the inherited set must NOT be enforced against
+// this scope's tools. Distinct from an absent set (same no-op) and from an
+// empty present set (refuses all, covered elsewhere).
+func TestExecuteCall_ClearedSentSet_NoGate(t *testing.T) {
+	orch, exec := gateOrch(t)
+	// Parent scope sent only p__always; a nested scope then clears it.
+	ctx := withoutSentNativeTools(sentCtx("p__always"))
+
+	res := orch.executeCall(ctx, ToolCall{ID: "c1", Plugin: "p", Action: "catalog", FromLLM: true})
+	if res.Error != "" {
+		t.Fatalf("a cleared sent set must neutralize the gate, got error %q", res.Error)
+	}
+	if exec.count != 1 {
+		t.Errorf("tool must run under a cleared sent set, ran %d time(s)", exec.count)
+	}
+}
+
 // The gate targets model-originated calls only. Internal/host-constructed calls
 // (preparers, guards, pipelines, formatters — FromLLM=false) are trusted and
 // never gated, even when the tool is absent from the sent array.

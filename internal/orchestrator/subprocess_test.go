@@ -71,6 +71,44 @@ func TestSubprocessBasicFork(t *testing.T) {
 	}
 }
 
+func TestSubprocess_ClearsInheritedNativeSentSet(t *testing.T) {
+	// A subprocess derives its ctx from the caller, which — on a native parent
+	// round — carries the parent's sent native tool set. The subprocess lists
+	// its tools inline (no native array) and dispatches child calls as FromLLM,
+	// so the tool-load gate must NOT enforce the parent's set against the
+	// subprocess's tools. Regression guard: a catalog tool the parent never
+	// promoted must still run inside the subprocess. Pre-fix (inherited set),
+	// it was refused "not loaded", killing the sub-agent on native providers.
+	exec := &countingExecutor{}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name: "search",
+		Actions: []Action{{Name: "query", Description: "Search", Parameters: []Parameter{
+			{Name: "q", Description: "query", Required: true},
+		}}},
+	}, exec)
+	sessions := state.NewSessionStore("")
+	llm := &fakeLLM{responses: []string{
+		"[tool_call]\n{\"tool\": \"search__query\", \"args\": {\"q\": \"x\"}}\n[/tool_call]",
+		"found it",
+	}}
+	orch := NewWithRules(llm, DefaultParser, registry, state.NewMemoryStore(""), sessions,
+		OrchestratorOpts{Subprocess: SubprocessConfig{Enabled: true, MaxDepth: 2}})
+
+	// Simulate a native parent round whose sent set does NOT contain
+	// search__query (a catalog tool the parent never loaded).
+	ctx := withSentNativeTools(context.Background(), map[string]struct{}{"_subprocess__run": {}})
+	req := subprocessRequest{Task: "search it", AllowedTools: []string{"search__query"}}
+
+	res, err := orch.runSubprocess(ctx, req, 1)
+	if err != nil {
+		t.Fatalf("runSubprocess: %v", err)
+	}
+	if exec.count != 1 {
+		t.Errorf("subprocess tool must run despite the parent sent set not containing it, ran %d time(s) (resp=%q)", exec.count, res.Response)
+	}
+}
+
 func TestSubprocessWithToolCalls(t *testing.T) {
 	// LLM sequence:
 	// 1. Parent calls _subprocess__run with tools restriction

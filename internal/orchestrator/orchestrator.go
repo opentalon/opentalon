@@ -5027,17 +5027,41 @@ func expectedToolsFromContext(ctx context.Context) []*pipeline.Step {
 // read, and cannot be thrown off by a mid-turn demotion / eviction / store blip.
 type sentNativeToolsKey struct{}
 
+// sentNativeToolsVal is the ctx payload for the native tool set. active
+// distinguishes three states that a bare map cannot: key ABSENT (no native
+// array in this scope — the default), active=true (a native array WAS sent;
+// fqns is it, possibly empty), and active=false (a nested scope explicitly has
+// NO native array and must neutralize an inherited parent value — see
+// withoutSentNativeTools). Collapsing "empty array sent" into "no array sent"
+// would be wrong: the former should refuse every tool, the latter none.
+type sentNativeToolsVal struct {
+	fqns   map[string]struct{}
+	active bool
+}
+
 func withSentNativeTools(ctx context.Context, fqns map[string]struct{}) context.Context {
-	return context.WithValue(ctx, sentNativeToolsKey{}, fqns)
+	return context.WithValue(ctx, sentNativeToolsKey{}, sentNativeToolsVal{fqns: fqns, active: true})
+}
+
+// withoutSentNativeTools marks the current scope as surfacing NO native array,
+// overriding any set inherited from a parent ctx. The sub-agent loop uses it:
+// it derives its ctx from the caller (which carries the caller's sent set) but
+// lists every tool in full inline in its own prompt with no native array, so
+// the tool-load gate must be a no-op inside it — not enforce the PARENT's set.
+func withoutSentNativeTools(ctx context.Context) context.Context {
+	return context.WithValue(ctx, sentNativeToolsKey{}, sentNativeToolsVal{active: false})
 }
 
 // sentNativeToolsFromContext returns the native tool set sent this request and
-// true when the current request surfaced tools natively. ok == false means no
-// native array was sent (text mode, sub-agent, or a non-agent-loop caller), and
-// the gate must not fire.
+// true when the current scope surfaced tools natively. ok == false means no
+// native array was sent (text mode, the sub-agent loop, or a non-agent-loop
+// caller), and the gate must not fire.
 func sentNativeToolsFromContext(ctx context.Context) (map[string]struct{}, bool) {
-	fqns, ok := ctx.Value(sentNativeToolsKey{}).(map[string]struct{})
-	return fqns, ok
+	v, ok := ctx.Value(sentNativeToolsKey{}).(sentNativeToolsVal)
+	if !ok || !v.active {
+		return nil, false
+	}
+	return v.fqns, true
 }
 
 // buildToolCallNudge creates a retry nudge message that includes a concrete
