@@ -524,6 +524,13 @@ func defaultContextArgProviders(o *Orchestrator, custom map[string]ContextArgPro
 	builtin := map[string]ContextArgProvider{
 		contextargs.SessionID:      func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
 		contextargs.ConversationID: func(ctx context.Context, _ string) string { return actor.ConversationID(ctx) },
+		// GroupID / EntityID bridge the authenticated actor scope to the
+		// injected args a plugin opts into via InjectContextArgs. Empty
+		// when the actor has no group/identity (e.g. profile-less dev);
+		// the consuming plugin fails closed on empty — the host never
+		// invents a scope. The injection loop skips empty values anyway.
+		contextargs.GroupID:  func(ctx context.Context, _ string) string { return actor.GroupID(ctx) },
+		contextargs.EntityID: func(ctx context.Context, _ string) string { return actor.Actor(ctx) },
 		contextargs.AllowedPlugins: func(ctx context.Context, _ string) string {
 			return resolveAllowedPluginNames(ctx, o)
 		},
@@ -4782,6 +4789,15 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 // Plugin executors must be safe for concurrent use — the same requirement that applies
 // when multiple sessions call the same plugin in parallel via Run.
 func (o *Orchestrator) RunAction(ctx context.Context, plugin, action string, args map[string]string) (string, error) {
+	content, _, err := o.RunActionResult(ctx, plugin, action, args)
+	return content, err
+}
+
+// RunActionResult dispatches the action like RunAction but also returns the
+// structured JSON payload. The callback path (handleCallback) uses this so a
+// plugin calling back through the host receives structured content, which the
+// (string, error) RunAction signature would otherwise drop.
+func (o *Orchestrator) RunActionResult(ctx context.Context, plugin, action string, args map[string]string) (content, structured string, err error) {
 	call := ToolCall{
 		ID:     fmt.Sprintf("direct-%s-%s", plugin, action),
 		Plugin: plugin,
@@ -4791,9 +4807,9 @@ func (o *Orchestrator) RunAction(ctx context.Context, plugin, action string, arg
 
 	result := o.executeCall(ctx, call)
 	if result.Error != "" {
-		return "", fmt.Errorf("%s: %s", toolFQN(plugin, action), result.Error)
+		return "", "", fmt.Errorf("%s: %s", toolFQN(plugin, action), result.Error)
 	}
-	return result.Content, nil
+	return result.Content, result.StructuredContent, nil
 }
 
 // nativeToolContent returns the content string for a role=tool message in

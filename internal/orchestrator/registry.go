@@ -37,6 +37,11 @@ type BidiExecutor interface {
 // implements it via a thin wrapper over RunAction.
 type CallbackHandler interface {
 	RunAction(ctx context.Context, plugin, action string, args map[string]string) (string, error)
+	// RunActionResult is RunAction that also returns the action's structured
+	// JSON payload (MCP structuredContent). The callback path must carry it
+	// so a plugin calling back through the host (e.g. talon-plugin.check /
+	// .evaluate) receives the structured result, not just the text content.
+	RunActionResult(ctx context.Context, plugin, action string, args map[string]string) (content, structured string, err error)
 }
 
 type ToolRegistry struct {
