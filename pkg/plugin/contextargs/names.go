@@ -44,3 +44,17 @@ const AllowedPlugins = "allowed_plugins"
 // older or misconfigured host that omitted it would otherwise silently
 // drop the chokepoint that the per-session palette enforces.
 const AllowedTools = "allowed_tools"
+
+// GroupID is the authenticated tenant/account scope of the actor, as
+// resolved by the profile verifier (Profile.Group) and carried on the
+// request context. Resolves to the empty string when the actor has no
+// group (e.g. a profile-less local dev setup). A plugin that scopes
+// per-tenant state MUST fail-closed on the empty value — an unscoped
+// call must never fall back to another tenant's data.
+const GroupID = "group_id"
+
+// EntityID is the actor identity — the profile's EntityID when a profile
+// system is active, else the classic channel:sender id. Resolves to the
+// empty string outside any actor context. Used to record who authored a
+// resource; distinct from GroupID, which scopes access.
+const EntityID = "entity_id"

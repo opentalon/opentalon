@@ -33,8 +33,9 @@ func (h *bidiStreamingHandler) ExecuteWithCallbacks(ctx context.Context, req pkg
 // recordingCallbackHandler captures the args of every RunAction call
 // the host side dispatches, and returns canned content for each.
 type recordingCallbackHandler struct {
-	calls    []callbackInvocation
-	response func(plugin, action string, args map[string]string) (string, error)
+	calls      []callbackInvocation
+	response   func(plugin, action string, args map[string]string) (string, error)
+	structured string // canned StructuredContent returned alongside content
 }
 
 type callbackInvocation struct {
@@ -43,12 +44,18 @@ type callbackInvocation struct {
 	Args   map[string]string
 }
 
-func (r *recordingCallbackHandler) RunAction(_ context.Context, plugin, action string, args map[string]string) (string, error) {
+func (r *recordingCallbackHandler) RunAction(ctx context.Context, plugin, action string, args map[string]string) (string, error) {
+	content, _, err := r.RunActionResult(ctx, plugin, action, args)
+	return content, err
+}
+
+func (r *recordingCallbackHandler) RunActionResult(_ context.Context, plugin, action string, args map[string]string) (string, string, error) {
 	r.calls = append(r.calls, callbackInvocation{Plugin: plugin, Action: action, Args: args})
 	if r.response != nil {
-		return r.response(plugin, action, args)
+		content, err := r.response(plugin, action, args)
+		return content, r.structured, err
 	}
-	return "default-reply", nil
+	return "default-reply", r.structured, nil
 }
 
 // startBidiServer wires a streaming handler into a real gRPC server
@@ -123,6 +130,36 @@ func TestClient_ExecuteBidi_RoundTrip(t *testing.T) {
 	}
 	if cb.calls[0].Args["q"] != "x" {
 		t.Errorf("callback args: %+v", cb.calls[0].Args)
+	}
+}
+
+// TestClient_ExecuteBidi_StructuredContent locks in that a callback's
+// StructuredContent reaches the plugin. Regression: the host used to fill only
+// CallbackResponse.Content, dropping StructuredContent, which broke plugins
+// (e.g. talon-plugin.check/.evaluate) that rely on the structured payload.
+func TestClient_ExecuteBidi_StructuredContent(t *testing.T) {
+	var gotStructured string
+	body := func(ctx context.Context, req pkg.Request, host pkg.HostCaller) pkg.Response {
+		r, err := host.RunAction(ctx, "talon", "check", map[string]string{"workflow": "src"})
+		if err != nil {
+			return pkg.Response{Error: err.Error()}
+		}
+		gotStructured = r.StructuredContent
+		return pkg.Response{CallID: req.ID, Content: "done"}
+	}
+	client := startBidiServer(t, body)
+
+	cb := &recordingCallbackHandler{
+		response:   func(_, _ string, _ map[string]string) (string, error) { return "ok: source is valid Talon.", nil },
+		structured: `{"ok":true}`,
+	}
+	result := client.ExecuteBidi(context.Background(), orchestrator.ToolCall{ID: "c3", Plugin: "agents", Action: "create"}, cb)
+
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if gotStructured != `{"ok":true}` {
+		t.Errorf("StructuredContent not propagated to plugin: got %q, want {\"ok\":true}", gotStructured)
 	}
 }
 

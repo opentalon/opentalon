@@ -209,12 +209,13 @@ func (c *Client) ExecuteBidi(ctx context.Context, call orchestrator.ToolCall, cb
 // stream. Errors from RunAction are surfaced via CallbackResponse.Error
 // so the plugin can decide how to react (retry, abort, ignore).
 func (c *Client) handleCallback(ctx context.Context, stream pluginpb.PluginService_ExecuteBidiClient, req *pluginpb.CallbackRequest, cb orchestrator.CallbackHandler) {
-	content, err := cb.RunAction(ctx, req.GetPlugin(), req.GetAction(), req.GetArgs())
+	content, structured, err := cb.RunActionResult(ctx, req.GetPlugin(), req.GetAction(), req.GetArgs())
 	resp := &pluginpb.CallbackResponse{Id: req.GetId()}
 	if err != nil {
 		resp.Error = err.Error()
 	} else {
 		resp.Content = content
+		resp.StructuredContent = structured
 	}
 	if sendErr := stream.Send(&pluginpb.HostMessage{
 		Payload: &pluginpb.HostMessage_CallbackResponse{CallbackResponse: resp},
