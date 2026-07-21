@@ -95,12 +95,11 @@ func TestWatchProcessCleansUpOnExit(t *testing.T) {
 
 	close(proc.exited)
 
+	// Deregister is the last cleanup step (runs after m.plugins delete, outside
+	// the lock), so poll on it — polling m.plugins races the registry deregister.
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		m.mu.Lock()
-		_, ok := m.plugins["echo"]
-		m.mu.Unlock()
-		if !ok {
+		if _, ok := registry.GetExecutor("echo"); !ok {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
