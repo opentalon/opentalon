@@ -43,13 +43,14 @@ func RunPluginMigrations(dataDir, pluginName, pluginPath string) error {
 		return fmt.Errorf("plugin_data dir: %w", err)
 	}
 	dbPath := filepath.Join(pluginDataDir, pluginName+".db")
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	// See db.go: modernc pragma syntax, applied per-connection via the DSN.
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return fmt.Errorf("plugin db open: %w", err)
 	}
 	defer func() { _ = db.Close() }()
-	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
-		return fmt.Errorf("plugin db busy_timeout: %w", err)
+	if err := verifySQLitePragmas(db); err != nil {
+		return fmt.Errorf("plugin db: %w", err)
 	}
 	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)"); err != nil {
 		return fmt.Errorf("plugin schema_version: %w", err)
