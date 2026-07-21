@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -116,6 +117,13 @@ func (j *Job) schedule() (schedule, error) {
 		}
 		return intervalSchedule{d: d}, nil
 	case hasCron:
+		// cron is minute-granularity by design. A 6-field expression is the
+		// seconds-cron form (LLMs invent it when asked for sub-minute schedules);
+		// steer callers to an interval-based poll trigger instead of surfacing
+		// the raw "expected exactly 5 fields" parser error.
+		if !strings.HasPrefix(strings.TrimSpace(j.Cron), "@") && len(strings.Fields(j.Cron)) == 6 {
+			return nil, fmt.Errorf("job %q: cron %q has 6 fields (seconds cron); cron is minute-granularity only — for sub-minute schedules use an interval like \"30s\" instead", j.Name, j.Cron)
+		}
 		s, err := cron.ParseStandard(j.Cron)
 		if err != nil {
 			return nil, fmt.Errorf("job %q: invalid cron: %w", j.Name, err)

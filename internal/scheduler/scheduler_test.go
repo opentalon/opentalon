@@ -828,6 +828,7 @@ func TestJobScheduleValidation(t *testing.T) {
 		{"bad interval", Job{Name: "j", Interval: "nope"}, "invalid interval"},
 		{"zero interval", Job{Name: "j", Interval: "0s"}, "must be positive"},
 		{"bad cron", Job{Name: "j", Cron: "not a cron"}, "invalid cron"},
+		{"6-field seconds cron", Job{Name: "j", Cron: "*/30 * * * * *"}, "sub-minute"},
 		{"good interval", Job{Name: "j", Interval: "30m"}, ""},
 		{"good cron", Job{Name: "j", Cron: "0 9 * * *"}, ""},
 	}
