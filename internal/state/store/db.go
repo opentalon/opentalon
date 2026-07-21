@@ -48,17 +48,18 @@ func Open(cfg config.DBConfig, dataDir string) (*DB, error) {
 			return nil, fmt.Errorf("state store: %w", err)
 		}
 		dbPath := filepath.Join(dataDir, "state.db")
-		rawDB, err = sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+		// modernc.org/sqlite DSN pragma syntax is ?_pragma=name(value). These
+		// apply on every connection the pool opens; busy_timeout is per-connection,
+		// so it must live in the DSN, not a one-off Exec that only hits one conn.
+		rawDB, err = sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 		if err != nil {
 			return nil, fmt.Errorf("state store: open db: %w", err)
 		}
-		if _, err = rawDB.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		// Assert the pragmas actually applied — the original bug was a silently
+		// ignored pragma, so verify rather than assume.
+		if err = verifySQLitePragmas(rawDB); err != nil {
 			_ = rawDB.Close()
-			return nil, fmt.Errorf("state store: busy_timeout: %w", err)
-		}
-		if _, err = rawDB.Exec("PRAGMA journal_mode=WAL"); err != nil {
-			_ = rawDB.Close()
-			return nil, fmt.Errorf("state store: WAL: %w", err)
+			return nil, fmt.Errorf("state store: %w", err)
 		}
 
 	case "postgres":
@@ -112,6 +113,27 @@ func Open(cfg config.DBConfig, dataDir string) (*DB, error) {
 		d.backfillSessionOwnership()
 	}
 	return d, nil
+}
+
+// verifySQLitePragmas confirms WAL and busy_timeout took effect on a fresh
+// connection. It fails loudly instead of silently running with default
+// rollback-journal mode and no busy wait (the SQLITE_BUSY root cause).
+func verifySQLitePragmas(db *sql.DB) error {
+	var journal string
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&journal); err != nil {
+		return fmt.Errorf("read journal_mode: %w", err)
+	}
+	if !strings.EqualFold(journal, "wal") {
+		return fmt.Errorf("journal_mode is %q, want wal", journal)
+	}
+	var busy int
+	if err := db.QueryRow("PRAGMA busy_timeout").Scan(&busy); err != nil {
+		return fmt.Errorf("read busy_timeout: %w", err)
+	}
+	if busy != 5000 {
+		return fmt.Errorf("busy_timeout is %d, want 5000", busy)
+	}
+	return nil
 }
 
 // DB holds the database connection and dialect.
