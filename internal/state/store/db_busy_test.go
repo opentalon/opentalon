@@ -8,7 +8,7 @@ import (
 	"github.com/opentalon/opentalon/internal/config"
 )
 
-// TestSQLiteBusyTimeoutAppliesToPooledConns reproduces issue #36: a second
+// TestSQLiteBusyTimeoutAppliesToPooledConns reproduces issue #313: a second
 // writer landing on a freshly-opened pool connection must inherit busy_timeout
 // and wait for the lock, not fail immediately with SQLITE_BUSY.
 //
