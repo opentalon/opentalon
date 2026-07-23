@@ -165,6 +165,53 @@ func TestEscalation_InFlightIsDropped(t *testing.T) {
 	}
 }
 
+func TestEscalation_ProfileFromArgsWhenContextHasNone(t *testing.T) {
+	// A background trigger (a plugin tick) runs under a profile-less context.
+	// The entity/group named in the args must seed a fallback profile so the
+	// turn still runs, rather than being refused as no_profile.
+	orch, exec, _, push := escTestOrch(t, OrchestratorOpts{Escalation: EscalationConfig{Enabled: true}})
+	call := escCall(false)
+	call.Args["entity_id"] = "ent1"
+	call.Args["group_id"] = "grp1"
+
+	got := decodeEscStatus(t, exec.Execute(context.Background(), call))
+	if !got.Escalated || got.Reason != "" {
+		t.Fatalf("status = %+v, want {escalated:true}", got)
+	}
+	select {
+	case <-push.got:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for escalation reply push")
+	}
+	_ = orch
+}
+
+func TestEscalation_ReplyMetadataCarriesProvenance(t *testing.T) {
+	orch, exec, _, push := escTestOrch(t, OrchestratorOpts{Escalation: EscalationConfig{Enabled: true}})
+	call := escCall(false)
+	call.Args["source"] = "agent"
+	call.Args["agent_id"] = "agent-42"
+	call.Args["trigger"] = "poll"
+
+	got := decodeEscStatus(t, exec.Execute(profileCtx(profile.Profile{EntityID: "ent1", Group: "grp1"}), call))
+	if !got.Escalated {
+		t.Fatalf("status = %+v, want escalated", got)
+	}
+	select {
+	case <-push.got:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for escalation reply push")
+	}
+	md := push.snapshot()[0].Msg.Metadata
+	if md["type"] != escalationMessageType {
+		t.Errorf("metadata[type] = %q, want %q", md["type"], escalationMessageType)
+	}
+	if md["source"] != "agent" || md["agent_id"] != "agent-42" || md["trigger"] != "poll" {
+		t.Errorf("provenance metadata = %+v, want source=agent agent_id=agent-42 trigger=poll", md)
+	}
+	_ = orch
+}
+
 func TestEscalation_AbsentFromLLMToolCatalog(t *testing.T) {
 	// UserOnly keeps _escalate out of the session-callable palette (the same
 	// set that feeds the LLM tool catalog and the load_tools visibility gate),

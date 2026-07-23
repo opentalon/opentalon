@@ -49,6 +49,20 @@ type UsageLimitChecker interface {
 type escalationRequest struct {
 	SessionID string
 	Prompt    string
+	// EntityID/GroupID are the caller-supplied target identity. A background
+	// trigger (a plugin tick, a scheduler job) runs under a profile-less
+	// context, so it cannot rely on profile.FromContext to name the entity the
+	// turn should run and bill as. When set, they seed a fallback profile — see
+	// startEscalation.
+	EntityID string
+	GroupID  string
+	// Source/AgentID/Trigger are optional provenance hints. When present they
+	// are stamped onto the pushed reply's OutboundMessage.Metadata so channels
+	// and clients can distinguish an agent-initiated escalation (and which
+	// agent / what tripped it) from a reply to an inbound user message.
+	Source  string
+	AgentID string
+	Trigger string
 }
 
 // escalationResult is the small JSON status the executor returns synchronously
@@ -94,7 +108,19 @@ func (o *Orchestrator) startEscalation(ctx context.Context, call ToolCall) ToolR
 	// session, and bound spend. The caller (a deterministic tick / job) must run
 	// under the target entity's profile — without one we can't safely run or
 	// bill a turn.
+	//
+	// The escalation callback executes under the context the host used to
+	// dispatch the background trigger (e.g. a scheduler `agents.tick` job),
+	// which carries no per-entity profile. So when the context has none, fall
+	// back to the identity the caller named explicitly in the args. Budget
+	// pre-check is naturally skipped for a synthesized profile (Limit is 0);
+	// the background caller is expected to rate-limit its own escalations.
 	p := profile.FromContext(ctx)
+	if p == nil || p.EntityID == "" {
+		if req.EntityID != "" {
+			p = &profile.Profile{EntityID: req.EntityID, Group: req.GroupID}
+		}
+	}
 	if p == nil || p.EntityID == "" {
 		return escalationStatus(call, false, "no_profile")
 	}
@@ -174,15 +200,35 @@ func (o *Orchestrator) runEscalation(req escalationRequest, p profile.Profile, e
 	// conversation) — see the title-push note in maybeGenerateTitle.
 	if pushErr := o.channelSender(ctx, req.SessionID, pkgchannel.OutboundMessage{
 		Content:  result.Response,
-		Metadata: map[string]string{"type": escalationMessageType},
+		Metadata: req.replyMetadata(),
 	}); pushErr != nil {
 		slog.Warn("escalation reply push failed", "session_id", req.SessionID, "error", pushErr)
 	}
 }
 
+// replyMetadata builds the OutboundMessage.Metadata for the pushed escalation
+// reply. `type` is always set so existing consumers keep working; source /
+// agent_id / trigger are added only when the caller supplied them, so a bare
+// escalation still pushes a minimal, backward-compatible tag.
+func (r escalationRequest) replyMetadata() map[string]string {
+	md := map[string]string{"type": escalationMessageType}
+	if r.Source != "" {
+		md["source"] = r.Source
+	}
+	if r.AgentID != "" {
+		md["agent_id"] = r.AgentID
+	}
+	if r.Trigger != "" {
+		md["trigger"] = r.Trigger
+	}
+	return md
+}
+
 // parseEscalationRequest reads the turn args. prompt is required; session_id
 // defaults to the caller's session when omitted (a tick already scoped to one
-// session need not repeat it).
+// session need not repeat it). entity_id/group_id name the target identity for
+// a profile-less background caller; source/agent_id/trigger are optional
+// provenance stamped onto the pushed reply.
 func parseEscalationRequest(ctx context.Context, args map[string]string) (escalationRequest, error) {
 	prompt := strings.TrimSpace(args["prompt"])
 	if prompt == "" {
@@ -195,7 +241,15 @@ func parseEscalationRequest(ctx context.Context, args map[string]string) (escala
 	if sessionID == "" {
 		return escalationRequest{}, fmt.Errorf("escalation requires a 'session_id' argument (no session in context)")
 	}
-	return escalationRequest{SessionID: sessionID, Prompt: prompt}, nil
+	return escalationRequest{
+		SessionID: sessionID,
+		Prompt:    prompt,
+		EntityID:  strings.TrimSpace(args["entity_id"]),
+		GroupID:   strings.TrimSpace(args["group_id"]),
+		Source:    strings.TrimSpace(args["source"]),
+		AgentID:   strings.TrimSpace(args["agent_id"]),
+		Trigger:   strings.TrimSpace(args["trigger"]),
+	}, nil
 }
 
 func escalationStatus(call ToolCall, escalated bool, reason string) ToolResult {

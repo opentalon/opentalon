@@ -792,6 +792,11 @@ func NewWithRules(
 				Parameters: []Parameter{
 					{Name: "session_id", Description: "Target session to run the turn against (the packed session key); defaults to the caller's session when omitted", Required: false},
 					{Name: "prompt", Description: "The synthesized user message that seeds the turn (e.g. what tripped and what to decide)", Required: true},
+					{Name: "entity_id", Description: "Target entity to run and bill the turn as; used when the calling context carries no profile (a background tick/job). Ignored when the context already has a profile", Required: false},
+					{Name: "group_id", Description: "Target group for the fallback profile, paired with entity_id", Required: false},
+					{Name: "source", Description: "Optional provenance stamped onto the pushed reply metadata (e.g. \"agent\")", Required: false},
+					{Name: "agent_id", Description: "Optional id of the background agent that triggered the escalation; stamped onto the reply metadata", Required: false},
+					{Name: "trigger", Description: "Optional trigger kind that fired the escalation (poll|schedule|webhook|escalation); stamped onto the reply metadata", Required: false},
 				},
 			}},
 		}
