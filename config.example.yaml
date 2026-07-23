@@ -195,8 +195,12 @@ orchestrator:
   # instead of only running a fixed plugin action. Reached two ways once
   # enabled: a plugin can call its HostCaller.RunAction(ctx, "_escalate", "turn",
   # {session_id, prompt}) mid-tick, or a scheduler job can set action
-  # "_escalate__turn". The turn runs asynchronously and its reply is pushed to
-  # the session's channel; the seed prompt is hidden from the user transcript.
+  # "_escalate__turn". A profile-less background caller (a system-wide tick)
+  # additionally passes {entity_id, group_id} to name the target identity the
+  # turn runs and bills as, and may pass {source, agent_id, trigger} which are
+  # stamped onto the pushed reply's metadata. The turn runs asynchronously and
+  # its reply is pushed to the session's channel; the seed prompt is hidden from
+  # the user transcript.
   # Escalation turns cost tokens: they are recorded as chat usage and so consume
   # (and are pre-checked against) the target entity's chat budget (WhoAmI Limit).
   # escalation:
