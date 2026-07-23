@@ -262,6 +262,25 @@ plugins:
     # ref: "master"
     config: {}
 
+  # Persistent, LLM-authored Talon workflow agents (watchers/schedules).
+  # Requires talon-plugin below (provides the check + evaluate language ops).
+  # Add a scheduler.jobs entry for `agents.tick` to drive its watchers.
+  # agents:
+  #   enabled: true
+  #   github: "opentalon/opentalon-agents"
+  #   ref: "master"
+  #   config:
+  #     db: { driver: sqlite, dsn: ./agents.db }   # or driver: postgres, dsn: <url>
+  #     talon_plugin_name: talon-plugin
+
+  # Talon language gateway: executes/validates Talon source (execute_workflow,
+  # check, evaluate). Used directly by the LLM and proxied by the agents plugin.
+  # talon-plugin:
+  #   enabled: true
+  #   github: "opentalon/talon-plugin"
+  #   ref: "v0.2.0"
+  #   config: {}
+
   # MCP bridge: connects to MCP-compatible tool servers.
   # Config block is passed to the plugin via the Init RPC.
   # mcp:
@@ -379,6 +398,11 @@ state:
 #     #   cron: "0 0 * * *"
 #     #   action: reports.generate
 #     #   notify_channel: slack
+#     # Drives the opentalon-agents watchers — fires the hidden agents.tick
+#     # action on an interval to poll sources and run due agents.
+#     # - name: agents-tick
+#     #   interval: "1m"
+#     #   action: agents.tick
 
 # Log level: debug, info, warn, error. Env var LOG_LEVEL overrides this.
 # All logs go to stderr (k8s-friendly). Debug includes LLM request/response details.
