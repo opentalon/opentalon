@@ -101,7 +101,7 @@ func TestSubprocessParallel_RunsAllInOrder(t *testing.T) {
 	if i1 < 0 || i2 < 0 || i3 < 0 {
 		t.Fatalf("missing task section(s):\n%s", tr.Content)
 	}
-	if !(i1 < i2 && i2 < i3) {
+	if i1 >= i2 || i2 >= i3 {
 		t.Errorf("sections out of order: %d,%d,%d", i1, i2, i3)
 	}
 	for _, want := range []string{"answer: alpha", "answer: bravo", "answer: charlie"} {
