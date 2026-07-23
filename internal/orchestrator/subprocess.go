@@ -20,7 +20,7 @@ type SubprocessConfig struct {
 	MaxDepth       int           // max nesting depth (default 2, hard cap 3)
 	MaxIterations  int           // default iterations per child (default 5, hard cap 10)
 	DefaultTimeout time.Duration // per-subprocess timeout (default 60s)
-	MaxParallel    int           // max concurrent children in _subprocess.parallel (default 4, hard cap 8)
+	MaxParallel    int           // max concurrent children per _subprocess.parallel CALL (default 4, hard cap 8); process-wide in-flight can reach N_calls x MaxParallel under MaxConcurrentSessions > 1
 }
 
 // Bounds for _subprocess.parallel. defaultMaxParallel/maxMaxParallel clamp the
@@ -137,6 +137,16 @@ func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall)
 	log := slog.With("component", "subprocess", "depth", currentDepth+1, "mode", "parallel")
 	log.Info("parallel subprocess started", "tasks", len(reqs), "max_parallel", maxParallel)
 
+	// The semaphore bounds concurrency for THIS call only. Total in-flight
+	// sub-agents across the process can reach N_calls x maxParallel when
+	// MaxConcurrentSessions > 1 (or, hypothetically, several parallel calls in
+	// one turn) — see the config note on max_parallel. This is also the first
+	// place runSubprocess runs concurrently within a single session, so every
+	// shared dependency it touches (o.llm, o.executeCall, o.parser, o.guard,
+	// o.pluginCallObserver) must be safe for concurrent use — the same contract
+	// that already lets MaxConcurrentSessions > 1 run turns in parallel. The one
+	// observer implementation, metrics.Collector, is goroutine-safe (Prometheus
+	// CounterVec ops are).
 	results := make([]parallelTaskResult, len(reqs))
 	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
@@ -175,6 +185,8 @@ func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall)
 		}
 	}
 
+	// Error ignored: parallelTaskResult is a flat struct of strings/ints, which
+	// json.Marshal cannot fail on. structured is "" on the impossible error.
 	structured, _ := json.Marshal(results)
 	return ToolResult{CallID: call.ID, Content: strings.TrimRight(sb.String(), "\n"), StructuredContent: string(structured)}
 }

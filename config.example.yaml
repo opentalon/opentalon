@@ -187,7 +187,9 @@ orchestrator:
   #   max_depth: 2             # max nesting depth (default 2, hard cap 3)
   #   max_iterations: 5        # default agent-loop iterations per child (default 5, hard cap 10)
   #   default_timeout: "60s"   # per-child timeout (Go duration; default "60s")
-  #   max_parallel: 4          # max concurrent children in _subprocess.parallel (default 4, hard cap 8)
+  #   max_parallel: 4          # max concurrent children per _subprocess.parallel CALL (default 4, hard cap 8).
+  #                            # Bounds one call only — with max_concurrent_sessions > 1, total in-flight
+  #                            # sub-agents across the process can reach sessions x max_parallel.
   # Background-trigger escalation: lets a background source start a full
   # assistant turn (reason + act + message the user) against a target session,
   # instead of only running a fixed plugin action. Reached two ways once
