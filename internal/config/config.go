@@ -426,6 +426,7 @@ type SubprocessOrchestratorConfig struct {
 	MaxDepth       int    `yaml:"max_depth,omitempty"`       // max nesting depth; default 2, hard cap 3
 	MaxIterations  int    `yaml:"max_iterations,omitempty"`  // default iterations per child; default 5, hard cap 10
 	DefaultTimeout string `yaml:"default_timeout,omitempty"` // Go duration; default "60s"
+	MaxParallel    int    `yaml:"max_parallel,omitempty"`    // max concurrent children in _subprocess.parallel; default 4, hard cap 8
 }
 
 // EscalationOrchestratorConfig enables the background-trigger turn entrypoint

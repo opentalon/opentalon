@@ -863,6 +863,7 @@ func main() {
 			Enabled:       cfg.Orchestrator.Subprocess.Enabled,
 			MaxDepth:      cfg.Orchestrator.Subprocess.MaxDepth,
 			MaxIterations: cfg.Orchestrator.Subprocess.MaxIterations,
+			MaxParallel:   cfg.Orchestrator.Subprocess.MaxParallel,
 			DefaultTimeout: func() time.Duration {
 				if cfg.Orchestrator.Subprocess.DefaultTimeout != "" {
 					if d, err := time.ParseDuration(cfg.Orchestrator.Subprocess.DefaultTimeout); err == nil {

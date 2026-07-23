@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/profile"
@@ -232,6 +233,59 @@ func TestVCRPipelineConfirmation(t *testing.T) {
 				t.Errorf("pipeline confirmation should have no tool calls, got %d", len(result.ToolCalls))
 			}
 		})
+	}
+}
+
+// TestVCRSubprocessParallel drives the full real-LLM path for the parallel
+// sub-agent primitive (#307): the model is asked two independent questions and
+// steered to answer both in one `_subprocess.parallel` call; each task runs as
+// its own sub-agent and the parent synthesizes the answers.
+//
+// Anthropic-only and recorded with MaxParallel=1 ON PURPOSE. The VCR Player
+// replays interactions by position, ignoring request content, and its pos
+// counter is not mutex-guarded — so genuinely concurrent sub-agent LLM calls
+// would both race the counter and be nondeterministic on replay. Serializing to
+// one at a time keeps recording + replay race-free and deterministic; the
+// concurrency/cap behaviour itself is covered by the barrier-LLM unit test in
+// subprocess_parallel_test.go. Which sub-agent consumes which of the two
+// adjacent recorded interactions is irrelevant: the parent's final synthesis is
+// a fixed recorded response, so result.Response and the tool-call assertion are
+// stable either way. withModel supplies the model for sub-agent Complete calls,
+// which (like the planner) don't inherit the profile model.
+func TestVCRSubprocessParallel(t *testing.T) {
+	llm, save := vcrLLM(t, "testdata/vcr/subprocess_parallel.json")
+	defer save()
+	orch, sessID := setupOrchestratorWithOpts(withModel(llm, recordModelAnthropic), DefaultParser, OrchestratorOpts{
+		Subprocess: SubprocessConfig{
+			Enabled:        true,
+			MaxDepth:       2,
+			MaxIterations:  5,
+			MaxParallel:    1,
+			DefaultTimeout: 30 * time.Second,
+		},
+	})
+
+	prompt := "I have two completely independent questions. Use the _subprocess.parallel tool to answer BOTH of them at once in a single call: (1) What is the capital of France? (2) What is 7 times 6? Then give me both answers."
+	result, err := orch.Run(vcrCtx(), sessID, prompt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response == "" {
+		t.Error("empty response")
+	}
+
+	// Assert in BOTH record and replay: the scenario is only meaningful if the
+	// real model actually drove a _subprocess.parallel fan-out. Failing at
+	// record time signals the prompt/steering needs adjustment before committing
+	// a cassette.
+	sawParallel := false
+	for _, tc := range result.ToolCalls {
+		if tc.Plugin == "_subprocess" && tc.Action == "parallel" {
+			sawParallel = true
+		}
+	}
+	if !sawParallel {
+		t.Errorf("expected a _subprocess.parallel tool call; got tool calls %+v", result.ToolCalls)
 	}
 }
 
