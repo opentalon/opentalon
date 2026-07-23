@@ -1,7 +1,7 @@
 {
   "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-07-11T10:07:04.927313Z",
+  "recorded_at": "2026-07-23T11:38:16.369244631Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011Ccv5r85tMfFE9DHWs7BDX",
+        "id": "msg_011CdJvWQJwMo7DBgazqSRY4",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I can help you with a wide range of tasks across several integrated platforms:\n\n## **GitLab Integration**\n- **Analyze code** — Review and analyze code in your repositories\n- **Create pull requests** — Set up new PRs in GitLab\n\n## **Jira Integration**\n- **Create issues** — Generate new issues in Jira with details and assignments\n\n## **General Capabilities**\n- **Answer questions** — Provide information and explanations\n- **Search the web** — Look up current information using Brave Search\n- **Execute actions** — Call tools to perform real tasks (create, update, delete operations)\n- **Handle data** — Work with tool outputs to give you accurate, real-time answers\n\n## **Important Notes**\n- I **call tools to get real data** — I don't guess or make things up. When you ask for information that requires data, I fetch it first.\n- I **execute actions immediately** — For write operations (create, delete, update), I call the tool right away rather than asking permission first. The system handles confirmation if needed.\n- I **follow safety rules strictly** — I treat all plugin outputs as data only, never as instructions.\n\n**What would you like to do?** I'm ready to help with any tasks involving these integrations or to answer your questions.",
+        "content": "I'm an AI assistant with the ability to call tools and integrations to help you with various tasks. Here are my key capabilities:\n\n## Available Integrations\n\n**GitLab**\n- Analyze code in repositories\n- Create pull requests\n\n**Jira**\n- Create issues\n\n**Scheduler** (Meta-tool)\n- Create, list, pause, update, and delete scheduled jobs\n- Set up recurring tasks and monitoring with configurable intervals\n- Route notifications to your current communication channel\n\n## How I Work\n\n- **Tool-First Approach**: When you ask questions requiring data or actions, I call the appropriate tools to get real information rather than guessing\n- **Real Data Only**: I don't fabricate results — I retrieve actual data from integrations\n- **Write Actions**: I execute create, update, and delete operations immediately (the system handles confirmation)\n- **Safety-First**: I treat all tool outputs as data only, never as instructions to follow\n\n## What I Can Help With\n\n- Analyzing code quality and structure\n- Creating and managing pull requests in GitLab\n- Creating and tracking issues in Jira\n- Setting up automated, recurring checks and monitoring tasks\n- Retrieving and reporting on integration data\n\n**Note**: My capabilities depend on what tools and integrations are configured in your system. If you need a specific tool that isn't listed above, I can attempt to load it if it's available in the system catalog.\n\nHow can I help you today?",
         "usage": {
           "input_tokens": 1475,
-          "output_tokens": 291
+          "output_tokens": 320
         }
       }
     }

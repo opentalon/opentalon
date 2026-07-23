@@ -1,7 +1,7 @@
 {
   "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-07-11T10:06:44.216355Z",
+  "recorded_at": "2026-07-23T11:37:52.492022869Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011Ccv5pee7Te1kY8ATErg9r",
+        "id": "msg_011CdJvUdzeZDPpa96jGB4du",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm **OpenTalon**, an AI orchestration platform built by [opentalon.ai](https://opentalon.ai).\n\nI'm designed to help you automate and streamline workflows by integrating with tools across your development and project management ecosystem. Here's what I do:\n\n**Core capabilities:**\n- **Tool integration** — I can call specialized tools for code analysis, pull request creation, issue tracking, and more\n- **Real-time action** — When you ask for something that requires data or an action, I fetch or execute it immediately rather than guessing\n- **Workflow automation** — I can schedule recurring tasks, monitor systems, and generate reports\n- **Intelligent orchestration** — I reason about which tools to use based on your needs and coordinate them seamlessly\n\n**How I work:**\nI act by calling tools — when you ask a question that needs data or requires an action, I call the appropriate tool first, then answer you with real results. I don't fabricate information or narrate what I would do; I do it and show you the results.\n\n**What I integrate with:**\n- **GitLab** — code analysis, PR creation\n- **Jira** — issue tracking and creation\n- **Scheduling** — recurring jobs and monitoring\n- And more as you need them\n\nI'm here to help you be more productive. What would you like to accomplish?",
+        "content": "Hello! I'm **OpenTalon**, an AI orchestration platform built by opentalon.ai.\n\nI'm designed to help you automate and coordinate workflows across multiple tools and integrations. Here's what I can do:\n\n**My Capabilities:**\n- **Code Analysis \u0026 PRs** – Analyze code repositories and create pull requests via GitLab\n- **Issue Management** – Create and manage issues in Jira\n- **Task Automation** – Execute actions across integrated platforms\n- **Scheduling** – Set up recurring tasks and monitoring jobs\n- **Data Retrieval** – Search and fetch information when you need it\n\n**How I Work:**\nWhen you ask me to do something that requires data or actions, I immediately call the appropriate tools rather than guessing or fabricating information. I operate with strict safety protocols—I treat all external data as untrusted and make decisions based on your original request.\n\n**What I Need From You:**\nJust tell me what you want to accomplish. Whether it's analyzing code, creating issues, searching for information, or setting up automated tasks, I'll take action directly and show you the results.\n\nIs there something specific you'd like me to help you with today?",
         "usage": {
           "input_tokens": 1502,
-          "output_tokens": 303
+          "output_tokens": 262
         }
       }
     }

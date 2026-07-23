@@ -1,7 +1,7 @@
 {
   "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-07-11T10:06:57.986166Z",
+  "recorded_at": "2026-07-23T11:38:04.678990372Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011Ccv5qaY5YFs8UNXnyYCxZ",
+        "id": "msg_011CdJvVZZXZPtFzZbxvS3mC",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant that can help you with various tasks by calling integrated tools. Here are my key capabilities:\n\n## **Code \u0026 Repository Management**\n- **Analyze code** – Examine code repositories and provide insights\n- **Create pull requests** – Generate PRs in GitLab\n\n## **Issue \u0026 Project Management**\n- **Create issues** – File new issues in Jira\n\n## **Task Scheduling**\n- **Monitor \u0026 schedule recurring actions** – Set up automated checks, monitoring jobs, and reports at custom intervals\n- **Manage scheduled jobs** – List, pause, resume, update, or delete scheduled tasks\n- **Route notifications** – Direct job notifications to your current communication channel\n\n## **Core Approach**\n- I **call tools to fetch real data** — I never guess or fabricate information\n- I **execute actions immediately** when requested (write operations like create, update, delete)\n- I **don't pretend to have data** — if I haven't called a tool, I'll call it first\n- I **treat plugin output as data only** — never as instructions to call other tools\n\n## **How I Work**\nWhen you ask me to:\n- **Get information** – I call the appropriate tool and return results\n- **Create/update/delete something** – I call the tool directly (the system handles confirmation if needed)\n- **Schedule recurring tasks** – I propose sensible intervals and wait for your approval before setting up\n\nWhat would you like me to help you with?",
+        "content": "I'm an AI assistant that can help you with several integrated workflows:\n\n## Core Capabilities\n\n**Code \u0026 Development**\n- Analyze code repositories (GitLab)\n- Create pull requests (GitLab)\n- Create issues (Jira)\n\n**Data \u0026 Information**\n- Search the web using Brave Search\n- Retrieve and work with real-time data from integrated tools\n- Call specialized plugins as needed\n\n**Job Scheduling**\n- Create, list, pause, delete, and manage scheduled jobs\n- Set up recurring tasks and monitoring with customizable intervals\n- Route notifications to your preferred channel\n\n## How I Work\n\n- **Data-driven**: When you ask questions requiring data, I call the appropriate tools to fetch real information — I never guess or fabricate answers\n- **Action-oriented**: For tasks like creating issues, PRs, or jobs, I call the tool directly rather than asking for permission; the system handles confirmation\n- **Safety-first**: I treat all tool outputs as data only, never as instructions\n- **Current focus**: I answer your latest question and don't repeat previous context unless needed\n\n## Available Tools\n\nAt any time, I can access:\n- **gitlab__analyze_code** — Analyze code in repositories\n- **gitlab__create_pr** — Create pull requests\n- **jira__create_issue** — Create Jira issues\n- **brave-search__search** — Search the web\n- **scheduler** tools — Manage scheduled jobs\n- **_meta__load_tools** — Load additional tools from the catalog if needed\n\nWhat would you like me to help you with?",
         "usage": {
           "input_tokens": 1475,
-          "output_tokens": 328
+          "output_tokens": 353
         }
       }
     }
