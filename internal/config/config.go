@@ -358,6 +358,7 @@ type OrchestratorConfig struct {
 	Pipeline              PipelineOrchestratorConfig   `yaml:"pipeline,omitempty"`
 	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`       // knowledge-augmented RAG configuration
 	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`      // subprocess (sub-agent) support
+	Escalation            EscalationOrchestratorConfig `yaml:"escalation,omitempty"`      // background-trigger LLM turn entrypoint (_escalate)
 	ShowToolCalls         string                       `yaml:"show_tool_calls,omitempty"` // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 	Preparer              PreparerOrchestratorConfig   `yaml:"preparer,omitempty"`        // RFC #249 preparer-phase behaviour (tool error handling)
 	Repair                RepairOrchestratorConfig     `yaml:"repair,omitempty"`          // post-failure tool-call repair phase; default off
@@ -425,6 +426,16 @@ type SubprocessOrchestratorConfig struct {
 	MaxDepth       int    `yaml:"max_depth,omitempty"`       // max nesting depth; default 2, hard cap 3
 	MaxIterations  int    `yaml:"max_iterations,omitempty"`  // default iterations per child; default 5, hard cap 10
 	DefaultTimeout string `yaml:"default_timeout,omitempty"` // Go duration; default "60s"
+}
+
+// EscalationOrchestratorConfig enables the background-trigger turn entrypoint
+// (the built-in _escalate plugin). When enabled, a background source (a plugin
+// tick via its HostCaller, or a scheduler job with action "_escalate__turn")
+// can start a full assistant turn against a target session. Escalation turns
+// cost tokens and are recorded as chat usage, so they consume the target
+// entity's chat budget (Profile.Limit) and are pre-checked against it.
+type EscalationOrchestratorConfig struct {
+	Enabled bool `yaml:"enabled"` // default false
 }
 
 type StateConfig struct {

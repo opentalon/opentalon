@@ -200,6 +200,8 @@ type OrchestratorOpts struct {
 	SyncActionsAction             string                  // optional; action name for sync (e.g. "sync_actions"); requires SyncActionsPlugin
 	Knowledge                     KnowledgeConfig         // optional; knowledge directory ingestion
 	Subprocess                    SubprocessConfig        // optional; subprocess (sub-agent) support
+	Escalation                    EscalationConfig        // optional; background-trigger LLM turn entrypoint (_escalate)
+	EscalationLimitChecker        UsageLimitChecker       // optional; pre-checks a background turn against the entity's token budget
 	OnStreamChunk                 StreamChunkCallback     // optional; when set and LLM supports streaming, final answers are streamed
 	ShowToolCalls                 string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 	InjectionStateStore           InjectionStateStore     // optional; persists known_tools sticky tiers across turns (load_tools promotion)
@@ -312,6 +314,36 @@ func (k *keyedMutex) unlock(key string, e *keyedMutexEntry) {
 	e.mu.Unlock()
 }
 
+// tryLock acquires key without blocking. It returns the entry and true when
+// the lock was taken (the caller must unlock), or nil and false when another
+// goroutine already holds it. Used by the escalation path as an in-flight
+// guard: a second background turn for a session already running one is dropped
+// rather than queued, so a flapping trigger can't stack goroutines.
+func (k *keyedMutex) tryLock(key string) (*keyedMutexEntry, bool) {
+	k.mu.Lock()
+	e, ok := k.entries[key]
+	if !ok {
+		e = &keyedMutexEntry{}
+		k.entries[key] = e
+	}
+	e.refCount++
+	k.mu.Unlock()
+
+	if e.mu.TryLock() {
+		return e, true
+	}
+
+	// Contended: release the refcount reservation we just took so the entry
+	// is still reaped when the current holder unlocks.
+	k.mu.Lock()
+	e.refCount--
+	if e.refCount == 0 {
+		delete(k.entries, key)
+	}
+	k.mu.Unlock()
+	return nil, false
+}
+
 type Orchestrator struct {
 	sessionMuxes *keyedMutex // per-session turn serialization within this pod
 	// sessionLocker extends per-session turn serialization across pods
@@ -371,21 +403,29 @@ type Orchestrator struct {
 	// loadPendingToolCall), which survives restarts and is shared across
 	// pods — so no pod can act on a stale in-memory copy after another pod
 	// already resolved it.
-	pendingPipelines    map[string]pendingPipeline
-	pipelineConfig      pipeline.PipelineConfig
-	confirmationPlugin  string                  // optional; plugin for confirmation strategy
-	confirmationAction  string                  // optional; action name for confirmation check
-	contextWindow       int                     // model context window in tokens; 0 = no trimming
-	maxOutputTokens     int                     // reserved output budget (max_tokens) subtracted from the window when trimming; 0 = flat 10% reserve
-	groupPluginLookup   GroupPluginLookup       // optional; nil = no group-based filtering
-	usageRecorder       UsageRecorder           // optional; nil = no usage tracking
-	pluginCallObserver  PluginCallObserver      // optional; nil = no plugin call observation
-	eventSink           emit.Sink               // structured session event sink; always non-nil (NoOpSink default)
-	snapshotStore       PromptSnapshotUpserter  // optional; nil = turn_start hashes are emitted but content is not persisted
-	syncActionsPlugin   string                  // optional; plugin name for action sync
-	syncActionsAction   string                  // optional; action name for action sync
-	knowledge           KnowledgeConfig         // optional; knowledge directory ingestion
-	subprocessConfig    SubprocessConfig        // optional; subprocess (sub-agent) support
+	pendingPipelines   map[string]pendingPipeline
+	pipelineConfig     pipeline.PipelineConfig
+	confirmationPlugin string                 // optional; plugin for confirmation strategy
+	confirmationAction string                 // optional; action name for confirmation check
+	contextWindow      int                    // model context window in tokens; 0 = no trimming
+	maxOutputTokens    int                    // reserved output budget (max_tokens) subtracted from the window when trimming; 0 = flat 10% reserve
+	groupPluginLookup  GroupPluginLookup      // optional; nil = no group-based filtering
+	usageRecorder      UsageRecorder          // optional; nil = no usage tracking
+	pluginCallObserver PluginCallObserver     // optional; nil = no plugin call observation
+	eventSink          emit.Sink              // structured session event sink; always non-nil (NoOpSink default)
+	snapshotStore      PromptSnapshotUpserter // optional; nil = turn_start hashes are emitted but content is not persisted
+	syncActionsPlugin  string                 // optional; plugin name for action sync
+	syncActionsAction  string                 // optional; action name for action sync
+	knowledge          KnowledgeConfig        // optional; knowledge directory ingestion
+	subprocessConfig   SubprocessConfig       // optional; subprocess (sub-agent) support
+	escalationConfig   EscalationConfig       // optional; background-trigger LLM turn entrypoint (_escalate)
+	escalationLimit    UsageLimitChecker      // optional; pre-checks a background turn against the entity's token budget
+	// escalationMuxes is a per-session in-flight guard for background
+	// escalation turns: tryLock drops a second escalation for a session
+	// already running one, so a flapping deterministic trigger can't stack
+	// goroutines. Disjoint domain from sessionMuxes/titleMuxes — only the
+	// keyedMutex mechanics are shared.
+	escalationMuxes     *keyedMutex
 	onStreamChunk       StreamChunkCallback     // optional; when set, final answers stream to caller
 	showToolCalls       string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 	injectionStateStore InjectionStateStore     // optional; nil = load_tools sticky promotions don't persist across turns
@@ -692,6 +732,8 @@ func NewWithRules(
 		toolErrorTracker:        newToolErrorTracker(),
 		channelSender:           opts.ChannelSender,
 		titleMuxes:              newKeyedMutex(),
+		escalationLimit:         opts.EscalationLimitChecker,
+		escalationMuxes:         newKeyedMutex(),
 		langDetector:            buildReplyLanguageDetector(),
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
@@ -721,6 +763,30 @@ func NewWithRules(
 			}},
 		}
 		_ = o.registry.Register(subCap, &subprocessExecutor{orch: o})
+	}
+
+	// Register the built-in _escalate plugin when enabled. It is the
+	// sanctioned entrypoint for starting an LLM turn from a background
+	// trigger (a watcher firing, a scheduled job) — see escalation.go. The
+	// action is UserOnly so it is hidden from the LLM tool catalog and
+	// blocked from LLM-sourced calls; only background sources (a plugin's
+	// HostCaller.RunAction callback, or the scheduler) reach it.
+	o.escalationConfig = opts.Escalation
+	if opts.Escalation.Enabled {
+		escCap := PluginCapability{
+			Name:        escalatePluginName,
+			Description: "Start an assistant reasoning turn from a background trigger, addressed to a target session",
+			Actions: []Action{{
+				Name:        escalateTurnAction,
+				Description: "Run a full assistant turn (reason + act + message the user) for a target session, seeded with a synthesized prompt. Asynchronous: the reply is pushed to the session's channel.",
+				UserOnly:    true,
+				Parameters: []Parameter{
+					{Name: "session_id", Description: "Target session to run the turn against (the packed session key); defaults to the caller's session when omitted", Required: false},
+					{Name: "prompt", Description: "The synthesized user message that seeds the turn (e.g. what tripped and what to decide)", Required: true},
+				},
+			}},
+		}
+		_ = o.registry.Register(escCap, &escalationExecutor{orch: o})
 	}
 
 	return o
