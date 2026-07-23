@@ -177,6 +177,17 @@ orchestrator:
   #   timeout: "10s"         # per corrector call (default "10s")
   #   # prompt: |            # optional override of the built-in corrector instructions;
   #   #   ...                # must keep the {"repaired_args": ...} / {"abort": ...} JSON contract
+  # Subprocess (sub-agent) forking: exposes the built-in `_subprocess` tool so
+  # the model can fork focused sub-agents. `_subprocess.run` handles one
+  # sub-task; `_subprocess.parallel` runs several INDEPENDENT tasks concurrently
+  # (e.g. "check these N items at once") and returns their answers together, in
+  # task order. Bounded by depth/iteration/timeout per child plus a concurrency cap.
+  # subprocess:
+  #   enabled: true            # default false
+  #   max_depth: 2             # max nesting depth (default 2, hard cap 3)
+  #   max_iterations: 5        # default agent-loop iterations per child (default 5, hard cap 10)
+  #   default_timeout: "60s"   # per-child timeout (Go duration; default "60s")
+  #   max_parallel: 4          # max concurrent children in _subprocess.parallel (default 4, hard cap 8)
   # Background-trigger escalation: lets a background source start a full
   # assistant turn (reason + act + message the user) against a target session,
   # instead of only running a fixed plugin action. Reached two ways once

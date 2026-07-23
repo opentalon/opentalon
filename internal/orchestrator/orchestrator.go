@@ -752,15 +752,24 @@ func NewWithRules(
 		subCap := PluginCapability{
 			Name:        "_subprocess",
 			Description: "Fork a focused sub-agent process to handle a sub-task",
-			Actions: []Action{{
-				Name:        "run",
-				Description: "Fork a subprocess that runs its own agent loop. Use for sub-tasks like research, multi-step tool usage, or focused questions that benefit from independent reasoning.",
-				Parameters: []Parameter{
-					{Name: "task", Description: "Clear description of what the subprocess should accomplish", Required: true},
-					{Name: "tools", Description: "Comma-separated plugin__action allowlist (empty = all available tools)", Required: false},
-					{Name: "max_iterations", Description: "Max agent loop iterations 1-10 (default 5)", Required: false},
+			Actions: []Action{
+				{
+					Name:        "run",
+					Description: "Fork a subprocess that runs its own agent loop. Use for sub-tasks like research, multi-step tool usage, or focused questions that benefit from independent reasoning.",
+					Parameters: []Parameter{
+						{Name: "task", Description: "Clear description of what the subprocess should accomplish", Required: true},
+						{Name: "tools", Description: "Comma-separated plugin__action allowlist (empty = all available tools)", Required: false},
+						{Name: "max_iterations", Description: "Max agent loop iterations 1-10 (default 5)", Required: false},
+					},
 				},
-			}},
+				{
+					Name:        "parallel",
+					Description: "Run several INDEPENDENT sub-agent tasks concurrently and get all their answers back together. Use this instead of calling `run` one at a time whenever you have multiple self-contained investigations that don't depend on each other (e.g. check N items/systems/accounts at once) — it is much faster. Results come back in the same order as the tasks.",
+					Parameters: []Parameter{
+						{Name: "tasks", Description: `JSON array of task objects, e.g. [{"task":"check lead time for SKU-1"},{"task":"list open POs for SKU-1","tools":"erp__list_orders","max_iterations":5}]. Each object needs a "task"; "tools" (comma-separated allowlist) and "max_iterations" are optional.`, Required: true},
+					},
+				},
+			},
 		}
 		_ = o.registry.Register(subCap, &subprocessExecutor{orch: o})
 	}

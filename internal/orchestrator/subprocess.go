@@ -2,10 +2,12 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opentalon/opentalon/internal/prompts"
@@ -18,7 +20,17 @@ type SubprocessConfig struct {
 	MaxDepth       int           // max nesting depth (default 2, hard cap 3)
 	MaxIterations  int           // default iterations per child (default 5, hard cap 10)
 	DefaultTimeout time.Duration // per-subprocess timeout (default 60s)
+	MaxParallel    int           // max concurrent children in _subprocess.parallel (default 4, hard cap 8)
 }
+
+// Bounds for _subprocess.parallel. defaultMaxParallel/maxMaxParallel clamp the
+// configured concurrency; maxParallelTasks caps how many tasks one call may
+// fan out (the LLM is told to split larger batches) to bound worst-case cost.
+const (
+	defaultMaxParallel = 4
+	maxMaxParallel     = 8
+	maxParallelTasks   = 16
+)
 
 // subprocessRequest is parsed from the LLM's _subprocess.run tool call args.
 type subprocessRequest struct {
@@ -45,6 +57,10 @@ type subprocessExecutor struct {
 }
 
 func (s *subprocessExecutor) Execute(ctx context.Context, call ToolCall) ToolResult {
+	if call.Action == "parallel" {
+		return s.executeParallel(ctx, call)
+	}
+
 	req, err := parseSubprocessRequest(call.Args)
 	if err != nil {
 		return ToolResult{CallID: call.ID, Error: err.Error()}
@@ -71,6 +87,96 @@ func (s *subprocessExecutor) Execute(ctx context.Context, call ToolCall) ToolRes
 	}
 
 	return ToolResult{CallID: call.ID, Content: result.Response}
+}
+
+// parallelTaskResult is one child's outcome, kept for deterministic, in-order
+// joining and for the structured payload.
+type parallelTaskResult struct {
+	Task       string `json:"task"`
+	Response   string `json:"response,omitempty"`
+	Error      string `json:"error,omitempty"`
+	Iterations int    `json:"iterations,omitempty"`
+}
+
+// executeParallel fans out several independent sub-agent tasks concurrently and
+// joins their answers in task order. It reuses runSubprocess per task, so every
+// per-child guardrail (iteration cap, timeout, no-recursion) is inherited; the
+// only new bound is MaxParallel (concurrency) plus a total-tasks cap.
+func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall) ToolResult {
+	reqs, err := parseParallelRequest(call.Args)
+	if err != nil {
+		return ToolResult{CallID: call.ID, Error: err.Error()}
+	}
+
+	// Depth clamp mirrors the run path: a parallel call already at the depth
+	// cap spawns nothing. Children run one level deeper; because _subprocess is
+	// excluded from sub-agent prompts, they cannot recurse into more parallel/run.
+	currentDepth := subprocessDepth(ctx)
+	maxDepth := s.orch.subprocessConfig.MaxDepth
+	if maxDepth <= 0 {
+		maxDepth = 2
+	}
+	if maxDepth > 3 {
+		maxDepth = 3
+	}
+	if currentDepth >= maxDepth {
+		return ToolResult{
+			CallID: call.ID,
+			Error:  fmt.Sprintf("subprocess depth limit reached (depth %d of %d)", currentDepth+1, maxDepth),
+		}
+	}
+
+	maxParallel := s.orch.subprocessConfig.MaxParallel
+	if maxParallel <= 0 {
+		maxParallel = defaultMaxParallel
+	}
+	if maxParallel > maxMaxParallel {
+		maxParallel = maxMaxParallel
+	}
+
+	log := slog.With("component", "subprocess", "depth", currentDepth+1, "mode", "parallel")
+	log.Info("parallel subprocess started", "tasks", len(reqs), "max_parallel", maxParallel)
+
+	results := make([]parallelTaskResult, len(reqs))
+	sem := make(chan struct{}, maxParallel)
+	var wg sync.WaitGroup
+	for i, req := range reqs {
+		wg.Add(1)
+		go func(i int, req subprocessRequest) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			results[i].Task = req.Task
+			res, err := s.orch.runSubprocess(ctx, req, currentDepth+1)
+			if err != nil {
+				results[i].Error = fmt.Sprintf("subprocess failed: %v", err)
+				return
+			}
+			results[i].Response = res.Response
+			results[i].Iterations = res.Iterations
+		}(i, req)
+	}
+	wg.Wait()
+
+	log.Info("parallel subprocess completed", "tasks", len(reqs))
+
+	var sb strings.Builder
+	for i, r := range results {
+		fmt.Fprintf(&sb, "## Task %d: %s\n", i+1, r.Task)
+		if r.Error != "" {
+			fmt.Fprintf(&sb, "error: %s\n", r.Error)
+		} else {
+			sb.WriteString(r.Response)
+			sb.WriteString("\n")
+		}
+		if i < len(results)-1 {
+			sb.WriteString("\n")
+		}
+	}
+
+	structured, _ := json.Marshal(results)
+	return ToolResult{CallID: call.ID, Content: strings.TrimRight(sb.String(), "\n"), StructuredContent: string(structured)}
 }
 
 // subprocessResult is the outcome of a subprocess execution.
@@ -282,6 +388,49 @@ func parseSubprocessRequest(args map[string]string) (subprocessRequest, error) {
 	}
 
 	return req, nil
+}
+
+// parseParallelRequest parses the _subprocess.parallel `tasks` arg — a JSON
+// array of {task, tools?, max_iterations?} — into per-child requests. Each
+// entry reuses the same fields as _subprocess.run. Rejects empty batches,
+// entries without a task, and batches over the total-tasks cap (the LLM is
+// told to split larger ones).
+func parseParallelRequest(args map[string]string) ([]subprocessRequest, error) {
+	raw := strings.TrimSpace(args["tasks"])
+	if raw == "" {
+		return nil, fmt.Errorf("_subprocess.parallel requires a 'tasks' argument (a JSON array of task objects)")
+	}
+
+	var items []struct {
+		Task          string `json:"task"`
+		Tools         string `json:"tools"`
+		MaxIterations int    `json:"max_iterations"`
+	}
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return nil, fmt.Errorf("invalid 'tasks' JSON: %v (expected an array like [{\"task\":\"...\"}])", err)
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("'tasks' must contain at least one task")
+	}
+	if len(items) > maxParallelTasks {
+		return nil, fmt.Errorf("too many parallel tasks: %d (max %d); split into smaller batches", len(items), maxParallelTasks)
+	}
+
+	reqs := make([]subprocessRequest, 0, len(items))
+	for i, it := range items {
+		task := strings.TrimSpace(it.Task)
+		if task == "" {
+			return nil, fmt.Errorf("task %d is missing a 'task' field", i+1)
+		}
+		req := subprocessRequest{Task: task, MaxIterations: it.MaxIterations}
+		for _, t := range strings.Split(it.Tools, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				req.AllowedTools = append(req.AllowedTools, t)
+			}
+		}
+		reqs = append(reqs, req)
+	}
+	return reqs, nil
 }
 
 // isSubprocessToolAllowed checks whether a tool call is permitted in a subprocess.
