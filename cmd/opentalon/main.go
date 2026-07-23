@@ -795,6 +795,15 @@ func main() {
 		}
 	}
 
+	// Escalation reuses the usage store to pre-check a background turn against
+	// the entity's chat budget. Assign through a typed local so a nil
+	// *store.UsageStore does not become a non-nil interface (which would defeat
+	// the nil guard in the escalation path and panic on use).
+	var escalationLimit orchestrator.UsageLimitChecker
+	if usageStore != nil {
+		escalationLimit = usageStore
+	}
+
 	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, orchestrator.OrchestratorOpts{
 		CustomRules:                   cfg.Orchestrator.Rules,
 		ContentPreparers:              contentPreparers,
@@ -863,7 +872,11 @@ func main() {
 				return 60 * time.Second
 			}(),
 		},
-		SessionLocker: sessionLocker,
+		Escalation: orchestrator.EscalationConfig{
+			Enabled: cfg.Orchestrator.Escalation.Enabled,
+		},
+		EscalationLimitChecker: escalationLimit,
+		SessionLocker:          sessionLocker,
 	})
 
 	// Wire on-clear actions now that the orchestrator is available.
