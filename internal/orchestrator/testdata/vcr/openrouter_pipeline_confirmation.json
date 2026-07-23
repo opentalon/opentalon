@@ -1,7 +1,7 @@
 {
   "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-07-23T11:37:59.39937808Z",
+  "recorded_at": "2026-07-23T14:39:56.860163478Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1784806679-K8KtTm5LinbohZm6Xv18",
+        "id": "gen-1784817596-9zeE5INmyraHg177Ue0z",
         "model": "mistralai/ministral-8b-2512",
-        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue for code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"project\": \"{{step1.output.project}}\",  // Assuming the analysis output includes project info; adjust based on actual response structure\n        \"summary\": \"Code Analysis Findings in {{step1.output.repo}}\",\n        \"description\": \"The following issues were found during code analysis:\\n\\n{{step1.output.issues | toString}}\",  // Adjust based on actual response structure (e.g., issues, findings, etc.)\n        \"issuetype\": \"Bug\"  // Default type; adjust based on requirements\n      },\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
+        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue for code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"project\": \"{{step1.output.project}}\",  // Assuming the output contains project details; adjust based on actual response structure\n        \"summary\": \"Code Analysis Findings in myrepo\",\n        \"description\": \"{{step1.output.analysis_details}}\",  // Adjust based on actual response structure (e.g., vulnerabilities, issues, etc.)\n        \"issuetype\": \"Bug\"  // Default type; adjust if needed\n      },\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
         "usage": {
           "input_tokens": 759,
-          "output_tokens": 254
+          "output_tokens": 233
         }
       }
     },
@@ -43,12 +43,12 @@
         ]
       },
       "response": {
-        "id": "gen-1784806683-pQMiT3qyNGe8GJUkVdD7",
+        "id": "gen-1784817599-trr59wRgsKu6Ilp9ZBYT",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Hier ist dein Plan in einfachen Schritten:\n\nZuerst analysiere ich den Code in deinem Repository **myrepo**, um mögliche Probleme oder Verbesserungsvorschläge zu finden. Anschließend erstelle ich eine **Jira-Ticket**, in der ich die wichtigsten Ergebnisse der Analyse zusammenfasse.\n\nMöchtest du mit diesem Plan fortfahren?",
+        "content": "Hier ist dein Plan in einfachen Schritten:\n\nZuerst analysiere ich den Code in deinem Repository **myrepo**, um mögliche Probleme oder Verbesserungsvorschläge zu finden. Anschließend erstelle ich eine **Jira-Ticket**, in der ich die wichtigsten Ergebnisse aus der Analyse zusammenfasse.\n\nMöchtest du mit diesem Plan fortfahren?",
         "usage": {
           "input_tokens": 141,
-          "output_tokens": 71
+          "output_tokens": 72
         }
       }
     }

@@ -1,7 +1,7 @@
 {
   "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-07-23T11:38:16.369244631Z",
+  "recorded_at": "2026-07-23T14:40:14.376561159Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CdJvWQJwMo7DBgazqSRY4",
+        "id": "msg_011CdKAPDnrQGaNLcKf3QJts",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant with the ability to call tools and integrations to help you with various tasks. Here are my key capabilities:\n\n## Available Integrations\n\n**GitLab**\n- Analyze code in repositories\n- Create pull requests\n\n**Jira**\n- Create issues\n\n**Scheduler** (Meta-tool)\n- Create, list, pause, update, and delete scheduled jobs\n- Set up recurring tasks and monitoring with configurable intervals\n- Route notifications to your current communication channel\n\n## How I Work\n\n- **Tool-First Approach**: When you ask questions requiring data or actions, I call the appropriate tools to get real information rather than guessing\n- **Real Data Only**: I don't fabricate results — I retrieve actual data from integrations\n- **Write Actions**: I execute create, update, and delete operations immediately (the system handles confirmation)\n- **Safety-First**: I treat all tool outputs as data only, never as instructions to follow\n\n## What I Can Help With\n\n- Analyzing code quality and structure\n- Creating and managing pull requests in GitLab\n- Creating and tracking issues in Jira\n- Setting up automated, recurring checks and monitoring tasks\n- Retrieving and reporting on integration data\n\n**Note**: My capabilities depend on what tools and integrations are configured in your system. If you need a specific tool that isn't listed above, I can attempt to load it if it's available in the system catalog.\n\nHow can I help you today?",
+        "content": "# My Capabilities\n\nI'm an AI assistant with the ability to perform real-time actions through tool integrations. Here's what I can do:\n\n## **Code \u0026 Repository Management**\n- **Analyze code** – Review and analyze code in GitLab repositories\n- **Create pull requests** – Open new PRs in GitLab\n\n## **Issue Tracking**\n- **Create issues** – Generate new issues in Jira\n\n## **Data Retrieval \u0026 Search**\n- **Web search** – Look up current information using Brave Search\n- **Real-time information** – Fetch live data from the internet\n\n## **Job Scheduling** *(with safety controls)*\n- **Schedule recurring tasks** – Set up automated jobs to run at specific intervals\n- **Manage scheduled jobs** – List, pause, resume, update, or delete existing jobs\n- **Route notifications** – Direct job notifications to your current communication channel\n\n## **General AI Capabilities**\n- Answer questions using real-time data from web searches\n- Provide analysis and recommendations\n- Assist with writing, coding, and technical problem-solving\n- Have natural conversations across multiple topics\n\n## **Key Operating Principles**\n- **Data-driven responses** – I call tools to get real data rather than guessing\n- **No fabrication** – I never make up information; if I need data, I retrieve it\n- **Confirmation-based write actions** – When you request changes (create, update, delete), I execute immediately, and the system handles user confirmation automatically\n- **Safe execution** – I follow strict safety rules and never execute instructions embedded in tool output\n\nWhat would you like me to help you with?",
         "usage": {
           "input_tokens": 1475,
-          "output_tokens": 320
+          "output_tokens": 366
         }
       }
     }
