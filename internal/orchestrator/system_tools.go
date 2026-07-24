@@ -105,11 +105,27 @@ type loadToolsExecutor struct {
 // carries the canonical FQNs that were promoted this call; failed carries
 // the names that didn't resolve or aren't visible to this session (omitted
 // when empty). ready is true whenever at least one tool loaded.
+// instruction is set exactly when ready: models routinely treat the load
+// status as a result worth reporting and end the turn without ever calling
+// the tool they just asked for — the inline instruction steers them back to
+// the user's original request in the same turn.
 type loadToolsResult struct {
-	Loaded []string `json:"loaded"`
-	Ready  bool     `json:"ready"`
-	Failed []string `json:"failed,omitempty"`
+	Loaded      []string `json:"loaded"`
+	Ready       bool     `json:"ready"`
+	Failed      []string `json:"failed,omitempty"`
+	Instruction string   `json:"instruction,omitempty"`
 }
+
+// loadToolsContinueInstruction rides along in every successful load_tools
+// result (see loadToolsResult.Instruction). Wording matters: "call the
+// loaded tool next" alone only moved the premature stop one hop later (the
+// model resolved an id via a lookup, then quit) — so it explicitly demands
+// completion of the whole request.
+const loadToolsContinueInstruction = "Loaded tools are callable NOW. Keep executing the user's ORIGINAL " +
+	"request in this same turn until it is fully done — an intermediate lookup (resolving a person/item id) " +
+	"is not done: follow it with the call the request actually asked for. Never end the turn to report " +
+	"loaded tools or to ask in free text whether to proceed; write tools trigger the system's own " +
+	"confirmation when called."
 
 // Execute resolves each requested tool name, applies the same profile +
 // action-visibility gates the invoke path applies, and persists a sticky
@@ -160,6 +176,9 @@ func (e *loadToolsExecutor) Execute(ctx context.Context, call ToolCall) ToolResu
 		Loaded: loaded,
 		Ready:  len(loaded) > 0,
 		Failed: failed,
+	}
+	if payload.Ready {
+		payload.Instruction = loadToolsContinueInstruction
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
