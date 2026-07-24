@@ -132,6 +132,12 @@ func TestLoadTools_ReturnsStatusJSON_NotDescription(t *testing.T) {
 	if len(got.Failed) != 0 {
 		t.Errorf("failed = %v, want empty", got.Failed)
 	}
+	// A successful load carries the continue-instruction: models otherwise
+	// treat the status as a reportable result and end the turn without
+	// calling the tool they just loaded.
+	if got.Instruction != loadToolsContinueInstruction {
+		t.Errorf("instruction = %q, want the continue instruction on a ready result", got.Instruction)
+	}
 	// The full description / parameters must NOT be in the result.
 	for _, leak := range []string{"Tool one detailed description.", "first arg", "Parameters"} {
 		if strings.Contains(res.Content, leak) {
@@ -189,6 +195,10 @@ func TestLoadTools_AllFailedReportsNotReady(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Failed, []string{"missing__a", "bad__b"}) {
 		t.Errorf("failed = %v, want [missing__a bad__b]", got.Failed)
+	}
+	// No continue-instruction when nothing loaded — there is nothing to call.
+	if got.Instruction != "" {
+		t.Errorf("instruction = %q, want empty when nothing loaded", got.Instruction)
 	}
 }
 
