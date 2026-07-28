@@ -2154,6 +2154,19 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var transientMessages []provider.Message
 	var lastCallSig string // "plugin__action\x00arg1=val1\x00..." for loop detection
 	var repeatCount int
+	// Phantom-completion guard state (consumed in the calls==nil branch). The
+	// model sometimes loads a write tool, resolves every parameter through
+	// lookups — and then NARRATES the mutation instead of calling it ("The
+	// item has been assigned to John Doe" with no assign-item call; seen in
+	// production and reproduced 3/10 in evals). Prompt-side rules provably do
+	// not stop it: three separate instructions said "never claim an action you
+	// did not execute", all three were in context, the phantom happened anyway.
+	// So the situation is detected structurally instead of textually: a write
+	// tool was loaded this turn, no write was ever attempted, and the model
+	// wants to end the turn in plain text.
+	var writeToolLoaded bool // load_tools promoted a non-read-only action this turn
+	var writeToolCalled bool // the model attempted any non-read-only call this turn
+	var actionNudged bool    // the one-shot phantom nudge was already spent
 	agentRound := 0
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		agentRound = i + 1
@@ -2374,6 +2387,30 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				continue
 			}
 
+			// Phantom-completion guard. The model loaded a write tool this
+			// turn, never attempted ANY write, and is ending the turn in
+			// plain text — the exact posture in which it narrates mutations
+			// that never happened ("The item has been assigned…"). One nudge,
+			// once per turn: perform the action, correct the claim, or ask
+			// the user — all three resolve the situation; an honest
+			// clarifying question is simply repeated and costs one round.
+			// This cannot fire on read-only traffic (no write tool gets
+			// loaded there) and cannot loop (actionNudged latches).
+			if writeToolLoaded && !writeToolCalled && !actionNudged {
+				actionNudged = true
+				log.Warn("write tool loaded but never called before final answer, nudging", "round", i+1)
+				emit.EmitRetry(ctx, o.eventSink, emit.RetryArgs{
+					Phase:     "llm_call",
+					Attempt:   1,
+					LastError: "write tool loaded but never called before final answer",
+				})
+				transientMessages = []provider.Message{
+					{Role: provider.RoleAssistant, Content: resp.Content},
+					{Role: provider.RoleUser, Content: phantomCompletionNudge},
+				}
+				continue
+			}
+
 			stripped := StripInternalBlocks(resp.Content)
 			if stripped == "" {
 				// Empty response — either the LLM returned nothing, or its output
@@ -2549,6 +2586,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		for i := range calls {
 			calls[i].FromLLM = true
 
+			// Phantom-completion guard: any attempt at a resolvable write
+			// action counts as "the model is acting, not narrating" — even
+			// one that goes on to fail or raise a confirmation. Only calls
+			// that resolve count; a hallucinated tool name is not an attempt.
+			if calls[i].Plugin != metaPluginName && !writeToolCalled {
+				if a := o.resolveAction(calls[i].Plugin, calls[i].Action); a != nil && !a.ReadOnly {
+					writeToolCalled = true
+				}
+			}
+
 			// Tool-level confirmation: if the confirmation plugin says this
 			// action needs confirmation, pause the agent loop and return a
 			// confirmation prompt to the user. The pending call is stored
@@ -2622,6 +2669,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				cachedTools = o.buildToolDefinitions(ctx)
 				log.Debug("cachedTools refreshed after _meta__load_tools",
 					"tools_count", len(cachedTools))
+			}
+			// Phantom-completion guard: remember when this load promoted a
+			// write tool. Parsed from the executor's result payload — the
+			// `loaded` array holds only the names that actually resolved,
+			// unlike the request args, which may carry failed names. Not
+			// gated on nativeMode: text-mode models phantom just the same.
+			if !writeToolLoaded && toolResult.Error == "" &&
+				call.Plugin == metaPluginName && call.Action == metaLoadTools {
+				writeToolLoaded = o.loadedAnyWriteTool(toolResult.Content)
 			}
 			// RFC #249 Phase 4 D5: update the consecutive-error counters,
 			// inject the "Tool X failed N times" nudge into the next LLM
