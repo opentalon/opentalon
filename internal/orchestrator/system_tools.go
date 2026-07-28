@@ -127,6 +127,39 @@ const loadToolsContinueInstruction = "Loaded tools are callable NOW. Keep execut
 	"loaded tools or to ask in free text whether to proceed; write tools trigger the system's own " +
 	"confirmation when called."
 
+// phantomCompletionNudge is injected once per turn when the model loaded a
+// write tool, never attempted any write, and tried to end the turn in plain
+// text (see the guard in Run's calls==nil branch). Three legitimate ways out,
+// one illegitimate: reporting the action as done. The last sentence keeps an
+// honest clarifying question cheap — the model just repeats it.
+const phantomCompletionNudge = "[system] Re-check your answer before it is sent: you prepared a write " +
+	"action this turn but no write was executed — nothing has been created, changed, assigned or deleted. " +
+	"If your answer reports such an action as completed, that report is false. Either perform the action " +
+	"now (the system will ask the user to confirm it), or correct your answer to say what is still open. " +
+	"If something is unclear or missing, ask the user. If your answer was only a question or contained no " +
+	"completed-action claim, send it again unchanged."
+
+// loadedAnyWriteTool reports whether a successful load_tools result payload
+// promoted at least one non-read-only action. Feeds the phantom-completion
+// guard: only turns that actively fetched a write tool are ever nudged, so
+// plain read/answer turns can never pay the extra round.
+func (o *Orchestrator) loadedAnyWriteTool(resultPayload string) bool {
+	var res loadToolsResult
+	if err := json.Unmarshal([]byte(resultPayload), &res); err != nil {
+		return false
+	}
+	for _, fqn := range res.Loaded {
+		plugin, action, err := parseToolName(fqn)
+		if err != nil {
+			continue
+		}
+		if a := o.resolveAction(plugin, action); a != nil && !a.ReadOnly {
+			return true
+		}
+	}
+	return false
+}
+
 // Execute resolves each requested tool name, applies the same profile +
 // action-visibility gates the invoke path applies, and persists a sticky
 // promotion for the ones that pass. It returns a STATUS JSON string
