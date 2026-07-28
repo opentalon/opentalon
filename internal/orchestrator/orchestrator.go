@@ -2387,30 +2387,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				continue
 			}
 
-			// Phantom-completion guard. The model loaded a write tool this
-			// turn, never attempted ANY write, and is ending the turn in
-			// plain text — the exact posture in which it narrates mutations
-			// that never happened ("The item has been assigned…"). One nudge,
-			// once per turn: perform the action, correct the claim, or ask
-			// the user — all three resolve the situation; an honest
-			// clarifying question is simply repeated and costs one round.
-			// This cannot fire on read-only traffic (no write tool gets
-			// loaded there) and cannot loop (actionNudged latches).
-			if writeToolLoaded && !writeToolCalled && !actionNudged {
-				actionNudged = true
-				log.Warn("write tool loaded but never called before final answer, nudging", "round", i+1)
-				emit.EmitRetry(ctx, o.eventSink, emit.RetryArgs{
-					Phase:     "llm_call",
-					Attempt:   1,
-					LastError: "write tool loaded but never called before final answer",
-				})
-				transientMessages = []provider.Message{
-					{Role: provider.RoleAssistant, Content: resp.Content},
-					{Role: provider.RoleUser, Content: phantomCompletionNudge},
-				}
-				continue
-			}
-
 			stripped := StripInternalBlocks(resp.Content)
 			if stripped == "" {
 				// Empty response — either the LLM returned nothing, or its output
@@ -2450,6 +2426,35 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				}
 				continue
 			}
+
+			// Phantom-completion guard. The model loaded a write tool this
+			// turn, never attempted ANY write, and is ending the turn in
+			// plain text — the exact posture in which it narrates mutations
+			// that never happened ("The item has been assigned…"). One nudge,
+			// once per turn: perform the action, correct the claim, or ask
+			// the user — all three resolve the situation; an honest
+			// clarifying question is simply repeated and costs one round.
+			// It cannot fire on read-only traffic (no write tool gets loaded
+			// there) and cannot loop (actionNudged latches). Placed AFTER the
+			// empty-response block on purpose: a stripped-empty answer takes
+			// the empty-retry path with its backoff, so the nudge never wraps
+			// an empty assistant message (some providers reject those). Down
+			// here stripped is guaranteed non-empty, hence so is resp.Content.
+			if writeToolLoaded && !writeToolCalled && !actionNudged {
+				actionNudged = true
+				log.Warn("write tool loaded but never called before final answer, nudging", "round", i+1)
+				emit.EmitRetry(ctx, o.eventSink, emit.RetryArgs{
+					Phase:     "llm_call",
+					Attempt:   1,
+					LastError: "write tool loaded but never called before final answer",
+				})
+				transientMessages = []provider.Message{
+					{Role: provider.RoleAssistant, Content: resp.Content},
+					{Role: provider.RoleUser, Content: phantomCompletionNudge},
+				}
+				continue
+			}
+
 			// Planner-informed retry: the planner expected tool calls but the
 			// LLM returned plain text. Retry up to 2 times with a nudge.
 			// This is language-independent — no regex needed.
@@ -2590,6 +2595,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// action counts as "the model is acting, not narrating" — even
 			// one that goes on to fail or raise a confirmation. Only calls
 			// that resolve count; a hallucinated tool name is not an attempt.
+			// Known tradeoff: an attempt refused by the native load gate
+			// ("tool not loaded") also disarms, so a model that then narrates
+			// instead of load-and-retry slips through. Deliberate — counting
+			// refused attempts as narration would instead tax every honest
+			// load-and-retry with a needless nudge round.
 			if calls[i].Plugin != metaPluginName && !writeToolCalled {
 				if a := o.resolveAction(calls[i].Plugin, calls[i].Action); a != nil && !a.ReadOnly {
 					writeToolCalled = true

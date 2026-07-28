@@ -118,6 +118,30 @@ func TestPhantomGuard_QuietWhenWriteExecuted(t *testing.T) {
 	}
 }
 
+// Ordering contract: an EMPTY response while the guard is armed must take the
+// empty-retry path first — the nudge may never wrap an empty assistant message
+// (some providers reject those). The guard then still fires on the next
+// non-empty plain-text answer: load, empty, honest answer (nudged), final.
+func TestPhantomGuard_EmptyResponseHandledBeforeNudge(t *testing.T) {
+	orch, llm, sessID := phantomOrch(t, []string{
+		"LOAD",
+		"",
+		"I could not complete this.",
+		"I have not executed the assignment — which person do you mean?",
+	})
+
+	result, err := orch.Run(context.Background(), sessID, "assign the drill")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if llm.callCount != 4 {
+		t.Errorf("expected 4 rounds (load, empty-retry, nudged answer, final), got %d", llm.callCount)
+	}
+	if !strings.Contains(result.Response, "not executed") {
+		t.Errorf("final answer must be the post-nudge response, got %q", result.Response)
+	}
+}
+
 // Read-only traffic can never pay for the guard: no write tool is loaded, so a
 // plain one-round answer stays a one-round answer.
 func TestPhantomGuard_QuietOnReadOnlyTurn(t *testing.T) {
