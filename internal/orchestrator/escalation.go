@@ -252,7 +252,12 @@ func parseEscalationRequest(ctx context.Context, args map[string]string) (escala
 	}, nil
 }
 
+// escalationStatus returns the status on BOTH Content and StructuredContent.
+// The callback path passes them through separately, and a plugin decoding a
+// JSON status reads StructuredContent — with it empty, opentalon-agents read a
+// successful spawn as "not started", logged the wrong outcome, and never
+// advanced its escalation rate-limit counter.
 func escalationStatus(call ToolCall, escalated bool, reason string) ToolResult {
 	payload, _ := json.Marshal(escalationResult{Escalated: escalated, Reason: reason})
-	return ToolResult{CallID: call.ID, Content: string(payload)}
+	return ToolResult{CallID: call.ID, Content: string(payload), StructuredContent: string(payload)}
 }

@@ -106,3 +106,48 @@ func TestChannelNotifier_AnonymousThreadKey_RoutesWithoutStamp(t *testing.T) {
 		t.Errorf("anonymous threaded frame must not carry the owner stamp, got %+v", got.Metadata)
 	}
 }
+
+// TestChannelNotifier_SendToConversation_Routes: an explicit (channel,
+// conversation) pair reaches that channel with the conversation filled in.
+func TestChannelNotifier_SendToConversation_Routes(t *testing.T) {
+	n, ch := newNotifierFixture(t)
+	err := n.SendToConversation(context.Background(), "ws", "c1", chanpkg.OutboundMessage{Content: "alert"})
+	if err != nil {
+		t.Fatalf("SendToConversation: %v", err)
+	}
+	got := sentFrame(t, ch)
+	if got.ConversationID != "c1" || got.Content != "alert" {
+		t.Errorf("delivered frame = %+v", got)
+	}
+}
+
+// TestChannelNotifier_SendToConversation_Rejects: half-specified targets and
+// unknown channels fail loudly instead of delivering somewhere unintended.
+func TestChannelNotifier_SendToConversation_Rejects(t *testing.T) {
+	n, ch := newNotifierFixture(t)
+	cases := []struct {
+		name          string
+		channel, conv string
+	}{
+		{"no channel", "", "c1"},
+		{"no conversation", "ws", ""},
+		{"unregistered channel", "telegram", "c1"},
+	}
+	for _, c := range cases {
+		if err := n.SendToConversation(context.Background(), c.channel, c.conv, chanpkg.OutboundMessage{Content: "x"}); err == nil {
+			t.Errorf("%s: expected an error", c.name)
+		}
+	}
+	if len(ch.sent) != 0 {
+		t.Errorf("nothing should have been delivered, got %d frame(s)", len(ch.sent))
+	}
+}
+
+// TestChannelNotifier_SendToConversation_NilRegistry: the late-bound registry
+// pointer is nil until wiring completes; a send then errors rather than panics.
+func TestChannelNotifier_SendToConversation_NilRegistry(t *testing.T) {
+	n := &channelNotifier{}
+	if err := n.SendToConversation(context.Background(), "ws", "c1", chanpkg.OutboundMessage{}); err == nil {
+		t.Fatal("expected an error before the registry is wired")
+	}
+}
