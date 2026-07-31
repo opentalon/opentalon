@@ -359,6 +359,7 @@ type OrchestratorConfig struct {
 	Knowledge             KnowledgeConfig              `yaml:"knowledge,omitempty"`       // knowledge-augmented RAG configuration
 	Subprocess            SubprocessOrchestratorConfig `yaml:"subprocess,omitempty"`      // subprocess (sub-agent) support
 	Escalation            EscalationOrchestratorConfig `yaml:"escalation,omitempty"`      // background-trigger LLM turn entrypoint (_escalate)
+	Notify                NotifyOrchestratorConfig     `yaml:"notify,omitempty"`          // background-trigger message push entrypoint (_notify)
 	ShowToolCalls         string                       `yaml:"show_tool_calls,omitempty"` // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 	Preparer              PreparerOrchestratorConfig   `yaml:"preparer,omitempty"`        // RFC #249 preparer-phase behaviour (tool error handling)
 	Repair                RepairOrchestratorConfig     `yaml:"repair,omitempty"`          // post-failure tool-call repair phase; default off
@@ -436,6 +437,17 @@ type SubprocessOrchestratorConfig struct {
 // cost tokens and are recorded as chat usage, so they consume the target
 // entity's chat budget (Profile.Limit) and are pre-checked against it.
 type EscalationOrchestratorConfig struct {
+	Enabled bool `yaml:"enabled"` // default false
+}
+
+// NotifyOrchestratorConfig enables the background-trigger push entrypoint (the
+// built-in _notify plugin). When enabled, a background source (a plugin tick
+// via its HostCaller, or a scheduler job with action "_notify__send") can push
+// a message to a user's conversation without starting an assistant turn.
+// Notifications cost no tokens, but they do send unsolicited messages to users,
+// so the entrypoint is opt-in like escalation and is never callable by the
+// model.
+type NotifyOrchestratorConfig struct {
 	Enabled bool `yaml:"enabled"` // default false
 }
 

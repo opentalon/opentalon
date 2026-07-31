@@ -877,7 +877,11 @@ func main() {
 			Enabled: cfg.Orchestrator.Escalation.Enabled,
 		},
 		EscalationLimitChecker: escalationLimit,
-		SessionLocker:          sessionLocker,
+		Notify: orchestrator.NotifyConfig{
+			Enabled: cfg.Orchestrator.Notify.Enabled,
+		},
+		ConversationSender: notifier.SendToConversation,
+		SessionLocker:      sessionLocker,
 	})
 
 	// Wire on-clear actions now that the orchestrator is available.
@@ -1334,6 +1338,28 @@ func (n *channelNotifier) Notify(ctx context.Context, channelID, conversationID,
 		ConversationID: conversationID,
 		Content:        content,
 	})
+}
+
+// SendToConversation satisfies orchestrator.ConversationSender: it delivers to
+// an explicitly addressed (channel, conversation) pair rather than to a packed
+// session key. The _notify entrypoint uses it for a background caller that
+// captured the pair at create time and has no live session to route through.
+// No owner stamping happens here — an explicit pair carries no entity segment
+// to derive an owner from (SendToSession's stamp comes from the session key).
+func (n *channelNotifier) SendToConversation(ctx context.Context, channelID, conversationID string, msg chanpkg.OutboundMessage) error {
+	if n.reg == nil {
+		return fmt.Errorf("channel registry not yet initialized")
+	}
+	if channelID == "" || conversationID == "" {
+		return fmt.Errorf("send to conversation needs both channel and conversation, got %q/%q", channelID, conversationID)
+	}
+	if _, ok := n.reg.Get(channelID); !ok {
+		return fmt.Errorf("no such channel %q", channelID)
+	}
+	if msg.ConversationID == "" {
+		msg.ConversationID = conversationID
+	}
+	return n.reg.Send(ctx, channelID, msg)
 }
 
 // SendToSession satisfies orchestrator.ChannelSender. The orchestrator

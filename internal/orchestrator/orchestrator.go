@@ -202,6 +202,8 @@ type OrchestratorOpts struct {
 	Subprocess                    SubprocessConfig        // optional; subprocess (sub-agent) support
 	Escalation                    EscalationConfig        // optional; background-trigger LLM turn entrypoint (_escalate)
 	EscalationLimitChecker        UsageLimitChecker       // optional; pre-checks a background turn against the entity's token budget
+	Notify                        NotifyConfig            // optional; background-trigger message push entrypoint (_notify)
+	ConversationSender            ConversationSender      // optional; when set, _notify can push to an explicit channel+conversation (not just a packed session key)
 	OnStreamChunk                 StreamChunkCallback     // optional; when set and LLM supports streaming, final answers are streamed
 	ShowToolCalls                 string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
 	InjectionStateStore           InjectionStateStore     // optional; persists known_tools sticky tiers across turns (load_tools promotion)
@@ -420,6 +422,8 @@ type Orchestrator struct {
 	subprocessConfig   SubprocessConfig       // optional; subprocess (sub-agent) support
 	escalationConfig   EscalationConfig       // optional; background-trigger LLM turn entrypoint (_escalate)
 	escalationLimit    UsageLimitChecker      // optional; pre-checks a background turn against the entity's token budget
+	notifyConfig       NotifyConfig           // optional; background-trigger message push entrypoint (_notify)
+	conversationSender ConversationSender     // optional; nil = _notify can only reach a conversation via a packed session key
 	// escalationMuxes is a per-session in-flight guard for background
 	// escalation turns: tryLock drops a second escalation for a session
 	// already running one, so a flapping deterministic trigger can't stack
@@ -734,6 +738,7 @@ func NewWithRules(
 		titleMuxes:              newKeyedMutex(),
 		escalationLimit:         opts.EscalationLimitChecker,
 		escalationMuxes:         newKeyedMutex(),
+		conversationSender:      opts.ConversationSender,
 		langDetector:            buildReplyLanguageDetector(),
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
@@ -801,6 +806,37 @@ func NewWithRules(
 			}},
 		}
 		_ = o.registry.Register(escCap, &escalationExecutor{orch: o})
+	}
+
+	// Register the built-in _notify plugin when enabled. It is the sanctioned
+	// way for a background trigger to PUSH a message to a user — the cheap,
+	// model-free counterpart to _escalate (see notify.go). Same guardrails:
+	// UserOnly, so it is hidden from the LLM tool catalog and blocked from
+	// LLM-sourced calls; only background sources (a plugin's
+	// HostCaller.RunAction callback, or the scheduler) reach it.
+	o.notifyConfig = opts.Notify
+	if opts.Notify.Enabled {
+		notifyCap := PluginCapability{
+			Name:        notifyPluginName,
+			Description: "Push a message from a background trigger to a user's conversation",
+			Actions: []Action{{
+				Name:        notifySendAction,
+				Description: "Deliver a message to a target conversation, addressed either by packed session key or by explicit channel + conversation. Synchronous: the result reports whether it was delivered. No LLM turn is started.",
+				UserOnly:    true,
+				Parameters: []Parameter{
+					{Name: "text", Description: "The message to deliver, verbatim", Required: true},
+					{Name: "session_id", Description: "Target session (the packed session key); defaults to the caller's session when no target is given at all", Required: false},
+					{Name: "channel_id", Description: "Channel that delivers (e.g. \"telegram\", \"slack\"); used with conversation_id when no session_id is available", Required: false},
+					{Name: "conversation_id", Description: "Chat/room id on channel_id to deliver into", Required: false},
+					{Name: "entity_id", Description: "Entity the notification is sent on behalf of; cross-checked against an entity-prefixed session key", Required: false},
+					{Name: "group_id", Description: "Group the notification is sent on behalf of, paired with entity_id", Required: false},
+					{Name: "source", Description: "Optional provenance stamped onto the message metadata (e.g. \"agent\")", Required: false},
+					{Name: "agent_id", Description: "Optional id of the background agent that produced the notification; stamped onto the message metadata", Required: false},
+					{Name: "trigger", Description: "Optional trigger kind that produced it (poll|schedule|webhook); stamped onto the message metadata", Required: false},
+				},
+			}},
+		}
+		_ = o.registry.Register(notifyCap, &notifyExecutor{orch: o})
 	}
 
 	return o
