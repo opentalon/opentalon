@@ -2154,7 +2154,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	nativeMode := o.supportsNativeTools()
 	if nativeMode {
 		cachedTools = o.buildToolDefinitions(ctx)
+		// The tool definitions ride on every round's request but are not
+		// messages, so the trim has no way to see them unless we hand the
+		// figure over. Re-stamped after a load_tools widens the set.
+		ctx = withToolTokens(ctx, estimateToolTokens(cachedTools))
 	}
+	// One correction factor for the whole turn, sharpened by every response:
+	// the rounds where tool results pile up size themselves against what this
+	// model charged for this conversation rather than against a constant.
+	ctx, turnCalibration := withCalibration(ctx)
 	// Build system prompt variants: the only difference between rounds is the
 	// format hint (suppressed until tool results exist). Pre-build both so the
 	// prompt text is identical across rounds that share the same variant.
@@ -2203,6 +2211,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var writeToolLoaded bool // load_tools promoted a non-read-only action this turn
 	var writeToolCalled bool // the model attempted any non-read-only call this turn
 	var actionNudged bool    // the one-shot phantom nudge was already spent
+	overflowRetries := 0     // "prompt too long" retries spent this turn
 	agentRound := 0
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		agentRound = i + 1
@@ -2215,6 +2224,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			cachedSysPrompt = sysPromptWithHint
 		}
 		messages := o.buildMessagesWithPrompt(ctx, sess, cachedSysPrompt)
+		// Held so a "prompt too long" retry can re-attach them: they are
+		// consumed on send, and the retry re-runs this round from scratch.
+		roundTransient := transientMessages
 		messages = append(messages, transientMessages...)
 		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
@@ -2294,32 +2306,21 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// collecting the full response for tool-call parsing.
 		// A per-request callback (from context) takes priority over the global one.
 		var resp *provider.CompletionResponse
+		// What this round is really sending, in the units the trim decides in.
+		// Always logged, not only under session debug as it used to be: this is
+		// the figure that has to be reconciled against the provider's own count
+		// when a session nears the window, and the session that overflows is
+		// precisely the one nobody had debug switched on for.
+		toolTokens := estimateToolTokens(req.Tools)
+		estimatedTokens := estimateMessagesTokens(guardedMessages) + toolTokens
+		log.Info("llm request size",
+			"round", agentRound,
+			"messages_count", len(guardedMessages),
+			"tools_count", len(req.Tools),
+			"estimated_tokens", estimatedTokens,
+			"tool_tokens", toolTokens,
+			"calibration", calibrationFromContext(ctx))
 		if timing != nil {
-			// Measure what we're sending to the LLM so operators can see
-			// where the 98k tokens come from.
-			var systemChars, messagesChars, toolCount int
-			for _, m := range guardedMessages {
-				if m.Role == "system" {
-					systemChars += len(m.Content)
-				} else {
-					messagesChars += len(m.Content)
-				}
-			}
-			toolCount = len(req.Tools)
-			var toolChars int
-			for _, td := range req.Tools {
-				toolChars += len(td.Name) + len(td.Description)
-				if b, err := json.Marshal(td.Parameters); err == nil {
-					toolChars += len(b)
-				}
-			}
-			log.Info("llm request size",
-				"round", agentRound,
-				"system_chars", systemChars,
-				"messages_count", len(guardedMessages),
-				"messages_chars", messagesChars,
-				"tools_count", toolCount,
-				"tools_chars", toolChars)
 			timing.begin(fmt.Sprintf("llm_round_%d", agentRound))
 		}
 		llmStart := time.Now()
@@ -2331,8 +2332,29 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		llmDuration := time.Since(llmStart)
 		if err != nil {
+			// A prompt refused for being too long is our own mistake, and
+			// without this branch it ended the turn — and every later message
+			// in the session, which kept rebuilding the same oversized prompt
+			// and kept being refused. Take the provider's own measurement,
+			// which is a better reading than any estimate, and run this round
+			// again against a correction that now knows the truth.
+			if measured, isOverflow := provider.ContextOverflow(err); isOverflow && overflowRetries < maxOverflowRetries {
+				overflowRetries++
+				turnCalibration.observeRejection(estimatedTokens, measured)
+				transientMessages = roundTransient
+				log.Warn("prompt refused as too long; retrying this round with a harder trim",
+					"round", agentRound, "attempt", overflowRetries,
+					"estimated_tokens", estimatedTokens, "provider_measured", measured,
+					"calibration", calibrationFromContext(ctx))
+				i-- // same round, smaller prompt; the counter guards the loop
+				continue
+			}
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
+		// The provider's own count of what it just charged for. Free, exact,
+		// and the only ground truth the estimate ever gets — the later rounds
+		// of this turn size themselves against it.
+		turnCalibration.observe(estimatedTokens, resp.Usage.InputTokens)
 		// Stamp the just-emitted llm_response as parent for the rest of
 		// this iteration: tool_call_extracted / tool_call_result / retry
 		// / confirmation events all form a tight subtree under the LLM
@@ -2713,6 +2735,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if nativeMode && toolResult.Error == "" &&
 				call.Plugin == metaPluginName && call.Action == metaLoadTools {
 				cachedTools = o.buildToolDefinitions(ctx)
+				ctx = withToolTokens(ctx, estimateToolTokens(cachedTools))
 				log.Debug("cachedTools refreshed after _meta__load_tools",
 					"tools_count", len(cachedTools))
 			}
@@ -3968,99 +3991,8 @@ func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.
 	return o.appendConversation(ctx, sess, messages)
 }
 
-// estimateTokens returns a rough token count for a string.
-// Uses ~4 characters per token which is a reasonable average for most LLMs.
-func estimateTokens(s string) int {
-	return len(s) / 4
-}
-
-// inputTokenBudget returns the maximum estimated input tokens the assembled
-// message list may occupy, given the model's context window and its per-call
-// output budget (max_tokens).
-//
-// The provider's hard ceiling is the context window and it applies to
-// prompt + completion combined: an OpenAI-compatible endpoint rejects a
-// request once prompt_tokens + max_tokens exceeds the model's context length.
-// Reasoning models (e.g. gpt-oss) additionally emit their chain-of-thought
-// INTO that same max_tokens budget, so the whole output budget can genuinely
-// be consumed. We therefore reserve the full output budget — not a flat 10% —
-// plus a small safety margin, because estimateTokens (chars/4) under-counts
-// structured JSON and non-Latin text and ignores per-message framing the
-// provider still charges for.
-//
-// When maxOutputTokens is unknown (0) we fall back to the historical 10%
-// reserve. When max_tokens (plus margin) alone fills the window — a
-// misconfiguration, since max_tokens should be a fraction of the window — the
-// budget clamps to 0 rather than a positive floor: any positive floor plus
-// that output budget would exceed the window and re-admit the very overflow
-// this reserve exists to prevent. The trim loop still keeps the system prompt
-// and the most recent message, so a 0 budget cannot strand it.
-func inputTokenBudget(contextWindow, maxOutputTokens int) int {
-	if contextWindow <= 0 {
-		return 0
-	}
-	if maxOutputTokens <= 0 {
-		return contextWindow * 9 / 10
-	}
-	margin := contextWindow / 20 // 5% headroom for estimator under-count + framing
-	budget := contextWindow - maxOutputTokens - margin
-	if budget < 0 {
-		return 0
-	}
-	return budget
-}
-
-// trimToContextWindow drops the oldest conversation messages (preserving
-// system messages at the front) until the estimated token count fits within
-// the model's usable input budget (the context window minus the reserved
-// output budget; see inputTokenBudget).
-func trimToContextWindow(ctx context.Context, messages []provider.Message, contextWindow, maxOutputTokens int) []provider.Message {
-	maxInputTokens := inputTokenBudget(contextWindow, maxOutputTokens)
-
-	total := 0
-	for _, m := range messages {
-		total += estimateTokens(m.Content)
-	}
-	if total <= maxInputTokens {
-		return messages
-	}
-
-	// Find where conversation messages start (skip leading system messages).
-	convStart := 0
-	for convStart < len(messages) && messages[convStart].Role == provider.RoleSystem {
-		convStart++
-	}
-
-	// Drop oldest conversation messages (pairs of assistant+user typically)
-	// until we fit. Always keep at least the last conversation message.
-	for total > maxInputTokens && convStart < len(messages)-1 {
-		total -= estimateTokens(messages[convStart].Content)
-		convStart++
-	}
-	// Don't leave a tool result orphaned by dropping its tool-call — advance the
-	// boundary past any leading orphaned results (but never to an empty slice).
-	if i := firstNonOrphanIndex(messages, convStart); i < len(messages) {
-		convStart = i
-	}
-
-	trimmed := make([]provider.Message, 0, len(messages)-convStart+convStart)
-	// Keep system messages.
-	for i := 0; i < len(messages); i++ {
-		if messages[i].Role == provider.RoleSystem {
-			trimmed = append(trimmed, messages[i])
-		} else {
-			break
-		}
-	}
-	// Append remaining conversation messages.
-	trimmed = append(trimmed, messages[convStart:]...)
-
-	if len(trimmed) < len(messages) {
-		logger.FromContext(ctx).Info("context trimming", "dropped", len(messages)-len(trimmed), "tokens", total, "limit", maxInputTokens)
-	}
-
-	return trimmed
-}
+// Context-window accounting — the token estimate, the input budget and the
+// oldest-first trim — lives in context_budget.go.
 
 func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string, includeServerInstructions bool) string {
 	var sb strings.Builder

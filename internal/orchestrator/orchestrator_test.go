@@ -1192,19 +1192,9 @@ func TestPreparerErrorFailOpenContinues(t *testing.T) {
 }
 
 // --- Context window trimming tests ---
-
-func TestEstimateTokens(t *testing.T) {
-	// 4 chars per token
-	if got := estimateTokens("abcd"); got != 1 {
-		t.Errorf("estimateTokens(4 chars) = %d, want 1", got)
-	}
-	if got := estimateTokens(strings.Repeat("x", 400)); got != 100 {
-		t.Errorf("estimateTokens(400 chars) = %d, want 100", got)
-	}
-	if got := estimateTokens(""); got != 0 {
-		t.Errorf("estimateTokens(empty) = %d, want 0", got)
-	}
-}
+// The measurement itself (what a message, a tool call and a tool definition
+// each cost, and the calibration against the provider's own count) is tested
+// in context_budget_test.go.
 
 func TestTrimToContextWindow_NoTrimNeeded(t *testing.T) {
 	msgs := []provider.Message{
