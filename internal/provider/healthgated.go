@@ -138,6 +138,14 @@ func (h *healthGatedProvider) Complete(ctx context.Context, req *CompletionReque
 		if err == nil {
 			return resp, nil
 		}
+		// Our prompt is too long: every remaining endpoint runs the same model
+		// behind the same window and will say the same thing. Stop here and
+		// hand the caller the reason it can actually act on.
+		if IsContextOverflow(err) {
+			h.log.Warn("llm request rejected as too long; not probing further endpoints",
+				"provider", e.Prov.ID(), "model", e.Model, "error", err)
+			return nil, err
+		}
 		lastErr = err
 		if idx == 0 {
 			h.health.trip()
@@ -160,6 +168,13 @@ func (h *healthGatedProvider) Stream(ctx context.Context, req *CompletionRequest
 		stream, err := e.Prov.Stream(ctx, &cp)
 		if err == nil {
 			return stream, nil
+		}
+		// Same reasoning as Complete: an oversized prompt is ours, not the
+		// endpoint's, and the next endpoint refuses it identically.
+		if IsContextOverflow(err) {
+			h.log.Warn("llm stream request rejected as too long; not probing further endpoints",
+				"provider", e.Prov.ID(), "model", e.Model, "error", err)
+			return nil, err
 		}
 		lastErr = err
 		if idx == 0 {

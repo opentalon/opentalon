@@ -13,6 +13,7 @@ type fakeProvider struct {
 	id        string
 	model     string
 	failNext  bool   // when true, Complete returns an error
+	failWith  error  // the error to return when failing; nil means a generic one
 	lastModel string // model id it was last called with
 	calls     int
 }
@@ -21,11 +22,18 @@ func (f *fakeProvider) ID() string                   { return f.id }
 func (f *fakeProvider) SupportsFeature(Feature) bool { return true }
 func (f *fakeProvider) Models() []ModelInfo          { return []ModelInfo{{ID: f.model, ProviderID: f.id}} }
 
+func (f *fakeProvider) failure() error {
+	if f.failWith != nil {
+		return f.failWith
+	}
+	return errors.New("boom")
+}
+
 func (f *fakeProvider) Complete(_ context.Context, req *CompletionRequest) (*CompletionResponse, error) {
 	f.calls++
 	f.lastModel = req.Model
 	if f.failNext {
-		return nil, errors.New("boom")
+		return nil, f.failure()
 	}
 	return &CompletionResponse{ID: f.id, Model: req.Model, Content: "ok-" + f.id}, nil
 }
@@ -34,9 +42,36 @@ func (f *fakeProvider) Stream(_ context.Context, req *CompletionRequest) (Respon
 	f.calls++
 	f.lastModel = req.Model
 	if f.failNext {
-		return nil, errors.New("boom")
+		return nil, f.failure()
 	}
 	return nil, errors.New("stream not exercised in these tests")
+}
+
+// TestHealthGatedContextOverflowStopsAtFirstEndpoint pins the two things that
+// went wrong on 2026-08-01: a prompt refused for being too long was carried to
+// the next endpoint, whose unrelated outage then became the error the customer
+// and the on-call engineer saw — and the refusal counted against the preferred
+// endpoint's health, even though nothing was wrong with it.
+func TestHealthGatedContextOverflowStopsAtFirstEndpoint(t *testing.T) {
+	tooLong := errors.New(`openai api error (status 400): {"message":"Input length (132235) exceeds model's maximum context length (131072)."}`)
+	preferred := &fakeProvider{id: "dedicated", model: "gpt-oss-120b", failNext: true, failWith: tooLong}
+	fallback := &fakeProvider{id: "shared", model: "gpt-oss-120b-ovh", failNext: true,
+		failWith: errors.New(`openai api error (status 400): {"message":"app has no replica running"}`)}
+	hg := newTestHG(preferred, fallback, 2, func(context.Context) error { return nil })
+
+	_, err := hg.Complete(context.Background(), &CompletionRequest{})
+	if err == nil {
+		t.Fatal("expected the refusal to surface")
+	}
+	if !IsContextOverflow(err) {
+		t.Errorf("caller got %q — the actionable cause was replaced by the next endpoint's failure", err)
+	}
+	if fallback.calls != 0 {
+		t.Errorf("fallback was probed %d times; the same model behind the same window can only refuse again", fallback.calls)
+	}
+	if !hg.health.isHealthy() {
+		t.Error("a prompt of ours being too long says nothing about the endpoint — it must stay in rotation")
+	}
 }
 
 // newTestHG builds a health-gated provider directly (no background goroutine)
