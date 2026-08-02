@@ -411,6 +411,7 @@ type Orchestrator struct {
 	confirmationAction string                 // optional; action name for confirmation check
 	contextWindow      int                    // model context window in tokens; 0 = no trimming
 	maxOutputTokens    int                    // reserved output budget (max_tokens) subtracted from the window when trimming; 0 = flat 10% reserve
+	calibrators        *calibrators           // per-model correction between the token estimate and what the provider charges; always allocated
 	groupPluginLookup  GroupPluginLookup      // optional; nil = no group-based filtering
 	usageRecorder      UsageRecorder          // optional; nil = no usage tracking
 	pluginCallObserver PluginCallObserver     // optional; nil = no plugin call observation
@@ -721,6 +722,7 @@ func NewWithRules(
 		confirmationAction:      opts.ConfirmationAction,
 		contextWindow:           opts.ContextWindow,
 		maxOutputTokens:         opts.MaxOutputTokens,
+		calibrators:             newCalibrators(),
 		groupPluginLookup:       opts.GroupPluginLookup,
 		usageRecorder:           opts.UsageRecorder,
 		pluginCallObserver:      opts.PluginCallObserver,
@@ -2154,15 +2156,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	nativeMode := o.supportsNativeTools()
 	if nativeMode {
 		cachedTools = o.buildToolDefinitions(ctx)
-		// The tool definitions ride on every round's request but are not
-		// messages, so the trim has no way to see them unless we hand the
-		// figure over. Re-stamped after a load_tools widens the set.
-		ctx = withToolTokens(ctx, estimateToolTokens(cachedTools))
 	}
-	// One correction factor for the whole turn, sharpened by every response:
-	// the rounds where tool results pile up size themselves against what this
-	// model charged for this conversation rather than against a constant.
-	ctx, turnCalibration := withCalibration(ctx)
 	// Build system prompt variants: the only difference between rounds is the
 	// format hint (suppressed until tool results exist). Pre-build both so the
 	// prompt text is identical across rounds that share the same variant.
@@ -2211,7 +2205,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var writeToolLoaded bool // load_tools promoted a non-read-only action this turn
 	var writeToolCalled bool // the model attempted any non-read-only call this turn
 	var actionNudged bool    // the one-shot phantom nudge was already spent
-	overflowRetries := 0     // "prompt too long" retries spent this turn
 	agentRound := 0
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		agentRound = i + 1
@@ -2224,9 +2217,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			cachedSysPrompt = sysPromptWithHint
 		}
 		messages := o.buildMessagesWithPrompt(ctx, sess, cachedSysPrompt)
-		// Held so a "prompt too long" retry can re-attach them: they are
-		// consumed on send, and the retry re-runs this round from scratch.
-		roundTransient := transientMessages
 		messages = append(messages, transientMessages...)
 		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
@@ -2306,55 +2296,57 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// collecting the full response for tool-call parsing.
 		// A per-request callback (from context) takes priority over the global one.
 		var resp *provider.CompletionResponse
-		// What this round is really sending, in the units the trim decides in.
-		// Always logged, not only under session debug as it used to be: this is
-		// the figure that has to be reconciled against the provider's own count
-		// when a session nears the window, and the session that overflows is
-		// precisely the one nobody had debug switched on for.
-		toolTokens := estimateToolTokens(req.Tools)
-		estimatedTokens := estimateMessagesTokens(guardedMessages) + toolTokens
-		log.Info("llm request size",
-			"round", agentRound,
-			"messages_count", len(guardedMessages),
-			"tools_count", len(req.Tools),
-			"estimated_tokens", estimatedTokens,
-			"tool_tokens", toolTokens,
-			"calibration", calibrationFromContext(ctx))
 		if timing != nil {
 			timing.begin(fmt.Sprintf("llm_round_%d", agentRound))
 		}
 		llmStart := time.Now()
 		streamCB := o.resolveStreamCallback(ctx)
-		if streamCB != nil {
-			resp, err = o.streamComplete(ctx, req)
-		} else {
-			resp, err = o.llm.Complete(ctx, req)
+		// Make it fit, send it, and if the provider says it is still too long,
+		// take its measurement and make it fit again. The refusal is our own
+		// mistake and it is deterministic — without this loop it ended the turn
+		// and every later message in the session, each one rebuilding the same
+		// oversized prompt and being refused again.
+		//
+		// The retry sits here, around the send alone, rather than re-running
+		// the round: replaying the round would re-invoke every guard preparer
+		// for a failure that has nothing to do with them.
+		var estimatedTokens int
+		for attempt := 0; ; attempt++ {
+			estimatedTokens = fitRequestToWindow(ctx, req, o.contextWindow, o.maxOutputTokens, o.calibrators.factor(req.Model))
+			// Always logged, not only under session debug as it used to be:
+			// this is the figure that has to be reconciled against the
+			// provider's own count when a session nears the window, and the
+			// session that overflows is precisely the one nobody had debug
+			// switched on for.
+			log.Info("llm request size",
+				"round", agentRound, "attempt", attempt+1,
+				"messages_count", len(req.Messages),
+				"tools_count", len(req.Tools),
+				"estimated_tokens", estimatedTokens,
+				"calibration", o.calibrators.factor(req.Model))
+
+			if streamCB != nil {
+				resp, err = o.streamComplete(ctx, req)
+			} else {
+				resp, err = o.llm.Complete(ctx, req)
+			}
+			measured, isOverflow := provider.ContextOverflow(err)
+			if !isOverflow || attempt >= maxOverflowRetries {
+				break
+			}
+			o.calibrators.observeRejection(req.Model, estimatedTokens, measured)
+			log.Warn("prompt refused as too long; re-fitting and sending again",
+				"round", agentRound, "attempt", attempt+1,
+				"estimated_tokens", estimatedTokens, "provider_measured", measured,
+				"calibration", o.calibrators.factor(req.Model))
 		}
 		llmDuration := time.Since(llmStart)
 		if err != nil {
-			// A prompt refused for being too long is our own mistake, and
-			// without this branch it ended the turn — and every later message
-			// in the session, which kept rebuilding the same oversized prompt
-			// and kept being refused. Take the provider's own measurement,
-			// which is a better reading than any estimate, and run this round
-			// again against a correction that now knows the truth.
-			if measured, isOverflow := provider.ContextOverflow(err); isOverflow && overflowRetries < maxOverflowRetries {
-				overflowRetries++
-				turnCalibration.observeRejection(estimatedTokens, measured)
-				transientMessages = roundTransient
-				log.Warn("prompt refused as too long; retrying this round with a harder trim",
-					"round", agentRound, "attempt", overflowRetries,
-					"estimated_tokens", estimatedTokens, "provider_measured", measured,
-					"calibration", calibrationFromContext(ctx))
-				i-- // same round, smaller prompt; the counter guards the loop
-				continue
-			}
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
 		// The provider's own count of what it just charged for. Free, exact,
-		// and the only ground truth the estimate ever gets — the later rounds
-		// of this turn size themselves against it.
-		turnCalibration.observe(estimatedTokens, resp.Usage.InputTokens)
+		// and the only ground truth the estimate ever gets.
+		o.calibrators.observe(req.Model, estimatedTokens, resp.Usage.InputTokens)
 		// Stamp the just-emitted llm_response as parent for the rest of
 		// this iteration: tool_call_extracted / tool_call_result / retry
 		// / confirmation events all form a tight subtree under the LLM
@@ -2735,7 +2727,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if nativeMode && toolResult.Error == "" &&
 				call.Plugin == metaPluginName && call.Action == metaLoadTools {
 				cachedTools = o.buildToolDefinitions(ctx)
-				ctx = withToolTokens(ctx, estimateToolTokens(cachedTools))
 				log.Debug("cachedTools refreshed after _meta__load_tools",
 					"tools_count", len(cachedTools))
 			}
@@ -3951,10 +3942,9 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	// poisoned assistant turns via sanitizeHistory.
 	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
 
-	if o.contextWindow > 0 {
-		messages = trimToContextWindow(ctx, messages, o.contextWindow, o.maxOutputTokens)
-	}
-
+	// No trimming here. Half of what a request costs is the tool definitions,
+	// which are attached to the request after assembly — so "make it fit" runs
+	// on the finished request, in the agent loop (see fitRequestToWindow).
 	return messages
 }
 

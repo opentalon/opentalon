@@ -656,3 +656,36 @@ func TestHandler_NewMessageHandler_PanicsOnNilRunner(t *testing.T) {
 		Runner:        nil,
 	})
 }
+
+// friendlyError turns a provider failure into the message the customer reads
+// and the error_code the frontend translates (docs/websocket-messages.md).
+// It had no coverage, and the "conversation too long" case used to match two
+// phrases of its own — so wordings the routing layer correctly recognised as an
+// oversized prompt still reached the user as "something went wrong".
+func TestFriendlyError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		code string
+	}{
+		{"vllm/ovh too long", errors.New(`openai api error (status 400): {"message":"Input length (132235) exceeds model's maximum context length (131072)."}`), "context_length_exceeded"},
+		{"anthropic too long", errors.New("prompt is too long: 200000 tokens > 199999 maximum"), "context_length_exceeded"},
+		{"openai too long", errors.New("This model's maximum context length is 8192 tokens. However, your messages resulted in 8500 tokens."), "context_length_exceeded"},
+		{"rate limit", errors.New("openai api error (status 429): rate_limit exceeded"), "rate_limited"},
+		{"timeout", errors.New("context deadline exceeded"), "timeout"},
+		// The dedicated-node outage that masked a too-long prompt on
+		// 2026-08-01 must NOT be dressed up as "start a new conversation".
+		{"endpoint outage", errors.New(`openai api error (status 400): {"message":"app has no replica running"}`), "internal_error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, code := friendlyError(tc.err)
+			if code != tc.code {
+				t.Errorf("code = %q, want %q", code, tc.code)
+			}
+			if msg == "" {
+				t.Error("expected a user-facing message")
+			}
+		})
+	}
+}
