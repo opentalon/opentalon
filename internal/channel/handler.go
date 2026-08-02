@@ -331,7 +331,13 @@ func safeMetadata(m map[string]string) map[string]string {
 func friendlyError(err error) (message string, errorCode string) {
 	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "maximum context length") || strings.Contains(msg, "context_length_exceeded"):
+	// One classifier, shared with the routing layer that decides whether to
+	// try another endpoint. This case used to carry two phrases of its own, so
+	// an Anthropic "prompt is too long: …" or an OpenAI "please reduce the
+	// length of the messages" fell through to the generic internal_error: the
+	// user was told "something went wrong" rather than to start a new
+	// conversation, and the frontend got the wrong error_code.
+	case provider.IsContextOverflow(err):
 		return "Sorry, this conversation has grown too long for the model to process. Please start a new conversation or clear the session.", "context_length_exceeded"
 	case strings.Contains(msg, "rate_limit") || strings.Contains(msg, "429"):
 		return "I'm being rate-limited right now. Please try again in a moment.", "rate_limited"

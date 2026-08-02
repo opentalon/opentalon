@@ -411,6 +411,7 @@ type Orchestrator struct {
 	confirmationAction string                 // optional; action name for confirmation check
 	contextWindow      int                    // model context window in tokens; 0 = no trimming
 	maxOutputTokens    int                    // reserved output budget (max_tokens) subtracted from the window when trimming; 0 = flat 10% reserve
+	calibrators        *calibrators           // per-model correction between the token estimate and what the provider charges; always allocated
 	groupPluginLookup  GroupPluginLookup      // optional; nil = no group-based filtering
 	usageRecorder      UsageRecorder          // optional; nil = no usage tracking
 	pluginCallObserver PluginCallObserver     // optional; nil = no plugin call observation
@@ -721,6 +722,7 @@ func NewWithRules(
 		confirmationAction:      opts.ConfirmationAction,
 		contextWindow:           opts.ContextWindow,
 		maxOutputTokens:         opts.MaxOutputTokens,
+		calibrators:             newCalibrators(),
 		groupPluginLookup:       opts.GroupPluginLookup,
 		usageRecorder:           opts.UsageRecorder,
 		pluginCallObserver:      opts.PluginCallObserver,
@@ -2295,44 +2297,56 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// A per-request callback (from context) takes priority over the global one.
 		var resp *provider.CompletionResponse
 		if timing != nil {
-			// Measure what we're sending to the LLM so operators can see
-			// where the 98k tokens come from.
-			var systemChars, messagesChars, toolCount int
-			for _, m := range guardedMessages {
-				if m.Role == "system" {
-					systemChars += len(m.Content)
-				} else {
-					messagesChars += len(m.Content)
-				}
-			}
-			toolCount = len(req.Tools)
-			var toolChars int
-			for _, td := range req.Tools {
-				toolChars += len(td.Name) + len(td.Description)
-				if b, err := json.Marshal(td.Parameters); err == nil {
-					toolChars += len(b)
-				}
-			}
-			log.Info("llm request size",
-				"round", agentRound,
-				"system_chars", systemChars,
-				"messages_count", len(guardedMessages),
-				"messages_chars", messagesChars,
-				"tools_count", toolCount,
-				"tools_chars", toolChars)
 			timing.begin(fmt.Sprintf("llm_round_%d", agentRound))
 		}
 		llmStart := time.Now()
 		streamCB := o.resolveStreamCallback(ctx)
-		if streamCB != nil {
-			resp, err = o.streamComplete(ctx, req)
-		} else {
-			resp, err = o.llm.Complete(ctx, req)
+		// Make it fit, send it, and if the provider says it is still too long,
+		// take its measurement and make it fit again. The refusal is our own
+		// mistake and it is deterministic — without this loop it ended the turn
+		// and every later message in the session, each one rebuilding the same
+		// oversized prompt and being refused again.
+		//
+		// The retry sits here, around the send alone, rather than re-running
+		// the round: replaying the round would re-invoke every guard preparer
+		// for a failure that has nothing to do with them.
+		var estimatedTokens int
+		for attempt := 0; ; attempt++ {
+			estimatedTokens = fitRequestToWindow(ctx, req, o.contextWindow, o.maxOutputTokens, o.calibrators.factor(req.Model))
+			// Always logged, not only under session debug as it used to be:
+			// this is the figure that has to be reconciled against the
+			// provider's own count when a session nears the window, and the
+			// session that overflows is precisely the one nobody had debug
+			// switched on for.
+			log.Info("llm request size",
+				"round", agentRound, "attempt", attempt+1,
+				"messages_count", len(req.Messages),
+				"tools_count", len(req.Tools),
+				"estimated_tokens", estimatedTokens,
+				"calibration", o.calibrators.factor(req.Model))
+
+			if streamCB != nil {
+				resp, err = o.streamComplete(ctx, req)
+			} else {
+				resp, err = o.llm.Complete(ctx, req)
+			}
+			measured, isOverflow := provider.ContextOverflow(err)
+			if !isOverflow || attempt >= maxOverflowRetries {
+				break
+			}
+			o.calibrators.observeRejection(req.Model, estimatedTokens, measured)
+			log.Warn("prompt refused as too long; re-fitting and sending again",
+				"round", agentRound, "attempt", attempt+1,
+				"estimated_tokens", estimatedTokens, "provider_measured", measured,
+				"calibration", o.calibrators.factor(req.Model))
 		}
 		llmDuration := time.Since(llmStart)
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
+		// The provider's own count of what it just charged for. Free, exact,
+		// and the only ground truth the estimate ever gets.
+		o.calibrators.observe(req.Model, estimatedTokens, resp.Usage.InputTokens)
 		// Stamp the just-emitted llm_response as parent for the rest of
 		// this iteration: tool_call_extracted / tool_call_result / retry
 		// / confirmation events all form a tight subtree under the LLM
@@ -3928,10 +3942,9 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	// poisoned assistant turns via sanitizeHistory.
 	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
 
-	if o.contextWindow > 0 {
-		messages = trimToContextWindow(ctx, messages, o.contextWindow, o.maxOutputTokens)
-	}
-
+	// No trimming here. Half of what a request costs is the tool definitions,
+	// which are attached to the request after assembly — so "make it fit" runs
+	// on the finished request, in the agent loop (see fitRequestToWindow).
 	return messages
 }
 
@@ -3968,99 +3981,8 @@ func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.
 	return o.appendConversation(ctx, sess, messages)
 }
 
-// estimateTokens returns a rough token count for a string.
-// Uses ~4 characters per token which is a reasonable average for most LLMs.
-func estimateTokens(s string) int {
-	return len(s) / 4
-}
-
-// inputTokenBudget returns the maximum estimated input tokens the assembled
-// message list may occupy, given the model's context window and its per-call
-// output budget (max_tokens).
-//
-// The provider's hard ceiling is the context window and it applies to
-// prompt + completion combined: an OpenAI-compatible endpoint rejects a
-// request once prompt_tokens + max_tokens exceeds the model's context length.
-// Reasoning models (e.g. gpt-oss) additionally emit their chain-of-thought
-// INTO that same max_tokens budget, so the whole output budget can genuinely
-// be consumed. We therefore reserve the full output budget — not a flat 10% —
-// plus a small safety margin, because estimateTokens (chars/4) under-counts
-// structured JSON and non-Latin text and ignores per-message framing the
-// provider still charges for.
-//
-// When maxOutputTokens is unknown (0) we fall back to the historical 10%
-// reserve. When max_tokens (plus margin) alone fills the window — a
-// misconfiguration, since max_tokens should be a fraction of the window — the
-// budget clamps to 0 rather than a positive floor: any positive floor plus
-// that output budget would exceed the window and re-admit the very overflow
-// this reserve exists to prevent. The trim loop still keeps the system prompt
-// and the most recent message, so a 0 budget cannot strand it.
-func inputTokenBudget(contextWindow, maxOutputTokens int) int {
-	if contextWindow <= 0 {
-		return 0
-	}
-	if maxOutputTokens <= 0 {
-		return contextWindow * 9 / 10
-	}
-	margin := contextWindow / 20 // 5% headroom for estimator under-count + framing
-	budget := contextWindow - maxOutputTokens - margin
-	if budget < 0 {
-		return 0
-	}
-	return budget
-}
-
-// trimToContextWindow drops the oldest conversation messages (preserving
-// system messages at the front) until the estimated token count fits within
-// the model's usable input budget (the context window minus the reserved
-// output budget; see inputTokenBudget).
-func trimToContextWindow(ctx context.Context, messages []provider.Message, contextWindow, maxOutputTokens int) []provider.Message {
-	maxInputTokens := inputTokenBudget(contextWindow, maxOutputTokens)
-
-	total := 0
-	for _, m := range messages {
-		total += estimateTokens(m.Content)
-	}
-	if total <= maxInputTokens {
-		return messages
-	}
-
-	// Find where conversation messages start (skip leading system messages).
-	convStart := 0
-	for convStart < len(messages) && messages[convStart].Role == provider.RoleSystem {
-		convStart++
-	}
-
-	// Drop oldest conversation messages (pairs of assistant+user typically)
-	// until we fit. Always keep at least the last conversation message.
-	for total > maxInputTokens && convStart < len(messages)-1 {
-		total -= estimateTokens(messages[convStart].Content)
-		convStart++
-	}
-	// Don't leave a tool result orphaned by dropping its tool-call — advance the
-	// boundary past any leading orphaned results (but never to an empty slice).
-	if i := firstNonOrphanIndex(messages, convStart); i < len(messages) {
-		convStart = i
-	}
-
-	trimmed := make([]provider.Message, 0, len(messages)-convStart+convStart)
-	// Keep system messages.
-	for i := 0; i < len(messages); i++ {
-		if messages[i].Role == provider.RoleSystem {
-			trimmed = append(trimmed, messages[i])
-		} else {
-			break
-		}
-	}
-	// Append remaining conversation messages.
-	trimmed = append(trimmed, messages[convStart:]...)
-
-	if len(trimmed) < len(messages) {
-		logger.FromContext(ctx).Info("context trimming", "dropped", len(messages)-len(trimmed), "tokens", total, "limit", maxInputTokens)
-	}
-
-	return trimmed
-}
+// Context-window accounting — the token estimate, the input budget and the
+// oldest-first trim — lives in context_budget.go.
 
 func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string, includeServerInstructions bool) string {
 	var sb strings.Builder
