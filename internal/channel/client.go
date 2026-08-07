@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/opentalon/opentalon/internal/grpclimit"
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 	"github.com/opentalon/opentalon/pkg/channel/channelpb"
 	"google.golang.org/grpc"
@@ -46,9 +47,11 @@ func DialChannel(network, address string, timeout time.Duration) (*PluginClient,
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cc, err := grpc.NewClient(target,
+	opts := append([]grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+	}, grpclimit.DialOptions()...)
+
+	cc, err := grpc.NewClient(target, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("dial channel at %s://%s: %w", network, address, err)
 	}

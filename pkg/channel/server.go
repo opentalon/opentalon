@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/opentalon/opentalon/internal/grpclimit"
 	"github.com/opentalon/opentalon/pkg/channel/channelpb"
 	"google.golang.org/grpc"
 )
@@ -55,7 +56,7 @@ func Serve(ctx context.Context, ch Channel) error {
 		}
 	}
 
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(grpclimit.ServerOptions()...)
 	channelpb.RegisterChannelServiceServer(srv, &grpcServer{ch: ch})
 
 	// Shut down gracefully when context is cancelled.

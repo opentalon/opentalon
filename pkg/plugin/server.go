@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/opentalon/opentalon/internal/grpclimit"
 	"github.com/opentalon/opentalon/proto/pluginpb"
 	"google.golang.org/grpc"
 )
@@ -52,7 +53,7 @@ type Refreshable interface {
 // and for closing the listener after ServeListener returns.
 // Useful for TCP mode (MCP_GRPC_PORT).
 func ServeListener(ln net.Listener, handler Handler) error {
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(grpclimit.ServerOptions()...)
 	pluginpb.RegisterPluginServiceServer(srv, &grpcServer{handler: handler})
 	return srv.Serve(ln)
 }
@@ -79,7 +80,7 @@ func Serve(handler Handler) error {
 		return fmt.Errorf("write handshake: %w", err)
 	}
 
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(grpclimit.ServerOptions()...)
 	pluginpb.RegisterPluginServiceServer(srv, &grpcServer{handler: handler})
 
 	return srv.Serve(ln)
