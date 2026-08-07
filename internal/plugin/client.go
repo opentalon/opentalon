@@ -7,6 +7,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/opentalon/opentalon/internal/grpclimit"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/profile"
 	pkg "github.com/opentalon/opentalon/pkg/plugin"
@@ -44,9 +45,11 @@ func Dial(network, address string, timeout time.Duration, configJSON string) (*C
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cc, err := grpc.NewClient(target,
+	opts := append([]grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+	}, grpclimit.DialOptions()...)
+
+	cc, err := grpc.NewClient(target, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("dial plugin at %s://%s: %w", network, address, err)
 	}

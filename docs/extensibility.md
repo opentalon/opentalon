@@ -50,6 +50,32 @@ For standalone capabilities the LLM calls: integrations, actions, data retrieval
 - Same proven pattern behind **Terraform**, **Vault**, and **Nomad**
 - **`user_only` actions** — set `user_only: true` on any action in `Capabilities()` to hide it from the LLM and allow it only via direct user invocation (e.g. slash commands). The core enforces this: LLM-generated calls to `user_only` actions are rejected. Built-in example: `/install skill` is `user_only` so only the user can install skills, not the LLM.
 
+### Message size limits
+
+Tool call arguments travel inline in a single unary gRPC message
+(`ToolCallRequest.args` is a `map<string, string>`), and so does the result. The
+receive limit on every host↔plugin and host↔channel path is **32 MiB** by
+default, shared across all arguments plus the rest of the message — so the
+usable ceiling for one argument is somewhat below that. Exceeding it fails at
+the transport:
+
+```
+rpc error: code = ResourceExhausted desc = grpc: received message larger than max (33554433 vs 33554432)
+```
+
+Override it with `OPENTALON_GRPC_MAX_MSG_BYTES` (bytes, decimal):
+
+```bash
+OPENTALON_GRPC_MAX_MSG_BYTES=67108864 ./opentalon
+```
+
+Set it on the **host**: plugins and channels launched as subprocesses inherit
+the host's environment, so both ends of the connection pick up the same value.
+For a plugin you run yourself (`grpc://`, docker, remote), set it in that
+process too — the limit applies to whichever side *receives* the large message,
+so raising only one side moves the failure to the other direction. An unset,
+unparseable, or non-positive value falls back to 32 MiB.
+
 ## Channel plugins (gRPC / HTTP / WS — any language)
 
 I/O adapters for messaging platforms. Written in any language, deployed as separate binaries/services.
