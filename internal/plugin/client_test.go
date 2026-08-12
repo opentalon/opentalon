@@ -372,6 +372,44 @@ func TestParameterTypeMappedFromProto(t *testing.T) {
 	}
 }
 
+// TestParameterSchemaMappedFromProto covers the other half of the boundary:
+// the raw JSON Schema fragment a plugin supplies for a parameter must reach
+// the orchestrator byte-for-byte. It is the only carrier for everything a
+// bare type name cannot express — enum values above all — so a fragment that
+// arrives altered here is a fragment the model never sees correctly. A plugin
+// that supplies none must arrive with none, so the host knows to synthesise.
+func TestParameterSchemaMappedFromProto(t *testing.T) {
+	const enumFragment = `{"type":"string","enum":["asset","consumable"],"description":"Which kind"}`
+	pb := &pluginpb.PluginCapabilities{
+		Name:        "myplugin",
+		Description: "Test plugin",
+		Actions: []*pluginpb.Action{
+			{
+				Name:        "list",
+				Description: "List",
+				Parameters: []*pluginpb.Parameter{
+					{Name: "kind", Description: "Which kind", Type: "string", Schema: enumFragment},
+					{Name: "plain", Description: "No fragment supplied", Type: "string"},
+				},
+			},
+		},
+	}
+	cap := toPluginCapability(pb)
+	if len(cap.Actions) != 1 || len(cap.Actions[0].Parameters) != 2 {
+		t.Fatalf("expected 1 action with 2 parameters, got %+v", cap.Actions)
+	}
+	params := map[string]orchestrator.Parameter{}
+	for _, p := range cap.Actions[0].Parameters {
+		params[p.Name] = p
+	}
+	if got := params["kind"].Schema; got != enumFragment {
+		t.Errorf("kind schema = %q, want it carried through verbatim: %q", got, enumFragment)
+	}
+	if got := params["plain"].Schema; got != "" {
+		t.Errorf("plain schema = %q, want empty when the plugin supplied none", got)
+	}
+}
+
 // credHeaderCapturingPluginService records the credential headers from each Execute call.
 type credHeaderCapturingPluginService struct {
 	pluginpb.UnimplementedPluginServiceServer

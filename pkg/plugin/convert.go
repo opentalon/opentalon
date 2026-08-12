@@ -1,10 +1,34 @@
 package plugin
 
 import (
+	"strings"
+	"unicode/utf8"
+
 	"github.com/opentalon/opentalon/proto/pluginpb"
 )
 
 // --- CapabilitiesMsg ---
+
+// schemaToProto prepares a parameter's raw JSON Schema fragment for a proto3
+// string field.
+//
+// Every other string in a capability arrives having been decoded by
+// encoding/json into a Go string, which silently replaces invalid UTF-8 with
+// U+FFFD on the way. A json.RawMessage does not: it holds whatever bytes the
+// source contained. A plugin that bridges a third-party tool server does not
+// control those bytes, and proto3 refuses to marshal a string field that is
+// not valid UTF-8 — so one bad byte in one property of one tool would fail
+// the whole Capabilities call and register none of the plugin's tools.
+//
+// Replacing rather than rejecting keeps the fragment a valid schema: U+FFFD
+// is legal inside a JSON string. Same treatment, and the same reason, as
+// ensureValidUTF8Map on the argument path.
+func schemaToProto(schema []byte) string {
+	if utf8.Valid(schema) {
+		return string(schema)
+	}
+	return strings.ToValidUTF8(string(schema), "�")
+}
 
 func capsToProto(c CapabilitiesMsg) *pluginpb.PluginCapabilities {
 	actions := make([]*pluginpb.Action, len(c.Actions))
@@ -16,6 +40,7 @@ func capsToProto(c CapabilitiesMsg) *pluginpb.PluginCapabilities {
 				Description: p.Description,
 				Type:        p.Type,
 				Required:    p.Required,
+				Schema:      schemaToProto(p.Schema),
 			}
 		}
 		actions[i] = &pluginpb.Action{

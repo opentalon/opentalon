@@ -1,7 +1,10 @@
 package plugin
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/opentalon/opentalon/proto/pluginpb"
 )
@@ -185,6 +188,87 @@ func TestCapsToProto_Parameters(t *testing.T) {
 	}
 	if pb.Actions[0].Parameters[1].Required {
 		t.Error("selector parameter should not be required")
+	}
+}
+
+// TestCapsToProto_ParameterSchema locks in the per-parameter JSON Schema
+// fragment on its way SDK -> proto. It is the only carrier for what a bare
+// type name cannot express — enum values, array item types, nested object
+// shapes — so it has to cross this boundary byte-for-byte. A plugin that
+// supplies none must produce an empty field, which is how the host knows to
+// synthesise a fragment from type + description instead.
+func TestCapsToProto_ParameterSchema(t *testing.T) {
+	const fragment = `{"type":"string","enum":["asset","consumable"]}`
+	msg := CapabilitiesMsg{
+		Name:        "myplugin",
+		Description: "Test",
+		Actions: []ActionMsg{
+			{
+				Name:        "act",
+				Description: "Action with a schema-carrying param",
+				Parameters: []ParameterMsg{
+					{Name: "kind", Description: "Which kind", Type: "string", Schema: []byte(fragment)},
+					{Name: "plain", Description: "No fragment", Type: "string"},
+				},
+			},
+		},
+	}
+	pb := capsToProto(msg)
+
+	if len(pb.Actions[0].Parameters) != 2 {
+		t.Fatalf("expected 2 parameters, got %d", len(pb.Actions[0].Parameters))
+	}
+	if got := pb.Actions[0].Parameters[0].Schema; got != fragment {
+		t.Errorf("kind schema = %q, want %q", got, fragment)
+	}
+	if got := pb.Actions[0].Parameters[1].Schema; got != "" {
+		t.Errorf("plain schema = %q, want empty when the plugin supplied none", got)
+	}
+}
+
+// TestCapsToProto_ParameterSchemaInvalidUTF8 guards the one place raw
+// third-party bytes reach a proto3 string.
+//
+// Every other string in a capability has been through encoding/json into a Go
+// string, which replaces invalid UTF-8 with U+FFFD on the way. A
+// json.RawMessage keeps whatever bytes the source held — and proto3 refuses to
+// marshal a string field that is not valid UTF-8, so one bad byte in one
+// property of one tool would fail the whole Capabilities call and register
+// none of the plugin's tools. The fragment must arrive sanitised, and must
+// still parse as a schema afterwards.
+func TestCapsToProto_ParameterSchemaInvalidUTF8(t *testing.T) {
+	// 0xff is never valid in UTF-8.
+	pb := capsToProto(CapabilitiesMsg{
+		Name: "myplugin",
+		Actions: []ActionMsg{{
+			Name:       "act",
+			Parameters: []ParameterMsg{{Name: "kind", Schema: []byte("{\"type\":\"string\",\"description\":\"caf\xff\"}")}},
+		}},
+	})
+
+	got := pb.Actions[0].Parameters[0].Schema
+	if !utf8.ValidString(got) {
+		t.Fatalf("schema = %q, want valid UTF-8 — proto3 will not marshal it otherwise", got)
+	}
+	if strings.ContainsRune(got, 0xff) {
+		t.Errorf("schema = %q, the raw 0xff byte should have been replaced", got)
+	}
+	var frag map[string]interface{}
+	if err := json.Unmarshal([]byte(got), &frag); err != nil {
+		t.Fatalf("sanitised schema no longer parses: %v", err)
+	}
+	if frag["type"] != "string" {
+		t.Errorf("sanitised schema lost its type: %#v", frag)
+	}
+
+	// Valid bytes must survive untouched — sanitising is not re-encoding.
+	const clean = `{"type":"string","enum":["a"]}`
+	pb = capsToProto(CapabilitiesMsg{
+		Name:    "myplugin",
+		Actions: []ActionMsg{{Name: "act", Parameters: []ParameterMsg{{Name: "kind", Schema: []byte(clean)}}}},
+	})
+	if got := pb.Actions[0].Parameters[0].Schema; got != clean {
+		t.Errorf("schema = %q, want %q unchanged", got, clean)
 	}
 }
 

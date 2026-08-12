@@ -259,6 +259,7 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 				Name:        p.Name,
 				Description: p.Description,
 				Type:        p.Type,
+				Schema:      p.Schema,
 				Required:    p.Required,
 			}
 		}
