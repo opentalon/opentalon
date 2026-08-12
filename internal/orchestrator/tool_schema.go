@@ -51,11 +51,13 @@ func parameterSchema(p Parameter) (map[string]interface{}, bool) {
 //   - it is not a single JSON object. A bare `true`, a string, an array,
 //     trailing content, malformed bytes: none of those can sit under
 //     `properties.<name>`;
-//   - its "type" names something JSON Schema does not define. This is the
-//     same guard jsonSchemaType applies on the synthesised branch, applied
-//     here too so a fragment cannot walk past it;
-//   - it contains a "$ref" at any depth. A per-parameter fragment travels
-//     without the "$defs" its reference points at, so the reference can never
+//   - its own "type" names something JSON Schema does not define. This is the
+//     same seven-name guard jsonSchemaType applies on the synthesised branch,
+//     applied here too so the fragment path cannot walk past the check the
+//     type path has. It reaches the fragment's own "type" only, not the
+//     "type" of a subschema nested inside it — see declaresKnownTypes;
+//   - it references a definition at any depth. A per-parameter fragment
+//     travels without the "$defs" the reference points at, so it can never
 //     resolve on the far side.
 //
 // An unusable fragment is not dropped, it falls back to the synthesised form
@@ -74,7 +76,7 @@ func usableSchemaFragment(raw string) (map[string]interface{}, bool) {
 	if dec.More() {
 		return nil, false
 	}
-	if !declaresKnownTypes(frag["type"]) {
+	if !declaresKnownTypes(frag) {
 		return nil, false
 	}
 	if containsRef(frag) {
@@ -83,15 +85,28 @@ func usableSchemaFragment(raw string) (map[string]interface{}, bool) {
 	return frag, true
 }
 
-// declaresKnownTypes reports whether a fragment's "type" keyword is one the
-// host can announce. JSON Schema allows a single name or a list of them, and
-// allows the keyword to be absent entirely — a fragment that only constrains
-// by enum is perfectly valid. Anything else present under the key, including
-// a non-string list member, is a type name no provider will accept.
-func declaresKnownTypes(declared interface{}) bool {
-	switch t := declared.(type) {
-	case nil:
+// declaresKnownTypes reports whether a fragment's own "type" keyword is one
+// the host can announce.
+//
+// Absent is fine — a fragment that constrains only by enum or const is a valid
+// schema. Present is held to the seven names, as a single string or as a list
+// of them. An explicitly null "type" is neither: JSON Schema has no such form,
+// so it is rejected rather than read as "absent", which is the reading a plain
+// nil check would give it.
+//
+// This deliberately looks at the fragment's own keyword and does not recurse.
+// A nested map inside a schema is not necessarily itself a schema — the value
+// under "default", "const" or an "enum" member is data, and a "type" key
+// inside it means nothing. Walking every nested "type" would reject valid
+// fragments over values that were never type declarations, which is a worse
+// trade than letting a wrong nested name through: the surrounding keyword
+// already tells the provider how to read it.
+func declaresKnownTypes(frag map[string]interface{}) bool {
+	declared, present := frag["type"]
+	if !present {
 		return true
+	}
+	switch t := declared.(type) {
 	case string:
 		return isJSONSchemaType(t)
 	case []interface{}:
@@ -108,13 +123,23 @@ func declaresKnownTypes(declared interface{}) bool {
 }
 
 // containsRef reports whether a decoded fragment references a definition
-// anywhere inside it. Nesting matters: a "$ref" three levels down inside an
+// anywhere inside it. Nesting matters: a reference three levels down inside an
 // items or properties block dangles just as badly as one at the top.
+//
+// All three of JSON Schema's reference keywords count, because all three
+// resolve against something a per-parameter fragment cannot bring with it.
+// This is a key-name scan, so it also fires on the rare fragment that uses one
+// of those names as a property name or inside a literal value — that costs
+// such a fragment its detail and nothing else, which is the right way round
+// for a check whose failure mode is the provider rejecting the whole tools
+// array.
 func containsRef(value interface{}) bool {
 	switch v := value.(type) {
 	case map[string]interface{}:
-		if _, present := v["$ref"]; present {
-			return true
+		for _, keyword := range [...]string{"$ref", "$dynamicRef", "$recursiveRef"} {
+			if _, present := v[keyword]; present {
+				return true
+			}
 		}
 		for _, nested := range v {
 			if containsRef(nested) {

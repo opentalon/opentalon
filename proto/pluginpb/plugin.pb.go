@@ -973,11 +973,16 @@ type Parameter struct {
 	// formats, defaults. Plugins that bridge an upstream tool protocol (e.g.
 	// the mcp-plugin) pass the upstream property schema straight through.
 	//
-	// The host announces this fragment to the model verbatim when present and
-	// synthesises one from `type` and `description` only when it is absent, so
-	// a plugin that leaves it empty behaves exactly as it did before this field
-	// existed. `required` stays where it is: it belongs to the enclosing object
-	// schema, not to the property.
+	// Every keyword in the fragment reaches the model. The host falls back to
+	// synthesising one from `type` and `description` when the fragment is
+	// absent — so a plugin that leaves this empty behaves exactly as it did
+	// before the field existed — and also when it cannot be announced safely:
+	// it must be a single JSON object, its own `type` must name a type JSON
+	// Schema defines, and it must not reference a definition, since the `$defs`
+	// it would point at cannot travel with a per-parameter fragment.
+	//
+	// `required` stays where it is: it belongs to the enclosing object schema,
+	// not to the property.
 	Schema        string `protobuf:"bytes,5,opt,name=schema,proto3" json:"schema,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

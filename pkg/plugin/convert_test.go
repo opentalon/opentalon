@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/opentalon/opentalon/proto/pluginpb"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestRequestFromProto_CredentialHeaders(t *testing.T) {
@@ -250,8 +251,15 @@ func TestCapsToProto_ParameterSchemaInvalidUTF8(t *testing.T) {
 	if !utf8.ValidString(got) {
 		t.Fatalf("schema = %q, want valid UTF-8 — proto3 will not marshal it otherwise", got)
 	}
-	if strings.ContainsRune(got, 0xff) {
+	if strings.IndexByte(got, 0xff) >= 0 {
 		t.Errorf("schema = %q, the raw 0xff byte should have been replaced", got)
+	}
+	// The point of the sanitiser is that this call succeeds. Without it the
+	// bytes reach proto3 as-is and marshalling the whole capabilities message
+	// fails, which registers none of the plugin's tools — assert the outcome,
+	// not just that the bytes changed.
+	if _, err := proto.Marshal(pb); err != nil {
+		t.Fatalf("capabilities do not marshal: %v", err)
 	}
 	var frag map[string]interface{}
 	if err := json.Unmarshal([]byte(got), &frag); err != nil {

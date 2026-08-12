@@ -265,6 +265,15 @@ func TestUsableSchemaFragment(t *testing.T) {
 		{"empty union", `{"type":[]}`, false},
 		{"non-string union member", `{"type":["string",7]}`, false},
 		{"type is an object", `{"type":{"$data":"/x"}}`, false},
+		// An explicit null is not the same as an absent keyword: JSON Schema
+		// has no such form, so it must not be read as "no type declared" and
+		// shipped as `"type": null`.
+		{"type is explicitly null", `{"type":null,"enum":["a"]}`, false},
+		// The check reaches the fragment's own keyword only. A nested map is
+		// not necessarily a schema, so walking into it would reject valid
+		// fragments over values that were never type declarations.
+		{"nested type is not inspected", `{"type":"array","items":{"type":"json"}}`, true},
+		{"a type inside a default value is data", `{"type":"object","default":{"type":"whatever"}}`, true},
 
 		// References, which have no $defs to resolve against once the
 		// fragment is on its own.
@@ -272,6 +281,8 @@ func TestUsableSchemaFragment(t *testing.T) {
 		{"ref inside items", `{"type":"array","items":{"$ref":"#/$defs/Tag"}}`, false},
 		{"ref nested in properties", `{"type":"object","properties":{"a":{"type":"object","properties":{"b":{"$ref":"#/$defs/X"}}}}}`, false},
 		{"ref inside a list keyword", `{"anyOf":[{"type":"string"},{"$ref":"#/$defs/X"}]}`, false},
+		{"dynamic ref", `{"$dynamicRef":"#node"}`, false},
+		{"recursive ref", `{"$recursiveRef":"#"}`, false},
 		{"the word ref in prose is fine", `{"type":"string","description":"pass a $ref here"}`, true},
 	}
 	for _, c := range cases {

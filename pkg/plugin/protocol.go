@@ -120,9 +120,14 @@ type ParameterMsg struct {
 	// formats, defaults. A plugin that bridges an upstream tool protocol
 	// passes the upstream property schema straight through here.
 	//
-	// The host announces this fragment to the model verbatim when present and
-	// synthesises one from Type and Description only when it is absent, so
-	// leaving it nil behaves exactly as it did before this field existed.
+	// Every keyword in the fragment reaches the model. The host falls back to
+	// synthesising one from Type and Description when the fragment is absent
+	// — so leaving this nil behaves exactly as it did before the field
+	// existed — and also when it cannot be announced safely: it must be a
+	// single JSON object, its own "type" must name a type JSON Schema
+	// defines, and it must not reference a definition, since the "$defs" it
+	// would point at cannot travel with a per-parameter fragment.
+	//
 	// Required stays where it is: it belongs to the enclosing object schema,
 	// not to the property.
 	Schema json.RawMessage `json:"schema,omitempty"`
