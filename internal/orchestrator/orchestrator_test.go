@@ -99,14 +99,32 @@ func setupOrchestrator(llm LLMClient, parser ToolCallParser) (*Orchestrator, str
 		Name:        "gitlab",
 		Description: "GitLab integration",
 		Actions: []Action{
-			{Name: "analyze_code", Description: "Analyze code", Parameters: []Parameter{{Name: "repo", Description: "Repository"}}},
+			// "Repository" on its own left a real model unsure whether a bare
+			// name was an acceptable value: it asked the user for a full path
+			// instead of calling the tool, which fails the integration
+			// scenario. Saying that a bare name is complete is what any real
+			// tool description does; an example value is NOT enough, it just
+			// gives the doubt something to offer back. Only this fixture
+			// needs it — the other setupOrchestrator* copies are only ever
+			// read by a fake LLM.
+			{Name: "analyze_code", Description: "Analyze code", Parameters: []Parameter{{Name: "repo", Description: "Repository name exactly as the user gave it. A bare name is complete — no owner, group or path is needed, and none should be asked for."}}},
 			{Name: "create_pr", Description: "Create PR"},
 		},
 	}, &echoExecutor{})
 	_ = registry.Register(PluginCapability{
 		Name:        "jira",
 		Description: "Jira integration",
-		Actions:     []Action{{Name: "create_issue", Description: "Create issue"}},
+		// A tool called "Create issue" that declares no parameters at all is
+		// not plausible to a model, so it invents some: asked to create an
+		// issue titled "Code review" it sent project/summary/issue_title in
+		// turn, each rejected by the unknown-argument guard, six wasted
+		// rounds before it gave up and called with none. The scenario still
+		// passed — it only asserts a non-empty response — which is exactly
+		// why this stayed invisible. Declaring the one parameter the
+		// scenario names ends the guessing.
+		Actions: []Action{{Name: "create_issue", Description: "Create issue", Parameters: []Parameter{
+			{Name: "title", Description: "Issue title, exactly as the user phrased it. This is the only parameter; nothing else is needed or accepted."},
+		}}},
 	}, &echoExecutor{})
 
 	memory := state.NewMemoryStore("")
