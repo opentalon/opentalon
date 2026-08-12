@@ -2844,9 +2844,15 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 			properties := make(map[string]interface{})
 			var required []string
 			for _, p := range action.Parameters {
-				properties[p.Name] = map[string]interface{}{
-					"type":        jsonSchemaType(p.Type),
-					"description": p.Description,
+				schema, fromPlugin := parameterSchema(p)
+				properties[p.Name] = schema
+				if p.Schema != "" && !fromPlugin {
+					// The plugin went to the trouble of declaring a schema and
+					// the model is not getting it. Silence here would leave a
+					// missing enum looking exactly like a parameter that never
+					// had one.
+					slog.Warn("tool registration: unusable parameter schema, falling back to type and description",
+						"tool", fqn, "param", p.Name)
 				}
 				if p.Required {
 					required = append(required, p.Name)

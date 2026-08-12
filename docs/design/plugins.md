@@ -86,6 +86,7 @@ message Parameter {
     string description = 2;
     string type = 3;
     bool required = 4;
+    string schema = 5;  // optional: this parameter's JSON Schema fragment, verbatim
 }
 ```
 
@@ -124,6 +125,7 @@ type Parameter struct {
     Name        string
     Description string
     Type        string // JSON Schema type; empty falls back to "string"
+    Schema      string // optional full JSON Schema fragment; wins over Type
     Required    bool
 }
 ```

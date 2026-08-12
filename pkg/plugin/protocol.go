@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
@@ -113,6 +114,23 @@ type ParameterMsg struct {
 	Description string `json:"description"`
 	Type        string `json:"type"`
 	Required    bool   `json:"required"`
+	// Schema is this parameter's JSON Schema fragment as its source declared
+	// it — the object that would sit under `properties.<name>`, carrying what
+	// Type alone cannot: enum values, array item types, nested object shapes,
+	// formats, defaults. A plugin that bridges an upstream tool protocol
+	// passes the upstream property schema straight through here.
+	//
+	// Every keyword in the fragment reaches the model. The host falls back to
+	// synthesising one from Type and Description when the fragment is absent
+	// — so leaving this nil behaves exactly as it did before the field
+	// existed — and also when it cannot be announced safely: it must be a
+	// single JSON object, its own "type" must name a type JSON Schema
+	// defines, and it must not reference a definition, since the "$defs" it
+	// would point at cannot travel with a per-parameter fragment.
+	//
+	// Required stays where it is: it belongs to the enclosing object schema,
+	// not to the property.
+	Schema json.RawMessage `json:"schema,omitempty"`
 }
 
 // Handshake is the first line a plugin binary writes to stdout.

@@ -2,18 +2,27 @@ package orchestrator
 
 // Parameter is one declared argument of an Action.
 //
-// Type is the JSON Schema type a plugin declares for the argument
-// ("integer", "boolean", "array", …). It is advisory: buildToolDefinitions
-// normalises it through jsonSchemaType before announcing it to the model, so
-// a plugin that declares nothing — or declares a name JSON Schema does not
-// define — still yields a valid tool schema. Tool-call arguments travel as
-// map[string]string regardless of what is declared here; the provider layer
-// flattens typed values on the way in and each plugin decodes them against
-// its own schema on the way out.
+// Schema, when a plugin supplies one, is the parameter's full JSON Schema
+// fragment as raw JSON text — the object that belongs under
+// `properties.<name>`, carrying what Type alone cannot: enum values, array
+// item types, nested object shapes, formats, defaults. Every keyword in it
+// reaches the model; parameterSchema decides that, and states what "reaches"
+// does and does not preserve.
+//
+// Type is the fallback for plugins that supply no fragment: a JSON Schema
+// type name ("integer", "boolean", "array", …), normalised through
+// jsonSchemaType so that a plugin declaring nothing, or declaring a name JSON
+// Schema does not define, still yields a valid tool schema.
+//
+// Neither constrains what may travel on the wire. Tool-call arguments are
+// map[string]string throughout; the provider layer flattens typed values on
+// the way in and each plugin decodes them against its own schema on the way
+// out. Both fields describe the argument, they do not carry it.
 type Parameter struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
 	Type        string `yaml:"type,omitempty"`
+	Schema      string `yaml:"schema,omitempty"`
 	Required    bool   `yaml:"required"`
 }
 

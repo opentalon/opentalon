@@ -50,6 +50,45 @@ For standalone capabilities the LLM calls: integrations, actions, data retrieval
 - Same proven pattern behind **Terraform**, **Vault**, and **Nomad**
 - **`user_only` actions** — set `user_only: true` on any action in `Capabilities()` to hide it from the LLM and allow it only via direct user invocation (e.g. slash commands). The core enforces this: LLM-generated calls to `user_only` actions are rejected. Built-in example: `/install skill` is `user_only` so only the user can install skills, not the LLM.
 
+### Describing parameters to the model
+
+Each `Parameter` in `Capabilities()` can carry a full JSON Schema fragment in
+its `schema` field — the object that belongs under `properties.<name>`:
+
+```json
+{"type": "string", "enum": ["asset", "consumable"], "description": "Which kind"}
+```
+
+Every keyword in that fragment reaches the model, so everything a bare type
+name cannot express survives: enum values, array item types, nested object
+shapes, formats, defaults. Plugins that bridge another tool protocol should
+pass the upstream property schema straight through rather than reducing it.
+
+`schema` is optional. Supply none and the host synthesises one from `type` and
+`description`, exactly as it did before the field existed; `type` is then the
+only shape information the model gets, and a type name JSON Schema does not
+define falls back to `"string"`. `required` is never part of the fragment — it
+belongs to the enclosing object schema and stays on the parameter.
+
+Three limits are worth knowing:
+
+- **It reaches the model through native function calling.** With a provider
+  that has no native tool support, tools are described as text in the system
+  prompt — name, description and which parameters are required, no schema.
+  That path predates this field and is unchanged.
+- **The fragment must stand on its own.** The host re-encodes it, so key order
+  is normalised (values are not). A fragment that is not a single JSON object,
+  or that names a type JSON Schema does not define, or that contains a `$ref` —
+  which cannot resolve, because the `$defs` it points at has no way to travel
+  with a per-parameter fragment — is dropped in favour of the synthesised form,
+  and the host logs a warning naming the tool and parameter.
+- **Nothing here changes what may travel on the wire.** Arguments are always
+  `map<string, string>`: the host flattens a JSON number, boolean, array or
+  object the model produced into its text form, and your plugin decodes it back
+  against its own schema. Note that the host drops an argument the model sent
+  as JSON `null` rather than forwarding it, so a nullable type in your fragment
+  does not give the model a way to send an explicit null.
+
 ### Message size limits
 
 Tool call arguments travel inline in a single unary gRPC message

@@ -962,11 +962,28 @@ func (x *Action) GetReadOnly() bool {
 }
 
 type Parameter struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
-	Type          string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`
-	Required      bool                   `protobuf:"varint,4,opt,name=required,proto3" json:"required,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Description string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	Type        string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`
+	Required    bool                   `protobuf:"varint,4,opt,name=required,proto3" json:"required,omitempty"`
+	// schema is this parameter's JSON Schema fragment as its source declared
+	// it — the object that would sit under `properties.<name>`, carrying what
+	// `type` alone cannot: enum values, array item types, nested object shapes,
+	// formats, defaults. Plugins that bridge an upstream tool protocol (e.g.
+	// the mcp-plugin) pass the upstream property schema straight through.
+	//
+	// Every keyword in the fragment reaches the model. The host falls back to
+	// synthesising one from `type` and `description` when the fragment is
+	// absent — so a plugin that leaves this empty behaves exactly as it did
+	// before the field existed — and also when it cannot be announced safely:
+	// it must be a single JSON object, its own `type` must name a type JSON
+	// Schema defines, and it must not reference a definition, since the `$defs`
+	// it would point at cannot travel with a per-parameter fragment.
+	//
+	// `required` stays where it is: it belongs to the enclosing object schema,
+	// not to the property.
+	Schema        string `protobuf:"bytes,5,opt,name=schema,proto3" json:"schema,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1027,6 +1044,13 @@ func (x *Parameter) GetRequired() bool {
 		return x.Required
 	}
 	return false
+}
+
+func (x *Parameter) GetSchema() string {
+	if x != nil {
+		return x.Schema
+	}
+	return ""
 }
 
 var File_plugin_proto protoreflect.FileDescriptor
@@ -1108,12 +1132,13 @@ const file_plugin_proto_rawDesc = "" +
 	"\tuser_only\x18\x04 \x01(\bR\buserOnly\x12.\n" +
 	"\x13inject_context_args\x18\x05 \x03(\tR\x11injectContextArgs\x12%\n" +
 	"\x0ealways_include\x18\x06 \x01(\bR\ralwaysInclude\x12\x1b\n" +
-	"\tread_only\x18\a \x01(\bR\breadOnly\"q\n" +
+	"\tread_only\x18\a \x01(\bR\breadOnly\"\x89\x01\n" +
 	"\tParameter\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x12\n" +
 	"\x04type\x18\x03 \x01(\tR\x04type\x12\x1a\n" +
-	"\brequired\x18\x04 \x01(\bR\brequired2\xb3\x03\n" +
+	"\brequired\x18\x04 \x01(\bR\brequired\x12\x16\n" +
+	"\x06schema\x18\x05 \x01(\tR\x06schema2\xb3\x03\n" +
 	"\rPluginService\x12F\n" +
 	"\x04Init\x12&.opentalon.plugin.v1.PluginInitRequest\x1a\x16.google.protobuf.Empty\x12X\n" +
 	"\aExecute\x12$.opentalon.plugin.v1.ToolCallRequest\x1a'.opentalon.plugin.v1.ToolResultResponse\x12O\n" +
