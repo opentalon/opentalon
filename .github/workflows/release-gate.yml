@@ -4,6 +4,13 @@ on:
   release:
     types: [published]
   workflow_dispatch:  # manual pre-release validation
+  # Nightly, so a red gate is seen the next morning rather than at the next
+  # release. Between v0.0.22 and v0.0.23 this gate was red for three weeks and
+  # nobody knew, because nothing ran it in between. Only the structural job
+  # fires here: the eval step keys on a patch number of 0 and a schedule run
+  # has no tag, so it stays skipped and this stays cheap.
+  schedule:
+    - cron: "0 3 * * *"
 
 permissions:
   contents: read
