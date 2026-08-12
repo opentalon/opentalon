@@ -2845,7 +2845,7 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 			var required []string
 			for _, p := range action.Parameters {
 				properties[p.Name] = map[string]interface{}{
-					"type":        "string",
+					"type":        jsonSchemaType(p.Type),
 					"description": p.Description,
 				}
 				if p.Required {

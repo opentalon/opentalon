@@ -258,6 +258,7 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 			params[j] = orchestrator.Parameter{
 				Name:        p.Name,
 				Description: p.Description,
+				Type:        p.Type,
 				Required:    p.Required,
 			}
 		}

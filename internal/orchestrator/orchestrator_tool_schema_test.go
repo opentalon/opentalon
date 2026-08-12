@@ -69,3 +69,73 @@ func TestBuildToolDefinitions_RequiredKeyShape(t *testing.T) {
 		t.Fatalf("no-required: `required` must be omitted when empty (not null/[]), got %#v", v)
 	}
 }
+
+// TestBuildToolDefinitions_ParameterTypes is the test whose absence let every
+// parameter be announced to the model as a string no matter what its plugin
+// declared: nothing fed a non-string parameter through to the tool definition
+// and checked what came out.
+//
+// A declared JSON Schema type must survive verbatim. Two things must NOT: an
+// undeclared type, and a plugin's own shorthand for a shape the wire cannot
+// carry ("json"). Both become "string" — announcing "json" would make a
+// provider reject the entire tools array, not just that one property.
+func TestBuildToolDefinitions_ParameterTypes(t *testing.T) {
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "typed-plugin", Description: "parameter type fixtures",
+		Actions: []Action{
+			{
+				Name: "search", Description: "typed parameters", AlwaysInclude: true,
+				Parameters: []Parameter{
+					{Name: "query", Description: "text", Type: "string", Required: true},
+					{Name: "limit", Description: "how many", Type: "integer"},
+					{Name: "ratio", Description: "fraction", Type: "number"},
+					{Name: "verbose", Description: "chatty", Type: "boolean"},
+					{Name: "tags", Description: "filters", Type: "array"},
+					{Name: "filter", Description: "nested", Type: "object"},
+					{Name: "payload", Description: "plugin shorthand", Type: "json"},
+					{Name: "legacy", Description: "no type declared"},
+				},
+			},
+		},
+	}, &fixedResultExecutor{content: "ok"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "", "")
+	orch := NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry,
+		state.NewMemoryStore(""), sessions, OrchestratorOpts{})
+	ctx := actor.WithSessionID(context.Background(), "s1")
+
+	var props map[string]interface{}
+	for _, td := range orch.buildToolDefinitions(ctx) {
+		if td.Name == toolFQN("typed-plugin", "search") {
+			props, _ = td.Parameters["properties"].(map[string]interface{})
+		}
+	}
+	if props == nil {
+		t.Fatalf("search tool missing from the tools array, or its properties are not an object")
+	}
+
+	want := map[string]string{
+		"query":   "string",
+		"limit":   "integer",
+		"ratio":   "number",
+		"verbose": "boolean",
+		"tags":    "array",
+		"filter":  "object",
+		"payload": "string", // "json" is not a JSON Schema type
+		"legacy":  "string", // nothing declared
+	}
+	for name, wantType := range want {
+		prop, ok := props[name].(map[string]interface{})
+		if !ok {
+			t.Errorf("property %q missing from the emitted schema", name)
+			continue
+		}
+		if prop["type"] != wantType {
+			t.Errorf("property %q type = %v, want %q", name, prop["type"], wantType)
+		}
+	}
+}

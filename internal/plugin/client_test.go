@@ -322,6 +322,56 @@ func TestAlwaysIncludeMappedFromProto(t *testing.T) {
 	}
 }
 
+// TestParameterTypeMappedFromProto pins the boundary where a declared
+// parameter type used to be dropped: the wire has always carried
+// Parameter.type, but toPluginCapability copied only name, description and
+// required, so every non-string parameter reached the orchestrator — and from
+// there the model — as an untyped one. A plugin that declares nothing must
+// still arrive with an empty type; choosing a default belongs to the schema
+// builder, not to this boundary.
+func TestParameterTypeMappedFromProto(t *testing.T) {
+	pb := &pluginpb.PluginCapabilities{
+		Name:        "myplugin",
+		Description: "Test plugin",
+		Actions: []*pluginpb.Action{
+			{
+				Name:        "search",
+				Description: "Search",
+				Parameters: []*pluginpb.Parameter{
+					{Name: "query", Description: "Text", Type: "string", Required: true},
+					{Name: "limit", Description: "How many", Type: "integer"},
+					{Name: "verbose", Description: "Chatty", Type: "boolean"},
+					{Name: "tags", Description: "Filters", Type: "array"},
+					{Name: "legacy", Description: "No type declared"},
+				},
+			},
+		},
+	}
+	cap := toPluginCapability(pb)
+	if len(cap.Actions) != 1 {
+		t.Fatalf("expected 1 action, got %d", len(cap.Actions))
+	}
+	want := map[string]string{
+		"query":   "string",
+		"limit":   "integer",
+		"verbose": "boolean",
+		"tags":    "array",
+		"legacy":  "",
+	}
+	got := map[string]string{}
+	for _, p := range cap.Actions[0].Parameters {
+		got[p.Name] = p.Type
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parameters = %v, want %d entries", got, len(want))
+	}
+	for name, wantType := range want {
+		if got[name] != wantType {
+			t.Errorf("parameter %q type = %q, want %q", name, got[name], wantType)
+		}
+	}
+}
+
 // credHeaderCapturingPluginService records the credential headers from each Execute call.
 type credHeaderCapturingPluginService struct {
 	pluginpb.UnimplementedPluginServiceServer
