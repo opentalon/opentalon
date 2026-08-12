@@ -123,6 +123,7 @@ type Action struct {
 type Parameter struct {
     Name        string
     Description string
+    Type        string // JSON Schema type; empty falls back to "string"
     Required    bool
 }
 ```
