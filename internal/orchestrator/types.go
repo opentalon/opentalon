@@ -1,8 +1,19 @@
 package orchestrator
 
+// Parameter is one declared argument of an Action.
+//
+// Type is the JSON Schema type a plugin declares for the argument
+// ("integer", "boolean", "array", …). It is advisory: buildToolDefinitions
+// normalises it through jsonSchemaType before announcing it to the model, so
+// a plugin that declares nothing — or declares a name JSON Schema does not
+// define — still yields a valid tool schema. Tool-call arguments travel as
+// map[string]string regardless of what is declared here; the provider layer
+// flattens typed values on the way in and each plugin decodes them against
+// its own schema on the way out.
 type Parameter struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
+	Type        string `yaml:"type,omitempty"`
 	Required    bool   `yaml:"required"`
 }
 

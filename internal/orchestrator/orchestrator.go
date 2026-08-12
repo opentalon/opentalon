@@ -2845,7 +2845,7 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 			var required []string
 			for _, p := range action.Parameters {
 				properties[p.Name] = map[string]interface{}{
-					"type":        "string",
+					"type":        jsonSchemaType(p.Type),
 					"description": p.Description,
 				}
 				if p.Required {
@@ -2874,6 +2874,29 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 		}
 	}
 	return tools
+}
+
+// undeclaredParameterType is what a parameter is announced as when its plugin
+// declares no type at all. Every tool-call argument reaches a plugin as a
+// string anyway, so "string" is the honest description of an undeclared
+// parameter — this is a named fallback, not a leftover of the days when every
+// parameter was announced this way.
+const undeclaredParameterType = "string"
+
+// jsonSchemaType maps a plugin-declared parameter type onto a type name JSON
+// Schema actually defines. Parameter.Type is a free-form string on the wire,
+// and plugins do use their own shorthand for shapes the wire cannot carry
+// (e.g. "json" for "an object or an array, encoded as text"). Announcing such
+// a name verbatim would make a provider reject the whole tools array, so
+// anything outside the seven JSON Schema types degrades to
+// undeclaredParameterType.
+func jsonSchemaType(declared string) string {
+	switch declared {
+	case "string", "number", "integer", "boolean", "array", "object", "null":
+		return declared
+	default:
+		return undeclaredParameterType
+	}
 }
 
 // prepareTurnStart assembles the turn_start event payload from the static
