@@ -136,11 +136,11 @@ func TestClient_ExecuteBidi_RoundTrip(t *testing.T) {
 // TestClient_ExecuteBidi_StructuredContent locks in that a callback's
 // StructuredContent reaches the plugin. Regression: the host used to fill only
 // CallbackResponse.Content, dropping StructuredContent, which broke plugins
-// (e.g. talon-plugin.check/.evaluate) that rely on the structured payload.
+// (e.g. tln-plugin.check/.evaluate) that rely on the structured payload.
 func TestClient_ExecuteBidi_StructuredContent(t *testing.T) {
 	var gotStructured string
 	body := func(ctx context.Context, req pkg.Request, host pkg.HostCaller) pkg.Response {
-		r, err := host.RunAction(ctx, "talon", "check", map[string]string{"workflow": "src"})
+		r, err := host.RunAction(ctx, "tln", "check", map[string]string{"workflow": "src"})
 		if err != nil {
 			return pkg.Response{Error: err.Error()}
 		}
@@ -150,7 +150,7 @@ func TestClient_ExecuteBidi_StructuredContent(t *testing.T) {
 	client := startBidiServer(t, body)
 
 	cb := &recordingCallbackHandler{
-		response:   func(_, _ string, _ map[string]string) (string, error) { return "ok: source is valid Talon.", nil },
+		response:   func(_, _ string, _ map[string]string) (string, error) { return "ok: source is valid Tln.", nil },
 		structured: `{"ok":true}`,
 	}
 	result := client.ExecuteBidi(context.Background(), orchestrator.ToolCall{ID: "c3", Plugin: "agents", Action: "create"}, cb)

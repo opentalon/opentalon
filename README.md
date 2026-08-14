@@ -15,8 +15,8 @@
 OpenTalon exists to solve **enterprise** issues — the gap between a chatbot demo and an AI system a real organization can actually depend on. Three ideas drive the design:
 
 - 📘 **[Enterprise AI Orchestration](https://opakalex.github.io/posts/enterprise-ai-orchestration/)** — why one big LLM call is not an enterprise architecture, and how multi-provider routing, deterministic preprocessing, plugin isolation, and policy enforcement combine into a system that holds up in production.
-- 📘 **[Expert-in-the-Loop (EITL)](https://opakalex.github.io/posts/expert-in-the-loop/)** — moving past "human-in-the-loop" rubber-stamping toward workflows where domain experts encode rules, gates, and review steps the system enforces deterministically — implemented in OpenTalon via [Talon workflows & EITL rules](#talon-workflows--eitl-rules).
-- 🛠️ **LLMs write code, the runtime keeps it safe** — adopting the same insight behind Cloudflare's [Code Mode for MCP](https://blog.cloudflare.com/code-mode/) (LLMs are dramatically better at writing programs than at orchestrating long chains of tool calls). OpenTalon lets the LLM emit **Talon scenarios** in a deliberately restricted DSL instead of raw tool calls. The grammar physically cannot express unsafe operations, so the sandbox is structural — not a policy you hope the model follows. See [Why LLMs write Talon scenarios, not raw tool calls](#why-llms-write-talon-scenarios-not-raw-tool-calls).
+- 📘 **[Expert-in-the-Loop (EITL)](https://opakalex.github.io/posts/expert-in-the-loop/)** — moving past "human-in-the-loop" rubber-stamping toward workflows where domain experts encode rules, gates, and review steps the system enforces deterministically — implemented in OpenTalon via [Tln workflows & EITL rules](#tln-workflows--eitl-rules).
+- 🛠️ **LLMs write code, the runtime keeps it safe** — adopting the same insight behind Cloudflare's [Code Mode for MCP](https://blog.cloudflare.com/code-mode/) (LLMs are dramatically better at writing programs than at orchestrating long chains of tool calls). OpenTalon lets the LLM emit **Tln scenarios** in a deliberately restricted DSL instead of raw tool calls. The grammar physically cannot express unsafe operations, so the sandbox is structural — not a policy you hope the model follows. See [Why LLMs write Tln scenarios, not raw tool calls](#why-llms-write-tln-scenarios-not-raw-tool-calls).
 
 Everything below is in service of these three ideas.
 
@@ -139,7 +139,7 @@ OpenTalon supports multiple AI providers out of the box, with a unified configur
 
 > **Getting started?** See the [Configuration Guide](docs/configuration.md). For the full architecture, see [docs/design/providers.md](docs/design/providers.md).
 
-## Talon workflows & EITL rules
+## Tln workflows & EITL rules
 
 > Conceptual background: [**Expert-in-the-Loop**](https://opakalex.github.io/posts/expert-in-the-loop/) — why enterprise AI needs domain experts encoding deterministic rules and gates, not just humans rubber-stamping LLM output.
 
@@ -151,30 +151,30 @@ OpenTalon supports multiple AI providers out of the box, with a unified configur
 
 **Expert-in-the-Loop (EITL)** flips the relationship. Domain experts write the rules once, in a deterministic language; the system enforces them every time without asking a human to babysit.
 
-### Why LLMs write Talon scenarios, not raw tool calls
+### Why LLMs write Tln scenarios, not raw tool calls
 
 The other half of the idea: **LLMs are at their best when they write code.** They are markedly weaker when forced to orchestrate long chains of individual tool calls — drift accumulates, prompt-injection surface explodes, and you can't audit what the model "decided" to do. Cloudflare's [**Code Mode for MCP**](https://blog.cloudflare.com/code-mode/) makes exactly this bet: instead of having the model issue tool calls one at a time, expose the MCP surface as a typed API and let the model write a small program against it, executed inside a sandboxed V8 isolate.
 
-OpenTalon applies the same bet with **Talon**:
+OpenTalon applies the same bet with **Tln**:
 
-- Instead of emitting a sequence of tool calls, the LLM writes a **Talon scenario** — a small program in a domain-specific language that the orchestrator compiles and executes.
-- Talon is **deliberately restricted**. No general I/O, no arbitrary process execution, no shell, no `eval`. The only actions available inside Talon are the ones the host orchestrator explicitly exposed — so the same `user_only`, sanitization, namespace, and isolation guarantees that protect individual tool calls also protect Talon programs by construction.
+- Instead of emitting a sequence of tool calls, the LLM writes a **Tln scenario** — a small program in a domain-specific language that the orchestrator compiles and executes.
+- Tln is **deliberately restricted**. No general I/O, no arbitrary process execution, no shell, no `eval`. The only actions available inside Tln are the ones the host orchestrator explicitly exposed — so the same `user_only`, sanitization, namespace, and isolation guarantees that protect individual tool calls also protect Tln programs by construction.
 - This shifts the safety boundary from *"can we trust the LLM to behave?"* to *"can the language even express the unsafe thing?"* — and the answer is no, because the grammar doesn't include it.
-- Experts and the LLM speak the **same restricted language**, against the same surface. Experts define policy in Talon; the LLM proposes scenarios in Talon; the runtime is the only thing that decides what runs.
+- Experts and the LLM speak the **same restricted language**, against the same surface. Experts define policy in Tln; the LLM proposes scenarios in Tln; the runtime is the only thing that decides what runs.
 
 The LLM gets to use what it's actually good at (writing code). The enterprise gets a sandbox that physically cannot execute the dangerous thing.
 
 ### How OpenTalon implements EITL
 
-The [**talon-plugin**](https://github.com/opentalon/talon-plugin) installs like any other OpenTalon plugin — no special orchestrator config knob. It uses the [`talon-language` Go SDK](https://github.com/opentalon/talon-language/tree/master/pkg/talon) to compile and execute **Talon source**: a small, expert-readable language for describing multi-step workflows, approval gates, conditional branches, and rule-driven escalation.
+The [**tln-plugin**](https://github.com/opentalon/tln-plugin) installs like any other OpenTalon plugin — no special orchestrator config knob. It uses the [`tln-language` Go SDK](https://github.com/opentalon/tln-language/tree/master/pkg/tln) to compile and execute **Tln source**: a small, expert-readable language for describing multi-step workflows, approval gates, conditional branches, and rule-driven escalation.
 
-Inside a Talon workflow, every MCP/tool call is routed **back through the host orchestrator** via OpenTalon's **bidirectional gRPC** host-callback contract (`ExecuteBidi`) — so each step picks up the same policy, observability, credential injection, and security guards as a normal tool call. Workflows are not a backdoor around OpenTalon's controls; they are a deterministic *driver* sitting on top of them.
+Inside a Tln workflow, every MCP/tool call is routed **back through the host orchestrator** via OpenTalon's **bidirectional gRPC** host-callback contract (`ExecuteBidi`) — so each step picks up the same policy, observability, credential injection, and security guards as a normal tool call. Workflows are not a backdoor around OpenTalon's controls; they are a deterministic *driver* sitting on top of them.
 
 ```mermaid
 flowchart LR
-    Expert["Domain expert"] -->|"writes rules"| TalonSrc["Talon source (VCS)"]
-    LLM["LLM proposes action"] --> Workflow["Talon workflow"]
-    TalonSrc --> Workflow
+    Expert["Domain expert"] -->|"writes rules"| TlnSrc["Tln source (VCS)"]
+    LLM["LLM proposes action"] --> Workflow["Tln workflow"]
+    TlnSrc --> Workflow
     Workflow -->|"approve"| Exec["Execute via orchestrator"]
     Workflow -->|"block / escalate"| Human["Human review"]
     Exec --> Guards["Same security guards as any tool call"]
@@ -187,16 +187,16 @@ flowchart LR
 - **Multi-step orchestration** — "open AppSignal incident, file Jira, draft MR, post status to #ops — but stop and alert if any step touches production data without an active change window"
 - **Tier-based routing** — "enterprise tier customers go to senior agents; SMB tier handled by the agent loop with policy guardrails"
 
-The expert writes those rules in Talon. The LLM proposes actions. The Talon workflow decides what runs, what blocks, and what needs human review — deterministically, the same way every time, auditable line by line.
+The expert writes those rules in Tln. The LLM proposes actions. The Tln workflow decides what runs, what blocks, and what needs human review — deterministically, the same way every time, auditable line by line.
 
 ### Why this is enterprise-grade
 
 - **Deterministic** — same input → same outcome. No prompt drift, no model upgrade surprises.
 - **Auditable** — every rule is a piece of source code, in version control, reviewable in PRs.
 - **Owned by domain experts** — the people who know the policy can read and write it, without going through engineering for every change.
-- **Compatible with the rest of OpenTalon** — Talon steps still go through guards, isolation, sanitization, and `user_only` enforcement.
+- **Compatible with the rest of OpenTalon** — Tln steps still go through guards, isolation, sanitization, and `user_only` enforcement.
 
-See the [talon-plugin repo](https://github.com/opentalon/talon-plugin) and [talon-language](https://github.com/opentalon/talon-language) for the language reference and examples.
+See the [tln-plugin repo](https://github.com/opentalon/tln-plugin) and [tln-language](https://github.com/opentalon/tln-language) for the language reference and examples.
 
 ## Documentation
 

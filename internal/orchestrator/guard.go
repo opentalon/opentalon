@@ -149,7 +149,7 @@ func (g *Guard) ExecuteWithDeadline(ctx context.Context, exec PluginExecutor, ca
 
 // bidiTimeout is the default wall-clock cap for a single ExecuteBidi
 // call. Set much higher than g.Timeout because bidi callers (e.g. a
-// Talon workflow) can legitimately run many MCP round-trips inside
+// Tln workflow) can legitimately run many MCP round-trips inside
 // one call; the guard.Timeout protecting host integrity for unary
 // runs would cut these off prematurely. Each inner CallbackRequest
 // gets its own deadline via the host's RunAction → executeCall path,
