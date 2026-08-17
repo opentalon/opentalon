@@ -288,6 +288,7 @@ type PluginConfig struct {
 	DBAccess    bool                   `yaml:"db_access,omitempty"`    // opt-in: inject state-store credentials into plugin config
 	DialTimeout string                 `yaml:"dial_timeout,omitempty"` // e.g. "30s"; overrides the default 5s gRPC init timeout
 	ExposeHTTP  bool                   `yaml:"expose_http,omitempty"`  // opt-in: reverse-proxy /{plugin-name}/* through the webhook server
+	HTTPPort    int                    `yaml:"http_port,omitempty"`    // per-plugin OPENTALON_HTTP_PORT; lets multiple expose_http plugins bind distinct ports (see opentalon#331)
 }
 
 type SchedulerConfig struct {

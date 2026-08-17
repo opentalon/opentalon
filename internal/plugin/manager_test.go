@@ -26,6 +26,25 @@ func TestDetectPluginMode(t *testing.T) {
 	}
 }
 
+// TestHTTPPortEnvOverride locks the contract cmd/opentalon relies on: a
+// configured http_port is applied as the plugin's own OPENTALON_HTTP_PORT, so
+// multiple expose_http plugins bind distinct listeners instead of colliding on
+// the single inherited port (opentalon#331).
+func TestHTTPPortEnvOverride(t *testing.T) {
+	e := PluginEntry{Name: "agents"}
+	e.WithEnvOverride("OPENTALON_HTTP_PORT", "8084")
+
+	found := false
+	for _, v := range e.Env {
+		if v == "OPENTALON_HTTP_PORT=8084" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected OPENTALON_HTTP_PORT=8084 in the plugin env")
+	}
+}
+
 func TestWithEnvOverride(t *testing.T) {
 	e := PluginEntry{Name: "test"}
 

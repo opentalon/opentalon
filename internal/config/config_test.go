@@ -679,6 +679,33 @@ plugins:
 	}
 }
 
+func TestParsePluginHTTPPort(t *testing.T) {
+	yaml := `
+models:
+  providers: {}
+plugins:
+  agents:
+    enabled: true
+    plugin: "./agents"
+    expose_http: true
+    http_port: 8084
+  legacy:
+    enabled: true
+    plugin: "./legacy"
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := cfg.Plugins["agents"]; !p.ExposeHTTP || p.HTTPPort != 8084 {
+		t.Errorf("agents: expose_http = %v, http_port = %d; want true, 8084", p.ExposeHTTP, p.HTTPPort)
+	}
+	// Unset http_port defaults to 0 (inherit the host env, as before).
+	if p := cfg.Plugins["legacy"]; p.HTTPPort != 0 {
+		t.Errorf("legacy http_port = %d; want 0 when omitted", p.HTTPPort)
+	}
+}
+
 func TestParseNoPlugins(t *testing.T) {
 	yaml := `
 models:

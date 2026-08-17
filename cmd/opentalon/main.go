@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -489,6 +490,12 @@ func main() {
 			} else {
 				slog.Warn("invalid dial_timeout for plugin, using default", "plugin", name, "value", p.DialTimeout)
 			}
+		}
+		// Give the plugin its own OPENTALON_HTTP_PORT when configured, so multiple
+		// expose_http plugins don't collide on the single inherited port
+		// (opentalon#331). Unset → inherit the host env as before.
+		if p.HTTPPort != 0 {
+			entry.WithEnvOverride("OPENTALON_HTTP_PORT", strconv.Itoa(p.HTTPPort))
 		}
 		pluginEntries = append(pluginEntries, entry)
 	}
