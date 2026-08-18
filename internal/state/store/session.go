@@ -134,10 +134,12 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 
 // AddMessageWithMetadata is AddMessage plus a small JSON map persisted in the
 // messages.metadata column (migration 013). The metadata is presentation/UI
-// state (e.g. tool-confirmation markers) surfaced by the transcript reader; it
-// is deliberately NOT loaded back into the session's Messages (loadMessages
-// ignores the column), so it never reaches the LLM. A nil/empty map persists as
-// SQL NULL, leaving ordinary chat turns byte-identical to the pre-013 shape.
+// state (e.g. tool-confirmation markers) surfaced by the transcript reader.
+// loadMessages reads back exactly ONE key — "prompt_type", into
+// Message.PromptType — as the signal the orchestrator uses to keep resolved
+// confirmation exchanges out of the LLM history; everything else in the map
+// never reaches the model. A nil/empty map persists as SQL NULL, leaving
+// ordinary chat turns byte-identical to the pre-013 shape.
 func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
 	ctx := context.Background()
 	d := s.db.Dialect()
@@ -377,7 +379,7 @@ func (s *SessionStore) PruneIdleSessions() error {
 // loadMessages reads all messages for a session from the messages table, ordered by seq.
 func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error) {
 	rows, err := s.db.SQLDB().Query(
-		s.db.Dialect().Rebind(`SELECT role, content, tool_calls, tool_call_id, visibility FROM messages WHERE session_id = ? ORDER BY seq`),
+		s.db.Dialect().Rebind(`SELECT role, content, tool_calls, tool_call_id, visibility, metadata FROM messages WHERE session_id = ? ORDER BY seq`),
 		sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load messages: %w", err)
@@ -387,8 +389,8 @@ func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error
 	var messages []provider.Message
 	for rows.Next() {
 		var role, content string
-		var toolCallsJSON, toolCallID, visibility sql.NullString
-		if err := rows.Scan(&role, &content, &toolCallsJSON, &toolCallID, &visibility); err != nil {
+		var toolCallsJSON, toolCallID, visibility, metadataJSON sql.NullString
+		if err := rows.Scan(&role, &content, &toolCallsJSON, &toolCallID, &visibility, &metadataJSON); err != nil {
 			return nil, fmt.Errorf("load messages scan: %w", err)
 		}
 		msg := provider.Message{
@@ -400,6 +402,16 @@ func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error
 		if toolCallsJSON.Valid {
 			if err := json.Unmarshal([]byte(toolCallsJSON.String), &msg.ToolCalls); err != nil {
 				return nil, fmt.Errorf("load messages unmarshal tool_calls: %w", err)
+			}
+		}
+		// Only the prompt_type marker is read back — the orchestrator uses it
+		// to keep resolved confirmation exchanges out of the LLM history. The
+		// rest of the metadata map stays presentation state. Tolerant parse: a
+		// broken blob on one row must not brick the whole session's history.
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			var meta map[string]string
+			if err := json.Unmarshal([]byte(metadataJSON.String), &meta); err == nil {
+				msg.PromptType = meta["prompt_type"]
 			}
 		}
 		messages = append(messages, msg)

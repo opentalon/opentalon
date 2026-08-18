@@ -54,11 +54,17 @@ func (c *cachedSessionStore) AddMessage(id string, msg provider.Message) error {
 }
 
 func (c *cachedSessionStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
+	// Mirror the one metadata key a reader consumes: PromptType is how
+	// stripApprovedConfirmationExchanges recognises resolved confirmation
+	// exchanges, and DURING a turn the context is built from THIS cache, not
+	// from a fresh DB load — without the marker the in-flight continuation
+	// after an approval would still replay the exchange to the model. The rest
+	// of the map stays transcript-only.
+	msg.PromptType = metadata["prompt_type"]
 	if err := c.inner.AddMessageWithMetadata(id, msg, metadata); err != nil {
 		return err
 	}
-	// Cache the message like AddMessage does — the metadata is transcript-only
-	// state that nothing reads back through this cache, so it is not held here.
+	// Update cache in-memory so subsequent Get() calls don't hit the DB.
 	if s, ok := c.cache[id]; ok {
 		s.Messages = append(s.Messages, msg)
 	}
