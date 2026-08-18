@@ -60,3 +60,18 @@ func TestWithGroupID_GroupID(t *testing.T) {
 		t.Errorf("WithGroupID(_, \"\") should not overwrite; GroupID = %q", GroupID(ctx))
 	}
 }
+
+func TestReasoningEffort(t *testing.T) {
+	ctx := context.Background()
+	if ReasoningEffort(ctx) != "" {
+		t.Errorf("ReasoningEffort(background) = %q; want \"\"", ReasoningEffort(ctx))
+	}
+	ctx = WithReasoningEffort(ctx, "low")
+	if got := ReasoningEffort(ctx); got != "low" {
+		t.Errorf("ReasoningEffort = %q; want low", got)
+	}
+	ctx = WithReasoningEffort(ctx, "")
+	if ReasoningEffort(ctx) != "low" {
+		t.Errorf("WithReasoningEffort(_, \"\") should not overwrite; got %q", ReasoningEffort(ctx))
+	}
+}

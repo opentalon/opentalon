@@ -9,6 +9,7 @@ type confirmationKey struct{}
 type groupKey struct{}
 type visibilityKey struct{}
 type agentIDKey struct{}
+type reasoningEffortKey struct{}
 
 // WithActor returns a context that carries the given actor ID (e.g. channel_id:sender_id).
 // Use Actor(ctx) to retrieve it. When the request has no actor, do not call WithActor.
@@ -173,6 +174,32 @@ func AgentID(ctx context.Context) string {
 		return ""
 	}
 	v := ctx.Value(agentIDKey{})
+	if v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// WithReasoningEffort overrides the model's default reasoning effort for THIS
+// turn ("low" | "medium" | "high"), set from a channel's inbound
+// metadata["reasoning_effort"]. Lets a caller trade depth for latency on a
+// specific request (e.g. one-shot Tln authoring) without changing the global
+// model config. Empty leaves the model default.
+func WithReasoningEffort(ctx context.Context, effort string) context.Context {
+	if effort == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, reasoningEffortKey{}, effort)
+}
+
+// ReasoningEffort returns the per-turn reasoning-effort override, or empty
+// string when the model default should apply.
+func ReasoningEffort(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v := ctx.Value(reasoningEffortKey{})
 	if v == nil {
 		return ""
 	}

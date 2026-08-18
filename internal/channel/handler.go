@@ -170,6 +170,14 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			ctx = actor.WithAgentID(ctx, agentID)
 		}
 
+		// Per-turn reasoning-effort override (e.g. a caller wanting a fast,
+		// low-effort one-shot). Only the canonical values are honored so a
+		// channel can't inject arbitrary provider params.
+		switch msg.Metadata["reasoning_effort"] {
+		case "low", "medium", "high":
+			ctx = actor.WithReasoningEffort(ctx, msg.Metadata["reasoning_effort"])
+		}
+
 		// Carry a per-message visibility ("hidden") so the orchestrator stamps
 		// it on the stored user turn: a hidden turn is fed to the model but
 		// dropped from the user-facing transcript (e.g. a system status note
