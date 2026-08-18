@@ -3990,8 +3990,80 @@ func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.
 // Context-window accounting — the token estimate, the input budget and the
 // oldest-first trim — lives in context_budget.go.
 
+// agentGroundingPlugin is the config-key of the opentalon-agents plugin, whose
+// show/runs actions back agent-scoped chat grounding.
+const agentGroundingPlugin = "agents"
+
+// buildAgentGroundingPrompt renders a system-prompt block describing the scoped
+// workflow agent — its program (Tln) + recent runs — so the assistant answers
+// AS the workflow. Best-effort: any missing plugin/action or fetch error yields
+// "" and the turn proceeds as the general assistant. Uses the guarded executor
+// directly (not RunAction) so this per-turn context fetch doesn't surface as an
+// assistant tool call in the session log.
+func (o *Orchestrator) buildAgentGroundingPrompt(ctx context.Context, agentID string) string {
+	if !o.registry.HasAction(agentGroundingPlugin, "show") {
+		return ""
+	}
+	exec, ok := o.registry.GetExecutor(agentGroundingPlugin)
+	if !ok {
+		return ""
+	}
+	groupID := actor.GroupID(ctx)
+	args := map[string]string{"id": agentID, "group_id": groupID}
+
+	showRes := o.guard.ExecuteWithDeadline(ctx, exec,
+		ToolCall{ID: "agent-grounding-show", Plugin: agentGroundingPlugin, Action: "show", Args: args}, 15*time.Second)
+	if showRes.Error != "" || showRes.StructuredContent == "" {
+		slog.Debug("agent grounding: show failed", "agent_id", agentID, "error", showRes.Error)
+		return ""
+	}
+	var ag struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		TlnSource   string `json:"tln_source"`
+	}
+	if err := json.Unmarshal([]byte(showRes.StructuredContent), &ag); err != nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## You are this workflow\n")
+	fmt.Fprintf(&sb, "This chat is scoped to the AI Workflow %q — answer as this workflow, in the first person. "+
+		"Do NOT ask which workflow or which run the user means; it is THIS one. "+
+		"Always reply in the user's own language (match the language of their message), regardless of the language of this instruction.\n", ag.Name)
+	if ag.Description != "" {
+		fmt.Fprintf(&sb, "What it does (the user's original ask): %s\n", ag.Description)
+	}
+	if ag.TlnSource != "" {
+		fmt.Fprintf(&sb, "Its program (Tln):\n```\n%s\n```\n", ag.TlnSource)
+	}
+	if o.registry.HasAction(agentGroundingPlugin, "runs") {
+		runsArgs := map[string]string{"id": agentID, "group_id": groupID, "limit": "10"}
+		runsRes := o.guard.ExecuteWithDeadline(ctx, exec,
+			ToolCall{ID: "agent-grounding-runs", Plugin: agentGroundingPlugin, Action: "runs", Args: runsArgs}, 15*time.Second)
+		if runsRes.Error == "" && runsRes.StructuredContent != "" {
+			sb.WriteString("Its recent runs (newest first) — use these to answer what it did:\n")
+			sb.WriteString(runsRes.StructuredContent)
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}
+
 func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string, includeServerInstructions bool) string {
 	var sb strings.Builder
+
+	// Agent-scoped chat: when the turn is scoped to a workflow agent, lead with
+	// that agent's context (its program + recent runs) so the assistant answers
+	// AS the workflow — "what did my last run do?" resolves from real history,
+	// not a clarifying question. Skipped (empty) for the general assistant.
+	if agentID := actor.AgentID(ctx); agentID != "" {
+		if grounding := o.buildAgentGroundingPrompt(ctx, agentID); grounding != "" {
+			sb.WriteString(grounding)
+		}
+	}
+
 	// When the provider supports native tool calling, use a preamble that
 	// omits the text-based [tool_call] format instructions. Sending both
 	// the text format and native tools confuses weaker models — they

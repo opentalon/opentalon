@@ -8,6 +8,7 @@ type conversationKey struct{}
 type confirmationKey struct{}
 type groupKey struct{}
 type visibilityKey struct{}
+type agentIDKey struct{}
 
 // WithActor returns a context that carries the given actor ID (e.g. channel_id:sender_id).
 // Use Actor(ctx) to retrieve it. When the request has no actor, do not call WithActor.
@@ -147,6 +148,31 @@ func Visibility(ctx context.Context) string {
 		return ""
 	}
 	v := ctx.Value(visibilityKey{})
+	if v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// WithAgentID scopes the turn to a specific workflow agent, set from a channel's
+// inbound metadata["agent_id"]. The orchestrator uses it to inject that agent's
+// context (its program + recent runs) into the system prompt so the assistant
+// answers AS that workflow. Empty = the general assistant.
+func WithAgentID(ctx context.Context, agentID string) context.Context {
+	if agentID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, agentIDKey{}, agentID)
+}
+
+// AgentID returns the scoped workflow agent id from the context, or empty
+// string if the turn is not agent-scoped.
+func AgentID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v := ctx.Value(agentIDKey{})
 	if v == nil {
 		return ""
 	}
