@@ -94,11 +94,14 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	return nil
 }
 
-// AddMessageWithMetadata mirrors the persistent store's signature. Per-message
-// metadata is presentation state read only from the transcript (the DB-backed
-// store), so the in-memory store — which never round-trips through a reader —
-// simply drops it and behaves like AddMessage.
-func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, _ map[string]string) error {
+// AddMessageWithMetadata mirrors the persistent store's signature. The one
+// metadata key a reader consumes — "prompt_type", which the orchestrator's
+// stripApprovedConfirmationExchanges uses to keep resolved confirmation
+// exchanges out of the LLM history — is mirrored onto the stored message so
+// the in-memory store behaves like the DB-backed one; the rest of the map is
+// presentation state and is dropped.
+func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
+	msg.PromptType = metadata["prompt_type"]
 	return s.AddMessage(id, msg)
 }
 

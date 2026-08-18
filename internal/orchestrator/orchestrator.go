@@ -3059,7 +3059,7 @@ func (o *Orchestrator) classifyConfirmationReply(
 func toolConfirmationFrameMetadata(toolCallID string) map[string]string {
 	m := map[string]string{
 		"type":        "confirmation",
-		"prompt_type": "tool_confirmation",
+		"prompt_type": provider.PromptTypeToolConfirmation,
 		"options":     "approve,reject",
 	}
 	if toolCallID != "" {
@@ -3099,7 +3099,7 @@ func pipelineConfirmationFrameMetadata(pipelineID string) map[string]string {
 // are deliberately kept out of history); pipelines persist both outcomes.
 func confirmationReplyMetadata(action string) map[string]string {
 	return map[string]string{
-		"prompt_type": "confirmation_response",
+		"prompt_type": provider.PromptTypeConfirmationResponse,
 		"action":      action,
 	}
 }
@@ -3799,6 +3799,43 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 	return out
 }
 
+// stripApprovedConfirmationExchanges drops RESOLVED tool-call confirmation
+// exchanges from the history fed to the model: the narrated "Shall I
+// proceed?" assistant row (metadata prompt_type=tool_confirmation) together
+// with the button reply row (prompt_type=confirmation_response) that
+// immediately follows it. Both rows are platform artifacts — the prompt was
+// written by narrateConfirmation during the gate pause, not by the model, and
+// the reply is a pressed button, not something the user typed. Replayed
+// verbatim they teach the model a false protocol: after two approved creates
+// in one turn the model starts IMITATING the pattern and asks "Shall I go
+// ahead?" in plain text instead of calling the tool, which strands the turn
+// with the remaining work undone (observed identically on gpt-oss, GLM-4.7
+// and Kimi K3 — ai_eval multi/container_creation_keeps_context). What remains
+// after stripping is user request → tool call → tool result: exactly the
+// protocol the model must continue.
+//
+// Only APPROVED-and-executed exchanges are stripped — a prompt row directly
+// followed by its reply row. A prompt WITHOUT a reply row stays: single-call
+// rejects never persist a reply, an amend correction arrives as a plain user
+// message, and the re-planning paths need the proposed action for context.
+// Pipeline plan confirmations (prompt_type=confirmation) are untouched. The
+// user-facing transcript is untouched too — this filters only what the LLM
+// sees.
+func stripApprovedConfirmationExchanges(msgs []provider.Message) []provider.Message {
+	out := make([]provider.Message, 0, len(msgs))
+	for i := 0; i < len(msgs); i++ {
+		m := msgs[i]
+		if m.Role == provider.RoleAssistant && m.PromptType == provider.PromptTypeToolConfirmation &&
+			i+1 < len(msgs) && msgs[i+1].Role == provider.RoleUser &&
+			msgs[i+1].PromptType == provider.PromptTypeConfirmationResponse {
+			i++ // resolved exchange: skip the prompt AND its reply row
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // isPoisonedAssistantContent reports whether a tool-less assistant turn is a
 // self-poisoning artifact that must not be replayed to the model: a broken
 // [tool_call] block, or a fabricated {{template}} result placeholder. Legitimate
@@ -3944,9 +3981,11 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	}
 
 	// Strip [knowledge_context] from HISTORICAL user messages only (current turn
-	// kept verbatim so preparer-injected RAG reaches the LLM), and drop genuinely
-	// poisoned assistant turns via sanitizeHistory.
-	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(convMessages))
+	// kept verbatim so preparer-injected RAG reaches the LLM), drop genuinely
+	// poisoned assistant turns via sanitizeHistory, and drop resolved
+	// confirmation exchanges so the model never imitates the gate's narrated
+	// "Shall I proceed?" pattern in plain text.
+	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(stripApprovedConfirmationExchanges(convMessages)))
 
 	// No trimming here. Half of what a request costs is the tool definitions,
 	// which are attached to the request after assembly — so "make it fit" runs

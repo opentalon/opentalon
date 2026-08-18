@@ -29,12 +29,26 @@ type Message struct {
 	// of the per-message metadata column. Empty means visible. Applies to
 	// role=user injected turns only; an assistant reply is always visible.
 	Visibility string `json:"visibility,omitempty"`
+	// PromptType mirrors the "prompt_type" marker of the persisted
+	// messages.metadata column for rows the confirmation flow wrote (the
+	// narrated tool-confirmation prompt and the button reply that resolved
+	// it). Internal history-filtering signal only — never serialized toward
+	// a provider (see orchestrator's stripApprovedConfirmationExchanges).
+	PromptType string `json:"-"`
 }
 
 // VisibilityHidden is the Message.Visibility value marking a turn that is fed
 // to the model but dropped from the user-facing transcript — a system-injected
 // turn such as a background-job status note. Empty visibility means visible.
 const VisibilityHidden = "hidden"
+
+// Prompt-type markers persisted in messages.metadata by the confirmation flow
+// and read back into Message.PromptType for history filtering. The strings are
+// wire format shared with the frontend's transcript rebuild — do not rename.
+const (
+	PromptTypeToolConfirmation     = "tool_confirmation"
+	PromptTypeConfirmationResponse = "confirmation_response"
+)
 
 // ToolDefinition describes a tool the LLM can call (native function calling).
 type ToolDefinition struct {

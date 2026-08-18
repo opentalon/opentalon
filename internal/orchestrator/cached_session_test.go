@@ -219,3 +219,51 @@ func TestCachedSessionStore_DeleteRemovesFromCache(t *testing.T) {
 		t.Fatal("expected error after delete")
 	}
 }
+
+// TestCachedStore_PromptTypeReachesCache pins the fix for the half-effective
+// confirmation stripping: DURING a turn the LLM context is built from the
+// request-scoped cache, so the prompt_type marker must ride on the CACHED
+// message too — not only on the DB row that a later fresh load would surface.
+// Without this, the continuation right after an approval still replayed the
+// narrated prompt + "y" to the model.
+func TestCachedStore_PromptTypeReachesCache(t *testing.T) {
+	inner := newStubSessionStore()
+	c := newCachedSessionStore(inner)
+	// Create on the INNER store and pull via Get — the cache then holds its own
+	// copy (the stub, like the in-memory store, appends to the same object it
+	// hands out, so caching Create's return value would double-append here).
+	inner.Create("s1", "e", "g", "chat")
+	if _, err := c.Get("s1"); err != nil {
+		t.Fatalf("prime cache: %v", err)
+	}
+
+	err := c.AddMessageWithMetadata("s1",
+		provider.Message{Role: provider.RoleAssistant, Content: "This will create Box A. Proceed?"},
+		toolConfirmationFrameMetadata("call-1"))
+	if err != nil {
+		t.Fatalf("AddMessageWithMetadata: %v", err)
+	}
+	err = c.AddMessageWithMetadata("s1",
+		provider.Message{Role: provider.RoleUser, Content: "y"},
+		confirmationReplyMetadata("approve"))
+	if err != nil {
+		t.Fatalf("AddMessageWithMetadata reply: %v", err)
+	}
+
+	sess, err := c.Get("s1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if n := len(sess.Messages); n != 2 {
+		t.Fatalf("want 2 cached messages, got %d", n)
+	}
+	if got := sess.Messages[0].PromptType; got != provider.PromptTypeToolConfirmation {
+		t.Fatalf("cached prompt row PromptType = %q, want %q", got, provider.PromptTypeToolConfirmation)
+	}
+	if got := sess.Messages[1].PromptType; got != provider.PromptTypeConfirmationResponse {
+		t.Fatalf("cached reply row PromptType = %q, want %q", got, provider.PromptTypeConfirmationResponse)
+	}
+	if got := stripApprovedConfirmationExchanges(sess.Messages); len(got) != 0 {
+		t.Fatalf("resolved exchange must strip from cached history, %d rows survived", len(got))
+	}
+}
