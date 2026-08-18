@@ -58,3 +58,20 @@ const GroupID = "group_id"
 // empty string outside any actor context. Used to record who authored a
 // resource; distinct from GroupID, which scopes access.
 const EntityID = "entity_id"
+
+// Callback identity carriers. A plugin that fires a host RunAction callback
+// for a background/system action (e.g. the agents plugin running a
+// scheduled workflow) has no profile on the wire — the CallbackRequest
+// carries only args. These reserved arg keys let such a plugin declare the
+// actor identity the whole nested action chain should run as. The host
+// (handleCallback) pops them off req.Args, enriches the callback ctx with
+// actor/group/session, and STRIPS them so the target action never sees
+// them as tool arguments. Distinct from the inject names above so they can
+// never collide with a value the host injects on the way back down. Both
+// the host and external plugins reference these constants, so a typo fails
+// to compile rather than silently dropping the identity.
+const (
+	CallbackEntityID  = "__ot_cb_entity_id"
+	CallbackGroupID   = "__ot_cb_group_id"
+	CallbackSessionID = "__ot_cb_session_id"
+)

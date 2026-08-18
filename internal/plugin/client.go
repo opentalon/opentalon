@@ -7,10 +7,12 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/grpclimit"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/profile"
 	pkg "github.com/opentalon/opentalon/pkg/plugin"
+	"github.com/opentalon/opentalon/pkg/plugin/contextargs"
 	"github.com/opentalon/opentalon/proto/pluginpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -212,7 +214,8 @@ func (c *Client) ExecuteBidi(ctx context.Context, call orchestrator.ToolCall, cb
 // stream. Errors from RunAction are surfaced via CallbackResponse.Error
 // so the plugin can decide how to react (retry, abort, ignore).
 func (c *Client) handleCallback(ctx context.Context, stream pluginpb.PluginService_ExecuteBidiClient, req *pluginpb.CallbackRequest, cb orchestrator.CallbackHandler) {
-	content, structured, err := cb.RunActionResult(ctx, req.GetPlugin(), req.GetAction(), req.GetArgs())
+	ctx, args := applyCallbackIdentity(ctx, req.GetArgs())
+	content, structured, err := cb.RunActionResult(ctx, req.GetPlugin(), req.GetAction(), args)
 	resp := &pluginpb.CallbackResponse{Id: req.GetId()}
 	if err != nil {
 		resp.Error = err.Error()
@@ -228,6 +231,49 @@ func (c *Client) handleCallback(ctx context.Context, stream pluginpb.PluginServi
 		// grpc bidi recv error in the ExecuteBidi loop above.
 		_ = sendErr
 	}
+}
+
+// applyCallbackIdentity lets a plugin that fires a background/system
+// RunAction callback (e.g. the agents plugin running a scheduled workflow)
+// declare the actor identity the nested action chain should run as. Such a
+// callback has no profile on the wire — the CallbackRequest carries only
+// args — so the identity rides reserved arg keys (contextargs.Callback*).
+// When present we enrich the callback ctx with actor/group/session exactly
+// like the exec dispatcher does for stream-dispatched actions, and return a
+// COPY of the args with the reserved keys stripped so the target action
+// never sees them as tool arguments. The enriched ctx flows down through
+// every nested callback (handleCallback reuses the outer Execute ctx), so
+// setting it once at the workflow entrypoint reaches the leaf MCP tool call
+// where contextargs.EntityID is injected as an X-Timly-User-Id header.
+//
+// No reserved keys → ctx and args pass through untouched (the common,
+// profile-carrying interactive path is unaffected).
+func applyCallbackIdentity(ctx context.Context, in map[string]string) (context.Context, map[string]string) {
+	entityID := in[contextargs.CallbackEntityID]
+	groupID := in[contextargs.CallbackGroupID]
+	sessionID := in[contextargs.CallbackSessionID]
+	if entityID == "" && groupID == "" && sessionID == "" {
+		return ctx, in
+	}
+
+	if entityID != "" || groupID != "" {
+		ctx = profile.WithProfile(ctx, &profile.Profile{EntityID: entityID, Group: groupID})
+		ctx = actor.WithActor(ctx, entityID)
+	}
+	if sessionID != "" {
+		ctx = actor.WithSessionID(ctx, sessionID)
+	}
+
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		switch k {
+		case contextargs.CallbackEntityID, contextargs.CallbackGroupID, contextargs.CallbackSessionID:
+			// strip — identity is now on ctx, never a tool argument
+		default:
+			out[k] = v
+		}
+	}
+	return ctx, out
 }
 
 // Close terminates the gRPC connection.
