@@ -163,6 +163,13 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			ctx = actor.WithConfirmationDecision(ctx, cd)
 		}
 
+		// Scope the turn to a specific workflow agent when the channel sends one
+		// (e.g. the Timly AI Workflows chat). The orchestrator injects that
+		// agent's context into the system prompt so it answers as the workflow.
+		if agentID := msg.Metadata["agent_id"]; agentID != "" {
+			ctx = actor.WithAgentID(ctx, agentID)
+		}
+
 		// Carry a per-message visibility ("hidden") so the orchestrator stamps
 		// it on the stored user turn: a hidden turn is fed to the model but
 		// dropped from the user-facing transcript (e.g. a system status note
