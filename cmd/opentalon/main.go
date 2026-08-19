@@ -451,7 +451,15 @@ func main() {
 	for name, p := range cfg.Plugins {
 		path := p.Plugin
 		if p.GitHub != "" && p.Ref != "" {
-			resolvedPath, err := bundle.EnsurePlugin(ctx, dataDir, name, p.GitHub, p.Ref, p.Cache)
+			// In-process plugins to compile into this host (e.g. tln plugins
+			// into tln-plugin): written as the checkout's mod.tln before build.
+			var bundlePlugins []bundle.BundlePlugin
+			for _, b := range p.Bundle {
+				bundlePlugins = append(bundlePlugins, bundle.BundlePlugin{
+					Name: b.Name, GitHub: b.GitHub, Ref: b.Ref, Store: b.Store,
+				})
+			}
+			resolvedPath, err := bundle.EnsurePlugin(ctx, dataDir, name, p.GitHub, p.Ref, p.Cache, bundlePlugins)
 			if err != nil {
 				slog.Warn("bundle plugin failed", "plugin", name, "error", err)
 				continue

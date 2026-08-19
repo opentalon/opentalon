@@ -39,7 +39,9 @@ RUN CGO_ENABLED=0 go build \
 # ─── Runtime stage ────────────────────────────────────────────────────────────
 FROM golang:1.25-alpine
 
-RUN apk add --no-cache ca-certificates tzdata git \
+# make is required at runtime: the plugin fetcher runs a repo's `make build`
+# when it has a Makefile (e.g. tln-plugin composing its bundle plugins).
+RUN apk add --no-cache ca-certificates tzdata git make \
     && addgroup -S opentalon \
     && adduser -S -G opentalon opentalon \
     && chown -R opentalon:opentalon /home/opentalon
