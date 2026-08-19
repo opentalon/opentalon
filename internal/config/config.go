@@ -279,16 +279,28 @@ type LogConfig struct {
 
 type PluginConfig struct {
 	Enabled     bool                   `yaml:"enabled"`
-	Cache       bool                   `yaml:"cache,omitempty"` // when true, reuse cached binary from plugins.lock (default false = always rebuild)
-	Insecure    *bool                  `yaml:"insecure"`        // if true or omitted (default), preparer cannot run invoke; if false (trusted), can invoke
-	Plugin      string                 `yaml:"plugin"`          // path to binary or grpc://... (optional if github is set)
-	GitHub      string                 `yaml:"github"`          // e.g. "owner/repo" (bundler-style)
-	Ref         string                 `yaml:"ref"`             // branch, tag, or commit; resolved and pinned in plugins.lock
+	Cache       bool                   `yaml:"cache,omitempty"`  // when true, reuse cached binary from plugins.lock (default false = always rebuild)
+	Insecure    *bool                  `yaml:"insecure"`         // if true or omitted (default), preparer cannot run invoke; if false (trusted), can invoke
+	Plugin      string                 `yaml:"plugin"`           // path to binary or grpc://... (optional if github is set)
+	GitHub      string                 `yaml:"github"`           // e.g. "owner/repo" (bundler-style)
+	Ref         string                 `yaml:"ref"`              // branch, tag, or commit; resolved and pinned in plugins.lock
+	Bundle      []PluginBundleEntry    `yaml:"bundle,omitempty"` // in-process plugins to compile INTO this plugin (e.g. tln plugins into tln-plugin)
 	Config      map[string]interface{} `yaml:"config,omitempty"`
 	DBAccess    bool                   `yaml:"db_access,omitempty"`    // opt-in: inject state-store credentials into plugin config
 	DialTimeout string                 `yaml:"dial_timeout,omitempty"` // e.g. "30s"; overrides the default 5s gRPC init timeout
 	ExposeHTTP  bool                   `yaml:"expose_http,omitempty"`  // opt-in: reverse-proxy /{plugin-name}/* through the webhook server
 	HTTPPort    int                    `yaml:"http_port,omitempty"`    // per-plugin OPENTALON_HTTP_PORT; lets multiple expose_http plugins bind distinct ports (see opentalon#331)
+}
+
+// PluginBundleEntry is one in-process plugin compiled INTO a bundling host
+// plugin (e.g. a tln plugin into tln-plugin). Same github/ref shape as a
+// plugin; the host is cloned, these are written as its mod.tln, and its
+// `make build` composes them in.
+type PluginBundleEntry struct {
+	Name   string `yaml:"name"`            // what a workflow references (e.g. `via asp`)
+	GitHub string `yaml:"github"`          // "owner/repo"
+	Ref    string `yaml:"ref"`             // branch, tag, or commit
+	Store  bool   `yaml:"store,omitempty"` // a FactStore plugin rather than a tool/connector
 }
 
 type SchedulerConfig struct {
