@@ -30,8 +30,7 @@ func TestBundleInstall_FromConfig(t *testing.T) {
 plugins:
   tln-plugin:
     github: opentalon/tln-plugin
-    # TODO: switch to "master" once tln-plugin#19 (Makefile bundle-install) merges.
-    ref: feat/makefile-bundle-install
+    ref: v0.5.0
     bundle:
       - name: asp
         github: opentalon/tln-asp
