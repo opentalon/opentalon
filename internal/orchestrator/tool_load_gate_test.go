@@ -232,16 +232,289 @@ func TestMaybeRequireConfirmation_ToolNotInSentArrayNeverPrompts(t *testing.T) {
 
 	// Not in the sent array → confirmation SKIPPED (falls through to executeCall's refusal).
 	rr, raised := orch.maybeRequireConfirmation(ctx, sessions, "s1",
-		ToolCall{ID: "c1", Plugin: "p", Action: "catalog_write", FromLLM: true}, "do it")
+		ToolCall{ID: "c1", Plugin: "p", Action: "catalog_write", FromLLM: true}, "do it", nil, false)
 	if raised || rr != nil {
 		t.Fatalf("a tool not in the sent array must not raise a confirmation, got raised=%v rr=%v", raised, rr)
 	}
 
 	// In the sent array → confirmation IS raised.
 	rr2, raised2 := orch.maybeRequireConfirmation(ctx, sessions, "s1",
-		ToolCall{ID: "c2", Plugin: "p", Action: "sent_write", FromLLM: true}, "do it")
+		ToolCall{ID: "c2", Plugin: "p", Action: "sent_write", FromLLM: true}, "do it", nil, false)
 	if !raised2 || rr2 == nil {
 		t.Fatalf("a sent write tool must raise a confirmation, got raised=%v rr=%v", raised2, rr2)
+	}
+}
+
+// An unresolvable call — hallucinated action, mangled name, unknown plugin —
+// must never reach a confirmation prompt: executeCall's not-found path owns
+// that error, and asking the user to approve a call that cannot run costs a
+// wasted approval plus a SECOND prompt for the model's corrected retry
+// (observed as the double-confirm in ai_eval
+// checkout/put_in_container_by_barcode, where the model called action
+// "timly__load_tools" under plugin "timly"). The gate must also stay free of
+// side effects on the skip: no messages, no pending call.
+func TestMaybeRequireConfirmation_UnresolvableCallNeverPrompts(t *testing.T) {
+	exec := &countingExecutor{}
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "p", Description: "confirmation gate fixtures",
+		Actions: []Action{{Name: "sent_write", Description: "A write tool that was sent."}},
+	}, exec); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := registry.Register(PluginCapability{
+		Name: "conf", Actions: []Action{{Name: "check"}},
+	}, confirmingExecutor{}); err != nil {
+		t.Fatalf("register conf: %v", err)
+	}
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
+		ConfirmationPlugin: "conf",
+		ConfirmationAction: "check",
+	})
+	ctx := sentCtx("p__sent_write")
+
+	for _, call := range []ToolCall{
+		{ID: "c1", Plugin: "p", Action: "does_not_exist", FromLLM: true}, // known plugin, garbage action
+		{ID: "c2", Plugin: "ghost", Action: "sent_write", FromLLM: true}, // unknown plugin
+		{ID: "c3", Plugin: "p", Action: "p__load_tools", FromLLM: true},  // meta action mangled under a plugin prefix
+	} {
+		rr, raised := orch.maybeRequireConfirmation(ctx, sessions, "s1", call, "do it", nil, false)
+		if raised || rr != nil {
+			t.Fatalf("unresolvable call %s/%s must not raise a confirmation, got raised=%v rr=%v",
+				call.Plugin, call.Action, raised, rr)
+		}
+	}
+	if s, err := sessions.Get("s1"); err != nil || len(s.Messages) != 0 {
+		t.Fatalf("the skip must leave the session untouched, got %d message(s), err=%v", len(s.Messages), err)
+	}
+}
+
+// A confirmation raised mid-batch abandons every later call of the same model
+// response. Each abandoned call must leave an explicit "NOT EXECUTED" exchange
+// in history — BEFORE the prompt row, so the resolved prompt+reply pair stays
+// adjacent for stripApprovedConfirmationExchanges — or the model later treats
+// its own dropped call as done and invents its result (observed in ai_eval
+// structure/create_category_and_container_type: the second create of a
+// two-call batch vanished silently and the model reported both as created).
+func TestMaybeRequireConfirmation_InterruptedBatchRecordedBeforePrompt(t *testing.T) {
+	exec := &countingExecutor{}
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "p", Description: "confirmation gate fixtures",
+		Actions: []Action{
+			{Name: "write_a", Description: "First write of the batch."},
+			{Name: "write_b", Description: "Second write of the batch."},
+		},
+	}, exec); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := registry.Register(PluginCapability{
+		Name: "conf", Actions: []Action{{Name: "check"}},
+	}, confirmingExecutor{}); err != nil {
+		t.Fatalf("register conf: %v", err)
+	}
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
+		ConfirmationPlugin: "conf",
+		ConfirmationAction: "check",
+	})
+	ctx := sentCtx("p__write_a", "p__write_b")
+
+	gated := ToolCall{ID: "c-a", Plugin: "p", Action: "write_a", FromLLM: true, Args: map[string]string{"name": "A"}}
+	dropped := ToolCall{ID: "c-b", Plugin: "p", Action: "write_b", FromLLM: true, Args: map[string]string{"name": "B"}}
+	rr, raised := orch.maybeRequireConfirmation(ctx, sessions, "s1", gated, "create both", []ToolCall{dropped}, true)
+	if !raised || rr == nil {
+		t.Fatalf("gated write must raise a confirmation, got raised=%v rr=%v", raised, rr)
+	}
+
+	s, err := sessions.Get("s1")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if len(s.Messages) != 3 {
+		t.Fatalf("want 3 messages (dropped call, its result, prompt row), got %d: %+v", len(s.Messages), s.Messages)
+	}
+	callRow, resultRow, promptRow := s.Messages[0], s.Messages[1], s.Messages[2]
+	if len(callRow.ToolCalls) != 1 || callRow.ToolCalls[0].ID != "c-b" || callRow.ToolCalls[0].Name != "p__write_b" {
+		t.Errorf("first row must carry the dropped call c-b, got %+v", callRow)
+	}
+	if resultRow.Role != provider.RoleTool || resultRow.ToolCallID != "c-b" {
+		t.Errorf("second row must be the dropped call's tool result, got %+v", resultRow)
+	}
+	if !strings.Contains(resultRow.Content, "NOT EXECUTED") || !strings.Contains(resultRow.Content, "p__write_a") {
+		t.Errorf("dropped-call result must say NOT EXECUTED and name the gated call, got %q", resultRow.Content)
+	}
+	if len(promptRow.ToolCalls) != 0 || promptRow.Role != provider.RoleAssistant || promptRow.Content != rr.Response {
+		t.Errorf("last row must be the confirmation prompt %q, got %+v", rr.Response, promptRow)
+	}
+}
+
+// Text-mode counterpart: a stack whose responses carry [tool_call] blocks
+// instead of native tool_calls must get the trace in ITS transcript shape
+// (assistant text + [plugin_output] user row), or the pair reads as a
+// malformed turn to the very model it is meant to inform.
+func TestMaybeRequireConfirmation_InterruptedBatchRecordedInTextMode(t *testing.T) {
+	orch, sessions := interruptedTraceFixture(t)
+
+	gated := ToolCall{ID: "c-a", Plugin: "p", Action: "write_a", FromLLM: true, Args: map[string]string{"name": "A"}}
+	dropped := ToolCall{ID: "c-b", Plugin: "p", Action: "write_b", FromLLM: true, Args: map[string]string{"name": "B"}}
+	if _, raised := orch.maybeRequireConfirmation(sentCtx("p__write_a", "p__write_b"), sessions, "s1",
+		gated, "create both", []ToolCall{dropped}, false); !raised {
+		t.Fatal("gated write must raise a confirmation")
+	}
+
+	s, err := sessions.Get("s1")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if len(s.Messages) != 3 {
+		t.Fatalf("want 3 messages, got %d: %+v", len(s.Messages), s.Messages)
+	}
+	callRow, resultRow := s.Messages[0], s.Messages[1]
+	if callRow.Role != provider.RoleAssistant || len(callRow.ToolCalls) != 0 ||
+		callRow.Content != formatToolCallMessage(dropped) {
+		t.Errorf("text mode must record the call as an assistant [tool_call] line, got %+v", callRow)
+	}
+	if resultRow.Role != provider.RoleUser || !strings.Contains(resultRow.Content, "[plugin_output]") ||
+		!strings.Contains(resultRow.Content, "NOT EXECUTED") {
+		t.Errorf("text mode must record the result as a wrapped user row, got %+v", resultRow)
+	}
+}
+
+// The trace must be tied to the confirmation, not to the mere presence of
+// later calls: when the gated call needs no approval the loop keeps executing
+// them itself, so recording "NOT EXECUTED" for calls that are about to run
+// would plant a lie in history. Recording unconditionally passes every other
+// test in this file, so this negative case is what pins the coupling.
+func TestMaybeRequireConfirmation_NoConfirmationRecordsNoTrace(t *testing.T) {
+	orch, sessions := interruptedTraceFixture(t)
+
+	readOnly := ToolCall{ID: "c-r", Plugin: "p", Action: "read_x", FromLLM: true}
+	dropped := ToolCall{ID: "c-b", Plugin: "p", Action: "write_b", FromLLM: true}
+	rr, raised := orch.maybeRequireConfirmation(sentCtx("p__read_x", "p__write_b"), sessions, "s1",
+		readOnly, "just look", []ToolCall{dropped}, true)
+	if raised || rr != nil {
+		t.Fatalf("a read-only call must not raise a confirmation, got raised=%v rr=%v", raised, rr)
+	}
+
+	s, err := sessions.Get("s1")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if len(s.Messages) != 0 {
+		t.Fatalf("no confirmation means no interrupted calls, so nothing may be recorded, got %d: %+v",
+			len(s.Messages), s.Messages)
+	}
+}
+
+// Shared fixture for the interrupted-trace tests: two writes and one read-only
+// action behind a confirmation plugin that gates every write, plus an empty
+// session so a message-count assertion means what it says.
+func interruptedTraceFixture(t *testing.T) (*Orchestrator, *state.SessionStore) {
+	t.Helper()
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "p", Description: "confirmation gate fixtures",
+		Actions: []Action{
+			{Name: "write_a", Description: "First write of the batch."},
+			{Name: "write_b", Description: "Second write of the batch."},
+			{Name: "read_x", Description: "A read-only query.", ReadOnly: true},
+		},
+	}, &countingExecutor{}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := registry.Register(PluginCapability{
+		Name: "conf", Actions: []Action{{Name: "check"}},
+	}, confirmingExecutor{}); err != nil {
+		t.Fatalf("register conf: %v", err)
+	}
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
+		ConfirmationPlugin: "conf",
+		ConfirmationAction: "check",
+	})
+	return orch, sessions
+}
+
+// End-to-end through Run: the model answers ONE response with TWO write calls;
+// the first needs confirmation, so the loop pauses there. The second call must
+// not vanish — the real loop hands calls[i+1:] to the gate, which records the
+// explicit NOT EXECUTED exchange before the prompt row, and neither write may
+// have executed. Pins the exact wiring the unit test above cannot see (the
+// call-site slice and the per-response native flag).
+func TestRun_ConfirmationMidBatchLeavesNotExecutedTrace(t *testing.T) {
+	exec := &countingExecutor{}
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "p", Description: "confirmation gate fixtures",
+		Actions: []Action{
+			{Name: "write_a", Description: "First write of the batch.", AlwaysInclude: true},
+			{Name: "write_b", Description: "Second write of the batch.", AlwaysInclude: true},
+		},
+	}, exec); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := registry.Register(PluginCapability{
+		Name: "conf", Actions: []Action{{Name: "check"}},
+	}, confirmingExecutor{}); err != nil {
+		t.Fatalf("register conf: %v", err)
+	}
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "", "")
+	llm := &scriptedNativeLLM{rounds: []provider.CompletionResponse{
+		{ToolCalls: []provider.ToolCall{
+			{ID: "c-a", Name: "p__write_a", Arguments: map[string]string{"name": "A"}},
+			{ID: "c-b", Name: "p__write_b", Arguments: map[string]string{"name": "B"}},
+		}},
+	}}
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
+		state.NewMemoryStore(""), sessions, OrchestratorOpts{
+			ConfirmationPlugin:  "conf",
+			ConfirmationAction:  "check",
+			InjectionStateStore: &fakeInjectionStateStore{},
+		})
+
+	res, err := orch.Run(actor.WithSessionID(context.Background(), "s1"), "s1", "create both")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if exec.count != 0 {
+		t.Errorf("no write may execute before the approval, ran %d time(s)", exec.count)
+	}
+
+	s, err := sessions.Get("s1")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	droppedCallIdx, droppedResultIdx, promptIdx := -1, -1, -1
+	for i, m := range s.Messages {
+		if len(m.ToolCalls) == 1 && m.ToolCalls[0].ID == "c-b" {
+			droppedCallIdx = i
+		}
+		if m.Role == provider.RoleTool && m.ToolCallID == "c-b" {
+			droppedResultIdx = i
+			if !strings.Contains(m.Content, "NOT EXECUTED") || !strings.Contains(m.Content, "p__write_a") {
+				t.Errorf("dropped-call result must say NOT EXECUTED and name the gated call, got %q", m.Content)
+			}
+		}
+		if m.Role == provider.RoleAssistant && m.Content != "" && m.Content == res.Response {
+			promptIdx = i
+		}
+	}
+	if droppedCallIdx == -1 || droppedResultIdx == -1 || promptIdx == -1 {
+		t.Fatalf("missing rows: droppedCall=%d droppedResult=%d prompt=%d in %+v",
+			droppedCallIdx, droppedResultIdx, promptIdx, s.Messages)
+	}
+	if droppedCallIdx >= droppedResultIdx || droppedResultIdx >= promptIdx {
+		t.Errorf("dropped exchange must precede the prompt row, got call=%d result=%d prompt=%d",
+			droppedCallIdx, droppedResultIdx, promptIdx)
+	}
+	if pending, _, _ := loadPendingToolCall(sessions, "s1"); pending == nil || pending.ID != "c-a" {
+		t.Errorf("pending call must be the gated write_a (c-a), got %+v", pending)
 	}
 }
 
