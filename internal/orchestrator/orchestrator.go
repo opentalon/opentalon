@@ -5150,10 +5150,11 @@ type pendingToolCallMeta struct {
 func (o *Orchestrator) recordConfirmationInterruptedCalls(
 	sessionID string, sessions SessionStoreInterface, gated ToolCall, dropped []ToolCall, native bool,
 ) {
+	notice := fmt.Sprintf(
+		"NOT EXECUTED — this call was issued in the same response as %s, which is now waiting for the user's confirmation. It did not run and changed nothing. Issue it again after that confirmation is resolved if it is still needed.",
+		toolFQN(gated.Plugin, gated.Action))
 	for _, dc := range dropped {
-		notice := fmt.Sprintf(
-			"NOT EXECUTED — this call was issued in the same response as %s, which is now waiting for the user's confirmation. It did not run and changed nothing. Issue it again after that confirmation is resolved if it is still needed.",
-			toolFQN(gated.Plugin, gated.Action))
+		result := ToolResult{CallID: dc.ID, Content: notice}
 		if native {
 			_ = sessions.AddMessage(sessionID, provider.Message{
 				Role: provider.RoleAssistant,
@@ -5165,19 +5166,19 @@ func (o *Orchestrator) recordConfirmationInterruptedCalls(
 			})
 			_ = sessions.AddMessage(sessionID, provider.Message{
 				Role:       provider.RoleTool,
-				Content:    notice,
+				Content:    nativeToolContent(result),
 				ToolCallID: dc.ID,
 			})
-		} else {
-			_ = sessions.AddMessage(sessionID, provider.Message{
-				Role:    provider.RoleAssistant,
-				Content: formatToolCallMessage(dc),
-			})
-			_ = sessions.AddMessage(sessionID, provider.Message{
-				Role:    provider.RoleUser,
-				Content: o.guard.WrapContent(ToolResult{CallID: dc.ID, Content: notice}),
-			})
+			continue
 		}
+		_ = sessions.AddMessage(sessionID, provider.Message{
+			Role:    provider.RoleAssistant,
+			Content: formatToolCallMessage(dc),
+		})
+		_ = sessions.AddMessage(sessionID, provider.Message{
+			Role:    provider.RoleUser,
+			Content: o.guard.WrapContent(result),
+		})
 	}
 }
 
