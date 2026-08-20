@@ -3194,8 +3194,11 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// approved call dies as not-found, and the model's corrected retry raises a
 	// SECOND prompt for the same action (observed as the "annoying
 	// double-confirm" in ai_eval checkout/put_in_container_by_barcode). Meta
-	// calls keep their existing path — they resolve outside the registry.
-	if call.FromLLM && call.Plugin != metaPluginName && o.resolveAction(call.Plugin, call.Action) == nil {
+	// calls need no carve-out: registerLoadToolsTool puts _meta in the same
+	// registry, so a well-formed one resolves here and leaves through the
+	// read-only exit below, while a mangled one (_meta__load_tool) is exactly
+	// the doomed call this skip is for.
+	if call.FromLLM && o.resolveAction(call.Plugin, call.Action) == nil {
 		logger.FromContext(ctx).Debug("skipping confirmation for unresolvable tool call; executeCall will refuse it as not-found",
 			"plugin", call.Plugin, "action", call.Action)
 		return nil, false
@@ -3233,12 +3236,6 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	}
 	log := logger.FromContext(ctx)
 	log.Info("tool call requires confirmation", "plugin", call.Plugin, "action", call.Action)
-	// The confirmation abandons every later call of this response — leave an
-	// explicit trace of each so the model re-issues them instead of assuming
-	// they ran (see the interrupted parameter's doc above). Recorded before the
-	// prompt row on purpose.
-	o.recordConfirmationInterruptedCalls(sessionID, sessions, call, interrupted, interruptedNative)
-
 	// Narrate with the main LLM so the prompt is in the user's language and the
 	// effect (e.g. batch count) is explicit; fall back to a static template.
 	var recentMsgs []provider.Message
@@ -3253,6 +3250,15 @@ func (o *Orchestrator) maybeRequireConfirmation(
 		}
 		confirmMsg += "\nWould you like me to proceed?"
 	}
+	// The confirmation abandons every later call of this response — leave an
+	// explicit trace of each so the model re-issues them instead of assuming
+	// they ran (see the interrupted parameter's doc above). Position is load
+	// bearing in BOTH directions: after narrateConfirmation, because that call
+	// summarises the tail of the session and internal bookkeeping rows would
+	// crowd the real conversation out of the window it reads; and before the
+	// prompt row below, so a resolved prompt+reply pair stays adjacent for
+	// stripApprovedConfirmationExchanges.
+	o.recordConfirmationInterruptedCalls(sessionID, sessions, call, interrupted, interruptedNative)
 	// Store the prompt so the next turn has context for the reply/amend, and
 	// persist the confirmation-frame metadata on that row so a reloaded client
 	// rebuilds the Approve/Reject buttons from the transcript (the live frame's

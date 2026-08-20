@@ -352,6 +352,94 @@ func TestMaybeRequireConfirmation_InterruptedBatchRecordedBeforePrompt(t *testin
 	}
 }
 
+// Text-mode counterpart: a stack whose responses carry [tool_call] blocks
+// instead of native tool_calls must get the trace in ITS transcript shape
+// (assistant text + [plugin_output] user row), or the pair reads as a
+// malformed turn to the very model it is meant to inform.
+func TestMaybeRequireConfirmation_InterruptedBatchRecordedInTextMode(t *testing.T) {
+	orch, sessions := interruptedTraceFixture(t)
+
+	gated := ToolCall{ID: "c-a", Plugin: "p", Action: "write_a", FromLLM: true, Args: map[string]string{"name": "A"}}
+	dropped := ToolCall{ID: "c-b", Plugin: "p", Action: "write_b", FromLLM: true, Args: map[string]string{"name": "B"}}
+	if _, raised := orch.maybeRequireConfirmation(sentCtx("p__write_a", "p__write_b"), sessions, "s1",
+		gated, "create both", []ToolCall{dropped}, false); !raised {
+		t.Fatal("gated write must raise a confirmation")
+	}
+
+	s, err := sessions.Get("s1")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if len(s.Messages) != 3 {
+		t.Fatalf("want 3 messages, got %d: %+v", len(s.Messages), s.Messages)
+	}
+	callRow, resultRow := s.Messages[0], s.Messages[1]
+	if callRow.Role != provider.RoleAssistant || len(callRow.ToolCalls) != 0 ||
+		callRow.Content != formatToolCallMessage(dropped) {
+		t.Errorf("text mode must record the call as an assistant [tool_call] line, got %+v", callRow)
+	}
+	if resultRow.Role != provider.RoleUser || !strings.Contains(resultRow.Content, "[plugin_output]") ||
+		!strings.Contains(resultRow.Content, "NOT EXECUTED") {
+		t.Errorf("text mode must record the result as a wrapped user row, got %+v", resultRow)
+	}
+}
+
+// The trace must be tied to the confirmation, not to the mere presence of
+// later calls: when the gated call needs no approval the loop keeps executing
+// them itself, so recording "NOT EXECUTED" for calls that are about to run
+// would plant a lie in history. Recording unconditionally passes every other
+// test in this file, so this negative case is what pins the coupling.
+func TestMaybeRequireConfirmation_NoConfirmationRecordsNoTrace(t *testing.T) {
+	orch, sessions := interruptedTraceFixture(t)
+
+	readOnly := ToolCall{ID: "c-r", Plugin: "p", Action: "read_x", FromLLM: true}
+	dropped := ToolCall{ID: "c-b", Plugin: "p", Action: "write_b", FromLLM: true}
+	rr, raised := orch.maybeRequireConfirmation(sentCtx("p__read_x", "p__write_b"), sessions, "s1",
+		readOnly, "just look", []ToolCall{dropped}, true)
+	if raised || rr != nil {
+		t.Fatalf("a read-only call must not raise a confirmation, got raised=%v rr=%v", raised, rr)
+	}
+
+	s, err := sessions.Get("s1")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if len(s.Messages) != 0 {
+		t.Fatalf("no confirmation means no interrupted calls, so nothing may be recorded, got %d: %+v",
+			len(s.Messages), s.Messages)
+	}
+}
+
+// Shared fixture for the interrupted-trace tests: two writes and one read-only
+// action behind a confirmation plugin that gates every write, plus an empty
+// session so a message-count assertion means what it says.
+func interruptedTraceFixture(t *testing.T) (*Orchestrator, *state.SessionStore) {
+	t.Helper()
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "p", Description: "confirmation gate fixtures",
+		Actions: []Action{
+			{Name: "write_a", Description: "First write of the batch."},
+			{Name: "write_b", Description: "Second write of the batch."},
+			{Name: "read_x", Description: "A read-only query.", ReadOnly: true},
+		},
+	}, &countingExecutor{}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := registry.Register(PluginCapability{
+		Name: "conf", Actions: []Action{{Name: "check"}},
+	}, confirmingExecutor{}); err != nil {
+		t.Fatalf("register conf: %v", err)
+	}
+	sessions := state.NewSessionStore("")
+	sessions.Create("s1", "", "", "")
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
+		ConfirmationPlugin: "conf",
+		ConfirmationAction: "check",
+	})
+	return orch, sessions
+}
+
 // End-to-end through Run: the model answers ONE response with TWO write calls;
 // the first needs confirmation, so the loop pauses there. The second call must
 // not vanish — the real loop hands calls[i+1:] to the gate, which records the
