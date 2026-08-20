@@ -421,7 +421,7 @@ func TestRun_ConfirmationMidBatchLeavesNotExecutedTrace(t *testing.T) {
 		t.Fatalf("missing rows: droppedCall=%d droppedResult=%d prompt=%d in %+v",
 			droppedCallIdx, droppedResultIdx, promptIdx, s.Messages)
 	}
-	if !(droppedCallIdx < droppedResultIdx && droppedResultIdx < promptIdx) {
+	if droppedCallIdx >= droppedResultIdx || droppedResultIdx >= promptIdx {
 		t.Errorf("dropped exchange must precede the prompt row, got call=%d result=%d prompt=%d",
 			droppedCallIdx, droppedResultIdx, promptIdx)
 	}
