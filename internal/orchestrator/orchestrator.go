@@ -2020,7 +2020,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				// server-side single-step path would execute a write — including
 				// an amend re-plan's corrected write — with no consent. Read-only
 				// / bypass calls fall straight through to execution.
-				if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, call, userMessage); raised {
+				if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, call, userMessage, nil, false); raised {
 					return rr, nil
 				}
 				toolResult := o.executeCall(ctx, call)
@@ -2677,7 +2677,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// the two sites can't drift. Narrates the prompt in the user's
 			// language, stores + persists the pending call, and returns the
 			// confirmation; read-only / bypass calls fall through to execution.
-			if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, calls[i], userMessage); raised {
+			if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, calls[i], userMessage, calls[i+1:], nativeToolCalls); raised {
 				return rr, nil
 			}
 
@@ -3151,8 +3151,21 @@ func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content strin
 // confirmation was raised — the caller must return it and NOT execute the call;
 // (nil, false) when the call is exempt (read-only / bypass / no plugin) and the
 // caller should proceed to execute.
+//
+// interrupted carries the not-yet-executed calls from the SAME model response
+// that this confirmation abandons (the agent loop stops at the gated call and
+// returns). Each one is recorded into history as an explicit "not executed"
+// exchange BEFORE the confirmation prompt row — without that trace the model
+// later treats its own issued-but-dropped calls as done and reports phantom
+// results (observed: structure/create_category_and_container_type — the second
+// create of a two-call batch vanished and the model announced both as created,
+// inventing an id). The pairs sit before the prompt row so the resolved
+// prompt+reply pair stays adjacent for stripApprovedConfirmationExchanges.
+// interruptedNative says how THIS response's calls are being recorded (the
+// loop's per-response native flag), so the pairs match the surrounding format.
 func (o *Orchestrator) maybeRequireConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
+	interrupted []ToolCall, interruptedNative bool,
 ) (*RunResult, bool) {
 	if call.ConfirmationBypass {
 		return nil, false
@@ -3167,6 +3180,23 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// approve running it.
 	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
 		logger.FromContext(ctx).Debug("skipping confirmation for unloaded catalog tool; executeCall will refuse it with a load_tools hint",
+			"plugin", call.Plugin, "action", call.Action)
+		return nil, false
+	}
+	// A call whose action does not resolve at all — a hallucinated or mangled
+	// name (e.g. plugin "timly", action "timly__load_tools") — will be refused
+	// by executeCall's not-found path, so it must not cost the user an approval
+	// either. callToUnloadedTool deliberately returns false for these (the
+	// not-found refusal owns that error), and callRequiresConfirmation below
+	// fails SAFE for them (unknown action reads as "not read-only", a
+	// confirmation-plugin error reads as "requires confirmation") — so without
+	// this skip the user is asked to approve a call that cannot run, the
+	// approved call dies as not-found, and the model's corrected retry raises a
+	// SECOND prompt for the same action (observed as the "annoying
+	// double-confirm" in ai_eval checkout/put_in_container_by_barcode). Meta
+	// calls keep their existing path — they resolve outside the registry.
+	if call.FromLLM && call.Plugin != metaPluginName && o.resolveAction(call.Plugin, call.Action) == nil {
+		logger.FromContext(ctx).Debug("skipping confirmation for unresolvable tool call; executeCall will refuse it as not-found",
 			"plugin", call.Plugin, "action", call.Action)
 		return nil, false
 	}
@@ -3203,6 +3233,11 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	}
 	log := logger.FromContext(ctx)
 	log.Info("tool call requires confirmation", "plugin", call.Plugin, "action", call.Action)
+	// The confirmation abandons every later call of this response — leave an
+	// explicit trace of each so the model re-issues them instead of assuming
+	// they ran (see the interrupted parameter's doc above). Recorded before the
+	// prompt row on purpose.
+	o.recordConfirmationInterruptedCalls(sessionID, sessions, call, interrupted, interruptedNative)
 
 	// Narrate with the main LLM so the prompt is in the user's language and the
 	// effect (e.g. batch count) is explicit; fall back to a static template.
@@ -5093,6 +5128,51 @@ type pendingToolCallMeta struct {
 	// passes executeCall's unknown-args validation. Rows persisted before
 	// this field unmarshal to false — exactly how they were restored then.
 	FromLLM bool `json:"from_llm,omitempty"`
+}
+
+// recordConfirmationInterruptedCalls writes one history exchange per tool call
+// that a confirmation interrupt drops: the call itself plus a deterministic
+// "NOT EXECUTED" result. The agent loop executes a response's calls one by one
+// and returns to the user as soon as one call needs approval, so every later
+// call of that response would otherwise vanish without any trace — and a model
+// that sees its own announcement but no failure treats the dropped call as
+// done. The recorded pair keeps the provider protocol valid (every tool call
+// carries a result) and tells the model in plain words to re-issue the call
+// after the confirmation resolves. `native` mirrors how the surrounding loop
+// records THIS response's calls (per-response flag, not the provider
+// capability), so transcript formats stay uniform within the turn.
+func (o *Orchestrator) recordConfirmationInterruptedCalls(
+	sessionID string, sessions SessionStoreInterface, gated ToolCall, dropped []ToolCall, native bool,
+) {
+	for _, dc := range dropped {
+		notice := fmt.Sprintf(
+			"NOT EXECUTED — this call was issued in the same response as %s, which is now waiting for the user's confirmation. It did not run and changed nothing. Issue it again after that confirmation is resolved if it is still needed.",
+			toolFQN(gated.Plugin, gated.Action))
+		if native {
+			_ = sessions.AddMessage(sessionID, provider.Message{
+				Role: provider.RoleAssistant,
+				ToolCalls: []provider.ToolCall{{
+					ID:        dc.ID,
+					Name:      toolFQN(dc.Plugin, dc.Action),
+					Arguments: dc.Args,
+				}},
+			})
+			_ = sessions.AddMessage(sessionID, provider.Message{
+				Role:       provider.RoleTool,
+				Content:    notice,
+				ToolCallID: dc.ID,
+			})
+		} else {
+			_ = sessions.AddMessage(sessionID, provider.Message{
+				Role:    provider.RoleAssistant,
+				Content: formatToolCallMessage(dc),
+			})
+			_ = sessions.AddMessage(sessionID, provider.Message{
+				Role:    provider.RoleUser,
+				Content: o.guard.WrapContent(ToolResult{CallID: dc.ID, Content: notice}),
+			})
+		}
+	}
 }
 
 func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID, prompt string) {
