@@ -5699,9 +5699,11 @@ func isVisibleUserMessage(m provider.Message) bool {
 // lastUserMessage returns the most recent VISIBLE user message from the session,
 // stripping knowledge context. Used to enrich short follow-up messages
 // (e.g. "Item") with the prior intent ("Create some arbitrary test object") so
-// RAG semantic search matches the right tools, and as the reply-language
-// fallback for a signal-less current turn. Hidden system-injected notes are
+// RAG semantic search matches the right tools. Hidden system-injected notes are
 // skipped (see isVisibleUserMessage) so they never stand in for the user's words.
+// The reply-language fallback deliberately does NOT use this: it needs the most
+// recent DETECTABLE message, not the most recent one — see
+// replyLanguageDirectiveFromHistory.
 func lastUserMessage(messages []provider.Message) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if isVisibleUserMessage(messages[i]) {

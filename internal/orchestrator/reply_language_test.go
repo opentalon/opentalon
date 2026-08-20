@@ -102,6 +102,25 @@ func TestReplyLanguageDirectiveWithHistory_ApprovalInheritsRequest(t *testing.T)
 	}
 }
 
+// One request can cost several approvals — a turn with two gated writes asks
+// twice — and then the newest user rows are a RUN of bare "y"s with the real
+// request behind them. Testing only the newest one leaves every turn after the
+// second approval unpinned, which is how an English request came back answered
+// in German (ai_eval structure/create_category_and_container_type, once the
+// batch actually produced its second confirmation instead of dropping it).
+func TestReplyLanguageDirectiveWithHistory_SecondApprovalStillInheritsRequest(t *testing.T) {
+	o := newDetectorOrchestrator()
+	history := []provider.Message{
+		{Role: provider.RoleUser, Content: "Please create the category 'Measuring Instruments' and a new container type 'Shelf'."},
+		{Role: provider.RoleAssistant, Content: "This will create the category. Shall I proceed?"},
+		{Role: provider.RoleUser, Content: "y", PromptType: provider.PromptTypeConfirmationResponse},
+		{Role: provider.RoleAssistant, Content: "This will create the container type. Shall I proceed?"},
+	}
+	if got := o.replyLanguageDirectiveWithHistory("y", history); !strings.Contains(got, "Reply in English.") {
+		t.Errorf("a second approval must still inherit English from the request behind the approvals, got %q", got)
+	}
+}
+
 // A short non-approval follow-up ("ok") after a German request must also inherit
 // German — the fallback is general, not approval-specific.
 func TestReplyLanguageDirectiveWithHistory_ShortReplyInheritsGerman(t *testing.T) {

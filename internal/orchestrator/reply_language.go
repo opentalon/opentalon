@@ -116,6 +116,13 @@ func (o *Orchestrator) replyLanguageDirective(userMessage string) string {
 // one the user asked in. Fall back to the most recent earlier user message that
 // IS detectable so the reply stays in the user's language.
 //
+// The fallback WALKS BACK rather than testing only the newest user row: one
+// request can cost several approvals (a turn whose writes are gated one by
+// one), and then the newest user rows are a run of bare "y"s with the real
+// request behind them. Stopping at the first of those leaves every turn after
+// the second approval unpinned — observed as an English request answered in
+// German once a two-write turn started producing its second confirmation.
+//
 // priorHistory must EXCLUDE the current turn's own rows (pass
 // sess.Messages[:msgCountAtStart]); otherwise a just-added tool result or the
 // approval reply itself could be mistaken for the request. A detectable current
@@ -124,22 +131,25 @@ func (o *Orchestrator) replyLanguageDirectiveWithHistory(current string, priorHi
 	if directive := o.replyLanguageDirective(current); directive != "" {
 		return directive
 	}
-	if prev := lastUserMessage(priorHistory); prev != "" {
-		return o.replyLanguageDirective(prev)
-	}
-	return ""
+	return o.replyLanguageDirectiveFromHistory(priorHistory)
 }
 
 // replyLanguageDirectiveForHidden returns the reply-language directive for a
 // hidden (system-injected) turn — a background-job status note delivered via
 // the inject path. Its text is not the user's own words (it is often an English
 // facts line), so detecting on it would answer a German conversation in English.
-// Instead walk back to the most recent VISIBLE user message that is long enough
-// to detect confidently, skipping bare approvals and any earlier hidden turns.
-// Returns "" when no visible user message is confidently detectable, so the
-// caller leaves the turn unpinned and the standing language rule (plus any
-// locale hint the injected note itself carries) applies.
+// The visible history is the only trustworthy signal here, so this path has
+// nothing to try first and goes straight to the walk-back.
 func (o *Orchestrator) replyLanguageDirectiveForHidden(priorHistory []provider.Message) string {
+	return o.replyLanguageDirectiveFromHistory(priorHistory)
+}
+
+// replyLanguageDirectiveFromHistory walks back to the most recent VISIBLE user
+// message that is long enough to detect confidently, skipping assistant and
+// tool rows, hidden system notes, and bare approvals. Returns "" when no
+// visible user message is confidently detectable, so the caller leaves the turn
+// unpinned and the standing language rule applies.
+func (o *Orchestrator) replyLanguageDirectiveFromHistory(priorHistory []provider.Message) string {
 	for i := len(priorHistory) - 1; i >= 0; i-- {
 		m := priorHistory[i]
 		if !isVisibleUserMessage(m) { // skip assistant/tool rows and hidden system notes
