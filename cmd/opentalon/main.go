@@ -490,7 +490,7 @@ func main() {
 			}
 		}
 		entry := plugin.PluginEntry{
-			Name: name, Plugin: path, Enabled: p.Enabled, Config: pluginCfg, ExposeHTTP: p.ExposeHTTP,
+			Name: name, Plugin: path, Enabled: p.Enabled, Config: pluginCfg, ExposeHTTP: p.ExposeHTTP, GRPCPort: p.GRPCPort,
 		}
 		if p.DialTimeout != "" {
 			if d, err := time.ParseDuration(p.DialTimeout); err == nil {

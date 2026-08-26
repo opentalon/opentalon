@@ -117,6 +117,16 @@ func (c *Client) RefreshCapabilities(ctx context.Context) (orchestrator.PluginCa
 	return toPluginCapability(resp), nil
 }
 
+// ExecuteRaw forwards a caller-built request to the plugin verbatim, with
+// none of the orchestrator.ToolCall wrapping (credential injection, usage
+// tracking) that Execute/ExecuteContext add. Only the external plugin
+// gateway (gateway.go) uses this — auth for that path is whatever the
+// plugin's own Execute handler does with the request's own fields, since the
+// gateway does not and cannot inspect them.
+func (c *Client) ExecuteRaw(ctx context.Context, req *pluginpb.ToolCallRequest) (*pluginpb.ToolResultResponse, error) {
+	return c.client.Execute(ctx, req)
+}
+
 // Execute sends a tool call to the plugin and returns the result.
 // It implements orchestrator.PluginExecutor.
 func (c *Client) Execute(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
