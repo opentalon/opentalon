@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -133,6 +134,58 @@ func TestWatchProcessCleansUpOnExit(t *testing.T) {
 	if _, ok := registry.GetExecutor("echo"); ok {
 		t.Error("plugin should be deregistered from registry after process exit")
 	}
+}
+
+// A crashed plugin must free its gateway port — otherwise the retry loop's
+// reload can never rebind it (net.Listen: address already in use), and the
+// stale gateway keeps accepting external calls and forwarding them to a
+// client that's already closed.
+func TestWatchProcessStopsGatewayOnExit(t *testing.T) {
+	registry := orchestrator.NewToolRegistry()
+	m := NewManager(registry)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := newTestPluginClient(t)
+	cap := client.Capability()
+	if err := registry.Register(cap, client); err != nil {
+		t.Fatal(err)
+	}
+
+	gw, err := startGateway("echo", client, 0)
+	if err != nil {
+		t.Fatalf("startGateway: %v", err)
+	}
+	addr := gw.addr()
+
+	proc := &Process{exited: make(chan struct{})}
+
+	m.mu.Lock()
+	m.plugins["echo"] = &managed{
+		entry:   PluginEntry{Name: "echo"},
+		process: proc,
+		client:  client,
+		gw:      gw,
+	}
+	m.mu.Unlock()
+
+	m.watchProcess(ctx, "echo", proc)
+	close(proc.exited)
+
+	// The port must be free to rebind soon after the crash — poll instead of
+	// asserting once, since cleanup runs in a goroutine.
+	deadline := time.Now().Add(time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		lis, err := net.Listen("tcp", addr)
+		if err == nil {
+			_ = lis.Close()
+			return
+		}
+		lastErr = err
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("gateway port %s never freed after plugin crash: %v", addr, lastErr)
 }
 
 func TestWatchProcessContextCancelDoesNotCleanUp(t *testing.T) {

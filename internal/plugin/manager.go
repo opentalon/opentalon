@@ -248,7 +248,10 @@ func (m *Manager) loadLocked(ctx context.Context, entry PluginEntry) (string, er
 	if entry.GRPCPort != 0 {
 		gw, err := startGateway(entry.Name, client, entry.GRPCPort)
 		if err != nil {
-			slog.Warn("plugin gateway failed to start", "component", "plugin-manager", "plugin", entry.Name, "error", err)
+			// Error, not Warn: grpc_port is an explicit opt-in, unlike expose_http's
+			// best-effort proxy — a plugin "loading" with no gateway on a port the
+			// operator deliberately asked for needs a loud signal, not a buried log line.
+			slog.Error("plugin gateway failed to start", "component", "plugin-manager", "plugin", entry.Name, "error", err)
 		} else {
 			mg.gw = gw
 		}
@@ -276,6 +279,9 @@ func (m *Manager) watchProcess(ctx context.Context, name string, proc *Process) 
 			}
 			m.mu.Unlock()
 			if ok {
+				if current.gw != nil {
+					current.gw.stop()
+				}
 				if current.client != nil {
 					_ = current.client.Close()
 				}
