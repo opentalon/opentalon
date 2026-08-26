@@ -29,6 +29,7 @@ type PluginEntry struct {
 	Env         []string      // if non-nil, used as the subprocess env verbatim; use WithEnvOverride to build it
 	DialTimeout time.Duration // overrides defaultDialTimeout for the gRPC Init call (0 = use default)
 	ExposeHTTP  bool          // operator opt-in: reverse-proxy /{name}/* through the webhook server
+	GRPCPort    int           // operator opt-in: expose an external PluginService.Execute gateway on this port (0 = disabled)
 }
 
 // WithEnvOverride starts from the current process environment (or the entry's
@@ -54,6 +55,7 @@ type managed struct {
 	entry   PluginEntry
 	process *Process
 	client  *Client
+	gw      *gateway
 }
 
 // PluginLoadedFunc is called after a plugin is successfully loaded and registered.
@@ -239,6 +241,22 @@ func (m *Manager) loadLocked(ctx context.Context, entry PluginEntry) (string, er
 			"component", "plugin-manager", "plugin", entry.Name)
 	}
 
+	// External PluginService.Execute gateway, only when the operator opts in
+	// via grpc_port. Unlike expose_http, this needs no signal from the plugin
+	// itself — it forwards straight to the Client already dialed above,
+	// whether the plugin is local (unix socket) or remote (connectRemote).
+	if entry.GRPCPort != 0 {
+		gw, err := startGateway(entry.Name, client, entry.GRPCPort)
+		if err != nil {
+			// Error, not Warn: grpc_port is an explicit opt-in, unlike expose_http's
+			// best-effort proxy — a plugin "loading" with no gateway on a port the
+			// operator deliberately asked for needs a loud signal, not a buried log line.
+			slog.Error("plugin gateway failed to start", "component", "plugin-manager", "plugin", entry.Name, "error", err)
+		} else {
+			mg.gw = gw
+		}
+	}
+
 	slog.Info("loaded plugin", "component", "plugin-manager", "plugin", entry.Name, "mode", mode, "actions", len(cap.Actions))
 
 	return entry.Name, nil
@@ -261,6 +279,9 @@ func (m *Manager) watchProcess(ctx context.Context, name string, proc *Process) 
 			}
 			m.mu.Unlock()
 			if ok {
+				if current.gw != nil {
+					current.gw.stop()
+				}
 				if current.client != nil {
 					_ = current.client.Close()
 				}
@@ -358,6 +379,9 @@ func (m *Manager) Unload(name string) error {
 
 	m.registry.Deregister(name)
 
+	if mg.gw != nil {
+		mg.gw.stop()
+	}
 	if mg.client != nil {
 		_ = mg.client.Close()
 	}
