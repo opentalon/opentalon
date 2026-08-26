@@ -1,7 +1,7 @@
 {
   "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-08-19T10:43:07.253423013Z",
+  "recorded_at": "2026-08-26T13:08:14.297397126Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,9 +19,9 @@
         ]
       },
       "response": {
-        "id": "msg_011CeBy9CGM681j3ox9eDFXX",
+        "id": "msg_011CeRQsSMJvngkwPY4o6EhU",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'll use the parallel subprocess tool to answer both questions simultaneously.\n\u003cfunction_calls\u003e\n[tool_call]\n{\"tool\": \"_subprocess__parallel\", \"args\": {\"tasks\": [{\"task\": \"What is the capital of France?\"}, {\"task\": \"What is 7 times 6?\"}]}}\n[/tool_call]\n\u003c/function_calls\u003e\n\nBased on the parallel subprocess results:\n\n1. **Capital of France**: Paris\n2. **7 times 6**: 42\n\nBoth answers completed in a single parallel call!",
+        "content": "I'll use the subprocess parallel tool to answer both of your independent questions at once.\n\u003cfunction_calls\u003e\n[tool_call]\n{\"tool\": \"_subprocess__parallel\", \"args\": {\"tasks\": [{\"task\": \"What is the capital of France?\"}, {\"task\": \"What is 7 times 6?\"}]}}\n[/tool_call]\n\u003c/function_calls\u003e\n\nHere are both answers:\n\n1. **What is the capital of France?** Paris\n2. **What is 7 times 6?** 42",
         "usage": {
           "input_tokens": 1956,
           "output_tokens": 130
@@ -43,7 +43,7 @@
         ]
       },
       "response": {
-        "id": "msg_011CeBy9HtgaWHAbE3DY3K1R",
+        "id": "msg_011CeRQsZpWxzBPH5qStLftz",
         "model": "claude-haiku-4-5-20251001",
         "content": "7 times 6 is 42.",
         "usage": {
@@ -67,12 +67,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CeBy9LtkvGuf6vkWXagC9",
+        "id": "msg_011CeRQscvJXgCjki5akPJaa",
         "model": "claude-haiku-4-5-20251001",
-        "content": "The capital of France is Paris.\n\nParis is the largest city in France and has been the capital since the 12th century. It is located in the north-central part of the country along the Seine River and is known for its cultural, historical, and artistic significance, including famous landmarks like the Eiffel Tower, Notre-Dame Cathedral, and the Louvre Museum.",
+        "content": "The capital of France is Paris.",
         "usage": {
           "input_tokens": 396,
-          "output_tokens": 82
+          "output_tokens": 10
         }
       }
     },
@@ -94,17 +94,17 @@
           },
           {
             "role": "user",
-            "content": "[plugin_output]\n## Task 1: What is the capital of France?\nThe capital of France is Paris.\n\nParis is the largest city in France and has been the capital since the 12th century. It is located in the north-central part of the country along the Seine River and is known for its cultural, historical, and artistic significance, including famous landmarks like the Eiffel Tower, Notre-Dame Cathedral, and the Louvre Museum.\n\n## Task 2: What is 7 times 6?\n7 times 6 is 42.\n\n[structured]\n[{\"task\":\"What is the capital of France?\",\"response\":\"The capital of France is Paris.\\n\\nParis is the largest city in France and has been the capital since the 12th century. It is located in the north-central part of the country along the Seine River and is known for its cultural, historical, and artistic significance, including famous landmarks like the Eiffel Tower, Notre-Dame Cathedral, and the Louvre Museum.\",\"iterations\":1},{\"task\":\"What is 7 times 6?\",\"response\":\"7 times 6 is 42.\",\"iterations\":1}]\n[/structured]\n[/plugin_output]"
+            "content": "[plugin_output]\n## Task 1: What is the capital of France?\nThe capital of France is Paris.\n\n## Task 2: What is 7 times 6?\n7 times 6 is 42.\n\n[structured]\n[{\"task\":\"What is the capital of France?\",\"response\":\"The capital of France is Paris.\",\"iterations\":1},{\"task\":\"What is 7 times 6?\",\"response\":\"7 times 6 is 42.\",\"iterations\":1}]\n[/structured]\n[/plugin_output]"
           }
         ]
       },
       "response": {
-        "id": "msg_011CeBy9SVc6ufZ2iC6VbdJT",
+        "id": "msg_011CeRQsfKfNriEipVrYeecb",
         "model": "claude-haiku-4-5-20251001",
-        "content": "Here are both answers:\n\n1. **The capital of France is Paris** — France's largest city, located along the Seine River, known for landmarks like the Eiffel Tower and the Louvre.\n\n2. **7 times 6 is 42**.",
+        "content": "Here are both answers:\n\n1. **Capital of France:** Paris\n2. **7 times 6:** 42",
         "usage": {
-          "input_tokens": 2303,
-          "output_tokens": 61
+          "input_tokens": 2156,
+          "output_tokens": 29
         }
       }
     }

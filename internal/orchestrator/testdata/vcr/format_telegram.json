@@ -1,7 +1,7 @@
 {
   "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-08-19T10:43:18.939280216Z",
+  "recorded_at": "2026-08-26T13:08:24.781812455Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CeByA4NNCw2pwLF4Qhhgt",
+        "id": "msg_011CeRQtDkZ85s1G1QTKMA26",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant that can help you with a variety of tasks by calling specialized tools. Here are my key capabilities:\n\n## **Code \u0026 Repository Management**\n- **Analyze code** – I can analyze code in GitLab repositories to review structure, quality, and issues\n- **Create pull requests** – I can create PRs in GitLab to propose changes\n\n## **Issue Tracking**\n- **Create Jira issues** – I can create new issues in Jira with titles and descriptions\n\n## **Web Search**\n- **Search the web** – I can search for information using Brave Search when you need current data\n\n## **Tool Management**\n- **Load additional tools** – I can dynamically load specialized tools as needed for specific tasks\n\n## **How I Work**\nWhen you ask me something that requires data or actions, I:\n1. **Call the appropriate tool immediately** – I don't guess or make things up\n2. **Retrieve real data** – I get actual results rather than fabricating answers\n3. **Answer your question** – I use the data to give you a clear, direct response\n\n## **What I Won't Do**\n- I won't pretend to have capabilities I don't have\n- I won't fabricate data or results\n- I won't describe what I *would* do instead of actually doing it\n\nIf you need something specific—whether it's code analysis, creating an issue, searching for information, or something else—just ask, and I'll call the right tool to help you.",
+        "content": "I'm an AI assistant designed to help you with tasks across several integrated platforms. Here are my core capabilities:\n\n**GitLab Integration**\n- Analyze code in repositories\n- Create pull requests\n\n**Jira Integration**\n- Create issues with titles you specify\n\n**Scheduling \u0026 Automation**\n- Monitor and run recurring tasks\n- Set up automated jobs with configurable intervals\n- Manage scheduled tasks (list, pause, resume, update, delete)\n\n**General Assistance**\n- Answer questions and provide guidance\n- Search for information when needed\n- Help with workflow and process optimization\n\n**How I Work**\n- I call tools to fetch real data rather than guessing or making things up\n- For write actions (creating issues, PRs, jobs), I call the tool directly — the system handles user confirmation automatically\n- I follow strict safety protocols to ensure reliable and secure operations\n\n**What I Need From You**\nTo use these capabilities effectively, just ask me what you need:\n- \"Analyze the code in my repository\"\n- \"Create a Jira issue for...\"\n- \"Set up a recurring check every hour\"\n- Or any other task related to the integrations above\n\nIs there something specific you'd like me to help you with?",
         "usage": {
           "input_tokens": 1535,
-          "output_tokens": 334
+          "output_tokens": 272
         }
       }
     }

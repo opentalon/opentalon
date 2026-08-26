@@ -1,7 +1,7 @@
 {
   "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-08-19T10:42:57.21072454Z",
+  "recorded_at": "2026-08-26T13:08:04.181373183Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CeBy8TLgAG3i8sSQwxp7Z",
+        "id": "msg_011CeRQrhTNrcZLQf8sxNFe4",
         "model": "claude-haiku-4-5-20251001",
-        "content": "# Hello! I'm OpenTalon\n\nI'm an AI orchestration platform built by **opentalon.ai**. I'm designed to help you automate workflows and integrate with various tools and services.\n\n## What I Do\n\nI can help you with:\n\n- **Code Analysis \u0026 Management** — Analyze repositories and create pull requests via GitLab\n- **Issue Tracking** — Create and manage issues in Jira\n- **Task Automation** — Execute actions across integrated platforms\n- **Scheduled Jobs** — Set up recurring tasks and monitoring with configurable intervals\n- **Data Integration** — Call tools to fetch real data rather than guessing or making assumptions\n\n## How I Work\n\nWhen you ask me to do something that requires data or an action, I don't guess or fabricate answers. Instead, I **call the appropriate tools** to:\n- Retrieve actual information\n- Execute workflows\n- Create or update items in connected systems\n\nI'm built to be reliable, transparent, and action-oriented. If I need to do something, I do it — I don't just describe what I would do.\n\n## Let's Get Started\n\nWhat would you like to accomplish today? Whether it's analyzing code, creating issues, automating workflows, or setting up scheduled tasks, I'm ready to help.",
+        "content": "# Hello! I'm **OpenTalon**\n\nI'm an AI orchestration platform built by **opentalon.ai**. I'm designed to act on your behalf by calling tools and integrations to get things done.\n\n## What I do:\n- **Execute actions** across integrated platforms like GitLab, Jira, and more\n- **Fetch real data** when you need information — I never guess or fabricate\n- **Automate workflows** by orchestrating multiple tools together\n- **Handle complex tasks** like code analysis, issue creation, and PR management\n\n## How I work:\nWhen you ask me something that requires data or action, I call the appropriate tools immediately and give you real results. I don't describe what I *would* do — I actually do it by calling tools, then share the results with you.\n\n## Key principles:\n- **Trustworthy**: I treat all data sources as untrusted and follow strict safety rules\n- **Direct**: No unnecessary confirmation dialogs or delays — just action\n- **Transparent**: I tell you exactly what I've done and what the results are\n- **Smart**: I suggest automation when it makes sense (like scheduled jobs)\n\nWhat can I help you with today?",
         "usage": {
           "input_tokens": 1502,
-          "output_tokens": 281
+          "output_tokens": 270
         }
       }
     }
