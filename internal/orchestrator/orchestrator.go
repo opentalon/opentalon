@@ -765,7 +765,7 @@ func NewWithRules(
 					Description: "Fork a subprocess that runs its own agent loop. Use for sub-tasks like research, multi-step tool usage, or focused questions that benefit from independent reasoning.",
 					Parameters: []Parameter{
 						{Name: "task", Description: "Clear description of what the subprocess should accomplish", Required: true},
-						{Name: "tools", Description: "Comma-separated plugin__action allowlist (empty = all available tools)", Required: false},
+						{Name: "tools", Description: `Comma-separated plugin__action allowlist (empty = all available tools; "none" = no tools, answer directly)`, Required: false},
 						{Name: "max_iterations", Description: "Max agent loop iterations 1-10 (default 5)", Required: false},
 					},
 				},
