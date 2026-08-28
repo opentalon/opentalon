@@ -63,3 +63,46 @@ func TestNarrateConfirmation_NilLLMReturnsEmpty(t *testing.T) {
 		t.Errorf("nil LLM must return empty string, got %q", got)
 	}
 }
+
+// TestNarrateConfirmation_SingleRecordPromptDemandsFields pins what the prompt
+// asks for on a call that names ONE record. The count-only version of this
+// prompt produced confirmations of the shape "shall I change all the specified
+// detail attributes?", which a user can only answer yes to blind — three fields
+// on a machine were overwritten with another machine's values that way. The
+// fields have to be named individually, with the value they change from, and a
+// missing previous value has to be admitted rather than invented or dropped.
+func TestNarrateConfirmation_SingleRecordPromptDemandsFields(t *testing.T) {
+	llm := &capturingLLM{responses: []string{"ok?"}}
+	orch := NewWithRules(llm, &fakeParser{}, NewToolRegistry(),
+		state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
+
+	call := ToolCall{Action: "timly.update-item", Args: map[string]string{"id": "42", "serial_number": "X-9"}}
+	orch.narrateConfirmation(context.Background(), nil, call, "setz die Seriennummer auf X-9")
+
+	if len(llm.requests) != 1 {
+		t.Fatalf("expected exactly 1 LLM call, got %d", len(llm.requests))
+	}
+	var sys string
+	for _, m := range llm.requests[0].Messages {
+		if m.Role == provider.RoleSystem {
+			sys = m.Content
+		}
+	}
+
+	for _, want := range []string{
+		"FIELD BY FIELD",              // the fields are named, not summarised
+		"previous value -> new value", // and named with what they change from
+		"the specified attributes",    // the phrasing that is called out as unacceptable
+		"not known here",              // a missing previous value is admitted
+	} {
+		if !strings.Contains(sys, want) {
+			t.Errorf("system prompt must cover %q, got: %q", want, sys)
+		}
+	}
+
+	// The batch rule has to survive alongside it: a count is still the right
+	// answer for many records, just not for one.
+	if !strings.Contains(sys, "COUNT of affected records") {
+		t.Errorf("system prompt lost the batch count rule, got: %q", sys)
+	}
+}
