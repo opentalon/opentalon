@@ -231,6 +231,14 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	if maxIter > 10 {
 		maxIter = 10
 	}
+	// A no-tools sub-agent has nothing to loop for: it answers in one turn. Pin
+	// it to a single iteration so an adversarial task that keeps emitting
+	// (refused) tool calls can't burn several model calls — the caller gets
+	// exactly one, which is what a determinism/budget guarantee on top of this
+	// needs (e.g. talooner's llm_review).
+	if req.NoTools {
+		maxIter = 1
+	}
 
 	log := slog.With("component", "subprocess", "depth", depth)
 	taskPreview := req.Task
@@ -395,7 +403,7 @@ func parseSubprocessRequest(args map[string]string) (subprocessRequest, error) {
 
 	req := subprocessRequest{Task: task}
 
-	if tools := strings.TrimSpace(args["tools"]); tools == noToolsSentinel {
+	if tools := strings.TrimSpace(args["tools"]); strings.EqualFold(tools, noToolsSentinel) {
 		req.NoTools = true
 	} else if tools != "" {
 		for _, t := range strings.Split(tools, ",") {
@@ -450,7 +458,7 @@ func parseParallelRequest(args map[string]string) ([]subprocessRequest, error) {
 			return nil, fmt.Errorf("task %d is missing a 'task' field", i+1)
 		}
 		req := subprocessRequest{Task: task, MaxIterations: it.MaxIterations}
-		if strings.TrimSpace(it.Tools) == noToolsSentinel {
+		if strings.EqualFold(strings.TrimSpace(it.Tools), noToolsSentinel) {
 			req.NoTools = true
 		} else {
 			for _, t := range strings.Split(it.Tools, ",") {

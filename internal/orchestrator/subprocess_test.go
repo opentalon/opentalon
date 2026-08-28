@@ -340,6 +340,15 @@ func TestParseSubprocessRequest(t *testing.T) {
 			},
 		},
 		{
+			name: "no tools is case-insensitive",
+			args: map[string]string{"task": "judge this", "tools": "NONE"},
+			check: func(t *testing.T, req subprocessRequest) {
+				if !req.NoTools {
+					t.Error(`tools="NONE" should set NoTools (case-insensitive)`)
+				}
+			},
+		},
+		{
 			name: "with max_iterations",
 			args: map[string]string{"task": "search", "max_iterations": "3"},
 			check: func(t *testing.T, req subprocessRequest) {
@@ -420,6 +429,22 @@ func TestSubprocessSystemPromptExcludesSubprocess(t *testing.T) {
 	}
 }
 
+func TestSubprocessSystemPromptNoTools(t *testing.T) {
+	orch := setupSubprocessOrchestrator(&fakeLLM{})
+
+	prompt := orch.buildSubprocessSystemPrompt(context.Background(), subprocessRequest{
+		Task:    "judge this",
+		NoTools: true,
+	})
+
+	if strings.Contains(prompt, "search__query") || strings.Contains(prompt, "math__calculate") {
+		t.Errorf("NoTools prompt must not list any tools, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "no tools") {
+		t.Errorf("NoTools prompt should tell the sub-agent it has no tools, got:\n%s", prompt)
+	}
+}
+
 func TestSubprocessSystemPromptRespectsAllowlist(t *testing.T) {
 	orch := setupSubprocessOrchestrator(&fakeLLM{})
 
@@ -455,5 +480,28 @@ func TestSubprocessMaxIterationsCapped(t *testing.T) {
 	// Should be capped at 10
 	if result.Iterations != 10 {
 		t.Errorf("expected 10 iterations (capped), got: %d", result.Iterations)
+	}
+}
+
+// A no-tools sub-agent is pinned to a single iteration, so an adversarial task
+// that keeps emitting (refused) tool calls can't burn several model calls — the
+// determinism/budget guarantee a caller like llm_review relies on.
+func TestSubprocessNoToolsPinsSingleIteration(t *testing.T) {
+	llm := &fakeLLM{responses: make([]string, 5)}
+	for i := range llm.responses {
+		llm.responses[i] = fmt.Sprintf(`[tool_call]
+{"tool": "search__query", "args": {"q": "attempt %d"}}
+[/tool_call]`, i)
+	}
+
+	orch := setupSubprocessOrchestrator(llm)
+
+	req := subprocessRequest{Task: "judge", NoTools: true, MaxIterations: 20}
+	result, err := orch.runSubprocess(context.Background(), req, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Iterations != 1 {
+		t.Errorf("NoTools must pin to a single iteration regardless of max_iterations, got: %d", result.Iterations)
 	}
 }
