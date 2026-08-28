@@ -328,6 +328,27 @@ func TestParseSubprocessRequest(t *testing.T) {
 			},
 		},
 		{
+			name: "no tools",
+			args: map[string]string{"task": "judge this", "tools": "none"},
+			check: func(t *testing.T, req subprocessRequest) {
+				if !req.NoTools {
+					t.Error("tools=none should set NoTools")
+				}
+				if len(req.AllowedTools) != 0 {
+					t.Errorf("tools=none should leave AllowedTools empty, got: %v", req.AllowedTools)
+				}
+			},
+		},
+		{
+			name: "no tools is case-insensitive",
+			args: map[string]string{"task": "judge this", "tools": "NONE"},
+			check: func(t *testing.T, req subprocessRequest) {
+				if !req.NoTools {
+					t.Error(`tools="NONE" should set NoTools (case-insensitive)`)
+				}
+			},
+		},
+		{
 			name: "with max_iterations",
 			args: map[string]string{"task": "search", "max_iterations": "3"},
 			check: func(t *testing.T, req subprocessRequest) {
@@ -364,23 +385,29 @@ func TestParseSubprocessRequest(t *testing.T) {
 
 func TestIsSubprocessToolAllowed(t *testing.T) {
 	// _subprocess is always blocked
-	var noTools []string
-	if isSubprocessToolAllowed(ToolCall{Plugin: "_subprocess", Action: "run"}, noTools) {
+	empty := subprocessRequest{}
+	if isSubprocessToolAllowed(ToolCall{Plugin: "_subprocess", Action: "run"}, empty) {
 		t.Error("_subprocess should always be blocked")
 	}
 
 	// No allowlist = everything except _subprocess
-	if !isSubprocessToolAllowed(ToolCall{Plugin: "search", Action: "query"}, noTools) {
+	if !isSubprocessToolAllowed(ToolCall{Plugin: "search", Action: "query"}, empty) {
 		t.Error("search__query should be allowed with no allowlist")
 	}
 
 	// With allowlist
-	allowed := []string{"search__query"}
+	allowed := subprocessRequest{AllowedTools: []string{"search__query"}}
 	if !isSubprocessToolAllowed(ToolCall{Plugin: "search", Action: "query"}, allowed) {
 		t.Error("search__query should be in allowlist")
 	}
 	if isSubprocessToolAllowed(ToolCall{Plugin: "math", Action: "calculate"}, allowed) {
 		t.Error("math__calculate should not be in allowlist")
+	}
+
+	// NoTools = nothing is allowed, even with an otherwise-permissive empty list
+	noTools := subprocessRequest{NoTools: true}
+	if isSubprocessToolAllowed(ToolCall{Plugin: "search", Action: "query"}, noTools) {
+		t.Error("no tool should be allowed when NoTools is set")
 	}
 }
 
@@ -399,6 +426,22 @@ func TestSubprocessSystemPromptExcludesSubprocess(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "math__calculate") {
 		t.Error("subprocess system prompt should contain math__calculate")
+	}
+}
+
+func TestSubprocessSystemPromptNoTools(t *testing.T) {
+	orch := setupSubprocessOrchestrator(&fakeLLM{})
+
+	prompt := orch.buildSubprocessSystemPrompt(context.Background(), subprocessRequest{
+		Task:    "judge this",
+		NoTools: true,
+	})
+
+	if strings.Contains(prompt, "search__query") || strings.Contains(prompt, "math__calculate") {
+		t.Errorf("NoTools prompt must not list any tools, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "no tools") {
+		t.Errorf("NoTools prompt should tell the sub-agent it has no tools, got:\n%s", prompt)
 	}
 }
 
@@ -437,5 +480,28 @@ func TestSubprocessMaxIterationsCapped(t *testing.T) {
 	// Should be capped at 10
 	if result.Iterations != 10 {
 		t.Errorf("expected 10 iterations (capped), got: %d", result.Iterations)
+	}
+}
+
+// A no-tools sub-agent is pinned to a single iteration, so an adversarial task
+// that keeps emitting (refused) tool calls can't burn several model calls — the
+// determinism/budget guarantee a caller like llm_review relies on.
+func TestSubprocessNoToolsPinsSingleIteration(t *testing.T) {
+	llm := &fakeLLM{responses: make([]string, 5)}
+	for i := range llm.responses {
+		llm.responses[i] = fmt.Sprintf(`[tool_call]
+{"tool": "search__query", "args": {"q": "attempt %d"}}
+[/tool_call]`, i)
+	}
+
+	orch := setupSubprocessOrchestrator(llm)
+
+	req := subprocessRequest{Task: "judge", NoTools: true, MaxIterations: 20}
+	result, err := orch.runSubprocess(context.Background(), req, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Iterations != 1 {
+		t.Errorf("NoTools must pin to a single iteration regardless of max_iterations, got: %d", result.Iterations)
 	}
 }

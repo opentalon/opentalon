@@ -37,6 +37,12 @@ type subprocessRequest struct {
 	Task          string
 	AllowedTools  []string
 	MaxIterations int
+	// NoTools runs the sub-agent with zero tools: none are advertised and any
+	// tool call is refused. It is distinct from an empty AllowedTools (which
+	// means "all tools") — set by tools:"none" for a pure-reasoning turn that
+	// must answer directly, e.g. a judgement call that must not have side effects
+	// from a prompt-injected task.
+	NoTools bool
 }
 
 // subprocessDepthKey is the context key for tracking subprocess nesting depth.
@@ -225,6 +231,14 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	if maxIter > 10 {
 		maxIter = 10
 	}
+	// A no-tools sub-agent has nothing to loop for: it answers in one turn. Pin
+	// it to a single iteration so an adversarial task that keeps emitting
+	// (refused) tool calls can't burn several model calls — the caller gets
+	// exactly one, which is what a determinism/budget guarantee on top of this
+	// needs (e.g. talooner's llm_review).
+	if req.NoTools {
+		maxIter = 1
+	}
 
 	log := slog.With("component", "subprocess", "depth", depth)
 	taskPreview := req.Task
@@ -275,7 +289,7 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 		for _, call := range calls {
 			call.FromLLM = true
 
-			if !isSubprocessToolAllowed(call, req.AllowedTools) {
+			if !isSubprocessToolAllowed(call, req) {
 				tr := ToolResult{
 					CallID: call.ID,
 					Error:  fmt.Sprintf("tool %s not allowed in this subprocess", toolFQN(call.Plugin, call.Action)),
@@ -311,6 +325,13 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 func (o *Orchestrator) buildSubprocessSystemPrompt(ctx context.Context, req subprocessRequest) string {
 	var sb strings.Builder
 	sb.WriteString(prompts.SubprocessPreamble)
+
+	// No tools requested: advertise none and answer directly. Listing tools the
+	// sub-agent isn't allowed to call would only invite refused calls.
+	if req.NoTools {
+		sb.WriteString("\nYou have no tools available. Answer the task directly from what you are given.\n")
+		return sb.String()
+	}
 
 	// Build allowlist set for fast lookup.
 	allowSet := make(map[string]bool, len(req.AllowedTools))
@@ -382,7 +403,9 @@ func parseSubprocessRequest(args map[string]string) (subprocessRequest, error) {
 
 	req := subprocessRequest{Task: task}
 
-	if tools := args["tools"]; tools != "" {
+	if tools := strings.TrimSpace(args["tools"]); strings.EqualFold(tools, noToolsSentinel) {
+		req.NoTools = true
+	} else if tools != "" {
 		for _, t := range strings.Split(tools, ",") {
 			t = strings.TrimSpace(t)
 			if t != "" {
@@ -435,9 +458,13 @@ func parseParallelRequest(args map[string]string) ([]subprocessRequest, error) {
 			return nil, fmt.Errorf("task %d is missing a 'task' field", i+1)
 		}
 		req := subprocessRequest{Task: task, MaxIterations: it.MaxIterations}
-		for _, t := range strings.Split(it.Tools, ",") {
-			if t = strings.TrimSpace(t); t != "" {
-				req.AllowedTools = append(req.AllowedTools, t)
+		if strings.EqualFold(strings.TrimSpace(it.Tools), noToolsSentinel) {
+			req.NoTools = true
+		} else {
+			for _, t := range strings.Split(it.Tools, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					req.AllowedTools = append(req.AllowedTools, t)
+				}
 			}
 		}
 		reqs = append(reqs, req)
@@ -445,18 +472,28 @@ func parseParallelRequest(args map[string]string) ([]subprocessRequest, error) {
 	return reqs, nil
 }
 
+// noToolsSentinel is the value of the `tools` arg that requests a sub-agent with
+// no tools at all. It is a distinct word rather than the empty string because an
+// empty allowlist already means "all tools", and a caller needs a way to say the
+// opposite (a pure-reasoning turn with no side effects).
+const noToolsSentinel = "none"
+
 // isSubprocessToolAllowed checks whether a tool call is permitted in a subprocess.
-// _subprocess is always blocked (prevents fork bombs). When an allowlist is provided,
-// only listed tools are permitted; when empty, all tools except _subprocess are allowed.
-func isSubprocessToolAllowed(call ToolCall, allowedTools []string) bool {
+// _subprocess is always blocked (prevents fork bombs). With NoTools, nothing is
+// permitted. Otherwise, when an allowlist is provided only listed tools are
+// permitted; when empty, all tools except _subprocess are allowed.
+func isSubprocessToolAllowed(call ToolCall, req subprocessRequest) bool {
 	if call.Plugin == "_subprocess" {
 		return false
 	}
-	if len(allowedTools) == 0 {
+	if req.NoTools {
+		return false
+	}
+	if len(req.AllowedTools) == 0 {
 		return true
 	}
 	key := toolFQN(call.Plugin, call.Action)
-	for _, t := range allowedTools {
+	for _, t := range req.AllowedTools {
 		if t == key {
 			return true
 		}
