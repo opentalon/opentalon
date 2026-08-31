@@ -1,0 +1,326 @@
+// Test suite for the starter rules.tln written by `talooner init`.
+//
+// Run:
+//   talooner rules test .github/talooner/
+//
+// Trimmed from tln-language/examples/talooner_review.tln.test alongside
+// rules.tln: no strict-rule test (the strict base ruleset isn't declared
+// here, it's loaded automatically) and no notify test (no rule uses it).
+
+// ─── Auto-approve ─────────────────────────────────────────────────────────────
+
+test "Small, tested, documented, non-critical PR is approved" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 101
+    attr 1 "pr.lines_changed" 30
+    attr 1 "pr.files_changed" 2
+    attr 1 "pr.draft" false
+    attr 1 "pr.has_description" true
+    attr 1 "pr.tests_passing" true
+    attr 1 "pr.changed_files" ["README.md", "docs/usage.md"]
+    attr 1 "pr.new_dependencies" 0
+
+    // Same PR shape but on the critical path — must not be approved.
+    record 2 type "pr"
+    attr 2 "pr.number" 102
+    attr 2 "pr.lines_changed" 30
+    attr 2 "pr.files_changed" 2
+    attr 2 "pr.draft" false
+    attr 2 "pr.has_description" true
+    attr 2 "pr.tests_passing" true
+    attr 2 "pr.changed_files" ["internal/auth/session.go"]
+    attr 2 "pr.new_dependencies" 0
+  }
+
+  when rule "Auto-approve safe changes"
+
+  expect {
+    flagged 1
+    not flagged 2
+    did 1 approve "pr"
+    did_not 2 approve "pr"
+  }
+}
+
+test "CI still running leaves tests_passing unset, so nothing is approved" {
+  given {
+    // Every other condition is satisfied. `pr.tests_passing` is deliberately
+    // absent: checks are queued, and the extractor asserts nothing rather than
+    // guessing false. A positive condition on an unset fact fails closed.
+    record 1 type "pr"
+    attr 1 "pr.number" 103
+    attr 1 "pr.lines_changed" 10
+    attr 1 "pr.files_changed" 1
+    attr 1 "pr.draft" false
+    attr 1 "pr.has_description" true
+    attr 1 "pr.changed_files" ["README.md"]
+  }
+
+  when rule "Auto-approve safe changes"
+
+  expect {
+    not flagged 1
+    did_not 1 approve "pr"
+  }
+}
+
+test "Repo with no matching checks is never auto-approved" {
+  given {
+    // No check run matched the tenant's `checks:` patterns, so the fact is
+    // unset rather than true. Same closed-fail path as CI-in-progress, and the
+    // reason the extractor must not default it to true.
+    record 1 type "pr"
+    attr 1 "pr.number" 104
+    attr 1 "pr.lines_changed" 5
+    attr 1 "pr.files_changed" 1
+    attr 1 "pr.draft" false
+    attr 1 "pr.has_description" true
+    attr 1 "pr.changed_files" ["README.md"]
+  }
+
+  when rule "Auto-approve safe changes"
+
+  expect {
+    not flagged 1
+    did_not 1 approve "pr"
+  }
+}
+
+test "Draft PR is not approved even when everything else is clean" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 105
+    attr 1 "pr.lines_changed" 12
+    attr 1 "pr.files_changed" 1
+    attr 1 "pr.draft" true
+    attr 1 "pr.has_description" true
+    attr 1 "pr.tests_passing" true
+    attr 1 "pr.changed_files" ["README.md"]
+  }
+
+  when rule "Auto-approve safe changes"
+
+  expect {
+    not flagged 1
+    did_not 1 approve "pr"
+  }
+}
+
+test "Failed extraction approves — the accepted A1 risk, pinned" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 106
+    attr 1 "pr.lines_changed" 8
+    attr 1 "pr.files_changed" 1
+    attr 1 "pr.draft" false
+    attr 1 "pr.has_description" true
+    attr 1 "pr.tests_passing" true
+    // pr.changed_files deliberately absent — the extractor threw.
+  }
+
+  when rule "Auto-approve safe changes"
+
+  expect {
+    flagged 1
+    did 1 approve "pr"
+  }
+}
+
+test "Empty changed_files matches no path predicate" {
+  given {
+    // A list with no elements satisfies no `contains` — there is no fallback
+    // to the scalar path. Distinct from the unset case above only in intent,
+    // which is why the extractor asserts the empty list explicitly.
+    record 1 type "pr"
+    attr 1 "pr.number" 107
+    attr 1 "pr.changed_files" []
+  }
+
+  when rule "Require human review for critical paths"
+
+  expect {
+    not flagged 1
+    did_not 1 require "review.senior_engineer"
+  }
+}
+
+// ─── Block incomplete PRs ─────────────────────────────────────────────────────
+
+test "PR with no description is blocked" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 108
+    attr 1 "pr.draft" false
+    attr 1 "pr.has_description" false
+
+    // Draft with no description — not blocked. Drafts are work in progress.
+    record 2 type "pr"
+    attr 2 "pr.number" 109
+    attr 2 "pr.draft" true
+    attr 2 "pr.has_description" false
+
+    record 3 type "pr"
+    attr 3 "pr.number" 110
+    attr 3 "pr.draft" false
+    attr 3 "pr.has_description" true
+  }
+
+  when rule "Block PRs with no description"
+
+  expect {
+    flagged 1
+    not flagged 2
+    not flagged 3
+    did 1 block "pr.merge"
+    did 1 comment "pr" contains "no description"
+    did_not 2 block "pr.merge"
+    did_not 3 block "pr.merge"
+  }
+}
+
+// ─── Critical paths ───────────────────────────────────────────────────────────
+
+test "Critical path PR requires a senior reviewer and tags the owner" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 111
+    attr 1 "pr.author" "@bob"
+    attr 1 "pr.changed_files" ["internal/auth/session.go", "internal/auth/token.go"]
+    attr 1 "user.owner" "@alice"
+
+    record 2 type "pr"
+    attr 2 "pr.number" 112
+    attr 2 "pr.author" "@bob"
+    attr 2 "pr.changed_files" ["billing/invoice.rb"]
+    attr 2 "user.owner" "@carol"
+
+    // Neither path — untouched by this rule.
+    record 3 type "pr"
+    attr 3 "pr.number" 113
+    attr 3 "pr.author" "@bob"
+    attr 3 "pr.changed_files" ["docs/readme.md", "internal/util/strings.go"]
+    attr 3 "user.owner" "@dave"
+  }
+
+  when rule "Require human review for critical paths"
+
+  expect {
+    flagged 1
+    flagged 2
+    not flagged 3
+    count == 2
+    did 1 require "review.senior_engineer"
+    did 1 assign "pr" "@alice"
+    did 1 comment "pr" contains "@alice"
+    did 2 assign "pr" "@carol"
+    did_not 3 require "review.senior_engineer"
+  }
+}
+
+test "A path predicate is a substring scan, not a glob" {
+  given {
+    // `internal/authority/` contains the string "internal/auth", so it matches
+    // "internal/auth/"? No — the predicate includes the trailing slash, so it
+    // does not. This is the precision cost of having no glob support, and the
+    // reason path predicates carry trailing slashes.
+    record 1 type "pr"
+    attr 1 "pr.number" 114
+    attr 1 "pr.changed_files" ["internal/authority/policy.go"]
+
+    record 2 type "pr"
+    attr 2 "pr.number" 115
+    attr 2 "pr.changed_files" ["docs/billing-guide.md"]
+  }
+
+  when rule "Require human review for critical paths"
+
+  expect {
+    not flagged 1
+    // "docs/billing-guide.md" does NOT contain "billing/" — the slash saves us.
+    not flagged 2
+  }
+}
+
+test "Author owning the critical code they changed escalates" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 116
+    attr 1 "pr.author" "@alice"
+    attr 1 "pr.changed_files" ["internal/auth/session.go"]
+    attr 1 "user.owner" "@alice"
+
+    // Same critical path, different author — the ordinary rule covers it, this
+    // one must not fire.
+    record 2 type "pr"
+    attr 2 "pr.number" 117
+    attr 2 "pr.author" "@bob"
+    attr 2 "pr.changed_files" ["internal/auth/session.go"]
+    attr 2 "user.owner" "@alice"
+  }
+
+  when rule "Escalate self-review of owned critical code"
+
+  expect {
+    flagged 1
+    not flagged 2
+    did 1 require "review.senior_engineer"
+    did 1 comment "pr" contains "@alice"
+    did_not 2 require "review.senior_engineer"
+  }
+}
+
+// ─── Large PRs ────────────────────────────────────────────────────────────────
+
+test "Large PRs require human review at the 500-line boundary" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 118
+    attr 1 "pr.lines_changed" 500
+
+    record 2 type "pr"
+    attr 2 "pr.number" 119
+    attr 2 "pr.lines_changed" 499
+
+    record 3 type "pr"
+    attr 3 "pr.number" 120
+    attr 3 "pr.lines_changed" 12000
+  }
+
+  when rule "Require human review for large PRs"
+
+  expect {
+    flagged 1
+    not flagged 2
+    flagged 3
+    did 1 require "review.human"
+    did_not 2 require "review.human"
+  }
+}
+
+// ─── Dependencies ─────────────────────────────────────────────────────────────
+
+test "New dependencies pull in the security team" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 121
+    attr 1 "pr.new_dependencies" 3
+
+    // A version bump is not a new dependency. Boundary at zero.
+    record 2 type "pr"
+    attr 2 "pr.number" 122
+    attr 2 "pr.new_dependencies" 0
+    attr 2 "pr.upgraded_dependencies" 7
+  }
+
+  when rule "Security review for new dependencies"
+
+  expect {
+    flagged 1
+    not flagged 2
+    did 1 require "review.security_team"
+    did 1 assign "pr" "@org/security"
+    did 1 comment "pr" contains "3 new dependencies"
+    did_not 2 require "review.security_team"
+  }
+}
