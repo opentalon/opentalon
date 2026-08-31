@@ -1,232 +1,149 @@
-# Plugin gateway: bridge external callers to a live `HostCaller`
+# Plugin Gateway: External Callers and the Live HostCaller
 
-## Status
+## Overview
 
-Implemented in this repo (`internal/plugin/gateway.go`, `client.go`,
-`manager.go`, `cmd/opentalon/main.go`). Rollout steps 2–4 (Helm image bump,
-`talooner` tenant `features` list, CLI verification against a live cluster)
-are still outstanding — they need an infra change and a real deployment,
-not just code in this repo.
+Core exposes exactly one externally-reachable `PluginService` surface: a
+per-plugin gRPC gateway, opt-in via `grpc_port` in that plugin's config
+(`internal/config/config.go`). It lets something outside the orchestrator's
+LLM tool-call loop — a CI workflow, an external service — call a loaded
+plugin's action directly, over the network, without going through a chat
+session.
 
-Two deviations from the design below worth flagging for the next reader:
-
-- Rather than converting the inbound `*pluginpb.ToolCallRequest` to an
-  `orchestrator.ToolCall` and calling `client.ExecuteBidi` (which rebuilds
-  `CredentialHeaders` from the request context's `profile.Profile`, not from
-  the request itself — there is no profile on this external path), the
-  gateway calls a new `Client.ExecuteBidiRaw(ctx, req, cb)` that forwards the
-  raw request byte-for-byte over the bidi stream, same as `ExecuteRaw` does
-  for unary. Keeps the "byte-for-byte forward" gateway invariant intact
-  instead of silently dropping any `CredentialHeaders` an external caller set
-  directly on the request.
-- §3's "gateways don't serve traffic until `Serve()` is called later in
-  `main`" turned out to be false — review caught it. `startGateway` used to
-  call `g.server.Serve(lis)` in a goroutine immediately, synchronously
-  during the initial plugin load, well before `SetCallbackHandler` runs. A
-  request landing in that startup window would have silently hit `cb ==
-  nil`, fallen back to unary, and reproduced the exact bug this doc exists
-  to fix — just moved earlier in the process lifetime instead of removed.
-  Fixed by splitting `startGateway` (bind + register, no `Serve`) from a new
-  `gateway.startServing()` (starts accepting connections), with
-  `Manager.SetCallbackHandler` flushing a `pendingGateways` queue of every
-  gateway that started before it ran. See `internal/plugin/manager.go` and
-  `gateway.go` for the actual mechanism — §3 below is retained for the
-  original (wrong) reasoning, not as a guide to the shipped code.
-- One caveat noted but deliberately not fixed here: a callback dispatched
-  through the external gateway runs with no `profile.Profile` on its ctx (no
-  profile exists on this external path to carry). `talooner`'s
-  `generate_ruleset`/`llm_review` only call the host's own `_subprocess` LLM
-  action, which needs no per-tenant credentials, so this doesn't affect the
-  bug this doc fixes — but a future callback action that *does* need
-  `profile.Credentials` for a downstream plugin call would silently get
-  none, unless the plugin threads identity through the reserved
-  `contextargs.Callback*` args `applyCallbackIdentity` already reads.
-
-## Problem
-
-Any plugin action that needs to call back into the host mid-request (run a
+A plugin action that needs to call back into the host mid-request (run a
 model completion, dispatch another action) needs a live `HostCaller`
-(`pkg/plugin/streaming.go`). That only exists on the `ExecuteBidi` gRPC
-stream. Plain unary `Execute` has no callback channel — a handler invoked
-that way always gets `host == nil`.
+(`pkg/plugin/streaming.go`), which only exists on the bidirectional
+`ExecuteBidi` gRPC stream — plain unary `Execute` has no callback channel.
+The gateway picks between the two per plugin, the same way the orchestrator
+picks for its own internal tool calls: `PluginCapability.SupportsCallbacks`.
 
-`internal/plugin/gateway.go` is core's **only** externally-reachable
-`PluginService` surface (opt-in via a plugin's `grpc_port` config,
-`internal/config/config.go:293`). Its `Execute` method:
+```
+External caller (e.g. talooner's GitHub Action)
+        │  gRPC PluginService.Execute
+        ▼
+┌────────────────────────────────────────────┐
+│  gateway (internal/plugin/gateway.go)       │
+│  one TCP listener per grpc_port plugin      │
+└───────────────────┬──────────────────────────┘
+                     │
+     SupportsCallbacks? ──No──▶ Client.ExecuteRaw (unary, byte-for-byte)
+                     │
+                    Yes
+                     │
+                     ▼
+          Client.ExecuteBidiRaw (bidirectional stream)
+                     │
+     CallbackRequest frames ──▶ Manager.callbackHandler() ──▶ orchestrator.RunActionResult
+                     │
+                     ▼
+            ToolResultResponse
+```
+
+## Dispatch
+
+`gateway.Execute` (`internal/plugin/gateway.go`):
 
 ```go
-// internal/plugin/gateway.go:30
 func (g *gateway) Execute(ctx context.Context, req *pluginpb.ToolCallRequest) (*pluginpb.ToolResultResponse, error) {
+	if g.client.Capability().SupportsCallbacks {
+		if cb := g.mgr.callbackHandler(); cb != nil {
+			return g.client.ExecuteBidiRaw(ctx, req, cb)
+		}
+		slog.Warn("plugin gateway: callback handler not wired yet, falling back to unary Execute", ...)
+	}
 	return g.client.ExecuteRaw(ctx, req)
 }
 ```
 
-`ExecuteRaw` (`internal/plugin/client.go:126`) is a byte-for-byte unary
-forward — `c.client.Execute(ctx, req)`, never `ExecuteBidi`. So **every**
-external caller going through the gateway gets `host == nil` in the plugin,
-no matter how the plugin itself is deployed or configured. This is not a
-plugin-side bug and not fixable from the plugin's side: `talooner-plugin`
-already implements `StreamingHandler`/`ExecuteWithCallbacks` correctly
-(`talooner-plugin/internal/service/service.go:177-195`) and already declares
-`SupportsCallbacks` — the gateway just never dials the RPC that would use it.
+`client.Capability()` is the same `PluginCapability` the plugin declared at
+`Init`/`Capabilities` time and that the `ToolRegistry` holds — the gateway
+and the orchestrator's internal dispatch (`internal/orchestrator/orchestrator.go`,
+`o.registry.GetCapability(call.Plugin).SupportsCallbacks`) read the identical
+signal.
 
-Confirmed this is the live topology, not a hypothetical: the deployed Helm
-config sets `plugins.talooner.grpc_port: 50100` specifically so `talooner`'s
-GitHub Actions workflow can call the plugin directly through this gateway —
-its own comment in that config already names this file. `talooner
-generate_ruleset` and `llm_review` are therefore structurally incapable of
-reaching a model today, in this or any deployment that uses the external
-gateway, until this is fixed.
+Both RPCs the gateway can take forward the caller's request byte-for-byte:
+neither injects credential headers from `ctx` (`profile.FromContext`), the
+way the orchestrator's internal `Execute`/`ExecuteBidi` do — there is no
+`profile.Profile` on an inbound external gRPC call, so any
+`CredentialHeaders` the caller wants applied must already be on the request
+it sent.
 
-### Why this wasn't caught earlier
+- `Client.ExecuteRaw` (`internal/plugin/client.go`) — `c.client.Execute(ctx, req)`, unchanged from the request.
+- `Client.ExecuteBidiRaw` (`internal/plugin/client.go`) — opens `ExecuteBidi`, sends `req` as the initial `HostMessage`, and returns the plugin's final `ToolResultResponse`. Shares its stream send/recv/callback-dispatch loop with the orchestrator's own `Client.ExecuteBidi` via the private `executeBidiStream` helper — the two differ only in how the outbound request is built (from a caller-supplied `*pluginpb.ToolCallRequest` vs. from an `orchestrator.ToolCall` plus ctx-derived credential headers).
 
-`talooner-plugin`'s `host == nil` fallback is deliberate and well-documented
-(`talooner-plugin/docs/llm-review.md:65`, "Standalone TCP mode has no
-host") — but that line describes the plugin's own `TALOONER_GRPC_PORT`
-standalone mode (`talooner-plugin/cmd/talooner-plugin/main.go:20-33`), a
-different code path than the one actually in use here. The deployed plugin
-runs core-managed (git-cloned by `internal/bundle/fetch.go`, spawned
-normally), *not* in its own standalone TCP mode — `SetStandalone` is never
-called on this path. The gap is entirely in the gateway's unary-only
-forwarding, one level up from where the existing docs looked.
+## Callback dispatch and identity
 
-## Design
+Every `CallbackRequest` frame the plugin sends back — on either the internal
+or external path — is handled by `Client.handleCallback`, which calls
+`cb.RunActionResult(ctx, plugin, action, args)`. `cb` is an
+`orchestrator.CallbackHandler`; in production it is the `*Orchestrator`
+itself (`RunAction`/`RunActionResult` in `internal/orchestrator/orchestrator.go`
+dispatch through `executeCall`, the same path a real tool call takes — model
+routing, credential injection, and quota accounting for that action are
+identical to an internal call).
 
-### 1. `internal/plugin/gateway.go` — dispatch via `ExecuteBidi` when the plugin supports it
+`applyCallbackIdentity` (`internal/plugin/client.go`) lets a plugin carry
+actor/group/session identity into a callback via reserved arg keys
+(`contextargs.Callback*`), stripping them from the args the target action
+actually sees. This is the only identity path a callback has — `ctx` itself
+carries a `profile.Profile` on the internal orchestrator path, but never on
+the external gateway path, since the inbound gRPC call has no profile to
+begin with. A callback whose downstream action needs `profile.Credentials`
+must have that identity threaded through by the plugin via
+`contextargs.Callback*`; one that doesn't will run with none. Today's only
+gateway caller with `SupportsCallbacks` (`talooner-plugin`, via
+`generate_ruleset`/`llm_review`) only calls the host's built-in
+`_subprocess` action, which uses the host's own configured model client —
+no per-tenant credentials involved.
 
-The orchestrator already makes this same decision for its own internal tool
-calls:
+## Gateway serving lifecycle
 
-```go
-// internal/orchestrator/orchestrator.go:4678
-if cap, hasCap := o.registry.GetCapability(call.Plugin); hasCap && cap.SupportsCallbacks {
-    // ... use ExecuteBidi
-}
+`Manager` builds and loads plugins (including any `grpc_port` gateways)
+before the orchestrator exists — the orchestrator depends on the
+`ToolRegistry` the manager populates while loading, so this ordering can't
+be reversed. `Manager.SetCallbackHandler` wires the orchestrator in as
+`CallbackHandler` once it's built, in `cmd/opentalon/main.go`, right after
+`orch := orchestrator.NewWithRules(...)`.
+
+A gateway must never accept a connection before a `CallbackHandler` exists
+for it to route callbacks to — otherwise a `SupportsCallbacks` plugin
+reached through it would silently fall back to unary `Execute` and run with
+`host == nil`. `startGateway` (`internal/plugin/gateway.go`) only binds the
+listener and registers the `PluginService` handler; it does not start
+accepting connections. `gateway.startServing()` does that, and is invoked
+exactly once per gateway:
+
+- Immediately, in `Manager.loadLocked`, if `Manager.cbHandler` is already
+  set (true for any plugin loaded after startup — the retry loop, `Reload`).
+- Otherwise the gateway is appended to `Manager.pendingGateways`, and
+  `Manager.SetCallbackHandler` calls `startServing` on every queued gateway
+  once it sets the handler (true for every gateway started during the
+  initial `LoadAll`, since that runs before the orchestrator exists).
+
+`gateway.stop()` calls both `server.GracefulStop()` and closes the listener
+directly — `GracefulStop` alone only closes listeners the server has
+actually `Serve`'d, so a gateway stopped while still in
+`pendingGateways` (never served) would otherwise leak its bound port.
+
+## Security
+
+`gateway.go`'s forwarding is byte-for-byte on both the unary and bidi paths:
+it does not inspect, gate, or rate-limit the request, so auth is entirely
+the plugin's own concern (e.g. an API key carried as a regular `Execute`
+arg, as `talooner-plugin` does). Routing the callback leg through
+`ExecuteBidi` does not introduce a new trust boundary — a callback only runs
+after the plugin's own per-request tenant auth has already gated the call,
+same as every other plugin action.
+
+## Configuration
+
+```yaml
+plugins:
+  talooner:
+    enabled: true
+    github: "opentalon/talooner-plugin"
+    grpc_port: 50100   # opt-in: expose Execute over this port, forwarding to the plugin unchanged
 ```
 
-`gateway` needs the same capability lookup (the `toolRegistry` it can reach
-through the manager already has this — `PluginCapability.SupportsCallbacks`,
-`internal/orchestrator/types.go:68`) and, when true, call
-`client.ExecuteBidi(ctx, call, cb)` (`internal/plugin/client.go:168`) instead
-of `ExecuteRaw`. Translate `*pluginpb.ToolCallRequest` → `orchestrator.ToolCall`
-and `orchestrator.ToolResult` → `*pluginpb.ToolResultResponse` at the
-boundary — `internal/plugin/client.go`'s existing `Execute`/`ExecuteContext`
-(around line 130-150) already does this conversion for the internal path and
-is the reference implementation.
-
-### 2. The missing piece: a `CallbackHandler` the gateway can hand to `ExecuteBidi`
-
-`orchestrator.CallbackHandler` (`internal/orchestrator/registry.go:34-45`) is
-"a thin wrapper over `RunAction`" that the orchestrator already implements
-for its own internal use. The gateway needs a reference to that same
-implementation so a callback answered through the external gateway goes
-through the **identical** model-routing/credential/quota path as an internal
-call — no new secret plumbing, no new LLM client, just reuse what already
-exists.
-
-### 3. Init-order problem in `cmd/opentalon/main.go`
-
-```
-pluginManager := plugin.NewManager(toolRegistry)   // line 613 — gateways start here as plugins load
-...
-orch := orchestrator.NewWithRules(...)              // line 822 — CallbackHandler doesn't exist yet
-```
-
-The manager (and any `grpc_port` gateways it starts) is built and plugins are
-loaded *before* `orch` exists. Can't fix this with a plain constructor
-argument. Needs a settable/lazy binding:
-
-- Add a setter, e.g. `pluginManager.SetCallbackHandler(cb orchestrator.CallbackHandler)`,
-  called immediately after `orch := orchestrator.NewWithRules(...)` at line
-  822.
-- Gateways don't actually serve traffic until `Serve()` is called later in
-  `main`, so this ordering is safe — the setter just needs to run before the
-  first request can arrive.
-- Do **not** reorder construction to build `orch` first — `orch` itself
-  depends on `toolRegistry`, which the plugin manager populates as it loads
-  plugins. This is a genuine two-way dependency, resolved with a setter, not
-  a reorder.
-
-### 4. Security — review, not redesign
-
-`gateway.go`'s existing doc comment: it forwards "byte-for-byte," doesn't
-inspect/gate/rate-limit, auth is "entirely the plugin's own concern." That
-doesn't change here. `talooner-plugin` already authenticates the tenant via
-an API-key request arg and enforces its own per-tenant quota
-(`talooner-plugin/internal/auth`, `internal/service/llm_review.go:38-56`)
-before any callback would fire. Routing the callback leg through
-`ExecuteBidi` doesn't introduce a new trust boundary — the callback only
-gets a chance to run after the plugin's own per-request tenant auth already
-gated the call, same as it does for every other action today. Worth one
-sentence in the PR description, not a new auth layer.
-
-### 5. Tests
-
-- `internal/plugin`: a fake `StreamingHandler`-implementing plugin behind
-  `gateway.go`, asserting the gateway picks `ExecuteBidi` when
-  `SupportsCallbacks` is true and falls back to unary `Execute` otherwise;
-  a fake `CallbackHandler` answers the callback and the result round-trips
-  correctly to the external caller. Shipped as
-  `TestGatewayUsesExecuteBidiWhenSupported` /
-  `TestGatewayFallsBackToUnaryWhenCallbackHandlerNotWired`
-  (`gateway_test.go`).
-- `internal/plugin`: `TestManagerDefersGatewayServingUntilCallbackHandlerSet`
-  (`manager_test.go`) — the regression test for the `startServing`/
-  `pendingGateways` fix above: dials a gateway before
-  `SetCallbackHandler` and asserts the connection is refused, then dials
-  again after and asserts it succeeds.
-- `cmd/opentalon`: no automated smoke test added — `main()` isn't
-  structured for testing this without a broader refactor, out of scope
-  here. Verified manually by reading the call sites: `SetCallbackHandler`
-  runs once, right after `orch := orchestrator.NewWithRules(...)`, and
-  nothing between manager construction and that point can reach a gateway
-  (enforced now by the deferred-serve mechanism itself, not just by
-  ordering).
-- No changes expected to `talooner-plugin`'s existing `host != nil` branch
-  tests (`generate_ruleset.go`, `llm_review.go`) — this fix is what makes
-  that branch reachable from outside the cluster for the first time.
-
-## Rollout / deploy order
-
-Only `opentalon` needs a code change. `talooner-plugin` and `talooner` (the
-CLI) are already correctly built for this — verify, don't modify, unless
-step 4 below surfaces something.
-
-1. **`opentalon`** — implement gateway.go + manager.go + main.go wiring
-   above, land the PR, tag a release.
-2. **Infra (Helm chart / cluster config)** — bump the deployed `opentalon`
-   core image to the new tag; redeploy. While in there, add
-   `"generate_ruleset"` to the `talooner` tenant's `features` list (currently
-   only `["llm_review"]`) so `whoami` reports it accurately — cosmetic, the
-   action itself isn't gated on this list today, but fix it for consistency.
-   No `talooner-plugin` version bump needed — its pinned commit ref is
-   unchanged; it already implements `StreamingHandler` correctly and just
-   starts actually receiving `ExecuteBidi` calls once core sends them.
-3. **`talooner-plugin`** — no code change required for this fix. Only
-   revisit if gateway-side integration testing surfaces something
-   `ExecuteWithCallbacks` doesn't handle correctly under real callback
-   traffic (it's only ever been exercised via the orchestrator's internal
-   path before now).
-4. **`talooner` (CLI)** — no code change, no redeploy. It only ever spoke
-   plain unary `Execute` to `OPENTALON_HOST`
-   (`talooner/internal/cluster/cluster.go:274-297`) and always will — the
-   fix is entirely transparent from here. Verify with:
-   ```
-   talooner onboard --repo opentalon/opentalon
-   ```
-   and confirm the output says a ruleset was generated (`source: "llm"`),
-   not `generate_ruleset fell back to the starter ruleset`.
-
-## Open items for whoever implements this
-
-- Confirm `internal/plugin/manager.go`'s `PluginCapability`/`toolRegistry`
-  lookup is accessible from `gateway.go` without a new import cycle (it
-  should be — `client.go` already imports `orchestrator` for
-  `CallbackHandler`/`ToolCall`/`ToolResult`).
-- Decide the exact `SetCallbackHandler` call site in `cmd/opentalon/main.go`
-  — right after `orch := orchestrator.NewWithRules(...)` at line 822 looks
-  correct, but confirm nothing between manager construction (line 613) and
-  that point can already receive gateway traffic (it shouldn't — `Serve()`
-  is later — but verify).
-- No changes needed to `k8s-operator` — this is core-internal wiring, not a
-  new CRD field or Helm value.
+`grpc_port: 0` (the default, omitted) disables the gateway for that plugin;
+it remains reachable only through the orchestrator's normal LLM tool-call
+loop.
