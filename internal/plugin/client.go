@@ -219,6 +219,40 @@ func (c *Client) ExecuteBidi(ctx context.Context, call orchestrator.ToolCall, cb
 	}
 }
 
+// ExecuteBidiRaw is ExecuteBidi's counterpart to ExecuteRaw: it forwards a
+// caller-built request over the bidirectional stream byte-for-byte — no
+// credential-header injection from ctx, since an external gateway caller
+// supplies its own CredentialHeaders directly on the request, if any — and
+// dispatches inbound CallbackRequest frames through cb exactly like
+// ExecuteBidi. Only the external plugin gateway (gateway.go) uses this.
+func (c *Client) ExecuteBidiRaw(ctx context.Context, req *pluginpb.ToolCallRequest, cb orchestrator.CallbackHandler) (*pluginpb.ToolResultResponse, error) {
+	stream, err := c.client.ExecuteBidi(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("grpc bidi open: %w", err)
+	}
+
+	if err := stream.Send(&pluginpb.HostMessage{
+		Payload: &pluginpb.HostMessage_Call{Call: req},
+	}); err != nil {
+		return nil, fmt.Errorf("grpc bidi send call: %w", err)
+	}
+
+	for {
+		pm, err := stream.Recv()
+		if err != nil {
+			return nil, fmt.Errorf("grpc bidi recv: %w", err)
+		}
+		switch payload := pm.GetPayload().(type) {
+		case *pluginpb.PluginMessage_Result:
+			return payload.Result, nil
+		case *pluginpb.PluginMessage_CallbackRequest:
+			go c.handleCallback(ctx, stream, payload.CallbackRequest, cb)
+		default:
+			return nil, fmt.Errorf("grpc bidi: unknown payload %T", payload)
+		}
+	}
+}
+
 // handleCallback runs one CallbackRequest against the host's
 // CallbackHandler and writes the matching CallbackResponse onto the
 // stream. Errors from RunAction are surfaced via CallbackResponse.Error

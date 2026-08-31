@@ -70,6 +70,7 @@ type Manager struct {
 	known          map[string]PluginEntry // all configured entries, including those that failed to load
 	registry       *orchestrator.ToolRegistry
 	onPluginLoaded PluginLoadedFunc
+	cbHandler      orchestrator.CallbackHandler // set once via SetCallbackHandler, after orch exists
 }
 
 // NewManager creates a manager that registers plugins into the given
@@ -89,6 +90,28 @@ func (m *Manager) OnPluginLoaded(fn PluginLoadedFunc) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onPluginLoaded = fn
+}
+
+// SetCallbackHandler wires the host-side CallbackHandler (normally the
+// orchestrator itself) that external gateway calls dispatch plugin
+// callbacks through. Called once during startup, right after the
+// orchestrator is constructed — necessarily after the manager and its
+// gateways already exist, since the orchestrator depends on the tool
+// registry the manager populates while loading plugins. Safe: gateways
+// don't serve traffic until Serve() runs later in main, so this ordering
+// never races an inbound request.
+func (m *Manager) SetCallbackHandler(cb orchestrator.CallbackHandler) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cbHandler = cb
+}
+
+// callbackHandler returns the wired CallbackHandler, or nil before
+// SetCallbackHandler has run.
+func (m *Manager) callbackHandler() orchestrator.CallbackHandler {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cbHandler
 }
 
 // RefreshCapabilities asks a loaded plugin to re-fetch its capabilities from its
@@ -246,7 +269,7 @@ func (m *Manager) loadLocked(ctx context.Context, entry PluginEntry) (string, er
 	// itself — it forwards straight to the Client already dialed above,
 	// whether the plugin is local (unix socket) or remote (connectRemote).
 	if entry.GRPCPort != 0 {
-		gw, err := startGateway(entry.Name, client, entry.GRPCPort)
+		gw, err := startGateway(entry.Name, client, entry.GRPCPort, m)
 		if err != nil {
 			// Error, not Warn: grpc_port is an explicit opt-in, unlike expose_http's
 			// best-effort proxy — a plugin "loading" with no gateway on a port the

@@ -152,7 +152,7 @@ func TestWatchProcessStopsGatewayOnExit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gw, err := startGateway("echo", client, 0)
+	gw, err := startGateway("echo", client, 0, m)
 	if err != nil {
 		t.Fatalf("startGateway: %v", err)
 	}

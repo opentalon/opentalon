@@ -23,11 +23,25 @@ type gateway struct {
 	pluginpb.UnimplementedPluginServiceServer
 	name   string
 	client *Client
+	mgr    *Manager
 	server *grpc.Server
 	lis    net.Listener
 }
 
+// Execute dispatches over ExecuteBidi when the plugin declares
+// SupportsCallbacks and the host's CallbackHandler is already wired
+// (SetCallbackHandler runs once during startup, after the orchestrator
+// exists but before any gateway can receive traffic). Without that, a
+// plugin needing to call back into the host mid-request would always see
+// host == nil, since plain unary Execute has no callback channel.
 func (g *gateway) Execute(ctx context.Context, req *pluginpb.ToolCallRequest) (*pluginpb.ToolResultResponse, error) {
+	if g.client.Capability().SupportsCallbacks {
+		if cb := g.mgr.callbackHandler(); cb != nil {
+			return g.client.ExecuteBidiRaw(ctx, req, cb)
+		}
+		slog.Warn("plugin gateway: callback handler not wired yet, falling back to unary Execute",
+			"component", "plugin-manager", "plugin", g.name)
+	}
 	return g.client.ExecuteRaw(ctx, req)
 }
 
@@ -35,13 +49,13 @@ func (g *gateway) Execute(ctx context.Context, req *pluginpb.ToolCallRequest) (*
 // calls to client in the background. TLS is deliberately not handled here —
 // this listener is meant to sit behind an ingress/proxy that terminates it,
 // the same way talooner-plugin's own standalone TCP mode does.
-func startGateway(name string, client *Client, port int) (*gateway, error) {
+func startGateway(name string, client *Client, port int, mgr *Manager) (*gateway, error) {
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, fmt.Errorf("plugin gateway %s: listen :%d: %w", name, port, err)
 	}
 
-	g := &gateway{name: name, client: client, server: grpc.NewServer(), lis: lis}
+	g := &gateway{name: name, client: client, mgr: mgr, server: grpc.NewServer(), lis: lis}
 	pluginpb.RegisterPluginServiceServer(g.server, g)
 
 	go func() {
