@@ -174,47 +174,73 @@ func (c *Client) ExecuteBidi(ctx context.Context, call orchestrator.ToolCall, cb
 		}
 	}
 
+	req := &pluginpb.ToolCallRequest{
+		Id:                call.ID,
+		Plugin:            call.Plugin,
+		Action:            call.Action,
+		Args:              ensureValidUTF8Map(call.Args),
+		CredentialHeaders: credHeaders,
+	}
+
+	r, err := c.executeBidiStream(ctx, req, cb)
+	if err != nil {
+		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
+	}
+	return orchestrator.ToolResult{
+		CallID:            r.GetCallId(),
+		Content:           r.GetContent(),
+		StructuredContent: r.GetStructuredContent(),
+		Error:             r.GetError(),
+	}
+}
+
+// ExecuteBidiRaw is ExecuteBidi's counterpart to ExecuteRaw: it forwards a
+// caller-built request over the bidirectional stream byte-for-byte — no
+// credential-header injection from ctx, since an external gateway caller
+// supplies its own CredentialHeaders directly on the request, if any — and
+// dispatches inbound CallbackRequest frames through cb exactly like
+// ExecuteBidi. Only the external plugin gateway (gateway.go) uses this.
+func (c *Client) ExecuteBidiRaw(ctx context.Context, req *pluginpb.ToolCallRequest, cb orchestrator.CallbackHandler) (*pluginpb.ToolResultResponse, error) {
+	return c.executeBidiStream(ctx, req, cb)
+}
+
+// executeBidiStream opens an ExecuteBidi stream, sends req as the initial
+// call, dispatches inbound CallbackRequest frames through cb, and returns
+// the plugin's final ToolResultResponse. Shared by ExecuteBidi (builds req
+// from an orchestrator.ToolCall plus ctx-derived credential headers) and
+// ExecuteBidiRaw (forwards a caller-built req untouched) so the stream
+// send/recv/callback-dispatch loop — including the concurrency contract
+// below — lives in exactly one place.
+func (c *Client) executeBidiStream(ctx context.Context, req *pluginpb.ToolCallRequest, cb orchestrator.CallbackHandler) (*pluginpb.ToolResultResponse, error) {
 	stream, err := c.client.ExecuteBidi(ctx)
 	if err != nil {
-		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc bidi open: %v", err)}
+		return nil, fmt.Errorf("grpc bidi open: %w", err)
 	}
 
 	if err := stream.Send(&pluginpb.HostMessage{
-		Payload: &pluginpb.HostMessage_Call{
-			Call: &pluginpb.ToolCallRequest{
-				Id:                call.ID,
-				Plugin:            call.Plugin,
-				Action:            call.Action,
-				Args:              ensureValidUTF8Map(call.Args),
-				CredentialHeaders: credHeaders,
-			},
-		},
+		Payload: &pluginpb.HostMessage_Call{Call: req},
 	}); err != nil {
-		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc bidi send call: %v", err)}
+		return nil, fmt.Errorf("grpc bidi send call: %w", err)
 	}
 
 	for {
 		pm, err := stream.Recv()
 		if err != nil {
-			return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc bidi recv: %v", err)}
+			return nil, fmt.Errorf("grpc bidi recv: %w", err)
 		}
 		switch payload := pm.GetPayload().(type) {
 		case *pluginpb.PluginMessage_Result:
-			r := payload.Result
-			return orchestrator.ToolResult{
-				CallID:            r.GetCallId(),
-				Content:           r.GetContent(),
-				StructuredContent: r.GetStructuredContent(),
-				Error:             r.GetError(),
-			}
+			return payload.Result, nil
 		case *pluginpb.PluginMessage_CallbackRequest:
 			// Run the callback on a fresh goroutine so a slow upstream
 			// action doesn't stall the receive loop (the plugin may
 			// fire multiple callbacks in parallel; today the SDK
-			// serialises them, but the wire protocol allows parallel).
+			// serialises them, but the wire protocol allows parallel —
+			// and stream.Send is not safe for concurrent callers, so a
+			// future parallel-callback SDK needs a send mutex here).
 			go c.handleCallback(ctx, stream, payload.CallbackRequest, cb)
 		default:
-			return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc bidi: unknown payload %T", payload)}
+			return nil, fmt.Errorf("grpc bidi: unknown payload %T", payload)
 		}
 	}
 }
@@ -223,6 +249,17 @@ func (c *Client) ExecuteBidi(ctx context.Context, call orchestrator.ToolCall, cb
 // CallbackHandler and writes the matching CallbackResponse onto the
 // stream. Errors from RunAction are surfaced via CallbackResponse.Error
 // so the plugin can decide how to react (retry, abort, ignore).
+// On the external gateway path (ExecuteBidiRaw), ctx carries no
+// profile.Profile — the inbound gRPC call has none to begin with — so a
+// callback lands here with tenant identity only if the plugin supplied it
+// via the reserved args applyCallbackIdentity reads below. A callback
+// action that needs profile.Credentials for its own downstream plugin call
+// (not the case for talooner's generate_ruleset/llm_review today: both
+// only call the host's own _subprocess LLM, which needs no per-tenant
+// credentials) would silently run with none. Not a gap introduced here —
+// ExecuteBidi's internal callers have the same reserved-args mechanism as
+// their only identity path — but the external gateway is the first caller
+// with no profile-bearing ctx to fall back on, so it's worth restating.
 func (c *Client) handleCallback(ctx context.Context, stream pluginpb.PluginService_ExecuteBidiClient, req *pluginpb.CallbackRequest, cb orchestrator.CallbackHandler) {
 	ctx, args := applyCallbackIdentity(ctx, req.GetArgs())
 	content, structured, err := cb.RunActionResult(ctx, req.GetPlugin(), req.GetAction(), args)

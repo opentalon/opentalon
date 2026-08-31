@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	pkg "github.com/opentalon/opentalon/pkg/plugin"
 	"github.com/opentalon/opentalon/proto/pluginpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -31,10 +32,11 @@ func TestGatewayForwardsExecute(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gw, err := startGateway("echo", client, 0)
+	gw, err := startGateway("echo", client, 0, NewManager(nil))
 	if err != nil {
 		t.Fatalf("startGateway: %v", err)
 	}
+	gw.startServing()
 	t.Cleanup(gw.stop)
 
 	rpc := dialGateway(t, gw.addr())
@@ -59,10 +61,11 @@ func TestGatewayForwardsPluginError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gw, err := startGateway("echo", client, 0)
+	gw, err := startGateway("echo", client, 0, NewManager(nil))
 	if err != nil {
 		t.Fatalf("startGateway: %v", err)
 	}
+	gw.startServing()
 	t.Cleanup(gw.stop)
 
 	rpc := dialGateway(t, gw.addr())
@@ -75,6 +78,88 @@ func TestGatewayForwardsPluginError(t *testing.T) {
 	}
 }
 
+// A plugin declaring SupportsCallbacks must be dispatched via ExecuteBidi
+// through the gateway, with callbacks routed through the manager's wired
+// CallbackHandler — this is the fix for talooner generate_ruleset always
+// falling back (host == nil) when called through the external gateway.
+func TestGatewayUsesExecuteBidiWhenSupported(t *testing.T) {
+	body := func(ctx context.Context, req pkg.Request, host pkg.HostCaller) pkg.Response {
+		r, err := host.RunAction(ctx, "inv", "list", map[string]string{"q": "x"})
+		if err != nil {
+			return pkg.Response{Error: err.Error()}
+		}
+		return pkg.Response{CallID: req.ID, Content: "ok: " + r.Content}
+	}
+	client := startBidiServer(t, body)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.fetchCapabilities(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(nil)
+	cb := &recordingCallbackHandler{
+		response: func(plugin, action string, args map[string]string) (string, error) {
+			return "42 found", nil
+		},
+	}
+	mgr.SetCallbackHandler(cb)
+
+	gw, err := startGateway("test", client, 0, mgr)
+	if err != nil {
+		t.Fatalf("startGateway: %v", err)
+	}
+	gw.startServing()
+	t.Cleanup(gw.stop)
+
+	rpc := dialGateway(t, gw.addr())
+	resp, err := rpc.Execute(ctx, &pluginpb.ToolCallRequest{Id: "g1", Plugin: "test", Action: "go"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if resp.Content != "ok: 42 found" {
+		t.Errorf("content = %q, want %q", resp.Content, "ok: 42 found")
+	}
+	if len(cb.calls) != 1 {
+		t.Fatalf("expected 1 callback dispatched through gateway, got %d", len(cb.calls))
+	}
+	if cb.calls[0].Plugin != "inv" || cb.calls[0].Action != "list" {
+		t.Errorf("callback dest: %+v", cb.calls[0])
+	}
+}
+
+// Before SetCallbackHandler has run (startup ordering: gateways start while
+// plugins load, before the orchestrator exists), a SupportsCallbacks plugin
+// must still fall back to unary Execute rather than hang or error opaquely.
+func TestGatewayFallsBackToUnaryWhenCallbackHandlerNotWired(t *testing.T) {
+	body := func(ctx context.Context, req pkg.Request, host pkg.HostCaller) pkg.Response {
+		t.Fatal("bidi body should not run when the gateway falls back to unary")
+		return pkg.Response{}
+	}
+	client := startBidiServer(t, body)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.fetchCapabilities(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	gw, err := startGateway("test", client, 0, NewManager(nil))
+	if err != nil {
+		t.Fatalf("startGateway: %v", err)
+	}
+	gw.startServing()
+	t.Cleanup(gw.stop)
+
+	rpc := dialGateway(t, gw.addr())
+	resp, err := rpc.Execute(ctx, &pluginpb.ToolCallRequest{Id: "g1", Plugin: "test", Action: "go"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if resp.Error != "unary not supported in test" {
+		t.Errorf("error = %q, want the bidiStreamingHandler's unary-fallback error", resp.Error)
+	}
+}
+
 func TestGatewayStopClosesListener(t *testing.T) {
 	cc := startFakePluginServer(t)
 	client := &Client{conn: cc, client: pluginpb.NewPluginServiceClient(cc)}
@@ -84,10 +169,11 @@ func TestGatewayStopClosesListener(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gw, err := startGateway("echo", client, 0)
+	gw, err := startGateway("echo", client, 0, NewManager(nil))
 	if err != nil {
 		t.Fatalf("startGateway: %v", err)
 	}
+	gw.startServing()
 	addr := gw.addr()
 	gw.stop()
 

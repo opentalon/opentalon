@@ -899,6 +899,16 @@ func main() {
 		SessionLocker:      sessionLocker,
 	})
 
+	// External plugin gateways (grpc_port) started while plugins were loading
+	// above need a live CallbackHandler to dispatch ExecuteBidi callbacks
+	// through — the same RunAction/RunActionResult path the orchestrator uses
+	// for its own internal tool calls. Every gateway from that initial load
+	// deferred accepting connections until this call (see
+	// Manager.SetCallbackHandler / gateway.startServing), so there is no
+	// window where an external caller could reach a gateway before it has a
+	// CallbackHandler to route to.
+	pluginManager.SetCallbackHandler(orch)
+
 	// Wire on-clear actions now that the orchestrator is available.
 	cmdExecutor.WithOnClear(onClearActions, orch.RunAction)
 
