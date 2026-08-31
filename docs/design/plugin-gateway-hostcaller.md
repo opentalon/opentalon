@@ -95,6 +95,14 @@ gateway caller with `SupportsCallbacks` (`talooner-plugin`, via
 `_subprocess` action, which uses the host's own configured model client —
 no per-tenant credentials involved.
 
+`_subprocess` is built into the binary (`internal/orchestrator/orchestrator.go`)
+but is only registered into the `ToolRegistry` when `orchestrator.subprocess.enabled: true`
+is set in config — it defaults to `false` and is otherwise absent from the
+registry entirely. A gateway callback that targets `_subprocess` on a
+deployment missing that config key fails with `plugin "_subprocess" not
+found`, not a HostCaller-wiring error; don't mistake it for one. See
+Configuration below.
+
 ## Gateway serving lifecycle
 
 `Manager` builds and loads plugins (including any `grpc_port` gateways)
@@ -142,8 +150,19 @@ plugins:
     enabled: true
     github: "opentalon/talooner-plugin"
     grpc_port: 50100   # opt-in: expose Execute over this port, forwarding to the plugin unchanged
+
+orchestrator:
+  subprocess:
+    enabled: true   # required if the gateway plugin's callback targets _subprocess (e.g. talooner-plugin's generate_ruleset/llm_review)
 ```
 
 `grpc_port: 0` (the default, omitted) disables the gateway for that plugin;
 it remains reachable only through the orchestrator's normal LLM tool-call
 loop.
+
+`orchestrator.subprocess.enabled` is a separate, independent switch from
+`grpc_port` — enabling the gateway does not enable `_subprocess`, and vice
+versa. A deployment with `grpc_port` set but `subprocess.enabled` unset (the
+default) will get past the HostCaller handshake and then fail the callback
+itself with `plugin "_subprocess" not found`. Both must be set for a
+`SupportsCallbacks` plugin whose callback action is `_subprocess`.
