@@ -902,8 +902,11 @@ func main() {
 	// External plugin gateways (grpc_port) started while plugins were loading
 	// above need a live CallbackHandler to dispatch ExecuteBidi callbacks
 	// through — the same RunAction/RunActionResult path the orchestrator uses
-	// for its own internal tool calls. Wire it now that orch exists; gateways
-	// don't serve traffic until Serve() runs later, so this is race-free.
+	// for its own internal tool calls. Every gateway from that initial load
+	// deferred accepting connections until this call (see
+	// Manager.SetCallbackHandler / gateway.startServing), so there is no
+	// window where an external caller could reach a gateway before it has a
+	// CallbackHandler to route to.
 	pluginManager.SetCallbackHandler(orch)
 
 	// Wire on-clear actions now that the orchestrator is available.

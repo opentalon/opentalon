@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/opentalon/opentalon/internal/orchestrator"
+	"github.com/opentalon/opentalon/proto/pluginpb"
 )
 
 func TestDetectPluginMode(t *testing.T) {
@@ -156,6 +157,7 @@ func TestWatchProcessStopsGatewayOnExit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startGateway: %v", err)
 	}
+	gw.startServing()
 	addr := gw.addr()
 
 	proc := &Process{exited: make(chan struct{})}
@@ -186,6 +188,55 @@ func TestWatchProcessStopsGatewayOnExit(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("gateway port %s never freed after plugin crash: %v", addr, lastErr)
+}
+
+// This is the fix for the review finding on this PR: startGateway used to
+// call Serve immediately, so a request landing between plugin load and
+// SetCallbackHandler (the entire initial LoadAll happens before the
+// orchestrator, and therefore the CallbackHandler, exists) would silently
+// see cb == nil and fall back to unary Execute even for a SupportsCallbacks
+// plugin — the exact "generate_ruleset falls back" bug this PR set out to
+// fix, just moved a few hundred milliseconds earlier in the process
+// lifetime. A gateway must not accept ANY connection until either the
+// handler is already set, or SetCallbackHandler flushes it.
+func TestManagerDefersGatewayServingUntilCallbackHandlerSet(t *testing.T) {
+	cc := startFakePluginServer(t)
+	client := &Client{conn: cc, client: pluginpb.NewPluginServiceClient(cc)}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.fetchCapabilities(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(nil)
+	gw, err := startGateway("echo", client, 0, m)
+	if err != nil {
+		t.Fatalf("startGateway: %v", err)
+	}
+	t.Cleanup(gw.stop)
+
+	// Simulate loadLocked's deferred-serve branch (cbHandler unset yet).
+	m.mu.Lock()
+	m.pendingGateways = append(m.pendingGateways, gw)
+	m.mu.Unlock()
+
+	earlyCtx, earlyCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer earlyCancel()
+	early := dialGateway(t, gw.addr())
+	if _, err := early.Execute(earlyCtx, &pluginpb.ToolCallRequest{Id: "early"}); err == nil {
+		t.Fatal("Execute succeeded before SetCallbackHandler; gateway must not accept connections yet")
+	}
+
+	m.SetCallbackHandler(&recordingCallbackHandler{})
+
+	rpc := dialGateway(t, gw.addr())
+	resp, err := rpc.Execute(ctx, &pluginpb.ToolCallRequest{Id: "g1", Args: map[string]string{"text": "hi"}})
+	if err != nil {
+		t.Fatalf("Execute after SetCallbackHandler: %v", err)
+	}
+	if resp.Content != "echo: hi" {
+		t.Errorf("content = %q, want %q", resp.Content, "echo: hi")
+	}
 }
 
 func TestWatchProcessContextCancelDoesNotCleanUp(t *testing.T) {

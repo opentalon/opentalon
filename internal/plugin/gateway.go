@@ -29,11 +29,11 @@ type gateway struct {
 }
 
 // Execute dispatches over ExecuteBidi when the plugin declares
-// SupportsCallbacks and the host's CallbackHandler is already wired
-// (SetCallbackHandler runs once during startup, after the orchestrator
-// exists but before any gateway can receive traffic). Without that, a
+// SupportsCallbacks and the host's CallbackHandler is wired. Without that, a
 // plugin needing to call back into the host mid-request would always see
-// host == nil, since plain unary Execute has no callback channel.
+// host == nil, since plain unary Execute has no callback channel. This
+// branch can only see cb == nil if it races startServing (see there) — in
+// steady state the handler is always set before Serve runs.
 func (g *gateway) Execute(ctx context.Context, req *pluginpb.ToolCallRequest) (*pluginpb.ToolResultResponse, error) {
 	if g.client.Capability().SupportsCallbacks {
 		if cb := g.mgr.callbackHandler(); cb != nil {
@@ -45,10 +45,13 @@ func (g *gateway) Execute(ctx context.Context, req *pluginpb.ToolCallRequest) (*
 	return g.client.ExecuteRaw(ctx, req)
 }
 
-// startGateway binds a gRPC server to port and starts forwarding Execute
-// calls to client in the background. TLS is deliberately not handled here —
-// this listener is meant to sit behind an ingress/proxy that terminates it,
-// the same way talooner-plugin's own standalone TCP mode does.
+// startGateway binds a gRPC server to port and registers the handler, but
+// does NOT start accepting connections — the caller (Manager.loadLocked /
+// Manager.SetCallbackHandler) decides when startServing runs, so that no
+// gateway serves a single request before the host's CallbackHandler is
+// wired (see startServing). The listener is still bound here, synchronously,
+// so the port is claimed and load errors surface immediately, same as
+// before.
 func startGateway(name string, client *Client, port int, mgr *Manager) (*gateway, error) {
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -58,18 +61,34 @@ func startGateway(name string, client *Client, port int, mgr *Manager) (*gateway
 	g := &gateway{name: name, client: client, mgr: mgr, server: grpc.NewServer(), lis: lis}
 	pluginpb.RegisterPluginServiceServer(g.server, g)
 
+	return g, nil
+}
+
+// startServing begins accepting connections in the background. Called
+// exactly once per gateway, either immediately (Manager.loadLocked, when
+// the CallbackHandler is already set — true for any plugin loaded after
+// startup, e.g. via the retry loop or Reload) or deferred until
+// Manager.SetCallbackHandler runs (true for every gateway started during
+// the initial LoadAll, since that happens before the orchestrator —  and
+// therefore the CallbackHandler — exists). Either way, Execute never sees a
+// request before g.mgr.callbackHandler() can return non-nil for a
+// SupportsCallbacks plugin.
+func (g *gateway) startServing() {
 	go func() {
-		if err := g.server.Serve(lis); err != nil {
-			slog.Info("plugin gateway stopped", "component", "plugin-manager", "plugin", name, "error", err)
+		if err := g.server.Serve(g.lis); err != nil {
+			slog.Info("plugin gateway stopped", "component", "plugin-manager", "plugin", g.name, "error", err)
 		}
 	}()
-	slog.Info("plugin gateway listening", "component", "plugin-manager", "plugin", name, "port", port)
-
-	return g, nil
+	slog.Info("plugin gateway listening", "component", "plugin-manager", "plugin", g.name, "port", g.lis.Addr())
 }
 
 func (g *gateway) stop() {
 	g.server.GracefulStop()
+	// GracefulStop only closes listeners the server has actually Serve'd.
+	// A gateway stopped while still in Manager.pendingGateways (startServing
+	// never ran) would otherwise leak its bound port — the next Load of the
+	// same plugin/port would then fail with "address already in use".
+	_ = g.lis.Close()
 }
 
 // addr returns the bound listener address, e.g. "[::]:50100" — useful in

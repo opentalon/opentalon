@@ -65,12 +65,13 @@ type PluginLoadedFunc func(name string)
 // Manager discovers, launches, and registers tool plugins with the
 // orchestrator's ToolRegistry.
 type Manager struct {
-	mu             sync.Mutex
-	plugins        map[string]*managed
-	known          map[string]PluginEntry // all configured entries, including those that failed to load
-	registry       *orchestrator.ToolRegistry
-	onPluginLoaded PluginLoadedFunc
-	cbHandler      orchestrator.CallbackHandler // set once via SetCallbackHandler, after orch exists
+	mu              sync.Mutex
+	plugins         map[string]*managed
+	known           map[string]PluginEntry // all configured entries, including those that failed to load
+	registry        *orchestrator.ToolRegistry
+	onPluginLoaded  PluginLoadedFunc
+	cbHandler       orchestrator.CallbackHandler // set once via SetCallbackHandler, after orch exists
+	pendingGateways []*gateway                   // gateways started before cbHandler was set; startServing deferred until SetCallbackHandler
 }
 
 // NewManager creates a manager that registers plugins into the given
@@ -97,13 +98,20 @@ func (m *Manager) OnPluginLoaded(fn PluginLoadedFunc) {
 // callbacks through. Called once during startup, right after the
 // orchestrator is constructed — necessarily after the manager and its
 // gateways already exist, since the orchestrator depends on the tool
-// registry the manager populates while loading plugins. Safe: gateways
-// don't serve traffic until Serve() runs later in main, so this ordering
-// never races an inbound request.
+// registry the manager populates while loading plugins. Every gateway
+// started before this point (the entire initial LoadAll) had its
+// startServing deferred exactly so this ordering can't race an inbound
+// request — this is what actually starts them accepting connections.
 func (m *Manager) SetCallbackHandler(cb orchestrator.CallbackHandler) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.cbHandler = cb
+	pending := m.pendingGateways
+	m.pendingGateways = nil
+	m.mu.Unlock()
+
+	for _, gw := range pending {
+		gw.startServing()
+	}
 }
 
 // callbackHandler returns the wired CallbackHandler, or nil before
@@ -277,6 +285,19 @@ func (m *Manager) loadLocked(ctx context.Context, entry PluginEntry) (string, er
 			slog.Error("plugin gateway failed to start", "component", "plugin-manager", "plugin", entry.Name, "error", err)
 		} else {
 			mg.gw = gw
+			// loadLocked holds m.mu for its whole body (see top), so this
+			// read/append of cbHandler/pendingGateways is already
+			// serialized against SetCallbackHandler — no separate lock
+			// needed. If the handler is already wired (any plugin loaded
+			// after startup: the retry loop, Reload), start serving now;
+			// otherwise defer to SetCallbackHandler so this gateway never
+			// accepts a request before a SupportsCallbacks plugin has
+			// somewhere to route its callbacks.
+			if m.cbHandler != nil {
+				gw.startServing()
+			} else {
+				m.pendingGateways = append(m.pendingGateways, gw)
+			}
 		}
 	}
 

@@ -8,16 +8,39 @@ Implemented in this repo (`internal/plugin/gateway.go`, `client.go`,
 are still outstanding — they need an infra change and a real deployment,
 not just code in this repo.
 
-One deviation from the design below worth flagging for the next reader:
-rather than converting the inbound `*pluginpb.ToolCallRequest` to an
-`orchestrator.ToolCall` and calling `client.ExecuteBidi` (which rebuilds
-`CredentialHeaders` from the request context's `profile.Profile`, not from
-the request itself — there is no profile on this external path), the
-gateway calls a new `Client.ExecuteBidiRaw(ctx, req, cb)` that forwards the
-raw request byte-for-byte over the bidi stream, same as `ExecuteRaw` does
-for unary. Keeps the "byte-for-byte forward" gateway invariant intact
-instead of silently dropping any `CredentialHeaders` an external caller set
-directly on the request.
+Two deviations from the design below worth flagging for the next reader:
+
+- Rather than converting the inbound `*pluginpb.ToolCallRequest` to an
+  `orchestrator.ToolCall` and calling `client.ExecuteBidi` (which rebuilds
+  `CredentialHeaders` from the request context's `profile.Profile`, not from
+  the request itself — there is no profile on this external path), the
+  gateway calls a new `Client.ExecuteBidiRaw(ctx, req, cb)` that forwards the
+  raw request byte-for-byte over the bidi stream, same as `ExecuteRaw` does
+  for unary. Keeps the "byte-for-byte forward" gateway invariant intact
+  instead of silently dropping any `CredentialHeaders` an external caller set
+  directly on the request.
+- §3's "gateways don't serve traffic until `Serve()` is called later in
+  `main`" turned out to be false — review caught it. `startGateway` used to
+  call `g.server.Serve(lis)` in a goroutine immediately, synchronously
+  during the initial plugin load, well before `SetCallbackHandler` runs. A
+  request landing in that startup window would have silently hit `cb ==
+  nil`, fallen back to unary, and reproduced the exact bug this doc exists
+  to fix — just moved earlier in the process lifetime instead of removed.
+  Fixed by splitting `startGateway` (bind + register, no `Serve`) from a new
+  `gateway.startServing()` (starts accepting connections), with
+  `Manager.SetCallbackHandler` flushing a `pendingGateways` queue of every
+  gateway that started before it ran. See `internal/plugin/manager.go` and
+  `gateway.go` for the actual mechanism — §3 below is retained for the
+  original (wrong) reasoning, not as a guide to the shipped code.
+- One caveat noted but deliberately not fixed here: a callback dispatched
+  through the external gateway runs with no `profile.Profile` on its ctx (no
+  profile exists on this external path to carry). `talooner`'s
+  `generate_ruleset`/`llm_review` only call the host's own `_subprocess` LLM
+  action, which needs no per-tenant credentials, so this doesn't affect the
+  bug this doc fixes — but a future callback action that *does* need
+  `profile.Credentials` for a downstream plugin call would silently get
+  none, unless the plugin threads identity through the reserved
+  `contextargs.Callback*` args `applyCallbackIdentity` already reads.
 
 ## Problem
 
@@ -143,9 +166,22 @@ sentence in the PR description, not a new auth layer.
   `gateway.go`, asserting the gateway picks `ExecuteBidi` when
   `SupportsCallbacks` is true and falls back to unary `Execute` otherwise;
   a fake `CallbackHandler` answers the callback and the result round-trips
-  correctly to the external caller.
-- `cmd/opentalon`: a smoke test (or manual check) that `SetCallbackHandler`
-  is actually wired before `Serve()` starts accepting gateway traffic.
+  correctly to the external caller. Shipped as
+  `TestGatewayUsesExecuteBidiWhenSupported` /
+  `TestGatewayFallsBackToUnaryWhenCallbackHandlerNotWired`
+  (`gateway_test.go`).
+- `internal/plugin`: `TestManagerDefersGatewayServingUntilCallbackHandlerSet`
+  (`manager_test.go`) — the regression test for the `startServing`/
+  `pendingGateways` fix above: dials a gateway before
+  `SetCallbackHandler` and asserts the connection is refused, then dials
+  again after and asserts it succeeds.
+- `cmd/opentalon`: no automated smoke test added — `main()` isn't
+  structured for testing this without a broader refactor, out of scope
+  here. Verified manually by reading the call sites: `SetCallbackHandler`
+  runs once, right after `orch := orchestrator.NewWithRules(...)`, and
+  nothing between manager construction and that point can reach a gateway
+  (enforced now by the deferred-serve mechanism itself, not just by
+  ordering).
 - No changes expected to `talooner-plugin`'s existing `host != nil` branch
   tests (`generate_ruleset.go`, `llm_review.go`) — this fix is what makes
   that branch reachable from outside the cluster for the first time.

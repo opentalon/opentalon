@@ -36,6 +36,7 @@ func TestGatewayForwardsExecute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startGateway: %v", err)
 	}
+	gw.startServing()
 	t.Cleanup(gw.stop)
 
 	rpc := dialGateway(t, gw.addr())
@@ -64,6 +65,7 @@ func TestGatewayForwardsPluginError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startGateway: %v", err)
 	}
+	gw.startServing()
 	t.Cleanup(gw.stop)
 
 	rpc := dialGateway(t, gw.addr())
@@ -107,6 +109,7 @@ func TestGatewayUsesExecuteBidiWhenSupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startGateway: %v", err)
 	}
+	gw.startServing()
 	t.Cleanup(gw.stop)
 
 	rpc := dialGateway(t, gw.addr())
@@ -144,6 +147,7 @@ func TestGatewayFallsBackToUnaryWhenCallbackHandlerNotWired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startGateway: %v", err)
 	}
+	gw.startServing()
 	t.Cleanup(gw.stop)
 
 	rpc := dialGateway(t, gw.addr())
@@ -169,6 +173,7 @@ func TestGatewayStopClosesListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startGateway: %v", err)
 	}
+	gw.startServing()
 	addr := gw.addr()
 	gw.stop()
 
