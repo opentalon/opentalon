@@ -49,3 +49,4 @@ rule "Flag critical-path changes for senior review" {
   do comment "pr" "This PR touches critical infrastructure (auth, plugins, runtime, or protobuf). Requesting senior review."
   priority MEDIUM
 }
+
