@@ -254,11 +254,27 @@ func (h *endpointHealth) probeOnce(ctx context.Context) {
 	}
 }
 
-// NewHTTPHealthProbe returns a HealthProbe that GETs probeURL with an optional
-// bearer token and treats any 2xx response as healthy. probeURL is typically
-// the provider base_url joined with "/models" (liveness + auth check) or
+// ProbeAuth selects the header scheme NewHTTPHealthProbe uses to send apiKey.
+type ProbeAuth int
+
+const (
+	// ProbeAuthBearer sends "Authorization: Bearer <apiKey>". Correct for
+	// OpenAI-compatible endpoints.
+	ProbeAuthBearer ProbeAuth = iota
+	// ProbeAuthAnthropicNative sends "x-api-key: <apiKey>" plus
+	// "anthropic-version". Anthropic's native API requires this on every
+	// path, including /v1/models — its OpenAI-compat layer accepts Bearer
+	// on /v1/chat/completions but not on /v1/models, so probes against
+	// api.anthropic.com must use this scheme regardless of which wire
+	// format the provider is configured to use for completions.
+	ProbeAuthAnthropicNative
+)
+
+// NewHTTPHealthProbe returns a HealthProbe that GETs probeURL with apiKey sent
+// per auth, and treats any 2xx response as healthy. probeURL is typically the
+// provider base_url joined with "/models" (liveness + auth check) or
 // "/health" (liveness only).
-func NewHTTPHealthProbe(probeURL, apiKey string, client *http.Client) HealthProbe {
+func NewHTTPHealthProbe(probeURL, apiKey string, auth ProbeAuth, client *http.Client) HealthProbe {
 	if client == nil {
 		client = &http.Client{Timeout: defaultHealthTimeout}
 	}
@@ -268,7 +284,13 @@ func NewHTTPHealthProbe(probeURL, apiKey string, client *http.Client) HealthProb
 			return err
 		}
 		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
+			switch auth {
+			case ProbeAuthAnthropicNative:
+				req.Header.Set("x-api-key", apiKey)
+				req.Header.Set("anthropic-version", anthropicAPIVersion)
+			default:
+				req.Header.Set("Authorization", "Bearer "+apiKey)
+			}
 		}
 		resp, err := client.Do(req)
 		if err != nil {

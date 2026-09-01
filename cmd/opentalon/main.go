@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1658,7 +1659,15 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 		probePath = "/models"
 	}
 	probeURL := strings.TrimRight(primaryPC.BaseURL, "/") + probePath
-	probe := provider.NewHTTPHealthProbe(probeURL, primaryPC.APIKey, nil)
+	probeAuth := provider.ProbeAuthBearer
+	if isAnthropicNativeHost(primaryPC.BaseURL) {
+		// api.anthropic.com's OpenAI-compat layer accepts Bearer on
+		// /chat/completions but not on /models — the probe must use
+		// Anthropic's native auth regardless of the provider's configured
+		// `api:` kind. See issue #324.
+		probeAuth = provider.ProbeAuthAnthropicNative
+	}
+	probe := provider.NewHTTPHealthProbe(probeURL, primaryPC.APIKey, probeAuth, nil)
 	gate := provider.HealthGateConfig{
 		Interval:     parseDurationOrZero(cfg.Routing.Health.Interval),
 		Timeout:      parseDurationOrZero(cfg.Routing.Health.Timeout),
@@ -1669,6 +1678,17 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 		"fallbacks", cfg.Routing.Fallbacks,
 		"health_probe", probeURL)
 	return provider.NewHealthGatedProvider(context.Background(), entries, probe, gate, slog.Default()), modelID, nil
+}
+
+// isAnthropicNativeHost reports whether baseURL points at Anthropic's API
+// (native or OpenAI-compat surface), where /v1/models only accepts
+// x-api-key, never Bearer.
+func isAnthropicNativeHost(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	return u.Hostname() == "api.anthropic.com"
 }
 
 // buildProviderRef builds a single provider from a "providerID" or
