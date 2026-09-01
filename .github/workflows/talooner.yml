@@ -1,0 +1,24 @@
+name: talooner
+on:
+  issue_comment:        {types: [created]}
+  pull_request:         {types: [synchronize, reopened, closed]}
+  pull_request_review:  {types: [submitted]}
+  check_suite:          {types: [completed]}
+
+concurrency:
+  group: talooner-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    if: github.event_name != 'issue_comment' || startsWith(github.event.comment.body, '!talooner')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      checks: write
+      contents: read
+    steps:
+      - uses: opentalon/talooner@v0.0.1-alpha5
+        with:
+          opentalon_host:    ${{ secrets.OPENTALON_HOST }}
+          opentalon_api_key: ${{ secrets.OPENTALON_API_KEY }}
