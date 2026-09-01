@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -97,7 +98,15 @@ func (w *SessionEventWriter) run(ctx context.Context) {
 	for e := range w.ch {
 		insertCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		if err := w.store.Insert(insertCtx, e); err != nil {
-			slog.Warn("session event insert failed",
+			// A session-less action dispatch (scheduler, exec-dispatcher, a
+			// gateway callback with no __ot_cb_session_id) has no session to
+			// attribute an llm_request/llm_response event to — expected, not a
+			// storage problem, so it doesn't warrant a production-log WARN.
+			level := slog.LevelWarn
+			if errors.Is(err, errSessionIDRequired) {
+				level = slog.LevelDebug
+			}
+			slog.Log(ctx, level, "session event insert failed",
 				"session_id", e.SessionID,
 				"event_type", e.EventType,
 				"error", err,
