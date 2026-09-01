@@ -66,9 +66,16 @@ func NewSessionEventStore(db *DB) *SessionEventStore {
 //     run their excerpts through events.SanitizeUTF8 before marshalling.
 //
 // Nothing else is touched. The raw-capture rule lives at the producer.
+// errSessionIDRequired is a sentinel so callers (SessionEventWriter) can
+// tell this specific, expected rejection — a session-less action dispatch
+// (scheduler, exec-dispatcher, gateway callback) emitting an llm_request/
+// llm_response event with nothing to attribute it to — apart from a real
+// storage failure worth a louder log.
+var errSessionIDRequired = fmt.Errorf("session event: session_id required")
+
 func (s *SessionEventStore) Insert(ctx context.Context, e SessionEvent) error {
 	if e.SessionID == "" {
-		return fmt.Errorf("session event: session_id required")
+		return errSessionIDRequired
 	}
 	if e.EventType == "" {
 		return fmt.Errorf("session event: event_type required")
