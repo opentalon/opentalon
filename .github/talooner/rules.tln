@@ -1,0 +1,57 @@
+define "small_change" {
+  attr "pr.lines_changed" < 100
+  attr "pr.files_changed" < 8
+}
+
+define "critical_path" {
+  attr "pr.changed_files" contains "internal/"
+}
+
+define "build_and_tests" {
+  attr "pr.tests_passing" == true
+}
+
+rule "Block PRs with no description" {
+  for records where type == "pr"
+    and attr "pr.draft" == false
+    and attr "pr.has_description" == false
+  block "merge"
+  do block "pr.merge"
+  do comment "pr" "This PR has no description. Describe the changes and reasoning before requesting review."
+  reason "no description"
+  priority HIGH
+}
+
+rule "Auto-approve safe non-critical changes" {
+  for records where type == "pr"
+    and is "small_change"
+    and attr "pr.draft" == false
+    and is "build_and_tests"
+    and not is "critical_path"
+  allow "merge"
+  do approve "pr"
+  do comment "pr" "Small, tested change outside critical paths — approved."
+  priority MEDIUM
+}
+
+rule "Require review for critical path changes" {
+  for records where type == "pr"
+    and attr "pr.draft" == false
+    and is "critical_path"
+  block "merge"
+  do block "pr.merge"
+  do comment "pr" "This PR touches critical internal paths. Maintainer review required before merge."
+  reason "critical path"
+  priority HIGH
+}
+
+rule "Block failing CI on non-draft PRs" {
+  for records where type == "pr"
+    and attr "pr.draft" == false
+    and attr "pr.tests_passing" == false
+  block "merge"
+  do block "pr.merge"
+  do comment "pr" "Tests are failing. Please fix failures before requesting review."
+  reason "tests failing"
+  priority HIGH
+}

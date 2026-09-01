@@ -1,0 +1,114 @@
+test "Small non-critical PR with passing tests is approved" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 101
+    attr 1 "pr.lines_changed" 75
+    attr 1 "pr.files_changed" 4
+    attr 1 "pr.draft" false
+    attr 1 "pr.tests_passing" true
+    attr 1 "pr.changed_files" ["cmd/example.go", "docs/guide.md"]
+  }
+
+  when rule "Auto-approve safe non-critical changes"
+
+  expect {
+    flagged 1
+    did 1 approve "pr"
+  }
+}
+
+test "Large PR does not trigger auto-approve" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 102
+    attr 1 "pr.lines_changed" 150
+    attr 1 "pr.files_changed" 10
+    attr 1 "pr.draft" false
+    attr 1 "pr.tests_passing" true
+    attr 1 "pr.changed_files" ["docs/file1.md", "docs/file2.md"]
+  }
+
+  when rule "Auto-approve safe non-critical changes"
+
+  expect {
+    not flagged 1
+  }
+}
+
+test "PR with no description is blocked" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 103
+    attr 1 "pr.draft" false
+    attr 1 "pr.has_description" false
+  }
+
+  when rule "Block PRs with no description"
+
+  expect {
+    flagged 1
+    did 1 block "pr.merge"
+  }
+}
+
+test "Critical path change requires review" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 104
+    attr 1 "pr.draft" false
+    attr 1 "pr.changed_files" ["internal/auth/token.go"]
+  }
+
+  when rule "Require review for critical path changes"
+
+  expect {
+    flagged 1
+    did 1 block "pr.merge"
+  }
+}
+
+test "Non-critical PR touching only examples passes review rule" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 105
+    attr 1 "pr.draft" false
+    attr 1 "pr.changed_files" ["examples/demo.go"]
+  }
+
+  when rule "Require review for critical path changes"
+
+  expect {
+    not flagged 1
+  }
+}
+
+test "PR with failing tests is blocked" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 106
+    attr 1 "pr.draft" false
+    attr 1 "pr.tests_passing" false
+  }
+
+  when rule "Block failing CI on non-draft PRs"
+
+  expect {
+    flagged 1
+    did 1 block "pr.merge"
+  }
+}
+
+test "Draft PR with failing tests is not blocked" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 107
+    attr 1 "pr.draft" true
+    attr 1 "pr.tests_passing" false
+  }
+
+  when rule "Block failing CI on non-draft PRs"
+
+  expect {
+    not flagged 1
+  }
+}
