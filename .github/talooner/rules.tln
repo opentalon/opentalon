@@ -1,0 +1,51 @@
+define "small_change" {
+  attr "pr.lines_changed" < 100
+  attr "pr.files_changed" < 8
+}
+
+define "critical_path" {
+  attr "pr.changed_files" contains "internal/auth/"
+  or attr "pr.changed_files" contains "internal/plugin/"
+  or attr "pr.changed_files" contains "pkg/runtime/"
+  or attr "pr.changed_files" contains "proto/"
+}
+
+rule "Block PRs with no description" {
+  for records where type == "pr"
+    and attr "pr.draft" == false
+    and attr "pr.has_description" == false
+  do block "pr.merge"
+  do comment "pr" "This PR has no description. Describe what changed and why before requesting review."
+  reason "no description"
+  priority HIGH
+}
+
+rule "Block PRs with failing tests" {
+  for records where type == "pr"
+    and attr "pr.draft" == false
+    and attr "pr.tests_passing" == false
+  do block "pr.merge"
+  do comment "pr" "CI checks are failing. Fix test failures before merge."
+  reason "failing tests"
+  priority HIGH
+}
+
+rule "Auto-approve safe changes" {
+  for records where type == "pr"
+    and is "small_change"
+    and attr "pr.draft" == false
+    and attr "pr.tests_passing" == true
+    and not is "critical_path"
+  do approve "pr"
+  do comment "pr" "Small, tested, and outside critical paths. Auto-approved."
+  priority MEDIUM
+}
+
+rule "Flag critical-path changes for senior review" {
+  for records where type == "pr"
+    and attr "pr.draft" == false
+    and is "critical_path"
+  do require "review.senior"
+  do comment "pr" "This PR touches critical infrastructure (auth, plugins, runtime, or protobuf). Requesting senior review."
+  priority MEDIUM
+}
