@@ -1,0 +1,114 @@
+// Talooner starter policy — written by `talooner init`.
+//
+// Trimmed from tln-language's phase-0 exit artifact
+// (tln-language/examples/talooner_review.tln), which has a full test suite and
+// is the reference this file is kept in sync with by hand. Two things were cut
+// on purpose, not by accident:
+//
+//   - No `strict` rule. Talooner always loads its own strict base ruleset
+//     ("never approve a PR with unresolved conflicts") server-side, imported
+//     into every tenant ruleset automatically. Declaring the same rule name
+//     here is a compile error, not extra safety.
+//   - No `do notify` rule. The notify verb has no executor in this version —
+//     a fired notify action fails the whole run rather than being skipped.
+//
+// Edit freely from here. `talooner rules validate .github/talooner/` and
+// `talooner rules test .github/talooner/` check changes before they reach a
+// real PR.
+
+// ─── Predicates ───────────────────────────────────────────────────────────────
+
+define "small_change" {
+  attr "pr.lines_changed" < 50
+  attr "pr.files_changed" < 5
+}
+
+define "large_change" {
+  attr "pr.lines_changed" >= 500
+}
+
+define "critical_path" {
+  attr "pr.changed_files" contains "internal/auth/"
+    or attr "pr.changed_files" contains "billing/"
+}
+
+define "ready_for_review" {
+  attr "pr.draft" == false
+  attr "pr.has_description" == true
+}
+
+// ─── Block incomplete PRs ────────────────────────────────────────────────────
+
+rule "Block PRs with no description" {
+  for records where type == "pr"
+    and attr "pr.draft" == false
+    and attr "pr.has_description" == false
+  block "merge"
+  do block "pr.merge"
+  do comment "pr" "This PR has no description. Say what changed and why before requesting review"
+  reason "no description"
+  priority HIGH
+}
+
+// ─── Auto-approve safe changes ───────────────────────────────────────────────
+
+rule "Auto-approve safe changes" {
+  for records where type == "pr"
+    and is "small_change"
+    and is "ready_for_review"
+    and attr "pr.tests_passing" == true
+    and not is "critical_path"
+  allow "merge"
+  do approve "pr"
+  do comment "pr" "Small, tested, documented, and off the critical path — no objections from me"
+  priority MEDIUM
+}
+
+// ─── Require human review ────────────────────────────────────────────────────
+
+rule "Require human review for critical paths" {
+  for records where type == "pr"
+    and is "critical_path"
+  requires "review.senior_engineer"
+  do require "review.senior_engineer"
+  do assign "pr" attr "user.owner"
+  do comment "pr" "Touches critical code owned by {attr.user.owner} — human approval required"
+  reason "touches a critical path"
+  priority HIGH
+}
+
+rule "Require human review for large PRs" {
+  for records where type == "pr"
+    and is "large_change"
+  requires "review.human"
+  do require "review.human"
+  do comment "pr" "{attr.pr.lines_changed} lines changed — too large to auto-approve. Consider splitting it"
+  reason "large change"
+  priority HIGH
+}
+
+// The author is the code owner, so CODEOWNERS will not request anyone. Invisible
+// to GitHub, trivial once ownership is a fact.
+rule "Escalate self-review of owned critical code" {
+  for records where type == "pr"
+    and is "critical_path"
+    and attr "user.owner" == attr "pr.author"
+  requires "review.senior_engineer"
+  do require "review.senior_engineer"
+  do comment "pr" "Author {attr.pr.author} owns this code — needs an independent reviewer"
+  reason "author owns the code they changed"
+  priority CRITICAL
+}
+
+// ─── Security review for new dependencies ────────────────────────────────────
+
+rule "Security review for new dependencies" {
+  for records where type == "pr"
+    and attr "pr.new_dependencies" > 0
+  requires "review.security_team"
+  do require "review.security_team"
+  do assign "pr" "@org/security"
+  do comment "pr" "{attr.pr.new_dependencies} new dependencies — security review required"
+  reason "adds new dependencies"
+  priority HIGH
+}
