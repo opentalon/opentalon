@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -185,6 +187,65 @@ func TestHealthGatedProbeFailureTripsAndRecovers(t *testing.T) {
 	hg.health.probeOnce(ctx)
 	if !hg.health.isHealthy() {
 		t.Fatal("healthy probe should recover with recover_after=1")
+	}
+}
+
+// TestHTTPHealthProbeAuthScheme pins issue #324: probing Anthropic's
+// /v1/models with a Bearer token always 401s (that path only accepts
+// x-api-key), which permanently tripped Anthropic-as-primary to its
+// fallback even though real completions worked fine.
+func TestHTTPHealthProbeAuthScheme(t *testing.T) {
+	var gotAuth, gotAPIKey, gotVersion string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotVersion = r.Header.Get("anthropic-version")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Run("bearer default", func(t *testing.T) {
+		probe := NewHTTPHealthProbe(srv.URL, "sk-test", ProbeAuthBearer, nil)
+		if err := probe(context.Background()); err != nil {
+			t.Fatalf("probe: %v", err)
+		}
+		if gotAuth != "Bearer sk-test" {
+			t.Errorf("Authorization = %q, want Bearer sk-test", gotAuth)
+		}
+		if gotAPIKey != "" {
+			t.Errorf("x-api-key = %q, want empty for bearer scheme", gotAPIKey)
+		}
+	})
+
+	t.Run("anthropic native", func(t *testing.T) {
+		probe := NewHTTPHealthProbe(srv.URL, "sk-ant-test", ProbeAuthAnthropicNative, nil)
+		if err := probe(context.Background()); err != nil {
+			t.Fatalf("probe: %v", err)
+		}
+		if gotAPIKey != "sk-ant-test" {
+			t.Errorf("x-api-key = %q, want sk-ant-test", gotAPIKey)
+		}
+		if gotVersion != anthropicAPIVersion {
+			t.Errorf("anthropic-version = %q, want %q", gotVersion, anthropicAPIVersion)
+		}
+		if gotAuth != "" {
+			t.Errorf("Authorization = %q, want empty for anthropic-native scheme", gotAuth)
+		}
+	})
+}
+
+// TestHTTPHealthProbeStillFailsOnRealAuthError guards against papering over a
+// genuinely invalid key: even with the right auth scheme, a 401 must still
+// trip the probe.
+func TestHTTPHealthProbeStillFailsOnRealAuthError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	probe := NewHTTPHealthProbe(srv.URL, "sk-ant-bad", ProbeAuthAnthropicNative, nil)
+	if err := probe(context.Background()); err == nil {
+		t.Fatal("expected error on 401, got nil")
 	}
 }
 
