@@ -41,6 +41,14 @@ type ScenarioAssert struct {
 	ResponseNotEmpty bool              `yaml:"response_not_empty"`
 	ToolCalled       string            `yaml:"tool_called"` // "plugin__action"
 	ArgEquals        map[string]string `yaml:"arg_equals"`
+
+	// Trajectory, when set, asserts a whole multi-step tool-call plan (see
+	// trajectory.go). Optional and independent of ToolCalled; nil == not used.
+	Trajectory *Trajectory `yaml:"trajectory"`
+	// Rubric, when set, carries the LLM-judge acceptance criteria for
+	// non-deterministic scenarios. Scored by the eval package's Judge, not by
+	// CheckAssertions (which stays deterministic).
+	Rubric *Rubric `yaml:"rubric"`
 }
 
 // Scenario is one test case: an input message and structural assertions on the result.
@@ -172,6 +180,11 @@ func CheckAssertions(s Scenario, result RunResult) string {
 			if got := found.Args[k]; got != want {
 				return fmt.Sprintf("arg %s = %q, want %q", k, got, want)
 			}
+		}
+	}
+	if s.Assert.Trajectory != nil {
+		if reason := checkTrajectory(s.Assert.Trajectory, result); reason != "" {
+			return reason
 		}
 	}
 	return ""
