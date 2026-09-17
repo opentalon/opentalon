@@ -19,10 +19,42 @@ type WebhookServer struct {
 	server  *http.Server
 	port    int
 	started bool
+	// handlers indexes each registered pattern by its swappable handler, so a
+	// re-registration (e.g. a plugin reloaded after a crash) updates the route
+	// in place. http.ServeMux PANICS on a duplicate pattern — calling
+	// mux.Handle twice for the same path would crash the whole host, so a route
+	// is only ever added to the mux once.
+	handlers map[string]*swappableHandler
+}
+
+// swappableHandler is a route target whose underlying handler can be replaced
+// atomically. The pattern is registered on the mux once (pointing here); a
+// re-registration swaps `h` instead of re-adding the pattern.
+type swappableHandler struct {
+	mu sync.RWMutex
+	h  http.HandlerFunc
+}
+
+func (s *swappableHandler) set(h http.HandlerFunc) {
+	s.mu.Lock()
+	s.h = h
+	s.mu.Unlock()
+}
+
+func (s *swappableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	h := s.h
+	s.mu.RUnlock()
+	if h == nil {
+		http.Error(w, "handler not ready", http.StatusServiceUnavailable)
+		return
+	}
+	h(w, r)
 }
 
 var globalWebhookServer = &WebhookServer{
-	mux: http.NewServeMux(),
+	mux:      http.NewServeMux(),
+	handlers: map[string]*swappableHandler{},
 }
 
 func webhookPortOrDefault(port int) int {
@@ -48,7 +80,20 @@ func (s *WebhookServer) register(port int, path string, handler http.HandlerFunc
 		return fmt.Errorf("webhook server already started on port %d; cannot use port %d", s.port, port)
 	}
 
-	s.mux.HandleFunc(path, handler)
+	if s.handlers == nil {
+		s.handlers = map[string]*swappableHandler{}
+	}
+	// Register each pattern on the mux ONCE. A repeat registration (a plugin
+	// reloaded after exiting) swaps the handler in place — http.ServeMux panics
+	// on a duplicate pattern, which previously crashed the host whenever a
+	// killed plugin was retried.
+	if sh, ok := s.handlers[path]; ok {
+		sh.set(handler)
+	} else {
+		sh := &swappableHandler{h: handler}
+		s.handlers[path] = sh
+		s.mux.Handle(path, sh)
+	}
 
 	if !s.started {
 		s.port = port

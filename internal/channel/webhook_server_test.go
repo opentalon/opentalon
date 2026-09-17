@@ -129,3 +129,32 @@ func TestReverseProxy_EncodedPath(t *testing.T) {
 		t.Errorf("backend RawPath = %q, want /a%%2Fb", gotRaw)
 	}
 }
+
+// TestWebhookServerReRegisterSwapsWithoutPanic is a regression guard: a plugin
+// reloaded after exiting re-registers its reverse-proxy pattern. http.ServeMux
+// panics on a duplicate pattern, which previously crashed the whole host every
+// time a killed plugin was retried. Re-registration must swap in place instead.
+func TestWebhookServerReRegisterSwapsWithoutPanic(t *testing.T) {
+	s := &WebhookServer{
+		mux:      http.NewServeMux(),
+		handlers: map[string]*swappableHandler{},
+		started:  true, // pre-started so register() doesn't bind a real port
+		port:     9999,
+	}
+	got := 0
+	first := func(w http.ResponseWriter, r *http.Request) { got = 1 }
+	second := func(w http.ResponseWriter, r *http.Request) { got = 2 }
+
+	if err := s.register(9999, "/tln-plugin/", first); err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+	// Re-registering the SAME pattern must NOT panic (would crash the host).
+	if err := s.register(9999, "/tln-plugin/", second); err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+
+	s.mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/tln-plugin/x", nil))
+	if got != 2 {
+		t.Fatalf("expected the re-registered handler to win (got=2), got=%d", got)
+	}
+}
