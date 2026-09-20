@@ -2,10 +2,13 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -633,12 +636,56 @@ type CooldownConfig struct {
 
 var envPattern = regexp.MustCompile(`\$\{([^}]+)}`)
 
+// unresolvedEnv collects ${VAR} references seen during the most recent Parse
+// that had no value in the environment. Parse resets it before expanding and
+// reads it afterwards to warn once, with every name, instead of leaving the
+// caller to discover the problem at request time.
+var (
+	unresolvedMu  sync.Mutex
+	unresolvedEnv map[string]struct{}
+)
+
+func noteUnresolvedEnv(name string) {
+	unresolvedMu.Lock()
+	defer unresolvedMu.Unlock()
+	if unresolvedEnv != nil {
+		unresolvedEnv[name] = struct{}{}
+	}
+}
+
+// takeUnresolvedEnv returns the collected names, sorted, and clears the set.
+func takeUnresolvedEnv() []string {
+	unresolvedMu.Lock()
+	defer unresolvedMu.Unlock()
+	names := make([]string, 0, len(unresolvedEnv))
+	for n := range unresolvedEnv {
+		names = append(names, n)
+	}
+	unresolvedEnv = nil
+	sort.Strings(names)
+	return names
+}
+
+// expandEnv replaces ${VAR} with the environment value. An unset variable is
+// left as the literal ${VAR}, which TestEnvSubstitutionPreservesUnsetVars
+// pins down.
+//
+// That literal is never a usable value, so every unset name is recorded and
+// Parse reports them together. Without it a missing variable surfaces far from
+// its cause: an unset URL fails on the first real request with `unsupported
+// protocol scheme "${...}"`, long after a start-up that looked clean.
+//
+// Note for maintainers: internal/profile/verifier.go expands the same kind of
+// field with os.ExpandEnv, where unset yields the empty string and a warning.
+// The two halves of the codebase disagree. Reconciling them is a behaviour
+// change and is left as a separate decision.
 func expandEnv(s string) string {
 	return envPattern.ReplaceAllStringFunc(s, func(match string) string {
 		varName := envPattern.FindStringSubmatch(match)[1]
 		if val, ok := os.LookupEnv(varName); ok {
 			return val
 		}
+		noteUnresolvedEnv(varName)
 		return match
 	})
 }
@@ -701,6 +748,10 @@ func Parse(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	unresolvedMu.Lock()
+	unresolvedEnv = map[string]struct{}{}
+	unresolvedMu.Unlock()
+
 	expandEnvInProviders(&cfg)
 	expandEnvInPlugins(&cfg)
 	expandEnvInChannels(&cfg)
@@ -708,6 +759,7 @@ func Parse(data []byte) (*Config, error) {
 	expandEnvInRedis(&cfg)
 	expandEnvInRequestPackages(&cfg)
 	expandEnvInEventWebhook(&cfg)
+	expandEnvInProfiles(&cfg)
 	cfg.Cluster.DedupTTL = expandEnv(cfg.Cluster.DedupTTL)
 	cfg.Metrics.Addr = expandEnv(cfg.Metrics.Addr)
 	if cfg.Metrics.Enabled && cfg.Metrics.Addr == "" {
@@ -743,6 +795,19 @@ func Parse(data []byte) (*Config, error) {
 			cfg.Lua.DefaultRef = expandEnv(cfg.Lua.DefaultRef)
 		}
 	}
+
+	// Report every ${VAR} that had no value, once, with all the names. This is
+	// a warning rather than an error on purpose: a config may legitimately
+	// reference a credential for a provider or channel it does not route to,
+	// and failing to start would be worse than the missing value. But it is
+	// never silent — a reference nothing supplies is at best dead weight and
+	// at worst the cause of a failure that would otherwise appear much later
+	// and somewhere else.
+	if names := takeUnresolvedEnv(); len(names) > 0 {
+		slog.Warn("config references environment variables that are not set; the literal ${VAR} is kept and will be used as the value",
+			"variables", strings.Join(names, ", "), "count", len(names))
+	}
+
 	return &cfg, nil
 }
 
@@ -805,6 +870,17 @@ func expandEnvInRedis(cfg *Config) {
 	for i, s := range cfg.Redis.Sentinels {
 		cfg.Redis.Sentinels[i] = expandEnv(s)
 	}
+}
+
+// expandEnvInProfiles expands the WhoAmI server address.
+//
+// ExtraHeaders are deliberately not touched here: the verifier expands them
+// itself at construction (internal/profile/verifier.go), and doing it twice
+// would be harmless but misleading about where that behaviour lives. The URL
+// had no expansion anywhere, which is the gap this closes — headers in the
+// same struct supported ${VAR} while the address beside them did not.
+func expandEnvInProfiles(cfg *Config) {
+	cfg.Profiles.WhoAmI.URL = expandEnv(cfg.Profiles.WhoAmI.URL)
 }
 
 func expandEnvInChannels(cfg *Config) {

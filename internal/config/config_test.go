@@ -1089,3 +1089,62 @@ orchestrator:
 		t.Errorf("absent tool_error_handling block must parse to zero ToolErrorHandlingConfig, got %+v", eh)
 	}
 }
+
+func TestExpandEnvInProfilesWhoAmIURL(t *testing.T) {
+	t.Setenv("WHOAMI_BASE", "https://identity.example.com")
+
+	cfg, err := Parse([]byte(`
+profiles:
+  who_am_i:
+    url: "${WHOAMI_BASE}/whoami"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Before this was wired up, profiles sat outside every expansion path: the
+	// literal reached the HTTP client and failed on the first verification with
+	// `unsupported protocol scheme ""`, while start-up looked healthy.
+	if got, want := cfg.Profiles.WhoAmI.URL, "https://identity.example.com/whoami"; got != want {
+		t.Errorf("who_am_i.url = %q, want %q", got, want)
+	}
+}
+
+func TestUnresolvedEnvIsCollectedAndCleared(t *testing.T) {
+	//nolint:errcheck // deliberately absent for this test
+	os.Unsetenv("DEFINITELY_NOT_SET_A")
+	//nolint:errcheck // deliberately absent for this test
+	os.Unsetenv("DEFINITELY_NOT_SET_B")
+
+	if _, err := Parse([]byte(`
+redis:
+  redis_url: "${DEFINITELY_NOT_SET_A}"
+profiles:
+  who_am_i:
+    url: "${DEFINITELY_NOT_SET_B}"
+`)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Parse reports and clears, so a second Parse does not inherit the first
+	// one's names. Anything left here would mean the warning drifts across
+	// loads and blames the wrong config.
+	if names := takeUnresolvedEnv(); len(names) != 0 {
+		t.Errorf("collector should be empty after Parse reported, got %v", names)
+	}
+}
+
+func TestUnresolvedEnvNamesAreSortedAndDeduped(t *testing.T) {
+	unresolvedMu.Lock()
+	unresolvedEnv = map[string]struct{}{}
+	unresolvedMu.Unlock()
+
+	noteUnresolvedEnv("ZEBRA")
+	noteUnresolvedEnv("ALPHA")
+	noteUnresolvedEnv("ZEBRA")
+
+	got := takeUnresolvedEnv()
+	if len(got) != 2 || got[0] != "ALPHA" || got[1] != "ZEBRA" {
+		t.Errorf("takeUnresolvedEnv() = %v, want [ALPHA ZEBRA]", got)
+	}
+}
