@@ -201,6 +201,14 @@ func (ch *YAMLChannel) processInboundFrame(frame map[string]interface{}) {
 		return
 	}
 
+	// Deterministic dispatch bypasses the orchestrator entirely: if the event
+	// matches, call the declared endpoint directly and stop, before any
+	// event_type/process_when/skip gating or InboundMessage mapping runs.
+	if ch.matchesDispatch(event) {
+		ch.dispatchDirect(event)
+		return
+	}
+
 	// Check event type
 	eventType, _ := event["type"].(string)
 	if !ch.shouldProcess(event, eventType) {
@@ -313,6 +321,31 @@ func (ch *YAMLChannel) shouldProcess(event map[string]interface{}, eventType str
 	return false
 }
 
+// matchRule evaluates a single field-match rule against an event.
+func (ch *YAMLChannel) matchRule(event map[string]interface{}, rule ProcessRule, contexts map[string]map[string]string) bool {
+	val := getStringField(event, rule.Field)
+
+	if rule.Equals != "" {
+		expected := substituteTemplate(rule.Equals, contexts)
+		if val == expected {
+			return true
+		}
+	}
+
+	if rule.Contains != "" {
+		needle := substituteTemplate(rule.Contains, contexts)
+		if strings.Contains(val, needle) {
+			return true
+		}
+	}
+
+	if rule.NotEmpty != nil && *rule.NotEmpty && val != "" {
+		return true
+	}
+
+	return false
+}
+
 // matchesProcessWhen checks process_when allowlist rules. If no rules are
 // configured, returns true (process everything). If rules are configured,
 // at least one must match (OR logic).
@@ -325,27 +358,78 @@ func (ch *YAMLChannel) matchesProcessWhen(event map[string]interface{}) bool {
 	contexts := ch.buildContexts()
 
 	for _, rule := range rules {
-		val := getStringField(event, rule.Field)
-
-		if rule.Equals != "" {
-			expected := substituteTemplate(rule.Equals, contexts)
-			if val == expected {
-				return true
-			}
-		}
-
-		if rule.Contains != "" {
-			needle := substituteTemplate(rule.Contains, contexts)
-			if strings.Contains(val, needle) {
-				return true
-			}
-		}
-
-		if rule.NotEmpty != nil && *rule.NotEmpty && val != "" {
+		if ch.matchRule(event, rule, contexts) {
 			return true
 		}
 	}
 	return false
+}
+
+// matchesDispatch checks inbound.dispatch.when rules (OR logic, same
+// semantics as process_when). Unlike matchesProcessWhen, an empty or absent
+// rule list never matches — dispatch is opt-in per rule, not a default-allow.
+func (ch *YAMLChannel) matchesDispatch(event map[string]interface{}) bool {
+	d := ch.spec.Inbound.Dispatch
+	if d == nil || len(d.When) == 0 {
+		return false
+	}
+
+	contexts := ch.buildContexts()
+
+	for _, rule := range d.When {
+		if ch.matchRule(event, rule, contexts) {
+			return true
+		}
+	}
+	return false
+}
+
+// dispatchDirect executes inbound.dispatch.call for a matched event,
+// templating it against {{event.*}} the same way outbound hooks are. Errors
+// are logged, not surfaced anywhere else — there is no InboundMessage to
+// attach an error frame to, since dispatch bypasses that path entirely.
+func (ch *YAMLChannel) dispatchDirect(event map[string]interface{}) {
+	contexts := ch.buildContexts()
+	eventCtx := make(map[string]string)
+	flattenDotted(event, "", eventCtx)
+	contexts["event"] = eventCtx
+
+	if err := ch.doHTTPCall(ch.ctx, ch.spec.Inbound.Dispatch.Call, contexts); err != nil {
+		slog.Warn("yaml-channel dispatch call failed", "channel", ch.spec.ID, "error", err)
+	}
+}
+
+// flattenDotted recursively flattens a nested event payload into dotted
+// template keys (e.g. "merge_request.iid"), unlike flattenToStringMap
+// (which nested objects pass through as a JSON blob under one key) — dispatch
+// calls need to pull individual fields out of nested webhook payloads like
+// GitLab's Note Hook (merge_request.iid, object_attributes.note, ...).
+func flattenDotted(m map[string]interface{}, prefix string, out map[string]string) {
+	for k, v := range m {
+		key := k
+		if prefix != "" {
+			key = prefix + "." + k
+		}
+		switch val := v.(type) {
+		case map[string]interface{}:
+			flattenDotted(val, key, out)
+		case string:
+			out[key] = val
+		case float64:
+			if val == float64(int64(val)) {
+				out[key] = fmt.Sprintf("%.0f", val)
+			} else {
+				out[key] = fmt.Sprintf("%g", val)
+			}
+		case bool:
+			out[key] = fmt.Sprintf("%t", val)
+		case nil:
+			out[key] = ""
+		default:
+			b, _ := json.Marshal(val)
+			out[key] = string(b)
+		}
+	}
 }
 
 // shouldSkip evaluates skip rules against the event.
