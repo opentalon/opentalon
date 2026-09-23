@@ -214,17 +214,24 @@ decide "email_kind" {
 
 The `.tln` source names a model; the backend is a config edit. Three interchangeable backends ship out of the box, all returning the same `{chosen, confidence, probabilities}` shape:
 
-- **`laya`** — an open-weights [ModernBERT typed-decisions](https://huggingface.co/convaiinnovations/laya-typed-decisions) classifier server
-- **`jev`** — the [typesafe.ai](https://typesafe.ai/) hosted System-1 API
-- **`local-logits`** — any OpenAI-compatible completions server; OpenTalon reads the first-token logprobs over the choices and softmaxes them locally ([the "Jev in 25 lines" recipe](https://www.nobodywho.ai/posts/jev-in-25-lines/))
+- **`laya`** — an open-weights [ModernBERT typed-decisions](https://huggingface.co/convaiinnovations/laya-typed-decisions) classifier server. Posts `{text, choices}`, accepts either per-choice `probabilities` (renormalized) or raw `scores` (softmaxed). A classifier forward pass, so it's input-token-only for cost. Point `base_url` at your laya server.
+- **`jev`** — the [typesafe.ai](https://typesafe.ai/) hosted System-1 API. Posts `{state, choices}` with a bearer `api_key`; the hosted answer is renormalized locally over the declared choices and its reported usage is passed through.
+- **`local-logits`** — any OpenAI-compatible completions server (llama.cpp `llama-server`, vLLM, Ollama's OpenAI shim, …). OpenTalon requests the first-token logprobs, keeps each choice's leading-token logprob, and **softmaxes them locally** ([the "Jev in 25 lines" recipe](https://www.nobodywho.ai/posts/jev-in-25-lines/)) — so calibration doesn't depend on the model behaving.
 
 ```yaml
 models:
   deciders:
-    decider:
+    decider:                                 # local-logits: self-hosted GGUF
       backend: local-logits
-      base_url: "http://localhost:8080/v1"
+      base_url: "http://localhost:8080/v1"   # OpenAI-compatible root
       model: "qwen3-0.6b"
+    jev-small:                               # jev: hosted System-1 API
+      backend: jev
+      base_url: "${JEV_URL}"
+      api_key: "${JEV_TOKEN}"
+    laya:                                    # laya: ModernBERT classifier server
+      backend: laya
+      base_url: "${LAYA_URL}"
 ```
 
 Because a decision is a model call, it goes through OpenTalon's provider layer and is **metered into `profile_usage`** and gated by the same per-profile token limits as every LLM call — never a side channel. Swapping laya ↔ Jev ↔ local-logits needs no code or `.tln` change. See [`internal/decideprovider`](internal/decideprovider/README.md).
