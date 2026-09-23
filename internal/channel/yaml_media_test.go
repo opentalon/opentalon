@@ -151,7 +151,7 @@ func TestEnrichEventCtx_ResolvesNestedPaths(t *testing.T) {
 		Description: "[Photo: {{event.photo.-1.file_id}}, voice: {{event.voice.duration}}s]",
 	}
 
-	enrichEventCtx(event, eventCtx, rule)
+	enrichEventCtx(event, eventCtx, mediaRuleTemplates(rule))
 
 	if got := eventCtx["photo.-1.file_id"]; got != "large456" {
 		t.Errorf("photo.-1.file_id = %q, want %q", got, "large456")
@@ -184,7 +184,7 @@ func TestEnrichEventCtx_ResolvesFromResolveSteps(t *testing.T) {
 		},
 	}
 
-	enrichEventCtx(event, eventCtx, rule)
+	enrichEventCtx(event, eventCtx, mediaRuleTemplates(rule))
 
 	if got := eventCtx["document.file_id"]; got != "doc123" {
 		t.Errorf("document.file_id = %q, want %q", got, "doc123")

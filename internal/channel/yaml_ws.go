@@ -201,6 +201,14 @@ func (ch *YAMLChannel) processInboundFrame(frame map[string]interface{}) {
 		return
 	}
 
+	// Deterministic dispatch bypasses the orchestrator entirely: if the event
+	// matches, call the declared endpoint directly and stop, before any
+	// event_type/process_when/skip gating or InboundMessage mapping runs.
+	if ch.matchesDispatch(event) {
+		ch.dispatchDirect(event)
+		return
+	}
+
 	// Check event type
 	eventType, _ := event["type"].(string)
 	if !ch.shouldProcess(event, eventType) {
@@ -313,6 +321,31 @@ func (ch *YAMLChannel) shouldProcess(event map[string]interface{}, eventType str
 	return false
 }
 
+// matchRule evaluates a single field-match rule against an event.
+func (ch *YAMLChannel) matchRule(event map[string]interface{}, rule ProcessRule, contexts map[string]map[string]string) bool {
+	val := getStringField(event, rule.Field)
+
+	if rule.Equals != "" {
+		expected := substituteTemplate(rule.Equals, contexts)
+		if val == expected {
+			return true
+		}
+	}
+
+	if rule.Contains != "" {
+		needle := substituteTemplate(rule.Contains, contexts)
+		if strings.Contains(val, needle) {
+			return true
+		}
+	}
+
+	if rule.NotEmpty != nil && *rule.NotEmpty && val != "" {
+		return true
+	}
+
+	return false
+}
+
 // matchesProcessWhen checks process_when allowlist rules. If no rules are
 // configured, returns true (process everything). If rules are configured,
 // at least one must match (OR logic).
@@ -325,27 +358,55 @@ func (ch *YAMLChannel) matchesProcessWhen(event map[string]interface{}) bool {
 	contexts := ch.buildContexts()
 
 	for _, rule := range rules {
-		val := getStringField(event, rule.Field)
-
-		if rule.Equals != "" {
-			expected := substituteTemplate(rule.Equals, contexts)
-			if val == expected {
-				return true
-			}
-		}
-
-		if rule.Contains != "" {
-			needle := substituteTemplate(rule.Contains, contexts)
-			if strings.Contains(val, needle) {
-				return true
-			}
-		}
-
-		if rule.NotEmpty != nil && *rule.NotEmpty && val != "" {
+		if ch.matchRule(event, rule, contexts) {
 			return true
 		}
 	}
 	return false
+}
+
+// matchesDispatch checks inbound.dispatch.when rules (OR logic, same
+// semantics as process_when). Unlike matchesProcessWhen, an empty or absent
+// rule list never matches — dispatch is opt-in per rule, not a default-allow.
+func (ch *YAMLChannel) matchesDispatch(event map[string]interface{}) bool {
+	d := ch.spec.Inbound.Dispatch
+	if d == nil || len(d.When) == 0 {
+		return false
+	}
+
+	contexts := ch.buildContexts()
+
+	for _, rule := range d.When {
+		if ch.matchRule(event, rule, contexts) {
+			return true
+		}
+	}
+	return false
+}
+
+// dispatchDirect executes inbound.dispatch.call for a matched event,
+// templating it against {{event.*}} the same way outbound hooks are. Errors
+// are logged, not surfaced anywhere else — there is no InboundMessage to
+// attach an error frame to, since dispatch bypasses that path entirely.
+func (ch *YAMLChannel) dispatchDirect(event map[string]interface{}) {
+	contexts := ch.buildContexts()
+	eventCtx := flattenToStringMap(event)
+	enrichEventCtx(event, eventCtx, httpCallTemplates(ch.spec.Inbound.Dispatch.Call))
+	contexts["event"] = eventCtx
+
+	if err := ch.doHTTPCall(ch.ctx, ch.spec.Inbound.Dispatch.Call, contexts); err != nil {
+		slog.Warn("yaml-channel dispatch call failed", "channel", ch.spec.ID, "error", err)
+	}
+}
+
+// httpCallTemplates collects the template strings of an HTTPCallSpec that
+// enrichEventCtx should scan for {{event.X}} references.
+func httpCallTemplates(call HTTPCallSpec) []string {
+	templates := []string{call.URL, call.Body}
+	for _, v := range call.Headers {
+		templates = append(templates, v)
+	}
+	return templates
 }
 
 // shouldSkip evaluates skip rules against the event.
@@ -764,7 +825,7 @@ func (ch *YAMLChannel) resolveMedia(event map[string]interface{}, eventCtx map[s
 		}
 		// Pre-resolve {{event.X.Y.Z}} template references against the raw event,
 		// because flattenToStringMap only captures top-level keys.
-		enrichEventCtx(event, eventCtx, rule)
+		enrichEventCtx(event, eventCtx, mediaRuleTemplates(rule))
 
 		contexts := ch.buildContexts()
 		contexts["event"] = eventCtx
@@ -786,12 +847,9 @@ func (ch *YAMLChannel) resolveMedia(event map[string]interface{}, eventCtx map[s
 	}
 }
 
-// enrichEventCtx pre-resolves nested event paths referenced in a media rule's
-// templates so that {{event.photo.-1.file_id}} works in the template engine
-// (which only does flat map lookups). It scans all template strings in the rule
-// for {{event.X}} references and resolves them via getStringField on the raw event.
-func enrichEventCtx(event map[string]interface{}, eventCtx map[string]string, rule MediaRule) {
-	// Collect all template strings from the rule
+// mediaRuleTemplates collects the template strings of a MediaRule that
+// enrichEventCtx should scan for {{event.X}} references.
+func mediaRuleTemplates(rule MediaRule) []string {
 	templates := []string{rule.Description}
 	if rule.Resolve != nil {
 		templates = append(templates, rule.Resolve.MimeType, rule.Resolve.Name)
@@ -802,6 +860,15 @@ func enrichEventCtx(event map[string]interface{}, eventCtx map[string]string, ru
 			}
 		}
 	}
+	return templates
+}
+
+// enrichEventCtx pre-resolves nested event paths referenced in the given
+// templates so that {{event.photo.-1.file_id}} works in the template engine
+// (which only does flat map lookups). It scans each template string for
+// {{event.X}} references and resolves them via getStringField on the raw
+// event — which, unlike flattenToStringMap, indexes into arrays.
+func enrichEventCtx(event map[string]interface{}, eventCtx map[string]string, templates []string) {
 	for _, tmpl := range templates {
 		for _, match := range contextRe.FindAllStringSubmatch(tmpl, -1) {
 			if len(match) == 3 && match[1] == "event" {

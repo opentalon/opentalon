@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -281,6 +282,7 @@ func newTestChannel(eventTypes []string, inbox chan<- pkg.InboundMessage) *YAMLC
 		selfVars: make(map[string]string),
 		config:   make(map[string]string),
 		inbox:    inbox,
+		client:   &http.Client{},
 		ctx:      ctx,
 		cancel:   cancel,
 	}
@@ -424,6 +426,179 @@ func TestWebhookHandler_SkipsBotMessages(t *testing.T) {
 		t.Errorf("expected no message, got %+v", msg)
 	case <-time.After(100 * time.Millisecond):
 		// correct: bot message was skipped
+	}
+}
+
+func TestWebhookHandler_DispatchBypassesOrchestrator(t *testing.T) {
+	type captured struct {
+		body        string
+		contentType string
+	}
+	calls := make(chan captured, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		calls <- captured{body: string(body), contentType: r.Header.Get("Content-Type")}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"note"}, inbox)
+	ch.spec.Inbound.Dispatch = &DispatchSpec{
+		When: []ProcessRule{{Field: "object_kind", Equals: "note"}},
+		Call: HTTPCallSpec{
+			Method:  "POST",
+			URL:     server.URL + "/trigger/pipeline",
+			Headers: map[string]string{"Content-Type": "application/json"},
+			Body:    `{"variables":{"MR_IID":"{{event.merge_request.iid}}"}}`,
+		},
+	}
+	wh := &WebhookInboundSpec{ResponseCode: 200}
+	handler := ch.buildWebhookHandler(wh)
+
+	body := `{"object_kind":"note","merge_request":{"iid":"42"},"text":"@talooner /review"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", rec.Code)
+	}
+
+	var got captured
+	select {
+	case got = <-calls:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timeout: dispatch call was not made")
+	}
+
+	select {
+	case msg := <-inbox:
+		t.Fatalf("expected dispatch to bypass orchestrator, got InboundMessage %+v", msg)
+	default:
+	}
+
+	if got.body != `{"variables":{"MR_IID":"42"}}` {
+		t.Errorf("dispatch call body = %q, want %q", got.body, `{"variables":{"MR_IID":"42"}}`)
+	}
+	if got.contentType != "application/json" {
+		t.Errorf("dispatch call Content-Type = %q, want application/json", got.contentType)
+	}
+}
+
+func TestWebhookHandler_DispatchResolvesArrayFields(t *testing.T) {
+	type captured struct{ body string }
+	calls := make(chan captured, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		calls <- captured{body: string(body)}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	notEmpty := true
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"push"}, inbox)
+	ch.spec.Inbound.Dispatch = &DispatchSpec{
+		When: []ProcessRule{{Field: "commits.0.id", NotEmpty: &notEmpty}},
+		Call: HTTPCallSpec{
+			Method:  "POST",
+			URL:     server.URL,
+			Headers: map[string]string{"Content-Type": "application/json"},
+			Body:    `{"sha":"{{event.commits.0.id}}"}`,
+		},
+	}
+	wh := &WebhookInboundSpec{ResponseCode: 200}
+	handler := ch.buildWebhookHandler(wh)
+
+	body := `{"object_kind":"push","commits":[{"id":"abc123"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", rec.Code)
+	}
+
+	select {
+	case got := <-calls:
+		if got.body != `{"sha":"abc123"}` {
+			t.Errorf("dispatch call body = %q, want %q", got.body, `{"sha":"abc123"}`)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timeout: dispatch call was not made")
+	}
+}
+
+func TestWebhookHandler_DispatchNoMatchFallsThroughToInbox(t *testing.T) {
+	dispatchCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dispatchCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"note"}, inbox)
+	ch.spec.Inbound.Mapping = MappingSpec{
+		ConversationID: MappingField{Field: "conversation.id"},
+		SenderID:       MappingField{Field: "from.id"},
+		Content:        MappingField{Field: "text"},
+	}
+	ch.spec.Inbound.Dispatch = &DispatchSpec{
+		When: []ProcessRule{{Field: "object_kind", Equals: "note"}},
+		Call: HTTPCallSpec{Method: "POST", URL: server.URL},
+	}
+	wh := &WebhookInboundSpec{ResponseCode: 200}
+	handler := ch.buildWebhookHandler(wh)
+
+	body := `{"type":"note","object_kind":"issue","text":"unrelated","from":{"id":"u1"},"conversation":{"id":"c1"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	select {
+	case msg := <-inbox:
+		if msg.Content != "unrelated" {
+			t.Errorf("Content = %q, want %q", msg.Content, "unrelated")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timeout: no message delivered to inbox")
+	}
+
+	if dispatchCalled {
+		t.Error("dispatch call fired despite non-matching rule")
+	}
+}
+
+func TestWebhookHandler_DispatchCallFailureDoesNotCrashOrLeakToInbox(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"note"}, inbox)
+	ch.spec.Inbound.Dispatch = &DispatchSpec{
+		When: []ProcessRule{{Field: "object_kind", Equals: "note"}},
+		Call: HTTPCallSpec{Method: "POST", URL: server.URL},
+	}
+	wh := &WebhookInboundSpec{ResponseCode: 200}
+	handler := ch.buildWebhookHandler(wh)
+
+	body := `{"object_kind":"note"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", rec.Code)
+	}
+
+	select {
+	case msg := <-inbox:
+		t.Fatalf("expected no InboundMessage on dispatch failure, got %+v", msg)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

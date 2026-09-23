@@ -69,6 +69,7 @@ type InboundSpec struct {
 	EventTypes        []string            `yaml:"event_types"`
 	AlwaysProcessWhen *FieldMatch         `yaml:"always_process_when"`
 	ProcessWhen       []ProcessRule       `yaml:"process_when"`
+	Dispatch          *DispatchSpec       `yaml:"dispatch"`
 	Skip              []SkipRule          `yaml:"skip"`
 	// Enrich runs per-message HTTP lookups before extractMessage. Results
 	// are exposed in the template context under {{enrich.<step>.<field>}}
@@ -163,6 +164,17 @@ type ProcessRule struct {
 	Equals   string `yaml:"equals"`    // match exact value (supports templates)
 	Contains string `yaml:"contains"`  // match substring (supports templates)
 	NotEmpty *bool  `yaml:"not_empty"` // match if field is non-empty
+}
+
+// DispatchSpec declares an opt-in deterministic bypass: when an inbound
+// event matches any rule in When (same match semantics as ProcessRule, OR'd
+// together), Call is executed directly instead of the event being mapped to
+// an InboundMessage and handed to the LLM orchestrator. When is required —
+// an empty list never matches, since a permissive default would silently
+// take every event off the orchestrator path.
+type DispatchSpec struct {
+	When []ProcessRule `yaml:"when"`
+	Call HTTPCallSpec  `yaml:"call"`
 }
 
 // PollingInboundSpec configures an HTTP polling loop for inbound messages.

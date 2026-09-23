@@ -523,6 +523,46 @@ kubectl logs -n opentalon -l app=opentalon -f
 - **The `/tmp` emptyDir mount is required.** The runtime image includes the Go toolchain for compiling plugins. Go needs writable `GOCACHE=/tmp/go-build` and `GOPATH=/tmp/go`.
 - **No readiness probe.** The pod shows `1/1` immediately. Add a probe if you need one.
 
+### Exposing an inbound webhook channel (Ingress)
+
+The Service above is ClusterIP-only, so a YAML channel using `inbound.http_webhook`
+(e.g. a Slack Events API webhook, or a relay channel receiving a third-party host's
+webhooks) isn't reachable from outside the cluster by default. Add an Ingress in
+front of the same Service, routed to the webhook's path and port (default `3978`,
+overridable per channel via `inbound.http_webhook.port`):
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: opentalon-webhook
+  namespace: opentalon
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - webhook.example.com
+      secretName: opentalon-webhook-tls
+  rules:
+    - host: webhook.example.com
+      http:
+        paths:
+          - path: /api/messages
+            pathType: Prefix
+            backend:
+              service:
+                name: opentalon
+                port:
+                  name: http
+```
+
+Adjust `ingressClassName`, the TLS issuer annotation, and `path` for your ingress
+controller and the channel's configured `inbound.http_webhook.path`. If more than one
+webhook channel shares the process's default port, add one `path` entry per channel
+rather than a separate Ingress — they all resolve to the same Service/port.
+
 ### Operator vs Raw Manifests
 
 | | Operator | Raw Manifests |

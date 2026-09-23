@@ -247,6 +247,76 @@ func TestShouldProcess(t *testing.T) {
 	}
 }
 
+func TestMatchesDispatch(t *testing.T) {
+	ch := &YAMLChannel{
+		spec: &YAMLChannelSpec{
+			Inbound: InboundSpec{
+				Dispatch: &DispatchSpec{
+					When: []ProcessRule{
+						{Field: "object_kind", Equals: "note"},
+						{Field: "text", Contains: "@talooner /review"},
+					},
+				},
+			},
+		},
+		selfVars: make(map[string]string),
+		config:   make(map[string]string),
+	}
+
+	tests := []struct {
+		name  string
+		event map[string]interface{}
+		want  bool
+	}{
+		{
+			name:  "equals rule matches",
+			event: map[string]interface{}{"object_kind": "note"},
+			want:  true,
+		},
+		{
+			name:  "contains rule matches",
+			event: map[string]interface{}{"object_kind": "issue", "text": "please @talooner /review this"},
+			want:  true,
+		},
+		{
+			name:  "no rule matches",
+			event: map[string]interface{}{"object_kind": "issue", "text": "unrelated comment"},
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ch.matchesDispatch(tt.event)
+			if got != tt.want {
+				t.Errorf("matchesDispatch = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMatchesDispatch_NilOrEmptyNeverMatches(t *testing.T) {
+	event := map[string]interface{}{"object_kind": "note"}
+
+	noDispatch := &YAMLChannel{
+		spec:     &YAMLChannelSpec{Inbound: InboundSpec{}},
+		selfVars: make(map[string]string),
+		config:   make(map[string]string),
+	}
+	if noDispatch.matchesDispatch(event) {
+		t.Error("matchesDispatch = true with no dispatch configured, want false")
+	}
+
+	emptyWhen := &YAMLChannel{
+		spec:     &YAMLChannelSpec{Inbound: InboundSpec{Dispatch: &DispatchSpec{}}},
+		selfVars: make(map[string]string),
+		config:   make(map[string]string),
+	}
+	if emptyWhen.matchesDispatch(event) {
+		t.Error("matchesDispatch = true with empty When list, want false (opt-in, not default-allow)")
+	}
+}
+
 func TestApplyTransforms(t *testing.T) {
 	ch := &YAMLChannel{
 		spec: &YAMLChannelSpec{
