@@ -198,6 +198,37 @@ The expert writes those rules in Tln. The LLM proposes actions. The Tln workflow
 
 See the [tln-plugin repo](https://github.com/opentalon/tln-plugin) and [tln-language](https://github.com/opentalon/tln-language) for the language reference and examples.
 
+### Typed decisions (System-1 models)
+
+Some steps aren't a full LLM turn or a hard-coded rule — they're a single **typed decision**: pick one label from a fixed set, with a calibrated confidence. Tln expresses this with a [`decide` block](https://github.com/opentalon/tln-language/blob/master/docs/decide.md), and OpenTalon services it through a **decider** — a small "System-1" decision model bound by name in config:
+
+```tln
+decide "email_kind" {
+  for records where folder == "Inbox"
+  choices ["Legitimate", "Spam", "Phishing"]
+  ask concat("Subject: ", attr "subject", "\n\n", attr "body")
+  using model "decider"
+  confidence >= 0.9
+}
+```
+
+The `.tln` source names a model; the backend is a config edit. Three interchangeable backends ship out of the box, all returning the same `{chosen, confidence, probabilities}` shape:
+
+- **`laya`** — an open-weights [ModernBERT typed-decisions](https://huggingface.co/convaiinnovations/laya-typed-decisions) classifier server
+- **`jev`** — the [typesafe.ai](https://typesafe.ai/) hosted System-1 API
+- **`local-logits`** — any OpenAI-compatible completions server; OpenTalon reads the first-token logprobs over the choices and softmaxes them locally ([the "Jev in 25 lines" recipe](https://www.nobodywho.ai/posts/jev-in-25-lines/))
+
+```yaml
+models:
+  deciders:
+    decider:
+      backend: local-logits
+      base_url: "http://localhost:8080/v1"
+      model: "qwen3-0.6b"
+```
+
+Because a decision is a model call, it goes through OpenTalon's provider layer and is **metered into `profile_usage`** and gated by the same per-profile token limits as every LLM call — never a side channel. Swapping laya ↔ Jev ↔ local-logits needs no code or `.tln` change. See [`internal/decideprovider`](internal/decideprovider/README.md).
+
 ## Documentation
 
 Most operational details live in [`docs/`](docs/). Highlights:
