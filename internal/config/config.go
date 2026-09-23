@@ -551,6 +551,20 @@ type SessionConfig struct {
 type ModelsConfig struct {
 	Providers map[string]ProviderConfig `yaml:"providers"`
 	Catalog   map[string]CatalogEntry   `yaml:"catalog"`
+	// Deciders are external "System 1" typed-decision models, keyed by the name
+	// a tln `decide "..." using model "<name>"` block references. Serviced by
+	// internal/decideprovider; metered into profile_usage like every LLM call.
+	Deciders map[string]DeciderConfig `yaml:"deciders"`
+}
+
+// DeciderConfig configures one typed-decision backend (issue #361). Backend is
+// one of "laya", "jev", or "local-logits"; the remaining fields are the backend
+// endpoint and auth. See internal/decideprovider.
+type DeciderConfig struct {
+	Backend string `yaml:"backend"`  // "laya" | "jev" | "local-logits"
+	BaseURL string `yaml:"base_url"` // backend endpoint (required)
+	APIKey  string `yaml:"api_key"`  // optional bearer / auth token
+	Model   string `yaml:"model"`    // served model id (local-logits)
 }
 
 type ProviderConfig struct {
@@ -722,6 +736,11 @@ func expandEnvInProviders(cfg *Config) {
 		p.BaseURL = expandEnv(p.BaseURL)
 		p.APIKey = expandEnv(p.APIKey)
 		cfg.Models.Providers[name] = p
+	}
+	for name, d := range cfg.Models.Deciders {
+		d.BaseURL = expandEnv(d.BaseURL)
+		d.APIKey = expandEnv(d.APIKey)
+		cfg.Models.Deciders[name] = d
 	}
 }
 
