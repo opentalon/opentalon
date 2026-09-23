@@ -33,6 +33,26 @@ models:
       alias: deepseek-r
       weight: 20
 
+  # deciders — external "System 1" typed-decision models (issue #361). A tln
+  # `decide "..." using model "<name>"` block resolves <name> here; the call is
+  # metered into profile_usage like every LLM call. backend is one of:
+  #   laya          — a laya typed-decisions server (open-weights ModernBERT)
+  #   jev           — the Jev hosted System-1 API (typesafe.ai)
+  #   local-logits  — any OpenAI-compatible completions server; reads first-token
+  #                   logprobs over the choices and softmaxes them locally
+  # deciders:
+  #   decider:
+  #     backend: local-logits
+  #     base_url: "http://localhost:8080/v1"   # OpenAI-compatible root
+  #     model: "qwen3-0.6b"
+  #   jev-small:
+  #     backend: jev
+  #     base_url: "${JEV_URL}"
+  #     api_key: "${JEV_TOKEN}"
+  #   laya:
+  #     backend: laya
+  #     base_url: "${LAYA_URL}"
+
 routing:
   primary: deepseek/deepseek-chat
   # When fallbacks is non-empty, core prefers `primary` while its endpoint is
