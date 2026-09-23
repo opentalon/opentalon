@@ -116,27 +116,58 @@ func buildLogitsPrompt(state string, choices []string) string {
 }
 
 // matchChoiceLogits keeps, for each declared choice, the highest logprob among
-// returned tokens that are a leading fragment of that choice (case- and
-// whitespace-insensitive). Tokenizers emit leading-space and sub-word tokens, so
-// a prefix match is the robust way to tie a token back to a choice label.
-// Choices whose leading token never appears are left absent (softmaxLogits reads
-// that as probability 0).
+// returned tokens that identify it (case- and whitespace-insensitive).
+// Tokenizers emit leading-space and sub-word tokens, so matching a token back to
+// a choice label needs care when labels share a prefix:
+//
+//   - An exact match (token == label) always wins and is unambiguous — so with
+//     choices ["Spam","Spammy"] the token "Spam" credits only "Spam".
+//   - A non-exact prefix match ("Spamm" -> "Spammy") counts only when exactly
+//     one label is prefixed by that token. A token that prefixes two or more
+//     labels (and matches none exactly) is genuinely ambiguous from a single
+//     position and is dropped rather than split equally across them — which the
+//     old code did, letting finalize's tie-break silently pick the first.
+//
+// Choices no token identifies are left absent (softmaxLogits reads that as
+// probability 0; if every choice is absent it falls back to uniform — honest for
+// deeply prefix-colliding labels the model can't distinguish in one token).
 func matchChoiceLogits(top map[string]float64, choices []string) map[string]float64 {
+	lower := make([]string, len(choices))
+	for i, c := range choices {
+		lower[i] = strings.ToLower(strings.TrimSpace(c))
+	}
 	out := make(map[string]float64, len(choices))
+	credit := func(i int, lp float64) {
+		c := choices[i]
+		if cur, ok := out[c]; !ok || lp > cur {
+			out[c] = lp
+		}
+	}
 	for tok, lp := range top {
 		t := strings.ToLower(strings.TrimSpace(tok))
 		if t == "" {
 			continue
 		}
-		for _, c := range choices {
-			cl := strings.ToLower(strings.TrimSpace(c))
-			if cl == "" || !strings.HasPrefix(cl, t) {
+		exact, prefixed := -1, -1
+		prefixCount := 0
+		for i, cl := range lower {
+			switch {
+			case cl == "" || !strings.HasPrefix(cl, t):
 				continue
-			}
-			if cur, ok := out[c]; !ok || lp > cur {
-				out[c] = lp
+			case cl == t:
+				exact = i
+			default:
+				prefixed = i
+				prefixCount++
 			}
 		}
+		switch {
+		case exact >= 0:
+			credit(exact, lp) // exact match is unambiguous
+		case prefixCount == 1:
+			credit(prefixed, lp) // unique prefix
+		}
+		// prefixCount > 1 with no exact match: ambiguous → drop.
 	}
 	return out
 }

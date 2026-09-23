@@ -737,6 +737,9 @@ func expandEnvInProviders(cfg *Config) {
 		p.APIKey = expandEnv(p.APIKey)
 		cfg.Models.Providers[name] = p
 	}
+}
+
+func expandEnvInDeciders(cfg *Config) {
 	for name, d := range cfg.Models.Deciders {
 		d.BaseURL = expandEnv(d.BaseURL)
 		d.APIKey = expandEnv(d.APIKey)
@@ -772,6 +775,7 @@ func Parse(data []byte) (*Config, error) {
 	unresolvedMu.Unlock()
 
 	expandEnvInProviders(&cfg)
+	expandEnvInDeciders(&cfg)
 	expandEnvInPlugins(&cfg)
 	expandEnvInChannels(&cfg)
 	expandEnvInBootstrap(&cfg)

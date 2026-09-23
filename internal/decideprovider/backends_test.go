@@ -155,6 +155,51 @@ func TestMatchChoiceLogits_PrefixAndMax(t *testing.T) {
 	}
 }
 
+func TestMatchChoiceLogits_SharedPrefixIsDisambiguated(t *testing.T) {
+	// "Spam" is a prefix of "Spammy". Exact tokens must credit only their own
+	// label; the shared-but-longer token "Spamm" resolves uniquely to Spammy.
+	got := matchChoiceLogits(
+		map[string]float64{"Spam": -0.3, "Spammy": -1.0, "Spamm": -0.1},
+		[]string{"Spam", "Spammy"},
+	)
+	if got["Spam"] != -0.3 {
+		t.Errorf("Spam = %v, want -0.3 (exact match only)", got["Spam"])
+	}
+	if got["Spammy"] != -0.1 { // max(-1.0 exact, -0.1 unique prefix)
+		t.Errorf("Spammy = %v, want -0.1", got["Spammy"])
+	}
+}
+
+func TestMatchChoiceLogits_AmbiguousPrefixDropped(t *testing.T) {
+	// A token that prefixes two labels and matches neither exactly is ambiguous;
+	// it must not be split equally across them (the old silent-collision bug).
+	got := matchChoiceLogits(map[string]float64{"Spamm": -0.2}, []string{"Spammy", "Spammer"})
+	if len(got) != 0 {
+		t.Errorf("ambiguous token credited someone: %#v", got)
+	}
+}
+
+func TestLocalLogits_SharedPrefixChoicesDoNotCollide(t *testing.T) {
+	// End-to-end: the decision must reflect the distinguishing tokens, not the
+	// declared-order tie-break that a collision would trigger.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"logprobs": map[string]any{
+				"top_logprobs": []map[string]float64{{"Spam": -2.0, "Spammy": -0.1}},
+			}}},
+		})
+	}))
+	defer srv.Close()
+	dec, err := NewLocalLogitsProvider("ll", srv.URL, "", "m").Decide(context.Background(),
+		&Request{State: "x", Choices: []string{"Spam", "Spammy"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dec.Chosen != "Spammy" {
+		t.Errorf("chosen = %q, want Spammy (its token dominates despite Spam being first)", dec.Chosen)
+	}
+}
+
 func TestBackends_HTTPErrorSurfaces(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)

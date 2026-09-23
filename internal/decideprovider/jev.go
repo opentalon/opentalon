@@ -44,7 +44,11 @@ type jevRequest struct {
 }
 
 type jevResponse struct {
-	Chosen        string             `json:"chosen"`
+	Chosen string `json:"chosen"`
+	// Confidence is part of Jev's wire shape but intentionally NOT trusted:
+	// Decision.Confidence is recomputed from the renormalized distribution in
+	// finalize (calibration is honored host-side, not taken on faith). Kept here
+	// to document the contract and to decode responses without a strict-field error.
 	Confidence    float64            `json:"confidence"`
 	Probabilities map[string]float64 `json:"probabilities"`
 	Usage         *struct {
