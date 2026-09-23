@@ -295,40 +295,6 @@ func TestMatchesDispatch(t *testing.T) {
 	}
 }
 
-func TestFlattenDotted(t *testing.T) {
-	event := map[string]interface{}{
-		"object_kind": "note",
-		"merge_request": map[string]interface{}{
-			"iid": float64(42),
-		},
-		"object_attributes": map[string]interface{}{
-			"note": "@talooner /review",
-			"author": map[string]interface{}{
-				"username": "eve",
-			},
-		},
-		"flag": true,
-		"note": nil,
-	}
-
-	out := make(map[string]string)
-	flattenDotted(event, "", out)
-
-	want := map[string]string{
-		"object_kind":                       "note",
-		"merge_request.iid":                 "42",
-		"object_attributes.note":            "@talooner /review",
-		"object_attributes.author.username": "eve",
-		"flag":                              "true",
-		"note":                              "",
-	}
-	for k, v := range want {
-		if out[k] != v {
-			t.Errorf("out[%q] = %q, want %q", k, out[k], v)
-		}
-	}
-}
-
 func TestMatchesDispatch_NilOrEmptyNeverMatches(t *testing.T) {
 	event := map[string]interface{}{"object_kind": "note"}
 

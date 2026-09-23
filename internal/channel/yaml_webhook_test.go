@@ -486,6 +486,50 @@ func TestWebhookHandler_DispatchBypassesOrchestrator(t *testing.T) {
 	}
 }
 
+func TestWebhookHandler_DispatchResolvesArrayFields(t *testing.T) {
+	type captured struct{ body string }
+	calls := make(chan captured, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		calls <- captured{body: string(body)}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	notEmpty := true
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"push"}, inbox)
+	ch.spec.Inbound.Dispatch = &DispatchSpec{
+		When: []ProcessRule{{Field: "commits.0.id", NotEmpty: &notEmpty}},
+		Call: HTTPCallSpec{
+			Method:  "POST",
+			URL:     server.URL,
+			Headers: map[string]string{"Content-Type": "application/json"},
+			Body:    `{"sha":"{{event.commits.0.id}}"}`,
+		},
+	}
+	wh := &WebhookInboundSpec{ResponseCode: 200}
+	handler := ch.buildWebhookHandler(wh)
+
+	body := `{"object_kind":"push","commits":[{"id":"abc123"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", rec.Code)
+	}
+
+	select {
+	case got := <-calls:
+		if got.body != `{"sha":"abc123"}` {
+			t.Errorf("dispatch call body = %q, want %q", got.body, `{"sha":"abc123"}`)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timeout: dispatch call was not made")
+	}
+}
+
 func TestWebhookHandler_DispatchNoMatchFallsThroughToInbox(t *testing.T) {
 	dispatchCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -390,8 +390,8 @@ func (ch *YAMLChannel) matchesDispatch(event map[string]interface{}) bool {
 // attach an error frame to, since dispatch bypasses that path entirely.
 func (ch *YAMLChannel) dispatchDirect(event map[string]interface{}) {
 	contexts := ch.buildContexts()
-	eventCtx := make(map[string]string)
-	flattenDotted(event, "", eventCtx)
+	eventCtx := flattenToStringMap(event)
+	enrichEventCtx(event, eventCtx, httpCallTemplates(ch.spec.Inbound.Dispatch.Call))
 	contexts["event"] = eventCtx
 
 	if err := ch.doHTTPCall(ch.ctx, ch.spec.Inbound.Dispatch.Call, contexts); err != nil {
@@ -399,37 +399,14 @@ func (ch *YAMLChannel) dispatchDirect(event map[string]interface{}) {
 	}
 }
 
-// flattenDotted recursively flattens a nested event payload into dotted
-// template keys (e.g. "merge_request.iid"), unlike flattenToStringMap
-// (which nested objects pass through as a JSON blob under one key) — dispatch
-// calls need to pull individual fields out of nested webhook payloads like
-// GitLab's Note Hook (merge_request.iid, object_attributes.note, ...).
-func flattenDotted(m map[string]interface{}, prefix string, out map[string]string) {
-	for k, v := range m {
-		key := k
-		if prefix != "" {
-			key = prefix + "." + k
-		}
-		switch val := v.(type) {
-		case map[string]interface{}:
-			flattenDotted(val, key, out)
-		case string:
-			out[key] = val
-		case float64:
-			if val == float64(int64(val)) {
-				out[key] = fmt.Sprintf("%.0f", val)
-			} else {
-				out[key] = fmt.Sprintf("%g", val)
-			}
-		case bool:
-			out[key] = fmt.Sprintf("%t", val)
-		case nil:
-			out[key] = ""
-		default:
-			b, _ := json.Marshal(val)
-			out[key] = string(b)
-		}
+// httpCallTemplates collects the template strings of an HTTPCallSpec that
+// enrichEventCtx should scan for {{event.X}} references.
+func httpCallTemplates(call HTTPCallSpec) []string {
+	templates := []string{call.URL, call.Body}
+	for _, v := range call.Headers {
+		templates = append(templates, v)
 	}
+	return templates
 }
 
 // shouldSkip evaluates skip rules against the event.
@@ -848,7 +825,7 @@ func (ch *YAMLChannel) resolveMedia(event map[string]interface{}, eventCtx map[s
 		}
 		// Pre-resolve {{event.X.Y.Z}} template references against the raw event,
 		// because flattenToStringMap only captures top-level keys.
-		enrichEventCtx(event, eventCtx, rule)
+		enrichEventCtx(event, eventCtx, mediaRuleTemplates(rule))
 
 		contexts := ch.buildContexts()
 		contexts["event"] = eventCtx
@@ -870,12 +847,9 @@ func (ch *YAMLChannel) resolveMedia(event map[string]interface{}, eventCtx map[s
 	}
 }
 
-// enrichEventCtx pre-resolves nested event paths referenced in a media rule's
-// templates so that {{event.photo.-1.file_id}} works in the template engine
-// (which only does flat map lookups). It scans all template strings in the rule
-// for {{event.X}} references and resolves them via getStringField on the raw event.
-func enrichEventCtx(event map[string]interface{}, eventCtx map[string]string, rule MediaRule) {
-	// Collect all template strings from the rule
+// mediaRuleTemplates collects the template strings of a MediaRule that
+// enrichEventCtx should scan for {{event.X}} references.
+func mediaRuleTemplates(rule MediaRule) []string {
 	templates := []string{rule.Description}
 	if rule.Resolve != nil {
 		templates = append(templates, rule.Resolve.MimeType, rule.Resolve.Name)
@@ -886,6 +860,15 @@ func enrichEventCtx(event map[string]interface{}, eventCtx map[string]string, ru
 			}
 		}
 	}
+	return templates
+}
+
+// enrichEventCtx pre-resolves nested event paths referenced in the given
+// templates so that {{event.photo.-1.file_id}} works in the template engine
+// (which only does flat map lookups). It scans each template string for
+// {{event.X}} references and resolves them via getStringField on the raw
+// event — which, unlike flattenToStringMap, indexes into arrays.
+func enrichEventCtx(event map[string]interface{}, eventCtx map[string]string, templates []string) {
 	for _, tmpl := range templates {
 		for _, match := range contextRe.FindAllStringSubmatch(tmpl, -1) {
 			if len(match) == 3 && match[1] == "event" {
