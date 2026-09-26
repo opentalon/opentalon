@@ -3326,6 +3326,22 @@ Rules:
 5. If a link to the record (a path such as /items/123) appears in the conversation, render the record name as that link.
 6. Keep it short: 1-3 sentences plus at most one line per field. End with a clear yes/no question. You are ONLY asking permission — do not claim anything has happened yet.`
 
+// confirmationNarrateSystemPrompt returns the narrator's system message. When
+// the turn carries a reply-language directive (see replyLanguageDirective), it
+// is appended and ranked above rule 1: the "latest request" the narrator sees
+// may be a confirmation-button label or another reply too short to show the
+// user's language, while the directive was already resolved from the user's own
+// words, looking back past such replies. Without a directive the prompt is
+// unchanged and rule 1 applies.
+func confirmationNarrateSystemPrompt(ctx context.Context) string {
+	dir := strings.TrimSpace(replyLanguageDirectiveFromContext(ctx))
+	if dir == "" {
+		return confirmationNarratePrompt
+	}
+	return confirmationNarratePrompt + "\n\n" + dir +
+		"\nThis reply-language instruction takes precedence over rule 1."
+}
+
 // narrateConfirmation produces the user-facing confirmation prompt with the main
 // LLM. It feeds the recent conversation so the model can resolve an opaque
 // scope_token to the count + example records the preceding list call returned,
@@ -3356,7 +3372,7 @@ func (o *Orchestrator) narrateConfirmation(ctx context.Context, recent []provide
 	}
 	resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{
 		Messages: []provider.Message{
-			{Role: provider.RoleSystem, Content: confirmationNarratePrompt},
+			{Role: provider.RoleSystem, Content: confirmationNarrateSystemPrompt(ctx)},
 			{Role: provider.RoleUser, Content: ub.String()},
 		},
 	})
