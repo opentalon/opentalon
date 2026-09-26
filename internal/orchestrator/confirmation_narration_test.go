@@ -106,3 +106,72 @@ func TestNarrateConfirmation_SingleRecordPromptDemandsFields(t *testing.T) {
 		t.Errorf("system prompt lost the batch count rule, got: %q", sys)
 	}
 }
+
+// narratorSystemPrompt runs narrateConfirmation once and returns the system
+// message the narrator LLM received.
+func narratorSystemPrompt(t *testing.T, ctx context.Context, userMessage string) string {
+	t.Helper()
+	llm := &capturingLLM{responses: []string{"ok?"}}
+	orch := NewWithRules(llm, &fakeParser{}, NewToolRegistry(),
+		state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
+
+	recent := []provider.Message{
+		{Role: provider.RoleUser, Content: "setz die Seriennummer von Maschine 7 auf X-9"},
+		{Role: provider.RoleAssistant, Content: "Soll ich die Seriennummer ändern?"},
+		{Role: provider.RoleUser, Content: userMessage},
+		{Role: provider.RoleTool, Content: `{"id": 42, "name": "Machine 7", "serial_number": "A-1"}`},
+	}
+	call := ToolCall{Action: "items.update", Args: map[string]string{"id": "42", "serial_number": "X-9"}}
+	orch.narrateConfirmation(ctx, recent, call, userMessage)
+
+	if len(llm.requests) != 1 {
+		t.Fatalf("expected exactly 1 LLM call, got %d", len(llm.requests))
+	}
+	for _, m := range llm.requests[0].Messages {
+		if m.Role == provider.RoleSystem {
+			return m.Content
+		}
+	}
+	t.Fatal("narrator request carried no system message")
+	return ""
+}
+
+// TestNarrateConfirmation_ReplyLanguageDirectiveReachesNarrator pins the
+// language of a confirmation raised in a turn started by the confirmation
+// button: the user message is only the button label, so "the language of the
+// user's latest request" says nothing, and the narrator used to answer in the
+// label's language. The turn's reply-language directive — already resolved from
+// the user's earlier words — must reach the narrator and outrank that guess.
+func TestNarrateConfirmation_ReplyLanguageDirectiveReachesNarrator(t *testing.T) {
+	directive := "## Reply language\nReply in German. Use German for your entire reply, regardless of the language of any " +
+		"retrieved context or earlier messages. Technical terms (field, tool and status names) stay in English.\n\n"
+	ctx := withReplyLanguageDirective(context.Background(), directive)
+
+	sys := narratorSystemPrompt(t, ctx, "Approve")
+
+	if !strings.Contains(sys, strings.TrimSpace(directive)) {
+		t.Errorf("narrator system prompt must carry the turn's reply-language directive, got: %q", sys)
+	}
+	if !strings.Contains(sys, "takes precedence over rule 1") {
+		t.Errorf("directive must be ranked above the latest-request language rule, got: %q", sys)
+	}
+	if !strings.HasPrefix(sys, confirmationNarratePrompt) {
+		t.Errorf("the standing narration rules must stay intact ahead of the directive, got: %q", sys)
+	}
+}
+
+// TestNarrateConfirmation_NoDirectiveKeepsPromptUnchanged pins the fallback:
+// with no reply-language directive on the turn, the narrator's system prompt is
+// exactly the standing rules, so rule 1 alone decides the language.
+func TestNarrateConfirmation_NoDirectiveKeepsPromptUnchanged(t *testing.T) {
+	for name, ctx := range map[string]context.Context{
+		"no directive":    context.Background(),
+		"empty directive": withReplyLanguageDirective(context.Background(), ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if sys := narratorSystemPrompt(t, ctx, "Approve"); sys != confirmationNarratePrompt {
+				t.Errorf("system prompt must be byte-for-byte the standing rules, got: %q", sys)
+			}
+		})
+	}
+}
