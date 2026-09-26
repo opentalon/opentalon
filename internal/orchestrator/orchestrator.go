@@ -2508,9 +2508,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// Phantom-completion guard. The model loaded a write tool this
 			// turn, never attempted ANY write, and is ending the turn in
 			// plain text — the exact posture in which it narrates mutations
-			// that never happened ("The item has been assigned…"). One nudge,
-			// once per turn: perform the action, correct the claim, or ask
-			// the user — all three resolve the situation; an honest
+			// that never happened ("The item has been assigned…") or
+			// announces one it then never makes ("I will now delete…").
+			// One nudge, once per turn: perform the action, correct the
+			// claim, or ask the user — all three resolve the situation; an honest
 			// clarifying question is simply repeated and costs one round.
 			// It cannot fire on read-only traffic (no write tool gets loaded
 			// there) and cannot loop (actionNudged latches). Placed AFTER the

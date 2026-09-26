@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
 
@@ -18,11 +19,13 @@ import (
 // this turn + no write attempted + plain-text finish → exactly one nudge.
 
 // phantomOrch wires a registry with one read-only lookup and one write action,
-// a scripted text-mode LLM, and a parser that understands two markers:
+// a scripted text-mode LLM that records every request (so tests can see
+// exactly what the nudge round was sent), and a parser that understands two
+// markers:
 // "LOAD"  → a _meta__load_tools call for the write tool
 // "WRITE" → a direct call to the write tool
 // Any other response parses to nil, i.e. a final plain-text answer.
-func phantomOrch(t *testing.T, responses []string) (*Orchestrator, *fakeLLM, string) {
+func phantomOrch(t *testing.T, responses []string) (*Orchestrator, *capturingLLM, string) {
 	t.Helper()
 	registry := NewToolRegistry()
 	if err := registry.Register(PluginCapability{
@@ -36,7 +39,7 @@ func phantomOrch(t *testing.T, responses []string) (*Orchestrator, *fakeLLM, str
 	}
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
-	llm := &fakeLLM{responses: responses}
+	llm := &capturingLLM{responses: responses}
 	parser := &fakeParser{parseFn: func(response string) []ToolCall {
 		switch {
 		case strings.Contains(response, "LOAD"):
@@ -50,6 +53,28 @@ func phantomOrch(t *testing.T, responses []string) (*Orchestrator, *fakeLLM, str
 	}}
 	orch := NewWithRules(llm, parser, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{})
 	return orch, llm, "s1"
+}
+
+// assertNudgedAfter checks that LLM round `round` (1-based) was sent the
+// rejected plain-text answer followed by exactly the phantom-completion nudge
+// as its last two messages.
+func assertNudgedAfter(t *testing.T, llm *capturingLLM, round int, answer string) {
+	t.Helper()
+	if len(llm.requests) < round {
+		t.Fatalf("expected at least %d LLM requests, got %d", round, len(llm.requests))
+	}
+	msgs := llm.requests[round-1].Messages
+	if len(msgs) < 2 {
+		t.Fatalf("round %d: expected the rejected answer and the nudge, got %d messages", round, len(msgs))
+	}
+	prev, last := msgs[len(msgs)-2], msgs[len(msgs)-1]
+	if prev.Role != provider.RoleAssistant || prev.Content != answer {
+		t.Errorf("round %d: second-to-last message = %s %q, want the rejected assistant answer %q",
+			round, prev.Role, prev.Content, answer)
+	}
+	if last.Role != provider.RoleUser || last.Content != phantomCompletionNudge {
+		t.Errorf("round %d: last message = %s %q, want the phantom-completion nudge", round, last.Role, last.Content)
+	}
 }
 
 // The phantom shape: load the write tool, then answer as if the write had
@@ -70,8 +95,47 @@ func TestPhantomGuard_NudgesWhenWriteLoadedButNeverCalled(t *testing.T) {
 	if llm.callCount != 3 {
 		t.Errorf("expected 3 LLM rounds (load, phantom answer, corrected answer), got %d", llm.callCount)
 	}
+	assertNudgedAfter(t, llm, 3, "The item has been assigned to John Doe.")
 	if !strings.Contains(result.Response, "not executed") {
 		t.Errorf("final answer must be the corrected round-3 response, got %q", result.Response)
+	}
+}
+
+// Announcing a write instead of calling it is the same failure as claiming it
+// is done: the plain-text answer ends the turn, so "I will now run the
+// deletion" promises something that never happens. The nudge must treat an
+// announcement like a completion claim (call the tool now or ask the user)
+// and must not offer the "send it again unchanged" exit for it — that exit is
+// only for answers that neither claim nor announce an action.
+func TestPhantomGuard_NudgesAnnouncedAction(t *testing.T) {
+	announcement := "Since you already confirmed, I will now run the final deletion."
+	orch, llm, sessID := phantomOrch(t, []string{
+		"LOAD",
+		announcement,
+		"WRITE",
+		"Done — the item has been deleted.",
+	})
+
+	result, err := orch.Run(context.Background(), sessID, "delete the drill")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if llm.callCount != 4 {
+		t.Errorf("expected 4 LLM rounds (load, announcement, write, summary), got %d", llm.callCount)
+	}
+	assertNudgedAfter(t, llm, 3, announcement)
+	if !strings.Contains(result.Response, "Done") {
+		t.Errorf("final answer must be the post-write summary, got %q", result.Response)
+	}
+
+	for _, want := range []string{
+		"says it is being done or is about to be done", // announcements count like completion claims
+		"Your answer ends the turn",                    // why an announcement is false
+		"only if it neither claims nor announces an action",
+	} {
+		if !strings.Contains(phantomCompletionNudge, want) {
+			t.Errorf("nudge must contain %q, got %q", want, phantomCompletionNudge)
+		}
 	}
 }
 

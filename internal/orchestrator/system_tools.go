@@ -130,14 +130,18 @@ const loadToolsContinueInstruction = "Loaded tools are callable NOW. Keep execut
 // phantomCompletionNudge is injected once per turn when the model loaded a
 // write tool, never attempted any write, and tried to end the turn in plain
 // text (see the guard in Run's calls==nil branch). Three legitimate ways out,
-// one illegitimate: reporting the action as done. The last sentence keeps an
-// honest clarifying question cheap — the model just repeats it.
+// one illegitimate: reporting the action as done — or announcing it as under
+// way or imminent ("I will now run the deletion"), which is just as false
+// because the plain-text answer ends the turn and nothing runs after it. The
+// last sentence keeps an honest clarifying question cheap — the model just
+// repeats it — but only when the answer neither claims nor announces an action.
 const phantomCompletionNudge = "[system] Re-check your answer before it is sent: you prepared a write " +
 	"action this turn but no write was executed — nothing has been created, changed, assigned or deleted. " +
-	"If your answer reports such an action as completed, that report is false. Either perform the action " +
-	"now (the system will ask the user to confirm it), or correct your answer to say what is still open. " +
-	"If something is unclear or missing, ask the user. If your answer was only a question or contained no " +
-	"completed-action claim, send it again unchanged."
+	"Your answer ends the turn, so nothing more will run after it. If it reports such an action as done, " +
+	"or says it is being done or is about to be done, that is false. Either perform the action now by " +
+	"calling the tool (the system will ask the user to confirm it), or correct your answer to say what is " +
+	"still open. If something is unclear or missing, ask the user. Send your answer again unchanged only " +
+	"if it neither claims nor announces an action, for example when it is just a question."
 
 // loadedAnyWriteTool reports whether a successful load_tools result payload
 // promoted at least one non-read-only action. Feeds the phantom-completion
