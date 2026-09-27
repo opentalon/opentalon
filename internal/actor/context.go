@@ -10,6 +10,7 @@ type groupKey struct{}
 type visibilityKey struct{}
 type agentIDKey struct{}
 type reasoningEffortKey struct{}
+type lastUserMessageIDKey struct{}
 
 // WithActor returns a context that carries the given actor ID (e.g. channel_id:sender_id).
 // Use Actor(ctx) to retrieve it. When the request has no actor, do not call WithActor.
@@ -47,6 +48,31 @@ func SessionID(ctx context.Context) string {
 		return ""
 	}
 	v := ctx.Value(sessionKey{})
+	if v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// WithLastUserMessageID returns a context that carries the session's id for
+// the latest message the user wrote (see contextargs.LastUserMessageID). The
+// orchestrator sets it at turn start from the value stored with the session.
+//
+// Unlike the other helpers here, an empty id is stored too: it clears a value
+// the context already carried, so a turn whose id could not be established
+// hands none out rather than one inherited from somewhere else.
+func WithLastUserMessageID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, lastUserMessageIDKey{}, id)
+}
+
+// LastUserMessageID returns the latest-user-message id from the context, or
+// empty string if not set.
+func LastUserMessageID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v := ctx.Value(lastUserMessageIDKey{})
 	if v == nil {
 		return ""
 	}

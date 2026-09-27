@@ -87,6 +87,28 @@ const InteractionKind = "interaction_kind"
 // the host only reports the label and enforces nothing itself.
 const SystemSource = "system_source"
 
+// LastUserMessageID is an opaque id for the latest message the user wrote
+// in this chat session. The host replaces it only when a turn starts with a
+// message the user wrote while nothing was waiting for their approval. It
+// stays the same for an answer to an open confirmation prompt (an
+// Approve/Reject click, or a typed reply the host reads as approve, reject
+// or a correction), for a hidden turn the host injects, for a run a backend
+// feature opened (interaction_kind "system", visible or not), and for a
+// click on a confirmation that is no longer active. The host keeps it with
+// the session, so it survives restarts and every host instance sees the
+// same value: a tool call the user approves on a later turn still carries
+// the id of the message that led to the proposal.
+//
+// A plugin can use it to require that the second step of a two-step
+// destructive action (look first, then run) is confirmed only after the user
+// has written again: remember the id with the first step and refuse the
+// second while the id is unchanged. Resolves to the empty string outside a
+// chat turn (a scheduled job, a webhook), in a nested callback that moved
+// to another session, and for a turn in which the host could not save or
+// read back the session's id; a consumer that gates on it MUST treat an
+// absent value as "unknown" and fail closed.
+const LastUserMessageID = "last_user_message_id"
+
 // Callback identity carriers. A plugin that fires a host RunAction callback
 // for a background/system action (e.g. the agents plugin running a
 // scheduled workflow) has no profile on the wire — the CallbackRequest

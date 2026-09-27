@@ -106,6 +106,7 @@ adds them to the call's arguments before `Execute`, next to the model's own.
 | `allowed_tools` | Sorted JSON array of `plugin__action` names the session can call right now; `[]` is a real value. |
 | `interaction_kind` | `chat` for a person's turn, `system` for a backend-originated run. |
 | `system_source` | The feature behind a `system` run, as the WhoAmI server named it. |
+| `last_user_message_id` | Opaque id of the latest message the person wrote in this chat session. A new one comes only with a message written while nothing awaited their approval; an answer to a confirmation prompt (button or typed), a hidden injected turn, a `system` run (visible or not), or a click on an expired prompt keeps it, so an approved call carries the id of the message that led to it. Lets a plugin require that the second step of a two-step destructive action is confirmed only after the person wrote again. Absent outside a chat turn. |
 
 Three rules apply to every name:
 

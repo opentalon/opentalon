@@ -315,6 +315,13 @@ func applyCallbackIdentity(ctx context.Context, in map[string]string) (context.C
 		ctx = actor.WithActor(ctx, entityID)
 	}
 	if sessionID != "" {
+		// A chain moved to another session no longer belongs to the outer
+		// turn, so that turn's latest-user-message id says nothing about it:
+		// drop it rather than pair it with a foreign session id (a plugin
+		// would read the mismatch as the user having written again).
+		if sessionID != actor.SessionID(ctx) {
+			ctx = actor.WithLastUserMessageID(ctx, "")
+		}
 		ctx = actor.WithSessionID(ctx, sessionID)
 	}
 
