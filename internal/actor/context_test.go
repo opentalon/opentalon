@@ -75,3 +75,20 @@ func TestReasoningEffort(t *testing.T) {
 		t.Errorf("WithReasoningEffort(_, \"\") should not overwrite; got %q", ReasoningEffort(ctx))
 	}
 }
+
+func TestWithLastUserMessageID_LastUserMessageID(t *testing.T) {
+	ctx := context.Background()
+	if LastUserMessageID(ctx) != "" {
+		t.Errorf("LastUserMessageID(background) = %q; want \"\"", LastUserMessageID(ctx))
+	}
+	ctx = WithLastUserMessageID(ctx, "msg-1")
+	if got := LastUserMessageID(ctx); got != "msg-1" {
+		t.Errorf("LastUserMessageID(WithLastUserMessageID(_, \"msg-1\")) = %q; want msg-1", got)
+	}
+	// Unlike the other helpers, an empty id clears the value: a turn whose id
+	// could not be established must not hand out one it inherited.
+	ctx = WithLastUserMessageID(ctx, "")
+	if got := LastUserMessageID(ctx); got != "" {
+		t.Errorf("WithLastUserMessageID(_, \"\") should clear; LastUserMessageID = %q", got)
+	}
+}

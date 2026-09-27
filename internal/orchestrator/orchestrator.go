@@ -563,15 +563,19 @@ func resolveAllowedToolFQNs(ctx context.Context, o *Orchestrator) string {
 }
 
 // defaultContextArgProviders returns built-in providers for orchestrator-managed
-// arguments: opaque identifiers (session_id, conversation_id), per-session
-// allowlists derived from the profile (allowed_plugins, allowed_tools), and the
-// run's own labels (interaction_kind, system_source). No session messages,
-// conversation text, or other sensitive user content is exposed via this
-// mechanism.
+// arguments: opaque identifiers (session_id, conversation_id,
+// last_user_message_id), per-session allowlists derived from the profile
+// (allowed_plugins, allowed_tools), and the run's own labels (interaction_kind,
+// system_source). No session messages, conversation text, or other sensitive
+// user content is exposed via this mechanism.
 func defaultContextArgProviders(o *Orchestrator, custom map[string]ContextArgProvider) map[string]ContextArgProvider {
 	builtin := map[string]ContextArgProvider{
 		contextargs.SessionID:      func(ctx context.Context, _ string) string { return actor.SessionID(ctx) },
 		contextargs.ConversationID: func(ctx context.Context, _ string) string { return actor.ConversationID(ctx) },
+		// The session's id for the latest message the user wrote, as Run put
+		// it on ctx at turn start (see withStoredLastUserMessageID). Empty
+		// outside a chat turn; the injection loop then removes the key.
+		contextargs.LastUserMessageID: func(ctx context.Context, _ string) string { return actor.LastUserMessageID(ctx) },
 		// GroupID / EntityID bridge the authenticated actor scope to the
 		// injected args a plugin opts into via InjectContextArgs. Empty
 		// when the actor has no group/identity (e.g. profile-less dev);
@@ -1453,6 +1457,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		msgCountAtStart = len(sess.Messages)
 	}
 
+	// Carry the session's stored latest-user-message id from here on, so a
+	// call the user approves below (Block A / A2) runs with the id of the
+	// message that led to the proposal, not with one minted for this reply.
+	// A fresh message the user wrote replaces it further down.
+	ctx = o.withStoredLastUserMessageID(ctx, sessions, sess, sessionID)
+
 	// Block A: Check for pending pipeline confirmation.
 	if timing != nil {
 		timing.begin("confirmation_check")
@@ -1681,6 +1691,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				"action": "confirmation_expired",
 			},
 		}, nil
+	}
+
+	// A message the user wrote while nothing was waiting for their approval
+	// gets a new latest-user-message id. Every other turn keeps the stored
+	// one: Block A returned for a pending pipeline (approve and cancel alike),
+	// Block A2 returned for a rejected call and left pendingCall set for an
+	// approved or corrected one, the check above returned for a click on an
+	// expired prompt, and neither a hidden turn nor a backend-opened (system)
+	// run is text the user wrote — a system run may be visible.
+	if !hidden && pendingCall == nil && !isSystemRun(ctx) {
+		ctx = o.rotateLastUserMessageID(ctx, sessions, sessionID, userMessageID)
 	}
 
 	content := userMessage

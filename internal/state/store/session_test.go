@@ -123,6 +123,55 @@ func TestSessionStore_ClearMessagesPreservesIdentityAndEvents(t *testing.T) {
 	}
 }
 
+// TestSessionStore_LastUserMessageIDSurvivesTranscriptRewrites pins the
+// storage contract the orchestrator's last_user_message_id relies on: the id
+// lives in session metadata, so summarisation (SetSummary), clear_session
+// (ClearMessages) and writes of other metadata keys (the pending tool call is
+// set and cleared on every confirmation) must all leave it in place.
+func TestSessionStore_LastUserMessageIDSurvivesTranscriptRewrites(t *testing.T) {
+	db := openTestDB(t)
+	store := NewSessionStore(db, 0, 0)
+
+	const sid = "sess-last-user-message"
+	const key = "last_user_message_id" // orchestrator.lastUserMessageIDMetaKey
+	store.Create(state.SessionParams{ID: sid})
+	if err := store.AddMessage(sid, provider.Message{Role: provider.RoleUser, Content: "first"}); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+	if err := store.SetMetadata(sid, key, "id-a"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+
+	check := func(step string) {
+		t.Helper()
+		got, err := store.Get(sid)
+		if err != nil {
+			t.Fatalf("Get after %s: %v", step, err)
+		}
+		if got.Metadata[key] != "id-a" {
+			t.Errorf("after %s: %s = %q, want id-a", step, key, got.Metadata[key])
+		}
+	}
+
+	if err := store.SetMetadata(sid, "pending_tool_call", `{"id":"c1"}`); err != nil {
+		t.Fatalf("SetMetadata pending: %v", err)
+	}
+	if err := store.SetMetadata(sid, "pending_tool_call", ""); err != nil {
+		t.Fatalf("clear pending: %v", err)
+	}
+	check("setting and clearing another key")
+
+	if err := store.SetSummary(sid, "summary", nil); err != nil {
+		t.Fatalf("SetSummary: %v", err)
+	}
+	check("SetSummary")
+
+	if err := store.ClearMessages(sid); err != nil {
+		t.Fatalf("ClearMessages: %v", err)
+	}
+	check("ClearMessages")
+}
+
 // TestSessionStore_GetMissingReturnsErrSessionNotFound pins the contract the
 // channel handler's session_expired vs internal_error split depends on: an
 // absent row must surface as a wrapped state.ErrSessionNotFound so the

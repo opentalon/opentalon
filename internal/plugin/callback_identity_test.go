@@ -50,3 +50,30 @@ func TestApplyCallbackIdentityPreservesRunLabels(t *testing.T) {
 		t.Errorf("profile without an outer run = %+v, want identity only", p2)
 	}
 }
+
+// A callback that moves the nested chain to another session must not carry
+// the outer turn's latest-user-message id along: paired with the other
+// session's id, a plugin would take it for a new message from the user. A
+// callback that names the same session keeps it.
+func TestApplyCallbackIdentityDropsLastUserMessageIDOnSessionChange(t *testing.T) {
+	outer := actor.WithLastUserMessageID(actor.WithSessionID(context.Background(), "s-outer"), "m-outer")
+
+	ctx, _ := applyCallbackIdentity(outer, map[string]string{contextargs.CallbackSessionID: "s-other"})
+	if got := actor.SessionID(ctx); got != "s-other" {
+		t.Fatalf("session = %q, want s-other", got)
+	}
+	if got := actor.LastUserMessageID(ctx); got != "" {
+		t.Errorf("last_user_message_id = %q after a session change, want it dropped", got)
+	}
+
+	same, _ := applyCallbackIdentity(outer, map[string]string{contextargs.CallbackSessionID: "s-outer"})
+	if got := actor.LastUserMessageID(same); got != "m-outer" {
+		t.Errorf("last_user_message_id = %q for the same session, want m-outer kept", got)
+	}
+
+	// Identity-only callbacks leave the session and its id alone.
+	idOnly, _ := applyCallbackIdentity(outer, map[string]string{contextargs.CallbackEntityID: "owner"})
+	if got := actor.LastUserMessageID(idOnly); got != "m-outer" {
+		t.Errorf("last_user_message_id = %q after an identity-only callback, want m-outer kept", got)
+	}
+}
