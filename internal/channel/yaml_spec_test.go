@@ -315,3 +315,128 @@ func TestLoadYAMLChannelSpecLongResponseFormatPrompt(t *testing.T) {
 		t.Errorf("prompt length = %d, want 501", len(spec.Capabilities.ResponseFormatPrompt))
 	}
 }
+
+func TestLoadYAMLChannelSpecDispatchRequiresAuth(t *testing.T) {
+	specYAML := `
+kind: channel
+version: 1
+id: gitlab-test
+name: GitLab Test
+inbound:
+  http_webhook:
+    path: /webhook
+  event_path: "event"
+  dispatch:
+    when:
+      - field: object_kind
+        equals: note
+    call:
+      method: POST
+      url: "https://gitlab.example.com/trigger"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "channel.yaml")
+	if err := os.WriteFile(path, []byte(specYAML), 0644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	_, err := LoadYAMLChannelSpec(path)
+	if err == nil {
+		t.Fatal("expected error: dispatch on an unauthenticated public webhook must be rejected")
+	}
+	if !strings.Contains(err.Error(), "dispatch") {
+		t.Errorf("error should mention dispatch, got: %v", err)
+	}
+}
+
+func TestLoadYAMLChannelSpecDispatchAllowedWithJWT(t *testing.T) {
+	specYAML := `
+kind: channel
+version: 1
+id: gitlab-test
+name: GitLab Test
+inbound:
+  http_webhook:
+    path: /webhook
+    validate_jwt: true
+    oidc_endpoint: "https://example.com/.well-known/openid-configuration"
+    audience: "aud"
+    issuer: "iss"
+  event_path: "event"
+  dispatch:
+    when:
+      - field: object_kind
+        equals: note
+    call:
+      method: POST
+      url: "https://gitlab.example.com/trigger"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "channel.yaml")
+	if err := os.WriteFile(path, []byte(specYAML), 0644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	if _, err := LoadYAMLChannelSpec(path); err != nil {
+		t.Fatalf("unexpected error with validate_jwt set: %v", err)
+	}
+}
+
+func TestLoadYAMLChannelSpecDispatchAllowedWithSecretHeader(t *testing.T) {
+	specYAML := `
+kind: channel
+version: 1
+id: gitlab-test
+name: GitLab Test
+inbound:
+  http_webhook:
+    path: /webhook
+    secret_header: "X-Gitlab-Token"
+    secret_value: "{{env.GITLAB_WEBHOOK_SECRET}}"
+  event_path: "event"
+  dispatch:
+    when:
+      - field: object_kind
+        equals: note
+    call:
+      method: POST
+      url: "https://gitlab.example.com/trigger"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "channel.yaml")
+	if err := os.WriteFile(path, []byte(specYAML), 0644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	if _, err := LoadYAMLChannelSpec(path); err != nil {
+		t.Fatalf("unexpected error with secret_header set: %v", err)
+	}
+}
+
+func TestLoadYAMLChannelSpecDispatchWithoutWebhookAllowed(t *testing.T) {
+	// dispatch is only attacker-reachable via an inbound.http_webhook; a
+	// websocket/polling channel with dispatch configured is not a public
+	// endpoint, so no auth requirement applies.
+	specYAML := `
+kind: channel
+version: 1
+id: ws-test
+name: WS Test
+connection:
+  url: "wss://example.com"
+inbound:
+  event_path: "event"
+  dispatch:
+    when:
+      - field: object_kind
+        equals: note
+    call:
+      method: POST
+      url: "https://example.com/trigger"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "channel.yaml")
+	if err := os.WriteFile(path, []byte(specYAML), 0644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	if _, err := LoadYAMLChannelSpec(path); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

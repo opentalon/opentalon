@@ -204,7 +204,13 @@ func (ch *YAMLChannel) processInboundFrame(frame map[string]interface{}) {
 	// Deterministic dispatch bypasses the orchestrator entirely: if the event
 	// matches, call the declared endpoint directly and stop, before any
 	// event_type/process_when/skip gating or InboundMessage mapping runs.
+	// inbound.skip itself does NOT apply here (see matchesDispatch) — only
+	// inbound.dispatch.skip, an explicit opt-in loop guard, does.
 	if ch.matchesDispatch(event) {
+		if d := ch.spec.Inbound.Dispatch; len(d.Skip) > 0 && ch.evaluateSkipRules(d.Skip, event) {
+			slog.Debug("yaml-channel dispatch skipped: matched dispatch.skip rule", "channel", ch.spec.ID)
+			return
+		}
 		ch.dispatchDirect(event)
 		return
 	}
@@ -409,11 +415,17 @@ func httpCallTemplates(call HTTPCallSpec) []string {
 	return templates
 }
 
-// shouldSkip evaluates skip rules against the event.
+// shouldSkip evaluates inbound.skip rules against the event.
 func (ch *YAMLChannel) shouldSkip(event map[string]interface{}) bool {
+	return ch.evaluateSkipRules(ch.spec.Inbound.Skip, event)
+}
+
+// evaluateSkipRules evaluates an arbitrary skip-rule list against the event.
+// Shared by shouldSkip (inbound.skip) and the dispatch path (inbound.dispatch.skip).
+func (ch *YAMLChannel) evaluateSkipRules(rules []SkipRule, event map[string]interface{}) bool {
 	contexts := ch.buildContexts()
 
-	for _, rule := range ch.spec.Inbound.Skip {
+	for _, rule := range rules {
 		val := getStringField(event, rule.Field)
 
 		if rule.Equals != "" {

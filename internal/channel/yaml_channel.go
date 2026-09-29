@@ -43,27 +43,33 @@ func LoadYAMLChannelSpec(path string) (*YAMLChannelSpec, error) {
 		slog.Warn("channel spec response_format_prompt is unusually long and will bloat every LLM request; consider using a shorter hint",
 			"channel", spec.ID, "length", len(p), "max_suggested", maxFormatPromptLen)
 	}
+	if wh := spec.Inbound.HTTPWebhook; wh != nil && spec.Inbound.Dispatch != nil {
+		if !wh.ValidateJWT && wh.SecretHeader == "" {
+			return nil, fmt.Errorf("channel spec %s: inbound.dispatch requires inbound.http_webhook.validate_jwt or secret_header — an unauthenticated public webhook must not be able to trigger a side-effecting dispatch call", path)
+		}
+	}
 	return &spec, nil
 }
 
 // YAMLChannel implements pkg.Channel, pkg.ConfigurableChannel, and
 // pkg.ToolProvider for YAML-driven channels that run in-process.
 type YAMLChannel struct {
-	spec         *YAMLChannelSpec
-	specDir      string // directory containing the spec file (for resolving tools_file)
-	instanceID   string // per-instance identifier (config map key under `channels:`); defaults to spec.ID when set empty by caller
-	config       map[string]string
-	selfVars     map[string]string
-	selfMu       sync.RWMutex // protects selfVars (written by reRunInit, read by buildContexts)
-	dedup        *Deduplicator
-	tools        []pkg.ToolDefinition
-	client       *http.Client
-	inbox        chan<- pkg.InboundMessage
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	jwtValidator *JWTValidator
-	enrichCache  EnrichCache // nil until SetEnrichCache is called; absence disables caching for inbound.enrich
+	spec               *YAMLChannelSpec
+	specDir            string // directory containing the spec file (for resolving tools_file)
+	instanceID         string // per-instance identifier (config map key under `channels:`); defaults to spec.ID when set empty by caller
+	config             map[string]string
+	selfVars           map[string]string
+	selfMu             sync.RWMutex // protects selfVars (written by reRunInit, read by buildContexts)
+	dedup              *Deduplicator
+	tools              []pkg.ToolDefinition
+	client             *http.Client
+	inbox              chan<- pkg.InboundMessage
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
+	jwtValidator       *JWTValidator
+	webhookSecretValue string      // resolved from WebhookInboundSpec.SecretValue at startWebhookInbound; empty means secret_header auth is off
+	enrichCache        EnrichCache // nil until SetEnrichCache is called; absence disables caching for inbound.enrich
 }
 
 // NewYAMLChannel creates a new YAMLChannel from a parsed spec. instanceID is
