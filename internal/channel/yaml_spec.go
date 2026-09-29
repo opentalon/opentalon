@@ -175,6 +175,12 @@ type ProcessRule struct {
 type DispatchSpec struct {
 	When []ProcessRule `yaml:"when"`
 	Call HTTPCallSpec  `yaml:"call"`
+	// Skip rules (same semantics as inbound.skip) are checked right before
+	// the dispatch call fires, independent of inbound.skip — dispatch
+	// otherwise bypasses inbound.skip entirely (see matchesDispatch). Use
+	// this to break an echo loop where the dispatch target's own posts
+	// re-enter the channel and re-trigger dispatch indefinitely.
+	Skip []SkipRule `yaml:"skip"`
 }
 
 // PollingInboundSpec configures an HTTP polling loop for inbound messages.
@@ -262,6 +268,13 @@ type WebhookInboundSpec struct {
 	Audience     string `yaml:"audience"`      // expected JWT aud claim
 	Issuer       string `yaml:"issuer"`        // expected JWT iss claim
 	ResponseCode int    `yaml:"response_code"` // default 200
+	// SecretHeader/SecretValue authenticate a shared-secret-header scheme
+	// (e.g. GitLab's X-Gitlab-Token), as an alternative to ValidateJWT for
+	// hosts that sign webhooks with a static token instead of a JWT. If both
+	// ValidateJWT and SecretHeader are set, a request must pass both checks
+	// (AND, not OR).
+	SecretHeader string `yaml:"secret_header"` // header name to check, e.g. "X-Gitlab-Token"
+	SecretValue  string `yaml:"secret_value"`  // expected value (supports templates, e.g. "{{env.GITLAB_WEBHOOK_SECRET}}")
 }
 
 // DedupSpec configures event deduplication.

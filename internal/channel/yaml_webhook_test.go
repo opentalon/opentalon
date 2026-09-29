@@ -364,6 +364,152 @@ func TestWebhookHandler_NoJWTHeaderReturns401(t *testing.T) {
 	}
 }
 
+func TestWebhookHandler_SecretHeaderValid(t *testing.T) {
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"message"}, inbox)
+	ch.webhookSecretValue = "s3cr3t"
+	wh := &WebhookInboundSpec{SecretHeader: "X-Gitlab-Token", ResponseCode: 200}
+	handler := ch.buildWebhookHandler(wh)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(`{}`))
+	req.Header.Set("X-Gitlab-Token", "s3cr3t")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("got status %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestWebhookHandler_SecretHeaderMismatchReturns401(t *testing.T) {
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"message"}, inbox)
+	ch.webhookSecretValue = "s3cr3t"
+	wh := &WebhookInboundSpec{SecretHeader: "X-Gitlab-Token", ResponseCode: 200}
+	handler := ch.buildWebhookHandler(wh)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(`{}`))
+	req.Header.Set("X-Gitlab-Token", "wrong")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("got status %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestWebhookHandler_SecretHeaderMissingReturns401(t *testing.T) {
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"message"}, inbox)
+	ch.webhookSecretValue = "s3cr3t"
+	wh := &WebhookInboundSpec{SecretHeader: "X-Gitlab-Token", ResponseCode: 200}
+	handler := ch.buildWebhookHandler(wh)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("got status %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestWebhookHandler_SecretHeaderEmptyExpectedValueRejectsEmptyHeader(t *testing.T) {
+	// webhookSecretValue unset (e.g. secret_value template resolved empty) must
+	// not accept an empty/missing header as a match — fail closed, not open.
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"message"}, inbox)
+	wh := &WebhookInboundSpec{SecretHeader: "X-Gitlab-Token", ResponseCode: 200}
+	handler := ch.buildWebhookHandler(wh)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(`{}`))
+	req.Header.Set("X-Gitlab-Token", "")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("got status %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestWebhookHandler_DispatchSkipRuleBreaksEchoLoop(t *testing.T) {
+	calls := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"note"}, inbox)
+	ch.spec.Inbound.Dispatch = &DispatchSpec{
+		When: []ProcessRule{{Field: "object_kind", Equals: "note"}},
+		Skip: []SkipRule{{Field: "user.username", Equals: "talooner-bot"}},
+		Call: HTTPCallSpec{
+			Method: "POST",
+			URL:    server.URL + "/trigger/pipeline",
+		},
+	}
+	wh := &WebhookInboundSpec{ResponseCode: 200}
+	handler := ch.buildWebhookHandler(wh)
+
+	// The dispatch target's own reply lands back on the webhook, authored by
+	// the bot account itself — dispatch.skip must stop it from re-triggering.
+	body := `{"object_kind":"note","user":{"username":"talooner-bot"},"text":"@talooner /review"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", rec.Code)
+	}
+
+	select {
+	case <-calls:
+		t.Error("dispatch call fired for an event matching dispatch.skip, want no call (echo loop guard)")
+	case <-time.After(100 * time.Millisecond):
+		// correct: skipped
+	}
+}
+
+func TestWebhookHandler_DispatchSkipRuleNoMatchStillDispatches(t *testing.T) {
+	calls := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"note"}, inbox)
+	ch.spec.Inbound.Dispatch = &DispatchSpec{
+		When: []ProcessRule{{Field: "object_kind", Equals: "note"}},
+		Skip: []SkipRule{{Field: "user.username", Equals: "talooner-bot"}},
+		Call: HTTPCallSpec{
+			Method: "POST",
+			URL:    server.URL + "/trigger/pipeline",
+		},
+	}
+	wh := &WebhookInboundSpec{ResponseCode: 200}
+	handler := ch.buildWebhookHandler(wh)
+
+	body := `{"object_kind":"note","user":{"username":"alice"},"text":"@talooner /review"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", rec.Code)
+	}
+
+	select {
+	case <-calls:
+		// correct: not skipped, dispatch fired
+	case <-time.After(200 * time.Millisecond):
+		t.Error("timeout: dispatch call did not fire for an event that doesn't match dispatch.skip")
+	}
+}
+
 func TestWebhookHandler_ProcessesActivityBody(t *testing.T) {
 	inbox := make(chan pkg.InboundMessage, 1)
 	ch := newTestChannel([]string{"message"}, inbox)
