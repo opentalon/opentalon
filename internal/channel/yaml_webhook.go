@@ -17,6 +17,10 @@ func (ch *YAMLChannel) startWebhookInbound(wh *WebhookInboundSpec) error {
 	}
 	if wh.SecretHeader != "" {
 		ch.webhookSecretValue = substituteTemplate(wh.SecretValue, ch.buildContexts())
+		if ch.webhookSecretValue == "" {
+			slog.Error("yaml-channel secret_header is set but secret_value resolved empty; every request will be rejected (fail-closed) — check the referenced env var is set",
+				"channel", ch.spec.ID, "secret_header", wh.SecretHeader, "secret_value_template", wh.SecretValue)
+		}
 	}
 
 	path := wh.Path

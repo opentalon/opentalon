@@ -270,7 +270,9 @@ type WebhookInboundSpec struct {
 	ResponseCode int    `yaml:"response_code"` // default 200
 	// SecretHeader/SecretValue authenticate a shared-secret-header scheme
 	// (e.g. GitLab's X-Gitlab-Token), as an alternative to ValidateJWT for
-	// hosts that sign webhooks with a static token instead of a JWT.
+	// hosts that sign webhooks with a static token instead of a JWT. If both
+	// ValidateJWT and SecretHeader are set, a request must pass both checks
+	// (AND, not OR).
 	SecretHeader string `yaml:"secret_header"` // header name to check, e.g. "X-Gitlab-Token"
 	SecretValue  string `yaml:"secret_value"`  // expected value (supports templates, e.g. "{{env.GITLAB_WEBHOOK_SECRET}}")
 }
