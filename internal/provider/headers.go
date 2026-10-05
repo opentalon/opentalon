@@ -44,9 +44,15 @@ func (h HeaderMap) Format(f fmt.State, _ rune) {
 // copyExtraHeaders returns a private copy of h without the entries whose value
 // is empty, so an unset credential sends no header instead of an empty one.
 // It returns nil when nothing is left, which keeps requests unchanged.
+//
+// Values are trimmed of leading and trailing spaces and tabs first. Go sends
+// " token " as "token" anyway, so trimming here keeps the value that is sent
+// and the value that is redacted from responses identical, for every caller
+// of the With*Headers options and not only for values from the config file.
 func copyExtraHeaders(h map[string]string) map[string]string {
 	var out map[string]string
 	for k, v := range h {
+		v = strings.Trim(v, " \t")
 		if v == "" {
 			continue
 		}
@@ -66,6 +72,13 @@ func applyExtraHeaders(req *http.Request, h map[string]string) {
 		req.Header.Set(k, v)
 	}
 }
+
+// Redacting header values from what the endpoint sends back is defence in
+// depth against an endpoint that echoes the exact value. It is not a
+// guarantee: a value that comes back encoded (a JSON escape such as \u0026
+// for "&"), or split across two streamed deltas so that it only appears
+// after decoding, is not recognised. Configured header values are as
+// sensitive as api_key and must be handled the same way.
 
 // minRedactLen is the shortest configured header value that is removed from
 // response bodies and errors. Shorter values are not treated as credentials:
@@ -177,10 +190,7 @@ type redactingTransport struct {
 func (t *redactingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
-		if msg := err.Error(); len(t.secrets) > 0 && redactString(msg, t.secrets) != msg {
-			return nil, errors.New(redactString(msg, t.secrets))
-		}
-		return nil, err
+		return nil, cleanError(err, t.secrets)
 	}
 	if len(t.secrets) > 0 && resp.Body != nil && resp.Body != http.NoBody {
 		resp.Body = &redactingReader{src: resp.Body, secrets: t.secrets}
@@ -221,7 +231,10 @@ func (r *redactingReader) Read(p []byte) (int, error) {
 		r.out = r.out[n:]
 		return n, nil
 	}
-	return 0, r.err
+	if r.err == io.EOF {
+		return 0, io.EOF // must stay exact: readers compare with ==
+	}
+	return 0, cleanError(r.err, r.secrets)
 }
 
 func (r *redactingReader) process(final bool) {
@@ -250,3 +263,70 @@ func longestSecretPrefixSuffix(s string, secrets []string) int {
 }
 
 func (r *redactingReader) Close() error { return r.src.Close() }
+
+// redactedError carries an error message with the secrets replaced. It does
+// not expose the original error through Unwrap, so code that walks and prints
+// the chain cannot reach the unredacted text, but errors.Is and errors.As
+// still see it: context.Canceled, context.DeadlineExceeded and network
+// timeouts stay recognisable.
+type redactedError struct {
+	msg   string
+	cause error
+}
+
+func (e *redactedError) Error() string        { return e.msg }
+func (e *redactedError) Is(target error) bool { return errors.Is(e.cause, target) }
+func (e *redactedError) As(target any) bool   { return errors.As(e.cause, target) }
+
+// Timeout keeps net.Error-style timeout checks working.
+func (e *redactedError) Timeout() bool {
+	var t interface{ Timeout() bool }
+	return errors.As(e.cause, &t) && t.Timeout()
+}
+
+// cleanError returns err itself when its text contains no secret, and a
+// redactedError otherwise.
+func cleanError(err error, secrets []string) error {
+	if err == nil || len(secrets) == 0 {
+		return err
+	}
+	msg := err.Error()
+	if clean := redactString(msg, secrets); clean != msg {
+		return &redactedError{msg: clean, cause: err}
+	}
+	return err
+}
+
+// cleanClientError cleans an error returned by http.Client.Do for a provider
+// with extra headers. The client wraps failures in a *url.Error whose URL is
+// the request or redirect target, so a refused redirect would otherwise quote
+// the full Location (for example "?token=..."). The URL loses its query,
+// fragment and user info, and the secrets are replaced in it in raw and
+// URL-escaped form. Without secrets err is returned unchanged.
+func cleanClientError(err error, secrets []string) error {
+	if err == nil || len(secrets) == 0 {
+		return err
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) && error(ue) == err {
+		return &url.Error{Op: ue.Op, URL: cleanURL(ue.URL, secrets), Err: cleanError(ue.Err, secrets)}
+	}
+	return cleanError(err, secrets)
+}
+
+func cleanURL(raw string, secrets []string) string {
+	all := append([]string(nil), secrets...)
+	for _, sec := range secrets {
+		for _, esc := range []string{url.QueryEscape(sec), url.PathEscape(sec)} {
+			if esc != sec {
+				all = append(all, esc)
+			}
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return len(all[i]) > len(all[j]) })
+	if u, err := url.Parse(raw); err == nil {
+		u.RawQuery, u.ForceQuery, u.Fragment, u.RawFragment, u.User = "", false, "", "", nil
+		raw = u.String()
+	}
+	return redactString(raw, all)
+}

@@ -288,6 +288,7 @@ func NewHTTPHealthProbeWithHeaders(probeURL, apiKey string, auth ProbeAuth, head
 		client = &http.Client{Timeout: defaultHealthTimeout}
 	}
 	client = guardClient(client, extra)
+	secrets := redactionSecrets(extra)
 	return func(ctx context.Context) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 		if err != nil {
@@ -305,7 +306,7 @@ func NewHTTPHealthProbeWithHeaders(probeURL, apiKey string, auth ProbeAuth, head
 		applyExtraHeaders(req, extra)
 		resp, err := client.Do(req)
 		if err != nil {
-			return err
+			return cleanClientError(err, secrets)
 		}
 		defer func() { _ = resp.Body.Close() }()
 		_, _ = io.Copy(io.Discard, resp.Body)

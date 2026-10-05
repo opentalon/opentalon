@@ -114,6 +114,8 @@ OpenTalon refuses to start when a header is invalid:
   `anthropic-version` for `api: anthropic-messages`;
 - a connection-level name: `Connection`, `Keep-Alive`, `Proxy-Connection`,
   `Upgrade`, `TE` and `Trailer`.
+- `Accept-Encoding`: setting it would switch off the HTTP client's automatic
+  decompression of replies.
 
 Overriding the first group would break the request or be silently ignored;
 the connection-level names describe a single network hop and are refused by
@@ -131,11 +133,28 @@ Header values are treated like API keys:
   on its own is replaced too. Values shorter than 8 characters are not
   replaced, because they are too short to be credentials and replacing them
   would garble ordinary text.
+- Leading and trailing spaces and tabs are removed from values before they
+  are sent; a value that is empty after that is not sent.
+- Errors from the HTTP client name the request address without its query
+  string, and with any configured value replaced, so a redirect address
+  that carries a token does not end up in logs.
 - OpenTalon will not follow a redirect to a different origin (scheme, host
   or port) for a provider with `headers`, because the HTTP client would
   forward the headers to that other server. The request fails with an error
   instead. Redirects within the same origin are followed as before, and
   providers without `headers` keep the usual redirect behaviour.
+
+Known limits:
+
+- Treat header values exactly like `api_key`: as secrets. Replacing them in
+  replies is a safety net for an endpoint that echoes the exact value, not
+  a guarantee. A value that comes back encoded (for example `&` written as
+  `\u0026` in JSON), or split across two parts of a streamed reply, is not
+  recognised.
+- A YAML syntax error found before OpenTalon reads the `headers` map (for
+  example an unquoted value that starts with `*`) can quote the text in the
+  error, just as for `api_key`. Put values in quotes, as in the example
+  above.
 
 ## Custom Models
 

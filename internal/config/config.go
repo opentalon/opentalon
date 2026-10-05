@@ -595,6 +595,11 @@ type ProviderHeaders map[string]string
 // include the offending text (for example `X-Token: !!int <token>`), and
 // header values usually carry credentials. Errors name only the header and
 // its line.
+//
+// Known limit: syntax errors that the YAML parser reports before this method
+// runs (for example an unquoted value starting with "*" read as an unknown
+// alias) can still quote the text, as they can for api_key. Quoting values
+// avoids that.
 func (h *ProviderHeaders) UnmarshalYAML(n *yaml.Node) error {
 	if n.Kind == yaml.AliasNode && n.Alias != nil {
 		n = n.Alias
@@ -874,6 +879,11 @@ func validateProviderHeaders(cfg *Config) error {
 				if canonical == hop {
 					return fmt.Errorf("models.providers.%s.headers: %q is a connection-level header and cannot be configured", id, name)
 				}
+			}
+			if canonical == "Accept-Encoding" {
+				// Setting it switches off Go's automatic decompression, so
+				// replies would arrive compressed and fail to parse.
+				return fmt.Errorf("models.providers.%s.headers: %q is managed by the HTTP client and cannot be configured", id, name)
 			}
 			if p.API == "anthropic-messages" && canonical == "Anthropic-Version" {
 				return fmt.Errorf("models.providers.%s.headers: %q is set by OpenTalon for the anthropic-messages API and cannot be configured", id, name)

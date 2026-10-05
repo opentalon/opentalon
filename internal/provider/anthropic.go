@@ -57,6 +57,7 @@ type AnthropicProvider struct {
 	eventSink emit.Sink         // structured session-event sink; nil disables emission
 	retry     RetryPolicy       // transient-failure retry policy (DefaultRetryPolicy unless configured)
 	headers   map[string]string // extra request headers from config; never logged or captured
+	secrets   []string          // header values to redact from responses and errors
 }
 
 // AnthropicOption configures an AnthropicProvider.
@@ -110,6 +111,7 @@ func NewAnthropicProvider(id, baseURL, apiKey string, models []ModelInfo, opts .
 	}
 	// Retry lives in the transport (see withRetry) — provider-agnostic and
 	// transparent to Complete.
+	p.secrets = redactionSecrets(p.headers)
 	p.client = withRetry(guardClient(p.client, p.headers), p.retry, p.eventSink)
 	return p
 }
@@ -261,6 +263,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 	start := time.Now()
 	httpResp, err := p.client.Do(httpReq)
 	if err != nil {
+		err = cleanClientError(err, p.secrets)
 		emit.EmitLLMError(ctx, p.eventSink, emit.LLMErrorArgs{
 			Phase:            phaseAnthChatTransport,
 			ResponseBodyText: err.Error(),

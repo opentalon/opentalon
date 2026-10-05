@@ -1363,3 +1363,13 @@ models:
 		t.Error("an empty headers key should decode to nil")
 	}
 }
+
+func TestParseProviderHeadersRejectsAcceptEncoding(t *testing.T) {
+	_, err := Parse([]byte("models:\n  providers:\n    gw:\n      headers:\n        accept-encoding: \"gzip-secret-value\"\n"))
+	if err == nil || !strings.Contains(err.Error(), `"accept-encoding" is managed by the HTTP client`) {
+		t.Fatalf("error = %v, want Accept-Encoding rejected", err)
+	}
+	if strings.Contains(err.Error(), "gzip-secret-value") {
+		t.Errorf("error leaks the value: %v", err)
+	}
+}
