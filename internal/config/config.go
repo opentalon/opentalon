@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -573,6 +575,90 @@ type ProviderConfig struct {
 	API     string            `yaml:"api"`
 	Models  []ModelDefinition `yaml:"models"`
 	Retry   RetryConfig       `yaml:"retry"` // optional; transient-failure (429/5xx) retry tuning
+	// Headers are extra HTTP request headers sent with every request to this
+	// provider, including the routing health probe. Values support ${VAR}.
+	// They are applied after the provider's own headers, so a configured
+	// Authorization (or x-api-key) replaces the default one. A header whose
+	// value is empty is not sent. See validateProviderHeaders for the names
+	// that are rejected.
+	Headers ProviderHeaders `yaml:"headers,omitempty"`
+}
+
+// ProviderHeaders maps a header name to its value. It is a plain
+// map[string]string underneath; the named type only exists so that printing a
+// config with fmt (%v, %+v, %#v, %s) shows the header names but never their
+// values, which usually carry credentials.
+type ProviderHeaders map[string]string
+
+// UnmarshalYAML decodes a map of header names to string values. It exists so
+// that a decoding error never quotes a value: the yaml package's own errors
+// include the offending text (for example `X-Token: !!int <token>`), and
+// header values usually carry credentials. Errors name only the header and
+// its line.
+//
+// Known limit: syntax errors that the YAML parser reports before this method
+// runs (for example an unquoted value starting with "*" read as an unknown
+// alias) can still quote the text, as they can for api_key. Quoting values
+// avoids that.
+func (h *ProviderHeaders) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.AliasNode && n.Alias != nil {
+		n = n.Alias
+	}
+	if n.Kind == yaml.ScalarNode && n.Tag == "!!null" {
+		*h = nil
+		return nil
+	}
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: headers must be a map of header names to values", n.Line)
+	}
+	out := make(ProviderHeaders, len(n.Content)/2)
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+		var name string
+		if k.Kind != yaml.ScalarNode || k.Decode(&name) != nil {
+			return fmt.Errorf("line %d: a header name in headers is not a string", k.Line)
+		}
+		if _, dup := out[name]; dup {
+			return fmt.Errorf("line %d: header %q is listed twice in headers", k.Line, name)
+		}
+		var value string
+		if v.Kind == yaml.AliasNode && v.Alias != nil {
+			v = v.Alias
+		}
+		if v.Kind != yaml.ScalarNode || v.Decode(&value) != nil {
+			return fmt.Errorf("line %d: the value of header %q must be a string", v.Line, name)
+		}
+		out[name] = value
+	}
+	*h = out
+	return nil
+}
+
+// Format prints the header names with every value replaced by [redacted].
+func (h ProviderHeaders) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, redactedHeaderString(h))
+}
+
+func redactedHeaderString(h map[string]string) string {
+	if h == nil {
+		return "map[]"
+	}
+	names := make([]string, 0, len(h))
+	for k := range h {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString("map[")
+	for i, k := range names {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(k)
+		b.WriteString(":[redacted]")
+	}
+	b.WriteByte(']')
+	return b.String()
 }
 
 // RetryConfig tunes per-provider retry on transient LLM failures (429 rate
@@ -735,8 +821,109 @@ func expandEnvInProviders(cfg *Config) {
 	for name, p := range cfg.Models.Providers {
 		p.BaseURL = expandEnv(p.BaseURL)
 		p.APIKey = expandEnv(p.APIKey)
+		for k, v := range p.Headers {
+			p.Headers[k] = expandEnv(v)
+		}
 		cfg.Models.Providers[name] = p
 	}
+}
+
+// clientOwnedHeaders are header names a provider's HTTP client must set
+// itself. Content-Type describes the JSON body the provider builds; Host,
+// Content-Length and Transfer-Encoding are written by Go's HTTP client from
+// the request itself, so a configured value would be silently ignored.
+// Rejecting them at load time is safer than sending a request that differs
+// from what the config says.
+var clientOwnedHeaders = []string{"Content-Type", "Content-Length", "Host", "Transfer-Encoding"}
+
+// connectionHeaders are connection-level (hop-by-hop) names: they describe
+// one network hop, not the request. Go's HTTP/2 client refuses them with an
+// error that quotes the value, so they are rejected at load time with an
+// error that does not.
+var connectionHeaders = []string{"Connection", "Keep-Alive", "Proxy-Connection", "Upgrade", "Te", "Trailer"}
+
+// validateProviderHeaders checks models.providers.<id>.headers after ${VAR}
+// expansion. Errors name the provider and the header, never the value.
+func validateProviderHeaders(cfg *Config) error {
+	ids := make([]string, 0, len(cfg.Models.Providers))
+	for id := range cfg.Models.Providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		p := cfg.Models.Providers[id]
+		seen := make(map[string]string, len(p.Headers))
+		names := make([]string, 0, len(p.Headers))
+		for k := range p.Headers {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if strings.TrimSpace(name) == "" {
+				return fmt.Errorf("models.providers.%s.headers: header name must not be empty", id)
+			}
+			if !validHeaderName(name) {
+				return fmt.Errorf("models.providers.%s.headers: %q is not a valid HTTP header name", id, name)
+			}
+			canonical := http.CanonicalHeaderKey(name)
+			if prev, dup := seen[canonical]; dup {
+				return fmt.Errorf("models.providers.%s.headers: %q and %q name the same header (names are not case-sensitive)", id, prev, name)
+			}
+			seen[canonical] = name
+			for _, owned := range clientOwnedHeaders {
+				if canonical == owned {
+					return fmt.Errorf("models.providers.%s.headers: %q is set by OpenTalon itself and cannot be configured", id, name)
+				}
+			}
+			for _, hop := range connectionHeaders {
+				if canonical == hop {
+					return fmt.Errorf("models.providers.%s.headers: %q is a connection-level header and cannot be configured", id, name)
+				}
+			}
+			if canonical == "Accept-Encoding" {
+				// Setting it switches off Go's automatic decompression, so
+				// replies would arrive compressed and fail to parse.
+				return fmt.Errorf("models.providers.%s.headers: %q is managed by the HTTP client and cannot be configured", id, name)
+			}
+			if p.API == "anthropic-messages" && canonical == "Anthropic-Version" {
+				return fmt.Errorf("models.providers.%s.headers: %q is set by OpenTalon for the anthropic-messages API and cannot be configured", id, name)
+			}
+			if !validHeaderValue(p.Headers[name]) {
+				return fmt.Errorf("models.providers.%s.headers: the value of %q contains a control character such as a line break", id, name)
+			}
+		}
+	}
+	return nil
+}
+
+// validHeaderName reports whether name is an HTTP field name (an RFC 9110
+// token).
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validHeaderValue rejects control characters other than horizontal tab, which
+// Go's HTTP client would refuse at send time on every request.
+func validHeaderValue(v string) bool {
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if (c < 0x20 && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func expandEnvInDeciders(cfg *Config) {
@@ -817,6 +1004,10 @@ func Parse(data []byte) (*Config, error) {
 		if cfg.Lua.DefaultRef != "" {
 			cfg.Lua.DefaultRef = expandEnv(cfg.Lua.DefaultRef)
 		}
+	}
+
+	if err := validateProviderHeaders(&cfg); err != nil {
+		return nil, err
 	}
 
 	// Report every ${VAR} that had no value, once, with all the names. This is

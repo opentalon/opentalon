@@ -35,6 +35,8 @@ type OpenAIProvider struct {
 	debugResolve DebugContextResolver // optional; returns (sessionID, traceID, enabled?) for this ctx
 	eventSink    emit.Sink            // structured session event sink; always non-nil (NoOpSink default)
 	retry        RetryPolicy          // transient-failure retry policy (DefaultRetryPolicy unless configured)
+	headers      map[string]string    // extra request headers from config; never logged or captured
+	secrets      []string             // header values to redact from responses and errors
 }
 
 // OpenAIOption configures an OpenAIProvider.
@@ -78,6 +80,14 @@ func WithOpenAISessionEventSink(s emit.Sink) OpenAIOption {
 	}
 }
 
+// WithOpenAIHeaders adds extra HTTP headers to every request this provider
+// sends. They are applied after the default headers, so a configured
+// Authorization replaces the "Bearer <api_key>" one. Entries with an empty
+// value are dropped. The map is copied.
+func WithOpenAIHeaders(h map[string]string) OpenAIOption {
+	return func(p *OpenAIProvider) { p.headers = copyExtraHeaders(h) }
+}
+
 // WithOpenAIRetryPolicy sets the transient-failure retry policy. Zero-valued
 // fields fall back to DefaultRetryPolicy, so a partial config is safe.
 func WithOpenAIRetryPolicy(rp RetryPolicy) OpenAIOption {
@@ -116,7 +126,8 @@ func NewOpenAIProvider(id, baseURL, apiKey string, models []ModelInfo, opts ...O
 	}
 	// Retry lives in the transport, so it is transparent to Complete/Stream and
 	// applies to whatever client the options ended up setting.
-	p.client = withRetry(p.client, p.retry, p.eventSink)
+	p.secrets = redactionSecrets(p.headers)
+	p.client = withRetry(guardClient(p.client, p.headers), p.retry, p.eventSink)
 	return p
 }
 
@@ -441,6 +452,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	start := time.Now()
 	httpResp, err := p.client.Do(httpReq)
 	if err != nil {
+		err = cleanClientError(err, p.secrets)
 		p.captureRawHTTP(ctx, "error", 0, nil, err)
 		emit.EmitLLMError(ctx, p.eventSink, emit.LLMErrorArgs{
 			Phase:            phaseChatTransport,
@@ -676,10 +688,11 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 	// Use a client without timeout for streaming; context handles cancellation.
 	// Same retry transport as the non-streaming client — a 429/5xx before the
 	// stream opens is retried; a 200 is returned untouched so SSE flows.
-	streamClient := withRetry(&http.Client{}, p.retry, p.eventSink)
+	streamClient := withRetry(guardClient(&http.Client{}, p.headers), p.retry, p.eventSink)
 	start := time.Now()
 	httpResp, err := streamClient.Do(httpReq)
 	if err != nil {
+		err = cleanClientError(err, p.secrets)
 		p.captureRawHTTP(ctx, "error", 0, nil, err)
 		emit.EmitLLMError(ctx, p.eventSink, emit.LLMErrorArgs{
 			Phase:            phaseStreamTransport,
@@ -947,6 +960,7 @@ func (p *OpenAIProvider) setHeaders(req *http.Request) {
 	if p.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
+	applyExtraHeaders(req, p.headers)
 }
 
 // rawJSONOrString returns body as json.RawMessage when the bytes are valid

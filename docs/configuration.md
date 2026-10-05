@@ -67,6 +67,95 @@ models:
       api: openai-completions
 ```
 
+### Extra request headers
+
+Some endpoints need more than an API key. A typical case is an
+OpenAI-compatible server behind an authenticating gateway or proxy that
+expects its own token in a header of its choosing. Add those headers under
+`headers`:
+
+```yaml
+models:
+  providers:
+    gateway:
+      base_url: "https://llm.example.com/v1"
+      api: openai-completions
+      headers:
+        cf-access-token: "${LLM_ACCESS_TOKEN}"
+```
+
+How they behave:
+
+- They are sent with every request to that provider, streaming or not, and
+  with the routing health check (`routing.health`) when the provider is the
+  primary.
+- Values support `${ENV_VAR}` like the rest of the config. As everywhere
+  else, an unset variable keeps the literal `${ENV_VAR}` text and OpenTalon
+  warns about it at start-up. A variable that is set to an empty string
+  gives an empty value, and **a header with an empty value is not sent at
+  all**, so no empty token goes out.
+- They are applied after the provider's own headers. A configured
+  `Authorization` replaces the default `Bearer <api_key>` (OpenAI-compatible),
+  and a configured `x-api-key` replaces the default key (Anthropic). An empty
+  value never removes a default header. Without an `api_key` and without a
+  configured `Authorization`, no `Authorization` header is sent, as before.
+- Header names are not case-sensitive; Go writes them in its usual form
+  (`cf-access-token` goes out as `Cf-Access-Token`).
+- Without `headers`, requests are exactly what they were before.
+
+OpenTalon refuses to start when a header is invalid:
+
+- an empty name, a name that is not a valid HTTP header name, or two names
+  that differ only in case;
+- a value that is not a plain string, or that contains a line break or other
+  control character;
+- a name OpenTalon or its HTTP client sets itself: `Content-Type`,
+  `Content-Length`, `Host` and `Transfer-Encoding` for every provider, and
+  `anthropic-version` for `api: anthropic-messages`;
+- a connection-level name: `Connection`, `Keep-Alive`, `Proxy-Connection`,
+  `Upgrade`, `TE` and `Trailer`.
+- `Accept-Encoding`: setting it would switch off the HTTP client's automatic
+  decompression of replies.
+
+Overriding the first group would break the request or be silently ignored;
+the connection-level names describe a single network hop and are refused by
+HTTP/2. None of these error messages repeat the header value.
+
+Header values are treated like API keys:
+
+- They do not appear in logs, in the `/debug` capture, in session events or
+  in error messages, and `/show config` prints them as `[redacted]`.
+- If the endpoint echoes a value back (for example
+  `invalid token: <value>`), every occurrence in the response is replaced
+  with `[redacted]` before OpenTalon logs, records or returns it. This covers
+  error replies, replies that are retried, and streamed replies. For a value
+  of the form `Bearer <token>`, `Basic <token>` or `Token <token>`, the token
+  on its own is replaced too. Values shorter than 8 characters are not
+  replaced, because they are too short to be credentials and replacing them
+  would garble ordinary text.
+- Leading and trailing spaces and tabs are removed from values before they
+  are sent; a value that is empty after that is not sent.
+- Errors from the HTTP client name the request address without its query
+  string, and with any configured value replaced, so a redirect address
+  that carries a token does not end up in logs.
+- OpenTalon will not follow a redirect to a different origin (scheme, host
+  or port) for a provider with `headers`, because the HTTP client would
+  forward the headers to that other server. The request fails with an error
+  instead. Redirects within the same origin are followed as before, and
+  providers without `headers` keep the usual redirect behaviour.
+
+Known limits:
+
+- Treat header values exactly like `api_key`: as secrets. Replacing them in
+  replies is a safety net for an endpoint that echoes the exact value, not
+  a guarantee. A value that comes back encoded (for example `&` written as
+  `\u0026` in JSON), or split across two parts of a streamed reply, is not
+  recognised.
+- A YAML syntax error found before OpenTalon reads the `headers` map (for
+  example an unquoted value that starts with `*`) can quote the text in the
+  error, just as for `api_key`. Put values in quotes, as in the example
+  above.
+
 ## Custom Models
 
 For well-known providers (Anthropic, OpenAI), the model catalog is built in. For custom or self-hosted providers, declare the models explicitly:

@@ -275,9 +275,20 @@ const (
 // provider base_url joined with "/models" (liveness + auth check) or
 // "/health" (liveness only).
 func NewHTTPHealthProbe(probeURL, apiKey string, auth ProbeAuth, client *http.Client) HealthProbe {
+	return NewHTTPHealthProbeWithHeaders(probeURL, apiKey, auth, nil, client)
+}
+
+// NewHTTPHealthProbeWithHeaders is NewHTTPHealthProbe that also sends the
+// provider's configured extra headers, after the auth headers, so the probe
+// passes the same gateway as the provider's own requests. Entries with an
+// empty value are not sent.
+func NewHTTPHealthProbeWithHeaders(probeURL, apiKey string, auth ProbeAuth, headers map[string]string, client *http.Client) HealthProbe {
+	extra := copyExtraHeaders(headers)
 	if client == nil {
 		client = &http.Client{Timeout: defaultHealthTimeout}
 	}
+	client = guardClient(client, extra)
+	secrets := redactionSecrets(extra)
 	return func(ctx context.Context) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 		if err != nil {
@@ -292,9 +303,10 @@ func NewHTTPHealthProbe(probeURL, apiKey string, auth ProbeAuth, client *http.Cl
 				req.Header.Set("Authorization", "Bearer "+apiKey)
 			}
 		}
+		applyExtraHeaders(req, extra)
 		resp, err := client.Do(req)
 		if err != nil {
-			return err
+			return cleanClientError(err, secrets)
 		}
 		defer func() { _ = resp.Body.Close() }()
 		_, _ = io.Copy(io.Discard, resp.Body)

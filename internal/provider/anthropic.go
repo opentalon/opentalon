@@ -54,8 +54,10 @@ type AnthropicProvider struct {
 	apiKey    string
 	models    []ModelInfo
 	client    *http.Client
-	eventSink emit.Sink   // structured session-event sink; nil disables emission
-	retry     RetryPolicy // transient-failure retry policy (DefaultRetryPolicy unless configured)
+	eventSink emit.Sink         // structured session-event sink; nil disables emission
+	retry     RetryPolicy       // transient-failure retry policy (DefaultRetryPolicy unless configured)
+	headers   map[string]string // extra request headers from config; never logged or captured
+	secrets   []string          // header values to redact from responses and errors
 }
 
 // AnthropicOption configures an AnthropicProvider.
@@ -75,6 +77,14 @@ func WithAnthropicHTTPClient(c *http.Client) AnthropicOption {
 // provider routed a given turn.
 func WithAnthropicSessionEventSink(s emit.Sink) AnthropicOption {
 	return func(p *AnthropicProvider) { p.eventSink = s }
+}
+
+// WithAnthropicHeaders adds extra HTTP headers to every request this provider
+// sends. They are applied after the default headers, so a configured
+// x-api-key replaces the default one. Entries with an empty value are
+// dropped. The map is copied.
+func WithAnthropicHeaders(h map[string]string) AnthropicOption {
+	return func(p *AnthropicProvider) { p.headers = copyExtraHeaders(h) }
 }
 
 // WithAnthropicRetryPolicy sets the transient-failure retry policy. Zero-valued
@@ -101,7 +111,8 @@ func NewAnthropicProvider(id, baseURL, apiKey string, models []ModelInfo, opts .
 	}
 	// Retry lives in the transport (see withRetry) — provider-agnostic and
 	// transparent to Complete.
-	p.client = withRetry(p.client, p.retry, p.eventSink)
+	p.secrets = redactionSecrets(p.headers)
+	p.client = withRetry(guardClient(p.client, p.headers), p.retry, p.eventSink)
 	return p
 }
 
@@ -252,6 +263,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 	start := time.Now()
 	httpResp, err := p.client.Do(httpReq)
 	if err != nil {
+		err = cleanClientError(err, p.secrets)
 		emit.EmitLLMError(ctx, p.eventSink, emit.LLMErrorArgs{
 			Phase:            phaseAnthChatTransport,
 			ResponseBodyText: err.Error(),
@@ -617,4 +629,5 @@ func (p *AnthropicProvider) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", p.apiKey)
 	req.Header.Set("anthropic-version", anthropicAPIVersion)
+	applyExtraHeaders(req, p.headers)
 }

@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -1146,5 +1148,228 @@ func TestUnresolvedEnvNamesAreSortedAndDeduped(t *testing.T) {
 	got := takeUnresolvedEnv()
 	if len(got) != 2 || got[0] != "ALPHA" || got[1] != "ZEBRA" {
 		t.Errorf("takeUnresolvedEnv() = %v, want [ALPHA ZEBRA]", got)
+	}
+}
+
+func TestParseProviderHeaders(t *testing.T) {
+	t.Setenv("LLM_ACCESS_TOKEN", "tok-123")
+	t.Setenv("EMPTY_TOKEN", "")
+	cfg, err := Parse([]byte(`
+models:
+  providers:
+    gateway:
+      base_url: "https://llm.example.com/v1"
+      api: openai-completions
+      headers:
+        cf-access-token: "${LLM_ACCESS_TOKEN}"
+        X-Prefix: "Token ${LLM_ACCESS_TOKEN}"
+        X-Empty: "${EMPTY_TOKEN}"
+        X-Literal: "plain"
+    plain:
+      api: openai-completions
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Models.Providers["gateway"].Headers
+	want := ProviderHeaders{
+		"cf-access-token": "tok-123",
+		"X-Prefix":        "Token tok-123",
+		"X-Empty":         "", // kept in config; the provider does not send it
+		"X-Literal":       "plain",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("headers = %d entries, want %d", len(got), len(want))
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("headers[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+	if h := cfg.Models.Providers["plain"].Headers; h != nil {
+		t.Errorf("provider without headers: Headers = %d entries, want nil", len(h))
+	}
+}
+
+func TestParseProviderHeadersUnsetVarKeepsLiteral(t *testing.T) {
+	//nolint:errcheck // test cleanup of env var
+	os.Unsetenv("OPENTALON_TEST_UNSET_HEADER_VAR")
+	cfg, err := Parse([]byte(`
+models:
+  providers:
+    gateway:
+      headers:
+        cf-access-token: "${OPENTALON_TEST_UNSET_HEADER_VAR}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same rule as every other ${VAR} in the config: the literal stays and
+	// Parse warns about the unset name.
+	if got := cfg.Models.Providers["gateway"].Headers["cf-access-token"]; got != "${OPENTALON_TEST_UNSET_HEADER_VAR}" {
+		t.Errorf("unset var: got %q, want the literal kept", got)
+	}
+}
+
+func TestParseProviderHeadersValidation(t *testing.T) {
+	t.Setenv("HEADER_WITH_NEWLINE", "abc\r\nX-Injected: 1")
+	cases := []struct {
+		name    string
+		api     string
+		headers string
+		wantErr string // "" = must parse
+	}{
+		{"empty name", "openai-completions", `"": "v"`, "header name must not be empty"},
+		{"blank name", "openai-completions", `"  ": "v"`, "header name must not be empty"},
+		{"name with space", "openai-completions", `"X Bad": "v"`, `"X Bad" is not a valid HTTP header name`},
+		{"name with colon", "openai-completions", `"X-Bad:": "v"`, "is not a valid HTTP header name"},
+		{"content-type", "openai-completions", `content-type: text/plain`, `"content-type" is set by OpenTalon itself`},
+		{"content-type anthropic", "anthropic-messages", `Content-Type: text/plain`, "is set by OpenTalon itself"},
+		{"host", "", `Host: other.example.com`, "is set by OpenTalon itself"},
+		{"content-length", "", `Content-Length: "1"`, "is set by OpenTalon itself"},
+		{"transfer-encoding", "", `Transfer-Encoding: chunked`, "is set by OpenTalon itself"},
+		{"anthropic-version on anthropic", "anthropic-messages", `anthropic-version: "2020-01-01"`, "for the anthropic-messages API"},
+		{"anthropic-version on openai is allowed", "openai-completions", `anthropic-version: "2023-06-01"`, ""},
+		{"case duplicates", "", "X-Token: a\n        x-token: b", "name the same header"},
+		{"control character in value", "", `X-Token: "${HEADER_WITH_NEWLINE}"`, "contains a control character"},
+		{"tab in value is allowed", "", `X-Token: "a\tb"`, ""},
+		{"authorization is allowed", "openai-completions", `Authorization: "Basic abc"`, ""},
+		{"x-api-key is allowed", "anthropic-messages", `x-api-key: "k"`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := "models:\n  providers:\n    gw:\n      api: \"" + tc.api + "\"\n      headers:\n        " + tc.headers + "\n"
+			_, err := Parse([]byte(yaml))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "models.providers.gw.headers") {
+				t.Errorf("error = %q, want it to name the provider and contain %q", err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), "X-Injected") || strings.Contains(err.Error(), "text/plain") {
+				t.Errorf("error must not echo the header value: %q", err)
+			}
+		})
+	}
+}
+
+func TestProviderHeadersNeverPrinted(t *testing.T) {
+	const secret = "s3cr3t-gateway-token-value"
+	t.Setenv("LLM_ACCESS_TOKEN", secret)
+	cfg, err := Parse([]byte(`
+models:
+  providers:
+    gateway:
+      headers:
+        cf-access-token: "${LLM_ACCESS_TOKEN}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc := cfg.Models.Providers["gateway"]
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+		for what, v := range map[string]any{"Config": *cfg, "*Config": cfg, "ProviderConfig": pc, "Headers": pc.Headers} {
+			out := fmt.Sprintf(verb, v)
+			if strings.Contains(out, secret) {
+				t.Errorf("%s printed with %s leaks the header value: %s", what, verb, out)
+			}
+			if !strings.Contains(out, "cf-access-token:[redacted]") {
+				t.Errorf("%s printed with %s should still name the header: %s", what, verb, out)
+			}
+		}
+	}
+	// The value itself is intact for the code that sends it.
+	if pc.Headers["cf-access-token"] != secret {
+		t.Errorf("header value = %q, want the expanded secret", pc.Headers["cf-access-token"])
+	}
+}
+
+func TestParseProviderHeadersConnectionLevelNames(t *testing.T) {
+	for _, name := range []string{"Connection", "keep-alive", "Proxy-Connection", "Upgrade", "TE", "Trailer"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte("models:\n  providers:\n    gw:\n      headers:\n        " + name + ": hop-secret-value\n"))
+			if err == nil || !strings.Contains(err.Error(), "is a connection-level header") {
+				t.Fatalf("error = %v, want a connection-level rejection", err)
+			}
+			if strings.Contains(err.Error(), "hop-secret-value") {
+				t.Errorf("error leaks the value: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseProviderHeadersYAMLErrorsHideValues(t *testing.T) {
+	const secret = "yaml-secret-value"
+	cases := []struct {
+		name    string
+		headers string // indented block under "headers:"
+		wantErr string
+	}{
+		{"wrong tag", "\n        X-Token: !!int " + secret, `the value of header "X-Token" must be a string`},
+		{"list value", "\n        X-Token: [" + secret + "]", `the value of header "X-Token" must be a string`},
+		{"map value", "\n        X-Token: {a: " + secret + "}", `the value of header "X-Token" must be a string`},
+		{"headers is a scalar", " " + secret, "headers must be a map"},
+		{"headers is a list", "\n        - " + secret, "headers must be a map"},
+		{"listed twice", "\n        X-Token: " + secret + "\n        X-Token: " + secret + "2", `header "X-Token" is listed twice`},
+		{"name is not a string", "\n        [a, b]: " + secret, "a header name in headers is not a string"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte("models:\n  providers:\n    gw:\n      headers:" + tc.headers + "\n"))
+			if err == nil {
+				t.Fatalf("expected an error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("error leaks the value: %q", err)
+			}
+		})
+	}
+}
+
+func TestParseProviderHeadersScalarKinds(t *testing.T) {
+	cfg, err := Parse([]byte(`
+models:
+  providers:
+    gw:
+      headers:
+        X-Num: 123
+        X-Bool: true
+        X-Null:
+        X-A: &tok shared-value
+        X-B: *tok
+    none:
+      headers:
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := cfg.Models.Providers["gw"].Headers
+	want := map[string]string{"X-Num": "123", "X-Bool": "true", "X-Null": "", "X-A": "shared-value", "X-B": "shared-value"}
+	for k, v := range want {
+		if got, ok := h[k]; !ok || got != v {
+			t.Errorf("headers[%q] = %q (present %v), want %q", k, got, ok, v)
+		}
+	}
+	if cfg.Models.Providers["none"].Headers != nil {
+		t.Error("an empty headers key should decode to nil")
+	}
+}
+
+func TestParseProviderHeadersRejectsAcceptEncoding(t *testing.T) {
+	_, err := Parse([]byte("models:\n  providers:\n    gw:\n      headers:\n        accept-encoding: \"gzip-secret-value\"\n"))
+	if err == nil || !strings.Contains(err.Error(), `"accept-encoding" is managed by the HTTP client`) {
+		t.Fatalf("error = %v, want Accept-Encoding rejected", err)
+	}
+	if strings.Contains(err.Error(), "gzip-secret-value") {
+		t.Errorf("error leaks the value: %v", err)
 	}
 }
