@@ -35,6 +35,7 @@ type OpenAIProvider struct {
 	debugResolve DebugContextResolver // optional; returns (sessionID, traceID, enabled?) for this ctx
 	eventSink    emit.Sink            // structured session event sink; always non-nil (NoOpSink default)
 	retry        RetryPolicy          // transient-failure retry policy (DefaultRetryPolicy unless configured)
+	headers      map[string]string    // extra request headers from config; never logged or captured
 }
 
 // OpenAIOption configures an OpenAIProvider.
@@ -76,6 +77,14 @@ func WithOpenAISessionEventSink(s emit.Sink) OpenAIOption {
 		}
 		p.eventSink = s
 	}
+}
+
+// WithOpenAIHeaders adds extra HTTP headers to every request this provider
+// sends. They are applied after the default headers, so a configured
+// Authorization replaces the "Bearer <api_key>" one. Entries with an empty
+// value are dropped. The map is copied.
+func WithOpenAIHeaders(h map[string]string) OpenAIOption {
+	return func(p *OpenAIProvider) { p.headers = copyExtraHeaders(h) }
 }
 
 // WithOpenAIRetryPolicy sets the transient-failure retry policy. Zero-valued
@@ -947,6 +956,7 @@ func (p *OpenAIProvider) setHeaders(req *http.Request) {
 	if p.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
+	applyExtraHeaders(req, p.headers)
 }
 
 // rawJSONOrString returns body as json.RawMessage when the bytes are valid

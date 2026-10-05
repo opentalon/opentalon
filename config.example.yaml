@@ -25,6 +25,18 @@ models:
             input: 0.55
             output: 2.19
 
+    # Optional extra HTTP headers sent with every request to a provider (and
+    # with the routing health check), for example when an OpenAI-compatible
+    # endpoint sits behind a gateway that wants its own access token.
+    # Values support ${VAR}; a header whose value is empty is not sent.
+    # A configured Authorization (or x-api-key) replaces the default one.
+    # See docs/configuration.md, "Extra request headers".
+    # gateway:
+    #   base_url: "https://llm.example.com/v1"
+    #   api: openai-completions
+    #   headers:
+    #     cf-access-token: "${LLM_ACCESS_TOKEN}"
+
   catalog:
     deepseek/deepseek-chat:
       alias: deepseek

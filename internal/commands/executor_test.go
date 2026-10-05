@@ -2,7 +2,10 @@ package commands
 
 import (
 	"context"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/orchestrator"
@@ -164,7 +167,9 @@ func TestExecutor_ClearSession_MissingSessionID(t *testing.T) {
 func TestRedactConfig(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Models.Providers = map[string]config.ProviderConfig{
-		"p": {APIKey: "secret", BaseURL: "https://api.example.com"},
+		"p": {APIKey: "secret", BaseURL: "https://api.example.com",
+			Headers: config.ProviderHeaders{"cf-access-token": "gateway-secret"}},
+		"plain": {BaseURL: "https://other.example.com"},
 	}
 	cfg.Plugins = map[string]config.PluginConfig{
 		"plug": {Enabled: true, Config: map[string]interface{}{"token": "x"}},
@@ -175,5 +180,24 @@ func TestRedactConfig(t *testing.T) {
 	}
 	if out.Plugins["plug"].Config != nil {
 		t.Error("expected plugin Config omitted (redacted)")
+	}
+	if got := out.Models.Providers["p"].Headers["cf-access-token"]; got != "[redacted]" {
+		t.Errorf("header value = %q, want [redacted]", got)
+	}
+	if out.Models.Providers["plain"].Headers != nil {
+		t.Error("provider without headers should stay without headers")
+	}
+	if got := cfg.Models.Providers["p"].Headers["cf-access-token"]; got != "gateway-secret" {
+		t.Errorf("redactConfig changed the live config: header value = %q", got)
+	}
+	data, err := yaml.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "gateway-secret") {
+		t.Errorf("/show config output leaks the header value:\n%s", data)
+	}
+	if !strings.Contains(string(data), "cf-access-token: '[redacted]'") {
+		t.Errorf("/show config output should name the header:\n%s", data)
 	}
 }

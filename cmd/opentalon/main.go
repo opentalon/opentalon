@@ -1667,7 +1667,7 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 		// `api:` kind. See issue #324.
 		probeAuth = provider.ProbeAuthAnthropicNative
 	}
-	probe := provider.NewHTTPHealthProbe(probeURL, primaryPC.APIKey, probeAuth, nil)
+	probe := provider.NewHTTPHealthProbeWithHeaders(probeURL, primaryPC.APIKey, probeAuth, primaryPC.Headers, nil)
 	gate := provider.HealthGateConfig{
 		Interval:     parseDurationOrZero(cfg.Routing.Health.Interval),
 		Timeout:      parseDurationOrZero(cfg.Routing.Health.Timeout),
@@ -1766,6 +1766,7 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 		DebugSink:    debugSink,
 		DebugResolve: debugResolve,
 		EventSink:    eventSink,
+		Headers:      provider.HeaderMap(pc.Headers),
 		Retry: provider.RetryPolicy{
 			MaxAttempts:  pc.Retry.MaxAttempts,
 			BaseDelay:    parseDurationOrZero(pc.Retry.BaseDelay),

@@ -32,6 +32,7 @@ type ProviderConfig struct {
 	DebugResolve DebugContextResolver
 	EventSink    emit.Sink
 	Retry        RetryPolicy // transient-failure retry; zero fields -> DefaultRetryPolicy
+	Headers      HeaderMap   // extra request headers; empty values are not sent
 }
 
 // FromConfig creates a Provider from a config entry. The api field
@@ -51,12 +52,18 @@ func FromConfig(cfg ProviderConfig) (Provider, error) {
 		if cfg.EventSink != nil {
 			opts = append(opts, WithOpenAISessionEventSink(cfg.EventSink))
 		}
+		if len(cfg.Headers) > 0 {
+			opts = append(opts, WithOpenAIHeaders(cfg.Headers))
+		}
 		opts = append(opts, WithOpenAIRetryPolicy(cfg.Retry))
 		return NewOpenAIProvider(cfg.ID, cfg.BaseURL, cfg.APIKey, cfg.Models, opts...), nil
 	case APIAnthropic:
 		opts := []AnthropicOption{}
 		if cfg.EventSink != nil {
 			opts = append(opts, WithAnthropicSessionEventSink(cfg.EventSink))
+		}
+		if len(cfg.Headers) > 0 {
+			opts = append(opts, WithAnthropicHeaders(cfg.Headers))
 		}
 		opts = append(opts, WithAnthropicRetryPolicy(cfg.Retry))
 		return NewAnthropicProvider(cfg.ID, cfg.BaseURL, cfg.APIKey, cfg.Models, opts...), nil

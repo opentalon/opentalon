@@ -67,6 +67,55 @@ models:
       api: openai-completions
 ```
 
+### Extra request headers
+
+Some endpoints need more than an API key. A typical case is an
+OpenAI-compatible server behind an authenticating gateway or proxy that
+expects its own token in a header of its choosing. Add those headers under
+`headers`:
+
+```yaml
+models:
+  providers:
+    gateway:
+      base_url: "https://llm.example.com/v1"
+      api: openai-completions
+      headers:
+        cf-access-token: "${LLM_ACCESS_TOKEN}"
+```
+
+How they behave:
+
+- They are sent with every request to that provider, streaming or not, and
+  with the routing health check (`routing.health`) when the provider is the
+  primary.
+- Values support `${ENV_VAR}` like the rest of the config. As everywhere
+  else, an unset variable keeps the literal `${ENV_VAR}` text and OpenTalon
+  warns about it at start-up. A variable that is set to an empty string
+  gives an empty value, and **a header with an empty value is not sent at
+  all**, so no empty token goes out.
+- They are applied after the provider's own headers. A configured
+  `Authorization` replaces the default `Bearer <api_key>` (OpenAI-compatible),
+  and a configured `x-api-key` replaces the default key (Anthropic). An empty
+  value never removes a default header. Without an `api_key` and without a
+  configured `Authorization`, no `Authorization` header is sent, as before.
+- Header names are not case-sensitive; Go writes them in its usual form
+  (`cf-access-token` goes out as `Cf-Access-Token`).
+- Without `headers`, requests are exactly what they were before.
+
+OpenTalon refuses to start when a header is invalid: an empty name, a name
+that is not a valid HTTP header name, two names that differ only in case, a
+value with a line break or other control character, or a name OpenTalon sets
+itself. Those names are `Content-Type`, `Content-Length`, `Host` and
+`Transfer-Encoding` for every provider, and `anthropic-version` for
+`api: anthropic-messages`. Rejecting them is deliberate: overriding them
+would either break the request body or be silently ignored by the HTTP
+client.
+
+Header values are treated like API keys. They do not appear in logs, in the
+`/debug` capture, in session events or in error messages, and
+`/show config` prints them as `[redacted]`.
+
 ## Custom Models
 
 For well-known providers (Anthropic, OpenAI), the model catalog is built in. For custom or self-hosted providers, declare the models explicitly:

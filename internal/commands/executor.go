@@ -499,7 +499,7 @@ func (e *Executor) clearSession(ctx context.Context, call orchestrator.ToolCall)
 	}
 }
 
-// redactConfig returns a copy of config with secrets redacted for display (API keys, plugin configs, and fields named secret/token/password).
+// redactConfig returns a copy of config with secrets redacted for display (API keys, provider header values, plugin configs, and fields named secret/token/password).
 func redactConfig(c *config.Config) *config.Config {
 	if c == nil {
 		return nil
@@ -512,6 +512,14 @@ func redactConfig(c *config.Config) *config.Config {
 			p2 := p
 			if p2.APIKey != "" {
 				p2.APIKey = "[redacted]"
+			}
+			if p2.Headers != nil {
+				// Fresh map: the live config must keep its values.
+				h := make(config.ProviderHeaders, len(p2.Headers))
+				for k := range p2.Headers {
+					h[k] = "[redacted]"
+				}
+				p2.Headers = h
 			}
 			provs[name] = p2
 		}

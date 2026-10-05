@@ -54,8 +54,9 @@ type AnthropicProvider struct {
 	apiKey    string
 	models    []ModelInfo
 	client    *http.Client
-	eventSink emit.Sink   // structured session-event sink; nil disables emission
-	retry     RetryPolicy // transient-failure retry policy (DefaultRetryPolicy unless configured)
+	eventSink emit.Sink         // structured session-event sink; nil disables emission
+	retry     RetryPolicy       // transient-failure retry policy (DefaultRetryPolicy unless configured)
+	headers   map[string]string // extra request headers from config; never logged or captured
 }
 
 // AnthropicOption configures an AnthropicProvider.
@@ -75,6 +76,14 @@ func WithAnthropicHTTPClient(c *http.Client) AnthropicOption {
 // provider routed a given turn.
 func WithAnthropicSessionEventSink(s emit.Sink) AnthropicOption {
 	return func(p *AnthropicProvider) { p.eventSink = s }
+}
+
+// WithAnthropicHeaders adds extra HTTP headers to every request this provider
+// sends. They are applied after the default headers, so a configured
+// x-api-key replaces the default one. Entries with an empty value are
+// dropped. The map is copied.
+func WithAnthropicHeaders(h map[string]string) AnthropicOption {
+	return func(p *AnthropicProvider) { p.headers = copyExtraHeaders(h) }
 }
 
 // WithAnthropicRetryPolicy sets the transient-failure retry policy. Zero-valued
@@ -617,4 +626,5 @@ func (p *AnthropicProvider) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", p.apiKey)
 	req.Header.Set("anthropic-version", anthropicAPIVersion)
+	applyExtraHeaders(req, p.headers)
 }
