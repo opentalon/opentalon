@@ -103,18 +103,39 @@ How they behave:
   (`cf-access-token` goes out as `Cf-Access-Token`).
 - Without `headers`, requests are exactly what they were before.
 
-OpenTalon refuses to start when a header is invalid: an empty name, a name
-that is not a valid HTTP header name, two names that differ only in case, a
-value with a line break or other control character, or a name OpenTalon sets
-itself. Those names are `Content-Type`, `Content-Length`, `Host` and
-`Transfer-Encoding` for every provider, and `anthropic-version` for
-`api: anthropic-messages`. Rejecting them is deliberate: overriding them
-would either break the request body or be silently ignored by the HTTP
-client.
+OpenTalon refuses to start when a header is invalid:
 
-Header values are treated like API keys. They do not appear in logs, in the
-`/debug` capture, in session events or in error messages, and
-`/show config` prints them as `[redacted]`.
+- an empty name, a name that is not a valid HTTP header name, or two names
+  that differ only in case;
+- a value that is not a plain string, or that contains a line break or other
+  control character;
+- a name OpenTalon or its HTTP client sets itself: `Content-Type`,
+  `Content-Length`, `Host` and `Transfer-Encoding` for every provider, and
+  `anthropic-version` for `api: anthropic-messages`;
+- a connection-level name: `Connection`, `Keep-Alive`, `Proxy-Connection`,
+  `Upgrade`, `TE` and `Trailer`.
+
+Overriding the first group would break the request or be silently ignored;
+the connection-level names describe a single network hop and are refused by
+HTTP/2. None of these error messages repeat the header value.
+
+Header values are treated like API keys:
+
+- They do not appear in logs, in the `/debug` capture, in session events or
+  in error messages, and `/show config` prints them as `[redacted]`.
+- If the endpoint echoes a value back (for example
+  `invalid token: <value>`), every occurrence in the response is replaced
+  with `[redacted]` before OpenTalon logs, records or returns it. This covers
+  error replies, replies that are retried, and streamed replies. For a value
+  of the form `Bearer <token>`, `Basic <token>` or `Token <token>`, the token
+  on its own is replaced too. Values shorter than 8 characters are not
+  replaced, because they are too short to be credentials and replacing them
+  would garble ordinary text.
+- OpenTalon will not follow a redirect to a different origin (scheme, host
+  or port) for a provider with `headers`, because the HTTP client would
+  forward the headers to that other server. The request fails with an error
+  instead. Redirects within the same origin are followed as before, and
+  providers without `headers` keep the usual redirect behaviour.
 
 ## Custom Models
 

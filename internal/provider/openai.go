@@ -125,7 +125,7 @@ func NewOpenAIProvider(id, baseURL, apiKey string, models []ModelInfo, opts ...O
 	}
 	// Retry lives in the transport, so it is transparent to Complete/Stream and
 	// applies to whatever client the options ended up setting.
-	p.client = withRetry(p.client, p.retry, p.eventSink)
+	p.client = withRetry(guardClient(p.client, p.headers), p.retry, p.eventSink)
 	return p
 }
 
@@ -685,7 +685,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 	// Use a client without timeout for streaming; context handles cancellation.
 	// Same retry transport as the non-streaming client — a 429/5xx before the
 	// stream opens is retried; a 200 is returned untouched so SSE flows.
-	streamClient := withRetry(&http.Client{}, p.retry, p.eventSink)
+	streamClient := withRetry(guardClient(&http.Client{}, p.headers), p.retry, p.eventSink)
 	start := time.Now()
 	httpResp, err := streamClient.Do(httpReq)
 	if err != nil {

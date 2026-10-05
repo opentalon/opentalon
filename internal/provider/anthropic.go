@@ -110,7 +110,7 @@ func NewAnthropicProvider(id, baseURL, apiKey string, models []ModelInfo, opts .
 	}
 	// Retry lives in the transport (see withRetry) — provider-agnostic and
 	// transparent to Complete.
-	p.client = withRetry(p.client, p.retry, p.eventSink)
+	p.client = withRetry(guardClient(p.client, p.headers), p.retry, p.eventSink)
 	return p
 }
 

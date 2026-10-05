@@ -1289,3 +1289,77 @@ models:
 		t.Errorf("header value = %q, want the expanded secret", pc.Headers["cf-access-token"])
 	}
 }
+
+func TestParseProviderHeadersConnectionLevelNames(t *testing.T) {
+	for _, name := range []string{"Connection", "keep-alive", "Proxy-Connection", "Upgrade", "TE", "Trailer"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte("models:\n  providers:\n    gw:\n      headers:\n        " + name + ": hop-secret-value\n"))
+			if err == nil || !strings.Contains(err.Error(), "is a connection-level header") {
+				t.Fatalf("error = %v, want a connection-level rejection", err)
+			}
+			if strings.Contains(err.Error(), "hop-secret-value") {
+				t.Errorf("error leaks the value: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseProviderHeadersYAMLErrorsHideValues(t *testing.T) {
+	const secret = "yaml-secret-value"
+	cases := []struct {
+		name    string
+		headers string // indented block under "headers:"
+		wantErr string
+	}{
+		{"wrong tag", "\n        X-Token: !!int " + secret, `the value of header "X-Token" must be a string`},
+		{"list value", "\n        X-Token: [" + secret + "]", `the value of header "X-Token" must be a string`},
+		{"map value", "\n        X-Token: {a: " + secret + "}", `the value of header "X-Token" must be a string`},
+		{"headers is a scalar", " " + secret, "headers must be a map"},
+		{"headers is a list", "\n        - " + secret, "headers must be a map"},
+		{"listed twice", "\n        X-Token: " + secret + "\n        X-Token: " + secret + "2", `header "X-Token" is listed twice`},
+		{"name is not a string", "\n        [a, b]: " + secret, "a header name in headers is not a string"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte("models:\n  providers:\n    gw:\n      headers:" + tc.headers + "\n"))
+			if err == nil {
+				t.Fatalf("expected an error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("error leaks the value: %q", err)
+			}
+		})
+	}
+}
+
+func TestParseProviderHeadersScalarKinds(t *testing.T) {
+	cfg, err := Parse([]byte(`
+models:
+  providers:
+    gw:
+      headers:
+        X-Num: 123
+        X-Bool: true
+        X-Null:
+        X-A: &tok shared-value
+        X-B: *tok
+    none:
+      headers:
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := cfg.Models.Providers["gw"].Headers
+	want := map[string]string{"X-Num": "123", "X-Bool": "true", "X-Null": "", "X-A": "shared-value", "X-B": "shared-value"}
+	for k, v := range want {
+		if got, ok := h[k]; !ok || got != v {
+			t.Errorf("headers[%q] = %q (present %v), want %q", k, got, ok, v)
+		}
+	}
+	if cfg.Models.Providers["none"].Headers != nil {
+		t.Error("an empty headers key should decode to nil")
+	}
+}

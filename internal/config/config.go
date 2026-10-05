@@ -590,6 +590,45 @@ type ProviderConfig struct {
 // values, which usually carry credentials.
 type ProviderHeaders map[string]string
 
+// UnmarshalYAML decodes a map of header names to string values. It exists so
+// that a decoding error never quotes a value: the yaml package's own errors
+// include the offending text (for example `X-Token: !!int <token>`), and
+// header values usually carry credentials. Errors name only the header and
+// its line.
+func (h *ProviderHeaders) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.AliasNode && n.Alias != nil {
+		n = n.Alias
+	}
+	if n.Kind == yaml.ScalarNode && n.Tag == "!!null" {
+		*h = nil
+		return nil
+	}
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: headers must be a map of header names to values", n.Line)
+	}
+	out := make(ProviderHeaders, len(n.Content)/2)
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+		var name string
+		if k.Kind != yaml.ScalarNode || k.Decode(&name) != nil {
+			return fmt.Errorf("line %d: a header name in headers is not a string", k.Line)
+		}
+		if _, dup := out[name]; dup {
+			return fmt.Errorf("line %d: header %q is listed twice in headers", k.Line, name)
+		}
+		var value string
+		if v.Kind == yaml.AliasNode && v.Alias != nil {
+			v = v.Alias
+		}
+		if v.Kind != yaml.ScalarNode || v.Decode(&value) != nil {
+			return fmt.Errorf("line %d: the value of header %q must be a string", v.Line, name)
+		}
+		out[name] = value
+	}
+	*h = out
+	return nil
+}
+
 // Format prints the header names with every value replaced by [redacted].
 func (h ProviderHeaders) Format(f fmt.State, _ rune) {
 	_, _ = io.WriteString(f, redactedHeaderString(h))
@@ -792,6 +831,12 @@ func expandEnvInProviders(cfg *Config) {
 // from what the config says.
 var clientOwnedHeaders = []string{"Content-Type", "Content-Length", "Host", "Transfer-Encoding"}
 
+// connectionHeaders are connection-level (hop-by-hop) names: they describe
+// one network hop, not the request. Go's HTTP/2 client refuses them with an
+// error that quotes the value, so they are rejected at load time with an
+// error that does not.
+var connectionHeaders = []string{"Connection", "Keep-Alive", "Proxy-Connection", "Upgrade", "Te", "Trailer"}
+
 // validateProviderHeaders checks models.providers.<id>.headers after ${VAR}
 // expansion. Errors name the provider and the header, never the value.
 func validateProviderHeaders(cfg *Config) error {
@@ -823,6 +868,11 @@ func validateProviderHeaders(cfg *Config) error {
 			for _, owned := range clientOwnedHeaders {
 				if canonical == owned {
 					return fmt.Errorf("models.providers.%s.headers: %q is set by OpenTalon itself and cannot be configured", id, name)
+				}
+			}
+			for _, hop := range connectionHeaders {
+				if canonical == hop {
+					return fmt.Errorf("models.providers.%s.headers: %q is a connection-level header and cannot be configured", id, name)
 				}
 			}
 			if p.API == "anthropic-messages" && canonical == "Anthropic-Version" {

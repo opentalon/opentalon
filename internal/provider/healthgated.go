@@ -287,6 +287,7 @@ func NewHTTPHealthProbeWithHeaders(probeURL, apiKey string, auth ProbeAuth, head
 	if client == nil {
 		client = &http.Client{Timeout: defaultHealthTimeout}
 	}
+	client = guardClient(client, extra)
 	return func(ctx context.Context) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 		if err != nil {
