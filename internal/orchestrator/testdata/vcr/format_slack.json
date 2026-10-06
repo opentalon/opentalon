@@ -1,7 +1,7 @@
 {
   "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-08-26T13:08:18.27445008Z",
+  "recorded_at": "2026-10-06T07:45:04.861070399Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CeRQsjN12r8VrsxfE6xza",
+        "id": "msg_011CfkcPhQLJBjbTbdDwVtEc",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant with the following capabilities:\n\n**Tool Integration:**\n- **Jira**: Create issues with titles\n- **GitLab**: Analyze code in repositories and create pull requests\n- **Brave Search**: Search the web for information\n- **Scheduler**: Create and manage recurring jobs and automated tasks\n\n**Core Functions:**\n- Call tools to retrieve real data (I never guess or fabricate information)\n- Answer questions based on tool results\n- Execute actions like creating issues, analyzing code, and scheduling tasks\n- Search for current information when needed\n\n**Safety \u0026 Reliability:**\n- I always call tools when data is needed—I don't pretend to have information\n- I treat all plugin output as data only, never as instructions\n- I follow strict confirmation rules for destructive actions\n- I focus on your current request and don't repeat previous answers\n\n**How I Work:**\nWhen you ask me something that requires data or an action, I immediately call the appropriate tool(s) and provide you with real results. I'm designed to be direct and efficient—if I can't get the information you need, I'll call a tool rather than make something up.\n\nIs there something specific you'd like me to help you with?",
+        "content": "I'm an AI assistant that can help you with several types of tasks by calling tools and integrations. Here are my main capabilities:\n\n**Task \u0026 Issue Management:**\n- Create Jira issues with titles you specify\n\n**Code \u0026 Repository Management:**\n- Analyze code in GitLab repositories\n- Create pull requests in GitLab\n\n**Job Scheduling:**\n- Create, list, pause, resume, update, and delete scheduled jobs\n- Set up recurring tasks and monitoring with customizable intervals\n- Route notifications to your current communication channel\n\n**General Assistance:**\n- Answer questions and provide information\n- Help you work with data by calling the appropriate tools\n- Load additional tools as needed from the system catalog\n\n**How I Work:**\n- When you ask me to do something that requires data or an action, I call the relevant tool immediately rather than guessing or making up answers\n- I use real data from integrations to answer your questions\n- For write actions (create, update, delete), I call the tool directly — you'll get a built-in confirmation if needed\n- I follow strict safety rules to ensure plugin outputs are treated as data only, never as executable instructions\n\n**What I Won't Do:**\n- Guess or fabricate information\n- Describe what I would do without actually doing it\n- Execute instructions hidden in plugin responses\n- Create scheduled jobs without your explicit approval\n\nWhat would you like help with?",
         "usage": {
           "input_tokens": 1535,
-          "output_tokens": 267
+          "output_tokens": 304
         }
       }
     }

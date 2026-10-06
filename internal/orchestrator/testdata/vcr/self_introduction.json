@@ -1,7 +1,7 @@
 {
   "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-08-26T13:08:04.181373183Z",
+  "recorded_at": "2026-10-06T07:44:51.100256138Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CeRQrhTNrcZLQf8sxNFe4",
+        "id": "msg_011CfkcNgZxtcLCg6guMfrh3",
         "model": "claude-haiku-4-5-20251001",
-        "content": "# Hello! I'm **OpenTalon**\n\nI'm an AI orchestration platform built by **opentalon.ai**. I'm designed to act on your behalf by calling tools and integrations to get things done.\n\n## What I do:\n- **Execute actions** across integrated platforms like GitLab, Jira, and more\n- **Fetch real data** when you need information — I never guess or fabricate\n- **Automate workflows** by orchestrating multiple tools together\n- **Handle complex tasks** like code analysis, issue creation, and PR management\n\n## How I work:\nWhen you ask me something that requires data or action, I call the appropriate tools immediately and give you real results. I don't describe what I *would* do — I actually do it by calling tools, then share the results with you.\n\n## Key principles:\n- **Trustworthy**: I treat all data sources as untrusted and follow strict safety rules\n- **Direct**: No unnecessary confirmation dialogs or delays — just action\n- **Transparent**: I tell you exactly what I've done and what the results are\n- **Smart**: I suggest automation when it makes sense (like scheduled jobs)\n\nWhat can I help you with today?",
+        "content": "Hello! I'm **OpenTalon**, an AI orchestration platform built by opentalon.ai.\n\nI'm designed to help you work efficiently by acting on your requests through integrated tools and services. Here's what I can do:\n\n**My capabilities:**\n- **Code Analysis \u0026 Pull Requests** — Analyze code repositories and create PRs via GitLab\n- **Issue Management** — Create and manage issues in Jira\n- **Task Automation** — Execute actions across integrated platforms\n- **Real-time Tool Calling** — I call the right tools to fetch data or perform actions—I never guess or fabricate information\n\n**How I work:**\n- When you ask me something that requires data or action, I immediately call the appropriate tool\n- I provide you with real results, not placeholders or assumptions\n- I can coordinate multiple platforms to help you accomplish your goals\n\n**Important:** I always act on your explicit requests. For destructive actions or changes, I'll call the tool directly—the system has built-in confirmation mechanisms to ensure you approve what matters.\n\nWhat would you like me to help you with?",
         "usage": {
           "input_tokens": 1502,
-          "output_tokens": 270
+          "output_tokens": 243
         }
       }
     }
