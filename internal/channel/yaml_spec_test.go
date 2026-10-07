@@ -540,3 +540,73 @@ inbound:
 		t.Fatal("expected error for unknown signature_scheme even without dispatch")
 	}
 }
+
+func TestLoadYAMLChannelSpecSecretHeaderWithoutValue(t *testing.T) {
+	path := writeSpecFile(t, signatureSpecYAML(`    secret_header: "X-Gitlab-Token"`))
+	_, err := LoadYAMLChannelSpec(path)
+	if err == nil {
+		t.Fatal("expected error: secret_header without secret_value rejects every request")
+	}
+	if !strings.Contains(err.Error(), "secret_value") {
+		t.Errorf("error should mention secret_value, got: %v", err)
+	}
+}
+
+func TestLoadYAMLChannelSpecSecretValueWithoutHeader(t *testing.T) {
+	path := writeSpecFile(t, `
+kind: channel
+version: 1
+id: hook-test
+name: Hook Test
+inbound:
+  http_webhook:
+    path: /webhook
+    secret_value: "{{env.GITLAB_WEBHOOK_SECRET}}"
+`)
+	_, err := LoadYAMLChannelSpec(path)
+	if err == nil {
+		t.Fatal("expected error: secret_value without secret_header would silently leave the webhook unauthenticated")
+	}
+	if !strings.Contains(err.Error(), "secret_header") {
+		t.Errorf("error should mention secret_header, got: %v", err)
+	}
+}
+
+func TestLoadYAMLChannelSpecSecretHeaderWithoutValueRejectedWithoutDispatch(t *testing.T) {
+	path := writeSpecFile(t, `
+kind: channel
+version: 1
+id: hook-test
+name: Hook Test
+inbound:
+  http_webhook:
+    path: /webhook
+    secret_header: "X-Gitlab-Token"
+`)
+	if _, err := LoadYAMLChannelSpec(path); err == nil {
+		t.Fatal("expected error for secret_header without secret_value even without dispatch")
+	}
+}
+
+func TestLoadYAMLChannelSpecDispatchOnPollingNeedsNoWebhookAuth(t *testing.T) {
+	path := writeSpecFile(t, `
+kind: channel
+version: 1
+id: poll-test
+name: Poll Test
+inbound:
+  polling:
+    url: "https://api.example.com/updates"
+  event_path: "event"
+  dispatch:
+    when:
+      - field: kind
+        equals: note
+    call:
+      method: POST
+      url: "https://api.example.com/trigger"
+`)
+	if _, err := LoadYAMLChannelSpec(path); err != nil {
+		t.Fatalf("dispatch on a polling transport exposes no public endpoint and must load without webhook auth: %v", err)
+	}
+}

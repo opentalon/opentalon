@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const maxWebhookBodyBytes = 1 << 20
+
 // startWebhookInbound registers the HTTP webhook handler and starts the
 // shared webhook server. Returns immediately (server runs in background).
 func (ch *YAMLChannel) startWebhookInbound(wh *WebhookInboundSpec) error {
@@ -77,10 +79,15 @@ func (ch *YAMLChannel) buildWebhookHandler(wh *WebhookInboundSpec) http.HandlerF
 		}
 
 		// Read body with 1MB cap
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBodyBytes+1))
 		if err != nil {
 			slog.Warn("yaml-channel read webhook body failed", "channel", ch.spec.ID, "error", err)
 			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if len(body) > maxWebhookBodyBytes {
+			slog.Warn("yaml-channel webhook body exceeds size limit", "channel", ch.spec.ID, "limit_bytes", maxWebhookBodyBytes, "content_length", r.ContentLength)
+			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 

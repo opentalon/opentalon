@@ -56,6 +56,12 @@ func LoadYAMLChannelSpec(path string) (*YAMLChannelSpec, error) {
 		default:
 			return nil, fmt.Errorf("channel spec %s: unknown inbound.http_webhook.signature_scheme %q (valid: %s, %s)", path, wh.SignatureScheme, SignatureSchemeGitHub, SignatureSchemeStandardWebhooks)
 		}
+		if wh.SecretHeader != "" && wh.SecretValue == "" {
+			return nil, fmt.Errorf("channel spec %s: inbound.http_webhook.secret_header %q requires secret_value", path, wh.SecretHeader)
+		}
+		if wh.SecretHeader == "" && wh.SecretValue != "" {
+			return nil, fmt.Errorf("channel spec %s: inbound.http_webhook.secret_value is set without secret_header", path)
+		}
 		if spec.Inbound.Dispatch != nil && !wh.ValidateJWT && wh.SecretHeader == "" && wh.SignatureScheme == "" {
 			return nil, fmt.Errorf("channel spec %s: inbound.dispatch requires inbound.http_webhook.validate_jwt, secret_header, or signature_scheme — an unauthenticated public webhook must not be able to trigger a side-effecting dispatch call", path)
 		}
