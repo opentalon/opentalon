@@ -243,3 +243,43 @@ func TestWebhookSignatureBodyStillProcessedAfterVerification(t *testing.T) {
 		t.Fatal("verified request did not reach inbox")
 	}
 }
+
+func TestWebhookSignatureBodyAtLimitIsVerified(t *testing.T) {
+	ch, wh := githubChannel("topsecret")
+	body := strings.Repeat("a", maxWebhookBodyBytes)
+	code := serveSigned(t, ch, wh, body, map[string]string{"X-Hub-Signature-256": githubSignature("topsecret", body)})
+	if code != http.StatusOK {
+		t.Errorf("body of exactly %d bytes: got status %d, want %d", maxWebhookBodyBytes, code, http.StatusOK)
+	}
+}
+
+func TestWebhookSignatureBodyOverLimitReturns413(t *testing.T) {
+	ch, wh := githubChannel("topsecret")
+	body := strings.Repeat("a", maxWebhookBodyBytes+1)
+	code := serveSigned(t, ch, wh, body, map[string]string{"X-Hub-Signature-256": githubSignature("topsecret", body)})
+	if code != http.StatusRequestEntityTooLarge {
+		t.Errorf("correctly signed body over the cap: got status %d, want %d", code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestWebhookSignatureBodyOverLimitSignedOverTruncatedPrefixReturns413(t *testing.T) {
+	ch, wh := githubChannel("topsecret")
+	body := strings.Repeat("a", maxWebhookBodyBytes+1)
+	code := serveSigned(t, ch, wh, body, map[string]string{"X-Hub-Signature-256": githubSignature("topsecret", body[:maxWebhookBodyBytes])})
+	if code != http.StatusRequestEntityTooLarge {
+		t.Errorf("body over the cap signed over its truncated prefix: got status %d, want %d", code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestWebhookBodyOverLimitWithoutAuthReturns413(t *testing.T) {
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"message"}, inbox)
+	wh := &WebhookInboundSpec{ResponseCode: 200}
+	code := serveSigned(t, ch, wh, strings.Repeat("a", maxWebhookBodyBytes+1), nil)
+	if code != http.StatusRequestEntityTooLarge {
+		t.Errorf("unauthenticated body over the cap: got status %d, want %d", code, http.StatusRequestEntityTooLarge)
+	}
+	if len(inbox) != 0 {
+		t.Errorf("oversized body must not reach the inbox, got %d messages", len(inbox))
+	}
+}
