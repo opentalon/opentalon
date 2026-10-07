@@ -440,3 +440,103 @@ inbound:
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func writeSpecFile(t *testing.T, specYAML string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "channel.yaml")
+	if err := os.WriteFile(path, []byte(specYAML), 0644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	return path
+}
+
+func signatureSpecYAML(authLines string) string {
+	return `
+kind: channel
+version: 1
+id: gitlab-test
+name: GitLab Test
+inbound:
+  http_webhook:
+    path: /webhook
+` + authLines + `
+  event_path: "event"
+  dispatch:
+    when:
+      - field: object_kind
+        equals: note
+    call:
+      method: POST
+      url: "https://gitlab.example.com/trigger"
+`
+}
+
+func TestLoadYAMLChannelSpecDispatchAllowedWithSignature(t *testing.T) {
+	for _, scheme := range []string{"github", "standard_webhooks"} {
+		path := writeSpecFile(t, signatureSpecYAML(`    signature_scheme: "`+scheme+`"
+    signature_secret: "{{env.SIGNING_SECRET}}"`))
+		spec, err := LoadYAMLChannelSpec(path)
+		if err != nil {
+			t.Fatalf("scheme %s: unexpected error: %v", scheme, err)
+		}
+		if spec.Inbound.HTTPWebhook.SignatureScheme != scheme {
+			t.Errorf("scheme %s: parsed signature_scheme %q", scheme, spec.Inbound.HTTPWebhook.SignatureScheme)
+		}
+		if spec.Inbound.HTTPWebhook.SignatureSecret != "{{env.SIGNING_SECRET}}" {
+			t.Errorf("scheme %s: parsed signature_secret %q", scheme, spec.Inbound.HTTPWebhook.SignatureSecret)
+		}
+	}
+}
+
+func TestLoadYAMLChannelSpecUnknownSignatureScheme(t *testing.T) {
+	for _, scheme := range []string{"gitlab", "sha1", "GITHUB", " github"} {
+		path := writeSpecFile(t, signatureSpecYAML(`    signature_scheme: "`+scheme+`"
+    signature_secret: "x"`))
+		_, err := LoadYAMLChannelSpec(path)
+		if err == nil {
+			t.Fatalf("scheme %q: expected error for unknown signature_scheme", scheme)
+		}
+		if !strings.Contains(err.Error(), "signature_scheme") {
+			t.Errorf("scheme %q: error should mention signature_scheme, got: %v", scheme, err)
+		}
+	}
+}
+
+func TestLoadYAMLChannelSpecSignatureSchemeWithoutSecret(t *testing.T) {
+	path := writeSpecFile(t, signatureSpecYAML(`    signature_scheme: "github"`))
+	_, err := LoadYAMLChannelSpec(path)
+	if err == nil {
+		t.Fatal("expected error: signature_scheme without signature_secret must be rejected")
+	}
+	if !strings.Contains(err.Error(), "signature_secret") {
+		t.Errorf("error should mention signature_secret, got: %v", err)
+	}
+}
+
+func TestLoadYAMLChannelSpecSignatureSecretWithoutScheme(t *testing.T) {
+	path := writeSpecFile(t, signatureSpecYAML(`    signature_secret: "{{env.SIGNING_SECRET}}"`))
+	_, err := LoadYAMLChannelSpec(path)
+	if err == nil {
+		t.Fatal("expected error: signature_secret without signature_scheme would silently leave the webhook unauthenticated")
+	}
+	if !strings.Contains(err.Error(), "signature_scheme") {
+		t.Errorf("error should mention signature_scheme, got: %v", err)
+	}
+}
+
+func TestLoadYAMLChannelSpecSignatureWithoutDispatchStillValidated(t *testing.T) {
+	path := writeSpecFile(t, `
+kind: channel
+version: 1
+id: hook-test
+name: Hook Test
+inbound:
+  http_webhook:
+    path: /webhook
+    signature_scheme: "md5"
+    signature_secret: "x"
+`)
+	if _, err := LoadYAMLChannelSpec(path); err == nil {
+		t.Fatal("expected error for unknown signature_scheme even without dispatch")
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 )
 
 // startWebhookInbound registers the HTTP webhook handler and starts the
@@ -23,11 +24,19 @@ func (ch *YAMLChannel) startWebhookInbound(wh *WebhookInboundSpec) error {
 		}
 	}
 
+	if wh.SignatureScheme != "" {
+		ch.webhookSignatureKey = resolveSignatureKey(wh.SignatureScheme, substituteTemplate(wh.SignatureSecret, ch.buildContexts()))
+		if ch.webhookSignatureKey == nil {
+			slog.Error("yaml-channel signature_secret resolved empty or undecodable; every request will be rejected (fail-closed) — check the referenced env var is set and, for standard_webhooks, is a whsec_<base64> token",
+				"channel", ch.spec.ID, "signature_scheme", wh.SignatureScheme, "signature_secret_template", wh.SignatureSecret)
+		}
+	}
+
 	path := wh.Path
 	if path == "" {
 		path = "/api/messages"
 	}
-	if !wh.ValidateJWT && wh.SecretHeader == "" {
+	if !wh.ValidateJWT && wh.SecretHeader == "" && wh.SignatureScheme == "" {
 		slog.Warn("yaml-channel webhook endpoint has no authentication configured", "channel", ch.spec.ID, "path", path)
 	}
 
@@ -73,6 +82,14 @@ func (ch *YAMLChannel) buildWebhookHandler(wh *WebhookInboundSpec) http.HandlerF
 			slog.Warn("yaml-channel read webhook body failed", "channel", ch.spec.ID, "error", err)
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
+		}
+
+		if wh.SignatureScheme != "" {
+			if err := verifyWebhookSignature(wh.SignatureScheme, ch.webhookSignatureKey, r.Header, body, time.Now()); err != nil {
+				slog.Warn("yaml-channel webhook signature validation failed", "channel", ch.spec.ID, "signature_scheme", wh.SignatureScheme, "error", err)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 		}
 
 		slog.Debug("yaml-channel webhook received", "channel", ch.spec.ID, "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "body", string(body))

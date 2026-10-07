@@ -273,8 +273,10 @@ type WebhookInboundSpec struct {
 	// hosts that sign webhooks with a static token instead of a JWT. If both
 	// ValidateJWT and SecretHeader are set, a request must pass both checks
 	// (AND, not OR).
-	SecretHeader string `yaml:"secret_header"` // header name to check, e.g. "X-Gitlab-Token"
-	SecretValue  string `yaml:"secret_value"`  // expected value (supports templates, e.g. "{{env.GITLAB_WEBHOOK_SECRET}}")
+	SecretHeader    string `yaml:"secret_header"` // header name to check, e.g. "X-Gitlab-Token"
+	SecretValue     string `yaml:"secret_value"`  // expected value (supports templates, e.g. "{{env.GITLAB_WEBHOOK_SECRET}}")
+	SignatureScheme string `yaml:"signature_scheme"`
+	SignatureSecret string `yaml:"signature_secret"`
 }
 
 // DedupSpec configures event deduplication.
