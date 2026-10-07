@@ -51,7 +51,7 @@ var commitSHARegex = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 func repoURL(repo string) string {
 	repo = strings.TrimSpace(repo)
-	if strings.HasPrefix(repo, "https://") || strings.HasPrefix(repo, "git@") {
+	if strings.HasPrefix(repo, "https://") || strings.HasPrefix(repo, "git@") || strings.HasPrefix(repo, "file://") {
 		return repo
 	}
 	return githubPrefix + strings.TrimPrefix(repo, "/") + ".git"
@@ -111,6 +111,13 @@ func CloneAndBuild(ctx context.Context, repo, ref, resolvedSHA, dir, binaryName 
 	checkoutTarget := resolvedSHA
 	if checkoutTarget == "" {
 		checkoutTarget = ref
+	}
+	if commitSHARegex.MatchString(checkoutTarget) {
+		fetch := exec.CommandContext(ctx, gitBin, "fetch", "--depth", "1", "origin", checkoutTarget)
+		fetch.Dir = dir
+		if output, err := fetch.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("git fetch %s: %w (output: %s)", checkoutTarget, err, string(output))
+		}
 	}
 	if checkoutTarget != "" {
 		checkout := exec.CommandContext(ctx, gitBin, "checkout", checkoutTarget)
@@ -224,6 +231,13 @@ func CloneOnly(ctx context.Context, repo, ref, resolvedSHA, dir string) error {
 	checkoutTarget := resolvedSHA
 	if checkoutTarget == "" {
 		checkoutTarget = ref
+	}
+	if commitSHARegex.MatchString(checkoutTarget) {
+		fetch := exec.CommandContext(ctx, gitBin, "fetch", "--depth", "1", "origin", checkoutTarget)
+		fetch.Dir = dir
+		if output, err := fetch.CombinedOutput(); err != nil {
+			return fmt.Errorf("git fetch %s: %w (output: %s)", checkoutTarget, err, string(output))
+		}
 	}
 	if checkoutTarget != "" {
 		checkout := exec.CommandContext(ctx, gitBin, "checkout", checkoutTarget)
