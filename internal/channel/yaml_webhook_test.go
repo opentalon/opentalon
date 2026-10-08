@@ -676,6 +676,44 @@ func TestWebhookHandler_DispatchResolvesArrayFields(t *testing.T) {
 	}
 }
 
+// Integer IDs above 2^53 must reach dispatch templates exactly, not rounded
+// through float64 (issue #366).
+func TestWebhookHandler_DispatchPreservesLargeIntegerIDs(t *testing.T) {
+	calls := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		calls <- string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	inbox := make(chan pkg.InboundMessage, 1)
+	ch := newTestChannel([]string{"note"}, inbox)
+	ch.spec.Inbound.Dispatch = &DispatchSpec{
+		When: []ProcessRule{{Field: "id", Equals: "1234567890123456789"}},
+		Call: HTTPCallSpec{
+			Method: "POST",
+			URL:    server.URL,
+			Body:   `{"id":"{{event.id}}","mr":"{{event.merge_request.iid}}","c":"{{event.commits.0.id}}"}`,
+		},
+	}
+	handler := ch.buildWebhookHandler(&WebhookInboundSpec{ResponseCode: 200})
+
+	body := `{"object_kind":"note","id":1234567890123456789,"merge_request":{"iid":9007199254740993},"commits":[{"id":9007199254740995}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
+	handler(httptest.NewRecorder(), req)
+
+	want := `{"id":"1234567890123456789","mr":"9007199254740993","c":"9007199254740995"}`
+	select {
+	case got := <-calls:
+		if got != want {
+			t.Errorf("dispatch call body = %q, want %q", got, want)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timeout: dispatch call was not made")
+	}
+}
+
 func TestWebhookHandler_DispatchNoMatchFallsThroughToInbox(t *testing.T) {
 	dispatchCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
