@@ -217,7 +217,9 @@ type OrchestratorOpts struct {
 	// invariant across pods. nil = sessionlock.Noop() (single-pod mode).
 	SessionLocker sessionlock.Locker
 	// Deciders are the typed-decision models (laya / Jev / local-logits), each
-	// registered as a callback-only `<name>__decide` plugin. nil = none.
+	// registered as a plugin named after the decider with one callback-only
+	// `decide` action (tool FQN `<name>__decide`). Validate the names with
+	// CheckDeciderNames first. nil = none.
 	Deciders *decideprovider.Registry
 }
 
@@ -428,7 +430,8 @@ type Orchestrator struct {
 	knowledge          KnowledgeConfig        // optional; knowledge directory ingestion
 	subprocessConfig   SubprocessConfig       // optional; subprocess (sub-agent) support
 	escalationConfig   EscalationConfig       // optional; background-trigger LLM turn entrypoint (_escalate)
-	escalationLimit    UsageLimitChecker      // optional; pre-checks a background turn against the entity's token budget
+	escalationLimit    UsageLimitChecker      // optional; pre-checks a background turn (and a decide) against the entity's token budget
+	decideUnattributed sync.Map               // decider name → warned once that its callbacks carry no identity
 	notifyConfig       NotifyConfig           // optional; background-trigger message push entrypoint (_notify)
 	conversationSender ConversationSender     // optional; nil = _notify can only reach a conversation via a packed session key
 	// escalationMuxes is a per-session in-flight guard for background
@@ -5876,13 +5879,18 @@ func fnv64a(s string) uint64 {
 }
 
 func capabilitiesToPlannerInfo(caps []PluginCapability) []pipeline.CapabilityInfo {
-	result := make([]pipeline.CapabilityInfo, len(caps))
-	for i, cap := range caps {
+	result := make([]pipeline.CapabilityInfo, 0, len(caps))
+	for _, cap := range caps {
 		var filteredActions []Action
 		for _, a := range cap.Actions {
 			if !a.UserOnly {
 				filteredActions = append(filteredActions, a)
 			}
+		}
+		// A plugin with only UserOnly actions (_notify, _escalate, a decider) has
+		// nothing the planner may plan; listing its bare name would only leak it.
+		if len(filteredActions) == 0 && len(cap.Actions) > 0 {
+			continue
 		}
 		actions := make([]pipeline.ActionInfo, len(filteredActions))
 		for j, a := range filteredActions {
@@ -5892,7 +5900,7 @@ func capabilitiesToPlannerInfo(caps []PluginCapability) []pipeline.CapabilityInf
 			}
 			actions[j] = pipeline.ActionInfo{Name: a.Name, Description: a.Description, Parameters: params}
 		}
-		result[i] = pipeline.CapabilityInfo{Name: cap.Name, Description: cap.Description, Actions: actions, SystemPromptAddition: cap.SystemPromptAddition}
+		result = append(result, pipeline.CapabilityInfo{Name: cap.Name, Description: cap.Description, Actions: actions, SystemPromptAddition: cap.SystemPromptAddition})
 	}
 	return result
 }

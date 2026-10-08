@@ -822,6 +822,15 @@ func main() {
 	}
 
 	deciders, err := buildDeciders(cfg.Models.Deciders)
+	if err == nil {
+		// Reserve every configured plugin (a failed load is retried later by the
+		// plugin manager) and the tools registered after the orchestrator.
+		reserved := []string{scheduler.ToolName, reminder.ToolName}
+		for name := range cfg.Plugins {
+			reserved = append(reserved, name)
+		}
+		err = orchestrator.CheckDeciderNames(deciders, toolRegistry, reserved...)
+	}
 	if err != nil {
 		slog.Error("invalid deciders config", "error", err)
 		os.Exit(1) //nolint:gocritic // matches the other main()-level fatal config paths

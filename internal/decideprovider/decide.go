@@ -92,8 +92,7 @@ func (r *Registry) Get(name string) (Provider, bool) {
 	return p, ok
 }
 
-// Has reports whether name is a configured decider — the routing predicate the
-// orchestrator uses to send a `decide` call here instead of the plugin gateway.
+// Has reports whether name is a configured decider.
 func (r *Registry) Has(name string) bool {
 	_, ok := r.Get(name)
 	return ok
