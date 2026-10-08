@@ -22,7 +22,7 @@ type SubprocessConfig struct {
 	MaxIterations  int           // default iterations per child (default 5, hard cap 10)
 	DefaultTimeout time.Duration // per-subprocess timeout (default 60s)
 	MaxParallel    int           // max concurrent children per _subprocess.parallel CALL (default 4, hard cap 8); process-wide in-flight can reach N_calls x MaxParallel under MaxConcurrentSessions > 1
-	Models         []string      // configured chat model ids a caller may pick with `model`; empty = no check
+	Models         []string      // chat model ids of the primary provider a RunAction caller may pick with `model`; empty = no check
 }
 
 // Bounds for _subprocess.parallel. defaultMaxParallel/maxMaxParallel clamp the
@@ -46,7 +46,9 @@ type subprocessRequest struct {
 	// from a prompt-injected task.
 	NoTools bool
 	// Model is the chat model id the sub-agent runs on; empty means the
-	// default model. It must be one of the configured models (ChatModels).
+	// parent sub-agent's model, or the default model at the top level. It must
+	// be one of SubprocessConfig.Models. Only host-side RunAction callers may
+	// set it; the LLM cannot (see checkSubprocessModel).
 	Model string
 }
 
@@ -74,7 +76,7 @@ func (s *subprocessExecutor) Execute(ctx context.Context, call ToolCall) ToolRes
 
 	req, err := parseSubprocessRequest(call.Args)
 	if err == nil {
-		err = s.orch.checkSubprocessModel(req.Model)
+		req.Model, err = s.orch.resolveSubprocessModel(ctx, call, req.Model)
 	}
 	if err != nil {
 		return ToolResult{CallID: call.ID, Error: err.Error()}
@@ -119,7 +121,7 @@ type parallelTaskResult struct {
 func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall) ToolResult {
 	reqs, err := parseParallelRequest(call.Args)
 	for i := 0; err == nil && i < len(reqs); i++ {
-		err = s.orch.checkSubprocessModel(reqs[i].Model)
+		reqs[i].Model, err = s.orch.resolveSubprocessModel(ctx, call, reqs[i].Model)
 	}
 	if err != nil {
 		return ToolResult{CallID: call.ID, Error: err.Error()}
@@ -224,6 +226,9 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	defer cancel()
 
 	ctx = withSubprocessDepth(ctx, depth)
+	if req.Model != "" {
+		ctx = context.WithValue(ctx, subprocessModelKey{}, req.Model)
+	}
 	// The sub-agent loop lists every allowed tool in full inline in its own
 	// prompt and sends NO native tools array, so the tool-load gate must be a
 	// no-op for its child calls. This ctx is derived from the caller's, which
@@ -405,15 +410,33 @@ func (o *Orchestrator) buildSubprocessSystemPrompt(ctx context.Context, req subp
 	return sb.String()
 }
 
-// checkSubprocessModel rejects a `model` that is not a configured chat model,
-// so a typo fails loudly instead of 4xx-ing at the provider or silently running
-// on the default model. With no configured list there is nothing to check.
-func (o *Orchestrator) checkSubprocessModel(model string) error {
-	models := o.subprocessConfig.Models
-	if model == "" || len(models) == 0 || slices.Contains(models, model) {
-		return nil
+// resolveSubprocessModel returns the model a sub-agent runs on. An explicit
+// `model` is only accepted from host-side callers (a plugin's RunAction, the
+// scheduler): the LLM is never offered the arg, so a prompt-injected task
+// cannot fan out work onto the most expensive model. It must be one of
+// SubprocessConfig.Models, so a typo fails loudly instead of 4xx-ing at the
+// provider or silently running on the default; with no list nothing is
+// checked. With no explicit model a nested sub-agent inherits its parent's.
+func (o *Orchestrator) resolveSubprocessModel(ctx context.Context, call ToolCall, model string) (string, error) {
+	if model == "" {
+		return subprocessModel(ctx), nil
 	}
-	return fmt.Errorf("unknown model %q for subprocess (configured: %s)", model, strings.Join(models, ", "))
+	if call.FromLLM {
+		return "", fmt.Errorf("model is not selectable from a tool call; omit it")
+	}
+	models := o.subprocessConfig.Models
+	if len(models) == 0 || slices.Contains(models, model) {
+		return model, nil
+	}
+	return "", fmt.Errorf("unknown model %q for subprocess (configured: %s)", model, strings.Join(models, ", "))
+}
+
+// subprocessModelKey carries a sub-agent's model so its own sub-agents inherit it.
+type subprocessModelKey struct{}
+
+func subprocessModel(ctx context.Context) string {
+	m, _ := ctx.Value(subprocessModelKey{}).(string)
+	return m
 }
 
 // parseSubprocessRequest parses tool call args into a subprocessRequest.

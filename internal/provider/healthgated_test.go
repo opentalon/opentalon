@@ -18,11 +18,18 @@ type fakeProvider struct {
 	failWith  error  // the error to return when failing; nil means a generic one
 	lastModel string // model id it was last called with
 	calls     int
+	extra     []string // further model ids it serves besides model
 }
 
 func (f *fakeProvider) ID() string                   { return f.id }
 func (f *fakeProvider) SupportsFeature(Feature) bool { return true }
-func (f *fakeProvider) Models() []ModelInfo          { return []ModelInfo{{ID: f.model, ProviderID: f.id}} }
+func (f *fakeProvider) Models() []ModelInfo {
+	out := []ModelInfo{{ID: f.model, ProviderID: f.id}}
+	for _, m := range f.extra {
+		out = append(out, ModelInfo{ID: m, ProviderID: f.id})
+	}
+	return out
+}
 
 func (f *fakeProvider) failure() error {
 	if f.failWith != nil {
@@ -258,5 +265,55 @@ func TestHealthGatedModelsUnion(t *testing.T) {
 	}
 	if hg.ID() != "dedicated" {
 		t.Fatalf("expected wrapper ID to be preferred's, got %q", hg.ID())
+	}
+}
+
+// An explicitly requested model (e.g. a _subprocess `model`) must reach an
+// endpoint that serves it rather than being overwritten with the entry's
+// configured id; the default model still maps to each entry's own id.
+func TestHealthGatedKeepsRequestedModel(t *testing.T) {
+	preferred := &fakeProvider{id: "anthropic", model: "opus", extra: []string{"haiku"}}
+	fallback := &fakeProvider{id: "backup", model: "opus-backup"}
+	hg := newTestHG(preferred, fallback, 1, nil)
+
+	for _, tt := range []struct {
+		name, requested, want string
+	}{
+		{name: "explicit model served by the preferred endpoint", requested: "haiku", want: "haiku"},
+		{name: "default model", requested: "opus", want: "opus"},
+		{name: "no model", requested: "", want: "opus"},
+	} {
+		if _, err := hg.Complete(context.Background(), &CompletionRequest{Model: tt.requested}); err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		if preferred.lastModel != tt.want {
+			t.Errorf("%s: preferred got model %q, want %q", tt.name, preferred.lastModel, tt.want)
+		}
+	}
+
+	// The preferred endpoint fails: the fallback does not serve haiku, so it
+	// runs on its own configured id (and the default maps to it as before).
+	preferred.failNext = true
+	for _, requested := range []string{"haiku", "opus"} {
+		if _, err := hg.Complete(context.Background(), &CompletionRequest{Model: requested}); err != nil {
+			t.Fatalf("fallback %s: %v", requested, err)
+		}
+		if fallback.lastModel != "opus-backup" {
+			t.Errorf("fallback got model %q for %q, want its configured opus-backup", fallback.lastModel, requested)
+		}
+	}
+}
+
+// Validation of a per-call model must use the preferred endpoint's models only:
+// Models() is the union, fallback-only ids included.
+func TestPrimaryModels(t *testing.T) {
+	preferred := &fakeProvider{id: "anthropic", model: "opus", extra: []string{"haiku"}}
+	fallback := &fakeProvider{id: "backup", model: "fallback-only"}
+	got := PrimaryModels(newTestHG(preferred, fallback, 1, nil))
+	if len(got) != 2 || got[0].ID != "opus" || got[1].ID != "haiku" {
+		t.Errorf("PrimaryModels = %+v, want the preferred endpoint's opus, haiku", got)
+	}
+	if got := PrimaryModels(preferred); len(got) != 2 {
+		t.Errorf("PrimaryModels on a bare provider = %+v, want its own models", got)
 	}
 }
