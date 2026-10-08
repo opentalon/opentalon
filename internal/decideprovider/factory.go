@@ -2,6 +2,7 @@ package decideprovider
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 )
 
@@ -23,10 +24,28 @@ type DeciderConfig struct {
 	Model string
 }
 
+// nameRe is the decider-name charset. A decider is registered as a plugin
+// named after it, so `<name>__decide` must pass the provider tool-name charset
+// (^[a-zA-Z0-9_-]{1,64}$); a leading underscore is reserved for built-in
+// plugins (_subprocess, _notify, …).
+var nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,55}$`)
+
+// ValidateName reports whether name can be a decider name.
+func ValidateName(name string) error {
+	if !nameRe.MatchString(name) {
+		return fmt.Errorf("decideprovider: invalid decider name %q: must match %s (letters, digits, '-', '_'; no leading '_'; at most 56 chars)",
+			name, nameRe.String())
+	}
+	return nil
+}
+
 // FromConfig builds a single Provider from cfg, dispatching on Backend.
 func FromConfig(cfg DeciderConfig) (Provider, error) {
 	if cfg.Name == "" {
 		return nil, fmt.Errorf("decideprovider: decider requires a name")
+	}
+	if err := ValidateName(cfg.Name); err != nil {
+		return nil, err
 	}
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("decideprovider: decider %q requires a base_url", cfg.Name)

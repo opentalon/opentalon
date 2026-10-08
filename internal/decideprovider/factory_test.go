@@ -1,6 +1,9 @@
 package decideprovider
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFromConfig_SelectsBackend(t *testing.T) {
 	cases := []struct {
@@ -66,5 +69,27 @@ func TestRegistryFromConfigs(t *testing.T) {
 	}
 	if _, ok := reg.Get("decider"); !ok {
 		t.Error("Get failed for configured decider")
+	}
+	if got := reg.Names(); len(got) != 2 || got[0] != "decider" || got[1] != "jev" {
+		t.Errorf("Names = %v, want [decider jev]", got)
+	}
+	var nilReg *Registry
+	if nilReg.Names() != nil {
+		t.Error("nil registry should have no names")
+	}
+}
+
+func TestValidateName(t *testing.T) {
+	for name, ok := range map[string]bool{
+		"jev": true, "jev-small": true, "laya_v2": true,
+		"": false, "jev.small": false, "_notify": false, "has space": false,
+		strings.Repeat("a", 56): true, strings.Repeat("a", 57): false,
+	} {
+		if err := ValidateName(name); (err == nil) != ok {
+			t.Errorf("ValidateName(%q) = %v, want ok=%v", name, err, ok)
+		}
+	}
+	if _, err := FromConfig(DeciderConfig{Name: "jev.small", Backend: BackendJev, BaseURL: "http://x"}); err == nil {
+		t.Error("FromConfig must reject an invalid name")
 	}
 }

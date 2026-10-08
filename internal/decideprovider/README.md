@@ -21,6 +21,24 @@ than a standalone tln plugin: decision spend must be **metered** and gated by th
 same per-profile limits (`UsageStore.TotalTokensSince`) as every other model
 call. A plugin off to the side would bypass that.
 
+Each configured decider is registered by the orchestrator
+(`internal/orchestrator/decide.go`) as a built-in plugin named after it, with
+one callback-only `decide` action (hidden from the LLM, refused on LLM-sourced
+calls). Usage lands in `profile_usage` with `model_id = "decide/<name>"`.
+Before the backend is called, the caller's profile is checked against its
+token limit (`Profile.Limit` over `LimitWindow`, the same gate as chat turns and
+`_escalate`). A profile at its limit is refused. A callback with no identity
+(no `__ot_cb_entity_id`, or the external gateway) cannot be gated, but is still
+metered, under the `_unattributed` entity, with a warning logged once per
+decider. Failed decisions are not metered: backends report usage only on
+success.
+
+Decider names share the plugin namespace. They must match
+`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,55}$` (a leading `_` is reserved for built-ins), and
+startup fails when one clashes with a loaded plugin, a configured plugin that
+loads later, or a tool registered after the orchestrator (`scheduler`,
+`reminder`).
+
 ## The contract
 
 Every backend answers the same shape the `decide` executor expects:
