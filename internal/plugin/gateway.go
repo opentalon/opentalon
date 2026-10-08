@@ -17,8 +17,7 @@ import (
 // the orchestrator's LLM tool-call loop (e.g. a CI workflow) had no way in.
 // The request is forwarded to the plugin byte-for-byte; the gateway does not
 // inspect, gate, or rate-limit it, so auth is entirely the plugin's own
-// concern (e.g. an API key carried as a regular Execute arg, as
-// talooner-plugin does).
+// concern (e.g. an API key carried as a regular Execute arg).
 type gateway struct {
 	pluginpb.UnimplementedPluginServiceServer
 	name   string

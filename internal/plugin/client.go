@@ -254,9 +254,8 @@ func (c *Client) executeBidiStream(ctx context.Context, req *pluginpb.ToolCallRe
 // callback lands here with tenant identity only if the plugin supplied it
 // via the reserved args applyCallbackIdentity reads below. A callback
 // action that needs profile.Credentials for its own downstream plugin call
-// (not the case for talooner's generate_ruleset/llm_review today: both
-// only call the host's own _subprocess LLM, which needs no per-tenant
-// credentials) would silently run with none. Not a gap introduced here —
+// (unlike one that only calls the host's own _subprocess LLM, which needs
+// no per-tenant credentials) would silently run with none. Not a gap introduced here —
 // ExecuteBidi's internal callers have the same reserved-args mechanism as
 // their only identity path — but the external gateway is the first caller
 // with no profile-bearing ctx to fall back on, so it's worth restating.

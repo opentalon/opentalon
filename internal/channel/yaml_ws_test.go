@@ -254,7 +254,7 @@ func TestMatchesDispatch(t *testing.T) {
 				Dispatch: &DispatchSpec{
 					When: []ProcessRule{
 						{Field: "object_kind", Equals: "note"},
-						{Field: "text", Contains: "@talooner /review"},
+						{Field: "text", Contains: "@reviewbot /review"},
 					},
 				},
 			},
@@ -275,7 +275,7 @@ func TestMatchesDispatch(t *testing.T) {
 		},
 		{
 			name:  "contains rule matches",
-			event: map[string]interface{}{"object_kind": "issue", "text": "please @talooner /review this"},
+			event: map[string]interface{}{"object_kind": "issue", "text": "please @reviewbot /review this"},
 			want:  true,
 		},
 		{

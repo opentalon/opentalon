@@ -11,8 +11,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// dialGateway connects to a gateway the way an external caller (e.g.
-// talooner's CLI) does: a real TCP dial, no host process in between.
+// dialGateway connects to a gateway the way an external caller (e.g. a
+// CLI) does: a real TCP dial, no host process in between.
 func dialGateway(t *testing.T, addr string) pluginpb.PluginServiceClient {
 	t.Helper()
 	cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -80,8 +80,8 @@ func TestGatewayForwardsPluginError(t *testing.T) {
 
 // A plugin declaring SupportsCallbacks must be dispatched via ExecuteBidi
 // through the gateway, with callbacks routed through the manager's wired
-// CallbackHandler — this is the fix for talooner generate_ruleset always
-// falling back (host == nil) when called through the external gateway.
+// CallbackHandler — otherwise a callback-using action always falls back
+// (host == nil) when called through the external gateway.
 func TestGatewayUsesExecuteBidiWhenSupported(t *testing.T) {
 	body := func(ctx context.Context, req pkg.Request, host pkg.HostCaller) pkg.Response {
 		r, err := host.RunAction(ctx, "inv", "list", map[string]string{"q": "x"})

@@ -17,7 +17,7 @@ The gateway picks between the two per plugin, the same way the orchestrator
 picks for its own internal tool calls: `PluginCapability.SupportsCallbacks`.
 
 ```
-External caller (e.g. talooner's GitHub Action)
+External caller (e.g. a CI workflow)
         │  gRPC PluginService.Execute
         ▼
 ┌────────────────────────────────────────────┐
@@ -89,10 +89,9 @@ carries a `profile.Profile` on the internal orchestrator path, but never on
 the external gateway path, since the inbound gRPC call has no profile to
 begin with. A callback whose downstream action needs `profile.Credentials`
 must have that identity threaded through by the plugin via
-`contextargs.Callback*`; one that doesn't will run with none. Today's only
-gateway caller with `SupportsCallbacks` (`talooner-plugin`, via
-`generate_ruleset`/`llm_review`) only calls the host's built-in
-`_subprocess` action, which uses the host's own configured model client —
+`contextargs.Callback*`; one that doesn't will run with none. A gateway
+plugin with `SupportsCallbacks` whose callbacks only call the host's
+built-in `_subprocess` action, which uses the host's own configured model client —
 no per-tenant credentials involved.
 
 `_subprocess` is built into the binary (`internal/orchestrator/orchestrator.go`)
@@ -137,7 +136,7 @@ actually `Serve`'d, so a gateway stopped while still in
 `gateway.go`'s forwarding is byte-for-byte on both the unary and bidi paths:
 it does not inspect, gate, or rate-limit the request, so auth is entirely
 the plugin's own concern (e.g. an API key carried as a regular `Execute`
-arg, as `talooner-plugin` does). Routing the callback leg through
+arg). Routing the callback leg through
 `ExecuteBidi` does not introduce a new trust boundary — a callback only runs
 after the plugin's own per-request tenant auth has already gated the call,
 same as every other plugin action.
@@ -146,14 +145,14 @@ same as every other plugin action.
 
 ```yaml
 plugins:
-  talooner:
+  review:
     enabled: true
-    github: "opentalon/talooner-plugin"
+    github: "acme/review-plugin"
     grpc_port: 50100   # opt-in: expose Execute over this port, forwarding to the plugin unchanged
 
 orchestrator:
   subprocess:
-    enabled: true   # required if the gateway plugin's callback targets _subprocess (e.g. talooner-plugin's generate_ruleset/llm_review)
+    enabled: true   # required if the gateway plugin's callback targets _subprocess (e.g. a plugin action that asks the host LLM for a sub-answer)
 ```
 
 `grpc_port: 0` (the default, omitted) disables the gateway for that plugin;

@@ -150,8 +150,8 @@ func TestCloneAndBuildUnknownCommitFails(t *testing.T) {
 
 func TestRepoURL(t *testing.T) {
 	cases := map[string]string{
-		"opentalon/talooner-plugin":  "https://github.com/opentalon/talooner-plugin.git",
-		"/opentalon/talooner-plugin": "https://github.com/opentalon/talooner-plugin.git",
+		"opentalon/example-plugin":   "https://github.com/opentalon/example-plugin.git",
+		"/opentalon/example-plugin":  "https://github.com/opentalon/example-plugin.git",
 		"https://gitlab.com/a/b.git": "https://gitlab.com/a/b.git",
 		"git@github.com:a/b.git":     "git@github.com:a/b.git",
 		"file:///tmp/some/repo":      "file:///tmp/some/repo",

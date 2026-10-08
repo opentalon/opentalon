@@ -444,7 +444,7 @@ func TestWebhookHandler_DispatchSkipRuleBreaksEchoLoop(t *testing.T) {
 	ch := newTestChannel([]string{"note"}, inbox)
 	ch.spec.Inbound.Dispatch = &DispatchSpec{
 		When: []ProcessRule{{Field: "object_kind", Equals: "note"}},
-		Skip: []SkipRule{{Field: "user.username", Equals: "talooner-bot"}},
+		Skip: []SkipRule{{Field: "user.username", Equals: "review-bot"}},
 		Call: HTTPCallSpec{
 			Method: "POST",
 			URL:    server.URL + "/trigger/pipeline",
@@ -455,7 +455,7 @@ func TestWebhookHandler_DispatchSkipRuleBreaksEchoLoop(t *testing.T) {
 
 	// The dispatch target's own reply lands back on the webhook, authored by
 	// the bot account itself — dispatch.skip must stop it from re-triggering.
-	body := `{"object_kind":"note","user":{"username":"talooner-bot"},"text":"@talooner /review"}`
+	body := `{"object_kind":"note","user":{"username":"review-bot"},"text":"@reviewbot /review"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	handler(rec, req)
@@ -484,7 +484,7 @@ func TestWebhookHandler_DispatchSkipRuleNoMatchStillDispatches(t *testing.T) {
 	ch := newTestChannel([]string{"note"}, inbox)
 	ch.spec.Inbound.Dispatch = &DispatchSpec{
 		When: []ProcessRule{{Field: "object_kind", Equals: "note"}},
-		Skip: []SkipRule{{Field: "user.username", Equals: "talooner-bot"}},
+		Skip: []SkipRule{{Field: "user.username", Equals: "review-bot"}},
 		Call: HTTPCallSpec{
 			Method: "POST",
 			URL:    server.URL + "/trigger/pipeline",
@@ -493,7 +493,7 @@ func TestWebhookHandler_DispatchSkipRuleNoMatchStillDispatches(t *testing.T) {
 	wh := &WebhookInboundSpec{ResponseCode: 200}
 	handler := ch.buildWebhookHandler(wh)
 
-	body := `{"object_kind":"note","user":{"username":"alice"},"text":"@talooner /review"}`
+	body := `{"object_kind":"note","user":{"username":"alice"},"text":"@reviewbot /review"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	handler(rec, req)
@@ -602,7 +602,7 @@ func TestWebhookHandler_DispatchBypassesOrchestrator(t *testing.T) {
 	wh := &WebhookInboundSpec{ResponseCode: 200}
 	handler := ch.buildWebhookHandler(wh)
 
-	body := `{"object_kind":"note","merge_request":{"iid":"42"},"text":"@talooner /review"}`
+	body := `{"object_kind":"note","merge_request":{"iid":"42"},"text":"@reviewbot /review"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	handler(rec, req)

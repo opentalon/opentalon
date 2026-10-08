@@ -235,7 +235,7 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	// it to a single iteration so an adversarial task that keeps emitting
 	// (refused) tool calls can't burn several model calls — the caller gets
 	// exactly one, which is what a determinism/budget guarantee on top of this
-	// needs (e.g. talooner's llm_review).
+	// needs.
 	if req.NoTools {
 		maxIter = 1
 	}
