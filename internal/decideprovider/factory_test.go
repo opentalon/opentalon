@@ -67,4 +67,11 @@ func TestRegistryFromConfigs(t *testing.T) {
 	if _, ok := reg.Get("decider"); !ok {
 		t.Error("Get failed for configured decider")
 	}
+	if got := reg.Names(); len(got) != 2 || got[0] != "decider" || got[1] != "jev" {
+		t.Errorf("Names = %v, want [decider jev]", got)
+	}
+	var nilReg *Registry
+	if nilReg.Names() != nil {
+		t.Error("nil registry should have no names")
+	}
 }

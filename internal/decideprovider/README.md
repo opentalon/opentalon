@@ -21,6 +21,12 @@ than a standalone tln plugin: decision spend must be **metered** and gated by th
 same per-profile limits (`UsageStore.TotalTokensSince`) as every other model
 call. A plugin off to the side would bypass that.
 
+Each configured decider is registered by the orchestrator
+(`internal/orchestrator/decide.go`) as a built-in plugin named after it, with
+one callback-only `decide` action (hidden from the LLM, refused on LLM-sourced
+calls). Usage lands in `profile_usage` with `model_id = "decide/<name>"`; a
+callback with no profile in context is not metered.
+
 ## The contract
 
 Every backend answers the same shape the `decide` executor expects:

@@ -16,7 +16,10 @@
 // so backends are swappable via config with no change to the .tln source.
 package decideprovider
 
-import "context"
+import (
+	"context"
+	"sort"
+)
 
 // Request is one typed-decision query: pick one of Choices for State.
 type Request struct {
@@ -94,4 +97,17 @@ func (r *Registry) Get(name string) (Provider, bool) {
 func (r *Registry) Has(name string) bool {
 	_, ok := r.Get(name)
 	return ok
+}
+
+// Names returns the configured decider names in sorted order.
+func (r *Registry) Names() []string {
+	if r == nil {
+		return nil
+	}
+	names := make([]string, 0, len(r.byName))
+	for name := range r.byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

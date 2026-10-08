@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/decideprovider"
 	"github.com/opentalon/opentalon/internal/logger"
 	"github.com/opentalon/opentalon/internal/lua"
 	"github.com/opentalon/opentalon/internal/pipeline"
@@ -215,6 +216,9 @@ type OrchestratorOpts struct {
 	// one pod; the locker extends the "one turn at a time per session"
 	// invariant across pods. nil = sessionlock.Noop() (single-pod mode).
 	SessionLocker sessionlock.Locker
+	// Deciders are the typed-decision models (laya / Jev / local-logits), each
+	// registered as a callback-only `<name>__decide` plugin. nil = none.
+	Deciders *decideprovider.Registry
 }
 
 // RepairConfig tunes the post-failure tool-call repair phase (see
@@ -867,6 +871,10 @@ func NewWithRules(
 		}
 		_ = o.registry.Register(notifyCap, &notifyExecutor{orch: o})
 	}
+
+	// Register each configured typed-decision model (laya / Jev / local-logits)
+	// so a tln `decide` block's host callback reaches it — see decide.go.
+	o.registerDeciders(opts.Deciders)
 
 	return o
 }

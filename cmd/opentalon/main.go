@@ -27,6 +27,7 @@ import (
 	"github.com/opentalon/opentalon/internal/channel"
 	"github.com/opentalon/opentalon/internal/commands"
 	"github.com/opentalon/opentalon/internal/config"
+	"github.com/opentalon/opentalon/internal/decideprovider"
 	"github.com/opentalon/opentalon/internal/dedup"
 	"github.com/opentalon/opentalon/internal/eventwebhook"
 	"github.com/opentalon/opentalon/internal/health"
@@ -820,6 +821,12 @@ func main() {
 		escalationLimit = usageStore
 	}
 
+	deciders, err := buildDeciders(cfg.Models.Deciders)
+	if err != nil {
+		slog.Error("invalid deciders config", "error", err)
+		os.Exit(1) //nolint:gocritic // matches the other main()-level fatal config paths
+	}
+
 	orch := orchestrator.NewWithRules(llm, orchestrator.DefaultParser, toolRegistry, memory, sessions, orchestrator.OrchestratorOpts{
 		CustomRules:                   cfg.Orchestrator.Rules,
 		ContentPreparers:              contentPreparers,
@@ -896,6 +903,7 @@ func main() {
 		Notify: orchestrator.NotifyConfig{
 			Enabled: cfg.Orchestrator.Notify.Enabled,
 		},
+		Deciders:           deciders,
 		ConversationSender: notifier.SendToConversation,
 		SessionLocker:      sessionLocker,
 	})
@@ -1292,6 +1300,15 @@ func seedBootstrapGroupPlugins(ctx context.Context, gps *store.GroupPluginStore,
 			slog.Warn("seed bootstrap group plugins failed", "group", groupID, "error", err)
 		}
 	}
+}
+
+// buildDeciders maps the deciders config onto a decideprovider.Registry.
+func buildDeciders(cfgs map[string]config.DeciderConfig) (*decideprovider.Registry, error) {
+	m := make(map[string]decideprovider.DeciderConfig, len(cfgs))
+	for name, d := range cfgs {
+		m[name] = decideprovider.DeciderConfig{Name: name, Backend: d.Backend, BaseURL: d.BaseURL, APIKey: d.APIKey, Model: d.Model}
+	}
+	return decideprovider.RegistryFromConfigs(m)
 }
 
 // usageRecorderAdapter adapts store.UsageStore to orchestrator.UsageRecorder.
