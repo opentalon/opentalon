@@ -3,7 +3,9 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -503,5 +505,108 @@ func TestSubprocessNoToolsPinsSingleIteration(t *testing.T) {
 	}
 	if result.Iterations != 1 {
 		t.Errorf("NoTools must pin to a single iteration regardless of max_iterations, got: %d", result.Iterations)
+	}
+}
+
+// modelLLM answers every call and records which model each request asked for.
+type modelLLM struct {
+	mu     sync.Mutex
+	models []string
+}
+
+func (m *modelLLM) Complete(_ context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	m.mu.Lock()
+	m.models = append(m.models, req.Model)
+	m.mu.Unlock()
+	return &provider.CompletionResponse{Content: "ok"}, nil
+}
+
+// A host-side caller (e.g. talooner's llm_review via RunAction) picks the
+// sub-agent's chat model per call; it must be a configured one, and no model
+// means the default.
+func TestSubprocessModel(t *testing.T) {
+	configured := []string{"claude-haiku-4-5-20251001", "claude-opus-5-5"}
+	for _, tt := range []struct {
+		name       string
+		action     string
+		args       map[string]string
+		models     []string // SubprocessConfig.Models; nil = configured
+		wantModels []string // sorted
+		wantErr    string
+	}{
+		{name: "configured model is used", args: map[string]string{"task": "t", "tools": "none", "model": "claude-haiku-4-5-20251001"},
+			wantModels: []string{"claude-haiku-4-5-20251001"}},
+		{name: "whitespace is trimmed", args: map[string]string{"task": "t", "tools": "none", "model": "  claude-opus-5-5 "},
+			wantModels: []string{"claude-opus-5-5"}},
+		{name: "no model means the default", args: map[string]string{"task": "t", "tools": "none"}, wantModels: []string{""}},
+		{name: "unknown model is refused", args: map[string]string{"task": "t", "model": "gpt-9"}, wantErr: `unknown model "gpt-9"`},
+		{name: "no configured list means no check", models: []string{}, args: map[string]string{"task": "t", "tools": "none", "model": "anything"},
+			wantModels: []string{"anything"}},
+		{name: "parallel gives each task its own model", action: "parallel",
+			args:       map[string]string{"tasks": `[{"task":"a","tools":"none","model":"claude-opus-5-5"},{"task":"b","tools":"none","model":"claude-haiku-4-5-20251001"}]`},
+			wantModels: []string{"claude-haiku-4-5-20251001", "claude-opus-5-5"}},
+		{name: "parallel mixes explicit and default", action: "parallel",
+			args:       map[string]string{"tasks": `[{"task":"a","tools":"none","model":"claude-opus-5-5"},{"task":"b","tools":"none"}]`},
+			wantModels: []string{"", "claude-opus-5-5"}},
+		{name: "parallel checks every task", action: "parallel",
+			args: map[string]string{"tasks": `[{"task":"a","model":"claude-opus-5-5"},{"task":"b","model":"nope"}]`}, wantErr: `unknown model "nope"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			llm := &modelLLM{}
+			orch := setupSubprocessOrchestrator(llm)
+			orch.subprocessConfig.Models = configured
+			if tt.models != nil {
+				orch.subprocessConfig.Models = tt.models
+			}
+			action := tt.action
+			if action == "" {
+				action = "run"
+			}
+			_, err := orch.RunAction(context.Background(), "_subprocess", action, tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				if len(llm.models) != 0 {
+					t.Errorf("model was called despite the refusal: %v", llm.models)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RunAction: %v", err)
+			}
+			got := append([]string(nil), llm.models...)
+			sort.Strings(got)
+			if strings.Join(got, ",") != strings.Join(tt.wantModels, ",") {
+				t.Errorf("requested models = %v, want %v", got, tt.wantModels)
+			}
+		})
+	}
+}
+
+// The LLM is never offered `model`: an LLM-sourced call naming one is refused,
+// so a prompt-injected task cannot fan out onto the most expensive model.
+func TestSubprocessModelNotSelectableByLLM(t *testing.T) {
+	orch := setupSubprocessOrchestrator(&modelLLM{})
+	orch.subprocessConfig.Models = []string{"claude-opus-5-5"}
+	if _, err := orch.resolveSubprocessModel(context.Background(), ToolCall{FromLLM: true}, "claude-opus-5-5"); err == nil {
+		t.Error("an LLM-sourced model choice must be refused")
+	}
+	for _, p := range orch.registry.plugins["_subprocess"].Actions {
+		for _, param := range p.Parameters {
+			if param.Name == "model" {
+				t.Errorf("_subprocess.%s advertises a model parameter to the LLM", p.Name)
+			}
+		}
+	}
+}
+
+// A nested sub-agent with no explicit model inherits its parent's.
+func TestSubprocessModelInherited(t *testing.T) {
+	orch := setupSubprocessOrchestrator(&modelLLM{})
+	ctx := context.WithValue(context.Background(), subprocessModelKey{}, "claude-haiku-4-5-20251001")
+	got, err := orch.resolveSubprocessModel(ctx, ToolCall{FromLLM: true}, "")
+	if err != nil || got != "claude-haiku-4-5-20251001" {
+		t.Errorf("inherited model = %q, %v; want the parent's", got, err)
 	}
 }

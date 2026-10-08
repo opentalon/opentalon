@@ -109,6 +109,36 @@ func (h *healthGatedProvider) Models() []ModelInfo {
 	return out
 }
 
+// modelFor picks the model id to send to entry e. The default model (empty, or
+// the preferred entry's id) maps to each entry's own configured id, as before.
+// An explicitly requested other model (a _subprocess `model`, repair.model, a
+// profile override) is kept on an entry that serves it, so it does not
+// silently run on the entry's default; an entry that does not serve it falls
+// back to its own id, with a warning naming both.
+func (h *healthGatedProvider) modelFor(e ProviderEntry, requested string) string {
+	if requested == "" || requested == h.entries[0].Model || requested == e.Model {
+		return e.Model
+	}
+	for _, m := range e.Prov.Models() {
+		if m.ID == requested {
+			return requested
+		}
+	}
+	h.log.Warn("requested model not served by this endpoint; using its configured model",
+		"provider", e.Prov.ID(), "requested", requested, "model", e.Model)
+	return e.Model
+}
+
+// PrimaryModels returns the models of the provider requests go to first: the
+// preferred endpoint of a health-gated provider (Models there is the union of
+// every endpoint, fallbacks included), otherwise p's own models.
+func PrimaryModels(p Provider) []ModelInfo {
+	if hg, ok := p.(*healthGatedProvider); ok {
+		return hg.entries[0].Prov.Models()
+	}
+	return p.Models()
+}
+
 // order returns the indices of entries to try, in priority order: preferred
 // first when healthy; otherwise fallbacks first with the preferred endpoint
 // kept as a last resort (in case it recovered between probes).
@@ -133,7 +163,7 @@ func (h *healthGatedProvider) Complete(ctx context.Context, req *CompletionReque
 	for _, idx := range h.order() {
 		e := h.entries[idx]
 		cp := *req
-		cp.Model = e.Model
+		cp.Model = h.modelFor(e, req.Model)
 		resp, err := e.Prov.Complete(ctx, &cp)
 		if err == nil {
 			return resp, nil
@@ -163,7 +193,7 @@ func (h *healthGatedProvider) Stream(ctx context.Context, req *CompletionRequest
 	for _, idx := range h.order() {
 		e := h.entries[idx]
 		cp := *req
-		cp.Model = e.Model
+		cp.Model = h.modelFor(e, req.Model)
 		cp.Stream = true
 		stream, err := e.Prov.Stream(ctx, &cp)
 		if err == nil {

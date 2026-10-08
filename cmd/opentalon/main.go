@@ -420,11 +420,7 @@ func main() {
 	// models record usage at zero cost, since cost lookup misses).
 	if cfg.Orchestrator.Repair.Enabled && cfg.Orchestrator.Repair.Model != "" {
 		if _, ok := modelMap[cfg.Orchestrator.Repair.Model]; !ok {
-			configured := make([]string, 0, len(modelMap))
-			for id := range modelMap {
-				configured = append(configured, id)
-			}
-			sort.Strings(configured)
+			configured := modelIDs(prov.Models())
 			slog.Warn("repair.model is not in the configured models list; corrector calls will fail unless the primary provider serves it (use a bare model id, not the provider/model routing form)",
 				"model", cfg.Orchestrator.Repair.Model,
 				"configured_models", strings.Join(configured, ", "))
@@ -896,6 +892,7 @@ func main() {
 			MaxDepth:      cfg.Orchestrator.Subprocess.MaxDepth,
 			MaxIterations: cfg.Orchestrator.Subprocess.MaxIterations,
 			MaxParallel:   cfg.Orchestrator.Subprocess.MaxParallel,
+			Models:        modelIDs(provider.PrimaryModels(prov)),
 			DefaultTimeout: func() time.Duration {
 				if cfg.Orchestrator.Subprocess.DefaultTimeout != "" {
 					if d, err := time.ParseDuration(cfg.Orchestrator.Subprocess.DefaultTimeout); err == nil {
@@ -1318,6 +1315,20 @@ func buildDeciders(cfgs map[string]config.DeciderConfig) (*decideprovider.Regist
 		m[name] = decideprovider.DeciderConfig{Name: name, Backend: d.Backend, BaseURL: d.BaseURL, APIKey: d.APIKey, Model: d.Model}
 	}
 	return decideprovider.RegistryFromConfigs(m)
+}
+
+// modelIDs returns the distinct ids of models, sorted.
+func modelIDs(models []provider.ModelInfo) []string {
+	seen := make(map[string]bool, len(models))
+	ids := make([]string, 0, len(models))
+	for _, m := range models {
+		if !seen[m.ID] {
+			seen[m.ID] = true
+			ids = append(ids, m.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // usageRecorderAdapter adapts store.UsageStore to orchestrator.UsageRecorder.
