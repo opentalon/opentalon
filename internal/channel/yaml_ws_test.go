@@ -317,6 +317,73 @@ func TestMatchesDispatch_NilOrEmptyNeverMatches(t *testing.T) {
 	}
 }
 
+func TestMatchesDispatch_TemplateResolvingToEmptyNeverMatches(t *testing.T) {
+	t.Setenv("TEST_TRIGGER_PHRASE", "")
+	t.Setenv("TEST_EXPECTED_KIND", "")
+
+	rules := []ProcessRule{
+		{Field: "text", Contains: "{{env.TEST_TRIGGER_PHRASE}}"},
+		{Field: "object_kind", Equals: "{{env.TEST_EXPECTED_KIND}}"},
+		{Field: "label", Contains: "{{config.missing_key}}"},
+	}
+	ch := &YAMLChannel{
+		spec: &YAMLChannelSpec{
+			Inbound: InboundSpec{
+				ProcessWhen: rules,
+				Dispatch:    &DispatchSpec{When: rules},
+			},
+		},
+		selfVars: make(map[string]string),
+		config:   make(map[string]string),
+	}
+
+	tests := []struct {
+		name  string
+		event map[string]interface{}
+	}{
+		{name: "any text", event: map[string]interface{}{"text": "unrelated comment"}},
+		{name: "empty text", event: map[string]interface{}{"text": ""}},
+		{name: "missing fields", event: map[string]interface{}{}},
+		{name: "label present", event: map[string]interface{}{"label": "bug"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if ch.matchesDispatch(tt.event) {
+				t.Error("matchesDispatch = true with rules whose templates resolve to empty, want false")
+			}
+			if ch.matchesProcessWhen(tt.event) {
+				t.Error("matchesProcessWhen = true with rules whose templates resolve to empty, want false")
+			}
+		})
+	}
+}
+
+func TestMatchesDispatch_TemplateResolvingToValueStillMatches(t *testing.T) {
+	t.Setenv("TEST_TRIGGER_PHRASE", "!review")
+
+	ch := &YAMLChannel{
+		spec: &YAMLChannelSpec{
+			Inbound: InboundSpec{
+				Dispatch: &DispatchSpec{
+					When: []ProcessRule{
+						{Field: "text", Contains: "{{env.TEST_TRIGGER_PHRASE}}"},
+					},
+				},
+			},
+		},
+		selfVars: make(map[string]string),
+		config:   make(map[string]string),
+	}
+
+	if !ch.matchesDispatch(map[string]interface{}{"text": "please !review /plan"}) {
+		t.Error("matchesDispatch = false for text containing resolved phrase, want true")
+	}
+	if ch.matchesDispatch(map[string]interface{}{"text": "please review"}) {
+		t.Error("matchesDispatch = true for text without resolved phrase, want false")
+	}
+}
+
 func TestApplyTransforms(t *testing.T) {
 	ch := &YAMLChannel{
 		spec: &YAMLChannelSpec{

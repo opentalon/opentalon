@@ -333,14 +333,14 @@ func (ch *YAMLChannel) matchRule(event map[string]interface{}, rule ProcessRule,
 
 	if rule.Equals != "" {
 		expected := substituteTemplate(rule.Equals, contexts)
-		if val == expected {
+		if expected != "" && val == expected {
 			return true
 		}
 	}
 
 	if rule.Contains != "" {
 		needle := substituteTemplate(rule.Contains, contexts)
-		if strings.Contains(val, needle) {
+		if needle != "" && strings.Contains(val, needle) {
 			return true
 		}
 	}
