@@ -896,6 +896,7 @@ func main() {
 			MaxDepth:      cfg.Orchestrator.Subprocess.MaxDepth,
 			MaxIterations: cfg.Orchestrator.Subprocess.MaxIterations,
 			MaxParallel:   cfg.Orchestrator.Subprocess.MaxParallel,
+			Models:        modelIDs(modelMap),
 			DefaultTimeout: func() time.Duration {
 				if cfg.Orchestrator.Subprocess.DefaultTimeout != "" {
 					if d, err := time.ParseDuration(cfg.Orchestrator.Subprocess.DefaultTimeout); err == nil {
@@ -1318,6 +1319,16 @@ func buildDeciders(cfgs map[string]config.DeciderConfig) (*decideprovider.Regist
 		m[name] = decideprovider.DeciderConfig{Name: name, Backend: d.Backend, BaseURL: d.BaseURL, APIKey: d.APIKey, Model: d.Model}
 	}
 	return decideprovider.RegistryFromConfigs(m)
+}
+
+// modelIDs returns the configured chat model ids, sorted.
+func modelIDs(models map[string]provider.ModelInfo) []string {
+	ids := make([]string, 0, len(models))
+	for id := range models {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // usageRecorderAdapter adapts store.UsageStore to orchestrator.UsageRecorder.

@@ -505,3 +505,55 @@ func TestSubprocessNoToolsPinsSingleIteration(t *testing.T) {
 		t.Errorf("NoTools must pin to a single iteration regardless of max_iterations, got: %d", result.Iterations)
 	}
 }
+
+// modelLLM answers every call and records which model each request asked for.
+type modelLLM struct{ models []string }
+
+func (m *modelLLM) Complete(_ context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	m.models = append(m.models, req.Model)
+	return &provider.CompletionResponse{Content: "ok"}, nil
+}
+
+// A caller (e.g. talooner's llm_review via RunAction) picks the sub-agent's chat
+// model per call; it must be a configured one, and no model means the default.
+func TestSubprocessModel(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		args      map[string]string
+		wantModel string
+		wantErr   string
+	}{
+		{name: "configured model is used", args: map[string]string{"task": "t", "tools": "none", "model": "claude-haiku-4-5-20251001"},
+			wantModel: "claude-haiku-4-5-20251001"},
+		{name: "no model means the default", args: map[string]string{"task": "t", "tools": "none"}, wantModel: ""},
+		{name: "unknown model is refused", args: map[string]string{"task": "t", "model": "gpt-9"}, wantErr: `unknown model "gpt-9"`},
+		{name: "parallel checks every task", args: map[string]string{"tasks": `[{"task":"a","model":"claude-opus-5-5"},{"task":"b","model":"nope"}]`},
+			wantErr: `unknown model "nope"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			llm := &modelLLM{}
+			orch := setupSubprocessOrchestrator(llm)
+			orch.subprocessConfig.Models = []string{"claude-haiku-4-5-20251001", "claude-opus-5-5"}
+			action := "run"
+			if _, ok := tt.args["tasks"]; ok {
+				action = "parallel"
+			}
+			_, err := orch.RunAction(context.Background(), "_subprocess", action, tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				if len(llm.models) != 0 {
+					t.Errorf("model was called despite the refusal: %v", llm.models)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RunAction: %v", err)
+			}
+			if len(llm.models) != 1 || llm.models[0] != tt.wantModel {
+				t.Errorf("requested models = %v, want [%q]", llm.models, tt.wantModel)
+			}
+		})
+	}
+}

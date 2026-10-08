@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ type SubprocessConfig struct {
 	MaxIterations  int           // default iterations per child (default 5, hard cap 10)
 	DefaultTimeout time.Duration // per-subprocess timeout (default 60s)
 	MaxParallel    int           // max concurrent children per _subprocess.parallel CALL (default 4, hard cap 8); process-wide in-flight can reach N_calls x MaxParallel under MaxConcurrentSessions > 1
+	Models         []string      // configured chat model ids a caller may pick with `model`; empty = no check
 }
 
 // Bounds for _subprocess.parallel. defaultMaxParallel/maxMaxParallel clamp the
@@ -43,6 +45,9 @@ type subprocessRequest struct {
 	// must answer directly, e.g. a judgement call that must not have side effects
 	// from a prompt-injected task.
 	NoTools bool
+	// Model is the chat model id the sub-agent runs on; empty means the
+	// default model. It must be one of the configured models (ChatModels).
+	Model string
 }
 
 // subprocessDepthKey is the context key for tracking subprocess nesting depth.
@@ -68,6 +73,9 @@ func (s *subprocessExecutor) Execute(ctx context.Context, call ToolCall) ToolRes
 	}
 
 	req, err := parseSubprocessRequest(call.Args)
+	if err == nil {
+		err = s.orch.checkSubprocessModel(req.Model)
+	}
 	if err != nil {
 		return ToolResult{CallID: call.ID, Error: err.Error()}
 	}
@@ -110,6 +118,9 @@ type parallelTaskResult struct {
 // only new bound is MaxParallel (concurrency) plus a total-tasks cap.
 func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall) ToolResult {
 	reqs, err := parseParallelRequest(call.Args)
+	for i := 0; err == nil && i < len(reqs); i++ {
+		err = s.orch.checkSubprocessModel(reqs[i].Model)
+	}
 	if err != nil {
 		return ToolResult{CallID: call.ID, Error: err.Error()}
 	}
@@ -245,7 +256,7 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	if len(taskPreview) > 100 {
 		taskPreview = taskPreview[:100] + "..."
 	}
-	log.Info("subprocess started", "task", taskPreview, "max_iterations", maxIter, "allowed_tools", len(req.AllowedTools))
+	log.Info("subprocess started", "task", taskPreview, "max_iterations", maxIter, "allowed_tools", len(req.AllowedTools), "model", req.Model)
 
 	systemPrompt := o.buildSubprocessSystemPrompt(ctx, req)
 
@@ -267,7 +278,7 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 			return result, nil
 		}
 
-		resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{Messages: guardedMessages})
+		resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{Messages: guardedMessages, Model: req.Model})
 		if err != nil {
 			return nil, fmt.Errorf("subprocess LLM: %w", err)
 		}
@@ -394,6 +405,17 @@ func (o *Orchestrator) buildSubprocessSystemPrompt(ctx context.Context, req subp
 	return sb.String()
 }
 
+// checkSubprocessModel rejects a `model` that is not a configured chat model,
+// so a typo fails loudly instead of 4xx-ing at the provider or silently running
+// on the default model. With no configured list there is nothing to check.
+func (o *Orchestrator) checkSubprocessModel(model string) error {
+	models := o.subprocessConfig.Models
+	if model == "" || len(models) == 0 || slices.Contains(models, model) {
+		return nil
+	}
+	return fmt.Errorf("unknown model %q for subprocess (configured: %s)", model, strings.Join(models, ", "))
+}
+
 // parseSubprocessRequest parses tool call args into a subprocessRequest.
 func parseSubprocessRequest(args map[string]string) (subprocessRequest, error) {
 	task := args["task"]
@@ -401,7 +423,7 @@ func parseSubprocessRequest(args map[string]string) (subprocessRequest, error) {
 		return subprocessRequest{}, fmt.Errorf("subprocess requires a 'task' argument")
 	}
 
-	req := subprocessRequest{Task: task}
+	req := subprocessRequest{Task: task, Model: strings.TrimSpace(args["model"])}
 
 	if tools := strings.TrimSpace(args["tools"]); strings.EqualFold(tools, noToolsSentinel) {
 		req.NoTools = true
@@ -440,6 +462,7 @@ func parseParallelRequest(args map[string]string) ([]subprocessRequest, error) {
 		Task          string `json:"task"`
 		Tools         string `json:"tools"`
 		MaxIterations int    `json:"max_iterations"`
+		Model         string `json:"model"`
 	}
 	if err := json.Unmarshal([]byte(raw), &items); err != nil {
 		return nil, fmt.Errorf("invalid 'tasks' JSON: %v (expected an array like [{\"task\":\"...\"}])", err)
@@ -457,7 +480,7 @@ func parseParallelRequest(args map[string]string) ([]subprocessRequest, error) {
 		if task == "" {
 			return nil, fmt.Errorf("task %d is missing a 'task' field", i+1)
 		}
-		req := subprocessRequest{Task: task, MaxIterations: it.MaxIterations}
+		req := subprocessRequest{Task: task, MaxIterations: it.MaxIterations, Model: strings.TrimSpace(it.Model)}
 		if strings.EqualFold(strings.TrimSpace(it.Tools), noToolsSentinel) {
 			req.NoTools = true
 		} else {
