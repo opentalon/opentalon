@@ -42,7 +42,8 @@ func (r toolPairingReport) empty() bool {
 // appended between the two halves by another writer, or the store's
 // max-messages trim. This is the last line of defence, run on the finished
 // request:
-//   - a call's result found later in the history is moved back to the call;
+//   - a call's result found later in the call's exchange (before the next user
+//     turn or tool-calling assistant message) is moved back to the call;
 //   - a call with no result is kept and answered with
 //     unrecordedToolResultNotice, so the model checks instead of repeating a
 //     call that may have run;
@@ -56,19 +57,20 @@ func (r toolPairingReport) empty() bool {
 func pairToolMessages(msgs []provider.Message) ([]provider.Message, toolPairingReport) {
 	var report toolPairingReport
 
-	// Where each call id's results sit, in order, so a misplaced result can be
-	// found from its call.
-	resultsByID := make(map[string][]int)
-	for i, m := range msgs {
-		if m.Role == provider.RoleTool && m.ToolCallID != "" {
-			resultsByID[m.ToolCallID] = append(resultsByID[m.ToolCallID], i)
-		}
-	}
 	used := make([]bool, len(msgs))
-	// nextResult returns the first unused result for id after position i.
+	// nextResult returns the first unused result for id after the call at
+	// position i, searching only the call's own exchange: it ends at the next
+	// user turn or the next assistant message that calls tools. Call ids are
+	// not unique across rounds (a provider that omits them gets "call-1" every
+	// round, planner calls are "planner-<plugin>-<action>"), so a result past
+	// that point belongs to a later call with the same id, not to this one.
+	// Assistant text with no calls (e.g. a notification) does not end it.
 	nextResult := func(id string, i int) (int, bool) {
-		for _, j := range resultsByID[id] {
-			if j > i && !used[j] {
+		for j := i + 1; j < len(msgs); j++ {
+			if bordersExchange(msgs[j]) {
+				break
+			}
+			if msgs[j].Role == provider.RoleTool && msgs[j].ToolCallID == id && !used[j] {
 				return j, true
 			}
 		}
@@ -135,15 +137,105 @@ func pairToolMessages(msgs []provider.Message) ([]provider.Message, toolPairingR
 }
 
 // summaryCut returns the index where summarization splits msgs so that the
-// last keep messages stay verbatim. The cut moves earlier while it would land
-// on a tool result, so a kept result never loses the call before it to the
-// summary.
+// last keep messages stay verbatim. The cut moves earlier while a kept result
+// would lose its call to the summary: when it lands on a tool result, or
+// inside an exchange whose call is before the cut and whose result is after it
+// (e.g. a notification between the two halves).
 func summaryCut(msgs []provider.Message, keep int) int {
 	cut := len(msgs) - keep
-	for cut > 0 && cut < len(msgs) && isToolResultMessage(msgs[cut]) {
-		cut--
+	for cut > 0 && cut < len(msgs) {
+		if isToolResultMessage(msgs[cut]) {
+			cut--
+			continue
+		}
+		k, ok := openExchangeCall(msgs, cut)
+		if !ok {
+			break
+		}
+		cut = k
 	}
 	return cut
+}
+
+// openExchangeCall reports whether a cut at position cut splits a native tool
+// exchange: the closest tool-calling assistant message before cut, with no
+// user turn in between, has a result at or after cut (before the exchange
+// ends at the next user turn or tool-calling assistant message). It returns
+// that assistant message's index.
+func openExchangeCall(msgs []provider.Message, cut int) (int, bool) {
+	k := cut - 1
+	for k >= 0 && !bordersExchange(msgs[k]) {
+		k--
+	}
+	if k < 0 || msgs[k].Role == provider.RoleUser {
+		return 0, false
+	}
+	ids := make(map[string]bool, len(msgs[k].ToolCalls))
+	for _, tc := range msgs[k].ToolCalls {
+		ids[tc.ID] = true
+	}
+	for j := cut; j < len(msgs); j++ {
+		if bordersExchange(msgs[j]) {
+			break
+		}
+		if msgs[j].Role == provider.RoleTool && ids[msgs[j].ToolCallID] {
+			return k, true
+		}
+	}
+	return 0, false
+}
+
+// bordersExchange reports whether m opens or closes a native tool exchange (a
+// tool-calling assistant message and the results that answer it): a user turn
+// or another tool-calling assistant message. Assistant text without calls,
+// such as a notification, sits inside an exchange without ending it.
+func bordersExchange(m provider.Message) bool {
+	return m.Role == provider.RoleUser || (m.Role == provider.RoleAssistant && len(m.ToolCalls) > 0)
+}
+
+// pairingReported remembers what a turn already reported, so damage that stays
+// in the history is reported once per turn rather than on every LLM round,
+// while newly found damage still is.
+type pairingReported struct {
+	keys    map[string]bool
+	dropped int
+}
+
+// fresh returns the part of r not reported yet this turn and marks it reported.
+func (p *pairingReported) fresh(r toolPairingReport) toolPairingReport {
+	if p.keys == nil {
+		p.keys = make(map[string]bool)
+	}
+	isNew := func(kind, id string) bool {
+		k := kind + "\x00" + id
+		if p.keys[k] {
+			return false
+		}
+		p.keys[k] = true
+		return true
+	}
+	var out toolPairingReport
+	for i, id := range r.UnansweredCallIDs {
+		if isNew("unanswered", id) {
+			out.UnansweredCallIDs = append(out.UnansweredCallIDs, id)
+			out.UnansweredTools = append(out.UnansweredTools, r.UnansweredTools[i])
+		}
+	}
+	for _, id := range r.MovedResultIDs {
+		if isNew("moved", id) {
+			out.MovedResultIDs = append(out.MovedResultIDs, id)
+		}
+	}
+	for _, id := range r.OrphanResultIDs {
+		if isNew("orphan", id) {
+			out.OrphanResultIDs = append(out.OrphanResultIDs, id)
+		}
+	}
+	if r.DroppedCallCount > p.dropped {
+		out.DroppedCallCount = r.DroppedCallCount - p.dropped
+		p.dropped = r.DroppedCallCount
+	}
+	return out
 }
 
 // reportToolPairing records a repair by pairToolMessages: a warning and a

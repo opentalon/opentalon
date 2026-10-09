@@ -23,6 +23,10 @@ func toolResult(id string) provider.Message {
 	return provider.Message{Role: provider.RoleTool, Content: "ok", ToolCallID: id}
 }
 
+func toolResultWith(id, content string) provider.Message {
+	return provider.Message{Role: provider.RoleTool, Content: content, ToolCallID: id}
+}
+
 func unrecorded(id string) provider.Message {
 	return provider.Message{Role: provider.RoleTool, Content: unrecordedToolResultNotice, ToolCallID: id}
 }
@@ -114,6 +118,24 @@ func TestPairToolMessages(t *testing.T) {
 			report: toolPairingReport{MovedResultIDs: []string{"a"}},
 		},
 		{
+			// Call ids repeat across rounds: the second call-1's result must not
+			// be taken by the first, unanswered call-1.
+			name: "result of a later call with the same id stays with it",
+			in: []provider.Message{sys, user("u"), toolUse("", "call-1"), user("hidden note"),
+				toolUse("", "call-1"), toolResultWith("call-1", "ROUND-2 RESULT")},
+			want: []provider.Message{sys, user("u"), toolUse("", "call-1"), unrecorded("call-1"), user("hidden note"),
+				toolUse("", "call-1"), toolResultWith("call-1", "ROUND-2 RESULT")},
+			report: toolPairingReport{UnansweredCallIDs: []string{"call-1"}, UnansweredTools: []string{"agents__create"}},
+		},
+		{
+			// A user turn ends the exchange: a result after it is not the call's.
+			name: "result past a user turn is not moved back",
+			in:   []provider.Message{sys, user("u"), toolUse("", "call-1"), user("u2"), toolResultWith("call-1", "RESULT OF CALL B")},
+			want: []provider.Message{sys, user("u"), toolUse("", "call-1"), unrecorded("call-1"), user("u2")},
+			report: toolPairingReport{UnansweredCallIDs: []string{"call-1"}, UnansweredTools: []string{"agents__create"},
+				OrphanResultIDs: []string{"call-1"}},
+		},
+		{
 			name:   "result for another call dropped",
 			in:     []provider.Message{sys, user("u"), toolUse("", "a"), toolResult("a"), toolResult("x")},
 			want:   []provider.Message{sys, user("u"), toolUse("", "a"), toolResult("a")},
@@ -176,6 +198,8 @@ func TestPairToolMessages(t *testing.T) {
 func TestSummaryCut_NeverSplitsAToolPair(t *testing.T) {
 	native := []provider.Message{user("u1"), toolUse("", "a"), toolResult("a"), user("u2"), toolUse("", "b"), toolResult("b")}
 	text := []provider.Message{user("u1"), assistant("[tool_call] x"), user("[plugin_output] y"), user("u2")}
+	// A notification between the two halves of a pair.
+	split := []provider.Message{user("u1"), toolUse("", "a"), assistant("note"), toolResult("a"), assistant("done"), user("u2")}
 	tests := []struct {
 		name       string
 		msgs       []provider.Message
@@ -188,6 +212,9 @@ func TestSummaryCut_NeverSplitsAToolPair(t *testing.T) {
 		{"native: keep all", native, 6, 0},
 		{"text: cut on [plugin_output] → back to its [tool_call]", text, 2, 1},
 		{"text: cut on a user turn", text, 1, 3},
+		{"split: cut between call and result → back to the call", split, 4, 1},
+		{"split: cut after the result", split, 2, 4},
+		{"split: cut on the next user turn", split, 1, 5},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -195,7 +222,11 @@ func TestSummaryCut_NeverSplitsAToolPair(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("summaryCut(keep=%d) = %d, want %d", tt.keep, got, tt.want)
 			}
-			assertPaired(t, tt.msgs[got:])
+			// The kept history may need a move, but never loses a call or a
+			// result to the summary.
+			if _, r := pairToolMessages(tt.msgs[got:]); len(r.OrphanResultIDs) > 0 || len(r.UnansweredCallIDs) > 0 {
+				t.Errorf("kept history split a pair: %+v", r)
+			}
 		})
 	}
 }
@@ -308,5 +339,25 @@ func TestMaybeSummarizeSession_SkipsWhenTheCutKeepsEverything(t *testing.T) {
 	}
 	if sess, _ := sessions.Get("sess"); len(sess.Messages) != 2 || sess.Summary != "" {
 		t.Errorf("session rewritten: %d messages, summary %q", len(sess.Messages), sess.Summary)
+	}
+}
+
+func TestPairingReported_ReportsEachRepairOncePerTurn(t *testing.T) {
+	var seen pairingReported
+	first := toolPairingReport{UnansweredCallIDs: []string{"a"}, UnansweredTools: []string{"t"}, OrphanResultIDs: []string{"x"}, DroppedCallCount: 1}
+	if got := seen.fresh(first); !reflect.DeepEqual(got, first) {
+		t.Errorf("first report = %+v, want all of it", got)
+	}
+	if got := seen.fresh(first); !got.empty() {
+		t.Errorf("same damage again = %+v, want nothing new", got)
+	}
+	// A later round finds more damage on top of the same: only the new part.
+	second := toolPairingReport{
+		UnansweredCallIDs: []string{"a", "b"}, UnansweredTools: []string{"t", "u"},
+		MovedResultIDs: []string{"m"}, OrphanResultIDs: []string{"x"}, DroppedCallCount: 3,
+	}
+	want := toolPairingReport{UnansweredCallIDs: []string{"b"}, UnansweredTools: []string{"u"}, MovedResultIDs: []string{"m"}, DroppedCallCount: 2}
+	if got := seen.fresh(second); !reflect.DeepEqual(got, want) {
+		t.Errorf("second report = %+v, want %+v", got, want)
 	}
 }

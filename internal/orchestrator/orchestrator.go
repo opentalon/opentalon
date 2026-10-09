@@ -2245,8 +2245,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var stripRetries int
 	var toolRetries int // retries when planner expected tools but LLM didn't call any
 	var transientMessages []provider.Message
-	var lastCallSig string    // "plugin__action\x00arg1=val1\x00..." for loop detection
-	var lastPairingSig string // last reported tool-pairing repair, so damage is reported once per turn
+	var lastCallSig string          // "plugin__action\x00arg1=val1\x00..." for loop detection
+	var pairingSeen pairingReported // tool-pairing repairs already reported this turn
 	var repeatCount int
 	// Phantom-completion guard state (consumed in the calls==nil branch). The
 	// model sometimes loads a write tool, resolves every parameter through
@@ -2366,11 +2366,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// counts what is sent. The fit keeps pairs intact, so once is enough.
 		var pairing toolPairingReport
 		req.Messages, pairing = pairToolMessages(req.Messages)
-		if !pairing.empty() {
-			if sig := fmt.Sprintf("%+v", pairing); sig != lastPairingSig {
-				lastPairingSig = sig
-				o.reportToolPairing(ctx, sessionID, pairing)
-			}
+		if fresh := pairingSeen.fresh(pairing); !fresh.empty() {
+			o.reportToolPairing(ctx, sessionID, fresh)
 		}
 		// Make it fit, send it, and if the provider says it is still too long,
 		// take its measurement and make it fit again. The refusal is our own
