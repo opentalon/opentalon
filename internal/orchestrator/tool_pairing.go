@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"strings"
 
 	"github.com/opentalon/opentalon/internal/logger"
 	"github.com/opentalon/opentalon/internal/provider"
@@ -195,28 +196,33 @@ func bordersExchange(m provider.Message) bool {
 
 // pairingReported remembers what a turn already reported, so damage that stays
 // in the history is reported once per turn rather than on every LLM round,
-// while newly found damage still is.
+// while newly found damage still is. It counts occurrences per key rather than
+// remembering keys: call ids repeat across rounds, so a second unanswered
+// "call-1" is new damage even when the first was already reported. Unanswered
+// calls are keyed on id and tool name.
 type pairingReported struct {
-	keys    map[string]bool
+	seen    map[string]int
 	dropped int
 }
 
 // fresh returns the part of r not reported yet this turn and marks it reported.
 func (p *pairingReported) fresh(r toolPairingReport) toolPairingReport {
-	if p.keys == nil {
-		p.keys = make(map[string]bool)
+	if p.seen == nil {
+		p.seen = make(map[string]int)
 	}
-	isNew := func(kind, id string) bool {
-		k := kind + "\x00" + id
-		if p.keys[k] {
-			return false
+	counts := make(map[string]int)
+	isNew := func(parts ...string) bool {
+		k := strings.Join(parts, "\x00")
+		counts[k]++
+		if counts[k] > p.seen[k] {
+			p.seen[k] = counts[k]
+			return true
 		}
-		p.keys[k] = true
-		return true
+		return false
 	}
 	var out toolPairingReport
 	for i, id := range r.UnansweredCallIDs {
-		if isNew("unanswered", id) {
+		if isNew("unanswered", id, r.UnansweredTools[i]) {
 			out.UnansweredCallIDs = append(out.UnansweredCallIDs, id)
 			out.UnansweredTools = append(out.UnansweredTools, r.UnansweredTools[i])
 		}

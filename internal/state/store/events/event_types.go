@@ -625,6 +625,13 @@ const MessagesTruncatedVersion = 1
 //     directly follow their call.
 //   - OrphanResultIDs: results with no call before them; dropped.
 //   - DroppedCallCount: calls with an empty or repeated id; dropped.
+//
+// The repair changes only the outgoing request, never the stored history, so
+// a damaged session is repaired — and this event emitted — once per turn until
+// summarization or a trim removes the damage. Count damaged sessions by
+// deduping on session_id and call id, not by counting events. Call ids are not
+// unique across rounds (e.g. a synthesized "call-1"), so pair them with
+// UnansweredTools where available.
 type ToolMessagesRepairedPayload struct {
 	Header
 	UnansweredCallIDs []string `json:"unanswered_call_ids,omitempty"`

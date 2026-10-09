@@ -2379,8 +2379,21 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// the round: replaying the round would re-invoke every guard preparer
 		// for a failure that has nothing to do with them.
 		var estimatedTokens int
+		sentMessages := 0
 		for attempt := 0; ; attempt++ {
 			estimatedTokens = fitRequestToWindow(ctx, req, o.contextWindow, o.maxOutputTokens, o.calibrators.factor(req.Model))
+			// The fit only ever drops messages. When the re-fit after a
+			// refusal dropped none (nothing left to drop, or the last tool
+			// call and its result kept together over budget), the provider
+			// would refuse the same request again: give up with its refusal
+			// instead of spending more calls on it.
+			if attempt > 0 && len(req.Messages) >= sentMessages {
+				log.Warn("prompt refused as too long and nothing more can be dropped; giving up",
+					"round", agentRound, "attempt", attempt+1,
+					"messages_count", len(req.Messages), "estimated_tokens", estimatedTokens)
+				break
+			}
+			sentMessages = len(req.Messages)
 			// Always logged, not only under session debug as it used to be:
 			// this is the figure that has to be reconciled against the
 			// provider's own count when a session nears the window, and the

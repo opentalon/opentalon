@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -359,5 +360,54 @@ func TestPairingReported_ReportsEachRepairOncePerTurn(t *testing.T) {
 	want := toolPairingReport{UnansweredCallIDs: []string{"b"}, UnansweredTools: []string{"u"}, MovedResultIDs: []string{"m"}, DroppedCallCount: 2}
 	if got := seen.fresh(second); !reflect.DeepEqual(got, want) {
 		t.Errorf("second report = %+v, want %+v", got, want)
+	}
+}
+
+// Call ids repeat across rounds: a second unanswered "call-1", for another tool
+// or the same one, is new damage and must be reported.
+func TestPairingReported_RepeatedIDsAreNewDamage(t *testing.T) {
+	var seen pairingReported
+	seen.fresh(toolPairingReport{UnansweredCallIDs: []string{"call-1"}, UnansweredTools: []string{"a__x"}, OrphanResultIDs: []string{"call-1"}})
+
+	got := seen.fresh(toolPairingReport{
+		UnansweredCallIDs: []string{"call-1", "call-1"}, UnansweredTools: []string{"a__x", "b__y"},
+		OrphanResultIDs: []string{"call-1", "call-1"},
+	})
+	want := toolPairingReport{UnansweredCallIDs: []string{"call-1"}, UnansweredTools: []string{"b__y"}, OrphanResultIDs: []string{"call-1"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("fresh = %+v, want %+v", got, want)
+	}
+
+	got = seen.fresh(toolPairingReport{UnansweredCallIDs: []string{"call-1", "call-1", "call-1"}, UnansweredTools: []string{"a__x", "b__y", "a__x"}})
+	want = toolPairingReport{UnansweredCallIDs: []string{"call-1"}, UnansweredTools: []string{"a__x"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("same tool, same id again = %+v, want %+v", got, want)
+	}
+}
+
+// overflowLLM refuses every request as too long and counts the attempts.
+type overflowLLM struct{ calls int }
+
+func (l *overflowLLM) Complete(_ context.Context, _ *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	l.calls++
+	return nil, errors.New("anthropic api error (status 400): prompt is too long: 250000 tokens > 200000 maximum")
+}
+
+// When the re-fit after a refusal cannot drop anything more, the same request
+// would be refused again: the turn gives up after the first refusal instead of
+// spending maxOverflowRetries more calls on it.
+func TestRun_OverflowRetryStopsWhenNothingMoreCanBeDropped(t *testing.T) {
+	llm := &overflowLLM{}
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "sess"})
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, NewToolRegistry(), state.NewMemoryStore(""), sessions,
+		OrchestratorOpts{ContextWindow: 200000})
+
+	_, err := orch.Run(context.Background(), "sess", "hello")
+	if err == nil || !strings.Contains(err.Error(), "prompt is too long") {
+		t.Fatalf("err = %v, want the provider's refusal", err)
+	}
+	if llm.calls != 1 {
+		t.Errorf("LLM calls = %d, want 1 (nothing to drop after the refusal)", llm.calls)
 	}
 }
