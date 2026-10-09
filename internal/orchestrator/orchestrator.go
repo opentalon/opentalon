@@ -2245,7 +2245,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var stripRetries int
 	var toolRetries int // retries when planner expected tools but LLM didn't call any
 	var transientMessages []provider.Message
-	var lastCallSig string // "plugin__action\x00arg1=val1\x00..." for loop detection
+	var lastCallSig string          // "plugin__action\x00arg1=val1\x00..." for loop detection
+	var pairingSeen pairingReported // tool-pairing repairs already reported this turn
 	var repeatCount int
 	// Phantom-completion guard state (consumed in the calls==nil branch). The
 	// model sometimes loads a write tool, resolves every parameter through
@@ -2361,6 +2362,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		llmStart := time.Now()
 		streamCB := o.resolveStreamCallback(ctx)
+		// Repair broken tool-call pairing before measuring, so the estimate
+		// counts what is sent. The fit keeps pairs intact, so once is enough.
+		var pairing toolPairingReport
+		req.Messages, pairing = pairToolMessages(req.Messages)
+		if fresh := pairingSeen.fresh(pairing); !fresh.empty() {
+			o.reportToolPairing(ctx, sessionID, fresh)
+		}
 		// Make it fit, send it, and if the provider says it is still too long,
 		// take its measurement and make it fit again. The refusal is our own
 		// mistake and it is deterministic — without this loop it ended the turn
@@ -2371,8 +2379,21 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// the round: replaying the round would re-invoke every guard preparer
 		// for a failure that has nothing to do with them.
 		var estimatedTokens int
+		sentMessages := 0
 		for attempt := 0; ; attempt++ {
 			estimatedTokens = fitRequestToWindow(ctx, req, o.contextWindow, o.maxOutputTokens, o.calibrators.factor(req.Model))
+			// The fit only ever drops messages. When the re-fit after a
+			// refusal dropped none (nothing left to drop, or the last tool
+			// call and its result kept together over budget), the provider
+			// would refuse the same request again: give up with its refusal
+			// instead of spending more calls on it.
+			if attempt > 0 && len(req.Messages) >= sentMessages {
+				log.Warn("prompt refused as too long and nothing more can be dropped; giving up",
+					"round", agentRound, "attempt", attempt+1,
+					"messages_count", len(req.Messages), "estimated_tokens", estimatedTokens)
+				break
+			}
+			sentMessages = len(req.Messages)
 			// Always logged, not only under session debug as it used to be:
 			// this is the figure that has to be reconciled against the
 			// provider's own count when a session nears the window, and the
@@ -4026,15 +4047,16 @@ func hasToolResults(msgs []provider.Message) bool {
 // message. Skipping the leading orphaned results keeps the kept slice a valid
 // transcript. Returns len(msgs) only if every remaining message is a result.
 func firstNonOrphanIndex(msgs []provider.Message, start int) int {
-	for start < len(msgs) {
-		m := msgs[start]
-		if m.Role == provider.RoleTool || (m.Role == provider.RoleUser && strings.Contains(m.Content, "[plugin_output]")) {
-			start++
-			continue
-		}
-		break
+	for start < len(msgs) && isToolResultMessage(msgs[start]) {
+		start++
 	}
 	return start
+}
+
+// isToolResultMessage reports whether m is a tool result: a native RoleTool
+// message or a text-format [plugin_output] user message.
+func isToolResultMessage(m provider.Message) bool {
+	return m.Role == provider.RoleTool || (m.Role == provider.RoleUser && strings.Contains(m.Content, "[plugin_output]"))
 }
 
 // applySlidingWindow keeps only the last o.contextMessages entries
@@ -5058,8 +5080,14 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 	if keep > len(sess.Messages) {
 		keep = len(sess.Messages)
 	}
-	toSummarize := sess.Messages[:len(sess.Messages)-keep]
-	keepMessages := sess.Messages[len(sess.Messages)-keep:]
+	cut := summaryCut(sess.Messages, keep)
+	if cut == 0 {
+		// Keeping the last messages verbatim means keeping all of them (the
+		// cut stepped back to a tool call at the start): nothing to summarize.
+		return
+	}
+	toSummarize := sess.Messages[:cut]
+	keepMessages := sess.Messages[cut:]
 	summTriggeredID := emit.EmitSummarizationTriggered(ctx, o.eventSink, emit.SummarizationTriggeredArgs{
 		MessageCount: len(sess.Messages),
 		Reason:       "threshold_reached",
