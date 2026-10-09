@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"sync"
 )
 
@@ -196,7 +197,7 @@ func (r *ToolRegistry) GetExecutor(name string) (PluginExecutor, bool) {
 // ListCapabilities returns all registered capabilities. Plugins that have
 // aliases (e.g. MCP servers) are replaced by one entry per alias, each with
 // the alias name but the parent's actions, so the LLM sees "jira" and
-// "appsignal" instead of "mcp".
+// "appsignal" instead of "mcp". Entries are sorted by name.
 func (r *ToolRegistry) ListCapabilities() []PluginCapability {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -223,6 +224,7 @@ func (r *ToolRegistry) ListCapabilities() []PluginCapability {
 			caps = append(caps, aliased)
 		}
 	}
+	sort.Slice(caps, func(i, j int) bool { return caps[i].Name < caps[j].Name })
 	return caps
 }
 

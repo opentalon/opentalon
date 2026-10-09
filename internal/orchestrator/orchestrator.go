@@ -2987,8 +2987,7 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 // loop; when native tool calling is off the slice is empty (text-mode
 // tools are described inside the system prompt and are already covered
 // by system_prompt_sha256). Both slices are sorted by Name so consumers
-// see stable order across runs — ListCapabilities() and cachedTools
-// both depend on Go map iteration, which is not deterministic.
+// see stable order across runs.
 //
 // snapshot upsert errors are logged and swallowed: a transient DB
 // failure must not break the turn. The resulting event still ships;
