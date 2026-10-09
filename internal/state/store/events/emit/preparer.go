@@ -183,3 +183,27 @@ func EmitMessagesTruncated(ctx context.Context, sink Sink, args MessagesTruncate
 		DroppedCount:    args.DroppedCount,
 	}, 0)
 }
+
+// ToolMessagesRepairedArgs describes one repair of an LLM request whose
+// native tool calls and results were not paired. See
+// events.ToolMessagesRepairedPayload for the fields.
+type ToolMessagesRepairedArgs struct {
+	UnansweredCallIDs []string
+	UnansweredTools   []string
+	MovedResultIDs    []string
+	OrphanResultIDs   []string
+	DroppedCallCount  int
+}
+
+// EmitToolMessagesRepaired writes one tool_messages_repaired event. Callers
+// emit only when something was repaired.
+func EmitToolMessagesRepaired(ctx context.Context, sink Sink, args ToolMessagesRepairedArgs) string {
+	return send(ctx, sink, events.TypeToolMessagesRepaired, events.ToolMessagesRepairedPayload{
+		Header:            events.Header{V: events.ToolMessagesRepairedVersion},
+		UnansweredCallIDs: args.UnansweredCallIDs,
+		UnansweredTools:   args.UnansweredTools,
+		MovedResultIDs:    args.MovedResultIDs,
+		OrphanResultIDs:   args.OrphanResultIDs,
+		DroppedCallCount:  args.DroppedCallCount,
+	}, 0)
+}

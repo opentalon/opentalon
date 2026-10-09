@@ -54,6 +54,12 @@ const (
 	TypeToolRetrieval      = "tool_retrieval"
 	TypePreparerDecision   = "preparer_decision"
 	TypeMessagesTruncated  = "messages_truncated"
+	// tool_messages_repaired fires when the assembled LLM request broke the
+	// native tool-calling pairing (a tool result without its call, or a call
+	// without its result) and the orchestrator repaired it before sending.
+	// It points at damaged session history, e.g. one half of a pair whose
+	// write failed.
+	TypeToolMessagesRepaired = "tool_messages_repaired"
 
 	TypeSummarizationTriggered = "summarization_triggered"
 	TypeSummarizationCompleted = "summarization_completed"
@@ -127,6 +133,7 @@ var AllEventTypes = []string{
 	TypeToolRetrieval,
 	TypePreparerDecision,
 	TypeMessagesTruncated,
+	TypeToolMessagesRepaired,
 	TypeSummarizationTriggered,
 	TypeSummarizationCompleted,
 	TypeSessionTitleInvoked,
@@ -609,6 +616,25 @@ type MessagesTruncatedPayload struct {
 }
 
 const MessagesTruncatedVersion = 1
+
+// ToolMessagesRepairedPayload — emitted when the assembled LLM request broke
+// the native tool-calling pairing and was repaired before it was sent.
+//   - UnansweredCallIDs / UnansweredTools: calls with no result; each was kept
+//     and answered with a synthetic "no result recorded" result.
+//   - MovedResultIDs: results found later in the history, moved back to
+//     directly follow their call.
+//   - OrphanResultIDs: results with no call before them; dropped.
+//   - DroppedCallCount: calls with an empty or repeated id; dropped.
+type ToolMessagesRepairedPayload struct {
+	Header
+	UnansweredCallIDs []string `json:"unanswered_call_ids,omitempty"`
+	UnansweredTools   []string `json:"unanswered_tools,omitempty"`
+	MovedResultIDs    []string `json:"moved_result_ids,omitempty"`
+	OrphanResultIDs   []string `json:"orphan_result_ids,omitempty"`
+	DroppedCallCount  int      `json:"dropped_call_count,omitempty"`
+}
+
+const ToolMessagesRepairedVersion = 1
 
 type SummarizationTriggeredPayload struct {
 	Header

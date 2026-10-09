@@ -2,11 +2,13 @@ package orchestrator
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
+	"github.com/opentalon/opentalon/internal/state/store/events"
 )
 
 func toolUse(content string, ids ...string) provider.Message {
@@ -21,9 +23,19 @@ func toolResult(id string) provider.Message {
 	return provider.Message{Role: provider.RoleTool, Content: "ok", ToolCallID: id}
 }
 
+func unrecorded(id string) provider.Message {
+	return provider.Message{Role: provider.RoleTool, Content: unrecordedToolResultNotice, ToolCallID: id}
+}
+
 func user(s string) provider.Message { return provider.Message{Role: provider.RoleUser, Content: s} }
 
-// assertPaired fails if msgs breaks the native tool-calling invariant.
+func assistant(s string) provider.Message {
+	return provider.Message{Role: provider.RoleAssistant, Content: s}
+}
+
+// assertPaired fails if msgs breaks the native tool-calling invariant: every
+// call has a non-empty id unique within its message and is answered right
+// after its message, and every result answers a call right before it.
 func assertPaired(t *testing.T, msgs []provider.Message) {
 	t.Helper()
 	for i, m := range msgs {
@@ -35,20 +47,27 @@ func assertPaired(t *testing.T, msgs []provider.Message) {
 			found := false
 			if j >= 0 {
 				for _, tc := range msgs[j].ToolCalls {
-					found = found || tc.ID == m.ToolCallID
+					found = found || (tc.ID != "" && tc.ID == m.ToolCallID)
 				}
 			}
 			if !found {
 				t.Errorf("tool result %q at %d has no tool call right before it", m.ToolCallID, i)
 			}
 		}
+		seen := map[string]bool{}
 		for _, tc := range m.ToolCalls {
-			found := false
-			for j := i + 1; j < len(msgs) && msgs[j].Role == provider.RoleTool; j++ {
-				found = found || msgs[j].ToolCallID == tc.ID
+			if tc.ID == "" || seen[tc.ID] {
+				t.Errorf("tool call at %d has an empty or repeated id %q", i, tc.ID)
 			}
-			if !found {
-				t.Errorf("tool call %q at %d has no tool result right after it", tc.ID, i)
+			seen[tc.ID] = true
+			answers := 0
+			for j := i + 1; j < len(msgs) && msgs[j].Role == provider.RoleTool; j++ {
+				if msgs[j].ToolCallID == tc.ID {
+					answers++
+				}
+			}
+			if answers != 1 {
+				t.Errorf("tool call %q at %d has %d results right after it, want 1", tc.ID, i, answers)
 			}
 		}
 	}
@@ -57,57 +76,127 @@ func assertPaired(t *testing.T, msgs []provider.Message) {
 func TestPairToolMessages(t *testing.T) {
 	sys := provider.Message{Role: provider.RoleSystem, Content: "sys"}
 	tests := []struct {
-		name string
-		in   []provider.Message
-		want int // messages kept
+		name   string
+		in     []provider.Message
+		want   []provider.Message
+		report toolPairingReport
 	}{
-		{"valid pair untouched", []provider.Message{sys, user("u"), toolUse("", "a"), toolResult("a")}, 4},
-		// #311: the tool_use write failed, so the result directly follows the user turn.
-		{"result without call dropped", []provider.Message{sys, user("u"), toolResult("a"), user("next")}, 3},
-		{"call without result dropped", []provider.Message{sys, user("u"), toolUse("", "a"), user("next")}, 3},
-		{"unanswered call keeps its text", []provider.Message{sys, user("u"), toolUse("let me check", "a"), user("next")}, 4},
-		{"partially answered call", []provider.Message{sys, user("u"), toolUse("", "a", "b"), toolResult("b")}, 4},
-		{"result for another call dropped", []provider.Message{sys, user("u"), toolUse("", "a"), toolResult("a"), toolResult("x")}, 4},
-		{"duplicate result dropped", []provider.Message{sys, user("u"), toolUse("", "a"), toolResult("a"), toolResult("a")}, 4},
-		{"leading orphan after trim", []provider.Message{sys, toolResult("a"), user("u")}, 2},
-		{"text-format results untouched", []provider.Message{sys, user("[plugin_output] x"), user("u")}, 3},
+		{
+			name: "valid pairs kept, results in call order",
+			in:   []provider.Message{sys, user("u"), toolUse("", "a", "b"), toolResult("b"), toolResult("a"), assistant("done")},
+			want: []provider.Message{sys, user("u"), toolUse("", "a", "b"), toolResult("a"), toolResult("b"), assistant("done")},
+		},
+		{
+			// #311: the tool_use write failed, so the result directly follows the user turn.
+			name:   "result without call dropped",
+			in:     []provider.Message{sys, user("u"), toolResult("a"), user("next")},
+			want:   []provider.Message{sys, user("u"), user("next")},
+			report: toolPairingReport{OrphanResultIDs: []string{"a"}},
+		},
+		{
+			// The result write failed: the call may have run, so it stays, answered.
+			name:   "call without result answered as unrecorded",
+			in:     []provider.Message{sys, user("u"), toolUse("", "a"), user("next")},
+			want:   []provider.Message{sys, user("u"), toolUse("", "a"), unrecorded("a"), user("next")},
+			report: toolPairingReport{UnansweredCallIDs: []string{"a"}, UnansweredTools: []string{"agents__create"}},
+		},
+		{
+			name:   "partially answered call",
+			in:     []provider.Message{sys, user("u"), toolUse("checking", "a", "b"), toolResult("b")},
+			want:   []provider.Message{sys, user("u"), toolUse("checking", "a", "b"), unrecorded("a"), toolResult("b")},
+			report: toolPairingReport{UnansweredCallIDs: []string{"a"}, UnansweredTools: []string{"agents__create"}},
+		},
+		{
+			// A notification appended between the two halves of a pair.
+			name:   "result separated from its call moved back",
+			in:     []provider.Message{sys, user("u"), toolUse("", "a"), assistant("note"), toolResult("a"), assistant("done")},
+			want:   []provider.Message{sys, user("u"), toolUse("", "a"), toolResult("a"), assistant("note"), assistant("done")},
+			report: toolPairingReport{MovedResultIDs: []string{"a"}},
+		},
+		{
+			name:   "result for another call dropped",
+			in:     []provider.Message{sys, user("u"), toolUse("", "a"), toolResult("a"), toolResult("x")},
+			want:   []provider.Message{sys, user("u"), toolUse("", "a"), toolResult("a")},
+			report: toolPairingReport{OrphanResultIDs: []string{"x"}},
+		},
+		{
+			name:   "duplicate result dropped",
+			in:     []provider.Message{sys, user("u"), toolUse("", "a"), toolResult("a"), toolResult("a")},
+			want:   []provider.Message{sys, user("u"), toolUse("", "a"), toolResult("a")},
+			report: toolPairingReport{OrphanResultIDs: []string{"a"}},
+		},
+		{
+			name:   "leading orphan after a trim",
+			in:     []provider.Message{sys, toolResult("a"), user("u")},
+			want:   []provider.Message{sys, user("u")},
+			report: toolPairingReport{OrphanResultIDs: []string{"a"}},
+		},
+		{
+			// openai.go drops a result with an empty id, which would leave the call unanswered.
+			name:   "empty id call and result dropped",
+			in:     []provider.Message{sys, user("u"), toolUse("", ""), toolResult(""), user("next")},
+			want:   []provider.Message{sys, user("u"), user("next")},
+			report: toolPairingReport{OrphanResultIDs: []string{""}, DroppedCallCount: 1},
+		},
+		{
+			name:   "empty id call keeps its text",
+			in:     []provider.Message{sys, user("u"), toolUse("let me check", "")},
+			want:   []provider.Message{sys, user("u"), assistant("let me check")},
+			report: toolPairingReport{DroppedCallCount: 1},
+		},
+		{
+			name:   "repeated call id dropped",
+			in:     []provider.Message{sys, user("u"), toolUse("", "a", "a"), toolResult("a")},
+			want:   []provider.Message{sys, user("u"), toolUse("", "a"), toolResult("a")},
+			report: toolPairingReport{DroppedCallCount: 1},
+		},
+		{
+			name: "text-format results untouched",
+			in:   []provider.Message{sys, user("[plugin_output] x"), assistant("[tool_call] y"), user("u")},
+			want: []provider.Message{sys, user("[plugin_output] x"), assistant("[tool_call] y"), user("u")},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := pairToolMessages(context.Background(), tt.in)
-			if len(got) != tt.want {
-				t.Errorf("kept %d messages, want %d: %+v", len(got), tt.want, got)
+			got, report := pairToolMessages(tt.in)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("messages:\n got %+v\nwant %+v", got, tt.want)
+			}
+			if !reflect.DeepEqual(report, tt.report) {
+				t.Errorf("report = %+v, want %+v", report, tt.report)
+			}
+			if report.empty() != reflect.DeepEqual(tt.report, toolPairingReport{}) {
+				t.Errorf("report.empty() = %v", report.empty())
 			}
 			assertPaired(t, got)
 		})
 	}
 }
 
-func TestPairToolMessages_StripsOnlyTheUnansweredCall(t *testing.T) {
-	got := pairToolMessages(context.Background(), []provider.Message{user("u"), toolUse("", "a", "b"), toolResult("b")})
-	if calls := got[1].ToolCalls; len(calls) != 1 || calls[0].ID != "b" {
-		t.Errorf("tool calls = %+v, want only b", calls)
-	}
-	got = pairToolMessages(context.Background(), []provider.Message{user("u"), toolUse("let me check", "a"), user("next")})
-	if got[1].ToolCalls != nil || got[1].Content != "let me check" {
-		t.Errorf("assistant = %+v, want its text without tool calls", got[1])
-	}
-}
-
 func TestSummaryCut_NeverSplitsAToolPair(t *testing.T) {
-	msgs := []provider.Message{user("u1"), toolUse("", "a"), toolResult("a"), user("u2"), toolUse("", "b"), toolResult("b")}
-	tests := []struct{ keep, want int }{
-		{keep: 1, want: 4}, // would keep only result b → keep its call too
-		{keep: 2, want: 4},
-		{keep: 3, want: 3},
-		{keep: 4, want: 1}, // would start at result a → back to its call
-		{keep: 6, want: 0},
+	native := []provider.Message{user("u1"), toolUse("", "a"), toolResult("a"), user("u2"), toolUse("", "b"), toolResult("b")}
+	text := []provider.Message{user("u1"), assistant("[tool_call] x"), user("[plugin_output] y"), user("u2")}
+	tests := []struct {
+		name       string
+		msgs       []provider.Message
+		keep, want int
+	}{
+		{"native: only result b kept → its call too", native, 1, 4},
+		{"native: cut on a call", native, 2, 4},
+		{"native: cut on a user turn", native, 3, 3},
+		{"native: cut on result a → back to its call", native, 4, 1},
+		{"native: keep all", native, 6, 0},
+		{"text: cut on [plugin_output] → back to its [tool_call]", text, 2, 1},
+		{"text: cut on a user turn", text, 1, 3},
 	}
 	for _, tt := range tests {
-		if got := summaryCut(msgs, tt.keep); got != tt.want {
-			t.Errorf("summaryCut(keep=%d) = %d, want %d", tt.keep, got, tt.want)
-		}
-		assertPaired(t, msgs[summaryCut(msgs, tt.keep):])
+		t.Run(tt.name, func(t *testing.T) {
+			got := summaryCut(tt.msgs, tt.keep)
+			if got != tt.want {
+				t.Errorf("summaryCut(keep=%d) = %d, want %d", tt.keep, got, tt.want)
+			}
+			assertPaired(t, tt.msgs[got:])
+		})
 	}
 }
 
@@ -127,35 +216,97 @@ func TestFitRequestToWindow_KeepsTheCallOfALoneFinalResult(t *testing.T) {
 	assertPaired(t, req.Messages)
 }
 
-// pairCheckingLLM records every request and answers in plain text.
-type pairCheckingLLM struct{ requests [][]provider.Message }
+// A text-format [plugin_output] turn is plain text to the provider: when it is
+// all that fits, it is sent alone rather than pulling its [tool_call] turn back
+// in over budget.
+func TestFitRequestToWindow_TextFormatResultIsNotSentOverBudget(t *testing.T) {
+	req := &provider.CompletionRequest{Messages: []provider.Message{
+		{Role: provider.RoleSystem, Content: block("s")},
+		assistant("[tool_call] " + strings.Repeat("x", 4000)),
+		user("[plugin_output] small"),
+	}}
+	est := fit(t, req, 600, 0, 1.0)
+	if len(req.Messages) != 2 || req.Messages[1].Content != "[plugin_output] small" {
+		t.Fatalf("want system + [plugin_output], got %d messages", len(req.Messages))
+	}
+	if budget := inputTokenBudget(600, 0); est > budget {
+		t.Errorf("estimate %d over budget %d", est, budget)
+	}
+}
 
-func (l *pairCheckingLLM) Complete(_ context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+// scriptedPairLLM records every request and plays its responses in order,
+// then answers in plain text.
+type scriptedPairLLM struct {
+	responses []*provider.CompletionResponse
+	requests  [][]provider.Message
+}
+
+func (l *scriptedPairLLM) Complete(_ context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
 	l.requests = append(l.requests, append([]provider.Message(nil), req.Messages...))
+	if i := len(l.requests) - 1; i < len(l.responses) {
+		return l.responses[i], nil
+	}
 	return &provider.CompletionResponse{Content: "done"}, nil
 }
 
-func (l *pairCheckingLLM) SupportsFeature(f provider.Feature) bool { return f == provider.FeatureTools }
+func (l *scriptedPairLLM) SupportsFeature(f provider.Feature) bool { return f == provider.FeatureTools }
 
-// #311: a session whose history lost one half of a tool pair (a failed write of
-// the assistant tool_use row) must still produce a request the provider accepts.
+// #311: a session whose history lost one half of each of two tool pairs must
+// still produce requests the provider accepts, and the damage is reported once
+// per turn, not once per LLM round.
 func TestRun_UnpairedHistoryIsRepairedBeforeSending(t *testing.T) {
-	llm := &pairCheckingLLM{}
+	llm := &scriptedPairLLM{responses: []*provider.CompletionResponse{
+		{ToolCalls: []provider.ToolCall{{ID: "call-now", Name: "inv__list"}}},
+	}}
+	sink := &recordingEventSink{}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{Name: "inv", Actions: []Action{{Name: "list", AlwaysInclude: true, ReadOnly: true}}}, &echoExecutor{})
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "sess"})
 	_ = sessions.AddMessage("sess", user("create an agent"))
 	_ = sessions.AddMessage("sess", toolResult("toolu_lost")) // its tool_use row was never written
 	_ = sessions.AddMessage("sess", toolUse("", "toolu_unanswered"))
-	_ = sessions.AddMessage("sess", provider.Message{Role: provider.RoleAssistant, Content: "Agent created."})
-	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
+	_ = sessions.AddMessage("sess", assistant("Agent created."))
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{EventSink: sink})
 
-	if _, err := orch.Run(context.Background(), "sess", "thanks"); err != nil {
+	if _, err := orch.Run(context.Background(), "sess", "list my items"); err != nil {
 		t.Fatal(err)
 	}
-	if len(llm.requests) == 0 {
-		t.Fatal("no LLM request was made")
+	if len(llm.requests) != 2 {
+		t.Fatalf("LLM requests = %d, want 2 (tool round + answer)", len(llm.requests))
 	}
 	for _, req := range llm.requests {
 		assertPaired(t, req)
+		found := false
+		for _, m := range req {
+			found = found || (m.ToolCallID == "toolu_unanswered" && m.Content == unrecordedToolResultNotice)
+		}
+		if !found {
+			t.Error("unanswered call was not answered with the unrecorded-result notice")
+		}
+	}
+	if n := countEventType(sink.snapshot(), events.TypeToolMessagesRepaired); n != 1 {
+		t.Errorf("tool_messages_repaired events = %d, want 1 per turn", n)
+	}
+}
+
+// A cut that steps back to the start keeps everything: there is nothing to
+// summarize, so no summarization request is made and the history stays.
+func TestMaybeSummarizeSession_SkipsWhenTheCutKeepsEverything(t *testing.T) {
+	llm := &scriptedPairLLM{}
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "sess"})
+	_ = sessions.AddMessage("sess", toolUse("", "a"))
+	_ = sessions.AddMessage("sess", toolResult("a"))
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, NewToolRegistry(), state.NewMemoryStore(""), sessions,
+		OrchestratorOpts{SummarizeAfterMessages: 2, MaxMessagesAfterSummary: 1})
+
+	orch.maybeSummarizeSession(context.Background(), "sess")
+
+	if len(llm.requests) != 0 {
+		t.Errorf("summarization requests = %d, want 0", len(llm.requests))
+	}
+	if sess, _ := sessions.Get("sess"); len(sess.Messages) != 2 || sess.Summary != "" {
+		t.Errorf("session rewritten: %d messages, summary %q", len(sess.Messages), sess.Summary)
 	}
 }

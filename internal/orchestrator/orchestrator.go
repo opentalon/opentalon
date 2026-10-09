@@ -2245,7 +2245,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var stripRetries int
 	var toolRetries int // retries when planner expected tools but LLM didn't call any
 	var transientMessages []provider.Message
-	var lastCallSig string // "plugin__action\x00arg1=val1\x00..." for loop detection
+	var lastCallSig string    // "plugin__action\x00arg1=val1\x00..." for loop detection
+	var lastPairingSig string // last reported tool-pairing repair, so damage is reported once per turn
 	var repeatCount int
 	// Phantom-completion guard state (consumed in the calls==nil branch). The
 	// model sometimes loads a write tool, resolves every parameter through
@@ -2361,6 +2362,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		llmStart := time.Now()
 		streamCB := o.resolveStreamCallback(ctx)
+		// Repair broken tool-call pairing before measuring, so the estimate
+		// counts what is sent. The fit keeps pairs intact, so once is enough.
+		var pairing toolPairingReport
+		req.Messages, pairing = pairToolMessages(req.Messages)
+		if !pairing.empty() {
+			if sig := fmt.Sprintf("%+v", pairing); sig != lastPairingSig {
+				lastPairingSig = sig
+				o.reportToolPairing(ctx, sessionID, pairing)
+			}
+		}
 		// Make it fit, send it, and if the provider says it is still too long,
 		// take its measurement and make it fit again. The refusal is our own
 		// mistake and it is deterministic — without this loop it ended the turn
@@ -2373,7 +2384,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		var estimatedTokens int
 		for attempt := 0; ; attempt++ {
 			estimatedTokens = fitRequestToWindow(ctx, req, o.contextWindow, o.maxOutputTokens, o.calibrators.factor(req.Model))
-			req.Messages = pairToolMessages(ctx, req.Messages)
 			// Always logged, not only under session debug as it used to be:
 			// this is the figure that has to be reconciled against the
 			// provider's own count when a session nears the window, and the
@@ -5061,6 +5071,11 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 		keep = len(sess.Messages)
 	}
 	cut := summaryCut(sess.Messages, keep)
+	if cut == 0 {
+		// Keeping the last messages verbatim means keeping all of them (the
+		// cut stepped back to a tool call at the start): nothing to summarize.
+		return
+	}
 	toSummarize := sess.Messages[:cut]
 	keepMessages := sess.Messages[cut:]
 	summTriggeredID := emit.EmitSummarizationTriggered(ctx, o.eventSink, emit.SummarizationTriggeredArgs{

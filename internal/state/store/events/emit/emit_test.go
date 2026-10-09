@@ -534,6 +534,7 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 			EmitPreparerDecision(c, s, PreparerDecisionArgs{Mode: events.PreparerDecisionModeInstrumentationOnly})
 		}, events.TypePreparerDecision, events.PreparerDecisionVersion},
 		{"MessagesTruncated", func(c context.Context, s Sink) { EmitMessagesTruncated(c, s, MessagesTruncatedArgs{}) }, events.TypeMessagesTruncated, events.MessagesTruncatedVersion},
+		{"ToolMessagesRepaired", func(c context.Context, s Sink) { EmitToolMessagesRepaired(c, s, ToolMessagesRepairedArgs{}) }, events.TypeToolMessagesRepaired, events.ToolMessagesRepairedVersion},
 		{"SummarizationTriggered", func(c context.Context, s Sink) { EmitSummarizationTriggered(c, s, SummarizationTriggeredArgs{}) }, events.TypeSummarizationTriggered, events.SummarizationTriggeredVersion},
 		{"SummarizationCompleted", func(c context.Context, s Sink) { EmitSummarizationCompleted(c, s, SummarizationCompletedArgs{}) }, events.TypeSummarizationCompleted, events.SummarizationCompletedVersion},
 		{"ModelSwitch", func(c context.Context, s Sink) { EmitModelSwitch(c, s, ModelSwitchArgs{}) }, events.TypeModelSwitch, events.ModelSwitchVersion},
@@ -561,7 +562,7 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 	// All event types must be exercised — keep this in lockstep with
 	// the constants in event_types.go. If you add a new event type and
 	// this count drops below it, add a row above.
-	const wantCases = 31
+	const wantCases = 32
 	if len(cases) != wantCases {
 		t.Fatalf("len(cases) = %d, want %d — keep TestAllEmitHelpers in sync with event_types.go", len(cases), wantCases)
 	}
@@ -1299,6 +1300,28 @@ func TestAllEmitHelpers_PopulateDistinctiveField(t *testing.T) {
 				}
 				if len(v.DroppedSeqRange) != 2 || v.DroppedSeqRange[0] != 12 || v.DroppedSeqRange[1] != 18 {
 					t.Errorf("DroppedSeqRange = %v, want [12, 18]", v.DroppedSeqRange)
+				}
+			},
+		},
+		{
+			"ToolMessagesRepaired.IDs",
+			func(c context.Context, s Sink) {
+				EmitToolMessagesRepaired(c, s, ToolMessagesRepairedArgs{
+					UnansweredCallIDs: []string{"a"}, UnansweredTools: []string{"agents__create"},
+					MovedResultIDs: []string{"b"}, OrphanResultIDs: []string{"c"}, DroppedCallCount: 2,
+				})
+			},
+			func(t *testing.T, p []byte) {
+				var v events.ToolMessagesRepairedPayload
+				_ = json.Unmarshal(p, &v)
+				if len(v.UnansweredCallIDs) != 1 || v.UnansweredCallIDs[0] != "a" || len(v.UnansweredTools) != 1 || v.UnansweredTools[0] != "agents__create" {
+					t.Errorf("unanswered = %v / %v", v.UnansweredCallIDs, v.UnansweredTools)
+				}
+				if len(v.MovedResultIDs) != 1 || v.MovedResultIDs[0] != "b" || len(v.OrphanResultIDs) != 1 || v.OrphanResultIDs[0] != "c" {
+					t.Errorf("moved / orphan = %v / %v", v.MovedResultIDs, v.OrphanResultIDs)
+				}
+				if v.DroppedCallCount != 2 {
+					t.Errorf("DroppedCallCount = %d", v.DroppedCallCount)
 				}
 			},
 		},
