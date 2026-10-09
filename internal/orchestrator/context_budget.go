@@ -299,6 +299,13 @@ func fitRequestToWindow(ctx context.Context, req *provider.CompletionRequest, co
 			total -= costs[j]
 		}
 		convStart = i
+	} else {
+		// Only results are left: step back to the call they answer and send
+		// the pair over budget rather than a lone result the provider rejects.
+		for convStart > 0 && messages[convStart-1].Role != provider.RoleSystem && isToolResultMessage(messages[convStart]) {
+			convStart--
+			total += costs[convStart]
+		}
 	}
 
 	trimmed := make([]provider.Message, 0, len(messages))

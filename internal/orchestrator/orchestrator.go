@@ -2373,6 +2373,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		var estimatedTokens int
 		for attempt := 0; ; attempt++ {
 			estimatedTokens = fitRequestToWindow(ctx, req, o.contextWindow, o.maxOutputTokens, o.calibrators.factor(req.Model))
+			req.Messages = pairToolMessages(ctx, req.Messages)
 			// Always logged, not only under session debug as it used to be:
 			// this is the figure that has to be reconciled against the
 			// provider's own count when a session nears the window, and the
@@ -4026,15 +4027,16 @@ func hasToolResults(msgs []provider.Message) bool {
 // message. Skipping the leading orphaned results keeps the kept slice a valid
 // transcript. Returns len(msgs) only if every remaining message is a result.
 func firstNonOrphanIndex(msgs []provider.Message, start int) int {
-	for start < len(msgs) {
-		m := msgs[start]
-		if m.Role == provider.RoleTool || (m.Role == provider.RoleUser && strings.Contains(m.Content, "[plugin_output]")) {
-			start++
-			continue
-		}
-		break
+	for start < len(msgs) && isToolResultMessage(msgs[start]) {
+		start++
 	}
 	return start
+}
+
+// isToolResultMessage reports whether m is a tool result: a native RoleTool
+// message or a text-format [plugin_output] user message.
+func isToolResultMessage(m provider.Message) bool {
+	return m.Role == provider.RoleTool || (m.Role == provider.RoleUser && strings.Contains(m.Content, "[plugin_output]"))
 }
 
 // applySlidingWindow keeps only the last o.contextMessages entries
@@ -5058,8 +5060,9 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 	if keep > len(sess.Messages) {
 		keep = len(sess.Messages)
 	}
-	toSummarize := sess.Messages[:len(sess.Messages)-keep]
-	keepMessages := sess.Messages[len(sess.Messages)-keep:]
+	cut := summaryCut(sess.Messages, keep)
+	toSummarize := sess.Messages[:cut]
+	keepMessages := sess.Messages[cut:]
 	summTriggeredID := emit.EmitSummarizationTriggered(ctx, o.eventSink, emit.SummarizationTriggeredArgs{
 		MessageCount: len(sess.Messages),
 		Reason:       "threshold_reached",
