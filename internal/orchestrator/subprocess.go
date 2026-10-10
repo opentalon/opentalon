@@ -287,6 +287,11 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 		if err != nil {
 			return nil, fmt.Errorf("subprocess LLM: %w", err)
 		}
+		model := resp.Model
+		if model == "" {
+			model = req.Model
+		}
+		o.observePluginUsage(ctx, model, resp.Usage)
 
 		calls := o.parser.Parse(resp.Content)
 		if calls == nil {

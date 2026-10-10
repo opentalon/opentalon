@@ -296,6 +296,15 @@ type PluginConfig struct {
 	ExposeHTTP  bool                   `yaml:"expose_http,omitempty"`  // opt-in: reverse-proxy /{plugin-name}/* through the webhook server
 	HTTPPort    int                    `yaml:"http_port,omitempty"`    // per-plugin OPENTALON_HTTP_PORT; lets multiple expose_http plugins bind distinct ports (see opentalon#331)
 	GRPCPort    int                    `yaml:"grpc_port,omitempty"`    // opt-in: expose an external PluginService.Execute gateway on this port, forwarding to the plugin unchanged
+	Metrics     PluginMetricsConfig    `yaml:"metrics,omitempty"`      // opt-in per-plugin LLM spend metrics; needs the top-level metrics endpoint
+}
+
+// PluginMetricsConfig opts a plugin into per-plugin LLM spend metrics: the
+// tokens and cost of the LLM calls the host makes on its behalf (_subprocess,
+// decide), labelled by plugin, action and model. Off by default.
+type PluginMetricsConfig struct {
+	Cost   bool   `yaml:"cost,omitempty"`   // emit opentalon_plugin_llm_tokens_total / opentalon_plugin_cost_usd_total
+	Prefix string `yaml:"prefix,omitempty"` // also emit <prefix>_llm_tokens_total / <prefix>_llm_cost_usd_total (needs cost)
 }
 
 // PluginBundleEntry is one in-process plugin compiled INTO a bundling host

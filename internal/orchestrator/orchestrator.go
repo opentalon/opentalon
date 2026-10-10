@@ -195,6 +195,7 @@ type OrchestratorOpts struct {
 	GroupPluginLookup             GroupPluginLookup       // optional; when set, filters tool list by profile group
 	UsageRecorder                 UsageRecorder           // optional; when set, records LLM usage after each run
 	PluginCallObserver            PluginCallObserver      // optional; when set, notified after each plugin/tool call
+	PluginUsageObserver           PluginUsageObserver     // optional; when set, notified of each LLM call made on behalf of a plugin
 	EventSink                     emit.Sink               // optional; nil defaults to emit.NoOpSink (helpers run unconditionally, the no-op sink discards them)
 	PromptSnapshotStore           PromptSnapshotUpserter  // optional; when set, system prompt + server instructions + tool descriptions are persisted by sha256 so turn_start hashes resolve to content
 	SyncActionsPlugin             string                  // optional; plugin name for action sync (e.g. "weaviate")
@@ -413,27 +414,28 @@ type Orchestrator struct {
 	// loadPendingToolCall), which survives restarts and is shared across
 	// pods — so no pod can act on a stale in-memory copy after another pod
 	// already resolved it.
-	pendingPipelines   map[string]pendingPipeline
-	pipelineConfig     pipeline.PipelineConfig
-	confirmationPlugin string                 // optional; plugin for confirmation strategy
-	confirmationAction string                 // optional; action name for confirmation check
-	contextWindow      int                    // model context window in tokens; 0 = no trimming
-	maxOutputTokens    int                    // reserved output budget (max_tokens) subtracted from the window when trimming; 0 = flat 10% reserve
-	calibrators        *calibrators           // per-model correction between the token estimate and what the provider charges; always allocated
-	groupPluginLookup  GroupPluginLookup      // optional; nil = no group-based filtering
-	usageRecorder      UsageRecorder          // optional; nil = no usage tracking
-	pluginCallObserver PluginCallObserver     // optional; nil = no plugin call observation
-	eventSink          emit.Sink              // structured session event sink; always non-nil (NoOpSink default)
-	snapshotStore      PromptSnapshotUpserter // optional; nil = turn_start hashes are emitted but content is not persisted
-	syncActionsPlugin  string                 // optional; plugin name for action sync
-	syncActionsAction  string                 // optional; action name for action sync
-	knowledge          KnowledgeConfig        // optional; knowledge directory ingestion
-	subprocessConfig   SubprocessConfig       // optional; subprocess (sub-agent) support
-	escalationConfig   EscalationConfig       // optional; background-trigger LLM turn entrypoint (_escalate)
-	escalationLimit    UsageLimitChecker      // optional; pre-checks a background turn (and a decide) against the entity's token budget
-	decideUnattributed sync.Map               // decider name → warned once that its callbacks carry no identity
-	notifyConfig       NotifyConfig           // optional; background-trigger message push entrypoint (_notify)
-	conversationSender ConversationSender     // optional; nil = _notify can only reach a conversation via a packed session key
+	pendingPipelines    map[string]pendingPipeline
+	pipelineConfig      pipeline.PipelineConfig
+	confirmationPlugin  string                 // optional; plugin for confirmation strategy
+	confirmationAction  string                 // optional; action name for confirmation check
+	contextWindow       int                    // model context window in tokens; 0 = no trimming
+	maxOutputTokens     int                    // reserved output budget (max_tokens) subtracted from the window when trimming; 0 = flat 10% reserve
+	calibrators         *calibrators           // per-model correction between the token estimate and what the provider charges; always allocated
+	groupPluginLookup   GroupPluginLookup      // optional; nil = no group-based filtering
+	usageRecorder       UsageRecorder          // optional; nil = no usage tracking
+	pluginCallObserver  PluginCallObserver     // optional; nil = no plugin call observation
+	pluginUsageObserver PluginUsageObserver    // optional; nil = plugin LLM spend is not observed
+	eventSink           emit.Sink              // structured session event sink; always non-nil (NoOpSink default)
+	snapshotStore       PromptSnapshotUpserter // optional; nil = turn_start hashes are emitted but content is not persisted
+	syncActionsPlugin   string                 // optional; plugin name for action sync
+	syncActionsAction   string                 // optional; action name for action sync
+	knowledge           KnowledgeConfig        // optional; knowledge directory ingestion
+	subprocessConfig    SubprocessConfig       // optional; subprocess (sub-agent) support
+	escalationConfig    EscalationConfig       // optional; background-trigger LLM turn entrypoint (_escalate)
+	escalationLimit     UsageLimitChecker      // optional; pre-checks a background turn (and a decide) against the entity's token budget
+	decideUnattributed  sync.Map               // decider name → warned once that its callbacks carry no identity
+	notifyConfig        NotifyConfig           // optional; background-trigger message push entrypoint (_notify)
+	conversationSender  ConversationSender     // optional; nil = _notify can only reach a conversation via a packed session key
 	// escalationMuxes is a per-session in-flight guard for background
 	// escalation turns: tryLock drops a second escalation for a session
 	// already running one, so a flapping deterministic trigger can't stack
@@ -760,6 +762,7 @@ func NewWithRules(
 		groupPluginLookup:       opts.GroupPluginLookup,
 		usageRecorder:           opts.UsageRecorder,
 		pluginCallObserver:      opts.PluginCallObserver,
+		pluginUsageObserver:     opts.PluginUsageObserver,
 		eventSink:               eventSink,
 		snapshotStore:           opts.PromptSnapshotStore,
 		syncActionsPlugin:       opts.SyncActionsPlugin,
