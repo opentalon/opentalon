@@ -42,6 +42,41 @@ Standard Go runtime and process metrics (`go_*`, `process_*`) are also exposed.
 
 > **Cardinality:** `entity_id` adds one series per unique user. For deployments with a bounded user base this is fine; for public-facing deployments with unbounded users, consider dropping the label via `metric_relabel_configs` in your Prometheus scrape config.
 
+## Per-plugin LLM spend (opt-in)
+
+Plugins can ask the host to run LLM calls for them — a `_subprocess` run or a `decide`
+call made through a callback while the plugin executes one of its actions (e.g.
+talooner's `llm_review`). By default that spend is not broken down by plugin. Turn it on
+per plugin:
+
+```yaml
+metrics:
+  enabled: true
+
+plugins:
+  talooner:
+    plugin: ./plugins/talooner-plugin
+    metrics:
+      cost: true          # per-plugin tokens and cost for this plugin
+      prefix: talooner    # optional: also export them under the plugin's own name
+```
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `opentalon_plugin_llm_tokens_total` | Counter | `plugin`, `action`, `model`, `direction` | Tokens of LLM calls made on behalf of the plugin; `direction` is `input` or `output` |
+| `opentalon_plugin_cost_usd_total` | Counter | `plugin`, `action`, `model` | Their cost, priced with the model's configured `cost` |
+| `<prefix>_llm_tokens_total` | Counter | `action`, `model`, `direction` | With `prefix`: the same tokens, without the `plugin` label |
+| `<prefix>_llm_cost_usd_total` | Counter | `action`, `model` | With `prefix`: the same cost, without the `plugin` label |
+
+- `action` is the plugin action that caused the spend (e.g. `evaluate_pr`), not the host
+  action it called back into.
+- `model` is the model that served the call; `decide` calls appear as `decide/<decider>`.
+- Plugins without `metrics.cost` add no series — existing dashboards are unaffected.
+- Prefer the `plugin` label in dashboards (`sum by (plugin) (…)` covers every plugin); use
+  `prefix` only when a plugin-named metric is wanted. A prefix that collides with another
+  metric name is rejected at startup, and `prefix` without `cost: true` is a config error.
+- Like the other cost metrics, cost is `0` unless the model has a `cost` configured.
+
 ## Prometheus sidecar / Docker Compose example
 
 The simplest deployment is a Prometheus sidecar that scrapes the OpenTalon metrics port.
