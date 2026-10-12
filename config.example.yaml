@@ -59,8 +59,9 @@ models:
   #     model: "qwen3-0.6b"
   #   jev-small:
   #     backend: jev
-  #     base_url: "${JEV_URL}"
+  #     base_url: "https://api.typesafe.ai/v1/systemone"
   #     api_key: "${JEV_TOKEN}"
+  #     model: "jev-latest"                     # default
   #   laya:
   #     backend: laya
   #     base_url: "${LAYA_URL}"

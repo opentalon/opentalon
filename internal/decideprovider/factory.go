@@ -19,8 +19,8 @@ type DeciderConfig struct {
 	BaseURL string
 	// APIKey is an optional bearer token (Jev) / auth (laya, local-logits).
 	APIKey string
-	// Model is the served model id — used by local-logits; ignored by
-	// laya/Jev, which serve a fixed model per endpoint.
+	// Model is the served model id — used by local-logits and Jev (default
+	// jev-latest); ignored by laya, which serves a fixed model per endpoint.
 	Model string
 }
 
@@ -54,7 +54,7 @@ func FromConfig(cfg DeciderConfig) (Provider, error) {
 	case BackendLaya:
 		return NewLayaProvider(cfg.Name, cfg.BaseURL, cfg.APIKey), nil
 	case BackendJev:
-		return NewJevProvider(cfg.Name, cfg.BaseURL, cfg.APIKey), nil
+		return NewJevProvider(cfg.Name, cfg.BaseURL, cfg.APIKey, cfg.Model), nil
 	case BackendLocalLogits:
 		return NewLocalLogitsProvider(cfg.Name, cfg.BaseURL, cfg.APIKey, cfg.Model), nil
 	case "":

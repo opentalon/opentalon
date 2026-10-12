@@ -572,7 +572,7 @@ type DeciderConfig struct {
 	Backend string `yaml:"backend"`  // "laya" | "jev" | "local-logits"
 	BaseURL string `yaml:"base_url"` // backend endpoint (required)
 	APIKey  string `yaml:"api_key"`  // optional bearer / auth token
-	Model   string `yaml:"model"`    // served model id (local-logits)
+	Model   string `yaml:"model"`    // served model id (local-logits, jev)
 }
 
 type ProviderConfig struct {
