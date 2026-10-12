@@ -172,7 +172,12 @@ func TestJev_Errors(t *testing.T) {
 		{"other question only", http.StatusOK, `{"answers":{"urgency":{"type":"noul","noul":0.97}}}`, []string{"A", "B"}, "no answer"},
 		{"wrong answer type", http.StatusOK, `{"answers":{"decision":{"type":"score","score":1.0}}}`, []string{"A", "B"}, "type"},
 		{"empty answer", http.StatusOK, `{"answers":{"decision":{"type":"choice"}}}`, []string{"A", "B"}, "neither"},
-		{"choice outside declared", http.StatusOK, `{"answers":{"decision":{"type":"choice","choice":"Z"}}}`, []string{"A", "B"}, ""},
+		{"choice outside declared", http.StatusOK, `{"answers":{"decision":{"type":"choice","choice":"Z"}}}`, []string{"A", "B"}, "not one of"},
+		{"choice outside declared with probabilities", http.StatusOK, `{"answers":{"decision":{"type":"choice","choice":"Z","probabilities":{"Z":1}}}}`, []string{"A", "B"}, "not one of"},
+		{"probabilities only on undeclared labels", http.StatusOK, `{"answers":{"decision":{"type":"choice","probabilities":{"Z":1}}}}`, []string{"A", "B"}, "no probability mass"},
+		{"declared choices all zero", http.StatusOK, `{"answers":{"decision":{"type":"choice","choice":"A","probabilities":{"A":0,"B":0}}}}`, []string{"A", "B"}, "no probability mass"},
+		{"declared choices negative", http.StatusOK, `{"answers":{"decision":{"type":"choice","probabilities":{"A":-0.5,"B":-0.5}}}}`, []string{"A", "B"}, "no probability mass"},
+		{"choice disagrees with probabilities", http.StatusOK, `{"answers":{"decision":{"type":"choice","choice":"A","probabilities":{"A":0.2,"B":0.8}}}}`, []string{"A", "B"}, "disagrees"},
 		{"not json", http.StatusOK, `<html>bad gateway</html>`, []string{"A", "B"}, "decode"},
 		{"no choices", http.StatusOK, `{"answers":{"decision":{"type":"choice","choice":"A"}}}`, nil, ""},
 	}
@@ -192,6 +197,21 @@ func TestJev_Errors(t *testing.T) {
 				t.Errorf("error = %q, want it to name the decider and contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestJev_ChoiceTiedWithArgmaxIsAccepted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"answers":{"decision":{"type":"choice","choice":"B","probabilities":{"A":0.5,"B":0.5}}}}`)
+	}))
+	defer srv.Close()
+	dec, err := NewJevProvider("jev", srv.URL, "", "").Decide(context.Background(),
+		&Request{State: "x", Choices: []string{"A", "B"}})
+	if err != nil {
+		t.Fatalf("Decide: %v, want a tie with the argmax accepted", err)
+	}
+	if dec.Confidence != 0.5 {
+		t.Errorf("confidence = %v, want 0.5", dec.Confidence)
 	}
 }
 

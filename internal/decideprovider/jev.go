@@ -109,17 +109,28 @@ func (p *JevProvider) Decide(ctx context.Context, req *Request) (*Decision, erro
 	if ans.Type != "choice" {
 		return nil, fmt.Errorf("jev %q: answer %q has type %q, want choice", p.id, jevQuestion, ans.Type)
 	}
+	if ans.Choice != "" && !slices.Contains(req.Choices, ans.Choice) {
+		return nil, fmt.Errorf("jev %q: answer chose %q, which is not one of %v", p.id, ans.Choice, req.Choices)
+	}
 	probs := ans.Probabilities
 	if len(probs) == 0 {
-		// A hosted answer with only a label still yields a valid distribution:
-		// give the chosen label all mass and let normalization spread the rest.
 		if ans.Choice == "" {
 			return nil, fmt.Errorf("jev %q: answer has neither probabilities nor choice", p.id)
 		}
-		if !slices.Contains(req.Choices, ans.Choice) {
-			return nil, fmt.Errorf("jev %q: answer chose %q, which is not one of %v", p.id, ans.Choice, req.Choices)
-		}
 		probs = map[string]float64{ans.Choice: 1}
+	}
+	var mass, top float64
+	for _, c := range req.Choices {
+		if v := probs[c]; v > 0 {
+			mass += v
+			top = max(top, v)
+		}
+	}
+	if mass == 0 {
+		return nil, fmt.Errorf("jev %q: answer puts no probability mass on any of %v: %v", p.id, req.Choices, probs)
+	}
+	if ans.Choice != "" && probs[ans.Choice] < top {
+		return nil, fmt.Errorf("jev %q: answer chose %q, which disagrees with its probabilities %v", p.id, ans.Choice, probs)
 	}
 	dec, err := normalizeProbabilities(probs, req.Choices)
 	if err != nil {
