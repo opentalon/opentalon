@@ -313,6 +313,11 @@ func applyCallbackIdentity(ctx context.Context, in map[string]string) (context.C
 		}
 		ctx = profile.WithProfile(ctx, p)
 		ctx = actor.WithActor(ctx, entityID)
+		// The injected contextargs.GroupID reads actor.GroupID, not the
+		// profile: without this the injected group_id is empty for workflow
+		// runs and plugins can't scope calls to the workflow's tenant.
+		// No group key → the outer one stays.
+		ctx = actor.WithGroupID(ctx, groupID)
 	}
 	if sessionID != "" {
 		// A chain moved to another session no longer belongs to the outer

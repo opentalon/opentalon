@@ -77,3 +77,60 @@ func TestApplyCallbackIdentityDropsLastUserMessageIDOnSessionChange(t *testing.T
 		t.Errorf("last_user_message_id = %q after an identity-only callback, want m-outer kept", got)
 	}
 }
+
+// A workflow callback names the account it belongs to via the reserved group
+// key. That group has to land on the actor ctx, because the injected
+// contextargs.GroupID is resolved from actor.GroupID (see the orchestrator's
+// defaultContextArgProviders), not from the profile. Without it the injected
+// group_id is empty for workflow runs, and plugins can't scope their calls to
+// the workflow's tenant.
+func TestApplyCallbackIdentitySetsActorGroup(t *testing.T) {
+	outer := actor.WithGroupID(actor.WithActor(context.Background(), "caller"), "g-caller")
+	in := map[string]string{
+		contextargs.CallbackEntityID: "owner",
+		contextargs.CallbackGroupID:  "g-owner",
+		"text":                       "x",
+	}
+
+	ctx, args := applyCallbackIdentity(outer, in)
+
+	if got := actor.GroupID(ctx); got != "g-owner" {
+		t.Errorf("actor group = %q, want the callback's g-owner", got)
+	}
+	if got := actor.Actor(ctx); got != "owner" {
+		t.Errorf("actor = %q, want owner", got)
+	}
+	if len(args) != 1 || args["text"] != "x" {
+		t.Errorf("args = %v, want only the non-reserved text arg", args)
+	}
+
+	// Group-only callback (no entity): the group still reaches the actor ctx.
+	groupOnly, _ := applyCallbackIdentity(context.Background(), map[string]string{contextargs.CallbackGroupID: "g-owner"})
+	if got := actor.GroupID(groupOnly); got != "g-owner" {
+		t.Errorf("actor group on a group-only callback = %q, want g-owner", got)
+	}
+}
+
+// A callback without a group key leaves the outer ctx's group alone: the
+// host never blanks or invents a scope.
+func TestApplyCallbackIdentityKeepsOuterGroupWithoutGroupKey(t *testing.T) {
+	outer := actor.WithGroupID(actor.WithActor(context.Background(), "caller"), "g-caller")
+
+	ctx, args := applyCallbackIdentity(outer, map[string]string{
+		contextargs.CallbackEntityID:  "owner",
+		contextargs.CallbackSessionID: "s-wf",
+		"text":                        "x",
+	})
+
+	if got := actor.GroupID(ctx); got != "g-caller" {
+		t.Errorf("actor group = %q, want the outer g-caller untouched", got)
+	}
+	for _, k := range []string{contextargs.CallbackEntityID, contextargs.CallbackGroupID, contextargs.CallbackSessionID} {
+		if _, leaked := args[k]; leaked {
+			t.Errorf("reserved key %q leaked into args %v", k, args)
+		}
+	}
+	if args["text"] != "x" {
+		t.Errorf("args = %v, want text kept", args)
+	}
+}
