@@ -81,9 +81,9 @@ func TestApplyCallbackIdentityDropsLastUserMessageIDOnSessionChange(t *testing.T
 // A workflow callback names the account it belongs to via the reserved group
 // key. That group has to land on the actor ctx, because the injected
 // contextargs.GroupID is resolved from actor.GroupID (see the orchestrator's
-// defaultContextArgProviders), not from the profile. Without it a workflow
-// run reaches plugins with no group, and the downstream service acts in
-// whatever account the owner currently has switched in.
+// defaultContextArgProviders), not from the profile. Without it the injected
+// group_id is empty for workflow runs, and plugins can't scope their calls to
+// the workflow's tenant.
 func TestApplyCallbackIdentitySetsActorGroup(t *testing.T) {
 	outer := actor.WithGroupID(actor.WithActor(context.Background(), "caller"), "g-caller")
 	in := map[string]string{
