@@ -213,3 +213,34 @@ type stringError string
 func (e stringError) Error() string { return string(e) }
 
 var errBoom = stringError("boom")
+
+type callerCapturingHandler struct {
+	recordingCallbackHandler
+	callers []orchestrator.PluginCaller
+}
+
+func (h *callerCapturingHandler) RunActionResult(ctx context.Context, plugin, action string, args map[string]string) (string, string, error) {
+	c, _ := orchestrator.PluginCallerFrom(ctx)
+	h.callers = append(h.callers, c)
+	return h.recordingCallbackHandler.RunActionResult(ctx, plugin, action, args)
+}
+
+func TestClient_ExecuteBidi_CallbackCarriesPluginCaller(t *testing.T) {
+	body := func(ctx context.Context, req pkg.Request, host pkg.HostCaller) pkg.Response {
+		if _, err := host.RunAction(ctx, "_subprocess", "run", map[string]string{"task": "x"}); err != nil {
+			return pkg.Response{Error: err.Error()}
+		}
+		return pkg.Response{CallID: req.ID, Content: "done"}
+	}
+	client := startBidiServer(t, body)
+	client.name = "talooner"
+
+	cb := &callerCapturingHandler{}
+	result := client.ExecuteBidi(context.Background(), orchestrator.ToolCall{ID: "c1", Plugin: "talooner", Action: "evaluate_pr"}, cb)
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if len(cb.callers) != 1 || cb.callers[0] != (orchestrator.PluginCaller{Plugin: "talooner", Action: "evaluate_pr"}) {
+		t.Fatalf("callers: %+v", cb.callers)
+	}
+}

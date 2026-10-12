@@ -740,6 +740,13 @@ func main() {
 	if metricsCollector != nil {
 		pluginObserver = metricsCollector
 	}
+	var pluginUsageObserver orchestrator.PluginUsageObserver
+	if n, err := enablePluginCostMetrics(cfg.Plugins, metricsCollector); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	} else if n > 0 {
+		pluginUsageObserver = &pluginUsageAdapter{provider: prov, collector: metricsCollector}
+	}
 
 	// channelNotifier carries a late-bound *channel.Registry pointer; both
 	// the scheduler (job notifications) and the orchestrator (server-
@@ -858,6 +865,7 @@ func main() {
 		GroupPluginLookup:             groupPluginStore,
 		UsageRecorder:                 usageRecorder,
 		PluginCallObserver:            pluginObserver,
+		PluginUsageObserver:           pluginUsageObserver,
 		EventSink:                     sessionSink,       // async-buffered via SessionEventWriter
 		PromptSnapshotStore:           sessionEventStore, // direct/sync store; intentionally not async-buffered so a consumer reading a turn_start event can resolve its sha256 references without racing the writer. nil when state DB is not configured
 		SyncActionsPlugin:             cfg.Orchestrator.Knowledge.SyncPlugin,
@@ -1342,17 +1350,7 @@ func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupI
 	if a.store == nil && a.collector == nil {
 		return
 	}
-	var inputCostUSD, outputCostUSD float64
-	if modelID != "" && a.provider != nil {
-		for _, m := range a.provider.Models() {
-			if m.ID == modelID {
-				// Cost is configured per million tokens.
-				inputCostUSD = float64(inputTokens) * m.Cost.Input / 1_000_000
-				outputCostUSD = float64(outputTokens) * m.Cost.Output / 1_000_000
-				break
-			}
-		}
-	}
+	inputCostUSD, outputCostUSD := modelCostUSD(a.provider, modelID, inputTokens, outputTokens)
 	if a.store != nil {
 		if err := a.store.Record(ctx, store.UsageRecord{
 			EntityID:        entityID,
@@ -1375,6 +1373,55 @@ func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupI
 		a.collector.RecordUsage(ctx, entityID, groupID, channelID, sessionID, modelID,
 			inputTokens, outputTokens, toolCalls, inputCostUSD, outputCostUSD)
 	}
+}
+
+func modelCostUSD(p provider.Provider, modelID string, inputTokens, outputTokens int) (float64, float64) {
+	if modelID == "" || p == nil {
+		return 0, 0
+	}
+	for _, m := range p.Models() {
+		if m.ID == modelID {
+			return float64(inputTokens) * m.Cost.Input / 1_000_000, float64(outputTokens) * m.Cost.Output / 1_000_000
+		}
+	}
+	return 0, 0
+}
+
+type pluginUsageAdapter struct {
+	provider  provider.Provider
+	collector *metrics.Collector
+}
+
+func (a *pluginUsageAdapter) ObservePluginUsage(ctx context.Context, plugin, action, model string, inputTokens, outputTokens int) {
+	in, out := modelCostUSD(a.provider, model, inputTokens, outputTokens)
+	a.collector.ObservePluginUsage(ctx, plugin, action, model, inputTokens, outputTokens, in+out)
+}
+
+func enablePluginCostMetrics(plugins map[string]config.PluginConfig, collector *metrics.Collector) (int, error) {
+	names := make([]string, 0, len(plugins))
+	for name := range plugins {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	n := 0
+	for _, name := range names {
+		pm := plugins[name].Metrics
+		if pm.Prefix != "" && !pm.Cost {
+			return 0, fmt.Errorf("plugins.%s.metrics.prefix needs metrics.cost: true", name)
+		}
+		if !pm.Cost || !plugins[name].Enabled {
+			continue
+		}
+		if collector == nil {
+			slog.Warn("plugin metrics.cost is set but the metrics endpoint is disabled; set metrics.enabled: true", "plugin", name)
+			continue
+		}
+		if err := collector.EnablePluginCost(name, pm.Prefix); err != nil {
+			return 0, err
+		}
+		n++
+	}
+	return n, nil
 }
 
 // newInMemoryState returns in-memory memory and session stores (used when data_dir is unset or DB open fails).

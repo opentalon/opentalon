@@ -11,6 +11,7 @@ import (
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/decideprovider"
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/provider"
 )
 
 const (
@@ -171,6 +172,7 @@ func (o *Orchestrator) decideOverLimit(ctx context.Context) string {
 // with no profile in context is recorded under unattributedEntity, so its
 // spend is visible rather than free, and warned about once per decider.
 func (o *Orchestrator) recordDecideUsage(ctx context.Context, decider string, u decideprovider.Usage) {
+	o.observePluginUsage(ctx, decideModelPrefix+decider, provider.Usage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens})
 	if o.usageRecorder == nil {
 		return
 	}

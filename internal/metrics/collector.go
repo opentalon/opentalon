@@ -23,6 +23,8 @@ type Collector struct {
 
 	pluginInputTokens  *prometheus.CounterVec
 	pluginOutputTokens *prometheus.CounterVec
+
+	pluginCost *pluginCost
 }
 
 // New creates and registers all metrics.
@@ -86,6 +88,7 @@ func New() *Collector {
 		c.pluginOutputTokens,
 	)
 
+	c.pluginCost = newPluginCost(reg)
 	return c
 }
 

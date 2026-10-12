@@ -238,7 +238,7 @@ func (c *Client) executeBidiStream(ctx context.Context, req *pluginpb.ToolCallRe
 			// serialises them, but the wire protocol allows parallel —
 			// and stream.Send is not safe for concurrent callers, so a
 			// future parallel-callback SDK needs a send mutex here).
-			go c.handleCallback(ctx, stream, payload.CallbackRequest, cb)
+			go c.handleCallback(orchestrator.WithPluginCaller(ctx, c.name, req.GetAction()), stream, payload.CallbackRequest, cb)
 		default:
 			return nil, fmt.Errorf("grpc bidi: unknown payload %T", payload)
 		}

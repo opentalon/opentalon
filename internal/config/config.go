@@ -296,6 +296,12 @@ type PluginConfig struct {
 	ExposeHTTP  bool                   `yaml:"expose_http,omitempty"`  // opt-in: reverse-proxy /{plugin-name}/* through the webhook server
 	HTTPPort    int                    `yaml:"http_port,omitempty"`    // per-plugin OPENTALON_HTTP_PORT; lets multiple expose_http plugins bind distinct ports (see opentalon#331)
 	GRPCPort    int                    `yaml:"grpc_port,omitempty"`    // opt-in: expose an external PluginService.Execute gateway on this port, forwarding to the plugin unchanged
+	Metrics     PluginMetricsConfig    `yaml:"metrics,omitempty"`
+}
+
+type PluginMetricsConfig struct {
+	Cost   bool   `yaml:"cost,omitempty"`
+	Prefix string `yaml:"prefix,omitempty"`
 }
 
 // PluginBundleEntry is one in-process plugin compiled INTO a bundling host
