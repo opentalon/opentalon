@@ -7,6 +7,8 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -57,41 +59,147 @@ func TestLaya_ScoresAreSoftmaxed(t *testing.T) {
 	}
 }
 
-func TestJev_PassesThroughUsageAndBearer(t *testing.T) {
-	var gotAuth string
+func TestJev_SendsSystemOneChoiceQuestion(t *testing.T) {
+	var gotAuth, gotPath string
+	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
-		_, _ = io.WriteString(w, `{"chosen":"Spam","confidence":0.9,
-			"probabilities":{"Spam":0.9,"Legitimate":0.1},
-			"usage":{"input_tokens":12,"output_tokens":1}}`)
+		gotPath = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		_, _ = io.WriteString(w, `{"model":"jev-1.13.0","answers":{"decision":{"type":"choice","choice":"Spam",
+			"confidence":1.0,"probabilities":{"Legitimate":0.0,"Spam":1.0}}},
+			"usage":{"input_tokens":315,"output_tokens":35}}`)
 	}))
 	defer srv.Close()
 
-	dec, err := NewJevProvider("jev", srv.URL, "secret").Decide(context.Background(),
-		&Request{State: "x", Choices: []string{"Legitimate", "Spam"}})
+	dec, err := NewJevProvider("jev", srv.URL+"/v1/systemone", "secret", "").Decide(context.Background(),
+		&Request{State: "Subject: WIN A FREE IPHONE", Choices: []string{"Legitimate", "Spam"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if gotAuth != "Bearer secret" {
 		t.Errorf("auth = %q, want Bearer secret", gotAuth)
 	}
-	if dec.Chosen != "Spam" || dec.Usage.InputTokens != 12 {
-		t.Errorf("decision = %#v", dec)
+	if gotPath != "/v1/systemone" {
+		t.Errorf("path = %q, want the base_url as given", gotPath)
+	}
+	want := map[string]any{
+		"state": "Subject: WIN A FREE IPHONE",
+		"model": "jev-latest",
+		"questions": map[string]any{
+			"decision": map[string]any{
+				"type":     "choice",
+				"criteria": map[string]any{"Legitimate": "Legitimate", "Spam": "Spam"},
+			},
+		},
+	}
+	if !reflect.DeepEqual(gotBody, want) {
+		t.Errorf("request body = %#v, want %#v", gotBody, want)
+	}
+	if dec.Chosen != "Spam" || dec.Probabilities["Spam"] != 1 || dec.Probabilities["Legitimate"] != 0 {
+		t.Errorf("decision = %#v, want Spam=1", dec)
+	}
+	if dec.Usage.InputTokens != 315 || dec.Usage.OutputTokens != 35 {
+		t.Errorf("usage = %#v, want 315/35", dec.Usage)
 	}
 }
 
-func TestJev_ChosenOnlyBecomesDistribution(t *testing.T) {
+func TestJev_SendsConfiguredModel(t *testing.T) {
+	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"chosen":"B"}`)
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		_, _ = io.WriteString(w, `{"answers":{"decision":{"type":"choice","choice":"A","probabilities":{"A":0.6,"B":0.4}}}}`)
 	}))
 	defer srv.Close()
-	dec, err := NewJevProvider("jev", srv.URL, "").Decide(context.Background(),
-		&Request{Choices: []string{"A", "B"}})
+
+	if _, err := NewJevProvider("jev", srv.URL, "", "jev-1.13.0").Decide(context.Background(),
+		&Request{State: "x", Choices: []string{"A", "B"}}); err != nil {
+		t.Fatal(err)
+	}
+	if gotBody["model"] != "jev-1.13.0" {
+		t.Errorf("model = %v, want jev-1.13.0", gotBody["model"])
+	}
+}
+
+func TestJev_RenormalizesInconsistentProbabilities(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"answers":{"decision":{"type":"choice","choice":"A","confidence":0.78,
+			"probabilities":{"A":0.89,"B":0.11,"C":0.5}}},"usage":{"input_tokens":284,"output_tokens":31}}`)
+	}))
+	defer srv.Close()
+
+	dec, err := NewJevProvider("jev", srv.URL, "", "").Decide(context.Background(),
+		&Request{State: "x", Choices: []string{"A", "B"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dec.Chosen != "A" || math.Abs(dec.Confidence-0.89) > 1e-9 || len(dec.Probabilities) != 2 {
+		t.Errorf("decision = %#v, want A at 0.89 over [A B] only", dec)
+	}
+}
+
+func TestJev_ChoiceOnlyBecomesDistribution(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"answers":{"decision":{"type":"choice","choice":"B"}}}`)
+	}))
+	defer srv.Close()
+	dec, err := NewJevProvider("jev", srv.URL, "", "").Decide(context.Background(),
+		&Request{State: "x", Choices: []string{"A", "B"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if dec.Chosen != "B" || dec.Probabilities["B"] != 1 {
 		t.Errorf("decision = %#v, want B=1", dec)
+	}
+	if dec.Usage.InputTokens != 1 || dec.Usage.OutputTokens != 1 {
+		t.Errorf("usage = %#v, want estimated 1/1 without reported usage", dec.Usage)
+	}
+}
+
+func TestJev_Errors(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		body    string
+		choices []string
+		want    string
+	}{
+		{"http 400", http.StatusBadRequest, `{"detail":{"error_type":"api_usage_error","message":"Invalid request."}}`, []string{"A", "B"}, "Invalid request."},
+		{"http 422", http.StatusUnprocessableEntity, `{"detail":[{"type":"missing","loc":["body","model"]}]}`, []string{"A", "B"}, "422"},
+		{"no answers", http.StatusOK, `{"model":"jev-1.13.0"}`, []string{"A", "B"}, "no answer"},
+		{"other question only", http.StatusOK, `{"answers":{"urgency":{"type":"noul","noul":0.97}}}`, []string{"A", "B"}, "no answer"},
+		{"wrong answer type", http.StatusOK, `{"answers":{"decision":{"type":"score","score":1.0}}}`, []string{"A", "B"}, "type"},
+		{"empty answer", http.StatusOK, `{"answers":{"decision":{"type":"choice"}}}`, []string{"A", "B"}, "neither"},
+		{"choice outside declared", http.StatusOK, `{"answers":{"decision":{"type":"choice","choice":"Z"}}}`, []string{"A", "B"}, ""},
+		{"not json", http.StatusOK, `<html>bad gateway</html>`, []string{"A", "B"}, "decode"},
+		{"no choices", http.StatusOK, `{"answers":{"decision":{"type":"choice","choice":"A"}}}`, nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			_, err := NewJevProvider("jev", srv.URL, "", "").Decide(context.Background(),
+				&Request{State: "x", Choices: tc.choices})
+			if err == nil {
+				t.Fatal("Decide succeeded, want an error")
+			}
+			if !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), `jev "jev"`) {
+				t.Errorf("error = %q, want it to name the decider and contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestJev_RequiresBaseURL(t *testing.T) {
+	_, err := NewJevProvider("jev", "", "", "").Decide(context.Background(),
+		&Request{State: "x", Choices: []string{"A", "B"}})
+	if err == nil || !strings.Contains(err.Error(), "base_url") {
+		t.Errorf("error = %v, want base_url required", err)
 	}
 }
 

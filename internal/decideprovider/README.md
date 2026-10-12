@@ -63,7 +63,7 @@ or an un-normalized vector is still made honest before the gate sees it.
 | `backend`        | source | notes |
 |------------------|--------|-------|
 | `laya`           | [`convaiinnovations/laya-typed-decisions`](https://huggingface.co/convaiinnovations/laya-typed-decisions) | open-weights ModernBERT classifier server; `probabilities` renormalized or `scores` softmaxed; input-only usage |
-| `jev`            | [typesafe.ai](https://typesafe.ai/) | hosted System-1 API, bearer auth; response renormalized locally; passes through reported usage |
+| `jev`            | [typesafe.ai](https://typesafe.ai/) | hosted System-1 API (`base_url: https://api.typesafe.ai/v1/systemone`, `model` default `jev-latest`), bearer auth; one `choice` question per decision; response renormalized locally; passes through reported usage |
 | `local-logits`   | [Jev in 25 lines](https://www.nobodywho.ai/posts/jev-in-25-lines/) | any OpenAI-compatible completions server; reads first-token logprobs over the choice tokens and **softmaxes them locally** |
 
 All three return the same shape, so they're swappable via config with **no change
