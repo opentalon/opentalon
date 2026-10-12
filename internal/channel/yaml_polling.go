@@ -1,7 +1,6 @@
 package channel
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -86,8 +85,8 @@ func (ch *YAMLChannel) doPollOnce(method string, client *http.Client) {
 	}
 
 	// Parse JSON response
-	var raw map[string]interface{}
-	if err := json.Unmarshal(respBody, &raw); err != nil {
+	raw, err := decodeJSONObject(respBody)
+	if err != nil {
 		slog.Warn("yaml-channel poll parse response failed", "channel", ch.spec.ID, "error", err)
 		return
 	}

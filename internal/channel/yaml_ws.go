@@ -50,8 +50,8 @@ func (ch *YAMLChannel) runInit(steps []InitStep) error {
 
 		// Parse JSON response and store fields (supports dotted paths like "result.id")
 		if len(step.Store) > 0 {
-			var result map[string]interface{}
-			if err := json.Unmarshal(respBody, &result); err != nil {
+			result, err := decodeJSONObject(respBody)
+			if err != nil {
 				return fmt.Errorf("init %s: parse response: %w", step.Name, err)
 			}
 			ch.selfMu.Lock()
@@ -157,8 +157,8 @@ func (ch *YAMLChannel) connectAndRead() error {
 
 // handleFrame processes a single WebSocket frame.
 func (ch *YAMLChannel) handleFrame(conn *websocket.Conn, data []byte) {
-	var frame map[string]interface{}
-	if err := json.Unmarshal(data, &frame); err != nil {
+	frame, err := decodeJSONObject(data)
+	if err != nil {
 		slog.Warn("yaml-channel invalid JSON frame", "channel", ch.spec.ID, "error", err)
 		return
 	}
@@ -184,12 +184,25 @@ func (ch *YAMLChannel) handleFrame(conn *websocket.Conn, data []byte) {
 // processInboundData processes raw JSON data received from any inbound source
 // (WebSocket frame or HTTP webhook body).
 func (ch *YAMLChannel) processInboundData(data []byte) {
-	var frame map[string]interface{}
-	if err := json.Unmarshal(data, &frame); err != nil {
+	frame, err := decodeJSONObject(data)
+	if err != nil {
 		slog.Warn("yaml-channel invalid JSON", "channel", ch.spec.ID, "error", err)
 		return
 	}
 	ch.processInboundFrame(frame)
+}
+
+func decodeJSONObject(data []byte) (map[string]interface{}, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var obj map[string]interface{}
+	if err := dec.Decode(&obj); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("unexpected data after JSON object")
+	}
+	return obj, nil
 }
 
 // processInboundFrame processes a parsed inbound frame from any source.
@@ -525,7 +538,13 @@ func decodeFileAttachment(m map[string]interface{}) *pkg.FileAttachment {
 	name, _ := m["name"].(string)
 	mimeType, _ := m["mime_type"].(string)
 	dataStr, _ := m["data"].(string)
-	sizeF, _ := m["size"].(float64)
+	var sizeF float64
+	switch v := m["size"].(type) {
+	case float64:
+		sizeF = v
+	case json.Number:
+		sizeF, _ = v.Float64()
+	}
 
 	if dataStr == "" {
 		return nil
@@ -733,8 +752,8 @@ func (ch *YAMLChannel) doHTTPCallCaptureField(ctx context.Context, call HTTPCall
 		return "", nil
 	}
 
-	var parsed map[string]interface{}
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
+	parsed, err := decodeJSONObject(respBody)
+	if err != nil {
 		return "", nil // not JSON, silently ignore
 	}
 	return getStringField(parsed, field), nil
@@ -770,6 +789,8 @@ func getStringField(m map[string]interface{}, key string) string {
 		switch v := val.(type) {
 		case string:
 			return v
+		case json.Number:
+			return v.String()
 		case float64:
 			if v == float64(int64(v)) {
 				return fmt.Sprintf("%.0f", v)
@@ -934,8 +955,8 @@ func (ch *YAMLChannel) resolveFile(spec *MediaResolveSpec, contexts map[string]m
 		}
 
 		if len(step.Store) > 0 {
-			var result map[string]interface{}
-			if err := json.Unmarshal(body, &result); err != nil {
+			result, err := decodeJSONObject(body)
+			if err != nil {
 				return nil, fmt.Errorf("parse response from %s: %w", url, err)
 			}
 			for selfKey, jsonField := range step.Store {
@@ -974,6 +995,8 @@ func flattenToStringMap(m map[string]interface{}) map[string]string {
 		switch val := v.(type) {
 		case string:
 			result[k] = val
+		case json.Number:
+			result[k] = val.String()
 		case float64:
 			if val == float64(int64(val)) {
 				result[k] = fmt.Sprintf("%.0f", val)
