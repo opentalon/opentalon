@@ -50,8 +50,8 @@ func (ch *YAMLChannel) runInit(steps []InitStep) error {
 
 		// Parse JSON response and store fields (supports dotted paths like "result.id")
 		if len(step.Store) > 0 {
-			var result map[string]interface{}
-			if err := json.Unmarshal(respBody, &result); err != nil {
+			result, err := decodeJSONObject(respBody)
+			if err != nil {
 				return fmt.Errorf("init %s: parse response: %w", step.Name, err)
 			}
 			ch.selfMu.Lock()
@@ -192,9 +192,6 @@ func (ch *YAMLChannel) processInboundData(data []byte) {
 	ch.processInboundFrame(frame)
 }
 
-// decodeJSONObject decodes an inbound JSON object, keeping numbers as
-// json.Number so integer IDs above 2^53 (Discord snowflakes, GitLab ids)
-// reach templates exactly instead of being rounded through float64.
 func decodeJSONObject(data []byte) (map[string]interface{}, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
@@ -202,7 +199,7 @@ func decodeJSONObject(data []byte) (map[string]interface{}, error) {
 	if err := dec.Decode(&obj); err != nil {
 		return nil, err
 	}
-	if dec.More() {
+	if _, err := dec.Token(); err != io.EOF {
 		return nil, fmt.Errorf("unexpected data after JSON object")
 	}
 	return obj, nil
@@ -755,8 +752,8 @@ func (ch *YAMLChannel) doHTTPCallCaptureField(ctx context.Context, call HTTPCall
 		return "", nil
 	}
 
-	var parsed map[string]interface{}
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
+	parsed, err := decodeJSONObject(respBody)
+	if err != nil {
 		return "", nil // not JSON, silently ignore
 	}
 	return getStringField(parsed, field), nil
@@ -958,8 +955,8 @@ func (ch *YAMLChannel) resolveFile(spec *MediaResolveSpec, contexts map[string]m
 		}
 
 		if len(step.Store) > 0 {
-			var result map[string]interface{}
-			if err := json.Unmarshal(body, &result); err != nil {
+			result, err := decodeJSONObject(body)
+			if err != nil {
 				return nil, fmt.Errorf("parse response from %s: %w", url, err)
 			}
 			for selfKey, jsonField := range step.Store {

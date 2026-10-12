@@ -184,8 +184,8 @@ func (ch *YAMLChannel) callEnrich(ctx context.Context, step EnrichSpec, contexts
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
-	var parsed map[string]interface{}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
+	parsed, err := decodeJSONObject(raw)
+	if err != nil {
 		return nil, fmt.Errorf("parse json: %w", err)
 	}
 

@@ -676,8 +676,6 @@ func TestWebhookHandler_DispatchResolvesArrayFields(t *testing.T) {
 	}
 }
 
-// Integer IDs above 2^53 must reach dispatch templates exactly, not rounded
-// through float64 (issue #366).
 func TestWebhookHandler_DispatchPreservesLargeIntegerIDs(t *testing.T) {
 	calls := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
