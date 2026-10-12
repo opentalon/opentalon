@@ -9,20 +9,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Per-plugin LLM spend — opt-in per plugin (plugins.<name>.metrics.cost), so
-// installs that don't ask for it keep exactly the series they had.
-//
-//	opentalon_plugin_llm_tokens_total{plugin, action, model, direction}
-//	opentalon_plugin_cost_usd_total{plugin, action, model}
-//
-// With a prefix (plugins.<name>.metrics.prefix) the same numbers are also
-// exported under the plugin's own name, without the plugin label:
-//
-//	<prefix>_llm_tokens_total{action, model, direction}
-//	<prefix>_llm_cost_usd_total{action, model}
 type pluginCost struct {
 	mu      sync.RWMutex
-	enabled map[string]*pluginAlias // plugin → alias (nil when it has no prefix)
+	enabled map[string]*pluginAlias
 
 	tokens *prometheus.CounterVec
 	cost   *prometheus.CounterVec
@@ -43,7 +32,7 @@ func newPluginCost(reg prometheus.Registerer) *pluginCost {
 			Help: "LLM tokens used on behalf of a plugin (its _subprocess and decide calls), by action, model and direction. Only for plugins with metrics.cost enabled.",
 		}, []string{"plugin", "action", "model", "direction"}),
 		cost: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "opentalon_plugin_cost_usd_total",
+			Name: "opentalon_plugin_llm_cost_usd_total",
 			Help: "Cost of LLM calls made on behalf of a plugin, by action and model, priced with the model's configured cost. Only for plugins with metrics.cost enabled.",
 		}, []string{"plugin", "action", "model"}),
 	}
@@ -51,9 +40,6 @@ func newPluginCost(reg prometheus.Registerer) *pluginCost {
 	return p
 }
 
-// EnablePluginCost turns on per-plugin LLM spend metrics for plugin, and with
-// a non-empty prefix also the <prefix>_llm_* alias. Call it at startup, once
-// per plugin.
 func (c *Collector) EnablePluginCost(plugin, prefix string) error {
 	p := c.pluginCost
 	p.mu.Lock()
@@ -73,7 +59,7 @@ func (c *Collector) EnablePluginCost(plugin, prefix string) error {
 			}, []string{"action", "model", "direction"}),
 			cost: prometheus.NewCounterVec(prometheus.CounterOpts{
 				Name: prefix + "_llm_cost_usd_total",
-				Help: "Cost of LLM calls made by the " + plugin + " plugin, by action and model (alias of opentalon_plugin_cost_usd_total).",
+				Help: "Cost of LLM calls made by the " + plugin + " plugin, by action and model (alias of opentalon_plugin_llm_cost_usd_total).",
 			}, []string{"action", "model"}),
 		}
 		if err := c.reg.Register(alias.tokens); err != nil {
@@ -88,7 +74,6 @@ func (c *Collector) EnablePluginCost(plugin, prefix string) error {
 	return nil
 }
 
-// PluginCostEnabled reports whether plugin has per-plugin spend metrics on.
 func (c *Collector) PluginCostEnabled(plugin string) bool {
 	c.pluginCost.mu.RLock()
 	defer c.pluginCost.mu.RUnlock()
@@ -96,8 +81,6 @@ func (c *Collector) PluginCostEnabled(plugin string) bool {
 	return ok
 }
 
-// ObservePluginUsage records one priced LLM call made for plugin's action. It
-// is a no-op for plugins without metrics.cost.
 func (c *Collector) ObservePluginUsage(_ context.Context, plugin, action, model string, inputTokens, outputTokens int, costUSD float64) {
 	p := c.pluginCost
 	p.mu.RLock()

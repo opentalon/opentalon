@@ -214,7 +214,6 @@ func (e stringError) Error() string { return string(e) }
 
 var errBoom = stringError("boom")
 
-// callerCapturingHandler records the plugin caller each callback runs for.
 type callerCapturingHandler struct {
 	recordingCallbackHandler
 	callers []orchestrator.PluginCaller
@@ -226,9 +225,6 @@ func (h *callerCapturingHandler) RunActionResult(ctx context.Context, plugin, ac
 	return h.recordingCallbackHandler.RunActionResult(ctx, plugin, action, args)
 }
 
-// TestClient_ExecuteBidi_CallbackCarriesPluginCaller locks in that a callback
-// runs with the calling plugin and its action in ctx, so LLM spend it causes
-// can be attributed (per-plugin cost metrics).
 func TestClient_ExecuteBidi_CallbackCarriesPluginCaller(t *testing.T) {
 	body := func(ctx context.Context, req pkg.Request, host pkg.HostCaller) pkg.Response {
 		if _, err := host.RunAction(ctx, "_subprocess", "run", map[string]string{"task": "x"}); err != nil {

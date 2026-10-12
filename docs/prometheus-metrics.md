@@ -64,13 +64,21 @@ plugins:
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `opentalon_plugin_llm_tokens_total` | Counter | `plugin`, `action`, `model`, `direction` | Tokens of LLM calls made on behalf of the plugin; `direction` is `input` or `output` |
-| `opentalon_plugin_cost_usd_total` | Counter | `plugin`, `action`, `model` | Their cost, priced with the model's configured `cost` |
+| `opentalon_plugin_llm_cost_usd_total` | Counter | `plugin`, `action`, `model` | Their cost, priced with the model's configured `cost` (always `0` for `decide/<decider>`, see below) |
 | `<prefix>_llm_tokens_total` | Counter | `action`, `model`, `direction` | With `prefix`: the same tokens, without the `plugin` label |
 | `<prefix>_llm_cost_usd_total` | Counter | `action`, `model` | With `prefix`: the same cost, without the `plugin` label |
 
 - `action` is the plugin action that caused the spend (e.g. `evaluate_pr`), not the host
   action it called back into.
 - `model` is the model that served the call; `decide` calls appear as `decide/<decider>`.
+- **`decide` spend is tokens only.** A `decide/<decider>` model has no configured price, so
+  its rows in `opentalon_plugin_llm_cost_usd_total` are always `0`, even for LLM-backed
+  deciders — the same as in `opentalon_llm_*_cost_usd_total`. Use the token counts.
+- **Only plugin callbacks are attributed.** Spend is attributed when the plugin asks the host
+  through a callback while executing one of its actions (`ExecuteBidi`, including the
+  external gateway). A `_subprocess` or `decide` call that reaches the host another way —
+  e.g. through the plugin exec dispatcher (Redis Streams, used by opentalon-workflows) —
+  carries no calling plugin and is not recorded here, even with `metrics.cost: true`.
 - Plugins without `metrics.cost` add no series — existing dashboards are unaffected.
 - Prefer the `plugin` label in dashboards (`sum by (plugin) (…)` covers every plugin); use
   `prefix` only when a plugin-named metric is wanted. A prefix that collides with another

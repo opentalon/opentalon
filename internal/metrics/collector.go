@@ -24,7 +24,7 @@ type Collector struct {
 	pluginInputTokens  *prometheus.CounterVec
 	pluginOutputTokens *prometheus.CounterVec
 
-	pluginCost *pluginCost // opt-in per plugin; see plugin_cost.go
+	pluginCost *pluginCost
 }
 
 // New creates and registers all metrics.

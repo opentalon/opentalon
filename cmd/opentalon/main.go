@@ -740,7 +740,6 @@ func main() {
 	if metricsCollector != nil {
 		pluginObserver = metricsCollector
 	}
-	// Per-plugin LLM spend metrics, for the plugins that opt in (plugins.<name>.metrics.cost).
 	var pluginUsageObserver orchestrator.PluginUsageObserver
 	if n, err := enablePluginCostMetrics(cfg.Plugins, metricsCollector); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1376,8 +1375,6 @@ func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupI
 	}
 }
 
-// modelCostUSD prices a call with the model's configured cost (per million
-// tokens); a model without a configured cost, or an unknown one, costs 0.
 func modelCostUSD(p provider.Provider, modelID string, inputTokens, outputTokens int) (float64, float64) {
 	if modelID == "" || p == nil {
 		return 0, 0
@@ -1390,8 +1387,6 @@ func modelCostUSD(p provider.Provider, modelID string, inputTokens, outputTokens
 	return 0, 0
 }
 
-// pluginUsageAdapter prices the LLM calls made on behalf of a plugin and
-// records them as per-plugin spend metrics.
 type pluginUsageAdapter struct {
 	provider  provider.Provider
 	collector *metrics.Collector
@@ -1402,9 +1397,6 @@ func (a *pluginUsageAdapter) ObservePluginUsage(ctx context.Context, plugin, act
 	a.collector.ObservePluginUsage(ctx, plugin, action, model, inputTokens, outputTokens, in+out)
 }
 
-// enablePluginCostMetrics turns on per-plugin spend metrics for every plugin
-// with metrics.cost and returns how many. Without the metrics endpoint the
-// setting has nowhere to go, so it is reported rather than ignored silently.
 func enablePluginCostMetrics(plugins map[string]config.PluginConfig, collector *metrics.Collector) (int, error) {
 	names := make([]string, 0, len(plugins))
 	for name := range plugins {

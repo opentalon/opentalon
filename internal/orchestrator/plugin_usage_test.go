@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/opentalon/opentalon/internal/decideprovider"
 	"github.com/opentalon/opentalon/internal/provider"
 )
 
@@ -69,5 +70,29 @@ func TestPluginCallerFrom(t *testing.T) {
 	c, ok := PluginCallerFrom(WithPluginCaller(context.Background(), "p", "a"))
 	if !ok || c != (PluginCaller{Plugin: "p", Action: "a"}) {
 		t.Errorf("got %+v %v", c, ok)
+	}
+}
+
+func TestDecideReportsUsageForTheCallingPlugin(t *testing.T) {
+	d := &fakeDecider{name: "jev", dec: &decideprovider.Decision{Chosen: "match", Confidence: 1,
+		Usage: decideprovider.Usage{InputTokens: 40, OutputTokens: 2}}}
+	spy := &pluginUsageSpy{}
+	o := decideTestOrch(t, d, nil)
+	o.pluginUsageObserver = spy
+
+	ctx := WithPluginCaller(context.Background(), "talooner", "evaluate_pr")
+	if _, _, err := o.RunActionResult(ctx, "jev", "decide", map[string]string{"state": "s", "choices": `["match"]`}); err != nil {
+		t.Fatalf("RunActionResult: %v", err)
+	}
+	want := recordedPluginUsage{"talooner", "evaluate_pr", "decide/jev", 40, 2}
+	if len(spy.got) != 1 || spy.got[0] != want {
+		t.Fatalf("got %+v, want %+v", spy.got, want)
+	}
+
+	if _, _, err := o.RunActionResult(context.Background(), "jev", "decide", map[string]string{"state": "s", "choices": `["match"]`}); err != nil {
+		t.Fatalf("RunActionResult: %v", err)
+	}
+	if len(spy.got) != 1 {
+		t.Fatalf("a decide call with no plugin caller must not be attributed: %+v", spy.got)
 	}
 }

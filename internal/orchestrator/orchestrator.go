@@ -187,15 +187,15 @@ type OrchestratorOpts struct {
 	// off → ship dark, flip in a watched window, instant revert.
 	ConfirmationClassifierEnabled bool
 	PipelineConfig                pipeline.PipelineConfig
-	ConfirmationPlugin            string                  // optional; plugin name for confirmation strategy (e.g. "planner")
-	ConfirmationAction            string                  // optional; action name (e.g. "check_confirmation")
-	ContextWindow                 int                     // model context window in tokens; 0 = no trimming
-	MaxOutputTokens               int                     // default model's per-call output budget (max_tokens); reserved from the window when trimming so prompt + completion cannot exceed the context length. 0 = fall back to a flat 10% reserve
-	MaxConcurrentSessions         int                     // max sessions running in parallel; default 1 (sequential)
-	GroupPluginLookup             GroupPluginLookup       // optional; when set, filters tool list by profile group
-	UsageRecorder                 UsageRecorder           // optional; when set, records LLM usage after each run
-	PluginCallObserver            PluginCallObserver      // optional; when set, notified after each plugin/tool call
-	PluginUsageObserver           PluginUsageObserver     // optional; when set, notified of each LLM call made on behalf of a plugin
+	ConfirmationPlugin            string             // optional; plugin name for confirmation strategy (e.g. "planner")
+	ConfirmationAction            string             // optional; action name (e.g. "check_confirmation")
+	ContextWindow                 int                // model context window in tokens; 0 = no trimming
+	MaxOutputTokens               int                // default model's per-call output budget (max_tokens); reserved from the window when trimming so prompt + completion cannot exceed the context length. 0 = fall back to a flat 10% reserve
+	MaxConcurrentSessions         int                // max sessions running in parallel; default 1 (sequential)
+	GroupPluginLookup             GroupPluginLookup  // optional; when set, filters tool list by profile group
+	UsageRecorder                 UsageRecorder      // optional; when set, records LLM usage after each run
+	PluginCallObserver            PluginCallObserver // optional; when set, notified after each plugin/tool call
+	PluginUsageObserver           PluginUsageObserver
 	EventSink                     emit.Sink               // optional; nil defaults to emit.NoOpSink (helpers run unconditionally, the no-op sink discards them)
 	PromptSnapshotStore           PromptSnapshotUpserter  // optional; when set, system prompt + server instructions + tool descriptions are persisted by sha256 so turn_start hashes resolve to content
 	SyncActionsPlugin             string                  // optional; plugin name for action sync (e.g. "weaviate")
@@ -416,15 +416,15 @@ type Orchestrator struct {
 	// already resolved it.
 	pendingPipelines    map[string]pendingPipeline
 	pipelineConfig      pipeline.PipelineConfig
-	confirmationPlugin  string                 // optional; plugin for confirmation strategy
-	confirmationAction  string                 // optional; action name for confirmation check
-	contextWindow       int                    // model context window in tokens; 0 = no trimming
-	maxOutputTokens     int                    // reserved output budget (max_tokens) subtracted from the window when trimming; 0 = flat 10% reserve
-	calibrators         *calibrators           // per-model correction between the token estimate and what the provider charges; always allocated
-	groupPluginLookup   GroupPluginLookup      // optional; nil = no group-based filtering
-	usageRecorder       UsageRecorder          // optional; nil = no usage tracking
-	pluginCallObserver  PluginCallObserver     // optional; nil = no plugin call observation
-	pluginUsageObserver PluginUsageObserver    // optional; nil = plugin LLM spend is not observed
+	confirmationPlugin  string             // optional; plugin for confirmation strategy
+	confirmationAction  string             // optional; action name for confirmation check
+	contextWindow       int                // model context window in tokens; 0 = no trimming
+	maxOutputTokens     int                // reserved output budget (max_tokens) subtracted from the window when trimming; 0 = flat 10% reserve
+	calibrators         *calibrators       // per-model correction between the token estimate and what the provider charges; always allocated
+	groupPluginLookup   GroupPluginLookup  // optional; nil = no group-based filtering
+	usageRecorder       UsageRecorder      // optional; nil = no usage tracking
+	pluginCallObserver  PluginCallObserver // optional; nil = no plugin call observation
+	pluginUsageObserver PluginUsageObserver
 	eventSink           emit.Sink              // structured session event sink; always non-nil (NoOpSink default)
 	snapshotStore       PromptSnapshotUpserter // optional; nil = turn_start hashes are emitted but content is not persisted
 	syncActionsPlugin   string                 // optional; plugin name for action sync
