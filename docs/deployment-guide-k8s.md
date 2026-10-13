@@ -563,6 +563,13 @@ controller and the channel's configured `inbound.http_webhook.path`. If more tha
 webhook channel shares the process's default port, add one `path` entry per channel
 rather than a separate Ingress — they all resolve to the same Service/port.
 
+**Don't reuse a host that already has a gRPC-mode Ingress on it** (e.g. a plugin's
+`PluginService.Execute` gateway, exposed via `nginx.ingress.kubernetes.io/backend-protocol:
+GRPC`). That annotation applies to the whole nginx server block generated for that
+host, not per-path — stacking a plain-HTTP webhook path onto the same hostname makes
+nginx try to speak gRPC framing to it, breaking the webhook. Give the webhook its own
+hostname (and DNS record) instead; it costs a free DNS A record, not a new IP.
+
 ### Operator vs Raw Manifests
 
 | | Operator | Raw Manifests |
@@ -1015,6 +1022,69 @@ Plugins are fetched from GitHub and compiled at runtime.
 - **Egress blocked:** Pod needs outbound HTTPS to `github.com:443`.
 - **Go build cache errors:** The image sets `GOCACHE=/tmp/go-build` and `GOPATH=/tmp/go`. If `/tmp` is not writable, compilation fails.
 - **/tmp not writable:** You **must** mount `/tmp` as an emptyDir. With `readOnlyRootFilesystem: true`, the container filesystem is read-only — `/tmp` needs an explicit mount.
+- **`git checkout <sha>: ... unable to read tree`:** The pinned `ref:` commit is no longer reachable from any branch — GitHub's API can still resolve a bare SHA to commit metadata for a while after the branch that contained it is deleted or squash-merged, but a plain `git clone`/`checkout` only ever transfers commits reachable from a live ref. The commit looking valid via `gh api repos/<owner>/<repo>/commits/<sha>` does **not** mean it's fetchable — confirm with `git ls-remote` against a real branch, or just re-pin to the repo's current default-branch HEAD. This fails **every** plugin load (`loaded: 0`), which then starves the `PluginService` gRPC gateway of any backend — every RPC through it (including a CLI's `whoami` handshake) hangs to a deadline instead of erroring immediately, which can look like a network/Ingress problem when the actual cause is three log lines up.
+
+### A YAML channel/webhook feature silently doesn't work, no error anywhere
+
+Check how old the pinned `image.digest` is before debugging further. `ci.yml` only
+ever publishes a floating `latest` tag — there's no semver tag to pin, so deployments
+typically pin by digest with a comment noting when it was resolved (see
+`docker buildx imagetools inspect ghcr.io/opentalon/opentalon:latest`). If that pin
+predates a feature you're relying on (check `git log --oneline <old-sha>..master` in
+this repo), the deployed binary doesn't know the YAML keys that feature introduced —
+`yaml.Unmarshal` silently drops unrecognized keys rather than erroring, so the config
+*looks* right and the channel *loads* successfully, but the behavior those keys were
+supposed to turn on just never happens. Concretely: an inbound webhook's
+`secret_header`/`secret_value` (added for deterministic-dispatch auth) on a digest
+predating that change means the endpoint accepts every request unauthenticated —
+confirm with an actual request, not just the config or the startup log line, e.g.:
+
+```bash
+curl -i -X POST https://your-webhook-host/your/path -d '{}'   # no auth header at all
+```
+
+A `200` where you expected a `401`/`403` is the tell. **Fix:** resolve a fresh
+`latest` digest, confirm the feature's merge commit is an ancestor
+(`git merge-base --is-ancestor <feature-sha> <image-revision-label>`), and re-pin.
+
+### Updating a Secret's data doesn't change running pod behavior
+
+`envFrom.secretRef`-sourced environment variables are injected once, at container
+start. Changing the underlying Secret's `data` (e.g. via a re-run CI job that
+`kubectl apply`s a new value) does **not** propagate to an already-running pod —
+nothing restarts it just because a Secret it references changed, since the pod
+spec itself (which only references the Secret by name) didn't change. Confirm with
+`kubectl get pod <name> -o jsonpath='{.status.startTime}'` against when the Secret
+was actually updated — if the pod is older, it's still running on stale values.
+**Fix:** `kubectl delete pod <name>` (StatefulSet/Deployment recreates it) after any
+Secret value change you need picked up.
+
+### A templated `{{env.X}}` value breaks a URL or header with a weird parse error
+
+```
+build request: parse "https://.../trigger/pipeline?token=glptt-xxxx\n&ref=master":
+net/url: invalid control character in URL
+```
+
+A trailing newline (or other whitespace) got baked into the Secret's value for that
+env var — almost always from how it was pasted into GitHub/GitLab's secret UI (a
+textarea that happily keeps a trailing blank line) or from `echo "$VAR"` instead of
+`printf '%s'`/a trimmed paste somewhere upstream in a CI pipeline. `{{env.X}}`
+substitutes the value byte-for-byte with no trimming, so a trailing `\n` lands
+literally in the middle of whatever string it's templated into — breaking URL
+parsing if it's mid-query-string, or just being invisible-but-wrong if it's at the
+end of a header value. Confirm with a byte-exact check (don't eyeball it — a
+trailing newline is invisible in most terminal output):
+
+```bash
+kubectl get secret <name> -n <namespace> -o jsonpath='{.data.YOUR_KEY}' | base64 -d | wc -c
+kubectl get secret <name> -n <namespace> -o jsonpath='{.data.YOUR_KEY}' | base64 -d | tail -c 5 | xxd
+```
+
+A byte count one more than the value's real length, or a trailing `0a` in the hex
+dump, confirms it. **Fix:** delete and recreate the secret at its source (GitHub
+Actions secret, GitLab CI/CD variable, wherever it's actually typed/pasted),
+making sure there's no trailing blank line, then redeploy.
 
 ### Helm "cannot be imported into the current release"
 
