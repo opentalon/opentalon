@@ -11,7 +11,8 @@ func TestFromConfig_SelectsBackend(t *testing.T) {
 		want    string
 	}{
 		{BackendLaya, "*decideprovider.LayaProvider"},
-		{BackendJev, "*decideprovider.JevProvider"},
+		{BackendJev, "*decideprovider.SystemOneProvider"},
+		{BackendSubQ, "*decideprovider.SystemOneProvider"},
 		{BackendLocalLogits, "*decideprovider.LocalLogitsProvider"},
 	}
 	for _, tc := range cases {
@@ -29,8 +30,8 @@ func typeName(v any) string {
 	switch v.(type) {
 	case *LayaProvider:
 		return "*decideprovider.LayaProvider"
-	case *JevProvider:
-		return "*decideprovider.JevProvider"
+	case *SystemOneProvider:
+		return "*decideprovider.SystemOneProvider"
 	case *LocalLogitsProvider:
 		return "*decideprovider.LocalLogitsProvider"
 	default:

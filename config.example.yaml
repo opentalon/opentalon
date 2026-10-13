@@ -50,6 +50,7 @@ models:
   # metered into profile_usage like every LLM call. backend is one of:
   #   laya          — a laya typed-decisions server (open-weights ModernBERT)
   #   jev           — the Jev hosted System-1 API (typesafe.ai)
+  #   subq          — SubQ Snap on the same hosted System-1 API (subq.ai)
   #   local-logits  — any OpenAI-compatible completions server; reads first-token
   #                   logprobs over the choices and softmaxes them locally
   # deciders:
@@ -62,6 +63,11 @@ models:
   #     base_url: "https://api.typesafe.ai/v1/systemone"
   #     api_key: "${JEV_TOKEN}"
   #     model: "jev-latest"                     # default
+  #   snap:
+  #     backend: subq
+  #     base_url: "https://api.subq.ai/v1/systemone"
+  #     api_key: "${SUBQ_API_KEY}"
+  #     model: "subq-snap-preview"              # default
   #   laya:
   #     backend: laya
   #     base_url: "${LAYA_URL}"

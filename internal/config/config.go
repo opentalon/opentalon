@@ -566,13 +566,13 @@ type ModelsConfig struct {
 }
 
 // DeciderConfig configures one typed-decision backend (issue #361). Backend is
-// one of "laya", "jev", or "local-logits"; the remaining fields are the backend
+// one of "laya", "jev", "subq", or "local-logits"; the remaining fields are the backend
 // endpoint and auth. See internal/decideprovider.
 type DeciderConfig struct {
-	Backend string `yaml:"backend"`  // "laya" | "jev" | "local-logits"
+	Backend string `yaml:"backend"`  // "laya" | "jev" | "subq" | "local-logits"
 	BaseURL string `yaml:"base_url"` // backend endpoint (required)
 	APIKey  string `yaml:"api_key"`  // optional bearer / auth token
-	Model   string `yaml:"model"`    // served model id (local-logits, jev)
+	Model   string `yaml:"model"`    // served model id (local-logits, jev, subq)
 }
 
 type ProviderConfig struct {

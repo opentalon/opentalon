@@ -13,14 +13,15 @@ type DeciderConfig struct {
 	// Name is the decider's identifier — the `using model "<name>"` string in
 	// .tln and the server name a `decide` callback arrives under.
 	Name string
-	// Backend selects the implementation: "laya" | "jev" | "local-logits".
+	// Backend selects the implementation: "laya" | "jev" | "subq" | "local-logits".
 	Backend string
 	// BaseURL is the backend endpoint. Required for every backend.
 	BaseURL string
-	// APIKey is an optional bearer token (Jev) / auth (laya, local-logits).
+	// APIKey is an optional bearer token (Jev, SubQ) / auth (laya, local-logits).
 	APIKey string
-	// Model is the served model id — used by local-logits and Jev (default
-	// jev-latest); ignored by laya, which serves a fixed model per endpoint.
+	// Model is the served model id — used by local-logits, Jev (default
+	// jev-latest) and SubQ (default subq-snap-preview); ignored by laya, which
+	// serves a fixed model per endpoint.
 	Model string
 }
 
@@ -55,14 +56,16 @@ func FromConfig(cfg DeciderConfig) (Provider, error) {
 		return NewLayaProvider(cfg.Name, cfg.BaseURL, cfg.APIKey), nil
 	case BackendJev:
 		return NewJevProvider(cfg.Name, cfg.BaseURL, cfg.APIKey, cfg.Model), nil
+	case BackendSubQ:
+		return NewSubQProvider(cfg.Name, cfg.BaseURL, cfg.APIKey, cfg.Model), nil
 	case BackendLocalLogits:
 		return NewLocalLogitsProvider(cfg.Name, cfg.BaseURL, cfg.APIKey, cfg.Model), nil
 	case "":
-		return nil, fmt.Errorf("decideprovider: decider %q requires a backend (%s, %s, %s)",
-			cfg.Name, BackendLaya, BackendJev, BackendLocalLogits)
+		return nil, fmt.Errorf("decideprovider: decider %q requires a backend (%s, %s, %s, %s)",
+			cfg.Name, BackendLaya, BackendJev, BackendSubQ, BackendLocalLogits)
 	default:
-		return nil, fmt.Errorf("decideprovider: decider %q has unknown backend %q (supported: %s, %s, %s)",
-			cfg.Name, cfg.Backend, BackendLaya, BackendJev, BackendLocalLogits)
+		return nil, fmt.Errorf("decideprovider: decider %q has unknown backend %q (supported: %s, %s, %s, %s)",
+			cfg.Name, cfg.Backend, BackendLaya, BackendJev, BackendSubQ, BackendLocalLogits)
 	}
 }
 
