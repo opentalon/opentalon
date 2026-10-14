@@ -249,3 +249,109 @@ func TestPlannerSkipsUserOnlyPlugins(t *testing.T) {
 		t.Errorf("planner capabilities = %+v, want only github with its one LLM-visible action", got)
 	}
 }
+
+type fakeMultiDecider struct {
+	fakeDecider
+	many  int
+	gotMR *decideprovider.MultiRequest
+}
+
+func (f *fakeMultiDecider) DecideMany(_ context.Context, req *decideprovider.MultiRequest) (*decideprovider.MultiDecision, error) {
+	f.many++
+	f.gotMR = req
+	out := &decideprovider.MultiDecision{Answers: map[string]*decideprovider.Decision{}, Usage: decideprovider.Usage{InputTokens: 4800}}
+	for _, k := range req.Order {
+		c := req.Questions[k].Choices
+		out.Answers[k] = &decideprovider.Decision{Chosen: c[0], Confidence: 0.9, Probabilities: map[string]float64{c[0]: 0.9, c[1]: 0.1}}
+	}
+	return out, nil
+}
+
+const reviewQuestionsArg = `{
+	"secrets":    {"instructions": "Does it follow \"Security > Secrets\"?", "choices": ["keeps","violates"]},
+	"refund_cap": {"instructions": "Does it follow \"Money > Refund cap\"?", "choices": ["keeps","violates"],
+	               "descriptions": {"keeps": "The file follows it", "violates": "The file breaks it"}}
+}`
+
+// {state, questions} reaches a multi-question decider in one call, ordered by
+// key, and returns {answers: {key: decision}}, metered once.
+func TestDecideQuestionsCallback(t *testing.T) {
+	d := &fakeMultiDecider{fakeDecider: fakeDecider{name: "snap"}}
+	usage := &usageSpy{}
+	opts := OrchestratorOpts{UsageRecorder: usage, Deciders: decideprovider.NewRegistry(d)}
+	orch := NewWithRules(&fakeLLM{}, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), state.NewSessionStore(""), opts)
+
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{EntityID: "ent1"})
+	_, structured, err := orch.RunActionResult(ctx, "snap", "decide", map[string]string{
+		"state": "guide + file", "questions": reviewQuestionsArg,
+	})
+	if err != nil {
+		t.Fatalf("RunActionResult: %v", err)
+	}
+	if d.many != 1 || d.got != nil {
+		t.Fatalf("DecideMany calls = %d, single Decide called = %v; want one multi call", d.many, d.got != nil)
+	}
+	if strings.Join(d.gotMR.Order, ",") != "refund_cap,secrets" || d.gotMR.State != "guide + file" ||
+		d.gotMR.Questions["refund_cap"].Descriptions["violates"] != "The file breaks it" {
+		t.Fatalf("decider got %+v", d.gotMR)
+	}
+	var got struct {
+		Answers map[string]decideprovider.Decision `json:"answers"`
+	}
+	if err := json.Unmarshal([]byte(structured), &got); err != nil {
+		t.Fatalf("structured = %q: %v", structured, err)
+	}
+	if len(got.Answers) != 2 || got.Answers["secrets"].Chosen != "keeps" {
+		t.Fatalf("answers = %+v", got.Answers)
+	}
+	if len(usage.calls) != 1 || usage.calls[0].in != 4800 || usage.calls[0].modelID != "decide/snap" {
+		t.Fatalf("usage = %+v, want one 4800-token record under decide/snap", usage.calls)
+	}
+}
+
+// A decider without DecideMany still answers {state, questions}: one Decide per
+// question, metered once with the summed usage.
+func TestDecideQuestionsFallBackPerQuestion(t *testing.T) {
+	d := &fakeDecider{name: "laya", dec: &decideprovider.Decision{
+		Chosen: "keeps", Confidence: 0.8, Probabilities: map[string]float64{"keeps": 0.8, "violates": 0.2},
+		Usage: decideprovider.Usage{InputTokens: 50},
+	}}
+	usage := &usageSpy{}
+	orch := decideTestOrch(t, d, usage)
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{EntityID: "ent1"})
+	if _, _, err := orch.RunActionResult(ctx, "laya", "decide", map[string]string{
+		"state": "guide + file", "questions": reviewQuestionsArg,
+	}); err != nil {
+		t.Fatalf("RunActionResult: %v", err)
+	}
+	if len(usage.calls) != 1 || usage.calls[0].in != 100 {
+		t.Fatalf("usage = %+v, want one record of 100 input tokens", usage.calls)
+	}
+}
+
+func TestDecideQuestionsErrors(t *testing.T) {
+	d := &fakeMultiDecider{fakeDecider: fakeDecider{name: "snap"}}
+	opts := OrchestratorOpts{Deciders: decideprovider.NewRegistry(d)}
+	orch := NewWithRules(&fakeLLM{}, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), state.NewSessionStore(""), opts)
+	cases := map[string]struct {
+		args map[string]string
+		want string
+	}{
+		"both forms":      {map[string]string{"state": "s", "choices": `["a","b"]`, "questions": reviewQuestionsArg}, "not both"},
+		"not json":        {map[string]string{"state": "s", "questions": `[1,2]`}, "JSON object"},
+		"empty":           {map[string]string{"state": "s", "questions": `{}`}, "at least one question"},
+		"no state":        {map[string]string{"questions": reviewQuestionsArg}, "state"},
+		"no instructions": {map[string]string{"state": "s", "questions": `{"a":{"choices":["x","y"]}}`}, "instructions"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := orch.RunActionResult(context.Background(), "snap", "decide", tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+	if d.many != 0 {
+		t.Fatalf("decider called %d times on invalid input", d.many)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,7 +18,8 @@ import (
 const (
 	// decideAction is the single action every configured decider answers. A
 	// tln `decide "..." using model "<name>"` block reaches it as the host
-	// callback RunAction(ctx, "<name>", "decide", {state, choices}).
+	// callback RunAction(ctx, "<name>", "decide", {state, choices}); a caller
+	// with several questions about one state sends {state, questions} instead.
 	decideAction = "decide"
 	// decideModelPrefix namespaces decider spend in profile_usage.model_id so it
 	// is distinguishable from chat-provider spend.
@@ -61,11 +63,12 @@ func (o *Orchestrator) registerDeciders(reg *decideprovider.Registry) {
 			Description: "Typed-decision model: pick one of a fixed set of choices for a state",
 			Actions: []Action{{
 				Name:        decideAction,
-				Description: "Classify state into exactly one of choices; returns {chosen, confidence, probabilities}.",
+				Description: "Classify state into exactly one of choices; returns {chosen, confidence, probabilities}. With questions instead of choices, answers each question about the same state in one call; returns {answers: {key: {chosen, confidence, probabilities}}}.",
 				UserOnly:    true,
 				Parameters: []Parameter{
 					{Name: "state", Description: "The text to classify", Required: true},
-					{Name: "choices", Description: `JSON array of choice labels, e.g. ["Spam","Legitimate"]`, Required: true},
+					{Name: "choices", Description: `JSON array of choice labels, e.g. ["Spam","Legitimate"]; omit when sending questions`},
+					{Name: "questions", Description: `JSON object of questions by key, each {"instructions": "...", "choices": ["keeps","violates"], "descriptions": {"keeps": "..."}}; omit when sending choices`},
 				},
 			}},
 		}
@@ -88,6 +91,9 @@ func (e *decideExecutor) Execute(ctx context.Context, call ToolCall) ToolResult 
 	}
 	if call.Action != decideAction {
 		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("decider %q has no action %q", e.provider.ID(), call.Action)}
+	}
+	if _, many := call.Args["questions"]; many {
+		return e.executeMany(ctx, call)
 	}
 	req, err := parseDecideRequest(call.Args)
 	if err != nil {
@@ -115,6 +121,61 @@ func (e *decideExecutor) Execute(ctx context.Context, call ToolCall) ToolResult 
 		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("encode decision: %v", err)}
 	}
 	return ToolResult{CallID: call.ID, Content: string(body), StructuredContent: string(body)}
+}
+
+// executeMany answers {state, questions}: every question about one state, in
+// one backend call where the backend supports it (decideprovider.DecideMany),
+// metered once for the whole request.
+func (e *decideExecutor) executeMany(ctx context.Context, call ToolCall) ToolResult {
+	if _, both := call.Args["choices"]; both {
+		return ToolResult{CallID: call.ID, Error: "decide takes either choices or questions, not both"}
+	}
+	req, err := parseDecideQuestions(call.Args)
+	if err != nil {
+		return ToolResult{CallID: call.ID, Error: err.Error()}
+	}
+	if reason := e.orch.decideOverLimit(ctx); reason != "" {
+		return ToolResult{CallID: call.ID, Error: reason}
+	}
+	dec, err := decideprovider.DecideMany(ctx, e.provider, req)
+	if err != nil {
+		return ToolResult{CallID: call.ID, Error: err.Error()}
+	}
+	e.orch.recordDecideUsage(ctx, e.provider.ID(), dec.Usage)
+	body, err := json.Marshal(struct {
+		Answers map[string]*decideprovider.Decision `json:"answers"`
+	}{dec.Answers})
+	if err != nil {
+		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("encode decisions: %v", err)}
+	}
+	return ToolResult{CallID: call.ID, Content: string(body), StructuredContent: string(body)}
+}
+
+// decideQuestionArg is one entry of the questions argument. Choices is a list
+// so its order — the tie-break order — survives JSON.
+type decideQuestionArg struct {
+	Instructions string            `json:"instructions"`
+	Choices      []string          `json:"choices"`
+	Descriptions map[string]string `json:"descriptions"`
+}
+
+// parseDecideQuestions reads {state, questions}. Questions are ordered by key,
+// so the request is deterministic; MultiRequest.Validate checks the rest.
+func parseDecideQuestions(args map[string]string) (*decideprovider.MultiRequest, error) {
+	var raw map[string]decideQuestionArg
+	if err := json.Unmarshal([]byte(args["questions"]), &raw); err != nil {
+		return nil, fmt.Errorf("questions must be a JSON object of {instructions, choices, descriptions}: %v", err)
+	}
+	req := &decideprovider.MultiRequest{State: args["state"], Questions: make(map[string]decideprovider.Question, len(raw))}
+	for key, q := range raw {
+		req.Questions[key] = decideprovider.Question{Instructions: q.Instructions, Choices: q.Choices, Descriptions: q.Descriptions}
+		req.Order = append(req.Order, key)
+	}
+	sort.Strings(req.Order)
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+	return req, nil
 }
 
 // parseDecideRequest validates the callback args. Required-argument checks only

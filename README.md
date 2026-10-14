@@ -215,7 +215,7 @@ decide "email_kind" {
 The `.tln` source names a model; the backend is a config edit. Four interchangeable backends ship out of the box, all returning the same `{chosen, confidence, probabilities}` shape:
 
 - **`laya`** — an open-weights [ModernBERT typed-decisions](https://huggingface.co/convaiinnovations/laya-typed-decisions) classifier server. Posts `{text, choices}`, accepts either per-choice `probabilities` (renormalized) or raw `scores` (softmaxed). A classifier forward pass, so it's input-token-only for cost. Point `base_url` at your laya server.
-- **`jev`** — the [typesafe.ai](https://typesafe.ai/) hosted System-1 API. Posts `{state, choices}` with a bearer `api_key`; the hosted answer is renormalized locally over the declared choices and its reported usage is passed through.
+- **`jev`** — the [typesafe.ai](https://typesafe.ai/) hosted System-1 API. Sends one `choice` question with a bearer `api_key`; the hosted answer is renormalized locally over the declared choices and its reported usage is passed through.
 - **`subq`** — [SubQ Snap](https://subq.ai/introducing-subq-snap) from Subquadratic, on the same hosted System-1 API as `jev` (`base_url: https://api.subq.ai/v1/systemone`, default model `subq-snap-preview`). Billed for input only.
 - **`local-logits`** — any OpenAI-compatible completions server (llama.cpp `llama-server`, vLLM, Ollama's OpenAI shim, …). OpenTalon requests the first-token logprobs, keeps each choice's leading-token logprob, and **softmaxes them locally** ([the "Jev in 25 lines" recipe](https://www.nobodywho.ai/posts/jev-in-25-lines/)) — so calibration doesn't depend on the model behaving. Labels are matched back to choices by exact/unique-prefix token; for best separation, prefer choice labels that aren't prefixes of one another (e.g. `["Approve","Reject"]` over `["Spam","Spammy"]`).
 
@@ -238,6 +238,8 @@ models:
       backend: laya
       base_url: "${LAYA_URL}"
 ```
+
+A plugin with several questions about the same text (one per section of a guide, say) can send them in one `decide` callback as `{state, questions}` instead of `{state, choices}`; Jev and SubQ Snap answer them in one request, the other backends one at a time. See [the decideprovider README](internal/decideprovider/README.md#several-questions-about-one-state).
 
 Because a decision is a model call, it goes through OpenTalon's provider layer and is **metered into `profile_usage`** and gated by the same per-profile token limits as every LLM call — never a side channel. Swapping laya ↔ Jev ↔ local-logits needs no code or `.tln` change. See [`internal/decideprovider`](internal/decideprovider/README.md).
 
