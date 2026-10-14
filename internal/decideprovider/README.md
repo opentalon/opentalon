@@ -64,9 +64,10 @@ or an un-normalized vector is still made honest before the gate sees it.
 |------------------|--------|-------|
 | `laya`           | [`convaiinnovations/laya-typed-decisions`](https://huggingface.co/convaiinnovations/laya-typed-decisions) | open-weights ModernBERT classifier server; `probabilities` renormalized or `scores` softmaxed; input-only usage |
 | `jev`            | [typesafe.ai](https://typesafe.ai/) | hosted System-1 API (`base_url: https://api.typesafe.ai/v1/systemone`, `model` default `jev-latest`), bearer auth; one `choice` question per decision; response renormalized locally; passes through reported usage |
+| `subq`           | [subq.ai](https://subq.ai/introducing-subq-snap) | SubQ Snap, the same hosted System-1 API as `jev` (`base_url: https://api.subq.ai/v1/systemone`, `model` default `subq-snap-preview`), bearer auth; one `choice` question per decision; response renormalized locally; passes through reported usage (input only) |
 | `local-logits`   | [Jev in 25 lines](https://www.nobodywho.ai/posts/jev-in-25-lines/) | any OpenAI-compatible completions server; reads first-token logprobs over the choice tokens and **softmaxes them locally** |
 
-All three return the same shape, so they're swappable via config with **no change
+All four return the same shape, so they're swappable via config with **no change
 to the `.tln` source**.
 
 ## Usage (tln-first)
@@ -94,5 +95,5 @@ decide "email_kind" {
 }
 ```
 
-Switching to Jev or laya is a config edit (`backend:` + endpoint), not a code or
+Switching to Jev, SubQ Snap or laya is a config edit (`backend:` + endpoint), not a code or
 `.tln` change.

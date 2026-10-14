@@ -123,6 +123,48 @@ func TestJev_SendsConfiguredModel(t *testing.T) {
 	}
 }
 
+// SubQ Snap speaks the same System-1 wire as Jev; only the default model and
+// the error prefix differ.
+func TestSubQ_SendsDefaultModelAndPassesUsage(t *testing.T) {
+	var gotAuth string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		_, _ = io.WriteString(w, `{"model":"subq-snap-preview","answers":{"decision":{"type":"choice","choice":"widens",
+			"confidence":0.9,"probabilities":{"none":0.1,"widens":0.9}}},
+			"usage":{"input_tokens":2048,"output_tokens":0}}`)
+	}))
+	defer srv.Close()
+
+	dec, err := NewSubQProvider("snap", srv.URL+"/v1/systemone", "sk-test", "").Decide(context.Background(),
+		&Request{State: "diff", Choices: []string{"none", "widens"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer sk-test" {
+		t.Errorf("auth = %q, want Bearer sk-test", gotAuth)
+	}
+	if gotBody["model"] != "subq-snap-preview" {
+		t.Errorf("model = %v, want subq-snap-preview", gotBody["model"])
+	}
+	if dec.Chosen != "widens" || math.Abs(dec.Confidence-0.9) > 1e-9 {
+		t.Errorf("decision = %#v, want widens at 0.9", dec)
+	}
+	if dec.Usage.InputTokens != 2048 || dec.Usage.OutputTokens != 0 {
+		t.Errorf("usage = %#v, want 2048/0", dec.Usage)
+	}
+}
+
+func TestSubQ_ErrorsNameTheBackend(t *testing.T) {
+	_, err := NewSubQProvider("snap", "", "", "").Decide(context.Background(),
+		&Request{State: "x", Choices: []string{"A", "B"}})
+	if err == nil || !strings.HasPrefix(err.Error(), `subq "snap":`) {
+		t.Errorf("err = %v, want a subq \"snap\": prefix", err)
+	}
+}
+
 func TestJev_RenormalizesInconsistentProbabilities(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"answers":{"decision":{"type":"choice","choice":"A","confidence":0.78,
