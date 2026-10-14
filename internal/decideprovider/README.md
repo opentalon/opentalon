@@ -58,6 +58,37 @@ with the invariants enforced in `normalize.go`:
 Calibration is honored **here**, so a backend that returns overconfident argmax
 or an un-normalized vector is still made honest before the gate sees it.
 
+### Several questions about one state
+
+A caller with many questions about the same text — a code review asking one
+question per section of a guide — sends them in one callback instead of one
+`decide` each, so the state is sent and billed once:
+
+```
+RunAction(ctx, "<decider>", "decide", {
+  state: "<guide + file + spec>",
+  questions: `{"refund_cap": {"instructions": "Does the file follow \"Money > Refund cap\"?",
+                              "choices": ["keeps", "violates"],
+                              "descriptions": {"keeps": "The file follows it", "violates": "The file breaks it"}},
+               "secrets":    {...}}`
+})
+-> {"answers": {"refund_cap": {chosen, confidence, probabilities}, "secrets": {...}}}
+```
+
+- `choices` and `questions` are mutually exclusive; each question needs
+  `instructions` and at least two distinct choices, and at most
+  `MaxQuestions` (100) questions go in one call.
+- `jev` and `subq` answer every question in **one** System-1 request: the
+  instructions are sent as the question's `instructions`, each description as
+  the choice's criterion (the label when there is none). Narrow, described
+  questions answer much more sharply than bare labels.
+- `laya` and `local-logits` answer one question at a time: `DecideMany` calls
+  `Decide` per question with the instruction and descriptions in front of the
+  state, and sums the usage.
+- Every answer gets the invariants above, over its own choices. One bad answer
+  fails the whole call — callers never act on a partial set — and the call is
+  metered once.
+
 ## Backends
 
 | `backend`        | source | notes |

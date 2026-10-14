@@ -75,8 +75,9 @@ func newSystemOneProvider(backend, defaultModel, name, baseURL, apiKey, model st
 func (p *SystemOneProvider) ID() string { return p.id }
 
 type systemOneChoiceQuestion struct {
-	Type     string            `json:"type"`
-	Criteria map[string]string `json:"criteria"`
+	Type         string            `json:"type"`
+	Instructions string            `json:"instructions,omitempty"`
+	Criteria     map[string]string `json:"criteria"`
 }
 
 type systemOneRequest struct {
@@ -104,10 +105,9 @@ type systemOneResponse struct {
 	} `json:"usage"`
 }
 
+// Decide asks one choice question whose criteria are the bare choice labels —
+// the shape tln's `decide` block sends.
 func (p *SystemOneProvider) Decide(ctx context.Context, req *Request) (*Decision, error) {
-	if p.baseURL == "" {
-		return nil, fmt.Errorf("%s %q: base_url is required", p.backend, p.id)
-	}
 	if len(req.Choices) == 0 {
 		return nil, fmt.Errorf("%s %q: %w", p.backend, p.id, errNoChoices)
 	}
@@ -115,55 +115,116 @@ func (p *SystemOneProvider) Decide(ctx context.Context, req *Request) (*Decision
 	for _, c := range req.Choices {
 		criteria[c] = c
 	}
-	body := systemOneRequest{
-		State:     req.State,
-		Model:     p.model,
-		Questions: map[string]systemOneChoiceQuestion{systemOneQuestion: {Type: "choice", Criteria: criteria}},
+	resp, err := p.ask(ctx, req.State, map[string]systemOneChoiceQuestion{systemOneQuestion: {Type: "choice", Criteria: criteria}})
+	if err != nil {
+		return nil, err
 	}
+	dec, err := p.decision(resp, systemOneQuestion, req.Choices)
+	if err != nil {
+		return nil, err
+	}
+	dec.Usage = p.usage(resp, req.State)
+	return dec, nil
+}
+
+// DecideMany asks every question of req in one request: each becomes a
+// "choice" question with its instructions and per-choice descriptions as
+// criteria, so the state is sent and billed once.
+func (p *SystemOneProvider) DecideMany(ctx context.Context, req *MultiRequest) (*MultiDecision, error) {
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("%s %q: %w", p.backend, p.id, err)
+	}
+	questions := make(map[string]systemOneChoiceQuestion, len(req.Order))
+	for _, key := range req.Order {
+		q := req.Questions[key]
+		criteria := make(map[string]string, len(q.Choices))
+		for _, c := range q.Choices {
+			criteria[c] = c
+			if d := q.Descriptions[c]; d != "" {
+				criteria[c] = d
+			}
+		}
+		questions[key] = systemOneChoiceQuestion{Type: "choice", Instructions: q.Instructions, Criteria: criteria}
+	}
+	resp, err := p.ask(ctx, req.State, questions)
+	if err != nil {
+		return nil, err
+	}
+	out := &MultiDecision{Answers: make(map[string]*Decision, len(req.Order)), Usage: p.usage(resp, req.State)}
+	for _, key := range req.Order {
+		dec, err := p.decision(resp, key, req.Questions[key].Choices)
+		if err != nil {
+			return nil, err
+		}
+		out.Answers[key] = dec
+	}
+	return out, nil
+}
+
+// ask posts one System-1 request.
+func (p *SystemOneProvider) ask(ctx context.Context, state string, questions map[string]systemOneChoiceQuestion) (*systemOneResponse, error) {
+	if p.baseURL == "" {
+		return nil, fmt.Errorf("%s %q: base_url is required", p.backend, p.id)
+	}
+	body := systemOneRequest{State: state, Model: p.model, Questions: questions}
 	var resp systemOneResponse
 	if err := postJSON(ctx, p.client, p.baseURL, p.apiKey, body, &resp); err != nil {
 		return nil, fmt.Errorf("%s %q: %w", p.backend, p.id, err)
 	}
-	ans, ok := resp.Answers[systemOneQuestion]
+	return &resp, nil
+}
+
+// decision turns the answer to question key into a normalized Decision over
+// choices, rejecting an answer that is missing, of another type, outside the
+// choices, without mass on them, or whose choice contradicts its probabilities.
+func (p *SystemOneProvider) decision(resp *systemOneResponse, key string, choices []string) (*Decision, error) {
+	ans, ok := resp.Answers[key]
 	if !ok {
-		return nil, fmt.Errorf("%s %q: response has no answer for question %q", p.backend, p.id, systemOneQuestion)
+		return nil, fmt.Errorf("%s %q: response has no answer for question %q", p.backend, p.id, key)
 	}
 	if ans.Type != "choice" {
-		return nil, fmt.Errorf("%s %q: answer %q has type %q, want choice", p.backend, p.id, systemOneQuestion, ans.Type)
+		return nil, fmt.Errorf("%s %q: answer %q has type %q, want choice", p.backend, p.id, key, ans.Type)
 	}
-	if ans.Choice != "" && !slices.Contains(req.Choices, ans.Choice) {
-		return nil, fmt.Errorf("%s %q: answer chose %q, which is not one of %v", p.backend, p.id, ans.Choice, req.Choices)
+	if ans.Choice != "" && !slices.Contains(choices, ans.Choice) {
+		return nil, fmt.Errorf("%s %q: answer %q chose %q, which is not one of %v", p.backend, p.id, key, ans.Choice, choices)
 	}
 	probs := ans.Probabilities
 	if len(probs) == 0 {
 		if ans.Choice == "" {
-			return nil, fmt.Errorf("%s %q: answer has neither probabilities nor choice", p.backend, p.id)
+			return nil, fmt.Errorf("%s %q: answer %q has neither probabilities nor choice", p.backend, p.id, key)
 		}
 		probs = map[string]float64{ans.Choice: 1}
 	}
 	var mass, top float64
-	for _, c := range req.Choices {
+	for _, c := range choices {
 		if v := probs[c]; v > 0 {
 			mass += v
 			top = max(top, v)
 		}
 	}
 	if mass == 0 {
-		return nil, fmt.Errorf("%s %q: answer puts no probability mass on any of %v: %v", p.backend, p.id, req.Choices, probs)
+		return nil, fmt.Errorf("%s %q: answer %q puts no probability mass on any of %v: %v", p.backend, p.id, key, choices, probs)
 	}
 	if ans.Choice != "" && probs[ans.Choice] < top {
-		return nil, fmt.Errorf("%s %q: answer chose %q, which disagrees with its probabilities %v", p.backend, p.id, ans.Choice, probs)
+		return nil, fmt.Errorf("%s %q: answer %q chose %q, which disagrees with its probabilities %v", p.backend, p.id, key, ans.Choice, probs)
 	}
-	dec, err := normalizeProbabilities(probs, req.Choices)
+	dec, err := normalizeProbabilities(probs, choices)
 	if err != nil {
 		return nil, fmt.Errorf("%s %q: %w", p.backend, p.id, err)
-	}
-	if resp.Usage != nil {
-		dec.Usage = Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens}
-	} else {
-		dec.Usage = Usage{InputTokens: approxTokens(req.State), OutputTokens: 1}
 	}
 	return dec, nil
 }
 
-var _ Provider = (*SystemOneProvider)(nil)
+// usage is the reported usage of resp, or an estimate from the state when the
+// backend reports none.
+func (p *SystemOneProvider) usage(resp *systemOneResponse, state string) Usage {
+	if resp.Usage != nil {
+		return Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens}
+	}
+	return Usage{InputTokens: approxTokens(state), OutputTokens: 1}
+}
+
+var (
+	_ Provider      = (*SystemOneProvider)(nil)
+	_ MultiProvider = (*SystemOneProvider)(nil)
+)
