@@ -181,8 +181,11 @@ func (p *SystemOneProvider) DecideMany(ctx context.Context, req *MultiRequest) (
 	}
 	out := &MultiDecision{Answers: make(map[string]*Decision, len(req.Order))}
 	var models []string
+	silent := false
 	for _, res := range results {
-		if res.Model != "" && !slices.Contains(models, res.Model) {
+		if res.Model == "" {
+			silent = true
+		} else if !slices.Contains(models, res.Model) {
 			models = append(models, res.Model)
 		}
 		out.Usage.InputTokens += res.Usage.InputTokens
@@ -191,8 +194,10 @@ func (p *SystemOneProvider) DecideMany(ctx context.Context, req *MultiRequest) (
 			out.Answers[key] = dec
 		}
 	}
-	slices.Sort(models)
-	out.Model = strings.Join(models, ",")
+	if !silent {
+		slices.Sort(models)
+		out.Model = strings.Join(models, ",")
+	}
 	return out, nil
 }
 

@@ -355,24 +355,24 @@ func modelServer(model, other string) *httptest.Server {
 
 func TestSystemOne_DecideManyReportsModel(t *testing.T) {
 	cases := map[string]struct {
-		p    func(url string) *SystemOneProvider
-		n    int
-		want string
+		p     func(url string) *SystemOneProvider
+		n     int
+		model string
 	}{
 		"jev one request":       {func(url string) *SystemOneProvider { return NewJevProvider("jev", url, "k", "jev-latest") }, 40, "jev-1.13.0"},
-		"subq one request":      {func(url string) *SystemOneProvider { return NewSubQProvider("snap", url, "k", "") }, 16, "jev-1.13.0"},
-		"subq chunks one model": {func(url string) *SystemOneProvider { return NewSubQProvider("snap", url, "k", "") }, 40, "jev-1.13.0"},
+		"subq 16 questions":     {func(url string) *SystemOneProvider { return NewSubQProvider("snap", url, "k", "") }, 16, "subq-snap-preview"},
+		"subq chunks one model": {func(url string) *SystemOneProvider { return NewSubQProvider("snap", url, "k", "") }, 40, "subq-snap-preview"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			srv := modelServer("jev-1.13.0", "jev-1.13.0")
+			srv := modelServer(tc.model, tc.model)
 			defer srv.Close()
 			dec, err := tc.p(srv.URL).DecideMany(context.Background(), manyQuestions(tc.n))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if dec.Model != tc.want {
-				t.Errorf("model = %q, want %q", dec.Model, tc.want)
+			if dec.Model != tc.model {
+				t.Errorf("model = %q, want %q", dec.Model, tc.model)
 			}
 		})
 	}
@@ -403,5 +403,27 @@ func TestSubQ_DecideManyNoModelReported(t *testing.T) {
 	}
 	if dec.Model != "" {
 		t.Errorf("model = %q, want empty", dec.Model)
+	}
+}
+
+// A chunk that reports no model while another does leaves the model empty, so
+// no answer is labelled with a model nobody confirmed for it.
+func TestSubQ_DecideManySilentChunkLeavesModelEmpty(t *testing.T) {
+	cases := map[string]struct{ model, other string }{
+		"q20 chunk silent":       {"subq-snap-preview", ""},
+		"only q20 chunk reports": {"", "subq-snap-preview"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := modelServer(tc.model, tc.other)
+			defer srv.Close()
+			dec, err := NewSubQProvider("snap", srv.URL, "k", "").DecideMany(context.Background(), manyQuestions(40))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dec.Model != "" {
+				t.Errorf("model = %q, want empty", dec.Model)
+			}
+		})
 	}
 }

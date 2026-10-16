@@ -43,7 +43,7 @@ type MultiDecision struct {
 	Usage   Usage
 	// Model is the model the backend reports answering with; several, sorted
 	// and comma-separated, when chunks of one call were answered by different
-	// models; empty when the backend reports none.
+	// models; empty when the backend reports none for any chunk.
 	Model string
 }
 
