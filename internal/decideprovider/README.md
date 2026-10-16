@@ -81,7 +81,9 @@ RunAction(ctx, "<decider>", "decide", {
 - `jev` and `subq` answer every question in **one** System-1 request: the
   instructions are sent as the question's `instructions`, each description as
   the choice's criterion (the label when there is none). Narrow, described
-  questions answer much more sharply than bare labels.
+  questions answer much more sharply than bare labels. SubQ Snap answers at
+  most 16 questions per request, so `subq` sends a larger call as chunks of 16
+  in parallel and sums their usage; a failing chunk fails the whole call.
 - `laya` and `local-logits` answer one question at a time: `DecideMany` calls
   `Decide` per question with the instruction and descriptions in front of the
   state, and sums the usage.
@@ -95,7 +97,7 @@ RunAction(ctx, "<decider>", "decide", {
 |------------------|--------|-------|
 | `laya`           | [`convaiinnovations/laya-typed-decisions`](https://huggingface.co/convaiinnovations/laya-typed-decisions) | open-weights ModernBERT classifier server; `probabilities` renormalized or `scores` softmaxed; input-only usage |
 | `jev`            | [typesafe.ai](https://typesafe.ai/) | hosted System-1 API (`base_url: https://api.typesafe.ai/v1/systemone`, `model` default `jev-latest`), bearer auth; one `choice` question per decision; response renormalized locally; passes through reported usage |
-| `subq`           | [subq.ai](https://subq.ai/introducing-subq-snap) | SubQ Snap, the same hosted System-1 API as `jev` (`base_url: https://api.subq.ai/v1/systemone`, `model` default `subq-snap-preview`), bearer auth; one `choice` question per decision; response renormalized locally; passes through reported usage (input only) |
+| `subq`           | [subq.ai](https://subq.ai/introducing-subq-snap) | SubQ Snap, the same hosted System-1 API as `jev` (`base_url: https://api.subq.ai/v1/systemone`, `model` default `subq-snap-preview`), bearer auth; one `choice` question per decision, at most 16 per request (larger calls are split); response renormalized locally; passes through reported usage (input only) |
 | `local-logits`   | [Jev in 25 lines](https://www.nobodywho.ai/posts/jev-in-25-lines/) | any OpenAI-compatible completions server; reads first-token logprobs over the choice tokens and **softmaxes them locally** |
 
 All four return the same shape, so they're swappable via config with **no change
