@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -179,12 +180,23 @@ func (p *SystemOneProvider) DecideMany(ctx context.Context, req *MultiRequest) (
 		return nil, failed
 	}
 	out := &MultiDecision{Answers: make(map[string]*Decision, len(req.Order))}
+	var models []string
+	silent := false
 	for _, res := range results {
+		if res.Model == "" {
+			silent = true
+		} else if !slices.Contains(models, res.Model) {
+			models = append(models, res.Model)
+		}
 		out.Usage.InputTokens += res.Usage.InputTokens
 		out.Usage.OutputTokens += res.Usage.OutputTokens
 		for key, dec := range res.Answers {
 			out.Answers[key] = dec
 		}
+	}
+	if !silent {
+		slices.Sort(models)
+		out.Model = strings.Join(models, ",")
 	}
 	return out, nil
 }
@@ -207,7 +219,7 @@ func (p *SystemOneProvider) decideChunk(ctx context.Context, state string, all m
 	if err != nil {
 		return nil, err
 	}
-	out := &MultiDecision{Answers: make(map[string]*Decision, len(keys)), Usage: p.usage(resp, state)}
+	out := &MultiDecision{Answers: make(map[string]*Decision, len(keys)), Usage: p.usage(resp, state), Model: resp.Model}
 	for _, key := range keys {
 		dec, err := p.decision(resp, key, all[key].Choices)
 		if err != nil {

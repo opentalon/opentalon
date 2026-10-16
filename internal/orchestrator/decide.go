@@ -63,7 +63,7 @@ func (o *Orchestrator) registerDeciders(reg *decideprovider.Registry) {
 			Description: "Typed-decision model: pick one of a fixed set of choices for a state",
 			Actions: []Action{{
 				Name:        decideAction,
-				Description: "Classify state into exactly one of choices; returns {chosen, confidence, probabilities}. With questions instead of choices, answers each question about the same state in one call; returns {answers: {key: {chosen, confidence, probabilities}}}.",
+				Description: "Classify state into exactly one of choices; returns {chosen, confidence, probabilities}. With questions instead of choices, answers each question about the same state in one call; returns {answers: {key: {chosen, confidence, probabilities}}, model} (model as the backend reports it, omitted when it reports none).",
 				UserOnly:    true,
 				Parameters: []Parameter{
 					{Name: "state", Description: "The text to classify", Required: true},
@@ -144,7 +144,8 @@ func (e *decideExecutor) executeMany(ctx context.Context, call ToolCall) ToolRes
 	e.orch.recordDecideUsage(ctx, e.provider.ID(), dec.Usage)
 	body, err := json.Marshal(struct {
 		Answers map[string]*decideprovider.Decision `json:"answers"`
-	}{dec.Answers})
+		Model   string                              `json:"model,omitempty"`
+	}{dec.Answers, dec.Model})
 	if err != nil {
 		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("encode decisions: %v", err)}
 	}
