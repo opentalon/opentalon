@@ -3,13 +3,18 @@ package decideprovider
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func reviewQuestions() *MultiRequest {
@@ -173,5 +178,156 @@ func TestMultiRequestValidate(t *testing.T) {
 	}
 	if err := reviewQuestions().Validate(); err != nil {
 		t.Errorf("valid request rejected: %v", err)
+	}
+}
+
+// manyQuestions builds n keeps/violates questions, keyed q00, q01, ….
+func manyQuestions(n int) *MultiRequest {
+	req := &MultiRequest{State: "guide + file", Questions: map[string]Question{}}
+	for i := range n {
+		key := fmt.Sprintf("q%02d", i)
+		req.Questions[key] = Question{Instructions: "Does the file follow " + key + "?", Choices: []string{"keeps", "violates"}}
+		req.Order = append(req.Order, key)
+	}
+	return req
+}
+
+// fakeSystemOne is a System-1 server for chunking tests: it answers every
+// question it gets with "keeps" and records the size of each request.
+type fakeSystemOne struct {
+	fail   string        // a request containing this key gets status
+	status int           // the failure status (default 500)
+	delay  time.Duration // how long requests without fail take
+	drop   string        // this key's answer is left out of the response
+	mu     sync.Mutex
+	sizes  []int
+}
+
+func (f *fakeSystemOne) serve(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Questions map[string]any `json:"questions"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		f.mu.Lock()
+		f.sizes = append(f.sizes, len(body.Questions))
+		f.mu.Unlock()
+		if _, ok := body.Questions[f.fail]; ok && f.fail != "" {
+			status := f.status
+			if status == 0 {
+				status = http.StatusInternalServerError
+			}
+			http.Error(w, "rate limited", status)
+			return
+		}
+		select {
+		case <-time.After(f.delay):
+		case <-r.Context().Done():
+			return
+		}
+		answers := map[string]any{}
+		for key := range body.Questions {
+			if key != f.drop {
+				answers[key] = map[string]any{"type": "choice", "choice": "keeps", "probabilities": map[string]float64{"keeps": 0.9, "violates": 0.1}}
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"answers": answers, "usage": map[string]int{"input_tokens": 1000, "output_tokens": 0}})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func (f *fakeSystemOne) requestSizes() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	sizes := slices.Clone(f.sizes)
+	slices.Sort(sizes)
+	return sizes
+}
+
+// noRetryWait makes postJSON's retries immediate for the test.
+func noRetryWait(t *testing.T) {
+	t.Helper()
+	old := retryWait
+	retryWait = func(int, string) time.Duration { return 0 }
+	t.Cleanup(func() { retryWait = old })
+}
+
+// SubQ Snap answers at most 16 questions per request: 40 questions go out as
+// 16 + 16 + 8, every answer comes back, and usage is the sum of the requests.
+func TestSubQ_DecideManySplitsIntoChunksOf16(t *testing.T) {
+	f := &fakeSystemOne{}
+	dec, err := NewSubQProvider("snap", f.serve(t).URL, "k", "").DecideMany(context.Background(), manyQuestions(40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.requestSizes(); !reflect.DeepEqual(got, []int{8, 16, 16}) {
+		t.Errorf("request sizes = %v, want [8 16 16]", got)
+	}
+	if len(dec.Answers) != 40 {
+		t.Errorf("answers = %d, want 40", len(dec.Answers))
+	}
+	if dec.Usage.InputTokens != 3000 {
+		t.Errorf("input tokens = %d, want 3000 (three requests)", dec.Usage.InputTokens)
+	}
+}
+
+// The boundary: 16 questions stay one request, 17 go out as 16 + 1.
+func TestSubQ_DecideManyChunkBoundary(t *testing.T) {
+	for n, want := range map[int][]int{1: {1}, 16: {16}, 17: {1, 16}, 32: {16, 16}, 33: {1, 16, 16}} {
+		f := &fakeSystemOne{}
+		dec, err := NewSubQProvider("snap", f.serve(t).URL, "k", "").DecideMany(context.Background(), manyQuestions(n))
+		if err != nil {
+			t.Fatalf("%d questions: %v", n, err)
+		}
+		if got := f.requestSizes(); !reflect.DeepEqual(got, want) {
+			t.Errorf("%d questions: request sizes = %v, want %v", n, got, want)
+		}
+		if len(dec.Answers) != n {
+			t.Errorf("%d questions: answers = %d", n, len(dec.Answers))
+		}
+	}
+}
+
+// Jev takes the same 40 questions in one request.
+func TestJev_DecideManyKeepsOneRequest(t *testing.T) {
+	f := &fakeSystemOne{}
+	if _, err := NewJevProvider("jev", f.serve(t).URL, "k", "").DecideMany(context.Background(), manyQuestions(40)); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.requestSizes(); !reflect.DeepEqual(got, []int{40}) {
+		t.Errorf("request sizes = %v, want [40]", got)
+	}
+}
+
+// The chunk that fails decides the error: with the failure in the last chunk
+// and the others still in flight, the caller sees the 429, not the "context
+// canceled" the cancelled chunks report.
+func TestSubQ_DecideManyReturnsTheFailingChunksError(t *testing.T) {
+	noRetryWait(t)
+	f := &fakeSystemOne{fail: "q35", status: http.StatusTooManyRequests, delay: 300 * time.Millisecond}
+	dec, err := NewSubQProvider("snap", f.serve(t).URL, "k", "").DecideMany(context.Background(), manyQuestions(40))
+	if err == nil {
+		t.Fatalf("want an error, got %d answers", len(dec.Answers))
+	}
+	if dec != nil {
+		t.Errorf("want no decision with the error, got %#v", dec)
+	}
+	if !strings.Contains(err.Error(), "429") || errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want the chunk's 429", err)
+	}
+}
+
+// A chunk whose response leaves out one of its questions fails the whole call.
+func TestSubQ_DecideManyMissingAnswerFailsAll(t *testing.T) {
+	f := &fakeSystemOne{drop: "q17"}
+	dec, err := NewSubQProvider("snap", f.serve(t).URL, "k", "").DecideMany(context.Background(), manyQuestions(40))
+	if err == nil || !strings.Contains(err.Error(), `"q17"`) {
+		t.Fatalf("error = %v, want one naming q17", err)
+	}
+	if dec != nil {
+		t.Errorf("want no decision with the error, got %#v", dec)
 	}
 }

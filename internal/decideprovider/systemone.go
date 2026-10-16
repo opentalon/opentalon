@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"sync"
 )
 
 // Backends that speak the hosted System-1 decision API.
@@ -21,6 +22,11 @@ const (
 )
 
 const systemOneQuestion = "decision"
+
+// subQMaxQuestions is the most questions SubQ Snap answers in one request; a
+// larger MultiRequest is split into requests of this size. Jev has no such cap
+// below MaxQuestions.
+const subQMaxQuestions = 16
 
 // SystemOneProvider talks to a hosted System-1 decision API. Jev (typesafe.ai,
 // https://docs.typesafe.ai/introduction/quickstart) and SubQ Snap (subq.ai,
@@ -51,6 +57,8 @@ type SystemOneProvider struct {
 	apiKey  string
 	model   string
 	client  *http.Client
+	// maxQuestions caps the questions per request (0 = MaxQuestions).
+	maxQuestions int
 }
 
 // NewJevProvider builds a Jev backend bound to name, posting to baseURL with
@@ -62,7 +70,9 @@ func NewJevProvider(name, baseURL, apiKey, model string) *SystemOneProvider {
 // NewSubQProvider builds a SubQ Snap backend bound to name, posting to baseURL
 // with apiKey as a bearer token and asking model (subq-snap-preview when empty).
 func NewSubQProvider(name, baseURL, apiKey, model string) *SystemOneProvider {
-	return newSystemOneProvider(BackendSubQ, defaultSubQModel, name, baseURL, apiKey, model)
+	p := newSystemOneProvider(BackendSubQ, defaultSubQModel, name, baseURL, apiKey, model)
+	p.maxQuestions = subQMaxQuestions
+	return p
 }
 
 func newSystemOneProvider(backend, defaultModel, name, baseURL, apiKey, model string) *SystemOneProvider {
@@ -129,14 +139,61 @@ func (p *SystemOneProvider) Decide(ctx context.Context, req *Request) (*Decision
 
 // DecideMany asks every question of req in one request: each becomes a
 // "choice" question with its instructions and per-choice descriptions as
-// criteria, so the state is sent and billed once.
+// criteria, so the state is sent and billed once. A backend with a lower
+// per-request cap (SubQ Snap: 16) gets the questions in chunks of that size,
+// sent in parallel; usage is the sum of the chunks, and any failing chunk fails
+// the whole request, so callers never act on a partial set.
 func (p *SystemOneProvider) DecideMany(ctx context.Context, req *MultiRequest) (*MultiDecision, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("%s %q: %w", p.backend, p.id, err)
 	}
-	questions := make(map[string]systemOneChoiceQuestion, len(req.Order))
-	for _, key := range req.Order {
-		q := req.Questions[key]
+	size := p.maxQuestions
+	if size <= 0 || size >= len(req.Order) {
+		return p.decideChunk(ctx, req.State, req.Questions, req.Order)
+	}
+	chunks := slices.Collect(slices.Chunk(req.Order, size))
+	results := make([]*MultiDecision, len(chunks))
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// The first chunk to fail cancels the others; its error is the one
+	// returned, not the "context canceled" the others then report.
+	var (
+		wg       sync.WaitGroup
+		failOnce sync.Once
+		failed   error
+	)
+	for i, keys := range chunks {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := p.decideChunk(ctx, req.State, req.Questions, keys)
+			if err != nil {
+				failOnce.Do(func() { failed = err; cancel() })
+				return
+			}
+			results[i] = res
+		}()
+	}
+	wg.Wait()
+	if failed != nil {
+		return nil, failed
+	}
+	out := &MultiDecision{Answers: make(map[string]*Decision, len(req.Order))}
+	for _, res := range results {
+		out.Usage.InputTokens += res.Usage.InputTokens
+		out.Usage.OutputTokens += res.Usage.OutputTokens
+		for key, dec := range res.Answers {
+			out.Answers[key] = dec
+		}
+	}
+	return out, nil
+}
+
+// decideChunk asks the questions named by keys in one request.
+func (p *SystemOneProvider) decideChunk(ctx context.Context, state string, all map[string]Question, keys []string) (*MultiDecision, error) {
+	questions := make(map[string]systemOneChoiceQuestion, len(keys))
+	for _, key := range keys {
+		q := all[key]
 		criteria := make(map[string]string, len(q.Choices))
 		for _, c := range q.Choices {
 			criteria[c] = c
@@ -146,13 +203,13 @@ func (p *SystemOneProvider) DecideMany(ctx context.Context, req *MultiRequest) (
 		}
 		questions[key] = systemOneChoiceQuestion{Type: "choice", Instructions: q.Instructions, Criteria: criteria}
 	}
-	resp, err := p.ask(ctx, req.State, questions)
+	resp, err := p.ask(ctx, state, questions)
 	if err != nil {
 		return nil, err
 	}
-	out := &MultiDecision{Answers: make(map[string]*Decision, len(req.Order)), Usage: p.usage(resp, req.State)}
-	for _, key := range req.Order {
-		dec, err := p.decision(resp, key, req.Questions[key].Choices)
+	out := &MultiDecision{Answers: make(map[string]*Decision, len(keys)), Usage: p.usage(resp, state)}
+	for _, key := range keys {
+		dec, err := p.decision(resp, key, all[key].Choices)
 		if err != nil {
 			return nil, err
 		}
