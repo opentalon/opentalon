@@ -72,9 +72,15 @@ RunAction(ctx, "<decider>", "decide", {
                               "descriptions": {"keeps": "The file follows it", "violates": "The file breaks it"}},
                "secrets":    {...}}`
 })
--> {"answers": {"refund_cap": {chosen, confidence, probabilities}, "secrets": {...}}}
+-> {"answers": {"refund_cap": {chosen, confidence, probabilities}, "secrets": {...}},
+    "model": "subq-snap-preview"}
 ```
 
+- `model` is the model the backend reports answering with (`jev` and `subq`
+  only; omitted when the backend reports none). When chunks of one call come
+  back from different models, every model is listed, sorted and
+  comma-separated. A caller keying calibration on the model should treat an
+  unknown value as uncalibrated.
 - `choices` and `questions` are mutually exclusive; each question needs
   `instructions` and at least two distinct choices, and at most
   `MaxQuestions` (100) questions go in one call.

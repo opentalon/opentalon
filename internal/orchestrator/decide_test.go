@@ -254,12 +254,13 @@ type fakeMultiDecider struct {
 	fakeDecider
 	many  int
 	gotMR *decideprovider.MultiRequest
+	model string
 }
 
 func (f *fakeMultiDecider) DecideMany(_ context.Context, req *decideprovider.MultiRequest) (*decideprovider.MultiDecision, error) {
 	f.many++
 	f.gotMR = req
-	out := &decideprovider.MultiDecision{Answers: map[string]*decideprovider.Decision{}, Usage: decideprovider.Usage{InputTokens: 4800}}
+	out := &decideprovider.MultiDecision{Answers: map[string]*decideprovider.Decision{}, Usage: decideprovider.Usage{InputTokens: 4800}, Model: f.model}
 	for _, k := range req.Order {
 		c := req.Questions[k].Choices
 		out.Answers[k] = &decideprovider.Decision{Chosen: c[0], Confidence: 0.9, Probabilities: map[string]float64{c[0]: 0.9, c[1]: 0.1}}
@@ -297,6 +298,7 @@ func TestDecideQuestionsCallback(t *testing.T) {
 	}
 	var got struct {
 		Answers map[string]decideprovider.Decision `json:"answers"`
+		Model   *string                            `json:"model"`
 	}
 	if err := json.Unmarshal([]byte(structured), &got); err != nil {
 		t.Fatalf("structured = %q: %v", structured, err)
@@ -304,8 +306,35 @@ func TestDecideQuestionsCallback(t *testing.T) {
 	if len(got.Answers) != 2 || got.Answers["secrets"].Chosen != "keeps" {
 		t.Fatalf("answers = %+v", got.Answers)
 	}
+	if got.Model != nil {
+		t.Fatalf("model = %q, want no model key when the backend reports none", *got.Model)
+	}
 	if len(usage.calls) != 1 || usage.calls[0].in != 4800 || usage.calls[0].modelID != "decide/snap" {
 		t.Fatalf("usage = %+v, want one 4800-token record under decide/snap", usage.calls)
+	}
+}
+
+// The model the backend reports answering with comes back next to the answers,
+// so a caller can key calibration on it and notice when it changes.
+func TestDecideQuestionsCallbackReportsModel(t *testing.T) {
+	d := &fakeMultiDecider{fakeDecider: fakeDecider{name: "snap"}, model: "subq-snap-preview"}
+	orch := NewWithRules(&fakeLLM{}, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), state.NewSessionStore(""),
+		OrchestratorOpts{Deciders: decideprovider.NewRegistry(d)})
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{EntityID: "ent1"})
+	_, structured, err := orch.RunActionResult(ctx, "snap", "decide", map[string]string{
+		"state": "guide + file", "questions": reviewQuestionsArg,
+	})
+	if err != nil {
+		t.Fatalf("RunActionResult: %v", err)
+	}
+	var got struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(structured), &got); err != nil {
+		t.Fatalf("structured = %q: %v", structured, err)
+	}
+	if got.Model != "subq-snap-preview" {
+		t.Fatalf("model = %q, want subq-snap-preview", got.Model)
 	}
 }
 
