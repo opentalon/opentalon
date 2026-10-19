@@ -245,9 +245,9 @@ func (o *Orchestrator) recordDecideUsage(ctx context.Context, decider string, u 
 				"decider", decider, "entity", unattributedEntity)
 		}
 		o.usageRecorder.RecordUsage(ctx, unattributedEntity, "", "", actor.SessionID(ctx),
-			decideModelPrefix+decider, profile.KindSystem, "decide", u.InputTokens, u.OutputTokens, 0)
+			decideModelPrefix+decider, profile.KindSystem, "decide", u.InputTokens, u.OutputTokens, 0, 0, 0)
 		return
 	}
 	o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group, p.ChannelID, actor.SessionID(ctx),
-		decideModelPrefix+decider, p.Kind, p.SystemSource, u.InputTokens, u.OutputTokens, 0)
+		decideModelPrefix+decider, p.Kind, p.SystemSource, u.InputTokens, u.OutputTokens, 0, 0, 0)
 }

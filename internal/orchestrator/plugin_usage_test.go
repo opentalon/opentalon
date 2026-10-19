@@ -11,18 +11,20 @@ import (
 type pluginUsageLLM struct{}
 
 func (pluginUsageLLM) Complete(_ context.Context, _ *provider.CompletionRequest) (*provider.CompletionResponse, error) {
-	return &provider.CompletionResponse{Content: "ok", Model: "m-1", Usage: provider.Usage{InputTokens: 120, OutputTokens: 30}}, nil
+	return &provider.CompletionResponse{Content: "ok", Model: "m-1",
+		Usage: provider.Usage{InputTokens: 120, OutputTokens: 30, InputCost: 0.25, OutputCost: 0.5}}, nil
 }
 
 type recordedPluginUsage struct {
 	plugin, action, model string
 	in, out               int
+	cost                  float64
 }
 
 type pluginUsageSpy struct{ got []recordedPluginUsage }
 
-func (s *pluginUsageSpy) ObservePluginUsage(_ context.Context, plugin, action, model string, in, out int) {
-	s.got = append(s.got, recordedPluginUsage{plugin, action, model, in, out})
+func (s *pluginUsageSpy) ObservePluginUsage(_ context.Context, plugin, action, model string, in, out int, cost float64) {
+	s.got = append(s.got, recordedPluginUsage{plugin, action, model, in, out, cost})
 }
 
 func runNoToolsSubprocess(t *testing.T, o *Orchestrator, ctx context.Context) {
@@ -39,7 +41,7 @@ func TestSubprocessReportsUsageForTheCallingPlugin(t *testing.T) {
 	o.pluginUsageObserver = spy
 
 	runNoToolsSubprocess(t, o, WithPluginCaller(context.Background(), "talooner", "evaluate_pr"))
-	if len(spy.got) != 1 || spy.got[0] != (recordedPluginUsage{"talooner", "evaluate_pr", "m-1", 120, 30}) {
+	if len(spy.got) != 1 || spy.got[0] != (recordedPluginUsage{"talooner", "evaluate_pr", "m-1", 120, 30, 0.75}) {
 		t.Fatalf("got %+v", spy.got)
 	}
 }
@@ -84,7 +86,7 @@ func TestDecideReportsUsageForTheCallingPlugin(t *testing.T) {
 	if _, _, err := o.RunActionResult(ctx, "jev", "decide", map[string]string{"state": "s", "choices": `["match"]`}); err != nil {
 		t.Fatalf("RunActionResult: %v", err)
 	}
-	want := recordedPluginUsage{"talooner", "evaluate_pr", "decide/jev", 40, 2}
+	want := recordedPluginUsage{"talooner", "evaluate_pr", "decide/jev", 40, 2, 0}
 	if len(spy.got) != 1 || spy.got[0] != want {
 		t.Fatalf("got %+v, want %+v", spy.got, want)
 	}

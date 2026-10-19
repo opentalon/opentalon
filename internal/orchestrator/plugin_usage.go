@@ -7,7 +7,7 @@ import (
 )
 
 type PluginUsageObserver interface {
-	ObservePluginUsage(ctx context.Context, plugin, action, model string, inputTokens, outputTokens int)
+	ObservePluginUsage(ctx context.Context, plugin, action, model string, inputTokens, outputTokens int, cost float64)
 }
 
 type PluginCaller struct {
@@ -34,5 +34,5 @@ func (o *Orchestrator) observePluginUsage(ctx context.Context, model string, u p
 	if !ok {
 		return
 	}
-	o.pluginUsageObserver.ObservePluginUsage(ctx, c.Plugin, c.Action, model, u.InputTokens, u.OutputTokens)
+	o.pluginUsageObserver.ObservePluginUsage(ctx, c.Plugin, c.Action, model, u.InputTokens, u.OutputTokens, u.InputCost+u.OutputCost)
 }

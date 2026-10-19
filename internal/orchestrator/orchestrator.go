@@ -109,8 +109,10 @@ type GroupPluginLookup interface {
 // UsageRecorder records LLM usage statistics after an orchestrator run.
 // interactionKind is the run's kind ("chat" | "system"); systemSource is an
 // optional per-feature label for system runs. Both come from the run's Profile.
+// inputCost and outputCost are the sums of the costs the provider returned
+// for the run's model calls.
 type UsageRecorder interface {
-	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int)
+	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int, inputCost, outputCost float64)
 }
 
 // PromptSnapshotUpserter persists content-addressed prompt bodies so a
@@ -2199,13 +2201,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	}
 
 	var totalInputTokens, totalOutputTokens, totalToolCalls int
+	var totalInputCost, totalOutputCost float64
 	var modelUsed string
 	defer func() {
 		if o.usageRecorder != nil {
 			if p := profile.FromContext(ctx); p != nil {
 				o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group,
 					p.ChannelID, sessionID, modelUsed, p.Kind, p.SystemSource,
-					totalInputTokens, totalOutputTokens, totalToolCalls)
+					totalInputTokens, totalOutputTokens, totalToolCalls, totalInputCost, totalOutputCost)
 			}
 		}
 	}()
@@ -2459,6 +2462,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		totalInputTokens += resp.Usage.InputTokens
 		totalOutputTokens += resp.Usage.OutputTokens
+		totalInputCost += resp.Usage.InputCost
+		totalOutputCost += resp.Usage.OutputCost
 
 		// Prefer native tool calls from the API response over text-based parsing.
 		var calls []ToolCall

@@ -733,7 +733,7 @@ func main() {
 	// Build orchestrator usage recorder adapter (nil when usageStore is nil and metrics disabled).
 	var usageRecorder orchestrator.UsageRecorder
 	if usageStore != nil || metricsCollector != nil {
-		usageRecorder = &usageRecorderAdapter{store: usageStore, provider: prov, collector: metricsCollector}
+		usageRecorder = &usageRecorderAdapter{store: usageStore, collector: metricsCollector}
 	}
 	// Avoid non-nil interface wrapping a nil pointer.
 	var pluginObserver orchestrator.PluginCallObserver
@@ -745,7 +745,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	} else if n > 0 {
-		pluginUsageObserver = &pluginUsageAdapter{provider: prov, collector: metricsCollector}
+		pluginUsageObserver = metricsCollector
 	}
 
 	// channelNotifier carries a late-bound *channel.Registry pointer; both
@@ -1344,15 +1344,10 @@ func modelIDs(models []provider.ModelInfo) []string {
 // usageRecorderAdapter adapts store.UsageStore to orchestrator.UsageRecorder.
 type usageRecorderAdapter struct {
 	store     *store.UsageStore
-	provider  provider.Provider
 	collector *metrics.Collector
 }
 
-func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int) {
-	if a.store == nil && a.collector == nil {
-		return
-	}
-	inputCostUSD, outputCostUSD := modelCostUSD(a.provider, modelID, inputTokens, outputTokens)
+func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int, inputCost, outputCost float64) {
 	if a.store != nil {
 		if err := a.store.Record(ctx, store.UsageRecord{
 			EntityID:        entityID,
@@ -1365,38 +1360,16 @@ func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupI
 			InputTokens:     inputTokens,
 			OutputTokens:    outputTokens,
 			ToolCalls:       toolCalls,
-			InputCost:       inputCostUSD,
-			OutputCost:      outputCostUSD,
+			InputCost:       inputCost,
+			OutputCost:      outputCost,
 		}); err != nil {
 			slog.Warn("usage record failed", "entity", entityID, "error", err)
 		}
 	}
 	if a.collector != nil {
 		a.collector.RecordUsage(ctx, entityID, groupID, channelID, sessionID, modelID,
-			inputTokens, outputTokens, toolCalls, inputCostUSD, outputCostUSD)
+			inputTokens, outputTokens, toolCalls, inputCost, outputCost)
 	}
-}
-
-func modelCostUSD(p provider.Provider, modelID string, inputTokens, outputTokens int) (float64, float64) {
-	if modelID == "" || p == nil {
-		return 0, 0
-	}
-	for _, m := range p.Models() {
-		if m.ID == modelID {
-			return float64(inputTokens) * m.Cost.Input / 1_000_000, float64(outputTokens) * m.Cost.Output / 1_000_000
-		}
-	}
-	return 0, 0
-}
-
-type pluginUsageAdapter struct {
-	provider  provider.Provider
-	collector *metrics.Collector
-}
-
-func (a *pluginUsageAdapter) ObservePluginUsage(ctx context.Context, plugin, action, model string, inputTokens, outputTokens int) {
-	in, out := modelCostUSD(a.provider, model, inputTokens, outputTokens)
-	a.collector.ObservePluginUsage(ctx, plugin, action, model, inputTokens, outputTokens, in+out)
 }
 
 func enablePluginCostMetrics(plugins map[string]config.PluginConfig, collector *metrics.Collector) (int, error) {

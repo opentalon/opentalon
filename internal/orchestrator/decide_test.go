@@ -32,6 +32,7 @@ func (f *fakeDecider) Decide(_ context.Context, req *decideprovider.Request) (*d
 type usageCall struct {
 	entityID, sessionID, modelID string
 	in, out                      int
+	inCost, outCost              float64
 }
 
 type usageSpy struct {
@@ -39,10 +40,10 @@ type usageSpy struct {
 	calls []usageCall
 }
 
-func (u *usageSpy) RecordUsage(_ context.Context, entityID, _, _, sessionID, modelID, _, _ string, in, out, _ int) {
+func (u *usageSpy) RecordUsage(_ context.Context, entityID, _, _, sessionID, modelID, _, _ string, in, out, _ int, inCost, outCost float64) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.calls = append(u.calls, usageCall{entityID: entityID, sessionID: sessionID, modelID: modelID, in: in, out: out})
+	u.calls = append(u.calls, usageCall{entityID: entityID, sessionID: sessionID, modelID: modelID, in: in, out: out, inCost: inCost, outCost: outCost})
 }
 
 func decideTestOrch(t *testing.T, d *fakeDecider, usage UsageRecorder) *Orchestrator {

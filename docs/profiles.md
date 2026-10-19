@@ -316,7 +316,7 @@ The two labels live in two places on purpose:
 
 Tool plugins can receive the current run's labels as injected context arguments; see [Context arguments the host injects](extensibility.md#context-arguments-the-host-injects).
 
-`input_cost` and `output_cost` are computed from the model's configured price per million tokens (set in `models.providers.<id>.models[].cost`). They will be zero if the model has no cost configured or if no model was recorded.
+`input_cost` and `output_cost` are the sums of the costs the provider returned for the run's model calls, priced with the model's configured price per million tokens (set in `models.providers.<id>.models[].cost`, cached input at `cache_write` / `cache_read`). They will be zero if the model has no cost configured.
 
 ## Channel plugin integration
 
