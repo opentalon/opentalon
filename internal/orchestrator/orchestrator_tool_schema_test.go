@@ -335,3 +335,43 @@ func TestParameterSchema_ReportsWhichBranchRan(t *testing.T) {
 		t.Error("no fragment at all must report that the host fell back")
 	}
 }
+
+// Map iteration order varies per range, so only repeated builds catch an unordered listing.
+func TestPromptAndToolsByteIdenticalAcrossBuilds(t *testing.T) {
+	registry := NewToolRegistry()
+	for _, name := range []string{"delta", "alpha", "mcp", "echo", "charlie", "bravo"} {
+		if err := registry.Register(PluginCapability{
+			Name: name, Description: name + " plugin", SystemPromptAddition: name + " instructions",
+			Actions: []Action{{Name: "run", Description: name + " run", AlwaysInclude: true}},
+		}, &fixedResultExecutor{content: "ok"}); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+	}
+	if err := registry.RegisterAlias("jira", "mcp"); err != nil {
+		t.Fatalf("register alias: %v", err)
+	}
+
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "s1"})
+	orch := NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry,
+		state.NewMemoryStore(""), sessions, OrchestratorOpts{})
+	ctx := actor.WithSessionID(context.Background(), "s1")
+
+	build := func() (prompt, tools string) {
+		raw, err := json.Marshal(orch.buildToolDefinitions(ctx))
+		if err != nil {
+			t.Fatalf("marshal tools: %v", err)
+		}
+		return orch.buildSystemPrompt(ctx, "q", true), string(raw)
+	}
+	wantPrompt, wantTools := build()
+	for range 20 {
+		prompt, tools := build()
+		if prompt != wantPrompt {
+			t.Fatalf("system prompt differs between builds:\n%s\n---\n%s", wantPrompt, prompt)
+		}
+		if tools != wantTools {
+			t.Fatalf("tools array differs between builds:\n%s\n---\n%s", wantTools, tools)
+		}
+	}
+}
