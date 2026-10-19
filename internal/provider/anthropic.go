@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
@@ -58,6 +59,8 @@ type AnthropicProvider struct {
 	retry     RetryPolicy       // transient-failure retry policy (DefaultRetryPolicy unless configured)
 	headers   map[string]string // extra request headers from config; never logged or captured
 	secrets   []string          // header values to redact from responses and errors
+
+	promptCache bool // cache markers on requests that carry segments; see cachedSystemBlocks
 }
 
 // AnthropicOption configures an AnthropicProvider.
@@ -91,6 +94,11 @@ func WithAnthropicHeaders(h map[string]string) AnthropicOption {
 // fields fall back to DefaultRetryPolicy, so a partial config is safe.
 func WithAnthropicRetryPolicy(rp RetryPolicy) AnthropicOption {
 	return func(p *AnthropicProvider) { p.retry = rp.withDefaults() }
+}
+
+// WithAnthropicPromptCache turns Anthropic prompt caching on or off.
+func WithAnthropicPromptCache(on bool) AnthropicOption {
+	return func(p *AnthropicProvider) { p.promptCache = on }
 }
 
 // NewAnthropicProvider creates a provider for the Anthropic API.
@@ -151,12 +159,27 @@ func (p *AnthropicProvider) SupportsFeature(f Feature) bool {
 // -- Anthropic wire types --
 
 type anthRequest struct {
-	Model     string        `json:"model"`
-	System    string        `json:"system,omitempty"`
-	Messages  []anthMessage `json:"messages"`
-	MaxTokens int           `json:"max_tokens"`
-	Thinking  *anthThinking `json:"thinking,omitempty"`
-	Tools     []anthTool    `json:"tools,omitempty"`
+	Model     string          `json:"model"`
+	System    json.RawMessage `json:"system,omitempty"` // string, or []anthTextBlock with prompt caching
+	Messages  []anthMessage   `json:"messages"`
+	MaxTokens int             `json:"max_tokens"`
+	Thinking  *anthThinking   `json:"thinking,omitempty"`
+	Tools     []anthTool      `json:"tools,omitempty"`
+	// CacheControl is the automatic cache marker: Anthropic caches the
+	// request up to its last block, so the conversation so far.
+	CacheControl *anthCacheControl `json:"cache_control,omitempty"`
+}
+
+type anthTextBlock struct {
+	Type         string            `json:"type"`
+	Text         string            `json:"text"`
+	CacheControl *anthCacheControl `json:"cache_control,omitempty"`
+}
+
+// anthCacheControl marks a cache breakpoint. Type "ephemeral" with no ttl is
+// Anthropic's default 5-minute lifetime.
+type anthCacheControl struct {
+	Type string `json:"type"`
 }
 
 type anthTool struct {
@@ -393,7 +416,10 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		}
 		msgs = append(msgs, msg)
 	}
-	system := joinStrings(systemParts)
+	system, cached, err := p.toAnthSystem(req, systemParts)
+	if err != nil {
+		return anthRequest{}, err
+	}
 
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
@@ -406,6 +432,9 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		Messages:  msgs,
 		MaxTokens: maxTokens,
 		Tools:     toolDefsToAnthTools(req.Tools),
+	}
+	if cached {
+		ar.CacheControl = &anthCacheControl{Type: "ephemeral"}
 	}
 
 	if req.Reasoning {
@@ -421,6 +450,52 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 	}
 
 	return ar, nil
+}
+
+// toAnthSystem renders the system field from the request's system messages,
+// systemParts in order: as cache-marked text blocks when cachedSystemBlocks
+// returns any, which cached reports, else as their join in one string.
+func (p *AnthropicProvider) toAnthSystem(req *CompletionRequest, systemParts []string) (system json.RawMessage, cached bool, err error) {
+	if blocks := p.cachedSystemBlocks(req, systemParts); len(blocks) > 0 {
+		system, err = json.Marshal(blocks)
+		if err != nil {
+			return nil, false, fmt.Errorf("marshal system blocks: %w", err)
+		}
+		return system, true, nil
+	}
+	text := joinStrings(systemParts)
+	if text == "" {
+		return nil, false, nil
+	}
+	system, err = json.Marshal(text)
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal system prompt: %w", err)
+	}
+	return system, false, nil
+}
+
+// cachedSystemBlocks returns the system field's text blocks when prompt
+// caching is on and req.Segments describes the leading system message: one
+// block per segment, then one per further system message, leaving out blank
+// ones (Anthropic rejects them), with a cache marker on the first block.
+// Otherwise it returns nil.
+func (p *AnthropicProvider) cachedSystemBlocks(req *CompletionRequest, systemParts []string) []anthTextBlock {
+	segs := req.Segments
+	if !p.promptCache || segs == nil || len(req.Messages) == 0 ||
+		req.Messages[0].Role != RoleSystem || req.Messages[0].Content != segs.Join() {
+		return nil
+	}
+	var blocks []anthTextBlock
+	// systemParts[0] is the leading system message, sent as its segments.
+	for _, text := range append([]string{segs.Fixed, segs.Conversation, segs.Round}, systemParts[1:]...) {
+		if strings.TrimSpace(text) != "" {
+			blocks = append(blocks, anthTextBlock{Type: "text", Text: text})
+		}
+	}
+	if len(blocks) > 0 {
+		blocks[0].CacheControl = &anthCacheControl{Type: "ephemeral"}
+	}
+	return blocks
 }
 
 // toolDefsToAnthTools maps the orchestrator's typed tool definitions onto

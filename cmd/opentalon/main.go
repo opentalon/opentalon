@@ -1838,8 +1838,13 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 			InputTypes:      m.InputTypes,
 			ContextWindow:   m.ContextWindow,
 			MaxTokens:       m.MaxTokens,
-			Cost:            provider.ModelCost{Input: m.Cost.Input, Output: m.Cost.Output},
-			Features:        features,
+			Cost: provider.ModelCost{
+				Input:      m.Cost.Input,
+				Output:     m.Cost.Output,
+				CacheWrite: valueOrZero(m.Cost.CacheWrite),
+				CacheRead:  valueOrZero(m.Cost.CacheRead),
+			},
+			Features: features,
 		})
 	}
 
@@ -1853,6 +1858,7 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 		DebugResolve: debugResolve,
 		EventSink:    eventSink,
 		Headers:      provider.HeaderMap(pc.Headers),
+		PromptCache:  pc.PromptCache.Value,
 		Retry: provider.RetryPolicy{
 			MaxAttempts:  pc.Retry.MaxAttempts,
 			BaseDelay:    parseDurationOrZero(pc.Retry.BaseDelay),
@@ -1879,6 +1885,14 @@ func parseDurationOrZero(s string) time.Duration {
 		return 0
 	}
 	return d
+}
+
+// valueOrZero returns *p, or 0 for an unset price.
+func valueOrZero(p *float64) float64 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 func defaultInt(v, fallback int) int {

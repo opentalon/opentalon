@@ -3,9 +3,14 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestAnthropicComplete(t *testing.T) {
@@ -30,8 +35,8 @@ func TestAnthropicComplete(t *testing.T) {
 		if req.Model != "claude-sonnet-4-20250514" {
 			t.Errorf("model = %q", req.Model)
 		}
-		if req.System != "You are helpful." {
-			t.Errorf("system = %q", req.System)
+		if got := systemText(t, req.System); got != "You are helpful." {
+			t.Errorf("system = %q", got)
 		}
 		if len(req.Messages) != 1 {
 			t.Fatalf("messages = %d, want 1 (system extracted)", len(req.Messages))
@@ -81,6 +86,16 @@ func TestAnthropicComplete(t *testing.T) {
 	if resp.Usage.OutputTokens != 8 {
 		t.Errorf("output_tokens = %d", resp.Usage.OutputTokens)
 	}
+}
+
+// systemText decodes a request's system field sent as one string.
+func systemText(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Errorf("system field is not a string: %s", raw)
+	}
+	return s
 }
 
 func TestAnthropicMultipleContentBlocks(t *testing.T) {
@@ -675,8 +690,8 @@ func TestAnthropicConcatenatesSystemMessages(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
 		}
-		if req.System != "Real prompt.\n\nStray nudge." {
-			t.Errorf("system = %q, want both system messages concatenated", req.System)
+		if got := systemText(t, req.System); got != "Real prompt.\n\nStray nudge." {
+			t.Errorf("system = %q, want both system messages concatenated", got)
 		}
 		resp := anthResponse{ID: "m", Content: []anthContentBlock{{Type: "text", Text: "ok"}}}
 		_ = json.NewEncoder(w).Encode(resp)
@@ -694,5 +709,206 @@ func TestAnthropicConcatenatesSystemMessages(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// --- prompt caching ---
+
+// cacheTestSegments hold "<", which encoding/json escapes, so the body pinned
+// in anthropicBodyWithoutCache pins that escaping too.
+var cacheTestSegments = SystemSegments{Fixed: "Fixed <rules>.\n", Conversation: "Conversation.\n", Round: "Round."}
+
+// cacheTestRequest is a chat-loop request: its leading system message is the
+// join of segs, and segments is what it carries on Segments.
+func cacheTestRequest(segs SystemSegments, segments *SystemSegments) *CompletionRequest {
+	return &CompletionRequest{
+		Model: "claude-x",
+		Messages: []Message{
+			{Role: RoleSystem, Content: segs.Join()},
+			{Role: RoleUser, Content: "How many items?"},
+		},
+		Tools: []ToolDefinition{{
+			Name: "inv__list-items", Description: "List items",
+			Parameters: map[string]interface{}{"type": "object"},
+		}},
+		Reasoning: true,
+		Segments:  segments,
+	}
+}
+
+// anthropicBodies sends req through a provider built with opts to a server
+// that answers every request with status, and returns the request bodies it
+// received with the error Complete returned.
+func anthropicBodies(t *testing.T, req *CompletionRequest, status int, opts ...AnthropicOption) ([]string, error) {
+	t.Helper()
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			_, _ = io.WriteString(w, `{"id":"r1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"rejected"}}`)
+	}))
+	defer server.Close()
+	_, err := NewAnthropicProvider("anthropic", server.URL, "key", nil, opts...).Complete(context.Background(), req)
+	mu.Lock()
+	defer mu.Unlock()
+	return bodies, err
+}
+
+// anthropicBodyWithoutCache is the body sent for cacheTestRequest with
+// cacheTestSegments before prompt caching existed.
+const anthropicBodyWithoutCache = `{"model":"claude-x","system":"Fixed \u003crules\u003e.\nConversation.\nRound.",` +
+	`"messages":[{"role":"user","content":"How many items?"}],"max_tokens":14096,` +
+	`"thinking":{"type":"enabled","budget_tokens":10000},` +
+	`"tools":[{"name":"inv__list-items","description":"List items","input_schema":{"type":"object"}}]}`
+
+// TestAnthropicSystemStaysAString covers the requests that send the system
+// prompt as one string: caching off, no segments, or segments that are not
+// the leading system message's text. Their body is byte for byte the body
+// sent before prompt caching existed.
+func TestAnthropicSystemStaysAString(t *testing.T) {
+	segs := cacheTestSegments
+	other := SystemSegments{Fixed: "Another prompt."}
+	on := []AnthropicOption{WithAnthropicPromptCache(true)}
+	cases := []struct {
+		name string
+		req  *CompletionRequest
+		opts []AnthropicOption
+	}{
+		{"caching off", cacheTestRequest(segs, &segs), nil},
+		{"caching on, no segments", cacheTestRequest(segs, nil), on},
+		{"caching on, segments of another text", cacheTestRequest(segs, &other), on},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bodies, err := anthropicBodies(t, tc.req, http.StatusOK, tc.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bodies) != 1 || bodies[0] != anthropicBodyWithoutCache {
+				t.Errorf("request bodies:\n got %q\nwant %q", bodies, anthropicBodyWithoutCache)
+			}
+		})
+	}
+}
+
+// TestAnthropicCacheMarkedSystem checks the request body with prompt caching
+// on and segments present: the system field is one text block per non-blank
+// segment, then per further system message, with a cache marker on the
+// first, and the request carries the automatic cache marker. The rest of the
+// body is what caching off sends.
+func TestAnthropicCacheMarkedSystem(t *testing.T) {
+	cases := []struct {
+		name       string
+		segs       SystemSegments
+		extra      string // a further system message after the user message
+		wantSystem string
+	}{
+		{
+			name: "three segments",
+			segs: SystemSegments{Fixed: "Fixed.\n", Conversation: "Conversation.\n", Round: "Round."},
+			wantSystem: `[{"type":"text","text":"Fixed.\n","cache_control":{"type":"ephemeral"}},` +
+				`{"type":"text","text":"Conversation.\n"},{"type":"text","text":"Round."}]`,
+		},
+		{
+			name:       "blank segments left out",
+			segs:       SystemSegments{Fixed: "Fixed.\n", Conversation: "", Round: " \n"},
+			wantSystem: `[{"type":"text","text":"Fixed.\n","cache_control":{"type":"ephemeral"}}]`,
+		},
+		{
+			name: "marker on the first block sent",
+			segs: SystemSegments{Fixed: "", Conversation: "Conversation.\n", Round: "Round."},
+			wantSystem: `[{"type":"text","text":"Conversation.\n","cache_control":{"type":"ephemeral"}},` +
+				`{"type":"text","text":"Round."}]`,
+		},
+		{
+			name:  "further system message",
+			segs:  SystemSegments{Fixed: "Fixed.\n", Round: "Round."},
+			extra: "Note.",
+			wantSystem: `[{"type":"text","text":"Fixed.\n","cache_control":{"type":"ephemeral"}},` +
+				`{"type":"text","text":"Round."},{"type":"text","text":"Note."}]`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			segs := tc.segs
+			req := cacheTestRequest(segs, &segs)
+			if tc.extra != "" {
+				req.Messages = append(req.Messages, Message{Role: RoleSystem, Content: tc.extra})
+			}
+			cachedBodies, err := anthropicBodies(t, req, http.StatusOK, WithAnthropicPromptCache(true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			plainBodies, err := anthropicBodies(t, req, http.StatusOK)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cached, plain map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(cachedBodies[0]), &cached); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(plainBodies[0]), &plain); err != nil {
+				t.Fatal(err)
+			}
+			if got := string(cached["system"]); got != tc.wantSystem {
+				t.Errorf("system:\n got %s\nwant %s", got, tc.wantSystem)
+			}
+			if got := string(cached["cache_control"]); got != `{"type":"ephemeral"}` {
+				t.Errorf("cache_control = %s, want the automatic marker", got)
+			}
+			delete(cached, "system")
+			delete(cached, "cache_control")
+			delete(plain, "system")
+			if len(cached) != len(plain) {
+				t.Errorf("fields besides system and cache_control: got %d, want %d", len(cached), len(plain))
+			}
+			for k, v := range plain {
+				if string(cached[k]) != string(v) {
+					t.Errorf("%s:\n got %s\nwant %s", k, cached[k], v)
+				}
+			}
+		})
+	}
+}
+
+// TestAnthropicCacheMarkedRequestRejected covers a cache-marked request the
+// API answers with an error: the error comes back through the usual path, and
+// every attempt sent, a transient retry included, is the same marked body.
+func TestAnthropicCacheMarkedRequestRejected(t *testing.T) {
+	cases := []struct {
+		status   int
+		attempts int
+	}{
+		{http.StatusBadRequest, 1},
+		{http.StatusServiceUnavailable, 2},
+	}
+	for _, tc := range cases {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			segs := cacheTestSegments
+			bodies, err := anthropicBodies(t, cacheTestRequest(segs, &segs), tc.status,
+				WithAnthropicPromptCache(true),
+				WithAnthropicRetryPolicy(RetryPolicy{MaxAttempts: tc.attempts, BaseDelay: time.Millisecond}))
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("anthropic api error (status %d)", tc.status)) {
+				t.Errorf("error = %v, want the API's status %d", err, tc.status)
+			}
+			if len(bodies) != tc.attempts {
+				t.Fatalf("requests sent = %d, want %d", len(bodies), tc.attempts)
+			}
+			for i, body := range bodies {
+				marked := strings.HasPrefix(body, `{"model":"claude-x","system":[{`) &&
+					strings.HasSuffix(body, `,"cache_control":{"type":"ephemeral"}}`)
+				if body != bodies[0] || !marked {
+					t.Errorf("attempt %d is not the first attempt's cache-marked body: %s", i+1, body)
+				}
+			}
+		})
 	}
 }

@@ -156,6 +156,48 @@ Known limits:
   error, just as for `api_key`. Put values in quotes, as in the example
   above.
 
+### Prompt caching (Anthropic)
+
+For an `anthropic-messages` provider, `prompt_cache: true` marks the chat
+loop's requests for Anthropic's prompt cache. The system prompt, tools and
+conversation that repeat from one model call to the next are then read from
+the cache at the cache price instead of the full input price.
+
+```yaml
+models:
+  providers:
+    anthropic:
+      api_key: "${ANTHROPIC_API_KEY}"
+      api: anthropic-messages
+      prompt_cache: true          # default false
+      models:
+        - id: claude-haiku-4-5
+          cost:
+            input: 1.00
+            output: 5.00
+            cache_write: 1.25     # per 1M tokens written to the cache
+            cache_read: 0.10      # per 1M tokens read from the cache
+```
+
+How it behaves:
+
+- The system prompt goes out as up to three text blocks: the part every
+  conversation with the same plugins shares, the part of one conversation,
+  and the part that may change from round to round. The first block carries
+  a cache marker, and the request carries Anthropic's automatic marker, which
+  caches the conversation so far. Entries last Anthropic's default 5 minutes.
+- Only the chat loop's model calls are marked. Session titles, summaries, the
+  planner, sub-agents and confirmation messages are sent as before.
+- With `prompt_cache: false`, the default, the system prompt is sent as one
+  string, as before.
+- Anthropic caches a prompt only above a minimum length per model. A shorter
+  one is sent without error and not cached.
+- `prompt_cache` takes `true` or `false` only; any other value (`yes`,
+  `"true"`, `1`) fails loading the config with an error naming the provider.
+  OpenTalon also refuses to start when `prompt_cache: true` is set on a
+  provider whose `api` is not `anthropic-messages`, or when a model's `cost`
+  sets a price but lacks `cache_write` or `cache_read`.
+
 ## Custom Models
 
 For well-known providers (Anthropic, OpenAI), the model catalog is built in. For custom or self-hosted providers, declare the models explicitly:
@@ -203,6 +245,8 @@ Model fields:
 | `max_tokens` | no | Max output tokens |
 | `cost.input` | no | Cost per 1M input tokens (USD). Used by smart router |
 | `cost.output` | no | Cost per 1M output tokens (USD) |
+| `cost.cache_write` | no | Cost per 1M tokens written to the prompt cache (USD). Required with `prompt_cache: true` when the model has a cost |
+| `cost.cache_read` | no | Cost per 1M tokens read from the prompt cache (USD). Required like `cache_write` |
 
 ## Smart Routing
 

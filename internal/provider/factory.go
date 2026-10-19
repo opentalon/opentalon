@@ -33,6 +33,7 @@ type ProviderConfig struct {
 	EventSink    emit.Sink
 	Retry        RetryPolicy // transient-failure retry; zero fields -> DefaultRetryPolicy
 	Headers      HeaderMap   // extra request headers; empty values are not sent
+	PromptCache  bool        // Anthropic only: cache markers on chat-loop requests
 }
 
 // FromConfig creates a Provider from a config entry. The api field
@@ -65,7 +66,7 @@ func FromConfig(cfg ProviderConfig) (Provider, error) {
 		if len(cfg.Headers) > 0 {
 			opts = append(opts, WithAnthropicHeaders(cfg.Headers))
 		}
-		opts = append(opts, WithAnthropicRetryPolicy(cfg.Retry))
+		opts = append(opts, WithAnthropicRetryPolicy(cfg.Retry), WithAnthropicPromptCache(cfg.PromptCache))
 		return NewAnthropicProvider(cfg.ID, cfg.BaseURL, cfg.APIKey, cfg.Models, opts...), nil
 	default:
 		return nil, fmt.Errorf("unknown api type %q for provider %q (supported: %s, %s)",

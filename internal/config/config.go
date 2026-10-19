@@ -590,6 +590,31 @@ type ProviderConfig struct {
 	// value is empty is not sent. See validateProviderHeaders for the names
 	// that are rejected.
 	Headers ProviderHeaders `yaml:"headers,omitempty"`
+	// PromptCache puts Anthropic cache markers on the chat loop's requests.
+	// anthropic-messages only; see validatePromptCache.
+	PromptCache StrictBool `yaml:"prompt_cache"`
+}
+
+// StrictBool is a config switch that takes only the YAML booleans true and
+// false, where yaml.v3 would also read yes, no, on and off into a bool. Any
+// other value is recorded instead of returned, since yaml.v3's error names
+// only the line; validation reports it under the key's path.
+type StrictBool struct {
+	Value       bool
+	invalidLine int // line of a value other than true or false; 0 if none
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (b *StrictBool) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.AliasNode && n.Alias != nil {
+		n = n.Alias
+	}
+	if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!bool" {
+		*b = StrictBool{invalidLine: n.Line}
+		return nil
+	}
+	*b = StrictBool{}
+	return n.Decode(&b.Value)
 }
 
 // ProviderHeaders maps a header name to its value. It is a plain
@@ -695,6 +720,10 @@ type ModelDefinition struct {
 type CostConfig struct {
 	Input  float64 `yaml:"input"`
 	Output float64 `yaml:"output"`
+	// Prices per 1M tokens written to and read from the prompt cache; nil
+	// when not configured, which validatePromptCache tells apart from 0.
+	CacheWrite *float64 `yaml:"cache_write"`
+	CacheRead  *float64 `yaml:"cache_read"`
 }
 
 type CatalogEntry struct {
@@ -904,6 +933,37 @@ func validateProviderHeaders(cfg *Config) error {
 	return nil
 }
 
+// validatePromptCache checks models.providers.<id>.prompt_cache: true or
+// false, true only for the anthropic-messages api, and with it both cache
+// prices on every model whose cost sets a price.
+func validatePromptCache(cfg *Config) error {
+	ids := make([]string, 0, len(cfg.Models.Providers))
+	for id := range cfg.Models.Providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		p := cfg.Models.Providers[id]
+		if line := p.PromptCache.invalidLine; line != 0 {
+			return fmt.Errorf("models.providers.%s.prompt_cache: line %d: must be true or false", id, line)
+		}
+		if !p.PromptCache.Value {
+			continue
+		}
+		if p.API != "anthropic-messages" {
+			return fmt.Errorf("models.providers.%s.prompt_cache: only the anthropic-messages api supports prompt caching", id)
+		}
+		for _, m := range p.Models {
+			c := m.Cost
+			priced := c.Input != 0 || c.Output != 0 || c.CacheWrite != nil || c.CacheRead != nil
+			if priced && (c.CacheWrite == nil || c.CacheRead == nil) {
+				return fmt.Errorf("models.providers.%s: model %q: prompt_cache needs cost.cache_write and cost.cache_read", id, m.ID)
+			}
+		}
+	}
+	return nil
+}
+
 // validHeaderName reports whether name is an HTTP field name (an RFC 9110
 // token).
 func validHeaderName(name string) bool {
@@ -1015,6 +1075,9 @@ func Parse(data []byte) (*Config, error) {
 	}
 
 	if err := validateProviderHeaders(&cfg); err != nil {
+		return nil, err
+	}
+	if err := validatePromptCache(&cfg); err != nil {
 		return nil, err
 	}
 

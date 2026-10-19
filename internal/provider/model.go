@@ -54,8 +54,10 @@ const (
 )
 
 type ModelCost struct {
-	Input  float64 `json:"input" yaml:"input"`
-	Output float64 `json:"output" yaml:"output"`
+	Input      float64 `json:"input" yaml:"input"`
+	Output     float64 `json:"output" yaml:"output"`
+	CacheWrite float64 `json:"cache_write" yaml:"cache_write"` // per 1M tokens written to the prompt cache
+	CacheRead  float64 `json:"cache_read" yaml:"cache_read"`   // per 1M tokens read from the prompt cache
 }
 
 type ModelInfo struct {
