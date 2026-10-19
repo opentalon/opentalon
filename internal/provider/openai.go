@@ -787,9 +787,9 @@ func (s *oaiResponseStream) Recv() (StreamChunk, error) {
 			s.contentBuf.WriteString(string(chunk.Choices[0].Delta.Content))
 		}
 
-		// Usage-only chunk (sent as the final chunk when stream_options.include_usage is true).
-		// It has no choices but carries the complete usage for the request.
-		if chunk.Usage != nil && len(chunk.Choices) == 0 {
+		// Usage without text: the usage-only final chunk (sent when stream_options.include_usage
+		// is true), or a finishing choice whose empty delta carries the usage.
+		if chunk.Usage != nil && (len(chunk.Choices) == 0 || chunk.Choices[0].Delta.Content == "") {
 			return StreamChunk{Model: chunk.Model, Usage: s.usage}, nil
 		}
 
