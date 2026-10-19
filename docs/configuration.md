@@ -170,6 +170,7 @@ models:
       api_key: "${ANTHROPIC_API_KEY}"
       api: anthropic-messages
       prompt_cache: true          # default false
+      cache_diagnostics: false    # default false
       models:
         - id: claude-haiku-4-5
           cost:
@@ -197,6 +198,27 @@ How it behaves:
   OpenTalon also refuses to start when `prompt_cache: true` is set on a
   provider whose `api` is not `anthropic-messages`, or when a model's `cost`
   sets a price but lacks `cache_write` or `cache_read`.
+
+#### Cache diagnostics
+
+`cache_diagnostics: true` asks Anthropic to compare each chat-loop request
+with the previous one of the same session and to report where the cacheable
+start of the prompt first differs. Every chat-loop request then carries the
+`anthropic-beta` header `cache-diagnosis-2026-04-07` and the id of the
+previous response in the session (none on the session's first request). The
+reason Anthropic reports, for example `system_changed`, `tools_changed` or
+`messages_changed`, is recorded as `cache_miss_reason` in the `llm_response`
+session event.
+
+- It needs `prompt_cache: true`; without it OpenTalon refuses to start with
+  an error naming the provider. Like `prompt_cache`, it takes `true` or
+  `false` only.
+- A configured `anthropic-beta` header is kept: both betas are sent,
+  separated by a comma.
+- The previous response ids are kept in memory, for at most 10,000 sessions.
+  After a restart, or when the previous request ran on another instance,
+  Anthropic does not know the id: the event then records
+  `previous_message_not_found` and the request is answered as usual.
 
 ## Custom Models
 

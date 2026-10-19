@@ -73,6 +73,21 @@ func applyExtraHeaders(req *http.Request, h map[string]string) {
 	}
 }
 
+// addListHeader appends value to the comma-separated header name, keeping the
+// values it already holds (a configured one included), unless it is one of them.
+func addListHeader(h http.Header, name, value string) {
+	cur := h.Get(name)
+	for _, v := range strings.Split(cur, ",") {
+		if strings.TrimSpace(v) == value {
+			return
+		}
+	}
+	if cur != "" {
+		value = cur + "," + value
+	}
+	h.Set(name, value)
+}
+
 // Redacting header values from what the endpoint sends back is defence in
 // depth against an endpoint that echoes the exact value. It is not a
 // guarantee: a value that comes back encoded (a JSON escape such as \u0026

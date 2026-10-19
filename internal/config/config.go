@@ -593,17 +593,24 @@ type ProviderConfig struct {
 	// PromptCache puts Anthropic cache markers on the chat loop's requests.
 	// anthropic-messages only; see validatePromptCache.
 	PromptCache StrictBool `yaml:"prompt_cache"`
+	// CacheDiagnostics has Anthropic report where each chat-loop request first
+	// differs from the session's previous one. Needs PromptCache; see
+	// validatePromptCache.
+	CacheDiagnostics StrictBool `yaml:"cache_diagnostics"`
 }
 
 // UnmarshalYAML decodes a provider. yaml.v3 never hands a null value to
-// StrictBool.UnmarshalYAML, so a null prompt_cache is recorded here.
+// StrictBool.UnmarshalYAML, so a null prompt_cache or cache_diagnostics is
+// recorded here.
 func (p *ProviderConfig) UnmarshalYAML(n *yaml.Node) error {
 	type plain ProviderConfig
 	if err := n.Decode((*plain)(p)); err != nil {
 		return err
 	}
-	if v := mappingValue(n, "prompt_cache"); v != nil && v.ShortTag() == "!!null" {
-		p.PromptCache = StrictBool{invalidLine: v.Line}
+	for key, b := range map[string]*StrictBool{"prompt_cache": &p.PromptCache, "cache_diagnostics": &p.CacheDiagnostics} {
+		if v := mappingValue(n, key); v != nil && v.ShortTag() == "!!null" {
+			*b = StrictBool{invalidLine: v.Line}
+		}
 	}
 	return nil
 }
@@ -988,7 +995,8 @@ func validateProviderHeaders(cfg *Config) error {
 
 // validatePromptCache checks models.providers.<id>.prompt_cache: true or
 // false, true only for the anthropic-messages api, and with it both cache
-// prices on every model whose cost sets a price.
+// prices on every model whose cost sets a price. cache_diagnostics is true or
+// false, and true only with prompt_cache.
 func validatePromptCache(cfg *Config) error {
 	ids := make([]string, 0, len(cfg.Models.Providers))
 	for id := range cfg.Models.Providers {
@@ -999,6 +1007,12 @@ func validatePromptCache(cfg *Config) error {
 		p := cfg.Models.Providers[id]
 		if line := p.PromptCache.invalidLine; line != 0 {
 			return fmt.Errorf("models.providers.%s.prompt_cache: line %d: must be true or false", id, line)
+		}
+		if line := p.CacheDiagnostics.invalidLine; line != 0 {
+			return fmt.Errorf("models.providers.%s.cache_diagnostics: line %d: must be true or false", id, line)
+		}
+		if p.CacheDiagnostics.Value && !p.PromptCache.Value {
+			return fmt.Errorf("models.providers.%s.cache_diagnostics: needs prompt_cache: true", id)
 		}
 		if !p.PromptCache.Value {
 			continue

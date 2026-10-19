@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,8 +11,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 )
 
@@ -27,6 +30,11 @@ const (
 	anthropicDefaultBaseURL = "https://api.anthropic.com"
 	anthropicMessagesPath   = "/v1/messages"
 	anthropicAPIVersion     = "2023-06-01"
+
+	anthropicCacheDiagnosisBeta = "cache-diagnosis-2026-04-07"
+	// maxDiagnosedSessions bounds the sessions whose last response id is kept
+	// for cache diagnostics.
+	maxDiagnosedSessions = 10_000
 )
 
 // Phase labels for emit.LLMErrorArgs. Mirrors the OpenAI provider's
@@ -61,6 +69,9 @@ type AnthropicProvider struct {
 	secrets   []string          // header values to redact from responses and errors
 
 	promptCache bool // cache markers on requests that carry segments; see cachedSystemBlocks
+	// lastIDs is set when cache diagnostics is on: the previous response id
+	// of each session, sent on its next chat-loop request.
+	lastIDs *lastResponseIDs
 }
 
 // AnthropicOption configures an AnthropicProvider.
@@ -99,6 +110,17 @@ func WithAnthropicRetryPolicy(rp RetryPolicy) AnthropicOption {
 // WithAnthropicPromptCache turns Anthropic prompt caching on or off.
 func WithAnthropicPromptCache(on bool) AnthropicOption {
 	return func(p *AnthropicProvider) { p.promptCache = on }
+}
+
+// WithAnthropicCacheDiagnostics turns Anthropic cache diagnostics on or off
+// for the requests that carry segments.
+func WithAnthropicCacheDiagnostics(on bool) AnthropicOption {
+	return func(p *AnthropicProvider) {
+		p.lastIDs = nil
+		if on {
+			p.lastIDs = newLastResponseIDs(maxDiagnosedSessions)
+		}
+	}
 }
 
 // NewAnthropicProvider creates a provider for the Anthropic API.
@@ -176,6 +198,13 @@ type anthRequest struct {
 	// CacheControl is the automatic cache marker: Anthropic caches the
 	// request up to its last block, so the conversation so far.
 	CacheControl *anthCacheControl `json:"cache_control,omitempty"`
+	Diagnostics  *anthDiagnostics  `json:"diagnostics,omitempty"`
+}
+
+// anthDiagnostics opts a request in to cache diagnostics. PreviousMessageID
+// is the session's previous response id, null on its first request.
+type anthDiagnostics struct {
+	PreviousMessageID *string `json:"previous_message_id"`
 }
 
 type anthTextBlock struct {
@@ -214,6 +243,13 @@ type anthResponse struct {
 	StopReason string             `json:"stop_reason,omitempty"`
 	Usage      anthUsage          `json:"usage"`
 	Error      *anthError         `json:"error,omitempty"`
+	// Diagnostics is null when there was nothing to compare or nothing
+	// diverged; its cache_miss_reason is null while the comparison runs.
+	Diagnostics *struct {
+		CacheMissReason *struct {
+			Type string `json:"type"`
+		} `json:"cache_miss_reason"`
+	} `json:"diagnostics"`
 }
 
 type anthContentBlock struct {
@@ -256,6 +292,11 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
+	session := actor.SessionID(ctx)
+	diagnose := p.lastIDs != nil && req.Segments != nil
+	if diagnose {
+		anthReq.Diagnostics = &anthDiagnostics{PreviousMessageID: p.lastIDs.get(session)}
+	}
 
 	// Log reasoning configuration.
 	if anthReq.Thinking != nil {
@@ -278,6 +319,9 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	p.setHeaders(httpReq)
+	if diagnose {
+		addListHeader(httpReq.Header, "anthropic-beta", anthropicCacheDiagnosisBeta)
+	}
 
 	// Structured session-event capture: emit metadata about the outbound
 	// LLM call immediately before the HTTP send so the row predates
@@ -347,6 +391,14 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		return nil, fmt.Errorf("anthropic error [%s]: %s", anthResp.Error.Type, anthResp.Error.Message)
 	}
 
+	var cacheMissReason string
+	if diagnose {
+		p.lastIDs.put(session, anthResp.ID)
+		if d := anthResp.Diagnostics; d != nil && d.CacheMissReason != nil {
+			cacheMissReason = d.CacheMissReason.Type
+		}
+	}
+
 	content, thinking, toolCalls := p.extractContent(anthResp.Content)
 
 	// Log thinking blocks when present.
@@ -389,6 +441,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		LatencyMS:          latencyMS,
 		ProviderResponseID: anthResp.ID,
 		ChatLoop:           req.Segments != nil,
+		CacheMissReason:    cacheMissReason,
 	})
 
 	return &CompletionResponse{
@@ -715,4 +768,51 @@ func (p *AnthropicProvider) setHeaders(req *http.Request) {
 	req.Header.Set("x-api-key", p.apiKey)
 	req.Header.Set("anthropic-version", anthropicAPIVersion)
 	applyExtraHeaders(req, p.headers)
+}
+
+// lastResponseIDs holds the last response id of each session, for at most
+// limit sessions: beyond that, the session updated longest ago is dropped.
+type lastResponseIDs struct {
+	mu    sync.Mutex
+	limit int
+	ids   map[string]*list.Element // session -> element of order
+	order *list.List               // *sessionResponseID, most recently updated first
+}
+
+type sessionResponseID struct{ session, id string }
+
+func newLastResponseIDs(limit int) *lastResponseIDs {
+	return &lastResponseIDs{limit: limit, ids: make(map[string]*list.Element), order: list.New()}
+}
+
+// get returns the session's last response id, or nil when it has none.
+func (s *lastResponseIDs) get(session string) *string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.ids[session]
+	if !ok {
+		return nil
+	}
+	id := e.Value.(*sessionResponseID).id
+	return &id
+}
+
+// put records id as the session's last response id. Requests without a
+// session have no previous response.
+func (s *lastResponseIDs) put(session, id string) {
+	if session == "" || id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.ids[session]; ok {
+		e.Value.(*sessionResponseID).id = id
+		s.order.MoveToFront(e)
+		return
+	}
+	s.ids[session] = s.order.PushFront(&sessionResponseID{session: session, id: id})
+	if s.order.Len() > s.limit {
+		oldest := s.order.Remove(s.order.Back()).(*sessionResponseID)
+		delete(s.ids, oldest.session)
+	}
 }

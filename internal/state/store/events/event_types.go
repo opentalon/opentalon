@@ -427,6 +427,8 @@ const LLMRequestVersion = 2
 // (CacheWriteTokens) and read from it (CacheReadTokens). CostInput prices
 // each of the three parts at its own rate. ChatLoop is true on a call whose
 // request carried system segments, which only the chat loop sends.
+// CacheMissReason is the type of cache miss Anthropic's cache diagnostics
+// reported for the call, e.g. "messages_changed" or "previous_message_not_found".
 type LLMResponsePayload struct {
 	Header
 	RawContentExcerpt   string          `json:"raw_content_excerpt"`
@@ -443,11 +445,12 @@ type LLMResponsePayload struct {
 	LatencyMS           int64           `json:"latency_ms,omitempty"`
 	ProviderResponseID  string          `json:"provider_response_id,omitempty"`
 	ChatLoop            bool            `json:"chat_loop,omitempty"`
+	CacheMissReason     string          `json:"cache_miss_reason,omitempty"`
 }
 
 // LLMResponseVersion bumped to 2 when the payload gained cache_write_tokens,
-// cache_read_tokens and chat_loop. All three are omitempty, so v=1 rows
-// decode cleanly with the fields absent.
+// cache_read_tokens, chat_loop and cache_miss_reason. All four are omitempty,
+// so v=1 rows decode cleanly with the fields absent.
 const LLMResponseVersion = 2
 
 // PlannerInvokedPayload / PlannerRequestPayload / PlannerResponsePayload /

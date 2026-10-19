@@ -1838,6 +1838,7 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 			MaxDelay:     parseDurationOrZero(pc.Retry.MaxDelay),
 			MaxTotalWait: parseDurationOrZero(pc.Retry.MaxTotalWait),
 		},
+		CacheDiagnostics: pc.CacheDiagnostics.Value,
 	}
 	prov, err := provider.FromConfig(provCfg)
 	if err != nil {

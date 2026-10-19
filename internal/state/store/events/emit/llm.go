@@ -62,6 +62,7 @@ type LLMResponseArgs struct {
 	LatencyMS          int64
 	ProviderResponseID string
 	ChatLoop           bool
+	CacheMissReason    string
 }
 
 // EmitLLMResponse writes one llm_response event. The helper computes
@@ -88,6 +89,7 @@ func EmitLLMResponse(ctx context.Context, sink Sink, args LLMResponseArgs) strin
 		LatencyMS:           args.LatencyMS,
 		ProviderResponseID:  args.ProviderResponseID,
 		ChatLoop:            args.ChatLoop,
+		CacheMissReason:     args.CacheMissReason,
 	}, args.LatencyMS)
 }
 
