@@ -362,7 +362,7 @@ func TestPromptAndToolsByteIdenticalAcrossBuilds(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal tools: %v", err)
 		}
-		return orch.buildSystemPrompt(ctx, "q", true), string(raw)
+		return orch.buildSystemPrompt(ctx, "q", true).Join(), string(raw)
 	}
 	wantPrompt, wantTools := build()
 	for range 20 {

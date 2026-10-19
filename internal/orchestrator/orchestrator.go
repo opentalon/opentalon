@@ -1743,7 +1743,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// Pin the reply language for this turn from the user's own message
 	// (post-STT, before any [knowledge_context] is injected by preparers,
 	// whose retrieved text may be in another language). The directive rides
-	// ctx into the per-variant buildSystemPrompt calls so detection runs once.
+	// ctx into buildSystemPrompt.
 	//
 	// When the current message is too short to detect (a bare approval on the
 	// confirm→execute→summarise path, an "ok", a numeric reply), fall back to
@@ -2223,11 +2223,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	if nativeMode {
 		cachedTools = o.buildToolDefinitions(ctx)
 	}
-	// Build system prompt variants: the only difference between rounds is the
-	// format hint (suppressed until tool results exist). Pre-build both so the
-	// prompt text is identical across rounds that share the same variant.
-	sysPromptNoHint := o.buildSystemPrompt(withSkipFormatHint(ctx), content, true)
-	sysPromptWithHint := o.buildSystemPrompt(ctx, content, true)
+	// Build the system prompt once per Run; appendConversation derives each
+	// round's per-round segment from it.
+	sysPrompt := o.buildSystemPrompt(ctx, content, true)
 
 	// Emit turn_start once per Run — captures the static request shape
 	// (system prompt digest, tool catalogue, model intent) that all agent
@@ -2236,16 +2234,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// configured, so a consumer reading the event can resolve every
 	// sha256 reference to content. Per-round mutations (e.g.
 	// reasoning-effort downgrade on summary rounds) are NOT reflected
-	// here; they remain on the individual llm_request events. The hinted
-	// variant is canonical: the unhinted one only differs by suppressing
-	// the format directive on round 1, which doesn't change tool
+	// here; they remain on the individual llm_request events. The prompt
+	// as built is canonical: rounds before the first tool result only
+	// leave out the output-format section, which doesn't change tool
 	// selection.
 	//
 	// Early-exit paths above (pending pipeline / pending tool-call
 	// confirmation) intentionally bypass this emission: the LLM is not
 	// driving those decisions, so there's no "turn" to start. They still
 	// emit user_message (above) because the user did send input.
-	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, sysPromptWithHint, profileModel, cachedTools))
+	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, sysPrompt.Join(), profileModel, cachedTools))
 	// Root every subsequent event in this turn under turn_start by
 	// stamping it as the default parent on ctx. Specific spans (planner,
 	// llm_response, tool_call_extracted) overwrite this slot with their
@@ -2277,13 +2275,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		agentRound = i + 1
 		sess, _ := sessions.Get(sessionID)
 
-		// Pick the cached system prompt variant based on whether tool
-		// results exist (format hint is only useful after the first tool round).
-		cachedSysPrompt := sysPromptNoHint
-		if hasToolResults(sess.Messages) {
-			cachedSysPrompt = sysPromptWithHint
-		}
-		messages := o.buildMessagesWithPrompt(ctx, sess, cachedSysPrompt)
+		messages, system := o.appendConversation(ctx, sess, sysPrompt)
 		messages = append(messages, transientMessages...)
 		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
@@ -2303,7 +2295,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("LLM request message", "index", j+1, "role", m.Role, "content", m.Content)
 		}
 
-		req := &provider.CompletionRequest{Messages: guardedMessages}
+		req := &provider.CompletionRequest{Messages: guardedMessages, Segments: &system}
 		if profileModel != "" {
 			req.Model = profileModel
 		}
@@ -4076,11 +4068,11 @@ func isToolResultMessage(m provider.Message) bool {
 // (possibly shortened) slice; when contextMessages is zero or the
 // input fits, returns msgs unchanged with no event.
 //
-// Called from both buildMessages and buildMessagesWithPrompt inside
-// the agent loop, so a long tool-call session can produce multiple
-// messages_truncated events per turn — each one represents a
-// distinct cut that actually dropped something. Consumers that want
-// "the first cut per turn" should fold by turn_start parent.
+// Called from appendConversation on every agent-loop round, so a long
+// tool-call session can produce multiple messages_truncated events per
+// turn — each one represents a distinct cut that actually dropped
+// something. Consumers that want "the first cut per turn" should fold by
+// turn_start parent.
 func (o *Orchestrator) applySlidingWindow(ctx context.Context, msgs []provider.Message) []provider.Message {
 	if o.contextMessages <= 0 || len(msgs) <= o.contextMessages {
 		return msgs
@@ -4097,14 +4089,13 @@ func (o *Orchestrator) applySlidingWindow(ctx context.Context, msgs []provider.M
 	return msgs[dropped:]
 }
 
-// appendConversation appends the message tail shared by buildMessages and
-// buildMessagesWithPrompt onto `messages` (which must already carry the system
-// prompt): the optional summary, the sliding-window-trimmed + sanitized +
-// knowledge-context-stripped history, the trailing format-hint and don't-repeat
-// reminders, and the final context-window trim. Extracted so the two assembly
-// paths cannot drift — the reminder strings and their gating were previously
-// duplicated verbatim in both.
-func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Session, messages []provider.Message) []provider.Message {
+// appendConversation assembles one round's message list from the system prompt
+// buildSystemPrompt built: the leading system message, with the optional
+// summary and the per-round section and reminders folded into its segments,
+// then the sliding-window-trimmed + sanitized + knowledge-context-stripped
+// history. It returns the segments the system message is the join of; nothing
+// changes that message after this.
+func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Session, system provider.SystemSegments) ([]provider.Message, provider.SystemSegments) {
 	// Sliding-window cutter (config-driven via o.contextMessages); emits
 	// messages_truncated when it fires.
 	convMessages := o.applySlidingWindow(ctx, sess.Messages)
@@ -4112,33 +4103,36 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	// Single system block (provider-compliance rule #1): the leading message
 	// built by buildSystemPrompt is the ONLY role:system message in the array.
 	// The conversation summary and the format/don't-repeat reminders fold into
-	// it as suffixes instead of being emitted as separate mid-array system
+	// its segments instead of being emitted as separate mid-array system
 	// messages. Anthropic's Messages API has no role:system inside the messages
 	// array — it carries one top-level `system` field — so scattered system
 	// turns made the adapter silently keep only the last one and drop the real
 	// prompt (see provider/anthropic.go toAnthRequest). Folding here keeps both
 	// the OpenAI-compatible and native-Anthropic adapters fed from one block.
-	var systemSuffix strings.Builder
 	if sess.Summary != "" {
-		systemSuffix.WriteString("\n\nPrevious conversation summary: ")
-		systemSuffix.WriteString(sess.Summary)
+		// Ends its line: the per-round segment follows.
+		system.Conversation += "\n\nPrevious conversation summary: " + sess.Summary + "\n"
+	}
+	// The per-round segment as built is the output-format section. Hold it
+	// back until a tool result exists: on the first round the HTML format hint
+	// stops weak models from emitting [tool_call] blocks.
+	if !hasToolResults(sess.Messages) {
+		system.Round = ""
 	}
 	// For weaker / OSS models, repeat the channel format hint — but only after a
 	// tool result exists, so it doesn't compete with the tool-calling
 	// instruction on the first round.
 	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
-		systemSuffix.WriteString("\n\n[IMPORTANT — output format reminder] ")
-		systemSuffix.WriteString(hint)
+		system.Round += "\n\n[IMPORTANT — output format reminder] " + hint
 	}
 	// Don't-repeat reminder, only with actual prior conversation. Wording is
 	// position-independent ("most recent message") because it now lives in the
 	// system block ahead of the conversation rather than as a trailing turn.
 	if len(convMessages) > 2 {
-		systemSuffix.WriteString("\n\n[IMPORTANT] Answer ONLY the user's most recent message. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.")
+		system.Round += "\n\n[IMPORTANT] Answer ONLY the user's most recent message. Do NOT repeat or summarize any earlier answers from this conversation. Be concise."
 	}
-	if systemSuffix.Len() > 0 && len(messages) > 0 && messages[0].Role == provider.RoleSystem {
-		messages[0].Content += systemSuffix.String()
-	}
+	messages := make([]provider.Message, 0, len(sess.Messages)+4)
+	messages = append(messages, provider.Message{Role: provider.RoleSystem, Content: system.Join()})
 
 	// Strip [knowledge_context] from HISTORICAL user messages only (current turn
 	// kept verbatim so preparer-injected RAG reaches the LLM), drop genuinely
@@ -4150,40 +4144,13 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	// No trimming here. Half of what a request costs is the tool definitions,
 	// which are attached to the request after assembly — so "make it fit" runs
 	// on the finished request, in the agent loop (see fitRequestToWindow).
-	return messages
+	return messages, system
 }
 
 func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
-	messages := make([]provider.Message, 0, len(sess.Messages)+4)
-
 	inclSI := len(includeServerInstructions) == 0 || includeServerInstructions[0]
-	// Suppress the OUTPUT FORMAT section in the system prompt until tool
-	// results exist. The HTML format hint prevents weak models from
-	// generating [tool_call] blocks on the first round.
-	buildCtx := ctx
-	hasResults := hasToolResults(sess.Messages)
-	if !hasResults {
-		buildCtx = withSkipFormatHint(ctx)
-	}
-	slog.Debug("format hint decision", "has_tool_results", hasResults, "skip_format_hint", !hasResults)
-	systemPrompt := o.buildSystemPrompt(buildCtx, userMessage, inclSI)
-	messages = append(messages, provider.Message{
-		Role:    provider.RoleSystem,
-		Content: systemPrompt,
-	})
-	return o.appendConversation(ctx, sess, messages)
-}
-
-// buildMessagesWithPrompt assembles the LLM message list using a pre-built
-// system prompt. This avoids rebuilding the prompt on every agent-loop round,
-// keeping the prefix byte-identical for provider-side KV cache hits.
-func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.Session, systemPrompt string) []provider.Message {
-	messages := make([]provider.Message, 0, len(sess.Messages)+4)
-	messages = append(messages, provider.Message{
-		Role:    provider.RoleSystem,
-		Content: systemPrompt,
-	})
-	return o.appendConversation(ctx, sess, messages)
+	messages, _ := o.appendConversation(ctx, sess, o.buildSystemPrompt(ctx, userMessage, inclSI))
+	return messages
 }
 
 // Context-window accounting — the token estimate, the input budget and the
@@ -4250,8 +4217,11 @@ func (o *Orchestrator) buildAgentGroundingPrompt(ctx context.Context, agentID st
 	return sb.String()
 }
 
-func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string, includeServerInstructions bool) string {
-	var sb strings.Builder
+// buildSystemPrompt builds the chat loop's system prompt in segments ordered
+// by how often they change. Round holds the output-format section, which
+// appendConversation leaves out until a tool result exists.
+func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string, includeServerInstructions bool) provider.SystemSegments {
+	var fixed, conversation, round strings.Builder
 
 	// Agent-scoped chat: when the turn is scoped to a workflow agent, lead with
 	// that agent's context (its program + recent runs) so the assistant answers
@@ -4259,7 +4229,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	// not a clarifying question. Skipped (empty) for the general assistant.
 	if agentID := actor.AgentID(ctx); agentID != "" {
 		if grounding := o.buildAgentGroundingPrompt(ctx, agentID); grounding != "" {
-			sb.WriteString(grounding)
+			fixed.WriteString(grounding)
 		}
 	}
 
@@ -4268,38 +4238,26 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	// the text format and native tools confuses weaker models — they
 	// narrate instead of calling tools.
 	if o.supportsNativeTools() {
-		sb.WriteString(prompts.OrchestratorPreambleNative)
+		fixed.WriteString(prompts.OrchestratorPreambleNative)
 	} else {
-		sb.WriteString(prompts.OrchestratorPreamble)
+		fixed.WriteString(prompts.OrchestratorPreamble)
 	}
 
-	sb.WriteString(o.rules.BuildPromptSection())
+	fixed.WriteString(o.rules.BuildPromptSection())
 
 	// Always-on knowledge catalog: titles + slugs of pullable articles, so the
 	// model knows what background it can fetch via ask_knowledge. Served from
 	// cache; a stale cache triggers a non-blocking background refresh.
 	if catalog := o.knowledgeCatalogSection(); catalog != "" {
-		sb.WriteString(catalog)
+		fixed.WriteString(catalog)
 	}
 
 	if o.runtimePromptPath != "" {
 		if data, err := os.ReadFile(o.runtimePromptPath); err == nil {
-			sb.WriteString("\n## Additional instructions (editable from chat)\n")
-			sb.WriteString(string(data))
-			sb.WriteString("\n\n")
+			fixed.WriteString("\n## Additional instructions (editable from chat)\n")
+			fixed.WriteString(string(data))
+			fixed.WriteString("\n\n")
 		}
-	}
-
-	// Expose the caller's channel and conversation id so the LLM knows what
-	// "the current channel" means when a tool parameter says it defaults to
-	// it. Without this, small models (e.g. Haiku) fail to invoke tools like
-	// scheduler__create_job on non-Slack channels because they pattern-match
-	// the Slack-shaped channel ids in other tool schemas and conclude they
-	// don't have a valid one on Telegram/Discord/etc.
-	if session := sessionDescriptor(ctx); session != "" {
-		sb.WriteString("## Current session\n")
-		sb.WriteString(session)
-		sb.WriteString("\nWhen a tool parameter's description says it defaults to the current channel or conversation, OMIT it — the host injects these values automatically. Do not try to invent or ask for an id.\n\n")
 	}
 
 	// Don't list content-preparer or guard actions as tools; they run automatically before LLM calls.
@@ -4340,12 +4298,12 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 			continue
 		}
 
-		fmt.Fprintf(&sb, "## %s\n%s\n", cap.Name, cap.Description)
+		fmt.Fprintf(&fixed, "## %s\n%s\n", cap.Name, cap.Description)
 		// Server instructions first — domain context the LLM needs before
 		// reading tool definitions (e.g. entity relationships, counting
 		// patterns, field semantics).
 		if includeServerInstructions && cap.SystemPromptAddition != "" {
-			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n", cap.Name, cap.SystemPromptAddition, cap.Name)
+			fmt.Fprintf(&fixed, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n", cap.Name, cap.SystemPromptAddition, cap.Name)
 		}
 		// In native tool mode, tool definitions are sent via req.Tools (the
 		// native set) and the catalog (everything else) — don't duplicate
@@ -4353,17 +4311,21 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		// accounts with many tools (e.g. 71 MCP tools).
 		if !o.supportsNativeTools() {
 			for _, action := range visibleActions {
-				fmt.Fprintf(&sb, "- %s: %s\n", toolFQN(cap.Name, action.Name), action.Description)
+				fmt.Fprintf(&fixed, "- %s: %s\n", toolFQN(cap.Name, action.Name), action.Description)
 				for _, p := range action.Parameters {
 					req := ""
 					if p.Required {
 						req = " (required)"
 					}
-					fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
+					fmt.Fprintf(&fixed, "  - %s: %s%s\n", p.Name, p.Description, req)
 				}
 			}
 		}
-		sb.WriteString("\n")
+		fixed.WriteString("\n")
+	}
+
+	if o.subprocessConfig.Enabled {
+		fixed.WriteString(prompts.OrchestratorSubprocess)
 	}
 
 	// Native mode: render the tool catalog — a one-line summary of every
@@ -4373,34 +4335,39 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	// decision. Non-native mode lists every action inline above, so no
 	// catalog is needed.
 	if o.supportsNativeTools() {
-		sb.WriteString(o.renderToolCatalog(o.promotedToolSet(ctx), allowedPlugins))
+		conversation.WriteString(o.renderToolCatalog(o.promotedToolSet(ctx), allowedPlugins))
 	}
 
-	if o.subprocessConfig.Enabled {
-		sb.WriteString(prompts.OrchestratorSubprocess)
-	}
-
-	if hint := channelFormatHint(ctx); hint != "" && !skipFormatHintFromContext(ctx) {
-		sb.WriteString("## OUTPUT FORMAT\n")
-		sb.WriteString(hint)
-		sb.WriteString("\n")
+	// Expose the caller's channel and conversation id so the LLM knows what
+	// "the current channel" means when a tool parameter says it defaults to
+	// it. Without this, small models (e.g. Haiku) fail to invoke tools like
+	// scheduler__create_job on non-Slack channels because they pattern-match
+	// the Slack-shaped channel ids in other tool schemas and conclude they
+	// don't have a valid one on Telegram/Discord/etc.
+	if session := sessionDescriptor(ctx); session != "" {
+		conversation.WriteString("## Current session\n")
+		conversation.WriteString(session)
+		conversation.WriteString("\nWhen a tool parameter's description says it defaults to the current channel or conversation, OMIT it — the host injects these values automatically. Do not try to invent or ask for an id.\n\n")
 	}
 
 	if p := profile.FromContext(ctx); p != nil && p.Name != "" {
-		sb.WriteString("## User\n")
-		fmt.Fprintf(&sb, "The user's name is %s. Address them by name where it feels natural; do not force it into every message.\n\n", p.Name)
+		conversation.WriteString("## User\n")
+		fmt.Fprintf(&conversation, "The user's name is %s. Address them by name where it feels natural; do not force it into every message.\n\n", p.Name)
 	}
 
-	// Reply-language directive, appended at the end of buildSystemPrompt's
-	// own output. Note it is no longer the very last thing in the system
-	// block: appendConversation folds the conversation-summary and the
-	// format/don't-repeat reminders onto messages[0] AFTER this. Empty
-	// unless detection was confident (see replyLanguageDirective).
+	// Reply-language directive. Empty unless detection was confident (see
+	// replyLanguageDirective).
 	if dir := replyLanguageDirectiveFromContext(ctx); dir != "" {
-		sb.WriteString(dir)
+		conversation.WriteString(dir)
 	}
 
-	return sb.String()
+	if hint := channelFormatHint(ctx); hint != "" {
+		round.WriteString("## OUTPUT FORMAT\n")
+		round.WriteString(hint)
+		round.WriteString("\n")
+	}
+
+	return provider.SystemSegments{Fixed: fixed.String(), Conversation: conversation.String(), Round: round.String()}
 }
 
 // sessionDescriptor returns a 1-2 line string describing the caller's current
@@ -5444,19 +5411,6 @@ func withAllowedPlugins(ctx context.Context, c cachedAllowedPlugins) context.Con
 	return context.WithValue(ctx, allowedPluginsKey{}, c)
 }
 
-// skipFormatHintKey suppresses the OUTPUT FORMAT section in the system prompt
-// so the HTML format hint doesn't interfere with tool-call generation.
-type skipFormatHintKey struct{}
-
-func withSkipFormatHint(ctx context.Context) context.Context {
-	return context.WithValue(ctx, skipFormatHintKey{}, true)
-}
-
-func skipFormatHintFromContext(ctx context.Context) bool {
-	v, _ := ctx.Value(skipFormatHintKey{}).(bool)
-	return v
-}
-
 // expectedToolsKey stores the planner's expected tool steps in context so the
 // agent loop can detect when the LLM fails to call tools that were expected.
 type expectedToolsKey struct{}
@@ -6128,9 +6082,16 @@ type knowledgeCatalogEntry struct {
 
 // renderKnowledgeCatalog builds the "## Available knowledge" system-prompt
 // section from the catalog entries (anchor + one "- Title (slug: `slug`)" line
-// each, in the order given). Pure (no I/O) so it is unit-testable; returns ""
-// when there are no valid entries.
+// each, sorted by title, then slug). Pure (no I/O) so it is unit-testable;
+// returns "" when there are no valid entries.
 func renderKnowledgeCatalog(entries []knowledgeCatalogEntry, anchor string) string {
+	entries = append([]knowledgeCatalogEntry(nil), entries...)
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Title != entries[j].Title {
+			return entries[i].Title < entries[j].Title
+		}
+		return entries[i].Slug < entries[j].Slug
+	})
 	var sb strings.Builder
 	n := 0
 	for _, e := range entries {

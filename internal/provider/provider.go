@@ -64,6 +64,22 @@ type ToolCall struct {
 	Arguments map[string]string `json:"arguments"` // parsed args
 }
 
+// SystemSegments is the leading system message of a chat-loop request, split
+// by how often each part changes: Fixed can be shared across conversations,
+// Conversation across the rounds and turns of one conversation, and Round may
+// change from one round to the next.
+type SystemSegments struct {
+	Fixed        string
+	Conversation string
+	Round        string
+}
+
+// Join returns the system message the segments make up: their concatenation
+// in order.
+func (s SystemSegments) Join() string {
+	return s.Fixed + s.Conversation + s.Round
+}
+
 type CompletionRequest struct {
 	Model           string           `json:"model"`
 	Messages        []Message        `json:"messages"`
@@ -74,6 +90,9 @@ type CompletionRequest struct {
 	Reasoning       bool             `json:"reasoning,omitempty"`        // enable extended thinking / reasoning
 	BudgetTokens    int              `json:"budget_tokens,omitempty"`    // Anthropic: max tokens for thinking (0 = provider default)
 	ReasoningEffort string           `json:"reasoning_effort,omitempty"` // OpenAI: "low", "medium", "high" (0 = "medium")
+	// Segments describes Messages[0], whose content is Segments.Join(). Only
+	// the chat loop sets it; nil on every other call.
+	Segments *SystemSegments `json:"-"`
 }
 
 type Usage struct {

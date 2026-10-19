@@ -7,8 +7,8 @@ import (
 
 // TestRenderKnowledgeCatalog covers the pure rendering of the always-on
 // knowledge catalog section: empty input yields nothing, invalid rows are
-// skipped, valid rows render as "- Title (slug: `slug`)" in input order, and
-// the anchor is included only when non-empty.
+// skipped, valid rows render as "- Title (slug: `slug`)" sorted by title, then
+// slug, and the anchor is included only when non-empty.
 func TestRenderKnowledgeCatalog(t *testing.T) {
 	// No entries → empty section (so buildSystemPrompt emits nothing).
 	if got := renderKnowledgeCatalog(nil, "anchor"); got != "" {
@@ -37,9 +37,16 @@ func TestRenderKnowledgeCatalog(t *testing.T) {
 		}
 	}
 
-	// Input order is preserved (the plugin already sorts by title).
-	if strings.Index(out, "categories") > strings.Index(out, "tickets") {
-		t.Errorf("entry order not preserved:\n%s", out)
+	// Sorted by title, then slug, whatever order the plugin returns them in.
+	want := "\n## Available knowledge\na\n" +
+		"- Orders (slug: `orders-a`)\n- Orders (slug: `orders-b`)\n- Tickets (slug: `tickets`)\n\n"
+	for _, entries := range [][]knowledgeCatalogEntry{
+		{{Slug: "tickets", Title: "Tickets"}, {Slug: "orders-b", Title: "Orders"}, {Slug: "orders-a", Title: "Orders"}},
+		{{Slug: "orders-a", Title: "Orders"}, {Slug: "orders-b", Title: "Orders"}, {Slug: "tickets", Title: "Tickets"}},
+	} {
+		if got := renderKnowledgeCatalog(entries, "a"); got != want {
+			t.Errorf("catalog order for %v:\n got %q\nwant %q", entries, got, want)
+		}
 	}
 
 	// Anchor omitted when empty, but the section + rows still render.

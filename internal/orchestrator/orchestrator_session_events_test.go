@@ -3023,7 +3023,7 @@ func TestToolCatalog_NativeMode_RendersCatalogAndKeepsToolsArraySmall(t *testing
 	orch := newCatalogOrch(t, &fakeInjectionStateStore{})
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
-	sysMsg := orch.buildSystemPrompt(ctx, "ask", true)
+	sysMsg := orch.buildSystemPrompt(ctx, "ask", true).Join()
 	if !strings.Contains(sysMsg, "## Tool catalog — name + one-line summary") {
 		t.Errorf("system prompt missing catalog header, got:\n%s", sysMsg)
 	}
@@ -3076,7 +3076,7 @@ func TestToolCatalog_LoadedToolLeavesCatalogAndEntersToolsArray(t *testing.T) {
 		t.Errorf("tools array must NOT contain the un-loaded tools-plugin__t2, got %v", names)
 	}
 
-	sysMsg := orch.buildSystemPrompt(ctx, "ask", true)
+	sysMsg := orch.buildSystemPrompt(ctx, "ask", true).Join()
 	if strings.Contains(sysMsg, "- tools-plugin__t1:") {
 		t.Errorf("loaded tool must drop out of the catalog, still present:\n%s", sysMsg)
 	}
