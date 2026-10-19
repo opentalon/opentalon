@@ -215,10 +215,12 @@ session event.
   `false` only.
 - A configured `anthropic-beta` header is kept: both betas are sent,
   separated by a comma.
-- The previous response ids are kept in memory, for at most 10,000 sessions.
-  After a restart, or when the previous request ran on another instance,
-  Anthropic does not know the id: the event then records
-  `previous_message_not_found` and the request is answered as usual.
+- The previous response ids are kept in memory, for at most 10,000 sessions
+  (the oldest is dropped first). After a restart, after a session's id was
+  dropped, or when the previous request ran on another instance, the next
+  request sends no id and the comparison starts over. `previous_message_not_found`
+  is recorded only when an id was sent that Anthropic no longer knows; the
+  request is answered as usual.
 
 ## Custom Models
 
