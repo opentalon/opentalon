@@ -139,9 +139,7 @@ func (p *OpenAIProvider) Models() []ModelInfo { return p.models }
 // this provider's configured per-million-token rate for modelID. Returns
 // (0, 0) when modelID is not in p.models — emit helpers stamp
 // LLMResponsePayload with omitempty so a zero cost simply leaves the
-// fields out rather than recording a misleading "free call". Mirrors
-// the silent-zero behaviour of usageRecorderAdapter.RecordUsage in
-// cmd/opentalon/main.go so the two pricing paths stay consistent.
+// fields out rather than recording a misleading "free call".
 //
 // Currency is unitless: ModelInfo.Cost values are stamped as-is, the
 // operator's deployment convention sets the unit. Centralising the math
