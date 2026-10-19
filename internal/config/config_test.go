@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const testYAML = `
@@ -1398,11 +1400,17 @@ func TestParsePromptCache(t *testing.T) {
 		{"yes is not a boolean", "anthropic-messages", "prompt_cache: yes", "models.providers.p.prompt_cache: line 5: must be true or false"},
 		{"quoted true is not a boolean", "anthropic-messages", `prompt_cache: "true"`, "models.providers.p.prompt_cache: line 5: must be true or false"},
 		{"number is not a boolean", "anthropic-messages", "prompt_cache: 1", "models.providers.p.prompt_cache: line 5: must be true or false"},
+		{"null is not a boolean", "anthropic-messages", "prompt_cache: null", "models.providers.p.prompt_cache: line 5: must be true or false"},
+		{"~ is not a boolean", "anthropic-messages", "prompt_cache: ~", "models.providers.p.prompt_cache: line 5: must be true or false"},
+		{"an empty value is not a boolean", "anthropic-messages", "prompt_cache:", "models.providers.p.prompt_cache: line 5: must be true or false"},
 		{"on an openai-completions provider", "openai-completions", "prompt_cache: true", "models.providers.p.prompt_cache: only the anthropic-messages api"},
 		{"on a provider without api", "", "prompt_cache: true", "models.providers.p.prompt_cache: only the anthropic-messages api"},
 		{"priced model without cache prices", "anthropic-messages", "prompt_cache: true" + priced + " }",
 			`models.providers.p: model "claude-x": prompt_cache needs cost.cache_write and cost.cache_read`},
 		{"priced model without cache_read", "anthropic-messages", "prompt_cache: true" + priced + ", cache_write: 1.25 }",
+			`model "claude-x": prompt_cache needs`},
+		{"prices of 0 without cache prices", "anthropic-messages",
+			"prompt_cache: true\n      models:\n        - id: claude-x\n          cost: { input: 0, output: 0 }",
 			`model "claude-x": prompt_cache needs`},
 		{"cache prices set, 0 included", "anthropic-messages", "prompt_cache: true" + priced + ", cache_write: 1.25, cache_read: 0 }", ""},
 		{"model without a cost", "anthropic-messages", "prompt_cache: true\n      models:\n        - id: claude-x", ""},
@@ -1454,5 +1462,21 @@ models:
 	}
 	if cfg.Models.Providers["plain"].PromptCache.Value {
 		t.Error("prompt_cache defaults to true, want false")
+	}
+}
+
+func TestPromptCacheMarshalsAsBoolean(t *testing.T) {
+	cfg, err := Parse([]byte("models:\n  providers:\n    cached:\n      api: anthropic-messages\n      prompt_cache: true\n    plain:\n      api: anthropic-messages\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{"cached": "prompt_cache: true\n", "plain": "prompt_cache: false\n"} {
+		out, err := yaml.Marshal(cfg.Models.Providers[id])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(out), want) {
+			t.Errorf("provider %s marshals as\n%s\nwant a line %q", id, out, want)
+		}
 	}
 }

@@ -595,6 +595,38 @@ type ProviderConfig struct {
 	PromptCache StrictBool `yaml:"prompt_cache"`
 }
 
+// UnmarshalYAML decodes a provider. yaml.v3 never hands a null value to
+// StrictBool.UnmarshalYAML, so a null prompt_cache is recorded here.
+func (p *ProviderConfig) UnmarshalYAML(n *yaml.Node) error {
+	type plain ProviderConfig
+	if err := n.Decode((*plain)(p)); err != nil {
+		return err
+	}
+	if v := mappingValue(n, "prompt_cache"); v != nil && v.ShortTag() == "!!null" {
+		p.PromptCache = StrictBool{invalidLine: v.Line}
+	}
+	return nil
+}
+
+// mappingValue returns the value of key in the mapping node n, or nil when n
+// is not a mapping or lacks the key.
+func mappingValue(n *yaml.Node, key string) *yaml.Node {
+	if n.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value != key {
+			continue
+		}
+		v := n.Content[i+1]
+		if v.Kind == yaml.AliasNode && v.Alias != nil {
+			v = v.Alias
+		}
+		return v
+	}
+	return nil
+}
+
 // StrictBool is a config switch that takes only the YAML booleans true and
 // false, where yaml.v3 would also read yes, no, on and off into a bool. Any
 // other value is recorded instead of returned, since yaml.v3's error names
@@ -615,6 +647,11 @@ func (b *StrictBool) UnmarshalYAML(n *yaml.Node) error {
 	}
 	*b = StrictBool{}
 	return n.Decode(&b.Value)
+}
+
+// MarshalYAML implements yaml.Marshaler, so the switch prints as true or false.
+func (b StrictBool) MarshalYAML() (any, error) {
+	return b.Value, nil
 }
 
 // ProviderHeaders maps a header name to its value. It is a plain
@@ -724,6 +761,22 @@ type CostConfig struct {
 	// when not configured, which validatePromptCache tells apart from 0.
 	CacheWrite *float64 `yaml:"cache_write"`
 	CacheRead  *float64 `yaml:"cache_read"`
+	priced     bool     // the YAML block names a price, 0 included
+}
+
+// UnmarshalYAML decodes a cost block and records whether it names a price,
+// which a decoded 0 cannot show.
+func (c *CostConfig) UnmarshalYAML(n *yaml.Node) error {
+	type plain CostConfig
+	if err := n.Decode((*plain)(c)); err != nil {
+		return err
+	}
+	for _, key := range []string{"input", "output", "cache_write", "cache_read"} {
+		if mappingValue(n, key) != nil {
+			c.priced = true
+		}
+	}
+	return nil
 }
 
 type CatalogEntry struct {
@@ -955,8 +1008,7 @@ func validatePromptCache(cfg *Config) error {
 		}
 		for _, m := range p.Models {
 			c := m.Cost
-			priced := c.Input != 0 || c.Output != 0 || c.CacheWrite != nil || c.CacheRead != nil
-			if priced && (c.CacheWrite == nil || c.CacheRead == nil) {
+			if c.priced && (c.CacheWrite == nil || c.CacheRead == nil) {
 				return fmt.Errorf("models.providers.%s: model %q: prompt_cache needs cost.cache_write and cost.cache_read", id, m.ID)
 			}
 		}
