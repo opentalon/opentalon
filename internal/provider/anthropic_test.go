@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/opentalon/opentalon/internal/state/store/events"
 )
 
 func TestAnthropicComplete(t *testing.T) {
@@ -910,5 +912,145 @@ func TestAnthropicCacheMarkedRequestRejected(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// --- usage and cost ---
+
+// TestAnthropicUsageAndCost covers R5: tokens in is uncached plus written plus
+// read tokens, the input cost prices each part at its own rate, and the
+// response and the llm_response event carry the same figures. A response
+// without cache fields records zero for both.
+func TestAnthropicUsageAndCost(t *testing.T) {
+	models := []ModelInfo{{ID: "claude-x", Cost: ModelCost{Input: 1, Output: 5, CacheWrite: 1.25, CacheRead: 0.1}}}
+	cases := []struct {
+		name  string
+		usage string
+		want  Usage
+	}{
+		{
+			name:  "cache usage",
+			usage: `{"input_tokens":1000000,"cache_creation_input_tokens":2000000,"cache_read_input_tokens":10000000,"output_tokens":3000000}`,
+			want: Usage{
+				InputTokens: 13_000_000, OutputTokens: 3_000_000,
+				CacheWriteTokens: 2_000_000, CacheReadTokens: 10_000_000,
+				InputCost: 1 + 2.5 + 1, OutputCost: 15,
+			},
+		},
+		{
+			name:  "no cache fields",
+			usage: `{"input_tokens":1000000,"output_tokens":3000000}`,
+			want:  Usage{InputTokens: 1_000_000, OutputTokens: 3_000_000, InputCost: 1, OutputCost: 15},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"r1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":`+tc.usage+`}`)
+			}))
+			defer server.Close()
+			sink := &recordingEventSink{}
+			p := NewAnthropicProvider("anthropic", server.URL, "key", models, WithAnthropicSessionEventSink(sink))
+			resp, err := p.Complete(context.Background(), &CompletionRequest{
+				Model:    "claude-x",
+				Messages: []Message{{Role: RoleUser, Content: "Hi"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.Usage != tc.want {
+				t.Errorf("response usage:\n got %+v\nwant %+v", resp.Usage, tc.want)
+			}
+
+			got := sink.snapshot()
+			if len(got) != 2 || got[1].EventType != events.TypeLLMResponse {
+				t.Fatalf("events = %v, want llm_request then llm_response", sink.types())
+			}
+			var payload events.LLMResponsePayload
+			if err := json.Unmarshal(got[1].Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			recorded := Usage{
+				InputTokens: payload.TokensIn, OutputTokens: payload.TokensOut,
+				CacheWriteTokens: payload.CacheWriteTokens, CacheReadTokens: payload.CacheReadTokens,
+				InputCost: payload.CostInput, OutputCost: payload.CostOutput,
+			}
+			if recorded != tc.want {
+				t.Errorf("llm_response records:\n got %+v\nwant %+v\npayload %s", recorded, tc.want, got[1].Payload)
+			}
+		})
+	}
+}
+
+// TestLLMResponseChatLoop checks chat_loop on the llm_response event of every
+// provider path: true when the request carried segments, absent otherwise.
+// Only the chat loop sets segments; TestNonChatLoopRequestsCarryNoSegments in
+// the orchestrator covers session titles, summaries, confirmation narration,
+// subprocesses and the planner.
+func TestLLMResponseChatLoop(t *testing.T) {
+	segs := SystemSegments{Fixed: "Fixed.\n", Conversation: "Conversation.\n", Round: "Round."}
+	paths := []struct {
+		name string
+		call func(t *testing.T, sink *recordingEventSink, req *CompletionRequest)
+	}{
+		{"anthropic", func(t *testing.T, sink *recordingEventSink, req *CompletionRequest) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"id":"r1","model":"m","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+			}))
+			defer server.Close()
+			p := NewAnthropicProvider("anthropic", server.URL, "key", nil,
+				WithAnthropicSessionEventSink(sink), WithAnthropicPromptCache(true))
+			if _, err := p.Complete(context.Background(), req); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"openai", func(t *testing.T, sink *recordingEventSink, req *CompletionRequest) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+			}))
+			defer server.Close()
+			if _, err := NewOpenAIProvider("openai", server.URL, "key", nil, WithOpenAISessionEventSink(sink)).
+				Complete(context.Background(), req); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"openai stream", func(t *testing.T, sink *recordingEventSink, req *CompletionRequest) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, streamResponse([]string{"ok"}, "stop", true))
+			}))
+			defer server.Close()
+			stream, err := NewOpenAIProvider("openai", server.URL, "key", nil, WithOpenAISessionEventSink(sink)).
+				Stream(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			drainStream(t, stream)
+			_ = stream.Close()
+		}},
+	}
+	for _, path := range paths {
+		for _, segments := range []*SystemSegments{&segs, nil} {
+			t.Run(fmt.Sprintf("%s/segments=%t", path.name, segments != nil), func(t *testing.T) {
+				sink := &recordingEventSink{}
+				path.call(t, sink, &CompletionRequest{
+					Model:    "m",
+					Messages: []Message{{Role: RoleSystem, Content: segs.Join()}, {Role: RoleUser, Content: "Hi"}},
+					Segments: segments,
+				})
+				got := sink.snapshot()
+				if len(got) != 2 || got[1].EventType != events.TypeLLMResponse {
+					t.Fatalf("events = %v, want llm_request then llm_response", sink.types())
+				}
+				payload := string(got[1].Payload)
+				if segments != nil && !strings.Contains(payload, `"chat_loop":true`) {
+					t.Errorf("chat-loop call: chat_loop missing from %s", payload)
+				}
+				if segments == nil && strings.Contains(payload, `"chat_loop"`) {
+					t.Errorf("call without segments: chat_loop present in %s", payload)
+				}
+			})
+		}
 	}
 }

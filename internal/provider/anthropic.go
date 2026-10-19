@@ -124,23 +124,31 @@ func NewAnthropicProvider(id, baseURL, apiKey string, models []ModelInfo, opts .
 	return p
 }
 
-// costForTokens computes input/output cost for tokensIn/tokensOut against
-// this provider's configured per-million-token rate for modelID. Returns
-// (0, 0) when modelID is not in p.models — emit helpers stamp
-// LLMResponsePayload with omitempty so a zero cost simply leaves the
-// fields out rather than recording a misleading "free call". Currency
-// is unitless: ModelInfo.Cost values are stamped as-is, the operator's
-// deployment convention sets the unit. Mirrors openai.go's costForTokens
-// so the two pricing paths stay consistent.
-func (p *AnthropicProvider) costForTokens(modelID string, tokensIn, tokensOut int) (float64, float64) {
+// usage returns a response's tokens and cost. Anthropic's input_tokens
+// leaves out the tokens written to and read from the prompt cache, so
+// InputTokens adds them. Per million tokens, uncached ones cost Cost.Input,
+// written ones Cost.CacheWrite and read ones Cost.CacheRead. A modelID not
+// in p.models costs 0, which LLMResponsePayload leaves out (omitempty)
+// rather than recording a misleading "free call". Currency is unitless:
+// the operator's deployment convention sets the unit.
+func (p *AnthropicProvider) usage(modelID string, u anthUsage) Usage {
+	usage := Usage{
+		InputTokens:      u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens,
+		OutputTokens:     u.OutputTokens,
+		CacheWriteTokens: u.CacheCreationInputTokens,
+		CacheReadTokens:  u.CacheReadInputTokens,
+	}
 	for _, m := range p.models {
 		if m.ID != modelID {
 			continue
 		}
-		return float64(tokensIn) * m.Cost.Input / 1_000_000,
-			float64(tokensOut) * m.Cost.Output / 1_000_000
+		usage.InputCost = (float64(u.InputTokens)*m.Cost.Input +
+			float64(u.CacheCreationInputTokens)*m.Cost.CacheWrite +
+			float64(u.CacheReadInputTokens)*m.Cost.CacheRead) / 1_000_000
+		usage.OutputCost = float64(u.OutputTokens) * m.Cost.Output / 1_000_000
+		break
 	}
-	return 0, 0
+	return usage
 }
 
 func (p *AnthropicProvider) ID() string { return p.id }
@@ -231,8 +239,10 @@ type anthImageSource struct {
 }
 
 type anthUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"` // uncached input tokens only
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
 type anthError struct {
@@ -365,17 +375,20 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		nativeToolCallsRaw, _ = json.Marshal(toolBlocks)
 	}
 
-	costIn, costOut := p.costForTokens(anthReq.Model, anthResp.Usage.InputTokens, anthResp.Usage.OutputTokens)
+	usage := p.usage(anthReq.Model, anthResp.Usage)
 	eventID := emit.EmitLLMResponse(ctx, p.eventSink, emit.LLMResponseArgs{
 		RawContent:         content,
 		NativeToolCallsRaw: nativeToolCallsRaw,
 		FinishReason:       anthResp.StopReason,
-		TokensIn:           anthResp.Usage.InputTokens,
-		TokensOut:          anthResp.Usage.OutputTokens,
-		CostInput:          costIn,
-		CostOutput:         costOut,
+		TokensIn:           usage.InputTokens,
+		TokensOut:          usage.OutputTokens,
+		CacheWriteTokens:   usage.CacheWriteTokens,
+		CacheReadTokens:    usage.CacheReadTokens,
+		CostInput:          usage.InputCost,
+		CostOutput:         usage.OutputCost,
 		LatencyMS:          latencyMS,
 		ProviderResponseID: anthResp.ID,
+		ChatLoop:           req.Segments != nil,
 	})
 
 	return &CompletionResponse{
@@ -383,11 +396,8 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		Model:     anthResp.Model,
 		Content:   content,
 		ToolCalls: toolCalls,
-		Usage: Usage{
-			InputTokens:  anthResp.Usage.InputTokens,
-			OutputTokens: anthResp.Usage.OutputTokens,
-		},
-		EventID: eventID,
+		Usage:     usage,
+		EventID:   eventID,
 	}, nil
 }
 

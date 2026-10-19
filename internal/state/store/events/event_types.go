@@ -422,6 +422,11 @@ const LLMRequestVersion = 2
 // Both fields use omitempty: a zero value means "model not in the
 // catalogue at emit time", not "free" — analytics should treat absent
 // fields as unpriced rather than summing them as zero-cost calls.
+//
+// TokensIn counts every input token: uncached, written to the prompt cache
+// (CacheWriteTokens) and read from it (CacheReadTokens). CostInput prices
+// each of the three parts at its own rate. ChatLoop is true on a call whose
+// request carried system segments, which only the chat loop sends.
 type LLMResponsePayload struct {
 	Header
 	RawContentExcerpt   string          `json:"raw_content_excerpt"`
@@ -431,13 +436,19 @@ type LLMResponsePayload struct {
 	FinishReason        string          `json:"finish_reason,omitempty"`
 	TokensIn            int             `json:"tokens_in,omitempty"`
 	TokensOut           int             `json:"tokens_out,omitempty"`
+	CacheWriteTokens    int             `json:"cache_write_tokens,omitempty"`
+	CacheReadTokens     int             `json:"cache_read_tokens,omitempty"`
 	CostInput           float64         `json:"cost_input,omitempty"`
 	CostOutput          float64         `json:"cost_output,omitempty"`
 	LatencyMS           int64           `json:"latency_ms,omitempty"`
 	ProviderResponseID  string          `json:"provider_response_id,omitempty"`
+	ChatLoop            bool            `json:"chat_loop,omitempty"`
 }
 
-const LLMResponseVersion = 1
+// LLMResponseVersion bumped to 2 when the payload gained cache_write_tokens,
+// cache_read_tokens and chat_loop. All three are omitempty, so v=1 rows
+// decode cleanly with the fields absent.
+const LLMResponseVersion = 2
 
 // PlannerInvokedPayload / PlannerRequestPayload / PlannerResponsePayload /
 // PlannerStepPayload — populated by the future planner instrumentation.

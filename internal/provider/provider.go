@@ -95,9 +95,17 @@ type CompletionRequest struct {
 	Segments *SystemSegments `json:"-"`
 }
 
+// Usage is a call's tokens and cost. InputTokens counts every input token,
+// including the CacheWriteTokens written to and the CacheReadTokens read from
+// the prompt cache. InputCost and OutputCost price the call at the model's
+// configured rates; both are 0 for a model without a price.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens      int     `json:"input_tokens"`
+	OutputTokens     int     `json:"output_tokens"`
+	CacheWriteTokens int     `json:"cache_write_tokens,omitempty"`
+	CacheReadTokens  int     `json:"cache_read_tokens,omitempty"`
+	InputCost        float64 `json:"input_cost,omitempty"`
+	OutputCost       float64 `json:"output_cost,omitempty"`
 }
 
 type CompletionResponse struct {
