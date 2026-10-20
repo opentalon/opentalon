@@ -11,11 +11,6 @@ import (
 	"time"
 )
 
-// defaultTimeout bounds a single decision call. Decision models are meant to be
-// fast (a BERT forward pass or a single-token completion); a generous ceiling
-// still protects the orchestrator's callback path from a hung backend.
-const defaultTimeout = 30 * time.Second
-
 // maxAttempts bounds how often postJSON sends one request: a 429 or 5xx is
 // retried, with backoff, up to this many attempts in total. Hosted decision
 // APIs return both transiently, and a review sends several requests at once.
@@ -32,7 +27,7 @@ var retryWait = func(n int, retryAfter string) time.Duration {
 }
 
 // newHTTPClient returns the shared client configuration used by every backend.
-func newHTTPClient() *http.Client { return &http.Client{Timeout: defaultTimeout} }
+func newHTTPClient() *http.Client { return &http.Client{} }
 
 // postJSON POSTs reqBody as JSON to url and decodes the JSON response into out.
 // bearer, when non-empty, is sent as an Authorization header. A 429 or 5xx is

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 )
@@ -33,6 +35,35 @@ const (
 	maxMaxParallel     = 8
 	maxParallelTasks   = 16
 )
+
+const subprocessDeadlineMargin = 10 * time.Second
+
+func (o *Orchestrator) subprocessTimeout() time.Duration {
+	if o.subprocessConfig.DefaultTimeout <= 0 {
+		return 60 * time.Second
+	}
+	return o.subprocessConfig.DefaultTimeout
+}
+
+func (o *Orchestrator) subprocessMaxParallel() int {
+	if o.subprocessConfig.MaxParallel <= 0 {
+		return defaultMaxParallel
+	}
+	return min(o.subprocessConfig.MaxParallel, maxMaxParallel)
+}
+
+func (o *Orchestrator) callDeadline(call ToolCall) time.Duration {
+	if call.Plugin != "_subprocess" {
+		return o.guard.Timeout
+	}
+	batches := 1
+	if call.Action == "parallel" {
+		if reqs, err := parseParallelRequest(call.Args); err == nil {
+			batches = (len(reqs) + o.subprocessMaxParallel() - 1) / o.subprocessMaxParallel()
+		}
+	}
+	return max(o.guard.Timeout, o.subprocessTimeout()*time.Duration(batches)+subprocessDeadlineMargin)
+}
 
 // subprocessRequest is parsed from the LLM's _subprocess.run tool call args.
 type subprocessRequest struct {
@@ -145,13 +176,7 @@ func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall)
 		}
 	}
 
-	maxParallel := s.orch.subprocessConfig.MaxParallel
-	if maxParallel <= 0 {
-		maxParallel = defaultMaxParallel
-	}
-	if maxParallel > maxMaxParallel {
-		maxParallel = maxMaxParallel
-	}
+	maxParallel := s.orch.subprocessMaxParallel()
 
 	log := slog.With("component", "subprocess", "depth", currentDepth+1, "mode", "parallel")
 	log.Info("parallel subprocess started", "tasks", len(reqs), "max_parallel", maxParallel)
@@ -218,11 +243,7 @@ type subprocessResult struct {
 
 // runSubprocess runs a mini agent loop for a focused sub-task.
 func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest, depth int) (*subprocessResult, error) {
-	timeout := o.subprocessConfig.DefaultTimeout
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, o.subprocessTimeout())
 	defer cancel()
 
 	ctx = withSubprocessDepth(ctx, depth)
@@ -292,6 +313,7 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 			model = req.Model
 		}
 		o.observePluginUsage(ctx, model, resp.Usage)
+		o.recordSubprocessUsage(ctx, model, resp.Usage)
 
 		calls := o.parser.Parse(resp.Content)
 		if calls == nil {
@@ -339,6 +361,24 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	result.Iterations = maxIter
 	log.Warn("subprocess hit iteration limit", "iterations", maxIter)
 	return result, nil
+}
+
+func (o *Orchestrator) recordSubprocessUsage(ctx context.Context, model string, u provider.Usage) {
+	if o.usageRecorder == nil {
+		return
+	}
+	p := profile.FromContext(ctx)
+	if p == nil || p.EntityID == "" {
+		if _, warned := o.decideUnattributed.LoadOrStore("_subprocess", true); !warned {
+			slog.Warn("subprocess call carries no identity; metering under the unattributed entity",
+				"entity", unattributedEntity)
+		}
+		o.usageRecorder.RecordUsage(ctx, unattributedEntity, "", "", actor.SessionID(ctx),
+			model, profile.KindSystem, "subprocess", u.InputTokens, u.OutputTokens, 0)
+		return
+	}
+	o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group, p.ChannelID, actor.SessionID(ctx),
+		model, p.Kind, p.SystemSource, u.InputTokens, u.OutputTokens, 0)
 }
 
 // buildSubprocessSystemPrompt builds a focused system prompt for a subprocess

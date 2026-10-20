@@ -85,3 +85,9 @@ func TestRetryWait(t *testing.T) {
 		}
 	}
 }
+
+func TestNewHTTPClientLeavesTheDeadlineToTheContext(t *testing.T) {
+	if got := newHTTPClient().Timeout; got != 0 {
+		t.Errorf("client timeout = %s, want 0 so orchestrator.callback_timeout is the only cut", got)
+	}
+}

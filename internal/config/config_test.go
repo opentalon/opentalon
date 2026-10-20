@@ -1373,3 +1373,16 @@ func TestParseProviderHeadersRejectsAcceptEncoding(t *testing.T) {
 		t.Errorf("error leaks the value: %v", err)
 	}
 }
+
+func TestParseConfig_OrchestratorCallbackLimits(t *testing.T) {
+	cfg, err := Parse([]byte("orchestrator:\n  callback_timeout: \"11m\"\n  max_response_bytes: 1048576\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Orchestrator.CallbackTimeout != "11m" {
+		t.Errorf("callback_timeout = %q, want 11m", cfg.Orchestrator.CallbackTimeout)
+	}
+	if cfg.Orchestrator.MaxResponseBytes != 1048576 {
+		t.Errorf("max_response_bytes = %d, want 1048576", cfg.Orchestrator.MaxResponseBytes)
+	}
+}

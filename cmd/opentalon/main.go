@@ -918,6 +918,8 @@ func main() {
 			Enabled: cfg.Orchestrator.Notify.Enabled,
 		},
 		Deciders:           deciders,
+		CallbackTimeout:    parseDurationOrZero(cfg.Orchestrator.CallbackTimeout),
+		MaxResponseBytes:   cfg.Orchestrator.MaxResponseBytes,
 		ConversationSender: notifier.SendToConversation,
 		SessionLocker:      sessionLocker,
 	})

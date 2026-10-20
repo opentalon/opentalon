@@ -39,13 +39,13 @@ func NewGuard() *Guard {
 
 func (g *Guard) Sanitize(result ToolResult) ToolResult {
 	result.Content = g.sanitizeContent(result.Content)
-	// Structured content is JSON: pattern-replacement would silently corrupt
-	// it (e.g. asterisks inside object keys produce invalid JSON the model
-	// then can't parse). Plugins are a trusted subprocess boundary per the
-	// project's threat model, so we cap size only and leave the payload
-	// intact.
-	result.StructuredContent = g.truncate(result.StructuredContent)
 	result.Error = g.sanitizeContent(result.Error)
+	if g.MaxResponseBytes > 0 && len(result.StructuredContent) > g.MaxResponseBytes {
+		if result.Error == "" {
+			result.Error = fmt.Sprintf("structured content of %d bytes exceeds the %d byte limit set by orchestrator.max_response_bytes", len(result.StructuredContent), g.MaxResponseBytes)
+		}
+		result.StructuredContent = ""
+	}
 	// Plugin responses can contain invalid UTF-8 from external sources.
 	// gRPC proto marshaling rejects any string field with invalid UTF-8,
 	// so replace bad sequences with the Unicode replacement character.

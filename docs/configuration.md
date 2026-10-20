@@ -356,6 +356,19 @@ orchestrator:
 
 See the [Hello World plugin](https://github.com/opentalon/hellow-world-plugin) for an example.
 
+### Plugin call limits
+
+```yaml
+orchestrator:
+  callback_timeout: "30s"     # Go duration; default "30s"
+  max_response_bytes: 65536   # bytes; default 65536 (64 KB)
+```
+
+- `callback_timeout` caps one non-streaming plugin action: a tool call from the LLM, or a plugin's callback into the host (`RunAction`), including a decider's `decide`. A decider's HTTP request has no timeout of its own, so `callback_timeout` is its only cut, retries included. Unset, zero or invalid keeps 30s.
+- `_subprocess.run` and `_subprocess.parallel` get the larger of `callback_timeout` and `subprocess.default_timeout × ceil(tasks / max_parallel) + 10s` (`tasks` = 1 for `run`), so a callback is not cut before its sub-agents can finish.
+- An action on a plugin's external gateway (`grpc_port`) has no host deadline of its own; it runs until the caller's gRPC deadline. Callbacks it makes get the deadlines above.
+- `max_response_bytes` caps `Content`, `Error` and `StructuredContent` of each plugin result handled by the orchestrator. Text over the cap is truncated with a notice. Structured content over the cap is dropped and the result becomes an error naming its size and the limit, so a caller never gets truncated JSON. Results returned to an external gateway caller are not capped. Unset, zero or negative keeps 65536.
+
 ## Bundler-style plugins and channels
 
 Instead of a local `plugin` path, you can point a plugin or channel at a GitHub repo and a **ref** (branch, tag, or commit). OpenTalon will clone the repo, build it, and pin the resolved commit in a lock file so installs are reproducible.

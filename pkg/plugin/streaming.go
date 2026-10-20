@@ -43,9 +43,8 @@ type StreamingHandler interface {
 }
 
 // hostCallerStream is the HostCaller the SDK hands to a
-// StreamingHandler. It serialises callback round-trips over the
-// underlying gRPC stream — only one in-flight RunAction at a time,
-// which matches the synchronous mental model plugin authors expect.
+// StreamingHandler. Several RunAction calls may be in flight at once;
+// each waits for the CallbackResponse matching its own id.
 type hostCallerStream struct {
 	stream pluginpb.PluginService_ExecuteBidiServer
 
@@ -63,10 +62,9 @@ func newHostCallerStream(stream pluginpb.PluginService_ExecuteBidiServer) *hostC
 }
 
 // RunAction emits a CallbackRequest on the stream, blocks until the
-// matching CallbackResponse arrives, and returns it. Concurrent calls
-// from the same StreamingHandler are serialised by mu — gRPC streams
-// can't safely interleave Sends, and the receive loop has to dispatch
-// responses to the right waiter anyway.
+// matching CallbackResponse arrives, and returns it. Safe for
+// concurrent use: mu serialises only the Send (gRPC streams can't
+// interleave Sends) and the inflight map, not the round-trip.
 func (h *hostCallerStream) RunAction(ctx context.Context, plugin, action string, args map[string]string) (CallResult, error) {
 	id := uuid.NewString()
 	wait := make(chan *pluginpb.CallbackResponse, 1)
