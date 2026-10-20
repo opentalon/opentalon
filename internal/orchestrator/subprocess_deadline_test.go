@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/decideprovider"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
@@ -225,5 +228,42 @@ func TestMaxResponseBytesLargeEnoughKeepsStructuredJSON(t *testing.T) {
 	}
 	if !json.Valid([]byte(structured)) {
 		t.Errorf("structured content is not valid JSON: %q", structured)
+	}
+}
+
+func slowLayaOrch(t *testing.T, delay, callbackTimeout time.Duration) *Orchestrator {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(delay):
+		}
+		_, _ = w.Write([]byte(`{"probabilities":{"yes":0.9,"no":0.1}}`))
+	}))
+	t.Cleanup(srv.Close)
+	reg := decideprovider.NewRegistry(decideprovider.NewLayaProvider("laya-slow", srv.URL, ""))
+	return NewWithRules(&fakeLLM{}, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), state.NewSessionStore(""),
+		OrchestratorOpts{Deciders: reg, CallbackTimeout: callbackTimeout})
+}
+
+var decideArgs = map[string]string{"state": "s", "choices": `["yes","no"]`}
+
+func TestDecideFollowsRaisedCallbackTimeout(t *testing.T) {
+	orch := slowLayaOrch(t, 300*time.Millisecond, 2*time.Second)
+	_, structured, err := orch.RunActionResult(context.Background(), "laya-slow", "decide", decideArgs)
+	if err != nil {
+		t.Fatalf("decide cut before callback_timeout: %v", err)
+	}
+	if !strings.Contains(structured, "yes") {
+		t.Errorf("structured = %q", structured)
+	}
+}
+
+func TestDecideCutBySmallCallbackTimeout(t *testing.T) {
+	orch := slowLayaOrch(t, 2*time.Second, 100*time.Millisecond)
+	_, _, err := orch.RunActionResult(context.Background(), "laya-slow", "decide", decideArgs)
+	if err == nil || !strings.Contains(err.Error(), "timed out after 100ms") {
+		t.Fatalf("err = %v, want timeout after 100ms", err)
 	}
 }

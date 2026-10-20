@@ -240,3 +240,71 @@ func TestExecuteBidi_HandlerWithoutStreamingImpl(t *testing.T) {
 
 // Compile-time: streamHandler satisfies StreamingHandler.
 var _ StreamingHandler = (*streamHandler)(nil)
+
+func TestExecuteBidi_ConcurrentCallbacksGetTheirOwnRepliesOutOfOrder(t *testing.T) {
+	const n = 8
+	h := &streamHandler{
+		caps: CapabilitiesMsg{Name: "p", SupportsCallbacks: true},
+		body: func(ctx context.Context, req Request, host HostCaller) Response {
+			errs := make(chan error, n)
+			for i := 0; i < n; i++ {
+				go func(i int) {
+					res, err := host.RunAction(ctx, "_subprocess", "run", map[string]string{"i": fmt.Sprint(i)})
+					if err == nil && res.Content != fmt.Sprintf("reply-%d", i) {
+						err = fmt.Errorf("caller %d got %q", i, res.Content)
+					}
+					errs <- err
+				}(i)
+			}
+			for i := 0; i < n; i++ {
+				if err := <-errs; err != nil {
+					return Response{CallID: req.ID, Error: err.Error()}
+				}
+			}
+			return Response{CallID: req.ID, Content: "all matched"}
+		},
+	}
+	srv := &grpcServer{handler: h}
+	stream := newFakeStream()
+	stream.in <- &pluginpb.HostMessage{Payload: &pluginpb.HostMessage_Call{
+		Call: &pluginpb.ToolCallRequest{Id: "c1", Plugin: "p", Action: "go"},
+	}}
+	done := make(chan error, 1)
+	go func() { done <- srv.ExecuteBidi(stream) }()
+
+	reqs := make([]*pluginpb.CallbackRequest, 0, n)
+	for len(reqs) < n {
+		select {
+		case msg := <-stream.outCh:
+			cb := msg.GetCallbackRequest()
+			if cb == nil {
+				t.Fatalf("expected CallbackRequest frame %d, got %T", len(reqs)+1, msg.GetPayload())
+			}
+			reqs = append(reqs, cb)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d of %d callbacks in flight", len(reqs), n)
+		}
+	}
+	for i := len(reqs) - 1; i >= 0; i-- {
+		stream.in <- &pluginpb.HostMessage{Payload: &pluginpb.HostMessage_CallbackResponse{
+			CallbackResponse: &pluginpb.CallbackResponse{Id: reqs[i].GetId(), Content: "reply-" + reqs[i].GetArgs()["i"]},
+		}}
+	}
+
+	select {
+	case msg := <-stream.outCh:
+		res := msg.GetResult()
+		if res == nil {
+			t.Fatalf("expected Result frame, got %T", msg.GetPayload())
+		}
+		if res.GetError() != "" || res.GetContent() != "all matched" {
+			t.Errorf("result = %+v", res)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Result frame")
+	}
+	stream.close()
+	if err := <-done; err != nil && !errors.Is(err, io.EOF) {
+		t.Errorf("ExecuteBidi returned: %v", err)
+	}
+}
