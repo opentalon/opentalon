@@ -221,7 +221,9 @@ type OrchestratorOpts struct {
 	// registered as a plugin named after the decider with one callback-only
 	// `decide` action (tool FQN `<name>__decide`). Validate the names with
 	// CheckDeciderNames first. nil = none.
-	Deciders *decideprovider.Registry
+	Deciders         *decideprovider.Registry
+	CallbackTimeout  time.Duration
+	MaxResponseBytes int
 }
 
 // RepairConfig tunes the post-failure tool-call repair phase (see
@@ -782,6 +784,12 @@ func NewWithRules(
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
+	if opts.CallbackTimeout > 0 {
+		o.guard.Timeout = opts.CallbackTimeout
+	}
+	if opts.MaxResponseBytes > 0 {
+		o.guard.MaxResponseBytes = opts.MaxResponseBytes
+	}
 
 	// Register the orchestrator-owned load_tools meta-tool unconditionally
 	// — it is the core discovery mechanism that turns the system-prompt
@@ -4793,7 +4801,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 			result = o.guard.ExecuteWithTimeout(ctx, exec, call)
 		}
 	} else {
-		result = o.guard.ExecuteWithTimeout(ctx, exec, call)
+		result = o.guard.ExecuteWithDeadline(ctx, exec, call, o.callDeadline(call))
 	}
 	result = o.guard.ValidateResult(call, result)
 	result = o.guard.Sanitize(result)

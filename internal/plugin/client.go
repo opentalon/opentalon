@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -223,6 +224,7 @@ func (c *Client) executeBidiStream(ctx context.Context, req *pluginpb.ToolCallRe
 		return nil, fmt.Errorf("grpc bidi send call: %w", err)
 	}
 
+	var sendMu sync.Mutex
 	for {
 		pm, err := stream.Recv()
 		if err != nil {
@@ -234,11 +236,8 @@ func (c *Client) executeBidiStream(ctx context.Context, req *pluginpb.ToolCallRe
 		case *pluginpb.PluginMessage_CallbackRequest:
 			// Run the callback on a fresh goroutine so a slow upstream
 			// action doesn't stall the receive loop (the plugin may
-			// fire multiple callbacks in parallel; today the SDK
-			// serialises them, but the wire protocol allows parallel —
-			// and stream.Send is not safe for concurrent callers, so a
-			// future parallel-callback SDK needs a send mutex here).
-			go c.handleCallback(orchestrator.WithPluginCaller(ctx, c.name, req.GetAction()), stream, payload.CallbackRequest, cb)
+			// fire multiple callbacks in parallel).
+			go c.handleCallback(orchestrator.WithPluginCaller(ctx, c.name, req.GetAction()), stream, &sendMu, payload.CallbackRequest, cb)
 		default:
 			return nil, fmt.Errorf("grpc bidi: unknown payload %T", payload)
 		}
@@ -260,7 +259,7 @@ func (c *Client) executeBidiStream(ctx context.Context, req *pluginpb.ToolCallRe
 // ExecuteBidi's internal callers have the same reserved-args mechanism as
 // their only identity path — but the external gateway is the first caller
 // with no profile-bearing ctx to fall back on, so it's worth restating.
-func (c *Client) handleCallback(ctx context.Context, stream pluginpb.PluginService_ExecuteBidiClient, req *pluginpb.CallbackRequest, cb orchestrator.CallbackHandler) {
+func (c *Client) handleCallback(ctx context.Context, stream pluginpb.PluginService_ExecuteBidiClient, sendMu *sync.Mutex, req *pluginpb.CallbackRequest, cb orchestrator.CallbackHandler) {
 	ctx, args := applyCallbackIdentity(ctx, req.GetArgs())
 	content, structured, err := cb.RunActionResult(ctx, req.GetPlugin(), req.GetAction(), args)
 	resp := &pluginpb.CallbackResponse{Id: req.GetId()}
@@ -270,9 +269,12 @@ func (c *Client) handleCallback(ctx context.Context, stream pluginpb.PluginServi
 		resp.Content = content
 		resp.StructuredContent = structured
 	}
-	if sendErr := stream.Send(&pluginpb.HostMessage{
+	sendMu.Lock()
+	sendErr := stream.Send(&pluginpb.HostMessage{
 		Payload: &pluginpb.HostMessage_CallbackResponse{CallbackResponse: resp},
-	}); sendErr != nil {
+	})
+	sendMu.Unlock()
+	if sendErr != nil {
 		// The stream's gone; nothing to do here. The plugin will see
 		// its Recv fail too and abort the action — that becomes a
 		// grpc bidi recv error in the ExecuteBidi loop above.

@@ -318,3 +318,34 @@ func TestSanitizeReplacesInvalidUTF8InStructuredContent(t *testing.T) {
 		t.Errorf("structured content still contains invalid UTF-8: %q", result.StructuredContent)
 	}
 }
+
+func TestSanitizeOversizedStructuredContentBecomesError(t *testing.T) {
+	g := NewGuard()
+	g.MaxResponseBytes = 10
+	out := g.Sanitize(ToolResult{CallID: "1", Content: "ok", StructuredContent: `{"a":"0123456789"}`})
+	if out.StructuredContent != "" {
+		t.Errorf("oversized structured content must not be returned, got %q", out.StructuredContent)
+	}
+	if !strings.Contains(out.Error, "18 bytes") || !strings.Contains(out.Error, "10") || !strings.Contains(out.Error, "max_response_bytes") {
+		t.Errorf("error = %q, want size, limit and config key", out.Error)
+	}
+}
+
+func TestSanitizeStructuredContentAtLimitPassesIntact(t *testing.T) {
+	g := NewGuard()
+	in := `{"a":"0123456789"}`
+	g.MaxResponseBytes = len(in)
+	out := g.Sanitize(ToolResult{CallID: "1", StructuredContent: in})
+	if out.StructuredContent != in || out.Error != "" {
+		t.Errorf("at-limit structured content changed: %+v", out)
+	}
+}
+
+func TestSanitizeOversizedStructuredContentKeepsExistingError(t *testing.T) {
+	g := NewGuard()
+	g.MaxResponseBytes = 15
+	out := g.Sanitize(ToolResult{CallID: "1", Error: "plugin failed", StructuredContent: `{"a":"0123456789"}`})
+	if out.Error != "plugin failed" || out.StructuredContent != "" {
+		t.Errorf("got %+v", out)
+	}
+}

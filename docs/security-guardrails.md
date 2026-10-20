@@ -9,10 +9,10 @@ Every plugin response passes through a **guard pipeline** before reaching the LL
 ```mermaid
 flowchart TD
     LLM[LLM decides tool call] --> Validate[Validate call against registry]
-    Validate --> Timeout["Set timeout (default 30s)"]
+    Validate --> Timeout["Set timeout (callback_timeout, default 30s)"]
     Timeout --> Execute[Execute plugin via gRPC]
-    Execute --> SizeCheck{Response within 64KB limit?}
-    SizeCheck -->|No| Truncate[Truncate + add notice]
+    Execute --> SizeCheck{"Response within max_response_bytes (default 64KB)?"}
+    SizeCheck -->|No| Truncate["Truncate text + add notice; oversized structured content becomes an error"]
     SizeCheck -->|Yes| Sanitize[Strip forbidden patterns]
     Truncate --> Sanitize
     Sanitize --> ValidateResult{CallID matches? Fields valid?}
