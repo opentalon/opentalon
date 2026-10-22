@@ -191,8 +191,8 @@ func TestSubprocessUsageWithoutIdentityIsUnattributed(t *testing.T) {
 	if _, err := orch.RunAction(context.Background(), "_subprocess", "run", map[string]string{"task": "x"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(usage.calls) != 1 || usage.calls[0].entityID != unattributedEntity {
-		t.Fatalf("usage = %+v, want one row under %s", usage.calls, unattributedEntity)
+	if len(usage.calls) != 1 || usage.calls[0].entityID != unattributedEntity || usage.calls[0].inCost != 0.25 || usage.calls[0].outCost != 0.5 {
+		t.Fatalf("usage = %+v, want one row under %s with the provider's cost", usage.calls, unattributedEntity)
 	}
 }
 
