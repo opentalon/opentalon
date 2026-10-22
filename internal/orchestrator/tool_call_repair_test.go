@@ -935,8 +935,8 @@ func TestRepair_ApprovedCall_RepairedWithoutReconfirmation(t *testing.T) {
 		ID: "pending-1", Plugin: "inventory", Action: "update-item",
 		Args:    map[string]string{"item_id": "7", "user_id": "131349"},
 		FromLLM: true,
-	}, "", approvedPrompt)
-	if restored, _, prompt := loadPendingToolCall(orch.sessions, sessID); restored == nil || !restored.FromLLM || prompt != approvedPrompt {
+	}, "", approvedPrompt, nil)
+	if restored, _, prompt, _ := loadPendingToolCall(orch.sessions, sessID); restored == nil || !restored.FromLLM || prompt != approvedPrompt {
 		t.Fatal("pending-call roundtrip must preserve FromLLM and the approved prompt")
 	}
 

@@ -1,0 +1,16 @@
+-- Per-message thinking blocks: the thinking and redacted_thinking blocks of
+-- the model response an assistant tool-call message came from, as a JSON array
+-- of the blocks exactly as the provider returned them (text and signature).
+-- Anthropic requires them back, unchanged and ahead of the tool_use blocks, on
+-- every later request of the conversation; loadMessages reads them into
+-- Message.Thinking for that replay.
+--
+-- Schema portability: TEXT-only (a JSON-encoded array, mirroring how
+-- tool_calls is stored in migration 008). No jsonb / generated columns, so the
+-- same migration runs on SQLite and PostgreSQL. NULL = no blocks: messages
+-- written before this migration, every message that is not an assistant
+-- tool call, and every response without thinking leave the column NULL.
+--
+-- Deploy order: the api-plugin reads messages by column name and never this
+-- one, so the added column changes nothing for any api-plugin build.
+ALTER TABLE messages ADD COLUMN thinking TEXT;

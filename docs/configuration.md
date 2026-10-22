@@ -304,6 +304,10 @@ models:
   effort for that turn. When the effort changes between two requests of a
   conversation, Anthropic reads a different prompt start, so with
   `prompt_cache: true` the conversation is written to the cache again.
+- The thinking blocks a response returns together with tool calls are stored
+  with the conversation and sent back unchanged, ahead of those tool calls, on
+  every later request of the conversation, as Anthropic requires in a tool
+  loop. This holds for thinking by budget as well.
 - `thinking` takes `adaptive` only. Any other value, `thinking: adaptive` on
   a provider whose `api` is not `anthropic-messages`, or a `reasoning_effort`
   other than the five levels on such a model fails loading the config with

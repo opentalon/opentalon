@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -232,14 +233,14 @@ func TestMaybeRequireConfirmation_ToolNotInSentArrayNeverPrompts(t *testing.T) {
 
 	// Not in the sent array → confirmation SKIPPED (falls through to executeCall's refusal).
 	rr, raised := orch.maybeRequireConfirmation(ctx, sessions, "s1",
-		ToolCall{ID: "c1", Plugin: "p", Action: "catalog_write", FromLLM: true}, "do it", nil, false)
+		ToolCall{ID: "c1", Plugin: "p", Action: "catalog_write", FromLLM: true}, "do it", nil, false, nil)
 	if raised || rr != nil {
 		t.Fatalf("a tool not in the sent array must not raise a confirmation, got raised=%v rr=%v", raised, rr)
 	}
 
 	// In the sent array → confirmation IS raised.
 	rr2, raised2 := orch.maybeRequireConfirmation(ctx, sessions, "s1",
-		ToolCall{ID: "c2", Plugin: "p", Action: "sent_write", FromLLM: true}, "do it", nil, false)
+		ToolCall{ID: "c2", Plugin: "p", Action: "sent_write", FromLLM: true}, "do it", nil, false, nil)
 	if !raised2 || rr2 == nil {
 		t.Fatalf("a sent write tool must raise a confirmation, got raised=%v rr=%v", raised2, rr2)
 	}
@@ -280,7 +281,7 @@ func TestMaybeRequireConfirmation_UnresolvableCallNeverPrompts(t *testing.T) {
 		{ID: "c2", Plugin: "ghost", Action: "sent_write", FromLLM: true}, // unknown plugin
 		{ID: "c3", Plugin: "p", Action: "p__load_tools", FromLLM: true},  // meta action mangled under a plugin prefix
 	} {
-		rr, raised := orch.maybeRequireConfirmation(ctx, sessions, "s1", call, "do it", nil, false)
+		rr, raised := orch.maybeRequireConfirmation(ctx, sessions, "s1", call, "do it", nil, false, nil)
 		if raised || rr != nil {
 			t.Fatalf("unresolvable call %s/%s must not raise a confirmation, got raised=%v rr=%v",
 				call.Plugin, call.Action, raised, rr)
@@ -325,7 +326,7 @@ func TestMaybeRequireConfirmation_InterruptedBatchRecordedBeforePrompt(t *testin
 
 	gated := ToolCall{ID: "c-a", Plugin: "p", Action: "write_a", FromLLM: true, Args: map[string]string{"name": "A"}}
 	dropped := ToolCall{ID: "c-b", Plugin: "p", Action: "write_b", FromLLM: true, Args: map[string]string{"name": "B"}}
-	rr, raised := orch.maybeRequireConfirmation(ctx, sessions, "s1", gated, "create both", []ToolCall{dropped}, true)
+	rr, raised := orch.maybeRequireConfirmation(ctx, sessions, "s1", gated, "create both", []ToolCall{dropped}, true, nil)
 	if !raised || rr == nil {
 		t.Fatalf("gated write must raise a confirmation, got raised=%v rr=%v", raised, rr)
 	}
@@ -362,7 +363,7 @@ func TestMaybeRequireConfirmation_InterruptedBatchRecordedInTextMode(t *testing.
 	gated := ToolCall{ID: "c-a", Plugin: "p", Action: "write_a", FromLLM: true, Args: map[string]string{"name": "A"}}
 	dropped := ToolCall{ID: "c-b", Plugin: "p", Action: "write_b", FromLLM: true, Args: map[string]string{"name": "B"}}
 	if _, raised := orch.maybeRequireConfirmation(sentCtx("p__write_a", "p__write_b"), sessions, "s1",
-		gated, "create both", []ToolCall{dropped}, false); !raised {
+		gated, "create both", []ToolCall{dropped}, false, nil); !raised {
 		t.Fatal("gated write must raise a confirmation")
 	}
 
@@ -395,7 +396,7 @@ func TestMaybeRequireConfirmation_NoConfirmationRecordsNoTrace(t *testing.T) {
 	readOnly := ToolCall{ID: "c-r", Plugin: "p", Action: "read_x", FromLLM: true}
 	dropped := ToolCall{ID: "c-b", Plugin: "p", Action: "write_b", FromLLM: true}
 	rr, raised := orch.maybeRequireConfirmation(sentCtx("p__read_x", "p__write_b"), sessions, "s1",
-		readOnly, "just look", []ToolCall{dropped}, true)
+		readOnly, "just look", []ToolCall{dropped}, true, nil)
 	if raised || rr != nil {
 		t.Fatalf("a read-only call must not raise a confirmation, got raised=%v rr=%v", raised, rr)
 	}
@@ -445,7 +446,9 @@ func interruptedTraceFixture(t *testing.T) (*Orchestrator, *state.SessionStore) 
 // not vanish — the real loop hands calls[i+1:] to the gate, which records the
 // explicit NOT EXECUTED exchange before the prompt row, and neither write may
 // have executed. Pins the exact wiring the unit test above cannot see (the
-// call-site slice and the per-response native flag).
+// call-site slice and the per-response native flag). The dropped call's
+// message is the first stored for the response, so it takes the response's
+// thinking blocks and the pending call keeps none.
 func TestRun_ConfirmationMidBatchLeavesNotExecutedTrace(t *testing.T) {
 	exec := &countingExecutor{}
 	registry := NewToolRegistry()
@@ -466,7 +469,7 @@ func TestRun_ConfirmationMidBatchLeavesNotExecutedTrace(t *testing.T) {
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
 	llm := &scriptedNativeLLM{rounds: []provider.CompletionResponse{
-		{ToolCalls: []provider.ToolCall{
+		{Thinking: replayThinking, ToolCalls: []provider.ToolCall{
 			{ID: "c-a", Name: "p__write_a", Arguments: map[string]string{"name": "A"}},
 			{ID: "c-b", Name: "p__write_b", Arguments: map[string]string{"name": "B"}},
 		}},
@@ -513,8 +516,11 @@ func TestRun_ConfirmationMidBatchLeavesNotExecutedTrace(t *testing.T) {
 		t.Errorf("dropped exchange must precede the prompt row, got call=%d result=%d prompt=%d",
 			droppedCallIdx, droppedResultIdx, promptIdx)
 	}
-	if pending, _, _ := loadPendingToolCall(sessions, "s1"); pending == nil || pending.ID != "c-a" {
-		t.Errorf("pending call must be the gated write_a (c-a), got %+v", pending)
+	if pending, _, _, thinking := loadPendingToolCall(sessions, "s1"); pending == nil || pending.ID != "c-a" || thinking != nil {
+		t.Errorf("pending call must be the gated write_a (c-a) without thinking, got %+v with %q", pending, thinking)
+	}
+	if got := s.Messages[droppedCallIdx].Thinking; !reflect.DeepEqual(got, replayThinking) {
+		t.Errorf("dropped call message thinking = %q, want the response's blocks", got)
 	}
 }
 

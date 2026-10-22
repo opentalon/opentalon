@@ -280,6 +280,19 @@ type anthContentBlock struct {
 	// tool_result (user echoes back the tool result)
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
+	// raw is a response block's JSON as received; a thinking block must go
+	// back exactly as it came.
+	raw json.RawMessage
+}
+
+// UnmarshalJSON decodes a block and keeps its JSON as received in b.raw.
+func (b *anthContentBlock) UnmarshalJSON(data []byte) error {
+	type plain anthContentBlock
+	if err := json.Unmarshal(data, (*plain)(b)); err != nil {
+		return err
+	}
+	b.raw = append(json.RawMessage(nil), data...)
+	return nil
 }
 
 type anthImageSource struct {
@@ -414,7 +427,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		}
 	}
 
-	content, thinking, toolCalls := p.extractContent(anthResp.Content)
+	content, thinking, thinkingBlocks, toolCalls := p.extractContent(anthResp.Content)
 
 	// Log thinking blocks when present.
 	if thinking != "" {
@@ -464,6 +477,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		Model:     anthResp.Model,
 		Content:   content,
 		ToolCalls: toolCalls,
+		Thinking:  thinkingBlocks,
 		Usage:     usage,
 		EventID:   eventID,
 	}, nil
@@ -613,9 +627,10 @@ func toolDefsToAnthTools(defs []ToolDefinition) []anthTool {
 //     content block — Anthropic carries tool results in user-role
 //     messages, not in a separate "tool" role like OpenAI.
 //   - RoleAssistant with ToolCalls: emitted as content blocks =
-//     [optional text] + [one tool_use block per ToolCall], so a replay
-//     of multi-turn history echoes back the assistant's prior tool
-//     invocation in the exact shape Anthropic produced it.
+//     [stored thinking blocks] + [optional text] + [one tool_use block per
+//     ToolCall], so a replay of multi-turn history echoes back the
+//     assistant's prior tool invocation in the exact shape Anthropic
+//     produced it.
 //   - Plain text (no files, no tool_calls): content is a JSON string,
 //     the most compact representation.
 //   - Messages with file attachments: content becomes a JSON array of
@@ -704,12 +719,15 @@ func toolResultMessage(m Message) (anthMessage, error) {
 
 // assistantWithToolUseMessage rebuilds an assistant turn whose response
 // contained tool_use blocks. Replay history needs the exact wire shape
-// Anthropic emitted: optional preamble text + N tool_use blocks (id,
-// name, input). Arguments come back from the orchestrator's typed
-// ToolCall.Arguments map[string]string; re-shape to JSON object so
-// Anthropic accepts the input field.
+// Anthropic emitted: the response's thinking blocks unchanged + optional
+// preamble text + N tool_use blocks (id, name, input). Arguments come back
+// from the orchestrator's typed ToolCall.Arguments map[string]string;
+// re-shape to JSON object so Anthropic accepts the input field.
 func assistantWithToolUseMessage(m Message) (anthMessage, error) {
-	var blocks []anthContentBlock
+	blocks := make([]any, 0, len(m.Thinking)+1+len(m.ToolCalls))
+	for _, t := range m.Thinking {
+		blocks = append(blocks, t)
+	}
 	if m.Content != "" {
 		blocks = append(blocks, anthContentBlock{Type: "text", Text: m.Content})
 	}
@@ -741,8 +759,9 @@ func assistantWithToolUseMessage(m Message) (anthMessage, error) {
 // blocks into the orchestrator's ToolCall shape. The arguments JSON
 // object is flattened to map[string]string (nil and "" entries dropped)
 // to match how openai.go shapes ToolCall.Arguments — keeps downstream
-// dispatcher code provider-agnostic.
-func (p *AnthropicProvider) extractContent(blocks []anthContentBlock) (content, thinking string, toolCalls []ToolCall) {
+// dispatcher code provider-agnostic. thinkingBlocks holds the thinking and
+// redacted_thinking blocks as received, for the replay.
+func (p *AnthropicProvider) extractContent(blocks []anthContentBlock) (content, thinking string, thinkingBlocks []json.RawMessage, toolCalls []ToolCall) {
 	var textParts, thinkParts []string
 	for _, b := range blocks {
 		switch b.Type {
@@ -750,11 +769,14 @@ func (p *AnthropicProvider) extractContent(blocks []anthContentBlock) (content, 
 			textParts = append(textParts, b.Text)
 		case "thinking":
 			thinkParts = append(thinkParts, b.Thinking)
+			thinkingBlocks = append(thinkingBlocks, b.raw)
+		case "redacted_thinking":
+			thinkingBlocks = append(thinkingBlocks, b.raw)
 		case "tool_use":
 			toolCalls = append(toolCalls, anthToolUseToToolCall(b))
 		}
 	}
-	return joinStrings(textParts), joinStrings(thinkParts), toolCalls
+	return joinStrings(textParts), joinStrings(thinkParts), thinkingBlocks, toolCalls
 }
 
 func anthToolUseToToolCall(b anthContentBlock) ToolCall {

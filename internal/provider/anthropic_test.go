@@ -668,7 +668,7 @@ func TestAnthropicMultipleToolUseBlocks(t *testing.T) {
 // carries its text in the `thinking` field (not `text`) and is captured by
 // extractContent. Regression guard for reading the wrong field.
 func TestAnthropicThinkingBlockExtraction(t *testing.T) {
-	content, thinking, calls := (&AnthropicProvider{}).extractContent([]anthContentBlock{
+	content, thinking, _, calls := (&AnthropicProvider{}).extractContent([]anthContentBlock{
 		{Type: "thinking", Thinking: "step-by-step reasoning"},
 		{Type: "text", Text: "final answer"},
 	})
@@ -680,6 +680,72 @@ func TestAnthropicThinkingBlockExtraction(t *testing.T) {
 	}
 	if len(calls) != 0 {
 		t.Errorf("tool_calls = %d, want 0", len(calls))
+	}
+}
+
+// Thinking blocks of a tool-calling response, as Anthropic returns them: the
+// signature and the redacted data are fields the provider does not model.
+const (
+	thinkingBlock         = `{"type":"thinking","thinking":"","signature":"sig-1"}`
+	redactedThinkingBlock = `{"type":"redacted_thinking","data":"enc-1"}`
+)
+
+// TestAnthropicReplaysThinkingBlocks sends a conversation's next request
+// after a response with thinking blocks and a tool call: the assistant
+// message goes back as the thinking blocks unchanged, then its text, then its
+// tool_use. The same message without blocks is sent as before.
+func TestAnthropicReplaysThinkingBlocks(t *testing.T) {
+	const toolUse = `{"type":"tool_use","id":"toolu_1","name":"inv__list-items","input":{"limit":"5"}}`
+	const textAndToolUse = `{"type":"text","text":"Checking."},` + toolUse
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(body))
+		content := `{"type":"text","text":"Done."}`
+		if len(bodies) == 1 {
+			content = thinkingBlock + "," + redactedThinkingBlock + "," + textAndToolUse
+		}
+		_, _ = io.WriteString(w, `{"id":"r","model":"claude-x","content":[`+content+`],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer server.Close()
+	p := NewAnthropicProvider("anthropic", server.URL, "key", nil)
+	user := Message{Role: RoleUser, Content: "How many items?"}
+
+	resp, err := p.Complete(context.Background(), &CompletionRequest{Model: "claude-x", Messages: []Message{user}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Thinking) != 2 || string(resp.Thinking[0]) != thinkingBlock || string(resp.Thinking[1]) != redactedThinkingBlock {
+		t.Fatalf("response thinking = %q, want both blocks as received", resp.Thinking)
+	}
+
+	cases := []struct {
+		name        string
+		thinking    []json.RawMessage
+		wantContent string
+	}{
+		{"with blocks", resp.Thinking, `[` + thinkingBlock + `,` + redactedThinkingBlock + `,` + textAndToolUse + `]`},
+		{"without blocks", nil, `[` + textAndToolUse + `]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assistant := Message{Role: RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls, Thinking: tc.thinking}
+			result := Message{Role: RoleTool, Content: "5 items", ToolCallID: "toolu_1"}
+			if _, err := p.Complete(context.Background(), &CompletionRequest{Model: "claude-x", Messages: []Message{user, assistant, result}}); err != nil {
+				t.Fatal(err)
+			}
+			var sent struct {
+				Messages []struct {
+					Content json.RawMessage `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.Unmarshal([]byte(bodies[len(bodies)-1]), &sent); err != nil {
+				t.Fatal(err)
+			}
+			if got := string(sent.Messages[1].Content); got != tc.wantContent {
+				t.Errorf("replayed assistant content:\n got %s\nwant %s", got, tc.wantContent)
+			}
+		})
 	}
 }
 

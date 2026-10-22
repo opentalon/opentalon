@@ -1558,8 +1558,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// could route a later message into a second execution.)
 	var pendingCall *ToolCall
 	var pendingCallConfID, pendingCallPrompt string
+	var pendingCallThinking []json.RawMessage
 	if !hidden {
-		pendingCall, pendingCallConfID, pendingCallPrompt = loadPendingToolCall(sessions, sessionID)
+		pendingCall, pendingCallConfID, pendingCallPrompt, pendingCallThinking = loadPendingToolCall(sessions, sessionID)
 	}
 	var pendingMetaClearErr error
 	if pendingCall != nil {
@@ -1620,7 +1621,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			tr := ToolResult{CallID: execCall.ID, Content: result.Content, StructuredContent: result.StructuredContent, Error: result.Error}
 			if o.supportsNativeTools() {
 				_ = sessions.AddMessage(sessionID, provider.Message{
-					Role: provider.RoleAssistant,
+					Role:     provider.RoleAssistant,
+					Thinking: pendingCallThinking,
 					ToolCalls: []provider.ToolCall{{
 						ID: execCall.ID, Name: toolFQN(execCall.Plugin, execCall.Action), Arguments: execCall.Args,
 					}},
@@ -2088,7 +2090,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				// server-side single-step path would execute a write — including
 				// an amend re-plan's corrected write — with no consent. Read-only
 				// / bypass calls fall straight through to execution.
-				if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, call, userMessage, nil, false); raised {
+				if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, call, userMessage, nil, false, nil); raised {
 					return rr, nil
 				}
 				toolResult := o.executeCall(ctx, call)
@@ -2729,6 +2731,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		perCallInput := resp.Usage.InputTokens / max(len(calls), 1)
 		perCallOutput := resp.Usage.OutputTokens / max(len(calls), 1)
 
+		// The response's thinking blocks, until the first native tool-call
+		// message stored for the response takes them (takeThinking).
+		var thinking []json.RawMessage
+		if nativeToolCalls {
+			thinking = resp.Thinking
+		}
+
 		for i := range calls {
 			calls[i].FromLLM = true
 
@@ -2763,7 +2772,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// the two sites can't drift. Narrates the prompt in the user's
 			// language, stores + persists the pending call, and returns the
 			// confirmation; read-only / bypass calls fall through to execution.
-			if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, calls[i], userMessage, calls[i+1:], nativeToolCalls); raised {
+			if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, calls[i], userMessage, calls[i+1:], nativeToolCalls, &thinking); raised {
 				return rr, nil
 			}
 
@@ -2846,8 +2855,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				// Native tool calling: store assistant message with tool_calls
 				// and tool result as role=tool with tool_call_id.
 				_ = sessions.AddMessage(sessionID, provider.Message{
-					Role:    provider.RoleAssistant,
-					Content: resp.Content,
+					Role:     provider.RoleAssistant,
+					Content:  resp.Content,
+					Thinking: takeThinking(&thinking),
 					ToolCalls: []provider.ToolCall{{
 						ID:        call.ID,
 						Name:      toolFQN(call.Plugin, call.Action),
@@ -3211,7 +3221,7 @@ func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content strin
 	// Tool call: the persisted blob is the single source of pending tool-call
 	// state (survives restart / failover, shared across pods) and carries the
 	// approved-intent prompt it was stored with.
-	if pendingCall, _, prompt := loadPendingToolCall(o.sessions, sessionID); pendingCall != nil {
+	if pendingCall, _, prompt, _ := loadPendingToolCall(o.sessions, sessionID); pendingCall != nil {
 		return prompt, toolConfirmationFrameMetadata(pendingCall.ID), true
 	}
 
@@ -3248,9 +3258,12 @@ func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content strin
 // prompt+reply pair stays adjacent for stripApprovedConfirmationExchanges.
 // interruptedNative says how THIS response's calls are being recorded (the
 // loop's per-response native flag), so the pairs match the surrounding format.
+// thinking holds the response's thinking blocks no stored message has taken
+// yet: a raised confirmation hands them to the first interrupted call's
+// message, else to the pending call (takeThinking). nil holds none.
 func (o *Orchestrator) maybeRequireConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
-	interrupted []ToolCall, interruptedNative bool,
+	interrupted []ToolCall, interruptedNative bool, thinking *[]json.RawMessage,
 ) (*RunResult, bool) {
 	if call.ConfirmationBypass {
 		return nil, false
@@ -3343,7 +3356,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// crowd the real conversation out of the window it reads; and before the
 	// prompt row below, so a resolved prompt+reply pair stays adjacent for
 	// stripApprovedConfirmationExchanges.
-	o.recordConfirmationInterruptedCalls(sessionID, sessions, call, interrupted, interruptedNative)
+	o.recordConfirmationInterruptedCalls(sessionID, sessions, call, interrupted, interruptedNative, thinking)
 	// Store the prompt so the next turn has context for the reply/amend, and
 	// persist the confirmation-frame metadata on that row so a reloaded client
 	// rebuilds the Approve/Reject buttons from the transcript (the live frame's
@@ -3363,7 +3376,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// actually approves, kept with the call so a post-approval repair can hand
 	// the corrector the approved intent without the session history.
 	pending := call
-	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg)
+	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg, takeThinking(thinking))
 	return &RunResult{
 		Response: confirmMsg,
 		Metadata: frameMeta,
@@ -5237,6 +5250,22 @@ type pendingToolCallMeta struct {
 	// passes executeCall's unknown-args validation. Rows persisted before
 	// this field unmarshal to false — exactly how they were restored then.
 	FromLLM bool `json:"from_llm,omitempty"`
+	// Thinking holds the thinking blocks of the response that issued the
+	// call, for the assistant message the approval stores.
+	Thinking []json.RawMessage `json:"thinking,omitempty"`
+}
+
+// takeThinking returns the blocks *pending holds and empties it, so the
+// thinking blocks of a response ride on the first assistant message stored
+// for it and on no later one: a replay sends each block once. A nil pending
+// holds none.
+func takeThinking(pending *[]json.RawMessage) []json.RawMessage {
+	if pending == nil {
+		return nil
+	}
+	blocks := *pending
+	*pending = nil
+	return blocks
 }
 
 // recordConfirmationInterruptedCalls writes one history exchange per tool call
@@ -5249,9 +5278,10 @@ type pendingToolCallMeta struct {
 // carries a result) and tells the model in plain words to re-issue the call
 // after the confirmation resolves. `native` mirrors how the surrounding loop
 // records THIS response's calls (per-response flag, not the provider
-// capability), so transcript formats stay uniform within the turn.
+// capability), so transcript formats stay uniform within the turn. The first
+// native call message takes the response's thinking blocks left in thinking.
 func (o *Orchestrator) recordConfirmationInterruptedCalls(
-	sessionID string, sessions SessionStoreInterface, gated ToolCall, dropped []ToolCall, native bool,
+	sessionID string, sessions SessionStoreInterface, gated ToolCall, dropped []ToolCall, native bool, thinking *[]json.RawMessage,
 ) {
 	notice := fmt.Sprintf(
 		"NOT EXECUTED — this call was issued in the same response as %s, which is now waiting for the user's confirmation. It did not run and changed nothing. Issue it again after that confirmation is resolved if it is still needed.",
@@ -5260,7 +5290,8 @@ func (o *Orchestrator) recordConfirmationInterruptedCalls(
 		result := ToolResult{CallID: dc.ID, Content: notice}
 		if native {
 			_ = sessions.AddMessage(sessionID, provider.Message{
-				Role: provider.RoleAssistant,
+				Role:     provider.RoleAssistant,
+				Thinking: takeThinking(thinking),
 				ToolCalls: []provider.ToolCall{{
 					ID:        dc.ID,
 					Name:      toolFQN(dc.Plugin, dc.Action),
@@ -5285,7 +5316,7 @@ func (o *Orchestrator) recordConfirmationInterruptedCalls(
 	}
 }
 
-func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID, prompt string) {
+func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID, prompt string, thinking []json.RawMessage) {
 	meta := pendingToolCallMeta{
 		ID:                      tc.ID,
 		Plugin:                  tc.Plugin,
@@ -5294,6 +5325,7 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 		ConfirmationRequestedID: confirmationRequestedID,
 		Prompt:                  prompt,
 		FromLLM:                 tc.FromLLM,
+		Thinking:                thinking,
 	}
 	data, err := json.Marshal(meta)
 	if err != nil {
@@ -5303,23 +5335,24 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 }
 
 // loadPendingToolCall restores the pending tool call from session metadata.
-// Returns the ToolCall, the confirmation_requested event id, and the
+// Returns the ToolCall, the confirmation_requested event id, the
 // confirmation prompt (either string empty when the persisted row predates
-// the field or nothing was captured).
-func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string, string) {
+// the field or nothing was captured), and the thinking blocks of the
+// response that issued the call.
+func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string, string, []json.RawMessage) {
 	sess, err := sessions.Get(sessionID)
 	if err != nil || sess == nil {
-		return nil, "", ""
+		return nil, "", "", nil
 	}
 	raw := sess.Metadata["pending_tool_call"]
 	if raw == "" {
-		return nil, "", ""
+		return nil, "", "", nil
 	}
 	var meta pendingToolCallMeta
 	if json.Unmarshal([]byte(raw), &meta) != nil {
-		return nil, "", ""
+		return nil, "", "", nil
 	}
-	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args, FromLLM: meta.FromLLM}, meta.ConfirmationRequestedID, meta.Prompt
+	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args, FromLLM: meta.FromLLM}, meta.ConfirmationRequestedID, meta.Prompt, meta.Thinking
 }
 
 // toolCallSignature builds a deterministic string from a set of tool calls

@@ -28,8 +28,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 16 {
-		t.Errorf("schema_version = %d, want 16", v)
+	if v != 17 {
+		t.Errorf("schema_version = %d, want 17", v)
 	}
 
 	// Re-open: idempotent, no error
@@ -42,8 +42,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version (second open): %v", err)
 	}
-	if v != 16 {
-		t.Errorf("schema_version after re-open = %d, want 16", v)
+	if v != 17 {
+		t.Errorf("schema_version after re-open = %d, want 17", v)
 	}
 }
 
@@ -498,6 +498,62 @@ func TestSessionStore_SetSummaryPreservesToolCalls(t *testing.T) {
 	if sess.Messages[2].ToolCallID != "call_x" {
 		t.Errorf("ToolCallID after SetSummary = %q", sess.Messages[2].ToolCallID)
 	}
+}
+
+// TestSessionStore_ThinkingRoundTrip stores an assistant tool-call message
+// with thinking blocks and reads them back unchanged, after AddMessage and
+// after SetSummary keeps the message. A row without thinking, as every row
+// written before migration 017 is, loads with no blocks.
+func TestSessionStore_ThinkingRoundTrip(t *testing.T) {
+	db, err := Open(config.DBConfig{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	sessStore := NewSessionStore(db, 0, 0)
+	sessStore.Create(state.SessionParams{ID: "s1"})
+
+	if _, err := db.SQLDB().Exec(
+		db.Dialect().Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?)`),
+		"s1", 1, "assistant", "", `[{"id":"call_old","name":"items.list","arguments":{}}]`, time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert row without thinking: %v", err)
+	}
+	blocks := []json.RawMessage{
+		json.RawMessage(`{"type":"thinking","thinking":"","signature":"sig-1"}`),
+		json.RawMessage(`{"type":"redacted_thinking","data":"enc-1"}`),
+	}
+	if err := sessStore.AddMessage("s1", provider.Message{
+		Role:      provider.RoleAssistant,
+		ToolCalls: []provider.ToolCall{{ID: "call_new", Name: "items.list", Arguments: map[string]string{}}},
+		Thinking:  blocks,
+	}); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+
+	check := func(after string) []provider.Message {
+		t.Helper()
+		sess, err := sessStore.Get("s1")
+		if err != nil {
+			t.Fatalf("Get after %s: %v", after, err)
+		}
+		if len(sess.Messages) != 2 {
+			t.Fatalf("after %s: %d messages, want 2", after, len(sess.Messages))
+		}
+		if got := sess.Messages[0].Thinking; got != nil {
+			t.Errorf("after %s: row without thinking loaded blocks %q", after, got)
+		}
+		got := sess.Messages[1].Thinking
+		if len(got) != len(blocks) || string(got[0]) != string(blocks[0]) || string(got[1]) != string(blocks[1]) {
+			t.Errorf("after %s: thinking = %q, want %q", after, got, blocks)
+		}
+		return sess.Messages
+	}
+	msgs := check("AddMessage")
+	if err := sessStore.SetSummary("s1", "summary", msgs); err != nil {
+		t.Fatalf("SetSummary: %v", err)
+	}
+	check("SetSummary")
 }
 
 // TestRunPluginMigrations_BinaryPath ensures that passing the directory of the

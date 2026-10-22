@@ -1,6 +1,9 @@
 package provider
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 type Role string
 
@@ -24,6 +27,10 @@ type Message struct {
 	Files      []MessageFile `json:"files,omitempty"`
 	ToolCallID string        `json:"tool_call_id,omitempty"` // for role=tool messages (native function calling)
 	ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`   // for role=assistant messages with native tool calls
+	// Thinking holds the thinking and redacted_thinking blocks of the response
+	// an assistant tool-call message came from, each as the JSON the provider
+	// returned, so a replay sends them back unchanged. Anthropic only.
+	Thinking []json.RawMessage `json:"thinking,omitempty"`
 	// Visibility "hidden" marks a message that IS fed to the model (it rides in
 	// role+content) but is dropped from the user-facing transcript — the inverse
 	// of the per-message metadata column. Empty means visible. Applies to
@@ -113,7 +120,10 @@ type CompletionResponse struct {
 	Model     string     `json:"model"`
 	Content   string     `json:"content"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // native tool calls from LLM; nil = check Content for text-based calls
-	Usage     Usage      `json:"usage"`
+	// Thinking holds the response's thinking and redacted_thinking blocks as
+	// returned (Anthropic only), for the message that stores its tool calls.
+	Thinking []json.RawMessage `json:"thinking,omitempty"`
+	Usage    Usage             `json:"usage"`
 
 	// EventID is the session-event id of the llm_response event the
 	// provider emitted for this completion (empty when no event sink is
