@@ -6013,10 +6013,26 @@ const knowledgeCatalogAction = "list_knowledge_titles"
 // MCP server's articles change), so a few minutes of staleness is fine.
 const knowledgeCatalogTTL = 5 * time.Minute
 
+// WarmKnowledgeCatalog fetches the catalog once, synchronously, so the first
+// system prompt after startup already carries it. Without it the first prompt
+// goes out without the section and every later one with it, which changes the
+// shared prefix once per process start.
+func (o *Orchestrator) WarmKnowledgeCatalog(ctx context.Context) {
+	o.knowledgeCatalogMu.Lock()
+	if o.knowledgeCatalogRefreshing {
+		o.knowledgeCatalogMu.Unlock()
+		return
+	}
+	o.knowledgeCatalogRefreshing = true
+	o.knowledgeCatalogMu.Unlock()
+	o.refreshKnowledgeCatalog(ctx)
+}
+
 // knowledgeCatalogSection returns the cached "## Available knowledge" block and,
 // when the cache is stale, kicks off a single-flight background refresh so the
-// hot path (buildSystemPrompt) never blocks on a network call. The first call
-// after startup returns "" and warms the cache for subsequent calls.
+// hot path (buildSystemPrompt) never blocks on a network call. Without a
+// WarmKnowledgeCatalog call the first call after startup returns "" and warms
+// the cache for subsequent calls.
 func (o *Orchestrator) knowledgeCatalogSection() string {
 	o.knowledgeCatalogMu.RLock()
 	section := o.knowledgeCatalog

@@ -969,6 +969,8 @@ func main() {
 	} else {
 		slog.Info("startup: sync skipped (follower), orchestrator ready", "component", "startup")
 	}
+	// Every pod builds its own prompts, so every pod fetches the catalog.
+	orch.WarmKnowledgeCatalog(ctx)
 
 	// Forward-declare channelManager so the OnPluginLoaded closure can
 	// reference it for readiness checks (channelManager is created below).
