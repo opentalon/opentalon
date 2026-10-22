@@ -3771,7 +3771,8 @@ func TestTurnEffortReachesAdaptiveThinking(t *testing.T) {
 	if err := json.Unmarshal([]byte(bodies[0]), &sent); err != nil {
 		t.Fatal(err)
 	}
-	if string(sent.Thinking) != `{"type":"adaptive"}` || string(sent.OutputConfig) != `{"effort":"low"}` {
+	if string(sent.Thinking) != `{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}}` ||
+		string(sent.OutputConfig) != `{"effort":"low"}` {
 		t.Errorf("thinking = %s, output_config = %s, want adaptive and the turn's effort low", sent.Thinking, sent.OutputConfig)
 	}
 }

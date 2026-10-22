@@ -990,7 +990,8 @@ func TestAnthropicCacheMarkedRequestRejected(t *testing.T) {
 // the field is sent today's thinking budget, byte for byte, and no effort.
 func TestAnthropicThinking(t *testing.T) {
 	const adaptive = `{"model":"claude-x","system":"Fixed \u003crules\u003e.\nConversation.\nRound.",` +
-		`"messages":[{"role":"user","content":"How many items?"}],"max_tokens":4096,"thinking":{"type":"adaptive"},`
+		`"messages":[{"role":"user","content":"How many items?"}],"max_tokens":4096,` +
+		`"thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}},`
 	const tools = `"tools":[{"name":"inv__list-items","description":"List items","input_schema":{"type":"object"}}]}`
 	cases := []struct {
 		name        string
@@ -1033,6 +1034,115 @@ func TestAnthropicThinking(t *testing.T) {
 				t.Errorf("llm_request reasoning = %t, effort = %q, want true and %q", payload.Reasoning, payload.ReasoningEffort, tc.wantEffort)
 			}
 		})
+	}
+}
+
+// TestAnthropicThinkingBindingBeta checks the beta header that goes with
+// block_binding: a model with adaptive thinking sends it, joined with the
+// cache-diagnosis beta on a diagnosed chat-loop request; a model with thinking
+// by budget sends neither the header value nor block_binding.
+func TestAnthropicThinkingBindingBeta(t *testing.T) {
+	const binding = `{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}}`
+	const budget = `{"type":"enabled","budget_tokens":10000}`
+	cases := []struct {
+		name         string
+		thinking     string
+		diagnostics  bool
+		wantThinking string
+		wantBeta     string
+	}{
+		{"adaptive", "adaptive", false, binding, anthropicThinkingBindingBeta},
+		{"adaptive with cache diagnostics", "adaptive", true, binding, anthropicCacheDiagnosisBeta + "," + anthropicThinkingBindingBeta},
+		{"budget", "", false, budget, ""},
+		{"budget with cache diagnostics", "", true, budget, anthropicCacheDiagnosisBeta},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, sent := diagnosticsServer(t, "")
+			models := []ModelInfo{{ID: "claude-x", Thinking: tc.thinking, Features: []Feature{FeatureReasoning}}}
+			p := NewAnthropicProvider("anthropic", server.URL, "key", models,
+				WithAnthropicPromptCache(true), WithAnthropicCacheDiagnostics(tc.diagnostics))
+			completeInSession(t, p, "s1", true)
+			reqs := sent()
+			if len(reqs) != 1 {
+				t.Fatalf("requests sent = %d, want 1", len(reqs))
+			}
+			var body struct {
+				Thinking json.RawMessage `json:"thinking"`
+			}
+			if err := json.Unmarshal(reqs[0].body, &body); err != nil {
+				t.Fatal(err)
+			}
+			if string(body.Thinking) != tc.wantThinking {
+				t.Errorf("thinking = %s, want %s", body.Thinking, tc.wantThinking)
+			}
+			if got := reqs[0].header.Get("anthropic-beta"); got != tc.wantBeta {
+				t.Errorf("anthropic-beta = %q, want %q", got, tc.wantBeta)
+			}
+		})
+	}
+}
+
+// TestAnthropicThinkingDropped counts the thinking_dropped entries of a
+// response's input_transformations onto the llm_response event; other entry
+// types do not count, and none leaves the field out.
+func TestAnthropicThinkingDropped(t *testing.T) {
+	cases := []struct {
+		name            string
+		transformations string
+		want            string // thinking_dropped in the payload; "" = absent
+	}{
+		{"two dropped", `[{"type":"thinking_dropped","path":"messages.1.content.0","reason":"prefix_binding_mismatch"},` +
+			`{"type":"thinking_mismatch_allowed","path":"messages.3.content.0"},` +
+			`{"type":"thinking_dropped","path":"messages.3.content.1","reason":"model_binding_mismatch"}]`, `"thinking_dropped":2`},
+		{"none dropped", `[]`, ""},
+		{"no field", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reply := `{"id":"r","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}`
+			if tc.transformations != "" {
+				reply += `,"input_transformations":` + tc.transformations
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, reply+"}")
+			}))
+			defer server.Close()
+			sink := &recordingEventSink{}
+			p := NewAnthropicProvider("anthropic", server.URL, "key", nil, WithAnthropicSessionEventSink(sink))
+			if _, err := p.Complete(context.Background(), cacheTestRequest(cacheTestSegments, nil)); err != nil {
+				t.Fatal(err)
+			}
+			got := sink.snapshot()
+			if len(got) != 2 || got[1].EventType != events.TypeLLMResponse {
+				t.Fatalf("events = %v, want llm_request then llm_response", sink.types())
+			}
+			payload := string(got[1].Payload)
+			if tc.want != "" && !strings.Contains(payload, tc.want) {
+				t.Errorf("llm_response payload lacks %s: %s", tc.want, payload)
+			}
+			if tc.want == "" && strings.Contains(payload, `"thinking_dropped"`) {
+				t.Errorf("llm_response payload carries thinking_dropped: %s", payload)
+			}
+		})
+	}
+}
+
+// TestAnthropicToolCallWithoutArguments checks that a replayed tool call
+// without arguments is sent with an empty input object, never null.
+func TestAnthropicToolCallWithoutArguments(t *testing.T) {
+	req := &CompletionRequest{Model: "claude-x", Messages: []Message{
+		{Role: RoleUser, Content: "Delete it."},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "toolu_1", Name: "inv__delete"}}},
+		{Role: RoleTool, Content: "deleted", ToolCallID: "toolu_1"},
+	}}
+	bodies, err := anthropicBodies(t, nil, req, http.StatusOK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"inv__delete","input":{}}]}`
+	if len(bodies) != 1 || !strings.Contains(bodies[0], want) {
+		t.Errorf("request bodies %q, want the tool call as %s", bodies, want)
 	}
 }
 

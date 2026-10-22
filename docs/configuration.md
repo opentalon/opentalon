@@ -308,6 +308,17 @@ models:
   with the conversation and sent back unchanged, ahead of those tool calls, on
   every later request of the conversation, as Anthropic requires in a tool
   loop. This holds for thinking by budget as well.
+- On Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 a thinking block
+  stays valid only while the system prompt, the tools and every earlier
+  message are unchanged, and OpenTalon changes the system prompt after a
+  turn's first tool result and the tools when it loads tools. Every request
+  to a model with `thinking: adaptive` therefore carries
+  `thinking.block_binding.prefix_mismatch_behavior: drop_block` and the
+  `anthropic-beta` value `thinking-binding-controls-2026-08-01` (joined with
+  `cache-diagnosis-2026-04-07` when cache diagnostics are on). Anthropic then
+  leaves such a block out instead of rejecting the request, and the
+  `llm_response` session event records how many it left out as
+  `thinking_dropped`.
 - `thinking` takes `adaptive` only. Any other value, `thinking: adaptive` on
   a provider whose `api` is not `anthropic-messages`, or a `reasoning_effort`
   other than the five levels on such a model fails loading the config with

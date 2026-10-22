@@ -32,6 +32,8 @@ const (
 	anthropicAPIVersion     = "2023-06-01"
 
 	anthropicCacheDiagnosisBeta = "cache-diagnosis-2026-04-07"
+	// anthropicThinkingBindingBeta allows thinking.block_binding.
+	anthropicThinkingBindingBeta = "thinking-binding-controls-2026-08-01"
 	// maxDiagnosedSessions bounds the sessions whose last response id is kept
 	// for cache diagnostics.
 	maxDiagnosedSessions = 10_000
@@ -230,6 +232,15 @@ type anthTool struct {
 type anthThinking struct {
 	Type         string `json:"type"`                    // "enabled" or "adaptive"
 	BudgetTokens int    `json:"budget_tokens,omitempty"` // max tokens for thinking; none with "adaptive"
+	// BlockBinding is sent with "adaptive" only, the one form that takes it.
+	BlockBinding *anthBlockBinding `json:"block_binding,omitempty"`
+}
+
+// anthBlockBinding says what Anthropic does with a replayed thinking block
+// whose earlier conversation changed: "drop_block" leaves the block out
+// instead of rejecting the request.
+type anthBlockBinding struct {
+	PrefixMismatchBehavior string `json:"prefix_mismatch_behavior"`
 }
 
 type anthOutputConfig struct {
@@ -264,6 +275,22 @@ type anthResponse struct {
 			Type string `json:"type"`
 		} `json:"cache_miss_reason"`
 	} `json:"diagnostics"`
+	// InputTransformations lists what the API changed in the request, such
+	// as a thinking block it dropped ("thinking_dropped").
+	InputTransformations []struct {
+		Type string `json:"type"`
+	} `json:"input_transformations"`
+}
+
+// thinkingDropped returns how many replayed thinking blocks the API dropped.
+func (r *anthResponse) thinkingDropped() int {
+	n := 0
+	for _, t := range r.InputTransformations {
+		if t.Type == "thinking_dropped" {
+			n++
+		}
+	}
+	return n
 }
 
 type anthContentBlock struct {
@@ -349,6 +376,9 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 	p.setHeaders(httpReq)
 	if diagnose {
 		addListHeader(httpReq.Header, "anthropic-beta", anthropicCacheDiagnosisBeta)
+	}
+	if anthReq.Thinking != nil && anthReq.Thinking.BlockBinding != nil {
+		addListHeader(httpReq.Header, "anthropic-beta", anthropicThinkingBindingBeta)
 	}
 
 	// Structured session-event capture: emit metadata about the outbound
@@ -470,6 +500,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		ProviderResponseID: anthResp.ID,
 		ChatLoop:           req.Segments != nil,
 		CacheMissReason:    cacheMissReason,
+		ThinkingDropped:    anthResp.thinkingDropped(),
 	})
 
 	return &CompletionResponse{
@@ -530,7 +561,9 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 	}
 
 	if model := findModel(p.models, req.Model); model.Thinking == "adaptive" {
-		ar.Thinking = &anthThinking{Type: "adaptive"}
+		// A replayed thinking block whose earlier conversation OpenTalon
+		// changed is dropped by the API instead of failing the request.
+		ar.Thinking = &anthThinking{Type: "adaptive", BlockBinding: &anthBlockBinding{PrefixMismatchBehavior: "drop_block"}}
 		effort := req.ReasoningEffort
 		if effort == "" {
 			effort = model.ReasoningEffort
@@ -734,9 +767,13 @@ func assistantWithToolUseMessage(m Message) (anthMessage, error) {
 	for _, tc := range m.ToolCalls {
 		// ToolCall.Arguments is map[string]string at the orchestrator boundary
 		// (string-coerced to dodge JSON ambiguity around `null`, numeric vs
-		// string ids, etc.). Anthropic accepts any JSON value in `input`, so
-		// the map serialises as-is.
-		argsRaw, err := json.Marshal(tc.Arguments)
+		// string ids, etc.). Anthropic takes an object in `input`, so a call
+		// without arguments goes out as {}, never null.
+		args := tc.Arguments
+		if args == nil {
+			args = map[string]string{}
+		}
+		argsRaw, err := json.Marshal(args)
 		if err != nil {
 			return anthMessage{}, fmt.Errorf("marshal tool call arguments: %w", err)
 		}
