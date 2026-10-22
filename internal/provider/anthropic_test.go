@@ -720,6 +720,9 @@ func TestAnthropicReplaysThinkingBlocks(t *testing.T) {
 	if len(resp.Thinking) != 2 || string(resp.Thinking[0]) != thinkingBlock || string(resp.Thinking[1]) != redactedThinkingBlock {
 		t.Fatalf("response thinking = %q, want both blocks as received", resp.Thinking)
 	}
+	if resp.ThinkingFingerprint == "" {
+		t.Fatal("response thinking has no fingerprint")
+	}
 
 	cases := []struct {
 		name        string
@@ -733,7 +736,8 @@ func TestAnthropicReplaysThinkingBlocks(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assistant := Message{Role: RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls, Thinking: tc.thinking}
+			assistant := Message{Role: RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls,
+				Thinking: tc.thinking, ThinkingFingerprint: resp.ThinkingFingerprint}
 			result := Message{Role: RoleTool, Content: "5 items", ToolCallID: "toolu_1"}
 			if _, err := tc.p.Complete(context.Background(), &CompletionRequest{Model: "claude-x", Messages: []Message{user, assistant, result}}); err != nil {
 				t.Fatal(err)
@@ -750,6 +754,173 @@ func TestAnthropicReplaysThinkingBlocks(t *testing.T) {
 				t.Errorf("replayed assistant content:\n got %s\nwant %s", got, tc.wantContent)
 			}
 		})
+	}
+}
+
+// thinkingReplayRig answers the n-th request with replies[n-1], or a text
+// answer past the end, and records the request bodies.
+func thinkingReplayRig(t *testing.T, models []ModelInfo, replies ...string) (*AnthropicProvider, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		defer mu.Unlock()
+		bodies = append(bodies, string(body))
+		content := `{"type":"text","text":"Done."}`
+		if n := len(bodies); n <= len(replies) {
+			content = replies[n-1]
+		}
+		_, _ = io.WriteString(w, `{"id":"r","model":"claude-x","content":[`+content+`],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	t.Cleanup(server.Close)
+	return NewAnthropicProvider("anthropic", server.URL, "key", models), func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), bodies...)
+	}
+}
+
+// sentAnthMessages returns the messages of a request body as the bytes sent.
+func sentAnthMessages(t *testing.T, body string) []string {
+	t.Helper()
+	var sent struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	out := make([]string, len(sent.Messages))
+	for i, m := range sent.Messages {
+		out[i] = string(m)
+	}
+	return out
+}
+
+// TestAnthropicThinkingReplayFollowsBinding replays a response's block on the
+// next request after one change each. With adaptive thinking the block goes
+// back only while the system, the tools and the earlier messages are
+// unchanged; an effort change keeps it. With a thinking budget it goes back
+// whatever changed. A block without a fingerprint never goes back.
+func TestAnthropicThinkingReplayFollowsBinding(t *testing.T) {
+	const call = `{"type":"tool_use","id":"toolu_1","name":"inv__list-items","input":{}}`
+	const withBlock = `{"role":"assistant","content":[` + thinkingBlock + `,` + call + `]}`
+	const withoutBlock = `{"role":"assistant","content":[` + call + `]}`
+	listItems := ToolDefinition{Name: "inv__list-items", Description: "List items", Parameters: map[string]interface{}{"type": "object"}}
+	showItem := ToolDefinition{Name: "inv__show-item", Description: "Show an item", Parameters: map[string]interface{}{"type": "object"}}
+	cases := []struct {
+		name     string
+		thinking string // the model's thinking form; "" thinks by budget
+		change   func(req *CompletionRequest, assistant *Message)
+		want     string
+	}{
+		{"adaptive, unchanged", "adaptive", func(*CompletionRequest, *Message) {}, withBlock},
+		{"adaptive, effort changed", "adaptive", func(r *CompletionRequest, _ *Message) { r.ReasoningEffort = "low" }, withBlock},
+		{"adaptive, system changed", "adaptive", func(r *CompletionRequest, _ *Message) { r.Messages[0].Content += " Be brief." }, withoutBlock},
+		{"adaptive, tool added", "adaptive", func(r *CompletionRequest, _ *Message) { r.Tools = append(r.Tools, showItem) }, withoutBlock},
+		{"adaptive, earlier message changed", "adaptive", func(r *CompletionRequest, _ *Message) { r.Messages[1].Content = "How many?" }, withoutBlock},
+		{"adaptive, no fingerprint", "adaptive", func(_ *CompletionRequest, a *Message) { a.ThinkingFingerprint = "" }, withoutBlock},
+		{"budget, system changed", "", func(r *CompletionRequest, _ *Message) { r.Messages[0].Content += " Be brief." }, withBlock},
+		{"budget, no fingerprint", "", func(_ *CompletionRequest, a *Message) { a.ThinkingFingerprint = "" }, withoutBlock},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			models := []ModelInfo{{ID: "claude-x", Thinking: tc.thinking, ReasoningEffort: "high", Features: []Feature{FeatureReasoning}}}
+			p, bodies := thinkingReplayRig(t, models, thinkingBlock+","+call)
+			request := func(msgs ...Message) *CompletionRequest {
+				return &CompletionRequest{Model: "claude-x", Messages: msgs, Tools: []ToolDefinition{listItems}, Reasoning: tc.thinking == ""}
+			}
+			system := Message{Role: RoleSystem, Content: "Rules."}
+			user := Message{Role: RoleUser, Content: "How many items?"}
+			resp, err := p.Complete(context.Background(), request(system, user))
+			if err != nil {
+				t.Fatal(err)
+			}
+			assistant := Message{Role: RoleAssistant, ToolCalls: resp.ToolCalls, Thinking: resp.Thinking, ThinkingFingerprint: resp.ThinkingFingerprint}
+			next := request(system, user)
+			tc.change(next, &assistant)
+			next.Messages = append(next.Messages, assistant, Message{Role: RoleTool, Content: "5", ToolCallID: "toolu_1"})
+			if _, err := p.Complete(context.Background(), next); err != nil {
+				t.Fatal(err)
+			}
+			if got := sentAnthMessages(t, bodies()[1])[1]; got != tc.want {
+				t.Errorf("replayed assistant message:\n got %s\nwant %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAnthropicThinkingReplayAfterToolLoad loads a tool between two rounds of
+// a turn: the block produced before the tool list changed is left out, the
+// one produced after it goes back unchanged.
+func TestAnthropicThinkingReplayAfterToolLoad(t *testing.T) {
+	const block1 = `{"type":"thinking","thinking":"","signature":"sig-1"}`
+	const block2 = `{"type":"thinking","thinking":"","signature":"sig-2"}`
+	const call1 = `{"type":"tool_use","id":"toolu_1","name":"inv__load","input":{}}`
+	const call2 = `{"type":"tool_use","id":"toolu_2","name":"inv__show-item","input":{}}`
+	p, bodies := thinkingReplayRig(t, []ModelInfo{{ID: "claude-x", Thinking: "adaptive"}}, block1+","+call1, block2+","+call2)
+	load := ToolDefinition{Name: "inv__load", Description: "Load tools", Parameters: map[string]interface{}{"type": "object"}}
+	show := ToolDefinition{Name: "inv__show-item", Description: "Show an item", Parameters: map[string]interface{}{"type": "object"}}
+	msgs := []Message{{Role: RoleUser, Content: "Show item 7."}}
+	complete := func(tools ...ToolDefinition) {
+		t.Helper()
+		resp, err := p.Complete(context.Background(), &CompletionRequest{Model: "claude-x", Messages: msgs, Tools: tools})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.ToolCalls) == 1 {
+			msgs = append(msgs,
+				Message{Role: RoleAssistant, ToolCalls: resp.ToolCalls, Thinking: resp.Thinking, ThinkingFingerprint: resp.ThinkingFingerprint},
+				Message{Role: RoleTool, Content: "ok", ToolCallID: resp.ToolCalls[0].ID})
+		}
+	}
+	complete(load)
+	complete(load, show)
+	complete(load, show)
+
+	got := sentAnthMessages(t, bodies()[2])
+	want := []string{
+		`{"role":"user","content":"Show item 7."}`,
+		`{"role":"assistant","content":[` + call1 + `]}`,
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}`,
+		`{"role":"assistant","content":[` + block2 + `,` + call2 + `]}`,
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"ok"}]}`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("third request messages:\n got %s\nwant %s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// TestThinkingBindingIgnoresCacheMarkers checks that adding, moving or
+// removing a cache marker on the system blocks, or reordering the tools,
+// leaves the fingerprint as it is, while a change of the system text does not.
+func TestThinkingBindingIgnoresCacheMarkers(t *testing.T) {
+	tools := []anthTool{{Name: "inv__a"}, {Name: "inv__b"}}
+	sumWith := func(system string, tools []anthTool) string {
+		t.Helper()
+		b, err := newThinkingBinding(json.RawMessage(system), tools)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b.sum()
+	}
+	sum := func(system string) string { return sumWith(system, tools) }
+	marker := `,"cache_control":{"type":"ephemeral"}`
+	first := sum(`[{"type":"text","text":"Fixed."` + marker + `},{"type":"text","text":"Round."}]`)
+	for name, system := range map[string]string{
+		"moved":   `[{"type":"text","text":"Fixed."},{"type":"text","text":"Round."` + marker + `}]`,
+		"removed": `[{"type":"text","text":"Fixed."},{"type":"text","text":"Round."}]`,
+	} {
+		if sum(system) != first {
+			t.Errorf("marker %s: fingerprint changed", name)
+		}
+	}
+	if sumWith(`[{"type":"text","text":"Fixed."`+marker+`},{"type":"text","text":"Round."}]`, []anthTool{tools[1], tools[0]}) != first {
+		t.Error("reordered tools: fingerprint changed")
+	}
+	if sum(`[{"type":"text","text":"Fixed."`+marker+`},{"type":"text","text":"Round 2."}]`) == first {
+		t.Error("a changed system text kept the fingerprint")
 	}
 }
 

@@ -313,13 +313,21 @@ models:
 - On Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 a thinking block
   stays valid only while the system prompt, the tools and every earlier
   message are unchanged, and OpenTalon changes the system prompt after a
-  turn's first tool result and the tools when it loads tools. Every request
-  to a model with `thinking: adaptive` therefore carries
+  turn's first tool result and the tools when it loads tools. Anthropic drops
+  a block that is no longer valid, and a dropped block makes it write the
+  conversation after it to the cache again. To a model with `thinking:
+  adaptive` OpenTalon therefore sends a block only while the system prompt,
+  the tools and the earlier messages are what they were when the block was
+  produced (cache markers and the effort do not count); a block produced
+  after such a change goes back as long as nothing changes again. With a
+  thinking budget every block goes back, as those models need the unfinished
+  turn's blocks and do not check them.
+- Every request to a model with `thinking: adaptive` also carries
   `thinking.block_binding.prefix_mismatch_behavior: drop_block` and the
   `anthropic-beta` value `thinking-binding-controls-2026-08-01` (joined with
-  `cache-diagnosis-2026-04-07` when cache diagnostics are on). Anthropic then
-  leaves such a block out instead of rejecting the request, and the
-  `llm_response` session event records how many it left out as
+  `cache-diagnosis-2026-04-07` when cache diagnostics are on), so a block
+  that is no longer valid is left out instead of failing the request. The
+  `llm_response` session event records how many Anthropic left out as
   `thinking_dropped`.
 - `thinking` takes `adaptive` only. Any other value, `thinking: adaptive` on
   a provider whose `api` is not `anthropic-messages`, or a `reasoning_effort`

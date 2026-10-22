@@ -1,11 +1,16 @@
 -- Per-message thinking blocks: the thinking and redacted_thinking blocks of
--- the model response an assistant tool-call message came from, as a JSON array
--- of the blocks exactly as the provider returned them (text and signature).
--- Anthropic requires them back, unchanged and ahead of the tool_use blocks, on
--- every later request of the conversation; loadMessages reads them into
--- Message.Thinking for that replay.
+-- the model response an assistant tool-call message came from, stored as
+-- {"fingerprint": ..., "blocks": [...]}: the blocks exactly as the provider
+-- returned them (text and signature), and a hash of the request prefix they
+-- are bound to (system, tools and earlier messages). Anthropic requires them
+-- back, unchanged and ahead of the tool_use blocks, on later requests of the
+-- conversation, and drops a block whose prefix changed; loadMessages reads
+-- both into the Message, and with adaptive thinking the provider replays a
+-- block only while its prefix is unchanged. A plain JSON array of blocks,
+-- written before the fingerprint existed, loads without one and is never
+-- replayed.
 --
--- Schema portability: TEXT-only (a JSON-encoded array, mirroring how
+-- Schema portability: TEXT-only (a JSON-encoded object, mirroring how
 -- tool_calls is stored in migration 008). No jsonb / generated columns, so the
 -- same migration runs on SQLite and PostgreSQL. NULL = no blocks: messages
 -- written before this migration, every message that is not an assistant

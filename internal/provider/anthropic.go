@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"container/list"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -203,6 +207,10 @@ type anthRequest struct {
 	// request up to its last block, so the conversation so far.
 	CacheControl *anthCacheControl `json:"cache_control,omitempty"`
 	Diagnostics  *anthDiagnostics  `json:"diagnostics,omitempty"`
+
+	// fingerprint is the thinking binding of the whole request, for the
+	// thinking blocks its response returns (see thinkingBinding).
+	fingerprint string
 }
 
 // anthDiagnostics opts a request in to cache diagnostics. PreviousMessageID
@@ -503,7 +511,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		ThinkingDropped:    anthResp.thinkingDropped(),
 	})
 
-	return &CompletionResponse{
+	resp := &CompletionResponse{
 		ID:        anthResp.ID,
 		Model:     anthResp.Model,
 		Content:   content,
@@ -511,7 +519,11 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		Thinking:  thinkingBlocks,
 		Usage:     usage,
 		EventID:   eventID,
-	}, nil
+	}
+	if len(thinkingBlocks) > 0 {
+		resp.ThinkingFingerprint = anthReq.fingerprint
+	}
+	return resp, nil
 }
 
 // Stream is not yet implemented; returns an error.
@@ -521,9 +533,10 @@ func (p *AnthropicProvider) Stream(_ context.Context, _ *CompletionRequest) (Res
 
 func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, error) {
 	model := findModel(p.models, req.Model)
+	adaptive := model.Thinking == "adaptive"
 	// Thinking blocks go back only on a request that turns thinking on: a
 	// model thinking by default gets no block_binding without it.
-	replayThinking := model.Thinking == "adaptive" || req.Reasoning
+	replayThinking := adaptive || req.Reasoning
 
 	// Anthropic carries the system prompt in a single top-level `system`
 	// field, not as a message. Concatenate every RoleSystem message (joined
@@ -531,25 +544,48 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 	// one leading system message, but a stray mid-array system message (e.g.
 	// a transient nudge) must not silently clobber the real prompt.
 	var systemParts []string
-	msgs := make([]anthMessage, 0, len(req.Messages))
-
+	conversation := make([]Message, 0, len(req.Messages))
 	for _, m := range req.Messages {
 		if m.Role == RoleSystem {
 			systemParts = append(systemParts, m.Content)
 			continue
 		}
-		if !replayThinking {
-			m.Thinking = nil
-		}
-		msg, err := p.toAnthMessage(m)
-		if err != nil {
-			return anthRequest{}, err
-		}
-		msgs = append(msgs, msg)
+		conversation = append(conversation, m)
 	}
 	system, cached, err := p.toAnthSystem(req, systemParts)
 	if err != nil {
 		return anthRequest{}, err
+	}
+	tools := toolDefsToAnthTools(req.Tools)
+	binding, err := newThinkingBinding(system, tools)
+	if err != nil {
+		return anthRequest{}, err
+	}
+
+	msgs := make([]anthMessage, 0, len(conversation))
+	for _, m := range conversation {
+		blocks := m.Thinking
+		m.Thinking = nil
+		plain, err := p.toAnthMessage(m)
+		if err != nil {
+			return anthRequest{}, err
+		}
+		msg := plain
+		// Blocks without a fingerprint predate it and are never sent. With
+		// adaptive thinking a block goes back only while what it is bound to
+		// is unchanged, since Anthropic drops it otherwise, and a dropped
+		// block changes the messages cache from its position on.
+		if replayThinking && len(blocks) > 0 && m.ThinkingFingerprint != "" &&
+			(!adaptive || m.ThinkingFingerprint == binding.sum()) {
+			m.Thinking = blocks
+			if msg, err = p.toAnthMessage(m); err != nil {
+				return anthRequest{}, err
+			}
+		}
+		msgs = append(msgs, msg)
+		if err := binding.add(plain); err != nil {
+			return anthRequest{}, err
+		}
 	}
 
 	maxTokens := req.MaxTokens
@@ -558,11 +594,12 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 	}
 
 	ar := anthRequest{
-		Model:     req.Model,
-		System:    system,
-		Messages:  msgs,
-		MaxTokens: maxTokens,
-		Tools:     toolDefsToAnthTools(req.Tools),
+		Model:       req.Model,
+		System:      system,
+		Messages:    msgs,
+		MaxTokens:   maxTokens,
+		Tools:       tools,
+		fingerprint: binding.sum(),
 	}
 	if cached {
 		ar.CacheControl = &anthCacheControl{Type: "ephemeral"}
@@ -638,6 +675,70 @@ func (p *AnthropicProvider) cachedSystemBlocks(req *CompletionRequest, systemPar
 		blocks[0].CacheControl = &anthCacheControl{Type: "ephemeral"}
 	}
 	return blocks
+}
+
+// thinkingBinding hashes what Anthropic binds a thinking block to: the
+// system, the tools and every message before the block. Cache markers in the
+// system are left out and the tools are taken in name order, since neither
+// counts as a change. The messages are added without their thinking blocks,
+// which Anthropic leaves out of the comparison as well.
+type thinkingBinding struct {
+	h hash.Hash
+}
+
+func newThinkingBinding(system json.RawMessage, tools []anthTool) (thinkingBinding, error) {
+	unmarked, err := unmarkedSystem(system)
+	if err != nil {
+		return thinkingBinding{}, err
+	}
+	sorted := append([]anthTool(nil), tools...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	toolsJSON, err := json.Marshal(sorted)
+	if err != nil {
+		return thinkingBinding{}, fmt.Errorf("marshal tools for the thinking binding: %w", err)
+	}
+	b := thinkingBinding{h: sha256.New()}
+	b.write(unmarked)
+	b.write(toolsJSON)
+	return b, nil
+}
+
+// add appends a message, rendered without thinking blocks, to the prefix.
+func (b thinkingBinding) add(m anthMessage) error {
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("marshal message for the thinking binding: %w", err)
+	}
+	b.write(raw)
+	return nil
+}
+
+// sum returns the fingerprint of the prefix added so far.
+func (b thinkingBinding) sum() string {
+	return hex.EncodeToString(b.h.Sum(nil))
+}
+
+// write adds one part; the newline ends it, compact JSON holds none.
+func (b thinkingBinding) write(part []byte) {
+	b.h.Write(part)
+	b.h.Write([]byte{'\n'})
+}
+
+// unmarkedSystem returns the system field without its cache_control markers.
+// A system sent as one string carries none.
+func unmarkedSystem(system json.RawMessage) (json.RawMessage, error) {
+	var blocks []map[string]json.RawMessage
+	if json.Unmarshal(system, &blocks) != nil {
+		return system, nil
+	}
+	for _, b := range blocks {
+		delete(b, "cache_control")
+	}
+	unmarked, err := json.Marshal(blocks)
+	if err != nil {
+		return nil, fmt.Errorf("marshal system for the thinking binding: %w", err)
+	}
+	return unmarked, nil
 }
 
 // toolDefsToAnthTools maps the orchestrator's typed tool definitions onto

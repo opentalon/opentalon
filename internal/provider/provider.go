@@ -31,6 +31,10 @@ type Message struct {
 	// an assistant tool-call message came from, each as the JSON the provider
 	// returned, so a replay sends them back unchanged. Anthropic only.
 	Thinking []json.RawMessage `json:"thinking,omitempty"`
+	// ThinkingFingerprint identifies the request prefix the Thinking blocks
+	// are bound to (see CompletionResponse). Blocks without one are never
+	// replayed.
+	ThinkingFingerprint string `json:"thinking_fingerprint,omitempty"`
 	// Visibility "hidden" marks a message that IS fed to the model (it rides in
 	// role+content) but is dropped from the user-facing transcript — the inverse
 	// of the per-message metadata column. Empty means visible. Applies to
@@ -123,7 +127,11 @@ type CompletionResponse struct {
 	// Thinking holds the response's thinking and redacted_thinking blocks as
 	// returned (Anthropic only), for the message that stores its tool calls.
 	Thinking []json.RawMessage `json:"thinking,omitempty"`
-	Usage    Usage             `json:"usage"`
+	// ThinkingFingerprint is a hash of what Anthropic binds the Thinking
+	// blocks to: the system, the tools and the messages of the request, as
+	// sent, without cache markers. Empty when the response has no blocks.
+	ThinkingFingerprint string `json:"thinking_fingerprint,omitempty"`
+	Usage               Usage  `json:"usage"`
 
 	// EventID is the session-event id of the llm_response event the
 	// provider emitted for this completion (empty when no event sink is

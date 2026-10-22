@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/opentalon/opentalon/internal/provider"
@@ -27,17 +28,39 @@ func toolCallsAsNullString(calls []provider.ToolCall) (sql.NullString, error) {
 	return sql.NullString{String: string(b), Valid: true}, nil
 }
 
-// thinkingAsNullString marshals a message's thinking blocks into a JSON
-// array; none persists as SQL NULL, like tool_calls.
-func thinkingAsNullString(blocks []json.RawMessage) (sql.NullString, error) {
-	if len(blocks) == 0 {
+// storedThinking is the messages.thinking column: a message's thinking blocks
+// with the fingerprint of the request prefix they are bound to.
+type storedThinking struct {
+	Fingerprint string            `json:"fingerprint"`
+	Blocks      []json.RawMessage `json:"blocks"`
+}
+
+// thinkingAsNullString marshals a message's thinking blocks and their
+// fingerprint; no blocks persist as SQL NULL, like tool_calls.
+func thinkingAsNullString(msg provider.Message) (sql.NullString, error) {
+	if len(msg.Thinking) == 0 {
 		return sql.NullString{}, nil
 	}
-	b, err := json.Marshal(blocks)
+	b, err := json.Marshal(storedThinking{Fingerprint: msg.ThinkingFingerprint, Blocks: msg.Thinking})
 	if err != nil {
 		return sql.NullString{}, fmt.Errorf("marshal thinking: %w", err)
 	}
 	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
+// loadThinking reads the messages.thinking column into msg. A plain array of
+// blocks, written before the fingerprint existed, loads without one, so it is
+// never replayed.
+func loadThinking(column string, msg *provider.Message) error {
+	if strings.HasPrefix(strings.TrimSpace(column), "[") {
+		return json.Unmarshal([]byte(column), &msg.Thinking)
+	}
+	var t storedThinking
+	if err := json.Unmarshal([]byte(column), &t); err != nil {
+		return err
+	}
+	msg.Thinking, msg.ThinkingFingerprint = t.Blocks, t.Fingerprint
+	return nil
 }
 
 // metadataAsNullString marshals a non-empty per-message metadata map into JSON;
@@ -203,7 +226,7 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	if err != nil {
 		return err
 	}
-	thinkingJSON, err := thinkingAsNullString(msg.Thinking)
+	thinkingJSON, err := thinkingAsNullString(msg)
 	if err != nil {
 		return err
 	}
@@ -363,7 +386,7 @@ func (s *SessionStore) SetSummary(id string, summary string, messages []provider
 		if err != nil {
 			return err
 		}
-		thinkingJSON, err := thinkingAsNullString(msg.Thinking)
+		thinkingJSON, err := thinkingAsNullString(msg)
 		if err != nil {
 			return err
 		}
@@ -491,7 +514,7 @@ func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error
 			}
 		}
 		if thinkingJSON.Valid {
-			if err := json.Unmarshal([]byte(thinkingJSON.String), &msg.Thinking); err != nil {
+			if err := loadThinking(thinkingJSON.String, &msg); err != nil {
 				return nil, fmt.Errorf("load messages unmarshal thinking: %w", err)
 			}
 		}

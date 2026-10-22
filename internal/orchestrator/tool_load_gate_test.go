@@ -469,7 +469,7 @@ func TestRun_ConfirmationMidBatchLeavesNotExecutedTrace(t *testing.T) {
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
 	llm := &scriptedNativeLLM{rounds: []provider.CompletionResponse{
-		{Thinking: replayThinking, ToolCalls: []provider.ToolCall{
+		{Thinking: replayThinking, ThinkingFingerprint: "fp-1", ToolCalls: []provider.ToolCall{
 			{ID: "c-a", Name: "p__write_a", Arguments: map[string]string{"name": "A"}},
 			{ID: "c-b", Name: "p__write_b", Arguments: map[string]string{"name": "B"}},
 		}},
@@ -516,11 +516,12 @@ func TestRun_ConfirmationMidBatchLeavesNotExecutedTrace(t *testing.T) {
 		t.Errorf("dropped exchange must precede the prompt row, got call=%d result=%d prompt=%d",
 			droppedCallIdx, droppedResultIdx, promptIdx)
 	}
-	if pending, _, _, thinking := loadPendingToolCall(sessions, "s1"); pending == nil || pending.ID != "c-a" || thinking != nil {
-		t.Errorf("pending call must be the gated write_a (c-a) without thinking, got %+v with %q", pending, thinking)
+	if pending, _, _, thinking := loadPendingToolCall(sessions, "s1"); pending == nil || pending.ID != "c-a" ||
+		!reflect.DeepEqual(thinking, responseThinking{}) {
+		t.Errorf("pending call must be the gated write_a (c-a) without thinking, got %+v with %+v", pending, thinking)
 	}
-	if got := s.Messages[droppedCallIdx].Thinking; !reflect.DeepEqual(got, replayThinking) {
-		t.Errorf("dropped call message thinking = %q, want the response's blocks", got)
+	if m := s.Messages[droppedCallIdx]; !reflect.DeepEqual(m.Thinking, replayThinking) || m.ThinkingFingerprint != "fp-1" {
+		t.Errorf("dropped call message thinking = %q (fingerprint %q), want the response's blocks and fingerprint", m.Thinking, m.ThinkingFingerprint)
 	}
 }
 
