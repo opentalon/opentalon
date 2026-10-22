@@ -374,11 +374,11 @@ func (o *Orchestrator) recordSubprocessUsage(ctx context.Context, model string, 
 				"entity", unattributedEntity)
 		}
 		o.usageRecorder.RecordUsage(ctx, unattributedEntity, "", "", actor.SessionID(ctx),
-			model, profile.KindSystem, "subprocess", u.InputTokens, u.OutputTokens, 0)
+			model, profile.KindSystem, "subprocess", u.InputTokens, u.OutputTokens, 0, u.InputCost, u.OutputCost)
 		return
 	}
 	o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group, p.ChannelID, actor.SessionID(ctx),
-		model, p.Kind, p.SystemSource, u.InputTokens, u.OutputTokens, 0)
+		model, p.Kind, p.SystemSource, u.InputTokens, u.OutputTokens, 0, u.InputCost, u.OutputCost)
 }
 
 // buildSubprocessSystemPrompt builds a focused system prompt for a subprocess
