@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -28,8 +29,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 16 {
-		t.Errorf("schema_version = %d, want 16", v)
+	if v != 17 {
+		t.Errorf("schema_version = %d, want 17", v)
 	}
 
 	// Re-open: idempotent, no error
@@ -42,8 +43,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version (second open): %v", err)
 	}
-	if v != 16 {
-		t.Errorf("schema_version after re-open = %d, want 16", v)
+	if v != 17 {
+		t.Errorf("schema_version after re-open = %d, want 17", v)
 	}
 }
 
@@ -498,6 +499,70 @@ func TestSessionStore_SetSummaryPreservesToolCalls(t *testing.T) {
 	if sess.Messages[2].ToolCallID != "call_x" {
 		t.Errorf("ToolCallID after SetSummary = %q", sess.Messages[2].ToolCallID)
 	}
+}
+
+// TestSessionStore_ThinkingRoundTrip stores an assistant tool-call message
+// with thinking blocks and their fingerprint and reads both back unchanged,
+// after AddMessage and after SetSummary keeps the message. A row without
+// thinking, as every row written before migration 017 is, loads with no
+// blocks; a row holding a plain array of blocks, the column's first form,
+// loads them without a fingerprint, so they are never replayed.
+func TestSessionStore_ThinkingRoundTrip(t *testing.T) {
+	db, err := Open(config.DBConfig{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	sessStore := NewSessionStore(db, 0, 0)
+	sessStore.Create(state.SessionParams{ID: "s1"})
+
+	blocks := []json.RawMessage{
+		json.RawMessage(`{"type":"thinking","thinking":"","signature":"sig-1"}`),
+		json.RawMessage(`{"type":"redacted_thinking","data":"enc-1"}`),
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for seq, thinking := range []sql.NullString{{}, {String: `[` + string(blocks[0]) + `,` + string(blocks[1]) + `]`, Valid: true}} {
+		if _, err := db.SQLDB().Exec(
+			db.Dialect().Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, thinking, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`),
+			"s1", seq+1, "assistant", "", `[{"id":"call_old","name":"items.list","arguments":{}}]`, thinking, now,
+		); err != nil {
+			t.Fatalf("insert row %d: %v", seq+1, err)
+		}
+	}
+	if err := sessStore.AddMessage("s1", provider.Message{
+		Role:                provider.RoleAssistant,
+		ToolCalls:           []provider.ToolCall{{ID: "call_new", Name: "items.list", Arguments: map[string]string{}}},
+		Thinking:            blocks,
+		ThinkingFingerprint: "fp-1",
+	}); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+
+	type loaded struct {
+		Blocks      []json.RawMessage
+		Fingerprint string
+	}
+	want := []loaded{{}, {Blocks: blocks}, {Blocks: blocks, Fingerprint: "fp-1"}}
+	check := func(after string) []provider.Message {
+		t.Helper()
+		sess, err := sessStore.Get("s1")
+		if err != nil {
+			t.Fatalf("Get after %s: %v", after, err)
+		}
+		got := make([]loaded, len(sess.Messages))
+		for i, m := range sess.Messages {
+			got[i] = loaded{Blocks: m.Thinking, Fingerprint: m.ThinkingFingerprint}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("after %s: thinking per message = %q, want %q", after, got, want)
+		}
+		return sess.Messages
+	}
+	msgs := check("AddMessage")
+	if err := sessStore.SetSummary("s1", "summary", msgs); err != nil {
+		t.Fatalf("SetSummary: %v", err)
+	}
+	check("SetSummary")
 }
 
 // TestRunPluginMigrations_BinaryPath ensures that passing the directory of the

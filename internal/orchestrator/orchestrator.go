@@ -109,8 +109,10 @@ type GroupPluginLookup interface {
 // UsageRecorder records LLM usage statistics after an orchestrator run.
 // interactionKind is the run's kind ("chat" | "system"); systemSource is an
 // optional per-feature label for system runs. Both come from the run's Profile.
+// inputCost and outputCost are the sums of the costs the provider returned
+// for the run's model calls.
 type UsageRecorder interface {
-	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int)
+	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int, inputCost, outputCost float64)
 }
 
 // PromptSnapshotUpserter persists content-addressed prompt bodies so a
@@ -1556,8 +1558,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// could route a later message into a second execution.)
 	var pendingCall *ToolCall
 	var pendingCallConfID, pendingCallPrompt string
+	var pendingCallThinking responseThinking
 	if !hidden {
-		pendingCall, pendingCallConfID, pendingCallPrompt = loadPendingToolCall(sessions, sessionID)
+		pendingCall, pendingCallConfID, pendingCallPrompt, pendingCallThinking = loadPendingToolCall(sessions, sessionID)
 	}
 	var pendingMetaClearErr error
 	if pendingCall != nil {
@@ -1617,12 +1620,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// Record in session history.
 			tr := ToolResult{CallID: execCall.ID, Content: result.Content, StructuredContent: result.StructuredContent, Error: result.Error}
 			if o.supportsNativeTools() {
-				_ = sessions.AddMessage(sessionID, provider.Message{
+				_ = sessions.AddMessage(sessionID, pendingCallThinking.attach(provider.Message{
 					Role: provider.RoleAssistant,
 					ToolCalls: []provider.ToolCall{{
 						ID: execCall.ID, Name: toolFQN(execCall.Plugin, execCall.Action), Arguments: execCall.Args,
 					}},
-				})
+				}))
 				_ = sessions.AddMessage(sessionID, provider.Message{
 					Role: provider.RoleTool, Content: nativeToolContent(tr), ToolCallID: execCall.ID,
 				})
@@ -1743,7 +1746,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// Pin the reply language for this turn from the user's own message
 	// (post-STT, before any [knowledge_context] is injected by preparers,
 	// whose retrieved text may be in another language). The directive rides
-	// ctx into the per-variant buildSystemPrompt calls so detection runs once.
+	// ctx into buildSystemPrompt.
 	//
 	// When the current message is too short to detect (a bare approval on the
 	// confirm→execute→summarise path, an "ok", a numeric reply), fall back to
@@ -2086,7 +2089,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				// server-side single-step path would execute a write — including
 				// an amend re-plan's corrected write — with no consent. Read-only
 				// / bypass calls fall straight through to execution.
-				if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, call, userMessage, nil, false); raised {
+				if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, call, userMessage, nil, false, nil); raised {
 					return rr, nil
 				}
 				toolResult := o.executeCall(ctx, call)
@@ -2199,13 +2202,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	}
 
 	var totalInputTokens, totalOutputTokens, totalToolCalls int
+	var totalInputCost, totalOutputCost float64
 	var modelUsed string
 	defer func() {
 		if o.usageRecorder != nil {
 			if p := profile.FromContext(ctx); p != nil {
 				o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group,
 					p.ChannelID, sessionID, modelUsed, p.Kind, p.SystemSource,
-					totalInputTokens, totalOutputTokens, totalToolCalls)
+					totalInputTokens, totalOutputTokens, totalToolCalls, totalInputCost, totalOutputCost)
 			}
 		}
 	}()
@@ -2223,11 +2227,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	if nativeMode {
 		cachedTools = o.buildToolDefinitions(ctx)
 	}
-	// Build system prompt variants: the only difference between rounds is the
-	// format hint (suppressed until tool results exist). Pre-build both so the
-	// prompt text is identical across rounds that share the same variant.
-	sysPromptNoHint := o.buildSystemPrompt(withSkipFormatHint(ctx), content, true)
-	sysPromptWithHint := o.buildSystemPrompt(ctx, content, true)
+	// Build the system prompt once per Run; appendConversation derives each
+	// round's per-round segment from it.
+	sysPrompt := o.buildSystemPrompt(ctx, content, true)
 
 	// Emit turn_start once per Run — captures the static request shape
 	// (system prompt digest, tool catalogue, model intent) that all agent
@@ -2236,16 +2238,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// configured, so a consumer reading the event can resolve every
 	// sha256 reference to content. Per-round mutations (e.g.
 	// reasoning-effort downgrade on summary rounds) are NOT reflected
-	// here; they remain on the individual llm_request events. The hinted
-	// variant is canonical: the unhinted one only differs by suppressing
-	// the format directive on round 1, which doesn't change tool
+	// here; they remain on the individual llm_request events. The prompt
+	// as built is canonical: rounds before the first tool result only
+	// leave out the output-format section, which doesn't change tool
 	// selection.
 	//
 	// Early-exit paths above (pending pipeline / pending tool-call
 	// confirmation) intentionally bypass this emission: the LLM is not
 	// driving those decisions, so there's no "turn" to start. They still
 	// emit user_message (above) because the user did send input.
-	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, sysPromptWithHint, profileModel, cachedTools))
+	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, sysPrompt.Join(), profileModel, cachedTools))
 	// Root every subsequent event in this turn under turn_start by
 	// stamping it as the default parent on ctx. Specific spans (planner,
 	// llm_response, tool_call_extracted) overwrite this slot with their
@@ -2277,13 +2279,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		agentRound = i + 1
 		sess, _ := sessions.Get(sessionID)
 
-		// Pick the cached system prompt variant based on whether tool
-		// results exist (format hint is only useful after the first tool round).
-		cachedSysPrompt := sysPromptNoHint
-		if hasToolResults(sess.Messages) {
-			cachedSysPrompt = sysPromptWithHint
-		}
-		messages := o.buildMessagesWithPrompt(ctx, sess, cachedSysPrompt)
+		messages, system := o.appendConversation(ctx, sess, sysPrompt)
 		messages = append(messages, transientMessages...)
 		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
@@ -2303,7 +2299,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("LLM request message", "index", j+1, "role", m.Role, "content", m.Content)
 		}
 
-		req := &provider.CompletionRequest{Messages: guardedMessages}
+		req := &provider.CompletionRequest{Messages: guardedMessages, Segments: &system}
 		if profileModel != "" {
 			req.Model = profileModel
 		}
@@ -2336,6 +2332,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		log.Debug("tool calling mode", "native", nativeMode, "model", req.Model)
 
+		// Per-turn override (channel metadata) wins over the model default,
+		// which the provider serving the request would otherwise fill.
+		if eff := actor.ReasoningEffort(ctx); eff != "" {
+			req.ReasoningEffort = eff
+		}
+
 		// Enable reasoning on EVERY turn the model supports it — including
 		// tool-attached turns, where the model decides WHICH tool to call.
 		// The earlier heuristic disabled reasoning whenever tools were
@@ -2351,11 +2353,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			req.Reasoning = true
 			if p := profile.FromContext(ctx); p != nil && p.BudgetTokens > 0 {
 				req.BudgetTokens = p.BudgetTokens
-			}
-			// Per-turn override (channel metadata) wins over the model default,
-			// which applyModelDefaults would otherwise fill at the provider edge.
-			if eff := actor.ReasoningEffort(ctx); eff != "" {
-				req.ReasoningEffort = eff
 			}
 			log.Debug("reasoning enabled for LLM request", "round", i+1,
 				"has_tools", len(req.Tools) > 0,
@@ -2467,6 +2464,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		totalInputTokens += resp.Usage.InputTokens
 		totalOutputTokens += resp.Usage.OutputTokens
+		totalInputCost += resp.Usage.InputCost
+		totalOutputCost += resp.Usage.OutputCost
 
 		// Prefer native tool calls from the API response over text-based parsing.
 		var calls []ToolCall
@@ -2731,6 +2730,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		perCallInput := resp.Usage.InputTokens / max(len(calls), 1)
 		perCallOutput := resp.Usage.OutputTokens / max(len(calls), 1)
 
+		// The response's thinking blocks, until the first native tool-call
+		// message stored for the response takes them (takeThinking).
+		var thinking responseThinking
+		if nativeToolCalls {
+			thinking = responseThinking{Blocks: resp.Thinking, Fingerprint: resp.ThinkingFingerprint}
+		}
+
 		for i := range calls {
 			calls[i].FromLLM = true
 
@@ -2765,7 +2771,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// the two sites can't drift. Narrates the prompt in the user's
 			// language, stores + persists the pending call, and returns the
 			// confirmation; read-only / bypass calls fall through to execution.
-			if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, calls[i], userMessage, calls[i+1:], nativeToolCalls); raised {
+			if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, calls[i], userMessage, calls[i+1:], nativeToolCalls, &thinking); raised {
 				return rr, nil
 			}
 
@@ -2847,7 +2853,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if nativeToolCalls {
 				// Native tool calling: store assistant message with tool_calls
 				// and tool result as role=tool with tool_call_id.
-				_ = sessions.AddMessage(sessionID, provider.Message{
+				_ = sessions.AddMessage(sessionID, takeThinking(&thinking).attach(provider.Message{
 					Role:    provider.RoleAssistant,
 					Content: resp.Content,
 					ToolCalls: []provider.ToolCall{{
@@ -2855,7 +2861,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 						Name:      toolFQN(call.Plugin, call.Action),
 						Arguments: call.Args,
 					}},
-				})
+				}))
 				_ = sessions.AddMessage(sessionID, provider.Message{
 					Role:       provider.RoleTool,
 					Content:    nativeToolContent(toolResult),
@@ -3213,7 +3219,7 @@ func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content strin
 	// Tool call: the persisted blob is the single source of pending tool-call
 	// state (survives restart / failover, shared across pods) and carries the
 	// approved-intent prompt it was stored with.
-	if pendingCall, _, prompt := loadPendingToolCall(o.sessions, sessionID); pendingCall != nil {
+	if pendingCall, _, prompt, _ := loadPendingToolCall(o.sessions, sessionID); pendingCall != nil {
 		return prompt, toolConfirmationFrameMetadata(pendingCall.ID), true
 	}
 
@@ -3250,9 +3256,12 @@ func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content strin
 // prompt+reply pair stays adjacent for stripApprovedConfirmationExchanges.
 // interruptedNative says how THIS response's calls are being recorded (the
 // loop's per-response native flag), so the pairs match the surrounding format.
+// thinking holds the response's thinking blocks no stored message has taken
+// yet: a raised confirmation hands them to the first interrupted call's
+// message, else to the pending call (takeThinking). nil holds none.
 func (o *Orchestrator) maybeRequireConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
-	interrupted []ToolCall, interruptedNative bool,
+	interrupted []ToolCall, interruptedNative bool, thinking *responseThinking,
 ) (*RunResult, bool) {
 	if call.ConfirmationBypass {
 		return nil, false
@@ -3345,7 +3354,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// crowd the real conversation out of the window it reads; and before the
 	// prompt row below, so a resolved prompt+reply pair stays adjacent for
 	// stripApprovedConfirmationExchanges.
-	o.recordConfirmationInterruptedCalls(sessionID, sessions, call, interrupted, interruptedNative)
+	o.recordConfirmationInterruptedCalls(sessionID, sessions, call, interrupted, interruptedNative, thinking)
 	// Store the prompt so the next turn has context for the reply/amend, and
 	// persist the confirmation-frame metadata on that row so a reloaded client
 	// rebuilds the Approve/Reject buttons from the transcript (the live frame's
@@ -3365,7 +3374,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// actually approves, kept with the call so a post-approval repair can hand
 	// the corrector the approved intent without the session history.
 	pending := call
-	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg)
+	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg, thinking)
 	return &RunResult{
 		Response: confirmMsg,
 		Metadata: frameMeta,
@@ -4076,11 +4085,11 @@ func isToolResultMessage(m provider.Message) bool {
 // (possibly shortened) slice; when contextMessages is zero or the
 // input fits, returns msgs unchanged with no event.
 //
-// Called from both buildMessages and buildMessagesWithPrompt inside
-// the agent loop, so a long tool-call session can produce multiple
-// messages_truncated events per turn — each one represents a
-// distinct cut that actually dropped something. Consumers that want
-// "the first cut per turn" should fold by turn_start parent.
+// Called from appendConversation on every agent-loop round, so a long
+// tool-call session can produce multiple messages_truncated events per
+// turn — each one represents a distinct cut that actually dropped
+// something. Consumers that want "the first cut per turn" should fold by
+// turn_start parent.
 func (o *Orchestrator) applySlidingWindow(ctx context.Context, msgs []provider.Message) []provider.Message {
 	if o.contextMessages <= 0 || len(msgs) <= o.contextMessages {
 		return msgs
@@ -4097,14 +4106,13 @@ func (o *Orchestrator) applySlidingWindow(ctx context.Context, msgs []provider.M
 	return msgs[dropped:]
 }
 
-// appendConversation appends the message tail shared by buildMessages and
-// buildMessagesWithPrompt onto `messages` (which must already carry the system
-// prompt): the optional summary, the sliding-window-trimmed + sanitized +
-// knowledge-context-stripped history, the trailing format-hint and don't-repeat
-// reminders, and the final context-window trim. Extracted so the two assembly
-// paths cannot drift — the reminder strings and their gating were previously
-// duplicated verbatim in both.
-func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Session, messages []provider.Message) []provider.Message {
+// appendConversation assembles one round's message list from the system prompt
+// buildSystemPrompt built: the leading system message, with the optional
+// summary and the per-round section and reminders folded into its segments,
+// then the sliding-window-trimmed + sanitized + knowledge-context-stripped
+// history. It returns the segments the system message is the join of; nothing
+// changes that message after this.
+func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Session, system provider.SystemSegments) ([]provider.Message, provider.SystemSegments) {
 	// Sliding-window cutter (config-driven via o.contextMessages); emits
 	// messages_truncated when it fires.
 	convMessages := o.applySlidingWindow(ctx, sess.Messages)
@@ -4112,33 +4120,36 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	// Single system block (provider-compliance rule #1): the leading message
 	// built by buildSystemPrompt is the ONLY role:system message in the array.
 	// The conversation summary and the format/don't-repeat reminders fold into
-	// it as suffixes instead of being emitted as separate mid-array system
+	// its segments instead of being emitted as separate mid-array system
 	// messages. Anthropic's Messages API has no role:system inside the messages
 	// array — it carries one top-level `system` field — so scattered system
 	// turns made the adapter silently keep only the last one and drop the real
 	// prompt (see provider/anthropic.go toAnthRequest). Folding here keeps both
 	// the OpenAI-compatible and native-Anthropic adapters fed from one block.
-	var systemSuffix strings.Builder
 	if sess.Summary != "" {
-		systemSuffix.WriteString("\n\nPrevious conversation summary: ")
-		systemSuffix.WriteString(sess.Summary)
+		// Ends its line: the per-round segment follows.
+		system.Conversation += "\n\nPrevious conversation summary: " + sess.Summary + "\n"
+	}
+	// The per-round segment as built is the output-format section. Hold it
+	// back until a tool result exists: on the first round the HTML format hint
+	// stops weak models from emitting [tool_call] blocks.
+	if !hasToolResults(sess.Messages) {
+		system.Round = ""
 	}
 	// For weaker / OSS models, repeat the channel format hint — but only after a
 	// tool result exists, so it doesn't compete with the tool-calling
 	// instruction on the first round.
 	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
-		systemSuffix.WriteString("\n\n[IMPORTANT — output format reminder] ")
-		systemSuffix.WriteString(hint)
+		system.Round += "\n\n[IMPORTANT — output format reminder] " + hint
 	}
 	// Don't-repeat reminder, only with actual prior conversation. Wording is
 	// position-independent ("most recent message") because it now lives in the
 	// system block ahead of the conversation rather than as a trailing turn.
 	if len(convMessages) > 2 {
-		systemSuffix.WriteString("\n\n[IMPORTANT] Answer ONLY the user's most recent message. Do NOT repeat or summarize any earlier answers from this conversation. Be concise.")
+		system.Round += "\n\n[IMPORTANT] Answer ONLY the user's most recent message. Do NOT repeat or summarize any earlier answers from this conversation. Be concise."
 	}
-	if systemSuffix.Len() > 0 && len(messages) > 0 && messages[0].Role == provider.RoleSystem {
-		messages[0].Content += systemSuffix.String()
-	}
+	messages := make([]provider.Message, 0, len(sess.Messages)+4)
+	messages = append(messages, provider.Message{Role: provider.RoleSystem, Content: system.Join()})
 
 	// Strip [knowledge_context] from HISTORICAL user messages only (current turn
 	// kept verbatim so preparer-injected RAG reaches the LLM), drop genuinely
@@ -4150,40 +4161,13 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	// No trimming here. Half of what a request costs is the tool definitions,
 	// which are attached to the request after assembly — so "make it fit" runs
 	// on the finished request, in the agent loop (see fitRequestToWindow).
-	return messages
+	return messages, system
 }
 
 func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
-	messages := make([]provider.Message, 0, len(sess.Messages)+4)
-
 	inclSI := len(includeServerInstructions) == 0 || includeServerInstructions[0]
-	// Suppress the OUTPUT FORMAT section in the system prompt until tool
-	// results exist. The HTML format hint prevents weak models from
-	// generating [tool_call] blocks on the first round.
-	buildCtx := ctx
-	hasResults := hasToolResults(sess.Messages)
-	if !hasResults {
-		buildCtx = withSkipFormatHint(ctx)
-	}
-	slog.Debug("format hint decision", "has_tool_results", hasResults, "skip_format_hint", !hasResults)
-	systemPrompt := o.buildSystemPrompt(buildCtx, userMessage, inclSI)
-	messages = append(messages, provider.Message{
-		Role:    provider.RoleSystem,
-		Content: systemPrompt,
-	})
-	return o.appendConversation(ctx, sess, messages)
-}
-
-// buildMessagesWithPrompt assembles the LLM message list using a pre-built
-// system prompt. This avoids rebuilding the prompt on every agent-loop round,
-// keeping the prefix byte-identical for provider-side KV cache hits.
-func (o *Orchestrator) buildMessagesWithPrompt(ctx context.Context, sess *state.Session, systemPrompt string) []provider.Message {
-	messages := make([]provider.Message, 0, len(sess.Messages)+4)
-	messages = append(messages, provider.Message{
-		Role:    provider.RoleSystem,
-		Content: systemPrompt,
-	})
-	return o.appendConversation(ctx, sess, messages)
+	messages, _ := o.appendConversation(ctx, sess, o.buildSystemPrompt(ctx, userMessage, inclSI))
+	return messages
 }
 
 // Context-window accounting — the token estimate, the input budget and the
@@ -4250,8 +4234,11 @@ func (o *Orchestrator) buildAgentGroundingPrompt(ctx context.Context, agentID st
 	return sb.String()
 }
 
-func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string, includeServerInstructions bool) string {
-	var sb strings.Builder
+// buildSystemPrompt builds the chat loop's system prompt in segments ordered
+// by how often they change. Round holds the output-format section, which
+// appendConversation leaves out until a tool result exists.
+func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string, includeServerInstructions bool) provider.SystemSegments {
+	var fixed, conversation, round strings.Builder
 
 	// Agent-scoped chat: when the turn is scoped to a workflow agent, lead with
 	// that agent's context (its program + recent runs) so the assistant answers
@@ -4259,7 +4246,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	// not a clarifying question. Skipped (empty) for the general assistant.
 	if agentID := actor.AgentID(ctx); agentID != "" {
 		if grounding := o.buildAgentGroundingPrompt(ctx, agentID); grounding != "" {
-			sb.WriteString(grounding)
+			fixed.WriteString(grounding)
 		}
 	}
 
@@ -4268,38 +4255,26 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	// the text format and native tools confuses weaker models — they
 	// narrate instead of calling tools.
 	if o.supportsNativeTools() {
-		sb.WriteString(prompts.OrchestratorPreambleNative)
+		fixed.WriteString(prompts.OrchestratorPreambleNative)
 	} else {
-		sb.WriteString(prompts.OrchestratorPreamble)
+		fixed.WriteString(prompts.OrchestratorPreamble)
 	}
 
-	sb.WriteString(o.rules.BuildPromptSection())
+	fixed.WriteString(o.rules.BuildPromptSection())
 
 	// Always-on knowledge catalog: titles + slugs of pullable articles, so the
 	// model knows what background it can fetch via ask_knowledge. Served from
 	// cache; a stale cache triggers a non-blocking background refresh.
 	if catalog := o.knowledgeCatalogSection(); catalog != "" {
-		sb.WriteString(catalog)
+		fixed.WriteString(catalog)
 	}
 
 	if o.runtimePromptPath != "" {
 		if data, err := os.ReadFile(o.runtimePromptPath); err == nil {
-			sb.WriteString("\n## Additional instructions (editable from chat)\n")
-			sb.WriteString(string(data))
-			sb.WriteString("\n\n")
+			fixed.WriteString("\n## Additional instructions (editable from chat)\n")
+			fixed.WriteString(string(data))
+			fixed.WriteString("\n\n")
 		}
-	}
-
-	// Expose the caller's channel and conversation id so the LLM knows what
-	// "the current channel" means when a tool parameter says it defaults to
-	// it. Without this, small models (e.g. Haiku) fail to invoke tools like
-	// scheduler__create_job on non-Slack channels because they pattern-match
-	// the Slack-shaped channel ids in other tool schemas and conclude they
-	// don't have a valid one on Telegram/Discord/etc.
-	if session := sessionDescriptor(ctx); session != "" {
-		sb.WriteString("## Current session\n")
-		sb.WriteString(session)
-		sb.WriteString("\nWhen a tool parameter's description says it defaults to the current channel or conversation, OMIT it — the host injects these values automatically. Do not try to invent or ask for an id.\n\n")
 	}
 
 	// Don't list content-preparer or guard actions as tools; they run automatically before LLM calls.
@@ -4340,12 +4315,12 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 			continue
 		}
 
-		fmt.Fprintf(&sb, "## %s\n%s\n", cap.Name, cap.Description)
+		fmt.Fprintf(&fixed, "## %s\n%s\n", cap.Name, cap.Description)
 		// Server instructions first — domain context the LLM needs before
 		// reading tool definitions (e.g. entity relationships, counting
 		// patterns, field semantics).
 		if includeServerInstructions && cap.SystemPromptAddition != "" {
-			fmt.Fprintf(&sb, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n", cap.Name, cap.SystemPromptAddition, cap.Name)
+			fmt.Fprintf(&fixed, "--- plugin: %s ---\n%s\n--- end plugin: %s ---\n", cap.Name, cap.SystemPromptAddition, cap.Name)
 		}
 		// In native tool mode, tool definitions are sent via req.Tools (the
 		// native set) and the catalog (everything else) — don't duplicate
@@ -4353,17 +4328,21 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		// accounts with many tools (e.g. 71 MCP tools).
 		if !o.supportsNativeTools() {
 			for _, action := range visibleActions {
-				fmt.Fprintf(&sb, "- %s: %s\n", toolFQN(cap.Name, action.Name), action.Description)
+				fmt.Fprintf(&fixed, "- %s: %s\n", toolFQN(cap.Name, action.Name), action.Description)
 				for _, p := range action.Parameters {
 					req := ""
 					if p.Required {
 						req = " (required)"
 					}
-					fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, req)
+					fmt.Fprintf(&fixed, "  - %s: %s%s\n", p.Name, p.Description, req)
 				}
 			}
 		}
-		sb.WriteString("\n")
+		fixed.WriteString("\n")
+	}
+
+	if o.subprocessConfig.Enabled {
+		fixed.WriteString(prompts.OrchestratorSubprocess)
 	}
 
 	// Native mode: render the tool catalog — a one-line summary of every
@@ -4373,34 +4352,39 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	// decision. Non-native mode lists every action inline above, so no
 	// catalog is needed.
 	if o.supportsNativeTools() {
-		sb.WriteString(o.renderToolCatalog(o.promotedToolSet(ctx), allowedPlugins))
+		conversation.WriteString(o.renderToolCatalog(o.promotedToolSet(ctx), allowedPlugins))
 	}
 
-	if o.subprocessConfig.Enabled {
-		sb.WriteString(prompts.OrchestratorSubprocess)
-	}
-
-	if hint := channelFormatHint(ctx); hint != "" && !skipFormatHintFromContext(ctx) {
-		sb.WriteString("## OUTPUT FORMAT\n")
-		sb.WriteString(hint)
-		sb.WriteString("\n")
+	// Expose the caller's channel and conversation id so the LLM knows what
+	// "the current channel" means when a tool parameter says it defaults to
+	// it. Without this, small models (e.g. Haiku) fail to invoke tools like
+	// scheduler__create_job on non-Slack channels because they pattern-match
+	// the Slack-shaped channel ids in other tool schemas and conclude they
+	// don't have a valid one on Telegram/Discord/etc.
+	if session := sessionDescriptor(ctx); session != "" {
+		conversation.WriteString("## Current session\n")
+		conversation.WriteString(session)
+		conversation.WriteString("\nWhen a tool parameter's description says it defaults to the current channel or conversation, OMIT it — the host injects these values automatically. Do not try to invent or ask for an id.\n\n")
 	}
 
 	if p := profile.FromContext(ctx); p != nil && p.Name != "" {
-		sb.WriteString("## User\n")
-		fmt.Fprintf(&sb, "The user's name is %s. Address them by name where it feels natural; do not force it into every message.\n\n", p.Name)
+		conversation.WriteString("## User\n")
+		fmt.Fprintf(&conversation, "The user's name is %s. Address them by name where it feels natural; do not force it into every message.\n\n", p.Name)
 	}
 
-	// Reply-language directive, appended at the end of buildSystemPrompt's
-	// own output. Note it is no longer the very last thing in the system
-	// block: appendConversation folds the conversation-summary and the
-	// format/don't-repeat reminders onto messages[0] AFTER this. Empty
-	// unless detection was confident (see replyLanguageDirective).
+	// Reply-language directive. Empty unless detection was confident (see
+	// replyLanguageDirective).
 	if dir := replyLanguageDirectiveFromContext(ctx); dir != "" {
-		sb.WriteString(dir)
+		conversation.WriteString(dir)
 	}
 
-	return sb.String()
+	if hint := channelFormatHint(ctx); hint != "" {
+		round.WriteString("## OUTPUT FORMAT\n")
+		round.WriteString(hint)
+		round.WriteString("\n")
+	}
+
+	return provider.SystemSegments{Fixed: fixed.String(), Conversation: conversation.String(), Round: round.String()}
 }
 
 // sessionDescriptor returns a 1-2 line string describing the caller's current
@@ -5264,6 +5248,35 @@ type pendingToolCallMeta struct {
 	// passes executeCall's unknown-args validation. Rows persisted before
 	// this field unmarshal to false — exactly how they were restored then.
 	FromLLM bool `json:"from_llm,omitempty"`
+	// The thinking of the response that issued the call, for the assistant
+	// message the approval stores. A blob written before the fingerprint
+	// existed holds blocks without one, which are never replayed.
+	responseThinking
+}
+
+// responseThinking is a response's thinking blocks with the fingerprint of
+// the request prefix they are bound to (provider.CompletionResponse).
+type responseThinking struct {
+	Blocks      []json.RawMessage `json:"thinking,omitempty"`
+	Fingerprint string            `json:"thinking_fingerprint,omitempty"`
+}
+
+// attach returns m carrying t.
+func (t responseThinking) attach(m provider.Message) provider.Message {
+	m.Thinking, m.ThinkingFingerprint = t.Blocks, t.Fingerprint
+	return m
+}
+
+// takeThinking returns what *pending holds and empties it, so the thinking
+// of a response rides on the first assistant message stored for it and on
+// no later one: a replay sends each block once. A nil pending holds none.
+func takeThinking(pending *responseThinking) responseThinking {
+	if pending == nil {
+		return responseThinking{}
+	}
+	t := *pending
+	*pending = responseThinking{}
+	return t
 }
 
 // recordConfirmationInterruptedCalls writes one history exchange per tool call
@@ -5276,9 +5289,10 @@ type pendingToolCallMeta struct {
 // carries a result) and tells the model in plain words to re-issue the call
 // after the confirmation resolves. `native` mirrors how the surrounding loop
 // records THIS response's calls (per-response flag, not the provider
-// capability), so transcript formats stay uniform within the turn.
+// capability), so transcript formats stay uniform within the turn. The first
+// native call message takes the response's thinking blocks left in thinking.
 func (o *Orchestrator) recordConfirmationInterruptedCalls(
-	sessionID string, sessions SessionStoreInterface, gated ToolCall, dropped []ToolCall, native bool,
+	sessionID string, sessions SessionStoreInterface, gated ToolCall, dropped []ToolCall, native bool, thinking *responseThinking,
 ) {
 	notice := fmt.Sprintf(
 		"NOT EXECUTED — this call was issued in the same response as %s, which is now waiting for the user's confirmation. It did not run and changed nothing. Issue it again after that confirmation is resolved if it is still needed.",
@@ -5286,14 +5300,14 @@ func (o *Orchestrator) recordConfirmationInterruptedCalls(
 	for _, dc := range dropped {
 		result := ToolResult{CallID: dc.ID, Content: notice}
 		if native {
-			_ = sessions.AddMessage(sessionID, provider.Message{
+			_ = sessions.AddMessage(sessionID, takeThinking(thinking).attach(provider.Message{
 				Role: provider.RoleAssistant,
 				ToolCalls: []provider.ToolCall{{
 					ID:        dc.ID,
 					Name:      toolFQN(dc.Plugin, dc.Action),
 					Arguments: dc.Args,
 				}},
-			})
+			}))
 			_ = sessions.AddMessage(sessionID, provider.Message{
 				Role:       provider.RoleTool,
 				Content:    nativeToolContent(result),
@@ -5312,7 +5326,9 @@ func (o *Orchestrator) recordConfirmationInterruptedCalls(
 	}
 }
 
-func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID, prompt string) {
+// savePendingToolCall persists the pending call with the thinking in
+// *thinking, which it takes (takeThinking).
+func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID, prompt string, thinking *responseThinking) {
 	meta := pendingToolCallMeta{
 		ID:                      tc.ID,
 		Plugin:                  tc.Plugin,
@@ -5321,6 +5337,7 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 		ConfirmationRequestedID: confirmationRequestedID,
 		Prompt:                  prompt,
 		FromLLM:                 tc.FromLLM,
+		responseThinking:        takeThinking(thinking),
 	}
 	data, err := json.Marshal(meta)
 	if err != nil {
@@ -5330,23 +5347,24 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 }
 
 // loadPendingToolCall restores the pending tool call from session metadata.
-// Returns the ToolCall, the confirmation_requested event id, and the
+// Returns the ToolCall, the confirmation_requested event id, the
 // confirmation prompt (either string empty when the persisted row predates
-// the field or nothing was captured).
-func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string, string) {
+// the field or nothing was captured), and the thinking of the response that
+// issued the call.
+func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string, string, responseThinking) {
 	sess, err := sessions.Get(sessionID)
 	if err != nil || sess == nil {
-		return nil, "", ""
+		return nil, "", "", responseThinking{}
 	}
 	raw := sess.Metadata["pending_tool_call"]
 	if raw == "" {
-		return nil, "", ""
+		return nil, "", "", responseThinking{}
 	}
 	var meta pendingToolCallMeta
 	if json.Unmarshal([]byte(raw), &meta) != nil {
-		return nil, "", ""
+		return nil, "", "", responseThinking{}
 	}
-	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args, FromLLM: meta.FromLLM}, meta.ConfirmationRequestedID, meta.Prompt
+	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args, FromLLM: meta.FromLLM}, meta.ConfirmationRequestedID, meta.Prompt, meta.responseThinking
 }
 
 // toolCallSignature builds a deterministic string from a set of tool calls
@@ -5442,19 +5460,6 @@ type cachedAllowedPlugins struct {
 
 func withAllowedPlugins(ctx context.Context, c cachedAllowedPlugins) context.Context {
 	return context.WithValue(ctx, allowedPluginsKey{}, c)
-}
-
-// skipFormatHintKey suppresses the OUTPUT FORMAT section in the system prompt
-// so the HTML format hint doesn't interfere with tool-call generation.
-type skipFormatHintKey struct{}
-
-func withSkipFormatHint(ctx context.Context) context.Context {
-	return context.WithValue(ctx, skipFormatHintKey{}, true)
-}
-
-func skipFormatHintFromContext(ctx context.Context) bool {
-	v, _ := ctx.Value(skipFormatHintKey{}).(bool)
-	return v
 }
 
 // expectedToolsKey stores the planner's expected tool steps in context so the
@@ -6054,10 +6059,26 @@ const knowledgeCatalogAction = "list_knowledge_titles"
 // MCP server's articles change), so a few minutes of staleness is fine.
 const knowledgeCatalogTTL = 5 * time.Minute
 
+// WarmKnowledgeCatalog fetches the catalog once, synchronously, so the first
+// system prompt after startup already carries it. Without it the first prompt
+// goes out without the section and every later one with it, which changes the
+// shared prefix once per process start.
+func (o *Orchestrator) WarmKnowledgeCatalog(ctx context.Context) {
+	o.knowledgeCatalogMu.Lock()
+	if o.knowledgeCatalogRefreshing {
+		o.knowledgeCatalogMu.Unlock()
+		return
+	}
+	o.knowledgeCatalogRefreshing = true
+	o.knowledgeCatalogMu.Unlock()
+	o.refreshKnowledgeCatalog(ctx)
+}
+
 // knowledgeCatalogSection returns the cached "## Available knowledge" block and,
 // when the cache is stale, kicks off a single-flight background refresh so the
-// hot path (buildSystemPrompt) never blocks on a network call. The first call
-// after startup returns "" and warms the cache for subsequent calls.
+// hot path (buildSystemPrompt) never blocks on a network call. Without a
+// WarmKnowledgeCatalog call the first call after startup returns "" and warms
+// the cache for subsequent calls.
 func (o *Orchestrator) knowledgeCatalogSection() string {
 	o.knowledgeCatalogMu.RLock()
 	section := o.knowledgeCatalog
@@ -6128,9 +6149,16 @@ type knowledgeCatalogEntry struct {
 
 // renderKnowledgeCatalog builds the "## Available knowledge" system-prompt
 // section from the catalog entries (anchor + one "- Title (slug: `slug`)" line
-// each, in the order given). Pure (no I/O) so it is unit-testable; returns ""
-// when there are no valid entries.
+// each, sorted by title, then slug). Pure (no I/O) so it is unit-testable;
+// returns "" when there are no valid entries.
 func renderKnowledgeCatalog(entries []knowledgeCatalogEntry, anchor string) string {
+	entries = append([]knowledgeCatalogEntry(nil), entries...)
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Title != entries[j].Title {
+			return entries[i].Title < entries[j].Title
+		}
+		return entries[i].Slug < entries[j].Slug
+	})
 	var sb strings.Builder
 	n := 0
 	for _, e := range entries {

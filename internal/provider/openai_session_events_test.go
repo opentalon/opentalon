@@ -1176,6 +1176,150 @@ func TestOpenAIStream_EmitsCostFromModelConfig(t *testing.T) {
 	}
 }
 
+// TestOpenAIReturnsRecordedCost covers R16: Complete's response, and on the
+// streaming path the usage chunk, return the cost the llm_response event
+// records. A content-filter refusal records no llm_response but returns its
+// cost too, and a model without a cost block returns 0.
+func TestOpenAIReturnsRecordedCost(t *testing.T) {
+	priced := []ModelInfo{{ID: "gpt-4o", Cost: ModelCost{Input: 2.5, Output: 10}}}
+	unpriced := []ModelInfo{{ID: "gpt-4o"}}
+	// Both servers below report 12 prompt and 9 completion tokens.
+	in, out := 12*2.5/1_000_000, 9*10.0/1_000_000
+	cases := []struct {
+		name            string
+		stream          bool
+		finish          string
+		models          []ModelInfo
+		wantIn, wantOut float64
+	}{
+		{"plain", false, "stop", priced, in, out},
+		{"plain refusal", false, openAIFinishReasonContentFilter, priced, in, out},
+		{"plain unpriced", false, "stop", unpriced, 0, 0},
+		{"stream", true, "stop", priced, in, out},
+		{"stream refusal", true, openAIFinishReasonContentFilter, priced, in, out},
+		{"stream unpriced", true, "stop", unpriced, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, streamResponse([]string{"ok"}, tc.finish, true))
+					return
+				}
+				_ = json.NewEncoder(w).Encode(oaiResponse{
+					ID:      "chatcmpl-cost",
+					Model:   "gpt-4o",
+					Choices: []oaiChoice{{Message: oaiMessage{Role: "assistant", Content: "ok"}, FinishReason: tc.finish}},
+					Usage:   oaiUsage{PromptTokens: 12, CompletionTokens: 9},
+				})
+			}))
+			defer server.Close()
+			sink := &recordingEventSink{}
+			p := NewOpenAIProvider("openai", server.URL, "test-key", tc.models, WithOpenAISessionEventSink(sink))
+			req := &CompletionRequest{Model: "gpt-4o", Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
+
+			var usage Usage
+			if tc.stream {
+				stream, err := p.Stream(context.Background(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for {
+					chunk, err := stream.Recv()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if chunk.Usage.InputTokens > 0 {
+						usage = chunk.Usage
+					}
+					if chunk.Done {
+						break
+					}
+				}
+				_ = stream.Close()
+			} else {
+				resp, err := p.Complete(context.Background(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				usage = resp.Usage
+			}
+			if usage.InputTokens != 12 || usage.OutputTokens != 9 || usage.InputCost != tc.wantIn || usage.OutputCost != tc.wantOut {
+				t.Errorf("returned usage = %+v, want 12/9 tokens costing %v/%v", usage, tc.wantIn, tc.wantOut)
+			}
+
+			got := sink.snapshot()
+			last := got[len(got)-1]
+			if tc.finish == openAIFinishReasonContentFilter {
+				if last.EventType != events.TypeLLMRefused {
+					t.Errorf("last event = %q, want %q", last.EventType, events.TypeLLMRefused)
+				}
+				return
+			}
+			var recorded events.LLMResponsePayload
+			if err := json.Unmarshal(last.Payload, &recorded); err != nil || last.EventType != events.TypeLLMResponse {
+				t.Fatalf("last event = %q (%v), want a decodable llm_response", last.EventType, err)
+			}
+			if recorded.CostInput != usage.InputCost || recorded.CostOutput != usage.OutputCost {
+				t.Errorf("returned cost %v/%v, llm_response records %v/%v",
+					usage.InputCost, usage.OutputCost, recorded.CostInput, recorded.CostOutput)
+			}
+		})
+	}
+}
+
+// TestOpenAIStream_ReturnsUsageFromFinishChunk covers R16 for servers that
+// put the usage on the finishing chunk, whose delta is empty, instead of a
+// separate usage-only chunk: the stream still returns the recorded cost.
+func TestOpenAIStream_ReturnsUsageFromFinishChunk(t *testing.T) {
+	body := `data: {"id":"chatcmpl-stream","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-stream","model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],` +
+		`"usage":{"prompt_tokens":12,"completion_tokens":9}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, body)
+	}))
+	defer server.Close()
+	sink := &recordingEventSink{}
+	models := []ModelInfo{{ID: "gpt-4o", Cost: ModelCost{Input: 2.5, Output: 10}}}
+	p := NewOpenAIProvider("openai", server.URL, "test-key", models, WithOpenAISessionEventSink(sink))
+	stream, err := p.Stream(context.Background(), &CompletionRequest{Model: "gpt-4o", Messages: []Message{{Role: RoleUser, Content: "Hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var usage Usage
+	for {
+		chunk, err := stream.Recv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if chunk.Usage.InputTokens > 0 {
+			usage = chunk.Usage
+		}
+		if chunk.Done {
+			break
+		}
+	}
+	_ = stream.Close()
+
+	wantIn, wantOut := 12*2.5/1_000_000, 9*10.0/1_000_000
+	if usage.InputTokens != 12 || usage.OutputTokens != 9 || usage.InputCost != wantIn || usage.OutputCost != wantOut {
+		t.Errorf("returned usage = %+v, want 12/9 tokens costing %v/%v", usage, wantIn, wantOut)
+	}
+	got := sink.snapshot()
+	last := got[len(got)-1]
+	var recorded events.LLMResponsePayload
+	if err := json.Unmarshal(last.Payload, &recorded); err != nil || last.EventType != events.TypeLLMResponse {
+		t.Fatalf("last event = %q (%v), want a decodable llm_response", last.EventType, err)
+	}
+	if recorded.CostInput != usage.InputCost || recorded.CostOutput != usage.OutputCost {
+		t.Errorf("returned cost %v/%v, llm_response records %v/%v",
+			usage.InputCost, usage.OutputCost, recorded.CostInput, recorded.CostOutput)
+	}
+}
+
 // ----- test helpers shared by the error-path tests above -----
 
 // roundTripperFunc adapts a closure into an http.RoundTripper so the

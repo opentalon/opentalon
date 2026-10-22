@@ -139,9 +139,7 @@ func (p *OpenAIProvider) Models() []ModelInfo { return p.models }
 // this provider's configured per-million-token rate for modelID. Returns
 // (0, 0) when modelID is not in p.models — emit helpers stamp
 // LLMResponsePayload with omitempty so a zero cost simply leaves the
-// fields out rather than recording a misleading "free call". Mirrors
-// the silent-zero behaviour of usageRecorderAdapter.RecordUsage in
-// cmd/opentalon/main.go so the two pricing paths stay consistent.
+// fields out rather than recording a misleading "free call".
 //
 // Currency is unitless: ModelInfo.Cost values are stamped as-is, the
 // operator's deployment convention sets the unit. Centralising the math
@@ -348,10 +346,10 @@ type oaiResponseStream struct {
 	responseID   string
 	contentBuf   strings.Builder
 	finishReason string
-	tokensIn     int
-	tokensOut    int
-	// costFn computes (inputCost, outputCost) from final token counts at
-	// end-of-stream. Captured as a closure rather than a back-pointer to
+	usage        Usage // the last usage the stream reported, priced by costFn
+	chatLoop     bool  // the request carried system segments
+	// costFn computes (inputCost, outputCost) from token counts when a
+	// chunk reports usage. Captured as a closure rather than a back-pointer to
 	// the provider so the stream stays decoupled from OpenAIProvider for
 	// targeted tests. nil when no pricing should be computed (test fakes
 	// that skip provider construction).
@@ -574,6 +572,10 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 		}
 	}
 
+	// A refusal is billed too, so its usage carries the cost as well.
+	usage := Usage{InputTokens: oaiResp.Usage.PromptTokens, OutputTokens: oaiResp.Usage.CompletionTokens}
+	usage.InputCost, usage.OutputCost = p.costForTokens(oaiReq.Model, usage.InputTokens, usage.OutputTokens)
+
 	// Refusal detection: OpenAI signals content-safety blocks via
 	// finish_reason="content_filter" (no separate refusal field). Emit
 	// llm_refused so analytics keeps refusals distinct from successful
@@ -590,17 +592,17 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 		// Refusals don't lead to tool dispatch, so a parent_id link from
 		// tool_call_extracted is not meaningful here anyway.
 	} else {
-		costIn, costOut := p.costForTokens(oaiReq.Model, oaiResp.Usage.PromptTokens, oaiResp.Usage.CompletionTokens)
 		eventID = emit.EmitLLMResponse(ctx, p.eventSink, emit.LLMResponseArgs{
 			RawContent:         content,
 			NativeToolCallsRaw: nativeToolCallsRaw,
 			FinishReason:       finishReason,
-			TokensIn:           oaiResp.Usage.PromptTokens,
-			TokensOut:          oaiResp.Usage.CompletionTokens,
-			CostInput:          costIn,
-			CostOutput:         costOut,
+			TokensIn:           usage.InputTokens,
+			TokensOut:          usage.OutputTokens,
+			CostInput:          usage.InputCost,
+			CostOutput:         usage.OutputCost,
 			LatencyMS:          latencyMS,
 			ProviderResponseID: oaiResp.ID,
+			ChatLoop:           req.Segments != nil,
 		})
 	}
 
@@ -609,11 +611,8 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 		Model:     oaiResp.Model,
 		Content:   content,
 		ToolCalls: toolCalls,
-		Usage: Usage{
-			InputTokens:  oaiResp.Usage.PromptTokens,
-			OutputTokens: oaiResp.Usage.CompletionTokens,
-		},
-		EventID: eventID,
+		Usage:     usage,
+		EventID:   eventID,
 	}, nil
 }
 
@@ -719,6 +718,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 		emitCtx:   ctx,
 		eventSink: p.eventSink,
 		startTime: start,
+		chatLoop:  req.Segments != nil,
 		costFn: func(in, out int) (float64, float64) {
 			return p.costForTokens(oaiReq.Model, in, out)
 		},
@@ -776,8 +776,7 @@ func (s *oaiResponseStream) Recv() (StreamChunk, error) {
 			s.responseID = chunk.ID
 		}
 		if chunk.Usage != nil {
-			s.tokensIn = chunk.Usage.PromptTokens
-			s.tokensOut = chunk.Usage.CompletionTokens
+			s.usage = s.priced(*chunk.Usage)
 		}
 		if len(chunk.Choices) > 0 {
 			if chunk.Choices[0].FinishReason != nil {
@@ -786,25 +785,16 @@ func (s *oaiResponseStream) Recv() (StreamChunk, error) {
 			s.contentBuf.WriteString(string(chunk.Choices[0].Delta.Content))
 		}
 
-		// Usage-only chunk (sent as the final chunk when stream_options.include_usage is true).
-		// It has no choices but carries the complete usage for the request.
-		if chunk.Usage != nil && len(chunk.Choices) == 0 {
-			return StreamChunk{
-				Model: chunk.Model,
-				Usage: Usage{
-					InputTokens:  chunk.Usage.PromptTokens,
-					OutputTokens: chunk.Usage.CompletionTokens,
-				},
-			}, nil
+		// Usage without text: the usage-only final chunk (sent when stream_options.include_usage
+		// is true), or a finishing choice whose empty delta carries the usage.
+		if chunk.Usage != nil && (len(chunk.Choices) == 0 || chunk.Choices[0].Delta.Content == "") {
+			return StreamChunk{Model: chunk.Model, Usage: s.usage}, nil
 		}
 
 		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
 			sc := StreamChunk{Content: string(chunk.Choices[0].Delta.Content), Model: chunk.Model}
 			if chunk.Usage != nil {
-				sc.Usage = Usage{
-					InputTokens:  chunk.Usage.PromptTokens,
-					OutputTokens: chunk.Usage.CompletionTokens,
-				}
+				sc.Usage = s.usage
 			}
 			return sc, nil
 		}
@@ -882,20 +872,26 @@ func (s *oaiResponseStream) emitStreamEnd() {
 		})
 		return
 	}
-	var costIn, costOut float64
-	if s.costFn != nil {
-		costIn, costOut = s.costFn(s.tokensIn, s.tokensOut)
-	}
 	s.lastEventID = emit.EmitLLMResponse(s.emitCtx, s.eventSink, emit.LLMResponseArgs{
 		RawContent:         content,
 		FinishReason:       s.finishReason,
-		TokensIn:           s.tokensIn,
-		TokensOut:          s.tokensOut,
-		CostInput:          costIn,
-		CostOutput:         costOut,
+		TokensIn:           s.usage.InputTokens,
+		TokensOut:          s.usage.OutputTokens,
+		CostInput:          s.usage.InputCost,
+		CostOutput:         s.usage.OutputCost,
 		LatencyMS:          latencyMS,
 		ProviderResponseID: s.responseID,
+		ChatLoop:           s.chatLoop,
 	})
+}
+
+// priced returns u with its cost from costFn.
+func (s *oaiResponseStream) priced(u oaiUsage) Usage {
+	usage := Usage{InputTokens: u.PromptTokens, OutputTokens: u.CompletionTokens}
+	if s.costFn != nil {
+		usage.InputCost, usage.OutputCost = s.costFn(usage.InputTokens, usage.OutputTokens)
+	}
+	return usage
 }
 
 func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error) {
@@ -940,6 +936,9 @@ func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error
 	}
 	if req.Reasoning {
 		oai.ReasoningEffort = req.ReasoningEffort
+		if oai.ReasoningEffort == "" {
+			oai.ReasoningEffort = findModel(p.models, req.Model).ReasoningEffort
+		}
 		if oai.ReasoningEffort == "" {
 			oai.ReasoningEffort = "medium" // default effort
 		}

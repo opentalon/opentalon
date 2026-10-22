@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -127,6 +128,29 @@ func TestFitRequestToWindow_DropsOldestFirstAndKeepsTheEnds(t *testing.T) {
 	}
 	if req.Messages[len(req.Messages)-1].Content != block("e") {
 		t.Error("the most recent message must survive")
+	}
+}
+
+func TestFitRequestToWindow_CountsReplayedThinking(t *testing.T) {
+	// A replayed thinking block carries its full thinking in the signature and
+	// the provider counts it as input, though the message's text is short.
+	thinking := json.RawMessage(`{"type":"thinking","thinking":"","signature":"` + strings.Repeat("A", 4000) + `"}`)
+	req := &provider.CompletionRequest{Messages: []provider.Message{
+		{Role: provider.RoleSystem, Content: block("s")},
+		{Role: provider.RoleUser, Content: "How many items?"},
+		{Role: provider.RoleAssistant, Thinking: []json.RawMessage{thinking}, ToolCalls: []provider.ToolCall{{ID: "call_1", Name: "list-items"}}},
+		{Role: provider.RoleTool, Content: "5", ToolCallID: "call_1"},
+		{Role: provider.RoleUser, Content: "And now?"},
+	}}
+	fit(t, req, 1000, 0, 1.0)
+
+	for _, m := range req.Messages {
+		if len(m.Thinking) > 0 {
+			t.Fatalf("the thinking-heavy message should have been dropped, kept %d of 5", len(req.Messages))
+		}
+	}
+	if last := req.Messages[len(req.Messages)-1]; last.Content != "And now?" {
+		t.Errorf("the most recent message must survive, got %q", last.Content)
 	}
 }
 

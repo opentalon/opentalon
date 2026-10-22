@@ -38,7 +38,7 @@ func (u *usageLLM) Complete(ctx context.Context, _ *provider.CompletionRequest) 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-time.After(u.delay):
-		return &provider.CompletionResponse{Content: "answer", Model: u.model, Usage: provider.Usage{InputTokens: 11, OutputTokens: 3}}, nil
+		return &provider.CompletionResponse{Content: "answer", Model: u.model, Usage: provider.Usage{InputTokens: 11, OutputTokens: 3, InputCost: 0.25, OutputCost: 0.5}}, nil
 	}
 }
 
@@ -178,7 +178,7 @@ func TestSubprocessUsageRecordedPerEntity(t *testing.T) {
 		t.Fatalf("recorded %d usage rows, want 3: %+v", len(usage.calls), usage.calls)
 	}
 	for _, c := range usage.calls {
-		if c.entityID != "ent1" || c.sessionID != "sess1" || c.modelID != "m-1" || c.in != 11 || c.out != 3 {
+		if c.entityID != "ent1" || c.sessionID != "sess1" || c.modelID != "m-1" || c.in != 11 || c.out != 3 || c.inCost != 0.25 || c.outCost != 0.5 {
 			t.Errorf("usage row = %+v", c)
 		}
 	}
@@ -191,8 +191,8 @@ func TestSubprocessUsageWithoutIdentityIsUnattributed(t *testing.T) {
 	if _, err := orch.RunAction(context.Background(), "_subprocess", "run", map[string]string{"task": "x"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(usage.calls) != 1 || usage.calls[0].entityID != unattributedEntity {
-		t.Fatalf("usage = %+v, want one row under %s", usage.calls, unattributedEntity)
+	if len(usage.calls) != 1 || usage.calls[0].entityID != unattributedEntity || usage.calls[0].inCost != 0.25 || usage.calls[0].outCost != 0.5 {
+		t.Fatalf("usage = %+v, want one row under %s with the provider's cost", usage.calls, unattributedEntity)
 	}
 }
 

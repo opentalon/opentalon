@@ -37,6 +37,25 @@ models:
     #   headers:
     #     cf-access-token: "${LLM_ACCESS_TOKEN}"
 
+    # Anthropic with prompt caching: the chat loop's repeated system prompt,
+    # tools and conversation are read from Anthropic's cache at the cache
+    # price. Every model with a cost then needs cache_write and cache_read
+    # (per 1M tokens). See docs/configuration.md, "Prompt caching (Anthropic)".
+    # anthropic:
+    #   api_key: "${ANTHROPIC_API_KEY}"
+    #   api: anthropic-messages
+    #   prompt_cache: true          # default false
+    #   cache_diagnostics: false    # default false
+    #   models:
+    #     - id: claude-haiku-4-5
+    #       cost: { input: 1.00, output: 5.00, cache_write: 1.25, cache_read: 0.10 }
+    #     # Claude 4.6 and later: adaptive thinking, effort low, medium, high,
+    #     # xhigh or max. See docs/configuration.md, "Adaptive thinking (Anthropic)".
+    #     - id: claude-sonnet-5-5
+    #       thinking: adaptive
+    #       reasoning_effort: high
+    #       cost: { input: 2.00, output: 10.00, cache_write: 2.50, cache_read: 0.20 }
+
   catalog:
     deepseek/deepseek-chat:
       alias: deepseek

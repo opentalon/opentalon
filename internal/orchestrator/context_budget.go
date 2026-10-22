@@ -51,7 +51,7 @@ func estimateProseTokens(s string) int { return int(float64(len(s)) / charsPerTo
 func estimateJSONTokens(s string) int { return int(float64(len(s)) / charsPerTokenJSON) }
 
 // estimateMessageTokens returns what one message costs: its text, its tool-call
-// arguments, and the per-message framing.
+// arguments, the thinking blocks it replays, and the per-message framing.
 //
 // Role decides the price of the text rather than any sniffing of the content: a
 // role=tool message IS a serialised tool result and a role=user/assistant one is
@@ -68,6 +68,11 @@ func estimateMessageTokens(m provider.Message) int {
 		if b, err := json.Marshal(m.ToolCalls); err == nil {
 			n += estimateJSONTokens(string(b))
 		}
+	}
+	// A block's signature carries its full thinking, which the provider
+	// counts as input.
+	for _, t := range m.Thinking {
+		n += estimateJSONTokens(string(t))
 	}
 	return n
 }

@@ -288,6 +288,20 @@ If **all** profiles for the current provider are in cooldown:
 
 The smart router sits above failover: the router picks the model, failover handles retries when the provider is down.
 
+## Prompt Caching (Anthropic)
+
+`prompt_cache: true` on an `anthropic-messages` provider makes the chat loop's requests cacheable. The chat loop builds its system prompt in three segments, ordered by how often they change, and hands them to the provider on `CompletionRequest.Segments`; the leading system message stays their concatenation, so providers that ignore the segments are unaffected:
+
+| Segment | Same across |
+|---|---|
+| fixed | all conversations with the same allowed plugins |
+| per conversation | the rounds and turns of one conversation |
+| per round | may change from one round to the next |
+
+With caching on, the Anthropic provider sends the system field as one text block per non-empty segment with a cache marker on the first, and sets Anthropic's automatic cache marker on the request, which caches the conversation so far. Anthropic renders tools, then system, then messages, so the first entry covers the tools and the fixed segment. Entries use Anthropic's default 5-minute lifetime. Every other model call (titles, summaries, planner, sub-agents) sends no segments and no markers.
+
+Each model with a cost then also prices the cache: `cost.cache_write` and `cost.cache_read`, per 1M tokens. OpenTalon refuses to start when `prompt_cache` is not a boolean, is turned on for another `api`, or a model with a price lacks either cache price.
+
 ## Configuration
 
 OpenTalon uses YAML for configuration. The config file lives at `~/.opentalon/config.yaml`.

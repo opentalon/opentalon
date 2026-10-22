@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -80,6 +81,8 @@ func assertPaired(t *testing.T, msgs []provider.Message) {
 
 func TestPairToolMessages(t *testing.T) {
 	sys := provider.Message{Role: provider.RoleSystem, Content: "sys"}
+	thinkingCall := toolUse("", "a")
+	thinkingCall.Thinking = []json.RawMessage{json.RawMessage(`{"type":"thinking","thinking":"","signature":"sig-1"}`)}
 	tests := []struct {
 		name   string
 		in     []provider.Message
@@ -117,6 +120,12 @@ func TestPairToolMessages(t *testing.T) {
 			in:     []provider.Message{sys, user("u"), toolUse("", "a"), assistant("note"), toolResult("a"), assistant("done")},
 			want:   []provider.Message{sys, user("u"), toolUse("", "a"), toolResult("a"), assistant("note"), assistant("done")},
 			report: toolPairingReport{MovedResultIDs: []string{"a"}},
+		},
+		{
+			name:   "thinking stays on a moved call message",
+			in:     []provider.Message{sys, toolResult("x"), user("u"), thinkingCall, assistant("note"), toolResult("a")},
+			want:   []provider.Message{sys, user("u"), thinkingCall, toolResult("a"), assistant("note")},
+			report: toolPairingReport{MovedResultIDs: []string{"a"}, OrphanResultIDs: []string{"x"}},
 		},
 		{
 			// Call ids repeat across rounds: the second call-1's result must not

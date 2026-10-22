@@ -486,7 +486,7 @@ func TestOrchestrator_PendingToolCallRejected_EmitsUserMessageButNotTurnStart(t 
 		Plugin: "gitlab",
 		Action: "analyze_code",
 		Args:   map[string]string{"repo": "myrepo"},
-	}, "", "")
+	}, "", "", nil)
 
 	result, err := orch.Run(context.Background(), sessID, "no")
 	if err != nil {
@@ -1987,7 +1987,7 @@ func TestOrchestrator_Confirmation_ToolCallApproved_EmitsResolved(t *testing.T) 
 		Action: "analyze_code",
 		Args:   map[string]string{},
 	}
-	savePendingToolCall(orch.sessions, sessID, pending, "", "")
+	savePendingToolCall(orch.sessions, sessID, pending, "", "", nil)
 
 	// Approve via the deterministic frontend button signal (metadata["confirmation"]).
 	ctx := actor.WithConfirmationDecision(context.Background(), "approve")
@@ -2019,7 +2019,7 @@ func TestOrchestrator_Confirmation_ToolCallRejected_EmitsResolved(t *testing.T) 
 		Action: "analyze_code",
 		Args:   map[string]string{},
 	}
-	savePendingToolCall(orch.sessions, sessID, pending, "", "")
+	savePendingToolCall(orch.sessions, sessID, pending, "", "", nil)
 
 	if _, err := orch.Run(context.Background(), sessID, "no"); err != nil {
 		t.Fatal(err)
@@ -3023,7 +3023,7 @@ func TestToolCatalog_NativeMode_RendersCatalogAndKeepsToolsArraySmall(t *testing
 	orch := newCatalogOrch(t, &fakeInjectionStateStore{})
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
-	sysMsg := orch.buildSystemPrompt(ctx, "ask", true)
+	sysMsg := orch.buildSystemPrompt(ctx, "ask", true).Join()
 	if !strings.Contains(sysMsg, "## Tool catalog — name + one-line summary") {
 		t.Errorf("system prompt missing catalog header, got:\n%s", sysMsg)
 	}
@@ -3076,7 +3076,7 @@ func TestToolCatalog_LoadedToolLeavesCatalogAndEntersToolsArray(t *testing.T) {
 		t.Errorf("tools array must NOT contain the un-loaded tools-plugin__t2, got %v", names)
 	}
 
-	sysMsg := orch.buildSystemPrompt(ctx, "ask", true)
+	sysMsg := orch.buildSystemPrompt(ctx, "ask", true).Join()
 	if strings.Contains(sysMsg, "- tools-plugin__t1:") {
 		t.Errorf("loaded tool must drop out of the catalog, still present:\n%s", sysMsg)
 	}
@@ -3201,7 +3201,7 @@ func TestOrchestrator_PendingToolCall_Amended(t *testing.T) {
 	savePendingToolCall(orch.sessions, sessID, &ToolCall{
 		ID: "pending-amend", Plugin: "gitlab", Action: "analyze_code",
 		Args: map[string]string{"assignee_id": "131349"},
-	}, "", "")
+	}, "", "", nil)
 
 	result, err := orch.Run(context.Background(), sessID, "bitte auf Hans Meier zuweisen")
 	if err != nil {
@@ -3231,7 +3231,7 @@ func TestOrchestrator_PendingToolCall_Amended(t *testing.T) {
 		t.Error("expected turn_start — amend should re-enter the agent loop")
 	}
 	// Pending state cleared so a later turn / instance can't resurrect it.
-	if pc, _, _ := loadPendingToolCall(orch.sessions, sessID); pc != nil {
+	if pc, _, _, _ := loadPendingToolCall(orch.sessions, sessID); pc != nil {
 		t.Error("expected pending tool call cleared after amend")
 	}
 }
@@ -3244,7 +3244,7 @@ func TestOrchestrator_PendingToolCall_RejectedWithReason(t *testing.T) {
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-rej", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "")
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-rej", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", nil)
 
 	result, err := orch.Run(context.Background(), sessID, "nein, lass es")
 	if err != nil {
@@ -3299,7 +3299,7 @@ func TestSingleStepPipeline_PrivilegedWrite_RequiresConfirmation(t *testing.T) {
 	if result.Metadata["type"] != "confirmation" {
 		t.Errorf("Metadata type = %q, want confirmation", result.Metadata["type"])
 	}
-	if pc, _, _ := loadPendingToolCall(orch.sessions, "sess"); pc == nil {
+	if pc, _, _, _ := loadPendingToolCall(orch.sessions, "sess"); pc == nil {
 		t.Error("expected the single-step write stored as a pending tool call (not executed)")
 	}
 }
@@ -3355,7 +3355,7 @@ func TestOrchestrator_PendingToolCall_ApproveWithChange_CoercedToAmend(t *testin
 	savePendingToolCall(orch.sessions, sessID, &ToolCall{
 		ID: "pending-coerce", Plugin: "gitlab", Action: "analyze_code",
 		Args: map[string]string{"assignee_id": "131349"},
-	}, "", "")
+	}, "", "", nil)
 
 	result, err := orch.Run(context.Background(), sessID, "ja, aber an Hans Meier")
 	if err != nil {
@@ -3385,7 +3385,7 @@ func TestOrchestrator_PendingToolCall_ClassifierError_FallsBackToReject(t *testi
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-err", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "")
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-err", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", nil)
 
 	result, err := orch.Run(context.Background(), sessID, "asdf qwer")
 	if err != nil {
@@ -3420,7 +3420,7 @@ func TestOrchestrator_PendingToolCall_ClassifierApprove_Executes(t *testing.T) {
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-ok", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "")
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-ok", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", nil)
 
 	if _, err := orch.Run(context.Background(), sessID, "ja, bitte ausführen"); err != nil {
 		t.Fatal(err)
@@ -3482,7 +3482,7 @@ func TestOrchestrator_ClassifierSpan_NestsUnderInvoked(t *testing.T) {
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-nest", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "")
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-nest", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", nil)
 
 	if _, err := orch.Run(context.Background(), sessID, "nein"); err != nil {
 		t.Fatal(err)

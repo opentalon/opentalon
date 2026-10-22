@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const testYAML = `
@@ -1384,5 +1386,136 @@ func TestParseConfig_OrchestratorCallbackLimits(t *testing.T) {
 	}
 	if cfg.Orchestrator.MaxResponseBytes != 1048576 {
 		t.Errorf("max_response_bytes = %d, want 1048576", cfg.Orchestrator.MaxResponseBytes)
+	}
+}
+
+func TestParsePromptCache(t *testing.T) {
+	const priced = "\n      models:\n        - id: claude-x\n          cost: { input: 1, output: 5"
+	cases := []struct {
+		name    string
+		api     string
+		fields  string // lines under the provider, after api
+		wantErr string // "" = must parse
+	}{
+		{"yes is not a boolean", "anthropic-messages", "prompt_cache: yes", "models.providers.p.prompt_cache: line 5: must be true or false"},
+		{"quoted true is not a boolean", "anthropic-messages", `prompt_cache: "true"`, "models.providers.p.prompt_cache: line 5: must be true or false"},
+		{"number is not a boolean", "anthropic-messages", "prompt_cache: 1", "models.providers.p.prompt_cache: line 5: must be true or false"},
+		{"null is not a boolean", "anthropic-messages", "prompt_cache: null", "models.providers.p.prompt_cache: line 5: must be true or false"},
+		{"~ is not a boolean", "anthropic-messages", "prompt_cache: ~", "models.providers.p.prompt_cache: line 5: must be true or false"},
+		{"an empty value is not a boolean", "anthropic-messages", "prompt_cache:", "models.providers.p.prompt_cache: line 5: must be true or false"},
+		{"on an openai-completions provider", "openai-completions", "prompt_cache: true", "models.providers.p.prompt_cache: only the anthropic-messages api"},
+		{"on a provider without api", "", "prompt_cache: true", "models.providers.p.prompt_cache: only the anthropic-messages api"},
+		{"priced model without cache prices", "anthropic-messages", "prompt_cache: true" + priced + " }",
+			`models.providers.p: model "claude-x": prompt_cache needs cost.cache_write and cost.cache_read`},
+		{"priced model without cache_read", "anthropic-messages", "prompt_cache: true" + priced + ", cache_write: 1.25 }",
+			`model "claude-x": prompt_cache needs`},
+		{"prices of 0 without cache prices", "anthropic-messages",
+			"prompt_cache: true\n      models:\n        - id: claude-x\n          cost: { input: 0, output: 0 }",
+			`model "claude-x": prompt_cache needs`},
+		{"cache prices set, 0 included", "anthropic-messages", "prompt_cache: true" + priced + ", cache_write: 1.25, cache_read: 0 }", ""},
+		{"model without a cost", "anthropic-messages", "prompt_cache: true\n      models:\n        - id: claude-x", ""},
+		{"off on an openai-completions provider", "openai-completions", "prompt_cache: false" + priced + " }", ""},
+		{"off without cache prices", "anthropic-messages", "prompt_cache: false" + priced + " }", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := "models:\n  providers:\n    p:\n      api: \"" + tc.api + "\"\n      " + tc.fields + "\n"
+			cfg, err := Parse([]byte(yaml))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			if cfg != nil {
+				t.Error("a failed parse returned a config")
+			}
+		})
+	}
+}
+
+func TestParseThinking(t *testing.T) {
+	cases := []struct {
+		name    string
+		api     string
+		fields  string // lines under the model, after its id
+		wantErr string // "" = must parse
+	}{
+		{"other value", "anthropic-messages", "thinking: budget",
+			`models.providers.p: model "claude-x": thinking must be adaptive, got "budget"`},
+		{"on an openai-completions provider", "openai-completions", "thinking: adaptive",
+			`models.providers.p: model "claude-x": thinking: adaptive needs the anthropic-messages api`},
+		{"on a provider without api", "", "thinking: adaptive",
+			`models.providers.p: model "claude-x": thinking: adaptive needs the anthropic-messages api`},
+		{"effort outside the five levels", "anthropic-messages", "thinking: adaptive\n          reasoning_effort: ultra",
+			`models.providers.p: model "claude-x": reasoning_effort must be low, medium, high, xhigh or max, got "ultra"`},
+		{"adaptive with effort max", "anthropic-messages", "thinking: adaptive\n          reasoning_effort: max", ""},
+		{"adaptive without effort", "anthropic-messages", "thinking: adaptive", ""},
+		{"any effort without thinking", "openai-completions", "reasoning_effort: ultra", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := "models:\n  providers:\n    p:\n      api: \"" + tc.api + "\"\n      models:\n        - id: claude-x\n          " + tc.fields + "\n"
+			cfg, err := Parse([]byte(yaml))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			if cfg != nil {
+				t.Error("a failed parse returned a config")
+			}
+		})
+	}
+}
+
+func TestParsePromptCacheValues(t *testing.T) {
+	cfg, err := Parse([]byte(`
+models:
+  providers:
+    anthropic:
+      api: anthropic-messages
+      prompt_cache: true
+      models:
+        - id: claude-x
+          cost: { input: 1, output: 5, cache_write: 1.25, cache_read: 0.1 }
+    plain:
+      api: anthropic-messages
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Models.Providers["anthropic"]
+	if !p.PromptCache.Value {
+		t.Error("prompt_cache: true was read as false")
+	}
+	if c := p.Models[0].Cost; c.CacheWrite == nil || *c.CacheWrite != 1.25 || c.CacheRead == nil || *c.CacheRead != 0.1 {
+		t.Errorf("cache prices = %v, %v, want 1.25 and 0.1", c.CacheWrite, c.CacheRead)
+	}
+	if cfg.Models.Providers["plain"].PromptCache.Value {
+		t.Error("prompt_cache defaults to true, want false")
+	}
+}
+
+func TestPromptCacheMarshalsAsBoolean(t *testing.T) {
+	cfg, err := Parse([]byte("models:\n  providers:\n    cached:\n      api: anthropic-messages\n      prompt_cache: true\n    plain:\n      api: anthropic-messages\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{"cached": "prompt_cache: true\n", "plain": "prompt_cache: false\n"} {
+		out, err := yaml.Marshal(cfg.Models.Providers[id])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(out), want) {
+			t.Errorf("provider %s marshals as\n%s\nwant a line %q", id, out, want)
+		}
 	}
 }

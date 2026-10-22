@@ -55,10 +55,15 @@ type LLMResponseArgs struct {
 	FinishReason       string
 	TokensIn           int
 	TokensOut          int
+	CacheWriteTokens   int
+	CacheReadTokens    int
 	CostInput          float64
 	CostOutput         float64
 	LatencyMS          int64
 	ProviderResponseID string
+	ChatLoop           bool
+	CacheMissReason    string
+	ThinkingDropped    int
 }
 
 // EmitLLMResponse writes one llm_response event. The helper computes
@@ -78,10 +83,15 @@ func EmitLLMResponse(ctx context.Context, sink Sink, args LLMResponseArgs) strin
 		FinishReason:        args.FinishReason,
 		TokensIn:            args.TokensIn,
 		TokensOut:           args.TokensOut,
+		CacheWriteTokens:    args.CacheWriteTokens,
+		CacheReadTokens:     args.CacheReadTokens,
 		CostInput:           args.CostInput,
 		CostOutput:          args.CostOutput,
 		LatencyMS:           args.LatencyMS,
 		ProviderResponseID:  args.ProviderResponseID,
+		ChatLoop:            args.ChatLoop,
+		CacheMissReason:     args.CacheMissReason,
+		ThinkingDropped:     args.ThinkingDropped,
 	}, args.LatencyMS)
 }
 

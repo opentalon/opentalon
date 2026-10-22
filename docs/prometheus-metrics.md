@@ -31,7 +31,7 @@ When enabled, OpenTalon starts an HTTP server on the configured address. Prometh
 
 Standard Go runtime and process metrics (`go_*`, `process_*`) are also exposed.
 
-> **Note:** Cost metrics are only non-zero when model `cost.input` / `cost.output` pricing is configured in `models.providers.<id>.models[*].cost`. Zero-cost (free-tier) models still emit the series with a value of `0`.
+> **Note:** Cost metrics carry the cost the provider returned for each model call, priced with the model's `cost` in `models.providers.<id>.models[*].cost` (cached input at `cost.cache_write` / `cost.cache_read`). They are only non-zero when that pricing is configured. Zero-cost (free-tier) models still emit the series with a value of `0`.
 
 ### Label semantics
 
@@ -64,16 +64,17 @@ plugins:
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `opentalon_plugin_llm_tokens_total` | Counter | `plugin`, `action`, `model`, `direction` | Tokens of LLM calls made on behalf of the plugin; `direction` is `input` or `output` |
-| `opentalon_plugin_llm_cost_usd_total` | Counter | `plugin`, `action`, `model` | Their cost, priced with the model's configured `cost` (always `0` for `decide/<decider>`, see below) |
+| `opentalon_plugin_llm_cost_usd_total` | Counter | `plugin`, `action`, `model` | Their cost, as the provider returned it for each call (always `0` for `decide/<decider>`, see below) |
 | `<prefix>_llm_tokens_total` | Counter | `action`, `model`, `direction` | With `prefix`: the same tokens, without the `plugin` label |
 | `<prefix>_llm_cost_usd_total` | Counter | `action`, `model` | With `prefix`: the same cost, without the `plugin` label |
 
 - `action` is the plugin action that caused the spend (e.g. `evaluate_pr`), not the host
   action it called back into.
 - `model` is the model that served the call; `decide` calls appear as `decide/<decider>`.
-- **`decide` spend is tokens only.** A `decide/<decider>` model has no configured price, so
-  its rows in `opentalon_plugin_llm_cost_usd_total` are always `0`, even for LLM-backed
-  deciders — the same as in `opentalon_llm_*_cost_usd_total`. Use the token counts.
+- **`decide` spend is tokens only.** A `decide` call is answered by its decider, not by a
+  model provider, so it carries no cost: its rows in `opentalon_plugin_llm_cost_usd_total` are
+  always `0`, even for LLM-backed deciders — the same as in `opentalon_llm_*_cost_usd_total`.
+  Use the token counts.
 - **Only plugin callbacks are attributed.** Spend is attributed when the plugin asks the host
   through a callback while executing one of its actions (`ExecuteBidi`, including the
   external gateway). A `_subprocess` or `decide` call that reaches the host another way —

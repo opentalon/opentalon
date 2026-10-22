@@ -174,7 +174,7 @@ func (h *lumHarness) proposeAfterInspect(msg string) string {
 	if res.Metadata["type"] != "confirmation" {
 		h.t.Fatalf("turn %q did not pause for confirmation: %+v", msg, res)
 	}
-	if pc, _, _ := loadPendingToolCall(h.sessions, lumSession); pc == nil || pc.Action != "purge" {
+	if pc, _, _, _ := loadPendingToolCall(h.sessions, lumSession); pc == nil || pc.Action != "purge" {
 		h.t.Fatalf("purge is not the pending call after %q: %+v", msg, pc)
 	}
 	return h.lastUserMessageEventID()

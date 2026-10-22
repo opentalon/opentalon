@@ -733,7 +733,7 @@ func main() {
 	// Build orchestrator usage recorder adapter (nil when usageStore is nil and metrics disabled).
 	var usageRecorder orchestrator.UsageRecorder
 	if usageStore != nil || metricsCollector != nil {
-		usageRecorder = &usageRecorderAdapter{store: usageStore, provider: prov, collector: metricsCollector}
+		usageRecorder = &usageRecorderAdapter{store: usageStore, collector: metricsCollector}
 	}
 	// Avoid non-nil interface wrapping a nil pointer.
 	var pluginObserver orchestrator.PluginCallObserver
@@ -745,7 +745,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	} else if n > 0 {
-		pluginUsageObserver = &pluginUsageAdapter{provider: prov, collector: metricsCollector}
+		pluginUsageObserver = metricsCollector
 	}
 
 	// channelNotifier carries a late-bound *channel.Registry pointer; both
@@ -969,6 +969,8 @@ func main() {
 	} else {
 		slog.Info("startup: sync skipped (follower), orchestrator ready", "component", "startup")
 	}
+	// Every pod builds its own prompts, so every pod fetches the catalog.
+	orch.WarmKnowledgeCatalog(ctx)
 
 	// Forward-declare channelManager so the OnPluginLoaded closure can
 	// reference it for readiness checks (channelManager is created below).
@@ -1344,15 +1346,10 @@ func modelIDs(models []provider.ModelInfo) []string {
 // usageRecorderAdapter adapts store.UsageStore to orchestrator.UsageRecorder.
 type usageRecorderAdapter struct {
 	store     *store.UsageStore
-	provider  provider.Provider
 	collector *metrics.Collector
 }
 
-func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int) {
-	if a.store == nil && a.collector == nil {
-		return
-	}
-	inputCostUSD, outputCostUSD := modelCostUSD(a.provider, modelID, inputTokens, outputTokens)
+func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int, inputCost, outputCost float64) {
 	if a.store != nil {
 		if err := a.store.Record(ctx, store.UsageRecord{
 			EntityID:        entityID,
@@ -1365,38 +1362,16 @@ func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupI
 			InputTokens:     inputTokens,
 			OutputTokens:    outputTokens,
 			ToolCalls:       toolCalls,
-			InputCost:       inputCostUSD,
-			OutputCost:      outputCostUSD,
+			InputCost:       inputCost,
+			OutputCost:      outputCost,
 		}); err != nil {
 			slog.Warn("usage record failed", "entity", entityID, "error", err)
 		}
 	}
 	if a.collector != nil {
 		a.collector.RecordUsage(ctx, entityID, groupID, channelID, sessionID, modelID,
-			inputTokens, outputTokens, toolCalls, inputCostUSD, outputCostUSD)
+			inputTokens, outputTokens, toolCalls, inputCost, outputCost)
 	}
-}
-
-func modelCostUSD(p provider.Provider, modelID string, inputTokens, outputTokens int) (float64, float64) {
-	if modelID == "" || p == nil {
-		return 0, 0
-	}
-	for _, m := range p.Models() {
-		if m.ID == modelID {
-			return float64(inputTokens) * m.Cost.Input / 1_000_000, float64(outputTokens) * m.Cost.Output / 1_000_000
-		}
-	}
-	return 0, 0
-}
-
-type pluginUsageAdapter struct {
-	provider  provider.Provider
-	collector *metrics.Collector
-}
-
-func (a *pluginUsageAdapter) ObservePluginUsage(ctx context.Context, plugin, action, model string, inputTokens, outputTokens int) {
-	in, out := modelCostUSD(a.provider, model, inputTokens, outputTokens)
-	a.collector.ObservePluginUsage(ctx, plugin, action, model, inputTokens, outputTokens, in+out)
 }
 
 func enablePluginCostMetrics(plugins map[string]config.PluginConfig, collector *metrics.Collector) (int, error) {
@@ -1560,8 +1535,10 @@ func (r *channelRunner) Run(ctx context.Context, sessionKey, content string, fil
 }
 
 // defaultModelClient wraps a provider and sets req.Model when empty.
-// It also injects model-level defaults (MaxTokens, ReasoningEffort)
-// from the provider's model config when the request doesn't set them.
+// It also injects the model-level MaxTokens from the provider's model
+// config when the request doesn't set it. The model's reasoning effort is
+// resolved by the provider that serves the request, so a fallback model
+// gets its own.
 type defaultModelClient struct {
 	provider provider.Provider
 	model    string
@@ -1591,8 +1568,8 @@ func (c *defaultModelClient) Stream(ctx context.Context, req *provider.Completio
 	return c.provider.Stream(ctx, req)
 }
 
-// applyModelDefaults injects MaxTokens and ReasoningEffort from the model
-// config when the request doesn't already set them.
+// applyModelDefaults injects MaxTokens from the model config when the
+// request doesn't already set it.
 func (c *defaultModelClient) applyModelDefaults(req *provider.CompletionRequest) {
 	m, ok := c.models[req.Model]
 	if !ok {
@@ -1600,9 +1577,6 @@ func (c *defaultModelClient) applyModelDefaults(req *provider.CompletionRequest)
 	}
 	if req.MaxTokens == 0 && m.MaxTokens > 0 {
 		req.MaxTokens = m.MaxTokens
-	}
-	if req.ReasoningEffort == "" && m.ReasoningEffort != "" {
-		req.ReasoningEffort = m.ReasoningEffort
 	}
 }
 
@@ -1835,11 +1809,17 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 			ProviderID:      providerID,
 			Reasoning:       m.Reasoning,
 			ReasoningEffort: m.ReasoningEffort,
+			Thinking:        m.Thinking,
 			InputTypes:      m.InputTypes,
 			ContextWindow:   m.ContextWindow,
 			MaxTokens:       m.MaxTokens,
-			Cost:            provider.ModelCost{Input: m.Cost.Input, Output: m.Cost.Output},
-			Features:        features,
+			Cost: provider.ModelCost{
+				Input:      m.Cost.Input,
+				Output:     m.Cost.Output,
+				CacheWrite: valueOrZero(m.Cost.CacheWrite),
+				CacheRead:  valueOrZero(m.Cost.CacheRead),
+			},
+			Features: features,
 		})
 	}
 
@@ -1853,12 +1833,14 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 		DebugResolve: debugResolve,
 		EventSink:    eventSink,
 		Headers:      provider.HeaderMap(pc.Headers),
+		PromptCache:  pc.PromptCache.Value,
 		Retry: provider.RetryPolicy{
 			MaxAttempts:  pc.Retry.MaxAttempts,
 			BaseDelay:    parseDurationOrZero(pc.Retry.BaseDelay),
 			MaxDelay:     parseDurationOrZero(pc.Retry.MaxDelay),
 			MaxTotalWait: parseDurationOrZero(pc.Retry.MaxTotalWait),
 		},
+		CacheDiagnostics: pc.CacheDiagnostics.Value,
 	}
 	prov, err := provider.FromConfig(provCfg)
 	if err != nil {
@@ -1879,6 +1861,14 @@ func parseDurationOrZero(s string) time.Duration {
 		return 0
 	}
 	return d
+}
+
+// valueOrZero returns *p, or 0 for an unset price.
+func valueOrZero(p *float64) float64 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 func defaultInt(v, fallback int) int {

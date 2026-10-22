@@ -252,6 +252,30 @@ func TestEmitLLMResponse_ZeroCostOmitted(t *testing.T) {
 	}
 }
 
+// TestEmitLLMResponse_CacheFields checks the version 2 payload: the cache
+// token counts and chat_loop pass through, and stay absent when zero, as in
+// version 1 rows.
+func TestEmitLLMResponse_CacheFields(t *testing.T) {
+	sink := &fakeSink{}
+	EmitLLMResponse(context.Background(), sink, LLMResponseArgs{
+		RawContent: "ok", TokensIn: 40210, CacheWriteTokens: 2104, CacheReadTokens: 37950, ChatLoop: true,
+	})
+	EmitLLMResponse(context.Background(), sink, LLMResponseArgs{RawContent: "ok", TokensIn: 10})
+
+	got := sink.snapshot()
+	set, unset := string(got[0].Payload), string(got[1].Payload)
+	for _, want := range []string{`"v":2,`, `"tokens_in":40210,`, `"cache_write_tokens":2104,`, `"cache_read_tokens":37950,`, `"chat_loop":true}`} {
+		if !strings.Contains(set, want) {
+			t.Errorf("payload lacks %s: %s", want, set)
+		}
+	}
+	for _, key := range []string{`"cache_write_tokens"`, `"cache_read_tokens"`, `"chat_loop"`} {
+		if strings.Contains(unset, key) {
+			t.Errorf("zero %s must be omitted, got: %s", key, unset)
+		}
+	}
+}
+
 func TestEmitLLMResponse_ExcerptAndSHA256(t *testing.T) {
 	sink := &fakeSink{}
 	long := strings.Repeat("A", events.ExcerptCap+128) // overshoot the cap

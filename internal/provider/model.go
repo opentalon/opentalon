@@ -54,8 +54,10 @@ const (
 )
 
 type ModelCost struct {
-	Input  float64 `json:"input" yaml:"input"`
-	Output float64 `json:"output" yaml:"output"`
+	Input      float64 `json:"input" yaml:"input"`
+	Output     float64 `json:"output" yaml:"output"`
+	CacheWrite float64 `json:"cache_write" yaml:"cache_write"` // per 1M tokens written to the prompt cache
+	CacheRead  float64 `json:"cache_read" yaml:"cache_read"`   // per 1M tokens read from the prompt cache
 }
 
 type ModelInfo struct {
@@ -63,7 +65,8 @@ type ModelInfo struct {
 	Name            string    `json:"name" yaml:"name"`
 	ProviderID      string    `json:"provider_id" yaml:"provider_id"`
 	Reasoning       bool      `json:"reasoning" yaml:"reasoning"`
-	ReasoningEffort string    `json:"reasoning_effort" yaml:"reasoning_effort"` // "low", "medium", "high"
+	ReasoningEffort string    `json:"reasoning_effort" yaml:"reasoning_effort"` // "low", "medium", "high", with Thinking also "xhigh", "max"
+	Thinking        string    `json:"thinking" yaml:"thinking"`                 // "adaptive": Anthropic adaptive thinking; empty = thinking by budget_tokens
 	InputTypes      []string  `json:"input" yaml:"input"`
 	ContextWindow   int       `json:"context_window" yaml:"context_window"`
 	MaxTokens       int       `json:"max_tokens" yaml:"max_tokens"`
@@ -82,4 +85,15 @@ func (m ModelInfo) SupportsFeature(f Feature) bool {
 		}
 	}
 	return false
+}
+
+// findModel returns the entry of models with id modelID, or the zero
+// ModelInfo when there is none.
+func findModel(models []ModelInfo, modelID string) ModelInfo {
+	for _, m := range models {
+		if m.ID == modelID {
+			return m
+		}
+	}
+	return ModelInfo{}
 }

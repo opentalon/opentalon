@@ -54,14 +54,14 @@ func TestConfirmationFrameMetadata_KeyContract(t *testing.T) {
 // confirmation must survive, intact, for the real user's next turn.
 func TestRun_HiddenTurnDoesNotResolvePendingConfirmation(t *testing.T) {
 	orch, sid := newConfirmationTestOrchestrator(t)
-	savePendingToolCall(orch.sessions, sid, &ToolCall{ID: "call_9", Plugin: "timly", Action: "delete-item"}, "", "Proceed with deleting 3 items?")
+	savePendingToolCall(orch.sessions, sid, &ToolCall{ID: "call_9", Plugin: "timly", Action: "delete-item"}, "", "Proceed with deleting 3 items?", nil)
 
 	ctx := actor.WithVisibility(context.Background(), provider.VisibilityHidden)
 	if _, err := orch.Run(ctx, sid, "[system] Your background job finished."); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if pc, _, _ := loadPendingToolCall(orch.sessions, sid); pc == nil {
+	if pc, _, _, _ := loadPendingToolCall(orch.sessions, sid); pc == nil {
 		t.Error("a hidden turn consumed the pending confirmation; it must leave it intact for the real user")
 	}
 }
@@ -69,7 +69,7 @@ func TestRun_HiddenTurnDoesNotResolvePendingConfirmation(t *testing.T) {
 func TestPendingConfirmationFrame_ToolCallFromPersistedBlob(t *testing.T) {
 	orch, sid := newConfirmationTestOrchestrator(t)
 	// The persisted blob is the single source of pending tool-call state.
-	savePendingToolCall(orch.sessions, sid, &ToolCall{ID: "call_restored", Plugin: "timly", Action: "delete-item"}, "", "Proceed after restart?")
+	savePendingToolCall(orch.sessions, sid, &ToolCall{ID: "call_restored", Plugin: "timly", Action: "delete-item"}, "", "Proceed after restart?", nil)
 
 	content, meta, ok := orch.PendingConfirmationFrame(sid)
 	if !ok {
@@ -84,7 +84,7 @@ func TestPendingConfirmationFrame_ToolCallFromPersistedBlob(t *testing.T) {
 
 	// Read-only: the pending state must survive the lookup so Run's Block A2
 	// can still consume it when the decision arrives.
-	if pc, _, _ := loadPendingToolCall(orch.sessions, sid); pc == nil {
+	if pc, _, _, _ := loadPendingToolCall(orch.sessions, sid); pc == nil {
 		t.Error("PendingConfirmationFrame consumed the pending state; it must be read-only")
 	}
 }

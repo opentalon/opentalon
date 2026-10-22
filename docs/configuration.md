@@ -156,6 +156,72 @@ Known limits:
   error, just as for `api_key`. Put values in quotes, as in the example
   above.
 
+### Prompt caching (Anthropic)
+
+For an `anthropic-messages` provider, `prompt_cache: true` marks the chat
+loop's requests for Anthropic's prompt cache. The system prompt, tools and
+conversation that repeat from one model call to the next are then read from
+the cache at the cache price instead of the full input price.
+
+```yaml
+models:
+  providers:
+    anthropic:
+      api_key: "${ANTHROPIC_API_KEY}"
+      api: anthropic-messages
+      prompt_cache: true          # default false
+      cache_diagnostics: false    # default false
+      models:
+        - id: claude-haiku-4-5
+          cost:
+            input: 1.00
+            output: 5.00
+            cache_write: 1.25     # per 1M tokens written to the cache
+            cache_read: 0.10      # per 1M tokens read from the cache
+```
+
+How it behaves:
+
+- The system prompt goes out as up to three text blocks: the part every
+  conversation with the same plugins shares, the part of one conversation,
+  and the part that may change from round to round. The first block carries
+  a cache marker, and the request carries Anthropic's automatic marker, which
+  caches the conversation so far. Entries last Anthropic's default 5 minutes.
+- Only the chat loop's model calls are marked. Session titles, summaries, the
+  planner, sub-agents and confirmation messages are sent as before.
+- With `prompt_cache: false`, the default, the system prompt is sent as one
+  string, as before.
+- Anthropic caches a prompt only above a minimum length per model. A shorter
+  one is sent without error and not cached.
+- `prompt_cache` takes `true` or `false` only; any other value (`yes`,
+  `"true"`, `1`) fails loading the config with an error naming the provider.
+  OpenTalon also refuses to start when `prompt_cache: true` is set on a
+  provider whose `api` is not `anthropic-messages`, or when a model's `cost`
+  sets a price but lacks `cache_write` or `cache_read`.
+
+#### Cache diagnostics
+
+`cache_diagnostics: true` asks Anthropic to compare each chat-loop request
+with the previous one of the same session and to report where the cacheable
+start of the prompt first differs. Every chat-loop request then carries the
+`anthropic-beta` header `cache-diagnosis-2026-04-07` and the id of the
+previous response in the session (none on the session's first request). The
+reason Anthropic reports, for example `system_changed`, `tools_changed` or
+`messages_changed`, is recorded as `cache_miss_reason` in the `llm_response`
+session event.
+
+- It needs `prompt_cache: true`; without it OpenTalon refuses to start with
+  an error naming the provider. Like `prompt_cache`, it takes `true` or
+  `false` only.
+- A configured `anthropic-beta` header is kept: both betas are sent,
+  separated by a comma.
+- The previous response ids are kept in memory, for at most 10,000 sessions
+  (the oldest is dropped first). After a restart, after a session's id was
+  dropped, or when the previous request ran on another instance, the next
+  request sends no id and the comparison starts over. `previous_message_not_found`
+  is recorded only when an id was sent that Anthropic no longer knows; the
+  request is answered as usual.
+
 ## Custom Models
 
 For well-known providers (Anthropic, OpenAI), the model catalog is built in. For custom or self-hosted providers, declare the models explicitly:
@@ -198,11 +264,75 @@ Model fields:
 | `id` | yes | Model ID sent to the API (e.g. `llama3`, `gpt-4o`) |
 | `name` | no | Human-readable name |
 | `reasoning` | no | Whether the model supports chain-of-thought |
+| `reasoning_effort` | no | Effort the model is asked for: `low`, `medium` or `high`; with `thinking: adaptive` also `xhigh` and `max`. Empty = the provider's default |
+| `thinking` | no | `adaptive` on an `anthropic-messages` provider, for Claude 4.6 and later. See "Adaptive thinking (Anthropic)" |
 | `input` | no | Supported input types (`[text]`, `[text, image]`) |
 | `context_window` | no | Max context size in tokens |
 | `max_tokens` | no | Max output tokens |
 | `cost.input` | no | Cost per 1M input tokens (USD). Used by smart router |
 | `cost.output` | no | Cost per 1M output tokens (USD) |
+| `cost.cache_write` | no | Cost per 1M tokens written to the prompt cache (USD). Required with `prompt_cache: true` when the model has a cost |
+| `cost.cache_read` | no | Cost per 1M tokens read from the prompt cache (USD). Required like `cache_write` |
+
+### Adaptive thinking (Anthropic)
+
+Claude 4.6 and later models think adaptively and take an effort instead of a
+thinking budget; Claude Opus and Sonnet 4.7 and later and the 5.x models
+reject the budget. Mark such a model with `thinking: adaptive`:
+
+```yaml
+models:
+  providers:
+    anthropic:
+      api_key: "${ANTHROPIC_API_KEY}"
+      api: anthropic-messages
+      models:
+        - id: claude-sonnet-5-5
+          thinking: adaptive
+          reasoning_effort: high    # low, medium, high, xhigh or max
+```
+
+- Every request to the model carries `thinking: {type: adaptive}` and, when
+  an effort is set, `output_config: {effort: <reasoning_effort>}`. Without
+  an effort, Anthropic uses the model's default effort. `max_tokens` is sent
+  as configured.
+- A model without `thinking` is sent a thinking budget (`budget_tokens`)
+  when it has `features: [reasoning]`, as before. Claude Haiku 4.5 and older
+  models need that form and reject `thinking: adaptive`.
+- A channel can set the effort of one turn with the message metadata
+  `reasoning_effort` (`low`, `medium` or `high`); it replaces the model's
+  effort for that turn. When the effort changes between two requests of a
+  conversation, Anthropic reads a different prompt start, so with
+  `prompt_cache: true` the conversation is written to the cache again.
+- The thinking blocks a response returns together with tool calls are stored
+  with the conversation and sent back unchanged, ahead of those tool calls, on
+  every later request of the conversation that turns thinking on (`thinking:
+  adaptive`, or a thinking budget), as Anthropic requires in a tool loop. A
+  model that thinks without `thinking: adaptive`, as the 5.x models do, is
+  sent none of them.
+- On Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 a thinking block
+  stays valid only while the system prompt, the tools and every earlier
+  message are unchanged, and OpenTalon changes the system prompt after a
+  turn's first tool result and the tools when it loads tools. Anthropic drops
+  a block that is no longer valid, and a dropped block makes it write the
+  conversation after it to the cache again. To a model with `thinking:
+  adaptive` OpenTalon therefore sends a block only while the system prompt,
+  the tools and the earlier messages are what they were when the block was
+  produced (cache markers and the effort do not count); a block produced
+  after such a change goes back as long as nothing changes again. With a
+  thinking budget every block goes back, as those models need the unfinished
+  turn's blocks and do not check them.
+- Every request to a model with `thinking: adaptive` also carries
+  `thinking.block_binding.prefix_mismatch_behavior: drop_block` and the
+  `anthropic-beta` value `thinking-binding-controls-2026-08-01` (joined with
+  `cache-diagnosis-2026-04-07` when cache diagnostics are on), so a block
+  that is no longer valid is left out instead of failing the request. The
+  `llm_response` session event records how many Anthropic left out as
+  `thinking_dropped`.
+- `thinking` takes `adaptive` only. Any other value, `thinking: adaptive` on
+  a provider whose `api` is not `anthropic-messages`, or a `reasoning_effort`
+  other than the five levels on such a model fails loading the config with
+  an error naming the model.
 
 ## Smart Routing
 

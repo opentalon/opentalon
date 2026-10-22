@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -768,7 +771,7 @@ func TestGuardNotListedInSystemPrompt(t *testing.T) {
 	guards := []ContentPreparerEntry{{Plugin: "guard-plugin", Action: "sanitize", Guard: true}}
 
 	orch := setupGuardOrchestrator(guards, llm, parser, map[string]PluginExecutor{"guard-plugin": exec})
-	prompt := orch.buildSystemPrompt(context.Background(), "test", true)
+	prompt := orch.buildSystemPrompt(context.Background(), "test", true).Join()
 	if strings.Contains(prompt, "guard-plugin.sanitize") {
 		t.Error("guard action should not appear in system prompt tool list")
 	}
@@ -1267,7 +1270,7 @@ func TestSystemPromptIncludesCurrentSessionClassic(t *testing.T) {
 	ctx := actor.WithActor(context.Background(), "telegram:user42")
 	ctx = actor.WithConversationID(ctx, "chat-999")
 
-	prompt := orch.buildSystemPrompt(ctx, "test", true)
+	prompt := orch.buildSystemPrompt(ctx, "test", true).Join()
 
 	if !strings.Contains(prompt, "## Current session") {
 		t.Error("expected '## Current session' header in prompt")
@@ -1291,7 +1294,7 @@ func TestSystemPromptIncludesCurrentSessionProfileMode(t *testing.T) {
 	})
 	ctx = actor.WithConversationID(ctx, "C-abc")
 
-	prompt := orch.buildSystemPrompt(ctx, "test", true)
+	prompt := orch.buildSystemPrompt(ctx, "test", true).Join()
 
 	if !strings.Contains(prompt, "channel `slack`") {
 		t.Errorf("expected channel 'slack' (profile mode) in prompt: %s", prompt)
@@ -1305,7 +1308,7 @@ func TestSystemPromptIncludesCurrentSessionProfileMode(t *testing.T) {
 // the section must be omitted — not rendered as an empty block.
 func TestSystemPromptOmitsCurrentSessionWhenMissing(t *testing.T) {
 	orch := setupUserOnlyOrchestrator(&fakeParser{parseFn: func(string) []ToolCall { return nil }})
-	prompt := orch.buildSystemPrompt(context.Background(), "test", true)
+	prompt := orch.buildSystemPrompt(context.Background(), "test", true).Join()
 
 	if strings.Contains(prompt, "## Current session") {
 		t.Error("session block should not appear when ctx has neither channel nor conversation")
@@ -1341,7 +1344,7 @@ func TestSessionDescriptorPartialContext(t *testing.T) {
 
 func TestUserOnlyActionHiddenFromSystemPrompt(t *testing.T) {
 	orch := setupUserOnlyOrchestrator(&fakeParser{parseFn: func(string) []ToolCall { return nil }})
-	prompt := orch.buildSystemPrompt(context.Background(), "test", true)
+	prompt := orch.buildSystemPrompt(context.Background(), "test", true).Join()
 
 	if !strings.Contains(prompt, "tools__normal_action") {
 		t.Error("normal action should appear in system prompt")
@@ -1366,7 +1369,7 @@ func TestServerInstructionsBeforeToolsInSystemPrompt(t *testing.T) {
 	sessions := state.NewSessionStore("")
 	orch := NewWithRules(&fakeLLM{}, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry, memory, sessions, OrchestratorOpts{})
 
-	prompt := orch.buildSystemPrompt(context.Background(), "test", true)
+	prompt := orch.buildSystemPrompt(context.Background(), "test", true).Join()
 
 	// Server instructions must be present.
 	if !strings.Contains(prompt, "Counting records") {
@@ -1380,7 +1383,7 @@ func TestServerInstructionsBeforeToolsInSystemPrompt(t *testing.T) {
 	}
 
 	// When includeServerInstructions=false, they must be absent.
-	promptNoSI := orch.buildSystemPrompt(context.Background(), "test", false)
+	promptNoSI := orch.buildSystemPrompt(context.Background(), "test", false).Join()
 	if strings.Contains(promptNoSI, "Counting records") {
 		t.Error("server instructions must be absent when includeServerInstructions=false")
 	}
@@ -3722,5 +3725,54 @@ func TestExecuteCall_RunLabelsAreHostOwned(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTurnEffortReachesAdaptiveThinking checks that the per-turn effort a
+// channel sets reaches the request of a model with adaptive thinking but
+// without the reasoning feature, as output_config.effort in place of the
+// model's own effort.
+func TestTurnEffortReachesAdaptiveThinking(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		_, _ = io.WriteString(w, `{"id":"msg_1","model":"claude-x","content":[{"type":"text","text":"Hello."}],`+
+			`"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer server.Close()
+	anth, err := provider.FromConfig(provider.ProviderConfig{
+		ID: "anthropic", API: provider.APIAnthropic, BaseURL: server.URL, APIKey: "key",
+		Models: []provider.ModelInfo{{ID: "claude-x", Thinking: "adaptive", ReasoningEffort: "high"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "s1"})
+	orch := NewWithRules(anth, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{Model: "anthropic/claude-x"})
+	if _, err := orch.Run(actor.WithReasoningEffort(ctx, "low"), "s1", "Hi"); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) == 0 {
+		t.Fatal("no model call")
+	}
+	var sent struct {
+		Thinking     json.RawMessage `json:"thinking"`
+		OutputConfig json.RawMessage `json:"output_config"`
+	}
+	if err := json.Unmarshal([]byte(bodies[0]), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if string(sent.Thinking) != `{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}}` ||
+		string(sent.OutputConfig) != `{"effort":"low"}` {
+		t.Errorf("thinking = %s, output_config = %s, want adaptive and the turn's effort low", sent.Thinking, sent.OutputConfig)
 	}
 }

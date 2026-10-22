@@ -2,6 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/provider"
@@ -161,19 +167,71 @@ func TestDefaultModelClient_ApplyModelDefaults_MaxTokensNotOverridden(t *testing
 	}
 }
 
-func TestDefaultModelClient_ApplyModelDefaults_ReasoningEffort(t *testing.T) {
-	fp := &fakeProvider{
-		models: []provider.ModelInfo{{ID: "gpt-oss-120b", ReasoningEffort: "high"}},
-	}
-	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
+// failingProvider answers every completion with an error.
+type failingProvider struct{ fakeProvider }
 
-	req := &provider.CompletionRequest{
-		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
-	}
-	_, _ = c.Complete(context.Background(), req)
+func (f *failingProvider) Complete(context.Context, *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	return nil, errors.New("endpoint down")
+}
 
-	if fp.lastReq.ReasoningEffort != "high" {
-		t.Errorf("expected ReasoningEffort=high from model config, got %s", fp.lastReq.ReasoningEffort)
+// TestDefaultModelClient_FallbackSendsItsOwnEffort checks that when the
+// primary endpoint fails, an adaptive fallback model is sent its own
+// configured effort, not the primary model's, while a turn's effort is kept.
+func TestDefaultModelClient_FallbackSendsItsOwnEffort(t *testing.T) {
+	cases := []struct {
+		name          string
+		primaryEffort string
+		turnEffort    string
+		want          string
+	}{
+		{"primary with an effort", "high", "", `{"effort":"low"}`},
+		{"primary without effort", "", "", `{"effort":"low"}`},
+		{"the turn's effort", "high", "medium", `{"effort":"medium"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var bodies []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				bodies = append(bodies, string(body))
+				mu.Unlock()
+				_, _ = io.WriteString(w, `{"id":"msg_1","model":"claude-x","content":[{"type":"text","text":"Hello."}],`+
+					`"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+			}))
+			defer server.Close()
+			primary := &failingProvider{fakeProvider{models: []provider.ModelInfo{{ID: "primary-model", ReasoningEffort: tc.primaryEffort}}}}
+			fallback := provider.NewAnthropicProvider("anthropic", server.URL, "key",
+				[]provider.ModelInfo{{ID: "claude-x", Thinking: "adaptive", ReasoningEffort: "low"}})
+			hg := provider.NewHealthGatedProvider(context.Background(), []provider.ProviderEntry{
+				{Prov: primary, Model: "primary-model"},
+				{Prov: fallback, Model: "claude-x"},
+			}, nil, provider.HealthGateConfig{}, nil)
+			c := &defaultModelClient{provider: hg, model: "primary-model", models: modelMap(hg.Models())}
+
+			_, err := c.Complete(context.Background(), &provider.CompletionRequest{
+				Messages:        []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+				ReasoningEffort: tc.turnEffort,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(bodies) != 1 {
+				t.Fatalf("fallback received %d requests, want 1", len(bodies))
+			}
+			var sent struct {
+				OutputConfig json.RawMessage `json:"output_config"`
+			}
+			if err := json.Unmarshal([]byte(bodies[0]), &sent); err != nil {
+				t.Fatal(err)
+			}
+			if string(sent.OutputConfig) != tc.want {
+				t.Errorf("output_config = %s, want %s", sent.OutputConfig, tc.want)
+			}
+		})
 	}
 }
 
@@ -196,7 +254,7 @@ func TestDefaultModelClient_ApplyModelDefaults_ReasoningEffortNotOverridden(t *t
 
 func TestDefaultModelClient_ApplyModelDefaults_StreamInjects(t *testing.T) {
 	fp := &fakeProvider{
-		models: []provider.ModelInfo{{ID: "gpt-oss-120b", MaxTokens: 65536, ReasoningEffort: "high"}},
+		models: []provider.ModelInfo{{ID: "gpt-oss-120b", MaxTokens: 65536}},
 	}
 	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
 
@@ -207,8 +265,5 @@ func TestDefaultModelClient_ApplyModelDefaults_StreamInjects(t *testing.T) {
 
 	if fp.streamReq.MaxTokens != 65536 {
 		t.Errorf("expected MaxTokens=65536 from model config in stream, got %d", fp.streamReq.MaxTokens)
-	}
-	if fp.streamReq.ReasoningEffort != "high" {
-		t.Errorf("expected ReasoningEffort=high from model config in stream, got %s", fp.streamReq.ReasoningEffort)
 	}
 }
