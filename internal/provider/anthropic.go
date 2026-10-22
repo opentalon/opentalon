@@ -515,10 +515,14 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		ar.CacheControl = &anthCacheControl{Type: "ephemeral"}
 	}
 
-	if p.adaptiveThinking(req.Model) {
+	if model := findModel(p.models, req.Model); model.Thinking == "adaptive" {
 		ar.Thinking = &anthThinking{Type: "adaptive"}
-		if req.ReasoningEffort != "" {
-			ar.OutputConfig = &anthOutputConfig{Effort: req.ReasoningEffort}
+		effort := req.ReasoningEffort
+		if effort == "" {
+			effort = model.ReasoningEffort
+		}
+		if effort != "" {
+			ar.OutputConfig = &anthOutputConfig{Effort: effort}
 		}
 	} else if req.Reasoning {
 		budget := req.BudgetTokens
@@ -533,18 +537,6 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 	}
 
 	return ar, nil
-}
-
-// adaptiveThinking reports whether modelID is configured with thinking:
-// adaptive, which takes the place of a thinking budget whatever
-// req.Reasoning says.
-func (p *AnthropicProvider) adaptiveThinking(modelID string) bool {
-	for _, m := range p.models {
-		if m.ID == modelID {
-			return m.Thinking == "adaptive"
-		}
-	}
-	return false
 }
 
 // toAnthSystem renders the system field from the request's system messages,

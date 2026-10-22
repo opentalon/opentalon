@@ -3728,19 +3728,6 @@ func TestExecuteCall_RunLabelsAreHostOwned(t *testing.T) {
 	}
 }
 
-// modelDefaultsLLM fills a request's empty effort with its model's, as the
-// client that wraps every provider does at the provider edge.
-type modelDefaultsLLM struct{ provider.Provider }
-
-func (l modelDefaultsLLM) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
-	for _, m := range l.Models() {
-		if m.ID == req.Model && req.ReasoningEffort == "" {
-			req.ReasoningEffort = m.ReasoningEffort
-		}
-	}
-	return l.Provider.Complete(ctx, req)
-}
-
 // TestTurnEffortReachesAdaptiveThinking checks that the per-turn effort a
 // channel sets reaches the request of a model with adaptive thinking but
 // without the reasoning feature, as output_config.effort in place of the
@@ -3766,7 +3753,7 @@ func TestTurnEffortReachesAdaptiveThinking(t *testing.T) {
 	}
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
-	orch := NewWithRules(modelDefaultsLLM{anth}, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
+	orch := NewWithRules(anth, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
 	ctx := profile.WithProfile(context.Background(), &profile.Profile{Model: "anthropic/claude-x"})
 	if _, err := orch.Run(actor.WithReasoningEffort(ctx, "low"), "s1", "Hi"); err != nil {
 		t.Fatal(err)

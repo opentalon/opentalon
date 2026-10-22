@@ -937,6 +937,9 @@ func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error
 	if req.Reasoning {
 		oai.ReasoningEffort = req.ReasoningEffort
 		if oai.ReasoningEffort == "" {
+			oai.ReasoningEffort = findModel(p.models, req.Model).ReasoningEffort
+		}
+		if oai.ReasoningEffort == "" {
 			oai.ReasoningEffort = "medium" // default effort
 		}
 	}

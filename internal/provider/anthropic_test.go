@@ -918,30 +918,35 @@ func TestAnthropicCacheMarkedRequestRejected(t *testing.T) {
 // --- thinking ---
 
 // TestAnthropicThinking covers the thinking form of a request. A model with
-// thinking: adaptive is sent thinking {type: adaptive}, the effort as
-// output_config.effort when one is set, and max_tokens as asked; the
-// llm_request event records the effort sent. A model without the field is
-// sent today's thinking budget, byte for byte, and no effort.
+// thinking: adaptive is sent thinking {type: adaptive}, the request's effort,
+// else the model's, as output_config.effort when one is set, and max_tokens
+// as asked; the llm_request event records the effort sent. A model without
+// the field is sent today's thinking budget, byte for byte, and no effort.
 func TestAnthropicThinking(t *testing.T) {
 	const adaptive = `{"model":"claude-x","system":"Fixed \u003crules\u003e.\nConversation.\nRound.",` +
 		`"messages":[{"role":"user","content":"How many items?"}],"max_tokens":4096,"thinking":{"type":"adaptive"},`
 	const tools = `"tools":[{"name":"inv__list-items","description":"List items","input_schema":{"type":"object"}}]}`
 	cases := []struct {
-		name       string
-		thinking   string
-		effort     string
-		wantBody   string
-		wantEffort string // recorded in the llm_request event
+		name        string
+		thinking    string
+		modelEffort string
+		effort      string
+		wantBody    string
+		wantEffort  string // recorded in the llm_request event
 	}{
-		{"adaptive with effort", "adaptive", "high", adaptive + `"output_config":{"effort":"high"},` + tools, "high"},
-		{"adaptive without effort", "adaptive", "", adaptive + tools, ""},
-		{"without thinking", "", "high", anthropicBodyWithoutCache, ""},
+		{"adaptive with effort", "adaptive", "", "high", adaptive + `"output_config":{"effort":"high"},` + tools, "high"},
+		{"adaptive with the model's effort", "adaptive", "medium", "", adaptive + `"output_config":{"effort":"medium"},` + tools, "medium"},
+		{"adaptive, the request's effort over the model's", "adaptive", "medium", "high",
+			adaptive + `"output_config":{"effort":"high"},` + tools, "high"},
+		{"adaptive without effort", "adaptive", "", "", adaptive + tools, ""},
+		{"without thinking", "", "medium", "high", anthropicBodyWithoutCache, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			req := cacheTestRequest(cacheTestSegments, nil)
 			req.ReasoningEffort = tc.effort
-			models := []ModelInfo{{ID: "claude-x", Thinking: tc.thinking, Features: []Feature{FeatureReasoning}}}
+			models := []ModelInfo{{ID: "claude-x", Thinking: tc.thinking, ReasoningEffort: tc.modelEffort,
+				Features: []Feature{FeatureReasoning}}}
 			sink := &recordingEventSink{}
 			bodies, err := anthropicBodies(t, models, req, http.StatusOK, WithAnthropicSessionEventSink(sink))
 			if err != nil {

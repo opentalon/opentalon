@@ -1535,8 +1535,10 @@ func (r *channelRunner) Run(ctx context.Context, sessionKey, content string, fil
 }
 
 // defaultModelClient wraps a provider and sets req.Model when empty.
-// It also injects model-level defaults (MaxTokens, ReasoningEffort)
-// from the provider's model config when the request doesn't set them.
+// It also injects the model-level MaxTokens from the provider's model
+// config when the request doesn't set it. The model's reasoning effort is
+// resolved by the provider that serves the request, so a fallback model
+// gets its own.
 type defaultModelClient struct {
 	provider provider.Provider
 	model    string
@@ -1566,8 +1568,8 @@ func (c *defaultModelClient) Stream(ctx context.Context, req *provider.Completio
 	return c.provider.Stream(ctx, req)
 }
 
-// applyModelDefaults injects MaxTokens and ReasoningEffort from the model
-// config when the request doesn't already set them.
+// applyModelDefaults injects MaxTokens from the model config when the
+// request doesn't already set it.
 func (c *defaultModelClient) applyModelDefaults(req *provider.CompletionRequest) {
 	m, ok := c.models[req.Model]
 	if !ok {
@@ -1575,9 +1577,6 @@ func (c *defaultModelClient) applyModelDefaults(req *provider.CompletionRequest)
 	}
 	if req.MaxTokens == 0 && m.MaxTokens > 0 {
 		req.MaxTokens = m.MaxTokens
-	}
-	if req.ReasoningEffort == "" && m.ReasoningEffort != "" {
-		req.ReasoningEffort = m.ReasoningEffort
 	}
 }
 

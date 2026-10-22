@@ -86,3 +86,14 @@ func (m ModelInfo) SupportsFeature(f Feature) bool {
 	}
 	return false
 }
+
+// findModel returns the entry of models with id modelID, or the zero
+// ModelInfo when there is none.
+func findModel(models []ModelInfo, modelID string) ModelInfo {
+	for _, m := range models {
+		if m.ID == modelID {
+			return m
+		}
+	}
+	return ModelInfo{}
+}

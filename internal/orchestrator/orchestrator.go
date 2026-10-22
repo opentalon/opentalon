@@ -2332,7 +2332,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		log.Debug("tool calling mode", "native", nativeMode, "model", req.Model)
 
 		// Per-turn override (channel metadata) wins over the model default,
-		// which applyModelDefaults would otherwise fill at the provider edge.
+		// which the provider serving the request would otherwise fill.
 		if eff := actor.ReasoningEffort(ctx); eff != "" {
 			req.ReasoningEffort = eff
 		}

@@ -498,3 +498,38 @@ func TestRawJSONOrString(t *testing.T) {
 		})
 	}
 }
+
+// TestOpenAIReasoningEffort covers the effort of a reasoning request: the
+// request's, else the model's, else medium; none without reasoning.
+func TestOpenAIReasoningEffort(t *testing.T) {
+	cases := []struct {
+		name        string
+		reasoning   bool
+		modelEffort string
+		effort      string
+		want        string
+	}{
+		{"the request's effort over the model's", true, "high", "low", "low"},
+		{"the model's effort", true, "high", "", "high"},
+		{"medium without either", true, "", "", "medium"},
+		{"none without reasoning", false, "high", "low", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewOpenAIProvider("openai", "http://localhost", "key",
+				[]ModelInfo{{ID: "gpt-oss-120b", ReasoningEffort: tc.modelEffort}})
+			oai, err := p.toOAIRequest(&CompletionRequest{
+				Model:           "gpt-oss-120b",
+				Messages:        []Message{{Role: RoleUser, Content: "hi"}},
+				Reasoning:       tc.reasoning,
+				ReasoningEffort: tc.effort,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if oai.ReasoningEffort != tc.want {
+				t.Errorf("reasoning_effort = %q, want %q", oai.ReasoningEffort, tc.want)
+			}
+		})
+	}
+}
