@@ -20,7 +20,7 @@ import (
 
 // Tool names are passed to Anthropic verbatim. The orchestrator's tool
 // registry composes fully-qualified names with the "__" separator (see
-// pkg/toolfqn), e.g. "timly__timly__list-items" or "_meta__load_tools".
+// pkg/toolfqn), e.g. "crm__crm__list-contacts" or "_meta__load_tools".
 // No wire encoding is needed because the composed FQN charset
 // `^[a-zA-Z0-9_-]{1,64}$` — Anthropic's tool-name pattern — is now
 // ENFORCED at registration (see ToolRegistry.Register), so any name that
