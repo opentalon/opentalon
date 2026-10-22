@@ -1810,6 +1810,7 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 			ProviderID:      providerID,
 			Reasoning:       m.Reasoning,
 			ReasoningEffort: m.ReasoningEffort,
+			Thinking:        m.Thinking,
 			InputTypes:      m.InputTypes,
 			ContextWindow:   m.ContextWindow,
 			MaxTokens:       m.MaxTokens,

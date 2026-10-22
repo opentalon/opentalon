@@ -65,7 +65,8 @@ type ModelInfo struct {
 	Name            string    `json:"name" yaml:"name"`
 	ProviderID      string    `json:"provider_id" yaml:"provider_id"`
 	Reasoning       bool      `json:"reasoning" yaml:"reasoning"`
-	ReasoningEffort string    `json:"reasoning_effort" yaml:"reasoning_effort"` // "low", "medium", "high"
+	ReasoningEffort string    `json:"reasoning_effort" yaml:"reasoning_effort"` // "low", "medium", "high", with Thinking also "xhigh", "max"
+	Thinking        string    `json:"thinking" yaml:"thinking"`                 // "adaptive": Anthropic adaptive thinking; empty = thinking by budget_tokens
 	InputTypes      []string  `json:"input" yaml:"input"`
 	ContextWindow   int       `json:"context_window" yaml:"context_window"`
 	MaxTokens       int       `json:"max_tokens" yaml:"max_tokens"`

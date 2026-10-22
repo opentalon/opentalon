@@ -2331,6 +2331,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		log.Debug("tool calling mode", "native", nativeMode, "model", req.Model)
 
+		// Per-turn override (channel metadata) wins over the model default,
+		// which applyModelDefaults would otherwise fill at the provider edge.
+		if eff := actor.ReasoningEffort(ctx); eff != "" {
+			req.ReasoningEffort = eff
+		}
+
 		// Enable reasoning on EVERY turn the model supports it — including
 		// tool-attached turns, where the model decides WHICH tool to call.
 		// The earlier heuristic disabled reasoning whenever tools were
@@ -2346,11 +2352,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			req.Reasoning = true
 			if p := profile.FromContext(ctx); p != nil && p.BudgetTokens > 0 {
 				req.BudgetTokens = p.BudgetTokens
-			}
-			// Per-turn override (channel metadata) wins over the model default,
-			// which applyModelDefaults would otherwise fill at the provider edge.
-			if eff := actor.ReasoningEffort(ctx); eff != "" {
-				req.ReasoningEffort = eff
 			}
 			log.Debug("reasoning enabled for LLM request", "round", i+1,
 				"has_tools", len(req.Tools) > 0,

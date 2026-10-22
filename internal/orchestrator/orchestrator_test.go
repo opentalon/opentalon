@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -3722,5 +3725,66 @@ func TestExecuteCall_RunLabelsAreHostOwned(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// modelDefaultsLLM fills a request's empty effort with its model's, as the
+// client that wraps every provider does at the provider edge.
+type modelDefaultsLLM struct{ provider.Provider }
+
+func (l modelDefaultsLLM) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	for _, m := range l.Models() {
+		if m.ID == req.Model && req.ReasoningEffort == "" {
+			req.ReasoningEffort = m.ReasoningEffort
+		}
+	}
+	return l.Provider.Complete(ctx, req)
+}
+
+// TestTurnEffortReachesAdaptiveThinking checks that the per-turn effort a
+// channel sets reaches the request of a model with adaptive thinking but
+// without the reasoning feature, as output_config.effort in place of the
+// model's own effort.
+func TestTurnEffortReachesAdaptiveThinking(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		_, _ = io.WriteString(w, `{"id":"msg_1","model":"claude-x","content":[{"type":"text","text":"Hello."}],`+
+			`"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer server.Close()
+	anth, err := provider.FromConfig(provider.ProviderConfig{
+		ID: "anthropic", API: provider.APIAnthropic, BaseURL: server.URL, APIKey: "key",
+		Models: []provider.ModelInfo{{ID: "claude-x", Thinking: "adaptive", ReasoningEffort: "high"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "s1"})
+	orch := NewWithRules(modelDefaultsLLM{anth}, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{Model: "anthropic/claude-x"})
+	if _, err := orch.Run(actor.WithReasoningEffort(ctx, "low"), "s1", "Hi"); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) == 0 {
+		t.Fatal("no model call")
+	}
+	var sent struct {
+		Thinking     json.RawMessage `json:"thinking"`
+		OutputConfig json.RawMessage `json:"output_config"`
+	}
+	if err := json.Unmarshal([]byte(bodies[0]), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if string(sent.Thinking) != `{"type":"adaptive"}` || string(sent.OutputConfig) != `{"effort":"low"}` {
+		t.Errorf("thinking = %s, output_config = %s, want adaptive and the turn's effort low", sent.Thinking, sent.OutputConfig)
 	}
 }

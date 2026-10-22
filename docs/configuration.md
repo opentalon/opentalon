@@ -264,6 +264,8 @@ Model fields:
 | `id` | yes | Model ID sent to the API (e.g. `llama3`, `gpt-4o`) |
 | `name` | no | Human-readable name |
 | `reasoning` | no | Whether the model supports chain-of-thought |
+| `reasoning_effort` | no | Effort the model is asked for: `low`, `medium` or `high`; with `thinking: adaptive` also `xhigh` and `max`. Empty = the provider's default |
+| `thinking` | no | `adaptive` on an `anthropic-messages` provider, for Claude 4.6 and later. See "Adaptive thinking (Anthropic)" |
 | `input` | no | Supported input types (`[text]`, `[text, image]`) |
 | `context_window` | no | Max context size in tokens |
 | `max_tokens` | no | Max output tokens |
@@ -271,6 +273,41 @@ Model fields:
 | `cost.output` | no | Cost per 1M output tokens (USD) |
 | `cost.cache_write` | no | Cost per 1M tokens written to the prompt cache (USD). Required with `prompt_cache: true` when the model has a cost |
 | `cost.cache_read` | no | Cost per 1M tokens read from the prompt cache (USD). Required like `cache_write` |
+
+### Adaptive thinking (Anthropic)
+
+Claude 4.6 and later models think adaptively and take an effort instead of a
+thinking budget; Claude Opus and Sonnet 4.7 and later and the 5.x models
+reject the budget. Mark such a model with `thinking: adaptive`:
+
+```yaml
+models:
+  providers:
+    anthropic:
+      api_key: "${ANTHROPIC_API_KEY}"
+      api: anthropic-messages
+      models:
+        - id: claude-sonnet-5-5
+          thinking: adaptive
+          reasoning_effort: high    # low, medium, high, xhigh or max
+```
+
+- Every request to the model carries `thinking: {type: adaptive}` and, when
+  an effort is set, `output_config: {effort: <reasoning_effort>}`. Without
+  an effort, Anthropic uses the model's default effort. `max_tokens` is sent
+  as configured.
+- A model without `thinking` is sent a thinking budget (`budget_tokens`)
+  when it has `features: [reasoning]`, as before. Claude Haiku 4.5 and older
+  models need that form and reject `thinking: adaptive`.
+- A channel can set the effort of one turn with the message metadata
+  `reasoning_effort` (`low`, `medium` or `high`); it replaces the model's
+  effort for that turn. When the effort changes between two requests of a
+  conversation, Anthropic reads a different prompt start, so with
+  `prompt_cache: true` the conversation is written to the cache again.
+- `thinking` takes `adaptive` only. Any other value, `thinking: adaptive` on
+  a provider whose `api` is not `anthropic-messages`, or a `reasoning_effort`
+  other than the five levels on such a model fails loading the config with
+  an error naming the model.
 
 ## Smart Routing
 

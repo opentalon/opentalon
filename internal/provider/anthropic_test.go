@@ -738,10 +738,10 @@ func cacheTestRequest(segs SystemSegments, segments *SystemSegments) *Completion
 	}
 }
 
-// anthropicBodies sends req through a provider built with opts to a server
-// that answers every request with status, and returns the request bodies it
-// received with the error Complete returned.
-func anthropicBodies(t *testing.T, req *CompletionRequest, status int, opts ...AnthropicOption) ([]string, error) {
+// anthropicBodies sends req through a provider built with models and opts to
+// a server that answers every request with status, and returns the request
+// bodies it received with the error Complete returned.
+func anthropicBodies(t *testing.T, models []ModelInfo, req *CompletionRequest, status int, opts ...AnthropicOption) ([]string, error) {
 	t.Helper()
 	var mu sync.Mutex
 	var bodies []string
@@ -758,7 +758,7 @@ func anthropicBodies(t *testing.T, req *CompletionRequest, status int, opts ...A
 		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"rejected"}}`)
 	}))
 	defer server.Close()
-	_, err := NewAnthropicProvider("anthropic", server.URL, "key", nil, opts...).Complete(context.Background(), req)
+	_, err := NewAnthropicProvider("anthropic", server.URL, "key", models, opts...).Complete(context.Background(), req)
 	mu.Lock()
 	defer mu.Unlock()
 	return bodies, err
@@ -790,7 +790,7 @@ func TestAnthropicSystemStaysAString(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bodies, err := anthropicBodies(t, tc.req, http.StatusOK, tc.opts...)
+			bodies, err := anthropicBodies(t, nil, tc.req, http.StatusOK, tc.opts...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -845,11 +845,11 @@ func TestAnthropicCacheMarkedSystem(t *testing.T) {
 			if tc.extra != "" {
 				req.Messages = append(req.Messages, Message{Role: RoleSystem, Content: tc.extra})
 			}
-			cachedBodies, err := anthropicBodies(t, req, http.StatusOK, WithAnthropicPromptCache(true))
+			cachedBodies, err := anthropicBodies(t, nil, req, http.StatusOK, WithAnthropicPromptCache(true))
 			if err != nil {
 				t.Fatal(err)
 			}
-			plainBodies, err := anthropicBodies(t, req, http.StatusOK)
+			plainBodies, err := anthropicBodies(t, nil, req, http.StatusOK)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -895,7 +895,7 @@ func TestAnthropicCacheMarkedRequestRejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(http.StatusText(tc.status), func(t *testing.T) {
 			segs := cacheTestSegments
-			bodies, err := anthropicBodies(t, cacheTestRequest(segs, &segs), tc.status,
+			bodies, err := anthropicBodies(t, nil, cacheTestRequest(segs, &segs), tc.status,
 				WithAnthropicPromptCache(true),
 				WithAnthropicRetryPolicy(RetryPolicy{MaxAttempts: tc.attempts, BaseDelay: time.Millisecond}))
 			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("anthropic api error (status %d)", tc.status)) {
@@ -910,6 +910,56 @@ func TestAnthropicCacheMarkedRequestRejected(t *testing.T) {
 				if body != bodies[0] || !marked {
 					t.Errorf("attempt %d is not the first attempt's cache-marked body: %s", i+1, body)
 				}
+			}
+		})
+	}
+}
+
+// --- thinking ---
+
+// TestAnthropicThinking covers the thinking form of a request. A model with
+// thinking: adaptive is sent thinking {type: adaptive}, the effort as
+// output_config.effort when one is set, and max_tokens as asked; the
+// llm_request event records the effort sent. A model without the field is
+// sent today's thinking budget, byte for byte, and no effort.
+func TestAnthropicThinking(t *testing.T) {
+	const adaptive = `{"model":"claude-x","system":"Fixed \u003crules\u003e.\nConversation.\nRound.",` +
+		`"messages":[{"role":"user","content":"How many items?"}],"max_tokens":4096,"thinking":{"type":"adaptive"},`
+	const tools = `"tools":[{"name":"inv__list-items","description":"List items","input_schema":{"type":"object"}}]}`
+	cases := []struct {
+		name       string
+		thinking   string
+		effort     string
+		wantBody   string
+		wantEffort string // recorded in the llm_request event
+	}{
+		{"adaptive with effort", "adaptive", "high", adaptive + `"output_config":{"effort":"high"},` + tools, "high"},
+		{"adaptive without effort", "adaptive", "", adaptive + tools, ""},
+		{"without thinking", "", "high", anthropicBodyWithoutCache, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := cacheTestRequest(cacheTestSegments, nil)
+			req.ReasoningEffort = tc.effort
+			models := []ModelInfo{{ID: "claude-x", Thinking: tc.thinking, Features: []Feature{FeatureReasoning}}}
+			sink := &recordingEventSink{}
+			bodies, err := anthropicBodies(t, models, req, http.StatusOK, WithAnthropicSessionEventSink(sink))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bodies) != 1 || bodies[0] != tc.wantBody {
+				t.Errorf("request bodies:\n got %q\nwant %q", bodies, tc.wantBody)
+			}
+			got := sink.snapshot()
+			if len(got) == 0 || got[0].EventType != events.TypeLLMRequest {
+				t.Fatalf("events = %v, want llm_request first", sink.types())
+			}
+			var payload events.LLMRequestPayload
+			if err := json.Unmarshal(got[0].Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if !payload.Reasoning || payload.ReasoningEffort != tc.wantEffort {
+				t.Errorf("llm_request reasoning = %t, effort = %q, want true and %q", payload.Reasoning, payload.ReasoningEffort, tc.wantEffort)
 			}
 		})
 	}

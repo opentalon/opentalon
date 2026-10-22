@@ -194,7 +194,9 @@ type anthRequest struct {
 	Messages  []anthMessage   `json:"messages"`
 	MaxTokens int             `json:"max_tokens"`
 	Thinking  *anthThinking   `json:"thinking,omitempty"`
-	Tools     []anthTool      `json:"tools,omitempty"`
+	// OutputConfig carries the effort of a model with adaptive thinking.
+	OutputConfig *anthOutputConfig `json:"output_config,omitempty"`
+	Tools        []anthTool        `json:"tools,omitempty"`
 	// CacheControl is the automatic cache marker: Anthropic caches the
 	// request up to its last block, so the conversation so far.
 	CacheControl *anthCacheControl `json:"cache_control,omitempty"`
@@ -226,8 +228,20 @@ type anthTool struct {
 }
 
 type anthThinking struct {
-	Type         string `json:"type"`          // "enabled" or "disabled"
-	BudgetTokens int    `json:"budget_tokens"` // max tokens for thinking
+	Type         string `json:"type"`                    // "enabled" or "adaptive"
+	BudgetTokens int    `json:"budget_tokens,omitempty"` // max tokens for thinking; none with "adaptive"
+}
+
+type anthOutputConfig struct {
+	Effort string `json:"effort"` // "low", "medium", "high", "xhigh" or "max"
+}
+
+// effort returns the effort sent, or "" when c is nil.
+func (c *anthOutputConfig) effort() string {
+	if c == nil {
+		return ""
+	}
+	return c.Effort
 }
 
 type anthMessage struct {
@@ -304,6 +318,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 			"model", anthReq.Model,
 			"thinking_type", anthReq.Thinking.Type,
 			"budget_tokens", anthReq.Thinking.BudgetTokens,
+			"effort", anthReq.OutputConfig.effort(),
 			"max_tokens", anthReq.MaxTokens,
 		)
 	}
@@ -331,10 +346,10 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		MessageCount: len(anthReq.Messages),
 		HasTools:     len(anthReq.Tools) > 0,
 		MaxTokens:    anthReq.MaxTokens,
-		// Thinking != nil means reasoning is on for this turn. Anthropic has
-		// no per-effort string knob on this path (budget is a token count,
-		// not low/medium/high), so ReasoningEffort stays empty.
-		Reasoning: anthReq.Thinking != nil,
+		// Thinking != nil means reasoning is on for this turn. Only adaptive
+		// thinking sends an effort; a budget is a token count.
+		Reasoning:       anthReq.Thinking != nil,
+		ReasoningEffort: anthReq.OutputConfig.effort(),
 	})
 
 	start := time.Now()
@@ -500,7 +515,12 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		ar.CacheControl = &anthCacheControl{Type: "ephemeral"}
 	}
 
-	if req.Reasoning {
+	if p.adaptiveThinking(req.Model) {
+		ar.Thinking = &anthThinking{Type: "adaptive"}
+		if req.ReasoningEffort != "" {
+			ar.OutputConfig = &anthOutputConfig{Effort: req.ReasoningEffort}
+		}
+	} else if req.Reasoning {
 		budget := req.BudgetTokens
 		if budget == 0 {
 			budget = 10000 // default thinking budget
@@ -513,6 +533,18 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 	}
 
 	return ar, nil
+}
+
+// adaptiveThinking reports whether modelID is configured with thinking:
+// adaptive, which takes the place of a thinking budget whatever
+// req.Reasoning says.
+func (p *AnthropicProvider) adaptiveThinking(modelID string) bool {
+	for _, m := range p.models {
+		if m.ID == modelID {
+			return m.Thinking == "adaptive"
+		}
+	}
+	return false
 }
 
 // toAnthSystem renders the system field from the request's system messages,

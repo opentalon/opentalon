@@ -1437,6 +1437,45 @@ func TestParsePromptCache(t *testing.T) {
 	}
 }
 
+func TestParseThinking(t *testing.T) {
+	cases := []struct {
+		name    string
+		api     string
+		fields  string // lines under the model, after its id
+		wantErr string // "" = must parse
+	}{
+		{"other value", "anthropic-messages", "thinking: budget",
+			`models.providers.p: model "claude-x": thinking must be adaptive, got "budget"`},
+		{"on an openai-completions provider", "openai-completions", "thinking: adaptive",
+			`models.providers.p: model "claude-x": thinking: adaptive needs the anthropic-messages api`},
+		{"on a provider without api", "", "thinking: adaptive",
+			`models.providers.p: model "claude-x": thinking: adaptive needs the anthropic-messages api`},
+		{"effort outside the five levels", "anthropic-messages", "thinking: adaptive\n          reasoning_effort: ultra",
+			`models.providers.p: model "claude-x": reasoning_effort must be low, medium, high, xhigh or max, got "ultra"`},
+		{"adaptive with effort max", "anthropic-messages", "thinking: adaptive\n          reasoning_effort: max", ""},
+		{"adaptive without effort", "anthropic-messages", "thinking: adaptive", ""},
+		{"any effort without thinking", "openai-completions", "reasoning_effort: ultra", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := "models:\n  providers:\n    p:\n      api: \"" + tc.api + "\"\n      models:\n        - id: claude-x\n          " + tc.fields + "\n"
+			cfg, err := Parse([]byte(yaml))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			if cfg != nil {
+				t.Error("a failed parse returned a config")
+			}
+		})
+	}
+}
+
 func TestParsePromptCacheValues(t *testing.T) {
 	cfg, err := Parse([]byte(`
 models:

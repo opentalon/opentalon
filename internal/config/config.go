@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -753,7 +754,8 @@ type ModelDefinition struct {
 	ID              string     `yaml:"id"`
 	Name            string     `yaml:"name"`
 	Reasoning       bool       `yaml:"reasoning"`
-	ReasoningEffort string     `yaml:"reasoning_effort"` // "low", "medium", "high" (OpenAI); empty = provider default
+	ReasoningEffort string     `yaml:"reasoning_effort"` // "low", "medium", "high", with Thinking also "xhigh", "max"; empty = provider default
+	Thinking        string     `yaml:"thinking"`         // "adaptive" (anthropic-messages only); empty = thinking by budget_tokens; see validateThinking
 	Features        []string   `yaml:"features"`
 	InputTypes      []string   `yaml:"input"`
 	ContextWindow   int        `yaml:"context_window"`
@@ -1030,6 +1032,33 @@ func validatePromptCache(cfg *Config) error {
 	return nil
 }
 
+// validateThinking checks models.providers.<id>.models[].thinking: empty or
+// adaptive, adaptive only for the anthropic-messages api, and with it a
+// reasoning_effort that Anthropic takes.
+func validateThinking(cfg *Config) error {
+	ids := make([]string, 0, len(cfg.Models.Providers))
+	for id := range cfg.Models.Providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		p := cfg.Models.Providers[id]
+		for _, m := range p.Models {
+			switch {
+			case m.Thinking == "":
+			case m.Thinking != "adaptive":
+				return fmt.Errorf("models.providers.%s: model %q: thinking must be adaptive, got %q", id, m.ID, m.Thinking)
+			case p.API != "anthropic-messages":
+				return fmt.Errorf("models.providers.%s: model %q: thinking: adaptive needs the anthropic-messages api", id, m.ID)
+			case !slices.Contains([]string{"", "low", "medium", "high", "xhigh", "max"}, m.ReasoningEffort):
+				return fmt.Errorf("models.providers.%s: model %q: reasoning_effort must be low, medium, high, xhigh or max, got %q",
+					id, m.ID, m.ReasoningEffort)
+			}
+		}
+	}
+	return nil
+}
+
 // validHeaderName reports whether name is an HTTP field name (an RFC 9110
 // token).
 func validHeaderName(name string) bool {
@@ -1144,6 +1173,9 @@ func Parse(data []byte) (*Config, error) {
 		return nil, err
 	}
 	if err := validatePromptCache(&cfg); err != nil {
+		return nil, err
+	}
+	if err := validateThinking(&cfg); err != nil {
 		return nil, err
 	}
 
