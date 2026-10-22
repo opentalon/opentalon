@@ -306,8 +306,10 @@ models:
   `prompt_cache: true` the conversation is written to the cache again.
 - The thinking blocks a response returns together with tool calls are stored
   with the conversation and sent back unchanged, ahead of those tool calls, on
-  every later request of the conversation, as Anthropic requires in a tool
-  loop. This holds for thinking by budget as well.
+  every later request of the conversation that turns thinking on (`thinking:
+  adaptive`, or a thinking budget), as Anthropic requires in a tool loop. A
+  model that thinks without `thinking: adaptive`, as the 5.x models do, is
+  sent none of them.
 - On Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 a thinking block
   stays valid only while the system prompt, the tools and every earlier
   message are unchanged, and OpenTalon changes the system prompt after a

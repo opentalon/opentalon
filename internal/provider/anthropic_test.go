@@ -693,7 +693,8 @@ const (
 // TestAnthropicReplaysThinkingBlocks sends a conversation's next request
 // after a response with thinking blocks and a tool call: the assistant
 // message goes back as the thinking blocks unchanged, then its text, then its
-// tool_use. The same message without blocks is sent as before.
+// tool_use. The same message without blocks, or to a model without thinking
+// turned on, is sent as before.
 func TestAnthropicReplaysThinkingBlocks(t *testing.T) {
 	const toolUse = `{"type":"tool_use","id":"toolu_1","name":"inv__list-items","input":{"limit":"5"}}`
 	const textAndToolUse = `{"type":"text","text":"Checking."},` + toolUse
@@ -708,7 +709,8 @@ func TestAnthropicReplaysThinkingBlocks(t *testing.T) {
 		_, _ = io.WriteString(w, `{"id":"r","model":"claude-x","content":[`+content+`],"usage":{"input_tokens":1,"output_tokens":1}}`)
 	}))
 	defer server.Close()
-	p := NewAnthropicProvider("anthropic", server.URL, "key", nil)
+	p := NewAnthropicProvider("anthropic", server.URL, "key", []ModelInfo{{ID: "claude-x", Thinking: "adaptive"}})
+	thinkingOff := NewAnthropicProvider("anthropic", server.URL, "key", nil)
 	user := Message{Role: RoleUser, Content: "How many items?"}
 
 	resp, err := p.Complete(context.Background(), &CompletionRequest{Model: "claude-x", Messages: []Message{user}})
@@ -721,17 +723,19 @@ func TestAnthropicReplaysThinkingBlocks(t *testing.T) {
 
 	cases := []struct {
 		name        string
+		p           *AnthropicProvider
 		thinking    []json.RawMessage
 		wantContent string
 	}{
-		{"with blocks", resp.Thinking, `[` + thinkingBlock + `,` + redactedThinkingBlock + `,` + textAndToolUse + `]`},
-		{"without blocks", nil, `[` + textAndToolUse + `]`},
+		{"with blocks", p, resp.Thinking, `[` + thinkingBlock + `,` + redactedThinkingBlock + `,` + textAndToolUse + `]`},
+		{"without blocks", p, nil, `[` + textAndToolUse + `]`},
+		{"thinking off", thinkingOff, resp.Thinking, `[` + textAndToolUse + `]`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assistant := Message{Role: RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls, Thinking: tc.thinking}
 			result := Message{Role: RoleTool, Content: "5 items", ToolCallID: "toolu_1"}
-			if _, err := p.Complete(context.Background(), &CompletionRequest{Model: "claude-x", Messages: []Message{user, assistant, result}}); err != nil {
+			if _, err := tc.p.Complete(context.Background(), &CompletionRequest{Model: "claude-x", Messages: []Message{user, assistant, result}}); err != nil {
 				t.Fatal(err)
 			}
 			var sent struct {

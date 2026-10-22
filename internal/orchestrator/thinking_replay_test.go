@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
@@ -121,7 +122,7 @@ func TestRun_ApprovedCallReplaysThinkingAfterRestart(t *testing.T) {
 	newOrch := func() *Orchestrator {
 		anth, err := provider.FromConfig(provider.ProviderConfig{
 			ID: "anthropic", API: provider.APIAnthropic, BaseURL: server.URL, APIKey: "key",
-			Models: []provider.ModelInfo{{ID: "claude-x", Features: []provider.Feature{provider.FeatureTools}}},
+			Models: []provider.ModelInfo{{ID: "claude-x", Thinking: "adaptive", Features: []provider.Feature{provider.FeatureTools}}},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -132,7 +133,8 @@ func TestRun_ApprovedCallReplaysThinkingAfterRestart(t *testing.T) {
 			InjectionStateStore: &fakeInjectionStateStore{},
 		})
 	}
-	ctx := actor.WithSessionID(context.Background(), "s1")
+	// The profile names the model, so its adaptive thinking applies.
+	ctx := actor.WithSessionID(profile.WithProfile(context.Background(), &profile.Profile{Model: "anthropic/claude-x"}), "s1")
 
 	if _, err := newOrch().Run(ctx, "s1", "delete item 7"); err != nil {
 		t.Fatalf("Run: %v", err)

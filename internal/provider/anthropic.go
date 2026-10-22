@@ -520,6 +520,11 @@ func (p *AnthropicProvider) Stream(_ context.Context, _ *CompletionRequest) (Res
 }
 
 func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, error) {
+	model := findModel(p.models, req.Model)
+	// Thinking blocks go back only on a request that turns thinking on: a
+	// model thinking by default gets no block_binding without it.
+	replayThinking := model.Thinking == "adaptive" || req.Reasoning
+
 	// Anthropic carries the system prompt in a single top-level `system`
 	// field, not as a message. Concatenate every RoleSystem message (joined
 	// by a blank line) rather than last-wins overwriting: the normal case is
@@ -532,6 +537,9 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		if m.Role == RoleSystem {
 			systemParts = append(systemParts, m.Content)
 			continue
+		}
+		if !replayThinking {
+			m.Thinking = nil
 		}
 		msg, err := p.toAnthMessage(m)
 		if err != nil {
@@ -560,7 +568,7 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		ar.CacheControl = &anthCacheControl{Type: "ephemeral"}
 	}
 
-	if model := findModel(p.models, req.Model); model.Thinking == "adaptive" {
+	if model.Thinking == "adaptive" {
 		// A replayed thinking block whose earlier conversation OpenTalon
 		// changed is dropped by the API instead of failing the request.
 		ar.Thinking = &anthThinking{Type: "adaptive", BlockBinding: &anthBlockBinding{PrefixMismatchBehavior: "drop_block"}}
