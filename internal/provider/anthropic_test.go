@@ -199,6 +199,48 @@ func TestAnthropicCustomMaxTokens(t *testing.T) {
 	}
 }
 
+// TestAnthropicMaxTokens covers the max_tokens sent: the request's, else the
+// model's, else 4096; a thinking budget raises it as before.
+func TestAnthropicMaxTokens(t *testing.T) {
+	cases := []struct {
+		name           string
+		modelMaxTokens int
+		maxTokens      int
+		reasoning      bool
+		want           int
+	}{
+		{"the model's max_tokens", 2048, 0, false, 2048},
+		{"4096 without either", 0, 0, false, 4096},
+		{"4096 for a negative model max_tokens", -1, 0, false, 4096},
+		{"the request's max_tokens over the model's", 2048, 1024, false, 1024},
+		{"the model's max_tokens raised for a thinking budget", 2048, 0, true, 14096},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bodies, err := anthropicBodies(t, []ModelInfo{{ID: "claude-x", MaxTokens: tc.modelMaxTokens}},
+				&CompletionRequest{
+					Model:     "claude-x",
+					Messages:  []Message{{Role: RoleUser, Content: "Hi"}},
+					MaxTokens: tc.maxTokens,
+					Reasoning: tc.reasoning,
+				}, http.StatusOK)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bodies) != 1 {
+				t.Fatalf("requests = %d, want 1", len(bodies))
+			}
+			var sent anthRequest
+			if err := json.Unmarshal([]byte(bodies[0]), &sent); err != nil {
+				t.Fatal(err)
+			}
+			if sent.MaxTokens != tc.want {
+				t.Errorf("max_tokens = %d, want %d", sent.MaxTokens, tc.want)
+			}
+		})
+	}
+}
+
 func TestAnthropicProviderInterface(t *testing.T) {
 	models := []ModelInfo{
 		{ID: "claude-sonnet-4-20250514", ProviderID: "anthropic", Features: []Feature{FeatureStreaming, FeatureReasoning}},

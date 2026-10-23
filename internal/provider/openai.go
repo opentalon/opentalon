@@ -934,6 +934,9 @@ func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error
 		MaxTokens:   req.MaxTokens,
 		Temperature: req.Temperature,
 	}
+	if m := findModel(p.models, req.Model).MaxTokens; oai.MaxTokens == 0 && m > 0 {
+		oai.MaxTokens = m
+	}
 	if req.Reasoning {
 		oai.ReasoningEffort = req.ReasoningEffort
 		if oai.ReasoningEffort == "" {
