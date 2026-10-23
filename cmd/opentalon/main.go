@@ -404,7 +404,7 @@ func main() {
 		os.Exit(1) //nolint:gocritic // matches the other main()-level fatal paths; the deferred db.Close is best-effort, the OS reclaims handles on exit
 	}
 
-	// Build model lookup map for defaultModelClient.
+	// Build model lookup map for the repair-model check and the context budget.
 	modelMap := make(map[string]provider.ModelInfo)
 	for _, m := range prov.Models() {
 		modelMap[m.ID] = m
@@ -428,7 +428,7 @@ func main() {
 	}
 
 	// LLM client that sets default model when orchestrator doesn't
-	llm := &defaultModelClient{provider: prov, model: defaultModel, models: modelMap}
+	llm := &defaultModelClient{provider: prov, model: defaultModel}
 
 	// Look up context window and output budget for the default model. The
 	// output budget (max_tokens) is reserved from the window on every trim so
@@ -1534,15 +1534,12 @@ func (r *channelRunner) Run(ctx context.Context, sessionKey, content string, fil
 	return result.Response, result.InputForDisplay, result.Metadata, nil
 }
 
-// defaultModelClient wraps a provider and sets req.Model when empty.
-// It also injects the model-level MaxTokens from the provider's model
-// config when the request doesn't set it. The model's reasoning effort is
-// resolved by the provider that serves the request, so a fallback model
-// gets its own.
+// defaultModelClient wraps a provider and sets req.Model when empty. The
+// model's max_tokens and reasoning effort are resolved by the provider that
+// serves the request, so a fallback model gets its own.
 type defaultModelClient struct {
 	provider provider.Provider
 	model    string
-	models   map[string]provider.ModelInfo
 }
 
 func (c *defaultModelClient) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
@@ -1551,7 +1548,6 @@ func (c *defaultModelClient) Complete(ctx context.Context, req *provider.Complet
 		cp.Model = c.model
 		req = &cp
 	}
-	c.applyModelDefaults(req)
 	return c.provider.Complete(ctx, req)
 }
 
@@ -1564,20 +1560,7 @@ func (c *defaultModelClient) Stream(ctx context.Context, req *provider.Completio
 		cp.Stream = true
 		req = &cp
 	}
-	c.applyModelDefaults(req)
 	return c.provider.Stream(ctx, req)
-}
-
-// applyModelDefaults injects MaxTokens from the model config when the
-// request doesn't already set it.
-func (c *defaultModelClient) applyModelDefaults(req *provider.CompletionRequest) {
-	m, ok := c.models[req.Model]
-	if !ok {
-		return
-	}
-	if req.MaxTokens == 0 && m.MaxTokens > 0 {
-		req.MaxTokens = m.MaxTokens
-	}
 }
 
 // SupportsFeature delegates to the underlying provider so the orchestrator

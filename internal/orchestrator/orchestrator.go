@@ -2347,8 +2347,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// "no items" without ever calling list-items). We now run the
 		// configured effort ("high") on the decision turns too, without the
 		// old summary-round downgrade, so reasoning runs at max where it helps.
-		// The effort itself is left empty here; applyModelDefaults resolves it
-		// from the model config ("high") at the provider edge.
+		// The effort itself is left empty here; the provider serving the
+		// request resolves it from its model config ("high").
 		if o.supportsReasoning() {
 			req.Reasoning = true
 			if p := profile.FromContext(ctx); p != nil && p.BudgetTokens > 0 {

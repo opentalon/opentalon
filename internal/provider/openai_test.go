@@ -533,3 +533,43 @@ func TestOpenAIReasoningEffort(t *testing.T) {
 		})
 	}
 }
+
+// TestOpenAIMaxTokens covers the max_tokens sent: the request's, else the
+// model's; omitted without either.
+func TestOpenAIMaxTokens(t *testing.T) {
+	cases := []struct {
+		name           string
+		modelMaxTokens int
+		maxTokens      int
+		want           string
+	}{
+		{"the model's max_tokens", 2048, 0, `"max_tokens":2048`},
+		{"the request's max_tokens over the model's", 2048, 1024, `"max_tokens":1024`},
+		{"omitted without either", 0, 0, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewOpenAIProvider("openai", "http://localhost", "key",
+				[]ModelInfo{{ID: "gpt-oss-120b", MaxTokens: tc.modelMaxTokens}})
+			oai, err := p.toOAIRequest(&CompletionRequest{
+				Model:     "gpt-oss-120b",
+				Messages:  []Message{{Role: RoleUser, Content: "hi"}},
+				MaxTokens: tc.maxTokens,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(oai)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" {
+				if strings.Contains(string(body), `"max_tokens"`) {
+					t.Errorf("body = %s, want no max_tokens", body)
+				}
+			} else if !strings.Contains(string(body), tc.want) {
+				t.Errorf("body = %s, want %s", body, tc.want)
+			}
+		})
+	}
+}

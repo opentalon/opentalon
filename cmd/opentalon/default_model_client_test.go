@@ -39,21 +39,13 @@ func (f *fakeProvider) Stream(_ context.Context, req *provider.CompletionRequest
 	return nil, nil
 }
 
-func modelMap(models []provider.ModelInfo) map[string]provider.ModelInfo {
-	m := make(map[string]provider.ModelInfo, len(models))
-	for _, mi := range models {
-		m[mi.ID] = mi
-	}
-	return m
-}
-
 func TestDefaultModelClient_SupportsFeature_Reasoning(t *testing.T) {
 	fp := &fakeProvider{
 		models: []provider.ModelInfo{
 			{ID: "gpt-oss-120b", Features: []provider.Feature{provider.FeatureStreaming, provider.FeatureReasoning}},
 		},
 	}
-	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
+	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b"}
 
 	if !c.SupportsFeature(provider.FeatureReasoning) {
 		t.Error("expected SupportsFeature(FeatureReasoning) = true")
@@ -72,7 +64,7 @@ func TestDefaultModelClient_SupportsFeature_NoReasoning(t *testing.T) {
 			{ID: "some-model", Features: []provider.Feature{provider.FeatureStreaming}},
 		},
 	}
-	c := &defaultModelClient{provider: fp, model: "some-model", models: modelMap(fp.models)}
+	c := &defaultModelClient{provider: fp, model: "some-model"}
 
 	if c.SupportsFeature(provider.FeatureReasoning) {
 		t.Error("expected SupportsFeature(FeatureReasoning) = false")
@@ -83,7 +75,7 @@ func TestDefaultModelClient_Complete_PreservesReasoningFields(t *testing.T) {
 	fp := &fakeProvider{
 		models: []provider.ModelInfo{{ID: "gpt-oss-120b"}},
 	}
-	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
+	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b"}
 
 	req := &provider.CompletionRequest{
 		Messages:        []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
@@ -114,7 +106,7 @@ func TestDefaultModelClient_Stream_PreservesReasoningFields(t *testing.T) {
 	fp := &fakeProvider{
 		models: []provider.ModelInfo{{ID: "gpt-oss-120b"}},
 	}
-	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
+	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b"}
 
 	req := &provider.CompletionRequest{
 		Messages:        []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
@@ -134,59 +126,34 @@ func TestDefaultModelClient_Stream_PreservesReasoningFields(t *testing.T) {
 	}
 }
 
-func TestDefaultModelClient_ApplyModelDefaults_MaxTokens(t *testing.T) {
-	fp := &fakeProvider{
-		models: []provider.ModelInfo{{ID: "gpt-oss-120b", MaxTokens: 32768}},
-	}
-	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
-
-	req := &provider.CompletionRequest{
-		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
-	}
-	_, _ = c.Complete(context.Background(), req)
-
-	if fp.lastReq.MaxTokens != 32768 {
-		t.Errorf("expected MaxTokens=32768 from model config, got %d", fp.lastReq.MaxTokens)
-	}
-}
-
-func TestDefaultModelClient_ApplyModelDefaults_MaxTokensNotOverridden(t *testing.T) {
-	fp := &fakeProvider{
-		models: []provider.ModelInfo{{ID: "gpt-oss-120b", MaxTokens: 32768}},
-	}
-	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
-
-	req := &provider.CompletionRequest{
-		Messages:  []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
-		MaxTokens: 1024,
-	}
-	_, _ = c.Complete(context.Background(), req)
-
-	if fp.lastReq.MaxTokens != 1024 {
-		t.Errorf("expected MaxTokens=1024 (explicit), got %d", fp.lastReq.MaxTokens)
-	}
-}
-
-// failingProvider answers every completion with an error.
+// failingProvider answers every completion and stream with an error.
 type failingProvider struct{ fakeProvider }
 
 func (f *failingProvider) Complete(context.Context, *provider.CompletionRequest) (*provider.CompletionResponse, error) {
 	return nil, errors.New("endpoint down")
 }
 
-// TestDefaultModelClient_FallbackSendsItsOwnEffort checks that when the
-// primary endpoint fails, an adaptive fallback model is sent its own
-// configured effort, not the primary model's, while a turn's effort is kept.
-func TestDefaultModelClient_FallbackSendsItsOwnEffort(t *testing.T) {
+func (f *failingProvider) Stream(context.Context, *provider.CompletionRequest) (provider.ResponseStream, error) {
+	return nil, errors.New("endpoint down")
+}
+
+// TestDefaultModelClient_FallbackSendsItsOwnEffortAndMaxTokens checks that
+// when the primary endpoint fails, an adaptive fallback model is sent its own
+// configured effort and max_tokens, not the primary model's, while a turn's
+// effort and a request's max_tokens are kept.
+func TestDefaultModelClient_FallbackSendsItsOwnEffortAndMaxTokens(t *testing.T) {
 	cases := []struct {
 		name          string
 		primaryEffort string
 		turnEffort    string
+		maxTokens     int
 		want          string
+		wantMaxTokens int
 	}{
-		{"primary with an effort", "high", "", `{"effort":"low"}`},
-		{"primary without effort", "", "", `{"effort":"low"}`},
-		{"the turn's effort", "high", "medium", `{"effort":"medium"}`},
+		{"primary with an effort", "high", "", 0, `{"effort":"low"}`, 2048},
+		{"primary without effort", "", "", 0, `{"effort":"low"}`, 2048},
+		{"the turn's effort", "high", "medium", 0, `{"effort":"medium"}`, 2048},
+		{"the request's max_tokens", "high", "", 1000, `{"effort":"low"}`, 1000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -201,18 +168,20 @@ func TestDefaultModelClient_FallbackSendsItsOwnEffort(t *testing.T) {
 					`"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
 			}))
 			defer server.Close()
-			primary := &failingProvider{fakeProvider{models: []provider.ModelInfo{{ID: "primary-model", ReasoningEffort: tc.primaryEffort}}}}
+			primary := &failingProvider{fakeProvider{models: []provider.ModelInfo{
+				{ID: "primary-model", ReasoningEffort: tc.primaryEffort, MaxTokens: 8192}}}}
 			fallback := provider.NewAnthropicProvider("anthropic", server.URL, "key",
-				[]provider.ModelInfo{{ID: "claude-x", Thinking: "adaptive", ReasoningEffort: "low"}})
+				[]provider.ModelInfo{{ID: "claude-x", Thinking: "adaptive", ReasoningEffort: "low", MaxTokens: 2048}})
 			hg := provider.NewHealthGatedProvider(context.Background(), []provider.ProviderEntry{
 				{Prov: primary, Model: "primary-model"},
 				{Prov: fallback, Model: "claude-x"},
 			}, nil, provider.HealthGateConfig{}, nil)
-			c := &defaultModelClient{provider: hg, model: "primary-model", models: modelMap(hg.Models())}
+			c := &defaultModelClient{provider: hg, model: "primary-model"}
 
 			_, err := c.Complete(context.Background(), &provider.CompletionRequest{
 				Messages:        []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
 				ReasoningEffort: tc.turnEffort,
+				MaxTokens:       tc.maxTokens,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -224,6 +193,7 @@ func TestDefaultModelClient_FallbackSendsItsOwnEffort(t *testing.T) {
 			}
 			var sent struct {
 				OutputConfig json.RawMessage `json:"output_config"`
+				MaxTokens    int             `json:"max_tokens"`
 			}
 			if err := json.Unmarshal([]byte(bodies[0]), &sent); err != nil {
 				t.Fatal(err)
@@ -231,15 +201,79 @@ func TestDefaultModelClient_FallbackSendsItsOwnEffort(t *testing.T) {
 			if string(sent.OutputConfig) != tc.want {
 				t.Errorf("output_config = %s, want %s", sent.OutputConfig, tc.want)
 			}
+			if sent.MaxTokens != tc.wantMaxTokens {
+				t.Errorf("max_tokens = %d, want %d", sent.MaxTokens, tc.wantMaxTokens)
+			}
 		})
 	}
 }
 
-func TestDefaultModelClient_ApplyModelDefaults_ReasoningEffortNotOverridden(t *testing.T) {
+// TestDefaultModelClient_StreamFallbackSendsItsOwnMaxTokens checks the same
+// for a stream: when the primary endpoint fails, an OpenAI-compatible fallback
+// model is sent its own max_tokens, not the primary model's, while a
+// request's max_tokens is kept.
+func TestDefaultModelClient_StreamFallbackSendsItsOwnMaxTokens(t *testing.T) {
+	cases := []struct {
+		name      string
+		maxTokens int
+		want      int
+	}{
+		{"the fallback model's max_tokens", 0, 2048},
+		{"the request's max_tokens", 1000, 1000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var bodies []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				bodies = append(bodies, string(body))
+				mu.Unlock()
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "data: [DONE]\n\n")
+			}))
+			defer server.Close()
+			primary := &failingProvider{fakeProvider{models: []provider.ModelInfo{{ID: "primary-model", MaxTokens: 8192}}}}
+			fallback := provider.NewOpenAIProvider("openai", server.URL, "key",
+				[]provider.ModelInfo{{ID: "gpt-oss-120b", MaxTokens: 2048}})
+			hg := provider.NewHealthGatedProvider(context.Background(), []provider.ProviderEntry{
+				{Prov: primary, Model: "primary-model"},
+				{Prov: fallback, Model: "gpt-oss-120b"},
+			}, nil, provider.HealthGateConfig{}, nil)
+			c := &defaultModelClient{provider: hg, model: "primary-model"}
+
+			stream, err := c.Stream(context.Background(), &provider.CompletionRequest{
+				Messages:  []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+				MaxTokens: tc.maxTokens,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = stream.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			if len(bodies) != 1 {
+				t.Fatalf("fallback received %d requests, want 1", len(bodies))
+			}
+			var sent struct {
+				MaxTokens int `json:"max_tokens"`
+			}
+			if err := json.Unmarshal([]byte(bodies[0]), &sent); err != nil {
+				t.Fatal(err)
+			}
+			if sent.MaxTokens != tc.want {
+				t.Errorf("max_tokens = %d, want %d", sent.MaxTokens, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultModelClient_ReasoningEffortNotOverridden(t *testing.T) {
 	fp := &fakeProvider{
 		models: []provider.ModelInfo{{ID: "gpt-oss-120b", ReasoningEffort: "high"}},
 	}
-	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
+	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b"}
 
 	req := &provider.CompletionRequest{
 		Messages:        []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
@@ -249,21 +283,5 @@ func TestDefaultModelClient_ApplyModelDefaults_ReasoningEffortNotOverridden(t *t
 
 	if fp.lastReq.ReasoningEffort != "low" {
 		t.Errorf("expected ReasoningEffort=low (explicit), got %s", fp.lastReq.ReasoningEffort)
-	}
-}
-
-func TestDefaultModelClient_ApplyModelDefaults_StreamInjects(t *testing.T) {
-	fp := &fakeProvider{
-		models: []provider.ModelInfo{{ID: "gpt-oss-120b", MaxTokens: 65536}},
-	}
-	c := &defaultModelClient{provider: fp, model: "gpt-oss-120b", models: modelMap(fp.models)}
-
-	req := &provider.CompletionRequest{
-		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
-	}
-	_, _ = c.Stream(context.Background(), req)
-
-	if fp.streamReq.MaxTokens != 65536 {
-		t.Errorf("expected MaxTokens=65536 from model config in stream, got %d", fp.streamReq.MaxTokens)
 	}
 }
