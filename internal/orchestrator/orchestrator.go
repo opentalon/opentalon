@@ -429,6 +429,7 @@ type Orchestrator struct {
 	usageRecorder       UsageRecorder      // optional; nil = no usage tracking
 	pluginCallObserver  PluginCallObserver // optional; nil = no plugin call observation
 	pluginUsageObserver PluginUsageObserver
+	pluginStageWarned   sync.Map
 	eventSink           emit.Sink              // structured session event sink; always non-nil (NoOpSink default)
 	snapshotStore       PromptSnapshotUpserter // optional; nil = turn_start hashes are emitted but content is not persisted
 	syncActionsPlugin   string                 // optional; plugin name for action sync
