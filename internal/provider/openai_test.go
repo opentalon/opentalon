@@ -546,6 +546,7 @@ func TestOpenAIMaxTokens(t *testing.T) {
 		{"the model's max_tokens", 2048, 0, `"max_tokens":2048`},
 		{"the request's max_tokens over the model's", 2048, 1024, `"max_tokens":1024`},
 		{"omitted without either", 0, 0, ""},
+		{"omitted for a negative model max_tokens", -1, 0, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

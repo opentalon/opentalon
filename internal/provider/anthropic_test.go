@@ -211,6 +211,7 @@ func TestAnthropicMaxTokens(t *testing.T) {
 	}{
 		{"the model's max_tokens", 2048, 0, false, 2048},
 		{"4096 without either", 0, 0, false, 4096},
+		{"4096 for a negative model max_tokens", -1, 0, false, 4096},
 		{"the request's max_tokens over the model's", 2048, 1024, false, 1024},
 		{"the model's max_tokens raised for a thinking budget", 2048, 0, true, 14096},
 	}

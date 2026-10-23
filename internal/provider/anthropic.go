@@ -589,7 +589,7 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 	}
 
 	maxTokens := req.MaxTokens
-	if maxTokens == 0 {
+	if maxTokens == 0 && model.MaxTokens > 0 {
 		maxTokens = model.MaxTokens
 	}
 	if maxTokens == 0 {
