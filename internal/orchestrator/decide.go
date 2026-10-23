@@ -92,6 +92,7 @@ func (e *decideExecutor) Execute(ctx context.Context, call ToolCall) ToolResult 
 	if call.Action != decideAction {
 		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("decider %q has no action %q", e.provider.ID(), call.Action)}
 	}
+	ctx = e.orch.withPluginStage(ctx, call)
 	if _, many := call.Args["questions"]; many {
 		return e.executeMany(ctx, call)
 	}

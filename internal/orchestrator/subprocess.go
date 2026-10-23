@@ -101,6 +101,7 @@ type subprocessExecutor struct {
 }
 
 func (s *subprocessExecutor) Execute(ctx context.Context, call ToolCall) ToolResult {
+	ctx = s.orch.withPluginStage(ctx, call)
 	if call.Action == "parallel" {
 		return s.executeParallel(ctx, call)
 	}
