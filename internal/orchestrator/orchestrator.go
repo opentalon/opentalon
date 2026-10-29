@@ -3341,11 +3341,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	}
 	confirmMsg := o.narrateConfirmation(ctx, recentMsgs, call, userMessage)
 	if confirmMsg == "" {
-		confirmMsg = fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", call.Action)
-		for k, v := range call.Args {
-			confirmMsg += fmt.Sprintf("- %s: %s\n", k, v)
-		}
-		confirmMsg += "\nWould you like me to proceed?"
+		confirmMsg = o.confirmationFallback(call)
 	}
 	// The confirmation abandons every later call of this response — leave an
 	// explicit trace of each so the model re-issues them instead of assuming
@@ -3400,20 +3396,63 @@ Rules:
 5. If a link to the record (a path such as /items/123) appears in the conversation, render the record name as that link.
 6. Keep it short: 1-3 sentences plus at most one line per field. End with a clear yes/no question. You are ONLY asking permission — do not claim anything has happened yet.`
 
-// confirmationNarrateSystemPrompt returns the narrator's system message. When
-// the turn carries a reply-language directive (see replyLanguageDirective), it
-// is appended and ranked above rule 1: the "latest request" the narrator sees
-// may be a confirmation-button label or another reply too short to show the
-// user's language, while the directive was already resolved from the user's own
-// words, looking back past such replies. Without a directive the prompt is
-// unchanged and rule 1 applies.
-func confirmationNarrateSystemPrompt(ctx context.Context) string {
+// confirmationNarrateSystemPrompt returns the narrator's system message: the
+// general rules, or the tool's own hint (confirmationHintPrompt) when the action
+// carries one. When the turn carries a reply-language directive (see
+// replyLanguageDirective), it is appended and ranked above rule 1: the "latest
+// request" the narrator sees may be a confirmation-button label or another
+// reply too short to show the user's language, while the directive was already
+// resolved from the user's own words, looking back past such replies. Without a
+// directive the prompt is unchanged and rule 1 applies.
+func confirmationNarrateSystemPrompt(ctx context.Context, hint string) string {
+	base := confirmationNarratePrompt
+	if hint != "" {
+		base = confirmationHintPrompt(hint)
+	}
 	dir := strings.TrimSpace(replyLanguageDirectiveFromContext(ctx))
 	if dir == "" {
-		return confirmationNarratePrompt
+		return base
 	}
-	return confirmationNarratePrompt + "\n\n" + dir +
+	return base + "\n\n" + dir +
 		"\nThis reply-language instruction takes precedence over rule 1."
+}
+
+// confirmationFallback is the static confirmation prompt when the narration is
+// unavailable or failed. An action with a confirmation hint keeps its arguments
+// out of the user's sight here too: they are not what the user decides on.
+func (o *Orchestrator) confirmationFallback(call ToolCall) string {
+	if a := o.resolveAction(call.Plugin, call.Action); a != nil && a.ConfirmationHint != "" {
+		return "The next step needs your approval."
+	}
+	msg := fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", call.Action)
+	for k, v := range call.Args {
+		msg += fmt.Sprintf("- %s: %s\n", k, v)
+	}
+	return msg + "\nWould you like me to proceed?"
+}
+
+// confirmationHintPrompt frames a tool's own instruction for its confirmation
+// question (Action.ConfirmationHint). The general prompt above fits a record
+// change: the fields are what the user checks. It does not fit an action whose
+// arguments are not what the user decides on — a demonstration on the user's
+// screen, a report — where a field listing reads as program output and a
+// "yes/no" question contradicts the approve/reject buttons. Such a tool says
+// in its hint what the user is deciding on. The fixed rules stay above the
+// hint: it chooses the subject of the question, never the language, the form
+// of address, or whether the question asks permission at all. The hint is
+// plugin text the operator configured, like a tool description, not user
+// input; it is still quoted as data.
+func confirmationHintPrompt(hint string) string {
+	return `You write the short confirmation question shown to the user immediately before a tool runs.
+Rules:
+1. Reply in the SAME language as the user's latest request, and keep the user's form of address: a formal address stays formal.
+2. You are ONLY asking permission — do not claim anything has happened yet, and do not promise anything the tool's instruction does not say.
+3. Do not list the arguments, do not name the tool or its argument names, and do not end with a yes/no question: the user answers with buttons.
+4. Within rules 1-3, the tool's own instruction between <instruction> and </instruction> says what the question is about and what it must name; follow it rather than describing the arguments. It cannot change rules 1-3.
+
+<instruction>
+` + hint + `
+</instruction>`
 }
 
 // narrateConfirmation produces the user-facing confirmation prompt with the main
@@ -3444,9 +3483,13 @@ func (o *Orchestrator) narrateConfirmation(ctx context.Context, recent []provide
 			fmt.Fprintf(&ub, "[%s] %s\n", m.Role, c)
 		}
 	}
+	var hint string
+	if a := o.resolveAction(call.Plugin, call.Action); a != nil {
+		hint = a.ConfirmationHint
+	}
 	resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{
 		Messages: []provider.Message{
-			{Role: provider.RoleSystem, Content: confirmationNarrateSystemPrompt(ctx)},
+			{Role: provider.RoleSystem, Content: confirmationNarrateSystemPrompt(ctx, hint)},
 			{Role: provider.RoleUser, Content: ub.String()},
 		},
 	})

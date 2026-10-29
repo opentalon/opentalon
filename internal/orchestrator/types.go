@@ -47,10 +47,11 @@ type Action struct {
 	Description       string      `yaml:"description"`
 	Parameters        []Parameter `yaml:"parameters,omitempty"`
 	InjectContextArgs []string    `yaml:"inject_context_args,omitempty"`
-	AuditLog          bool        `yaml:"audit_log,omitempty"`      // if true, log invocation for audit
-	UserOnly          bool        `yaml:"user_only,omitempty"`      // if true, hidden from LLM and blocked from LLM-sourced calls
-	AlwaysInclude     bool        `yaml:"always_include,omitempty"` // RFC #249 Phase 4: pin to Tier 0 regardless of RAG score
-	ReadOnly          bool        `yaml:"read_only,omitempty"`      // if true, skip per-call user-confirmation gate (pure query)
+	AuditLog          bool        `yaml:"audit_log,omitempty"`         // if true, log invocation for audit
+	UserOnly          bool        `yaml:"user_only,omitempty"`         // if true, hidden from LLM and blocked from LLM-sourced calls
+	AlwaysInclude     bool        `yaml:"always_include,omitempty"`    // RFC #249 Phase 4: pin to Tier 0 regardless of RAG score
+	ReadOnly          bool        `yaml:"read_only,omitempty"`         // if true, skip per-call user-confirmation gate (pure query)
+	ConfirmationHint  string      `yaml:"confirmation_hint,omitempty"` // how to word this action's confirmation question; see narrateConfirmation
 }
 
 type PluginCapability struct {

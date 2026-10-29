@@ -175,3 +175,84 @@ func TestNarrateConfirmation_NoDirectiveKeepsPromptUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// TestNarrateConfirmation_FollowsTheToolsHint pins the per-tool wording: an
+// action that carries a ConfirmationHint is narrated under that hint (what the
+// user decides on, no argument listing, no yes/no question) instead of the
+// general field-by-field rules, which fit a record change only.
+func TestNarrateConfirmation_FollowsTheToolsHint(t *testing.T) {
+	llm := &capturingLLM{responses: []string{"Ich zeige Ihnen, wie Sie „Bleistift HB“ anlegen. Loslegen?"}}
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "timly",
+		Actions: []Action{{
+			Name:             "walk-through-task",
+			ConfirmationHint: "Ask in one sentence whether to show how the example item is created.",
+		}},
+	}, &echoExecutor{}); err != nil {
+		t.Fatal(err)
+	}
+	orch := NewWithRules(llm, &fakeParser{}, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
+
+	call := ToolCall{Plugin: "timly", Action: "walk-through-task", Args: map[string]string{"task": "create_item", "example_name": "Bleistift HB"}}
+	got := orch.narrateConfirmation(context.Background(), nil, call, "Wie lege ich einen Bleistift an?")
+
+	if got != "Ich zeige Ihnen, wie Sie „Bleistift HB“ anlegen. Loslegen?" {
+		t.Errorf("must return the LLM narration verbatim, got %q", got)
+	}
+	var sys string
+	for _, m := range llm.requests[0].Messages {
+		if m.Role == provider.RoleSystem {
+			sys = m.Content
+		}
+	}
+	if !strings.Contains(sys, "show how the example item is created") {
+		t.Errorf("system prompt must carry the tool's hint, got: %q", sys)
+	}
+	if strings.Contains(sys, "field: previous value") {
+		t.Errorf("the field-by-field rules must give way to the hint, got: %q", sys)
+	}
+	if !strings.Contains(strings.ToLower(sys), "form of address") {
+		t.Errorf("system prompt must keep the user's form of address, got: %q", sys)
+	}
+
+	// Without a hint the general rules apply as before.
+	plain := ToolCall{Plugin: "timly", Action: "update-item", Args: map[string]string{"id": "7"}}
+	orch.narrateConfirmation(context.Background(), nil, plain, "ändere die Seriennummer")
+	for _, m := range llm.requests[1].Messages {
+		if m.Role == provider.RoleSystem && !strings.Contains(m.Content, "field: previous value") {
+			t.Errorf("an action without a hint keeps the general rules, got: %q", m.Content)
+		}
+	}
+
+	// The static fallback (narration unavailable) keeps a hinted action's arguments out of sight as well.
+	if got := orch.confirmationFallback(call); strings.Contains(got, "example_name") || strings.Contains(got, "walk-through-task") {
+		t.Errorf("fallback for a hinted action shows neither its arguments nor its name, got: %q", got)
+	}
+	if got := orch.confirmationFallback(plain); !strings.Contains(got, "- id: 7") {
+		t.Errorf("fallback for a plain action lists its arguments, got: %q", got)
+	}
+}
+
+// TestNarrateConfirmation_HintFoundUnderMCPNames pins the lookup through the
+// name normalisation the mcp-plugin needs: the manifest carries the prefixed
+// form ("timly__walk-through-task"), the model emits the bare one.
+func TestNarrateConfirmation_HintFoundUnderMCPNames(t *testing.T) {
+	llm := &capturingLLM{responses: []string{"Loslegen?"}}
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name:    "timly",
+		Actions: []Action{{Name: "timly__walk-through-task", ConfirmationHint: "Ask whether to show it."}},
+	}, &echoExecutor{}); err != nil {
+		t.Fatal(err)
+	}
+	orch := NewWithRules(llm, &fakeParser{}, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
+
+	orch.narrateConfirmation(context.Background(), nil, ToolCall{Plugin: "timly", Action: "walk-through-task"}, "zeig es mir")
+
+	for _, m := range llm.requests[0].Messages {
+		if m.Role == provider.RoleSystem && !strings.Contains(m.Content, "Ask whether to show it.") {
+			t.Errorf("the hint must be found under the normalised action name, got: %q", m.Content)
+		}
+	}
+}

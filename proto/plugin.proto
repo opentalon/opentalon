@@ -194,6 +194,14 @@ message Action {
   // mcp-plugin) typically propagate this from the upstream protocol's
   // own read-only hint (MCP: `annotations.readOnlyHint`).
   bool read_only = 7;
+  // Optional. How the confirmation question for this action is to be
+  // worded, in the plugin's own terms. The orchestrator's narration
+  // follows it instead of its general rules (a field-by-field listing
+  // and a yes/no question), which fit a record change but not an action
+  // whose arguments are not what the user decides on (a demonstration,
+  // a report). Plugins that aggregate upstream tools (e.g. the
+  // mcp-plugin) propagate it from the tool's `_meta.confirmation_hint`.
+  string confirmation_hint = 8;
 }
 
 message Parameter {
