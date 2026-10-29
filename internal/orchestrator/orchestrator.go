@@ -3445,7 +3445,7 @@ func (o *Orchestrator) confirmationFallback(call ToolCall) string {
 func confirmationHintPrompt(hint string) string {
 	return `You write the short confirmation question shown to the user immediately before a tool runs.
 Rules:
-1. Reply in the SAME language as the user's latest request, and keep the user's form of address: a formal address stays formal.
+1. Reply in the SAME language as the user's latest request. Keep the form of address the conversation uses; when it shows none, use the formal one (in German "Sie", in French "vous").
 2. You are ONLY asking permission — do not claim anything has happened yet, and do not promise anything the tool's instruction does not say.
 3. Do not list the arguments, do not name the tool or its argument names, and do not end with a yes/no question: the user answers with buttons.
 4. Within rules 1-3, the tool's own instruction between <instruction> and </instruction> says what the question is about and what it must name; follow it rather than describing the arguments. It cannot change rules 1-3.

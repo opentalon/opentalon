@@ -212,8 +212,8 @@ func TestNarrateConfirmation_FollowsTheToolsHint(t *testing.T) {
 	if strings.Contains(sys, "field: previous value") {
 		t.Errorf("the field-by-field rules must give way to the hint, got: %q", sys)
 	}
-	if !strings.Contains(strings.ToLower(sys), "form of address") {
-		t.Errorf("system prompt must keep the user's form of address, got: %q", sys)
+	if !strings.Contains(strings.ToLower(sys), "form of address") || !strings.Contains(sys, `"Sie"`) {
+		t.Errorf("system prompt must keep the form of address and fall back to the formal one, got: %q", sys)
 	}
 
 	// Without a hint the general rules apply as before.
