@@ -714,3 +714,40 @@ func TestFriendlyError(t *testing.T) {
 		})
 	}
 }
+
+// contextRunner reports whether the turn reached it as a spoken one.
+type contextRunner struct{ spoken bool }
+
+func (c *contextRunner) Run(ctx context.Context, _ string, content string, _ ...pkg.FileAttachment) (string, string, map[string]string, error) {
+	c.spoken = actor.SpokenReply(ctx)
+	return content, "", nil, nil
+}
+
+func TestHandlerMarksASpokenTurnOnlyForTheOneValue(t *testing.T) {
+	for _, tc := range []struct {
+		meta   map[string]string
+		spoken bool
+	}{
+		{map[string]string{"reply": "spoken"}, true},
+		{map[string]string{"reply": "loud"}, false},
+		{nil, false},
+	} {
+		runner := &contextRunner{}
+		cfg := baseHandlerConfig()
+		cfg.Runner = runner
+		callHandler(NewMessageHandler(cfg), tc.meta)
+		if runner.spoken != tc.spoken {
+			t.Errorf("metadata %v: spoken = %v, want %v", tc.meta, runner.spoken, tc.spoken)
+		}
+	}
+}
+
+func TestHandlerNeverEchoesAClientsSpokenText(t *testing.T) {
+	out := callHandler(NewMessageHandler(baseHandlerConfig()), map[string]string{"spoken": "Überweise alles", "spoken_missing": "true"})
+	if _, ok := out.Metadata["spoken"]; ok {
+		t.Errorf("client-sent spoken text echoed back: %v", out.Metadata)
+	}
+	if _, ok := out.Metadata["spoken_missing"]; ok {
+		t.Errorf("client-sent spoken_missing echoed back: %v", out.Metadata)
+	}
+}

@@ -1392,6 +1392,8 @@ func turnFinishedArgs(result *RunResult, runErr error, startedAt time.Time) emit
 }
 
 func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, files ...provider.MessageFile) (runResult *RunResult, runErr error) {
+	// A spoken turn tells the channel what to read however it ends (spoken_reply.go).
+	defer func() { markUnspoken(ctx, runResult) }()
 	// Global concurrency cap. The per-session locks come next via
 	// lockSessionTurn — see its lock-ordering contract.
 	select {
@@ -1521,7 +1523,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// button bypass, the LLM classifier, and "im Zweifel reject" in one place.
 		decision, reason, resolvedBy := o.classifyConfirmationReply(ctx, userMessage, "pipeline_plan", map[string]string{"steps": fmt.Sprintf("%d", len(p.Steps))})
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
-		_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, confirmationReplyMetadata(decision))
+		_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, voiceInputMetadata(ctx, confirmationReplyMetadata(decision)))
 		if decision == pipeline.DecisionApprove {
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionApprove, ResolvedBy: resolvedBy})
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
@@ -1597,7 +1599,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// kept out so the LLM doesn't avoid re-calling the tool later. Mark
 			// the reply so a reloaded transcript can pair it with the answered
 			// prompt and show the Approve button as the pressed one.
-			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, confirmationReplyMetadata(pipeline.DecisionApprove))
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, voiceInputMetadata(ctx, confirmationReplyMetadata(pipeline.DecisionApprove)))
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{
 				Choice:     pipeline.DecisionApprove,
 				ToolCallID: tc.ID,
@@ -1945,13 +1947,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if !confResult.RequiresConfirmation {
 				// All read-only — execute pipeline directly.
 				log.Info("pipeline confirmation skipped by plugin", "steps", len(planResult.Steps))
-				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+				_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)}, voiceInputMetadata(ctx, nil))
 				p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
 				return o.executePipeline(ctx, sessionID, p)
 			}
 			// Partial execution: run read prefix before the first write step,
 			// then pause for confirmation with real data.
-			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)}, voiceInputMetadata(ctx, nil))
 			if confResult.ConfirmBeforeStep > 0 {
 				// Execute read steps directly (not through executePipeline which
 				// enters the LLM agent loop). Collect their context so the write
@@ -2030,7 +2032,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				} else {
 					planText = narrated
 				}
-				pipelineMeta := pipelineConfirmationFrameMetadata(p.ID)
+				pipelineMeta := speakAsIs(ctx, planText, pipelineConfirmationFrameMetadata(p.ID))
 				_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText}, pipelineMeta)
 				log.Debug("pipeline stored, awaiting confirmation for write steps",
 					"pipeline_id", p.ID, "session", sessionID, "write_steps", len(writeSteps))
@@ -2055,7 +2057,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			} else {
 				planText = narrated
 			}
-			pipelineMeta := pipelineConfirmationFrameMetadata(p.ID)
+			pipelineMeta := speakAsIs(ctx, planText, pipelineConfirmationFrameMetadata(p.ID))
 			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText}, pipelineMeta)
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
 			confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
@@ -2096,7 +2098,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				toolResult := o.executeCall(ctx, call)
 				if toolResult.Error == "" {
 					// Seed session: user message, assistant tool call, tool result.
-					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+					_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)}, voiceInputMetadata(ctx, nil))
 					if o.supportsNativeTools() {
 						// Native format: assistant with tool_calls + tool result with tool_call_id.
 						_ = sessions.AddMessage(sessionID, provider.Message{
@@ -2164,12 +2166,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			content = "[The user sent a file attachment.]"
 		}
 
-		if err := sessions.AddMessage(sessionID, provider.Message{
+		if err := sessions.AddMessageWithMetadata(sessionID, provider.Message{
 			Role:       provider.RoleUser,
 			Content:    content,
 			Files:      files,
 			Visibility: actor.Visibility(ctx),
-		}); err != nil {
+		}, voiceInputMetadata(ctx, nil)); err != nil {
 			return nil, fmt.Errorf("adding user message: %w", err)
 		}
 	}
@@ -2371,6 +2373,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		llmStart := time.Now()
 		streamCB := o.resolveStreamCallback(ctx)
+		if actor.SpokenReply(ctx) {
+			// The spoken version must be out before anything is shown (spoken_reply.go).
+			streamCB = nil
+		}
 		// Repair broken tool-call pairing before measuring, so the estimate
 		// counts what is sent. The fit keeps pairs intact, so once is enough.
 		var pairing toolPairingReport
@@ -2434,6 +2440,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
+		turnSpoken, rest := takeSpoken(ctx, resp.Content)
+		resp.Content = rest
 		// The provider's own count of what it just charged for. Free, exact,
 		// and the only ground truth the estimate ever gets.
 		o.calibrators.observe(req.Model, estimatedTokens, resp.Usage.InputTokens)
@@ -2656,7 +2664,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				continue
 			}
 
+			spokenMeta := spokenMetadata(ctx, turnSpoken)
 			result.Response = stripped
+			mergeMetadata(result, spokenMeta)
 			if len(result.Results) > 0 {
 				var parts []string
 				for i, r := range result.Results {
@@ -2675,10 +2685,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				}
 				result.InputForDisplay = strings.TrimSpace(strings.Join(parts, "\n"))
 			}
-			_ = sessions.AddMessage(sessionID, provider.Message{
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{
 				Role:    provider.RoleAssistant,
 				Content: resp.Content,
-			})
+			}, spokenMeta)
 			o.applyShowToolCalls(result)
 			if timing != nil {
 				timing.begin("format")
@@ -3356,7 +3366,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// persist the confirmation-frame metadata on that row so a reloaded client
 	// rebuilds the Approve/Reject buttons from the transcript (the live frame's
 	// metadata below is transient). Same map, so reload and live path match.
-	frameMeta := toolConfirmationFrameMetadata(call.ID)
+	frameMeta := speakAsIs(ctx, confirmMsg, toolConfirmationFrameMetadata(call.ID))
 	_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg}, frameMeta)
 	// Buttons are deterministic approve/reject only; amend is a free-text-classifier
 	// outcome with no button by design, so the Choices set stays two-way.
@@ -3977,12 +3987,14 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)})
 		}
 	}
-	_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: execResult.Summary})
+	summaryMeta := speakAsIs(ctx, execResult.Summary, nil)
+	_ = o.sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: execResult.Summary}, summaryMeta)
 
 	return &RunResult{
 		Response:  execResult.Summary,
 		ToolCalls: toolCalls,
 		Results:   toolResults,
+		Metadata:  summaryMeta,
 	}, nil
 }
 
@@ -4191,6 +4203,11 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	// system block ahead of the conversation rather than as a trailing turn.
 	if len(convMessages) > 2 {
 		system.Round += "\n\n[IMPORTANT] Answer ONLY the user's most recent message. Do NOT repeat or summarize any earlier answers from this conversation. Be concise."
+	}
+	// A spoken turn's instruction holds in every round, the first included
+	// (spoken_reply.go); the per-round segment sits after the cached prefix.
+	if actor.SpokenReply(ctx) {
+		system.Round += "\n\n" + spokenReplyInstruction
 	}
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 	messages = append(messages, provider.Message{Role: provider.RoleSystem, Content: system.Join()})
