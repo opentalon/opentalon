@@ -3396,13 +3396,13 @@ const confirmationNarratePrompt = `You write the short confirmation question sho
 Rules:
 1. Reply in the SAME language as the user's latest request.
 2. If the call acts on MANY records at once (a batch, an ids array, or a scope_token), state the COUNT of affected records and 2-3 concrete examples (names and/or ids) taken from the recent conversation. Never show a raw scope_token or dump internal arguments.
-3. If the call acts on ONE record (changes, creates or deletes it), name that record by its name rather than its id (by its id only when no name is known), and say what happens to it FIELD BY FIELD, one list item per field ("- field: ..."): for a change, "- field: previous value -> new value" for each field it sets, taking the previous value from the recent conversation; for a new record, its kind and, when it is given one, its name in the question and "- field: value" for each further value it gets — a new record has no previous values, so never write one or an arrow for it; a call that may also update an existing record is a change; for a deletion, say what kind of record it is. A summary such as "the specified attributes" or "the given details" is never acceptable — those fields are the whole thing the user is being asked to check, and nobody can check what you did not name.
+3. If the call acts on ONE record (changes, creates or deletes it), name that record by its name rather than its id (by its id only when no name is known), and say what happens to it FIELD BY FIELD, one list item per field ("- field: ..."): for a change, "- field: previous value -> new value" for each field it sets, taking the previous value from the recent conversation; for a new record, its kind and, when it is given one, its name in the opening sentence (not again as a line) and "- field: value" for each further value it gets — a new record has no previous values, so never write one or an arrow for it; a call that may also update an existing record is a change; for a deletion, say what kind of record it is. A summary such as "the specified attributes" or "the given details" is never acceptable — those fields are the whole thing the user is being asked to check, and nobody can check what you did not name.
 4. If a previous value of a change does not appear in the conversation, give the new value and say plainly that the previous one is not known here. Never guess it, and never drop the field to avoid the gap.
-5. Name every field as the user sees it in the application, in the user's language ("serial number", not serial_number), never by the tool's argument name; a value that refers to another record is that record's name when the conversation shows it, its id otherwise.
+5. Field names are words of your reply: name every field as the user sees it in the application, in the language of your reply like every other word (in a German reply "Kategorie", not "Category"), never by the tool's argument name ("serial number", not serial_number); a value that refers to another record is that record's name when the conversation shows it, its id otherwise.
 6. If a link to the record (a path such as /items/123) appears in the conversation, render the record name as that link.
 7. Keep it short: 1-3 sentences plus at most one line per field. End with one clear question whether to go ahead, without answer options such as "(yes/no)": the user answers with buttons. You are ONLY asking permission — do not claim anything has happened yet.
 
-The form, shown in English with made-up records; write yours in the user's language, with the names from the conversation.
+The form, shown in English with made-up records; write yours entirely in the language of your reply, field names included, with the names from the conversation.
 A new record:
 The item **Cordless drill** would be created:
 - Category: Tools
@@ -3434,7 +3434,7 @@ func confirmationNarrateSystemPrompt(ctx context.Context, hint string) string {
 	}
 	base += "\n\n" + dir + "\nThis reply-language instruction takes precedence over rule 1."
 	if hint == "" {
-		base += " Its line on technical terms does not apply to field names: rule 5 says how to name them."
+		base += " Its line on technical terms does not apply to field names: they are written in this language (rule 5)."
 	}
 	return base
 }
