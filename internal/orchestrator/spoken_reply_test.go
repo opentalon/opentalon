@@ -7,6 +7,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/provider"
+	"github.com/opentalon/opentalon/internal/state"
 )
 
 // metadataRecorder keeps what the orchestrator stores with each message; the in-memory store drops it.
@@ -255,5 +256,114 @@ func TestTextWrittenWithoutMarkersIsItsOwnSpokenVersionWhenShort(t *testing.T) {
 	typed := map[string]string{"prompt_type": "tool_confirmation"}
 	if got := speakAsIs(context.Background(), "Soll ich?", typed); len(got) != 1 {
 		t.Errorf("a typed turn's prompt gained metadata: %v", got)
+	}
+}
+
+func TestOnlyTheSentencesOfATextAreRead(t *testing.T) {
+	cases := []struct{ text, read string }{
+		{"Soll ich in Ihrem Konto die neue Hauptkategorie **Werkzeuge** anlegen?\n" +
+			"- name: neu -> Werkzeuge (eine Kategorie mit diesem Namen existiert bisher nicht)\n" +
+			"Danach würde ich die Objekte Bohrmaschine und Hammer darin erstellen. Möchten Sie die Kategorie jetzt anlegen (ja/nein)?",
+			"Soll ich in Ihrem Konto die neue Hauptkategorie Werkzeuge anlegen? Danach würde ich die Objekte " +
+				"Bohrmaschine und Hammer darin erstellen. Möchten Sie die Kategorie jetzt anlegen (ja/nein)?"},
+		{"Soll ich [Maschine 7](/items/42) ändern?\nSeriennummer: A-1 → X-9", "Soll ich Maschine 7 ändern?"},
+		{"## Ergebnis\n| Name | Anzahl |\n|---|---|\nA | 2\n```\nlist-items\n```\n---\n1. Erstens\n2. Zweitens\n* Drittens\n" +
+			"> - name: Werkzeuge\n> ## Ergebnis\n> Zwei Treffer, siehe `serial_number` und _Notizen_.",
+			"Zwei Treffer, siehe serial number und Notizen."},
+		{"1. Januar ist der nächste freie Termin, er kostet ~10 € und dauert 2*3 Stunden.",
+			"1. Januar ist der nächste freie Termin, er kostet ~10 € und dauert 2*3 Stunden."},
+		{"Der Wert 5 * 3 ist **sehr** wichtig (*geschätzt*), ~~alt~~ neu.", "Der Wert 5 * 3 ist sehr wichtig (geschätzt), alt neu."},
+		{"Créer «**Outils**» ? ¿**Confirmar**?", "Créer «Outils» ? ¿Confirmar?"},
+		{"Hier der Befehl:\n    rake db:migrate\n\tlist-items\n```\n1. a\n2. b\n```\n1. Januar ist frei.",
+			"Hier der Befehl: 1. Januar ist frei."},
+		{"    rake db:migrate\n>     rake db:seed\n> > Erledigt.\n````md\n```\nlist-items\n```\n````\nFertig.\n" +
+			"```\n    ```\nlist-items\n```\nGut.", "Erledigt. Fertig. Gut."},
+		{"Fertig. ![Bild](/a.png) Mehr unter https://example.com/a", "Fertig. Mehr unter"},
+		{"- A\n- B", ""},
+	}
+	for _, c := range cases {
+		if got := speakable(c.text); got != c.read {
+			t.Errorf("speakable(%q)\n = %q\nwant %q", c.text, got, c.read)
+		}
+	}
+}
+
+func TestASpokenVersionIsReadWithoutMarkdownAndATextOfOnlyAListStaysSilent(t *testing.T) {
+	spokenCtx := actor.WithSpokenReply(context.Background())
+	if got := spokenMetadata(spokenCtx, "Ich habe **zwei** Treffer, die Details stehen im Chat.")[SpokenMetadataKey]; got !=
+		"Ich habe zwei Treffer, die Details stehen im Chat." {
+		t.Errorf("spoken version read as %q", got)
+	}
+	if meta := speakAsIs(spokenCtx, "- A\n- B", nil); meta[SpokenMissingMetadataKey] != "true" || meta[SpokenMetadataKey] != "" {
+		t.Errorf("a list alone: %v; want spoken_missing", meta)
+	}
+}
+
+// raiseConfirmation asks for approval of one write in ctx with a narrator that answers narration; it returns the
+// result, the narrator's system prompt and the session store.
+func raiseConfirmation(t *testing.T, ctx context.Context, narration string) (*RunResult, string, *state.SessionStore, *Orchestrator) {
+	t.Helper()
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "p", Actions: []Action{{Name: "create_category", Description: "Creates a category."}},
+	}, &countingExecutor{}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := registry.Register(PluginCapability{Name: "conf", Actions: []Action{{Name: "check"}}}, confirmingExecutor{}); err != nil {
+		t.Fatalf("register conf: %v", err)
+	}
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "s1"})
+	llm := &capturingLLM{responses: []string{narration}}
+	orch := NewWithRules(llm, &fakeParser{}, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
+		ConfirmationPlugin: "conf", ConfirmationAction: "check",
+	})
+	call := ToolCall{ID: "c1", Plugin: "p", Action: "create_category", Args: map[string]string{"name": "Werkzeuge"}, FromLLM: true}
+	rr, raised := orch.maybeRequireConfirmation(ctx, sessions, "s1", call, "Lege Werkzeuge an", nil, false, nil)
+	if !raised || rr == nil || len(llm.requests) != 1 {
+		t.Fatalf("no confirmation raised: raised=%v rr=%v narrator calls=%d", raised, rr, len(llm.requests))
+	}
+	return rr, llm.requests[0].Messages[0].Content, sessions, orch
+}
+
+const shownQuestion = "Soll ich in Ihrem Konto die neue Hauptkategorie **Werkzeuge** anlegen?\n- name: neu -> Werkzeuge\n" +
+	"Möchten Sie die Kategorie jetzt anlegen (ja/nein)?"
+
+func TestASpokenConfirmationReadsTheQuestionAsTheNarratorAskedItAloud(t *testing.T) {
+	aloud := "Soll ich die Hauptkategorie Werkzeuge anlegen?"
+	rr, system, sessions, orch := raiseConfirmation(t, actor.WithSpokenReply(sentCtx("p__create_category")),
+		spokenOpen+aloud+spokenClose+"\n"+shownQuestion)
+
+	if !strings.Contains(system, "## SPOKEN QUESTION") {
+		t.Error("the narrator of a spoken turn is not asked for the question as it is asked aloud")
+	}
+	if rr.Response != shownQuestion || rr.Metadata[SpokenMetadataKey] != aloud || rr.Metadata["prompt_type"] != "tool_confirmation" {
+		t.Errorf("shown %q, metadata %v", rr.Response, rr.Metadata)
+	}
+	sess, _ := sessions.Get("s1")
+	stored := sess.Messages[len(sess.Messages)-1]
+	if stored.Content != shownQuestion {
+		t.Errorf("stored prompt = %q, want the question without the spoken version", stored.Content)
+	}
+	if prompt, _, _ := orch.PendingConfirmationFrame("s1"); prompt != shownQuestion {
+		t.Errorf("pending prompt = %q, want the question without the spoken version", prompt)
+	}
+}
+
+func TestASpokenConfirmationWithoutTheQuestionAloudReadsOnlyItsSentences(t *testing.T) {
+	rr, _, _, _ := raiseConfirmation(t, actor.WithSpokenReply(sentCtx("p__create_category")), shownQuestion)
+	want := "Soll ich in Ihrem Konto die neue Hauptkategorie Werkzeuge anlegen? Möchten Sie die Kategorie jetzt anlegen (ja/nein)?"
+	if rr.Response != shownQuestion || rr.Metadata[SpokenMetadataKey] != want {
+		t.Errorf("shown %q, read %q", rr.Response, rr.Metadata[SpokenMetadataKey])
+	}
+}
+
+func TestATypedConfirmationIsNarratedAsBefore(t *testing.T) {
+	rr, system, _, _ := raiseConfirmation(t, sentCtx("p__create_category"), shownQuestion)
+	if strings.Contains(system, "## SPOKEN QUESTION") {
+		t.Error("the narrator of a typed turn is asked for a spoken question")
+	}
+	if _, ok := rr.Metadata[SpokenMetadataKey]; ok || rr.Response != shownQuestion {
+		t.Errorf("typed confirmation changed: %q %v", rr.Response, rr.Metadata)
 	}
 }

@@ -3371,7 +3371,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	if s, gerr := sessions.Get(sessionID); gerr == nil && s != nil {
 		recentMsgs = s.Messages
 	}
-	confirmMsg := o.narrateConfirmation(ctx, recentMsgs, call, userMessage)
+	spokenQuestion, confirmMsg := takeSpoken(ctx, o.narrateConfirmation(ctx, recentMsgs, call, userMessage))
 	if confirmMsg == "" {
 		confirmMsg = o.confirmationFallback(call)
 	}
@@ -3388,7 +3388,10 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// persist the confirmation-frame metadata on that row so a reloaded client
 	// rebuilds the Approve/Reject buttons from the transcript (the live frame's
 	// metadata below is transient). Same map, so reload and live path match.
-	frameMeta := speakAsIs(ctx, confirmMsg, toolConfirmationFrameMetadata(call.ID))
+	if spokenQuestion == "" {
+		spokenQuestion = confirmMsg
+	}
+	frameMeta := speakAsIs(ctx, spokenQuestion, toolConfirmationFrameMetadata(call.ID))
 	_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg}, frameMeta)
 	// Buttons are deterministic approve/reject only; amend is a free-text-classifier
 	// outcome with no button by design, so the Choices set stays two-way.
@@ -3456,19 +3459,21 @@ Shall I change it?`
 // resolved from the user's own words, looking back past such replies. Its
 // English technical terms do not reach the field names, which the user checks
 // under the names they see (rule 5). Without a directive the prompt is unchanged
-// and rule 1 applies.
+// and rule 1 applies. In a spoken turn the
+// narrator also writes the question as it is asked aloud (spokenConfirmationInstruction).
 func confirmationNarrateSystemPrompt(ctx context.Context, hint string) string {
 	base := confirmationNarratePrompt
 	if hint != "" {
 		base = confirmationHintPrompt(hint)
 	}
-	dir := strings.TrimSpace(replyLanguageDirectiveFromContext(ctx))
-	if dir == "" {
-		return base
+	if dir := strings.TrimSpace(replyLanguageDirectiveFromContext(ctx)); dir != "" {
+		base += "\n\n" + dir + "\nThis reply-language instruction takes precedence over rule 1."
+		if hint == "" {
+			base += " Its line on technical terms does not apply to field names: they are written in this language (rule 5)."
+		}
 	}
-	base += "\n\n" + dir + "\nThis reply-language instruction takes precedence over rule 1."
-	if hint == "" {
-		base += " Its line on technical terms does not apply to field names: they are written in this language (rule 5)."
+	if actor.SpokenReply(ctx) {
+		base += "\n\n" + spokenConfirmationInstruction
 	}
 	return base
 }
