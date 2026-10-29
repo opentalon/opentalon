@@ -100,7 +100,8 @@ func TestNarrateConfirmation_SingleRecordPromptDemandsFields(t *testing.T) {
 		"never write one or an arrow", // a new record lists its values, not "new -> value"
 		"may also update an existing record is a change",
 		"never by the tool's argument name",
-		"without answer options", // the buttons answer, not "(yes/no)"
+		"without answer options",                                           // the buttons answer, not "(yes/no)"
+		"The item **Cordless drill** would be created:\n- Category: Tools", // the name in the sentence, labels for the rest
 	} {
 		if !strings.Contains(sys, want) {
 			t.Errorf("system prompt must cover %q, got: %q", want, sys)
