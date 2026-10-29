@@ -10,6 +10,7 @@ type groupKey struct{}
 type visibilityKey struct{}
 type agentIDKey struct{}
 type reasoningEffortKey struct{}
+type spokenReplyKey struct{}
 type lastUserMessageIDKey struct{}
 
 // WithActor returns a context that carries the given actor ID (e.g. channel_id:sender_id).
@@ -217,6 +218,22 @@ func WithReasoningEffort(ctx context.Context, effort string) context.Context {
 		return ctx
 	}
 	return context.WithValue(ctx, reasoningEffortKey{}, effort)
+}
+
+// WithSpokenReply marks THIS turn as one the person spoke and will hear the
+// answer to, set from a channel's inbound metadata["reply"] == "spoken": the
+// model then writes a short spoken version of its reply as well.
+func WithSpokenReply(ctx context.Context) context.Context {
+	return context.WithValue(ctx, spokenReplyKey{}, true)
+}
+
+// SpokenReply reports whether THIS turn's answer is read aloud.
+func SpokenReply(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	spoken, _ := ctx.Value(spokenReplyKey{}).(bool)
+	return spoken
 }
 
 // ReasoningEffort returns the per-turn reasoning-effort override, or empty

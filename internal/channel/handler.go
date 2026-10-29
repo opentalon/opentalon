@@ -183,6 +183,13 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			ctx = actor.WithReasoningEffort(ctx, msg.Metadata["reasoning_effort"])
 		}
 
+		// A turn the person spoke (a channel's voice input): its answer is read
+		// aloud, so the model writes a short spoken version too. Only this one
+		// value is honored.
+		if msg.Metadata["reply"] == "spoken" {
+			ctx = actor.WithSpokenReply(ctx)
+		}
+
 		// Carry a per-message visibility ("hidden") so the orchestrator stamps
 		// it on the stored user turn: a hidden turn is fed to the model but
 		// dropped from the user-facing transcript (e.g. a system status note
@@ -345,6 +352,10 @@ func safeMetadata(m map[string]string) map[string]string {
 	// yaml_ws.go and the handler. Never echo them back to channel adapters.
 	delete(out, enrichmentFailedKey)
 	delete(out, enrichmentFailedStepKey)
+	// What is read aloud comes from the orchestrator's result only, never from
+	// what a client sent in.
+	delete(out, "spoken")
+	delete(out, "spoken_missing")
 	return out
 }
 
