@@ -712,28 +712,50 @@ func callOf(id, name string, args map[string]string) provider.CompletionResponse
 }
 
 // End-to-end through Run: the model calls a catalog tool it never loaded. That
-// call does not run, the tool is loaded, and the model calls it again with the
-// same arguments: the retry runs exactly once, because the unrun call is not the
-// previous call for the repeat check. A third identical call repeats one that
-// ran and is still stopped.
-func TestRun_UnloadedCallLoadsToolAndIdenticalRetryRunsOnce(t *testing.T) {
-	args := map[string]string{"q": "x"}
-	orch, llm, exec := loadOnCallOrch(t, &fakeInjectionStateStore{},
-		callOf("r1", "p__catalog", args), callOf("r2", "p__catalog", args), callOf("r3", "p__catalog", args))
+// call does not run, the tool is loaded, and the model sends the same response
+// again: the call that did not run now runs exactly once, while a call of that
+// response which already ran does not run again. A third identical response
+// repeats only calls that ran and is stopped.
+func TestRun_IdenticalRetryRunsOnlyTheUnrunCallsOnce(t *testing.T) {
+	catalog := provider.ToolCall{Name: "p__catalog", Arguments: map[string]string{"q": "x"}}
+	always := provider.ToolCall{Name: "p__always", Arguments: map[string]string{}}
+	for _, tc := range []struct {
+		name     string
+		response []provider.ToolCall
+		want     []string // executed and answered calls, in order: "<tool> ran" or "<tool> loaded"
+	}{
+		{"one unloaded call", []provider.ToolCall{catalog},
+			[]string{"p__catalog loaded", "p__catalog ran"}},
+		{"a loaded call and an unloaded one", []provider.ToolCall{always, catalog},
+			[]string{"p__always ran", "p__catalog loaded", "p__catalog ran"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			round := provider.CompletionResponse{ToolCalls: tc.response}
+			orch, llm, exec := loadOnCallOrch(t, &fakeInjectionStateStore{}, round, round, round)
 
-	res := runTurn(t, orch)
-	if exec.count != 1 {
-		t.Errorf("the tool must run exactly once (the retry), ran %d time(s)", exec.count)
-	}
-	if len(res.Results) != 2 || !strings.Contains(res.Results[0].Error, "call p__catalog again") || res.Results[1].Error != "" {
-		t.Fatalf("want the call-again answer, then the retry's result, got %+v", res.Results)
-	}
-	if len(llm.requests) != 4 {
-		t.Fatalf("want 4 requests (call, retry, repeat, answer), got %d", len(llm.requests))
-	}
-	afterRepeat := llm.requests[3].Messages
-	if last := afterRepeat[len(afterRepeat)-1].Content; !strings.Contains(last, "You are repeating the same tool call") {
-		t.Errorf("the identical repeat of the call that ran must be stopped, last message %q", last)
+			res := runTurn(t, orch)
+			var got []string
+			for i, call := range res.ToolCalls {
+				outcome := " ran"
+				if res.Results[i].Error != "" {
+					outcome = " loaded"
+					if !strings.Contains(res.Results[i].Error, "call p__catalog again") {
+						t.Errorf("unexpected error for %s: %q", call.Action, res.Results[i].Error)
+					}
+				}
+				got = append(got, toolFQN(call.Plugin, call.Action)+outcome)
+			}
+			if !reflect.DeepEqual(got, tc.want) || exec.count != len(tc.want)-1 {
+				t.Errorf("calls = %v (executor ran %d), want %v", got, exec.count, tc.want)
+			}
+			if len(llm.requests) != 4 {
+				t.Fatalf("want 4 requests (call, retry, repeat, answer), got %d", len(llm.requests))
+			}
+			afterRepeat := llm.requests[3].Messages
+			if last := afterRepeat[len(afterRepeat)-1].Content; !strings.Contains(last, "You are repeating the same tool call") {
+				t.Errorf("the identical repeat of calls that ran must be stopped, last message %q", last)
+			}
+		})
 	}
 }
 

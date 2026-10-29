@@ -2262,6 +2262,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var lastCallSig string          // "plugin__action\x00arg1=val1\x00..." for loop detection
 	var pairingSeen pairingReported // tool-pairing repairs already reported this turn
 	var repeatCount int
+	var lastUnrun map[string]bool // signatures of the previous response's calls answered without running
 	// Phantom-completion guard state (consumed in the calls==nil branch). The
 	// model sometimes loads a write tool, resolves every parameter through
 	// lookups — and then NARRATES the mutation instead of calling it ("The
@@ -2715,6 +2716,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			lastCallSig = callSig
 			repeatCount = 1
 		}
+		// The previous response's calls answered "loaded now, call again" did
+		// not run, so repeating the response is the retry they asked for: only
+		// those calls run, never again the ones that did.
+		if retries := retriesOfUnrunCalls(calls, lastUnrun); repeatCount >= 2 && len(retries) > 0 {
+			log.Info("identical response retries calls that did not run, running only those",
+				"round", i+1, "calls", len(calls), "retries", len(retries))
+			calls, repeatCount = retries, 1
+		}
 		if repeatCount >= 2 {
 			log.Warn("repeated identical tool call detected, breaking loop", "round", i+1, "repeat", repeatCount)
 			transientMessages = []provider.Message{
@@ -2742,7 +2751,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			thinking = responseThinking{Blocks: resp.Thinking, Fingerprint: resp.ThinkingFingerprint}
 		}
 
-		ran := make([]ToolCall, 0, len(calls))
+		unrun := make(map[string]bool)
 		for i := range calls {
 			calls[i].FromLLM = true
 
@@ -2788,8 +2797,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			answeredBefore := loadsOnCall.answered
 			toolResult := o.executeCall(ctx, calls[i])
 			loadedOnCall := loadsOnCall.answered > answeredBefore
-			if !loadedOnCall {
-				ran = append(ran, calls[i])
+			if loadedOnCall {
+				unrun[toolCallSignature(calls[i:i+1])] = true
 			}
 			// Captured before the repair block so the "plugin call" log line
 			// times the plugin, not the corrector side-call — repair logs its
@@ -2891,13 +2900,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				})
 			}
 		}
-		// A call answered "loaded now, call again" did not run, so it is not
-		// the previous call for the repeat check above: the model's retry with
-		// the same arguments runs once, while a call that ran is still stopped
-		// when the model repeats it.
-		if len(ran) < len(calls) {
-			lastCallSig = toolCallSignature(ran)
-		}
+		lastUnrun = unrun
 	}
 
 	return nil, fmt.Errorf("agent loop exceeded %d iterations", maxAgentLoopIterations)

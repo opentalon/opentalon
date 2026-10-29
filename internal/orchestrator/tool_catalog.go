@@ -185,6 +185,19 @@ func (o *Orchestrator) answerUnloadedCall(ctx context.Context, call ToolCall, di
 		canonical, canonical), dispatchStart)
 }
 
+// retriesOfUnrunCalls returns the calls that repeat, with the same arguments, a
+// call of the previous response that was answered without running (unrun holds
+// those calls' signatures, see toolCallSignature).
+func retriesOfUnrunCalls(calls []ToolCall, unrun map[string]bool) []ToolCall {
+	var retries []ToolCall
+	for i := range calls {
+		if unrun[toolCallSignature(calls[i:i+1])] {
+			retries = append(retries, calls[i])
+		}
+	}
+	return retries
+}
+
 // toolDemoted reports whether the session store marks the tool demoted. No
 // session, no store, no entry or a failed read all read as not demoted.
 func (o *Orchestrator) toolDemoted(ctx context.Context, sessionID, fqn string) bool {
