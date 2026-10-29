@@ -2,6 +2,7 @@ package decideprovider
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 )
@@ -52,6 +53,16 @@ func FromConfig(cfg DeciderConfig) (Provider, error) {
 	}
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("decideprovider: decider %q requires a base_url", cfg.Name)
+	}
+	// A negative price would make the cost counters decrease, which panics in
+	// Prometheus on the first decide call; reject it at startup instead.
+	for _, c := range []struct {
+		name  string
+		price float64
+	}{{"input", cfg.Cost.Input}, {"output", cfg.Cost.Output}} {
+		if c.price < 0 || math.IsNaN(c.price) || math.IsInf(c.price, 0) {
+			return nil, fmt.Errorf("decideprovider: decider %q cost.%s = %v: want a price per 1M tokens of 0 or more", cfg.Name, c.name, c.price)
+		}
 	}
 	switch cfg.Backend {
 	case BackendLaya:
