@@ -1,6 +1,7 @@
 package decideprovider
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -52,6 +53,14 @@ func TestFromConfig_Errors(t *testing.T) {
 	if _, err := FromConfig(DeciderConfig{Name: "d", Backend: "bogus", BaseURL: "http://x"}); err == nil {
 		t.Error("expected error for unknown backend")
 	}
+	for _, cost := range []Cost{{Input: -1}, {Output: -0.5}, {Input: math.NaN()}, {Output: math.Inf(1)}} {
+		if _, err := FromConfig(DeciderConfig{Name: "d", Backend: BackendSubQ, BaseURL: "http://x", Cost: cost}); err == nil {
+			t.Errorf("expected error for cost %+v", cost)
+		}
+	}
+	if _, err := FromConfig(DeciderConfig{Name: "d", Backend: BackendSubQ, BaseURL: "http://x", Cost: Cost{Input: 0.05}}); err != nil {
+		t.Errorf("a valid cost is rejected: %v", err)
+	}
 }
 
 func TestRegistryFromConfigs(t *testing.T) {
@@ -77,6 +86,38 @@ func TestRegistryFromConfigs(t *testing.T) {
 	var nilReg *Registry
 	if nilReg.Names() != nil {
 		t.Error("nil registry should have no names")
+	}
+	if nilReg.Cost("jev") != (Cost{}) {
+		t.Error("nil registry should have no costs")
+	}
+}
+
+func TestRegistryFromConfigsKeepsCosts(t *testing.T) {
+	reg, err := RegistryFromConfigs(map[string]DeciderConfig{
+		"snap": {Backend: BackendSubQ, BaseURL: "http://subq", Cost: Cost{Input: 0.05, Output: 1}},
+		"jev":  {Backend: BackendJev, BaseURL: "http://jev"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reg.Cost("snap"); got != (Cost{Input: 0.05, Output: 1}) {
+		t.Errorf("snap cost = %+v", got)
+	}
+	if got := reg.Cost("jev"); got != (Cost{}) {
+		t.Errorf("an unpriced decider costs %+v, want zero", got)
+	}
+	if _, err := RegistryFromConfigs(map[string]DeciderConfig{"bad": {Backend: BackendSubQ, BaseURL: "http://subq", Cost: Cost{Input: -1}}}); err == nil {
+		t.Error("a negative cost should fail the registry")
+	}
+}
+
+func TestCostPrice(t *testing.T) {
+	u := Cost{Input: 0.5, Output: 4}.Price(Usage{InputTokens: 2_000_000, OutputTokens: 250_000})
+	if u.InputCost != 1 || u.OutputCost != 1 || u.InputTokens != 2_000_000 || u.OutputTokens != 250_000 {
+		t.Errorf("priced usage = %+v", u)
+	}
+	if u := (Cost{}).Price(Usage{InputTokens: 10, OutputTokens: 10}); u.InputCost != 0 || u.OutputCost != 0 {
+		t.Errorf("zero cost priced usage = %+v", u)
 	}
 }
 

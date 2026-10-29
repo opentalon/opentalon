@@ -92,6 +92,69 @@ func TestDecideCallbackRoutesAndMeters(t *testing.T) {
 	}
 }
 
+// A priced decider's usage carries its cost into profile_usage and the plugin
+// cost metric, on every metering path; an unpriced one stays at 0.
+func TestDecideUsageIsPriced(t *testing.T) {
+	single := &decideprovider.Decision{Chosen: "match", Confidence: 0.95,
+		Probabilities: map[string]float64{"match": 0.95, "mismatch": 0.05},
+		Usage:         decideprovider.Usage{InputTokens: 2_000_000, OutputTokens: 500_000}}
+	for _, tt := range []struct {
+		name             string
+		cost             decideprovider.Cost
+		profile          bool
+		args             map[string]string
+		wantEntity       string
+		wantIn, wantOut  float64
+		wantInTokens     int
+		wantPluginMetric float64
+	}{
+		{name: "decide", cost: decideprovider.Cost{Input: 0.5, Output: 4}, profile: true,
+			args:       map[string]string{"state": "s", "choices": `["match","mismatch"]`},
+			wantEntity: "ent1", wantIn: 1, wantOut: 2, wantInTokens: 2_000_000, wantPluginMetric: 3},
+		{name: "several questions", cost: decideprovider.Cost{Input: 0.5, Output: 4}, profile: true,
+			args:       map[string]string{"state": "guide + file", "questions": reviewQuestionsArg},
+			wantEntity: "ent1", wantIn: 0.0024, wantOut: 0, wantInTokens: 4800, wantPluginMetric: 0.0024},
+		{name: "unattributed", cost: decideprovider.Cost{Input: 0.5, Output: 4},
+			args:       map[string]string{"state": "s", "choices": `["match","mismatch"]`},
+			wantEntity: unattributedEntity, wantIn: 1, wantOut: 2, wantInTokens: 2_000_000, wantPluginMetric: 3},
+		{name: "unpriced", profile: true,
+			args:       map[string]string{"state": "s", "choices": `["match","mismatch"]`},
+			wantEntity: "ent1", wantInTokens: 2_000_000},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &fakeMultiDecider{fakeDecider: fakeDecider{name: "snap", dec: single}}
+			usage, plugin := &usageSpy{}, &pluginUsageSpy{}
+			reg := decideprovider.NewRegistry(d).WithCosts(map[string]decideprovider.Cost{"snap": tt.cost})
+			orch := NewWithRules(&fakeLLM{}, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), state.NewSessionStore(""),
+				OrchestratorOpts{UsageRecorder: usage, PluginUsageObserver: plugin, Deciders: reg})
+
+			ctx := WithPluginCaller(context.Background(), "talooner", "evaluate_pr")
+			if tt.profile {
+				ctx = profile.WithProfile(ctx, &profile.Profile{EntityID: "ent1"})
+			}
+			if _, _, err := orch.RunActionResult(ctx, "snap", "decide", tt.args); err != nil {
+				t.Fatalf("RunActionResult: %v", err)
+			}
+			if len(usage.calls) != 1 {
+				t.Fatalf("usage = %+v, want one record", usage.calls)
+			}
+			u := usage.calls[0]
+			if u.entityID != tt.wantEntity || u.modelID != "decide/snap" || u.in != tt.wantInTokens ||
+				!near(u.inCost, tt.wantIn) || !near(u.outCost, tt.wantOut) {
+				t.Errorf("usage = %+v, want entity %s, %d tokens, cost %v / %v", u, tt.wantEntity, tt.wantInTokens, tt.wantIn, tt.wantOut)
+			}
+			if len(plugin.got) != 1 {
+				t.Fatalf("plugin usage = %+v, want one observation", plugin.got)
+			}
+			if p := plugin.got[0]; p.plugin != "talooner" || p.action != "evaluate_pr" || p.model != "decide/snap" || !near(p.cost, tt.wantPluginMetric) {
+				t.Errorf("plugin usage = %+v, want talooner/evaluate_pr decide/snap cost %v", p, tt.wantPluginMetric)
+			}
+		})
+	}
+}
+
+func near(a, b float64) bool { return a-b < 1e-12 && b-a < 1e-12 }
+
 // A callback without identity (the plugin omitted the identity args, or the
 // external gateway) is still metered — under the unattributed entity — never free.
 func TestDecideWithoutProfileIsMeteredUnattributed(t *testing.T) {

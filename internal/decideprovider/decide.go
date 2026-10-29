@@ -35,8 +35,24 @@ type Request struct {
 // (laya) report OutputTokens == 0; they still report InputTokens so input cost
 // is attributable.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens  int     `json:"input_tokens"`
+	OutputTokens int     `json:"output_tokens"`
+	InputCost    float64 `json:"input_cost,omitempty"`
+	OutputCost   float64 `json:"output_cost,omitempty"`
+}
+
+// Cost is a decider's price per 1M input / output tokens, like a provider
+// model's cost. Zero leaves its usage unpriced.
+type Cost struct {
+	Input  float64
+	Output float64
+}
+
+// Price returns u with its cost at c.
+func (c Cost) Price(u Usage) Usage {
+	u.InputCost = float64(u.InputTokens) * c.Input / 1_000_000
+	u.OutputCost = float64(u.OutputTokens) * c.Output / 1_000_000
+	return u
 }
 
 // Decision is a calibrated distribution over the declared choices plus the
@@ -70,6 +86,7 @@ type Provider interface {
 // after construction and safe for concurrent use.
 type Registry struct {
 	byName map[string]Provider
+	costs  map[string]Cost
 }
 
 // NewRegistry builds a Registry from the given providers, keyed by ID().
@@ -90,6 +107,21 @@ func (r *Registry) Get(name string) (Provider, bool) {
 	}
 	p, ok := r.byName[name]
 	return p, ok
+}
+
+// WithCosts sets the deciders' prices, keyed by name, and returns r. Call it
+// while building the registry, before it is shared.
+func (r *Registry) WithCosts(costs map[string]Cost) *Registry {
+	r.costs = costs
+	return r
+}
+
+// Cost returns the price of the decider bound to name; zero when unpriced.
+func (r *Registry) Cost(name string) Cost {
+	if r == nil {
+		return Cost{}
+	}
+	return r.costs[name]
 }
 
 // Has reports whether name is a configured decider.

@@ -234,6 +234,7 @@ models:
       backend: subq
       base_url: "https://api.subq.ai/v1/systemone"
       api_key: "${SUBQ_API_KEY}"
+      cost: { input: 0.5, output: 2 }        # optional: price per 1M tokens, like a provider model
     laya:                                    # laya: ModernBERT classifier server
       backend: laya
       base_url: "${LAYA_URL}"
@@ -241,7 +242,7 @@ models:
 
 A plugin with several questions about the same text (one per section of a guide, say) can send them in one `decide` callback as `{state, questions}` instead of `{state, choices}`; Jev and SubQ Snap answer them in one request, the other backends one at a time. See [the decideprovider README](internal/decideprovider/README.md#several-questions-about-one-state).
 
-Because a decision is a model call, it goes through OpenTalon's provider layer and is **metered into `profile_usage`** and gated by the same per-profile token limits as every LLM call — never a side channel. Swapping laya ↔ Jev ↔ local-logits needs no code or `.tln` change. See [`internal/decideprovider`](internal/decideprovider/README.md).
+Because a decision is a model call, it goes through OpenTalon's provider layer and is **metered into `profile_usage`** and gated by the same per-profile token limits as every LLM call — never a side channel. Its usage is recorded as model `decide/<name>`, priced by the decider's optional `cost`. Swapping laya ↔ Jev ↔ local-logits needs no code or `.tln` change. See [`internal/decideprovider`](internal/decideprovider/README.md).
 
 ## Documentation
 

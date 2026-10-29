@@ -4,8 +4,41 @@ import (
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/config"
+	"github.com/opentalon/opentalon/internal/decideprovider"
 	"github.com/opentalon/opentalon/internal/metrics"
 )
+
+// models.deciders.<name>.cost reaches the registry the orchestrator prices with.
+func TestBuildDecidersCarriesCost(t *testing.T) {
+	cfg, err := config.Parse([]byte(`models:
+  deciders:
+    snap:
+      backend: subq
+      base_url: "https://api.subq.ai/v1/systemone"
+      cost: { input: 0.05, output: 1.5 }
+    jev:
+      backend: jev
+      base_url: "https://api.typesafe.ai/v1/systemone"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := buildDeciders(cfg.Models.Deciders)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reg.Cost("snap"); got != (decideprovider.Cost{Input: 0.05, Output: 1.5}) {
+		t.Errorf("snap cost = %+v", got)
+	}
+	if got := reg.Cost("jev"); got != (decideprovider.Cost{}) {
+		t.Errorf("jev cost = %+v, want unpriced", got)
+	}
+
+	cfg.Models.Deciders["snap"] = config.DeciderConfig{Backend: "subq", BaseURL: "https://x", Cost: config.CostConfig{Input: -1}}
+	if _, err := buildDeciders(cfg.Models.Deciders); err == nil {
+		t.Error("a negative decider cost should fail startup")
+	}
+}
 
 func TestEnablePluginCostMetrics(t *testing.T) {
 	plugins := map[string]config.PluginConfig{

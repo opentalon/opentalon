@@ -2,6 +2,7 @@ package decideprovider
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 )
@@ -23,6 +24,8 @@ type DeciderConfig struct {
 	// jev-latest) and SubQ (default subq-snap-preview); ignored by laya, which
 	// serves a fixed model per endpoint.
 	Model string
+	// Cost is the price per 1M tokens its usage is metered at; zero = unpriced.
+	Cost Cost
 }
 
 // nameRe is the decider-name charset. A decider is registered as a plugin
@@ -50,6 +53,16 @@ func FromConfig(cfg DeciderConfig) (Provider, error) {
 	}
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("decideprovider: decider %q requires a base_url", cfg.Name)
+	}
+	// A negative price would make the cost counters decrease, which panics in
+	// Prometheus on the first decide call; reject it at startup instead.
+	for _, c := range []struct {
+		name  string
+		price float64
+	}{{"input", cfg.Cost.Input}, {"output", cfg.Cost.Output}} {
+		if c.price < 0 || math.IsNaN(c.price) || math.IsInf(c.price, 0) {
+			return nil, fmt.Errorf("decideprovider: decider %q cost.%s = %v: want a price per 1M tokens of 0 or more", cfg.Name, c.name, c.price)
+		}
 	}
 	switch cfg.Backend {
 	case BackendLaya:
@@ -80,6 +93,7 @@ func RegistryFromConfigs(cfgs map[string]DeciderConfig) (*Registry, error) {
 	sort.Strings(names)
 
 	providers := make([]Provider, 0, len(cfgs))
+	costs := make(map[string]Cost, len(cfgs))
 	seen := make(map[string]bool, len(cfgs))
 	for _, name := range names {
 		cfg := cfgs[name]
@@ -95,6 +109,7 @@ func RegistryFromConfigs(cfgs map[string]DeciderConfig) (*Registry, error) {
 		}
 		seen[cfg.Name] = true
 		providers = append(providers, p)
+		costs[cfg.Name] = cfg.Cost
 	}
-	return NewRegistry(providers...), nil
+	return NewRegistry(providers...).WithCosts(costs), nil
 }

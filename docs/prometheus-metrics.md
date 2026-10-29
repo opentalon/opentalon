@@ -64,7 +64,7 @@ plugins:
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `opentalon_plugin_llm_tokens_total` | Counter | `plugin`, `action`, `stage`, `model`, `direction` | Tokens of LLM calls made on behalf of the plugin; `direction` is `input` or `output` |
-| `opentalon_plugin_llm_cost_usd_total` | Counter | `plugin`, `action`, `stage`, `model` | Their cost, as the provider returned it for each call (always `0` for `decide/<decider>`, see below) |
+| `opentalon_plugin_llm_cost_usd_total` | Counter | `plugin`, `action`, `stage`, `model` | Their cost, as the provider returned it for each call (for `decide/<decider>`, the decider's `cost`, see below) |
 | `<prefix>_llm_tokens_total` | Counter | `action`, `stage`, `model`, `direction` | With `prefix`: the same tokens, without the `plugin` label |
 | `<prefix>_llm_cost_usd_total` | Counter | `action`, `stage`, `model` | With `prefix`: the same cost, without the `plugin` label |
 
@@ -79,10 +79,11 @@ plugins:
   only: the model never sees it, and a `_subprocess` call made by the model is never
   attributed to a plugin.
 - `model` is the model that served the call; `decide` calls appear as `decide/<decider>`.
-- **`decide` spend is tokens only.** A `decide` call is answered by its decider, not by a
-  model provider, so it carries no cost: its rows in `opentalon_plugin_llm_cost_usd_total` are
-  always `0`, even for LLM-backed deciders — the same as in `opentalon_llm_*_cost_usd_total`.
-  Use the token counts. A stage served only by `decide` calls therefore shows `0` cost.
+- **`decide` spend is priced by the decider's `cost`.** A `decide` call is answered by its
+  decider, not by a model provider; set `models.deciders.<name>.cost: { input, output }` (per
+  1M tokens) and its rows in `opentalon_plugin_llm_cost_usd_total` and
+  `opentalon_llm_*_cost_usd_total` carry that price. Without it they stay `0` — use the token
+  counts.
 - **Only plugin callbacks are attributed.** Spend is attributed when the plugin asks the host
   through a callback while executing one of its actions (`ExecuteBidi`, including the
   external gateway). A `_subprocess` or `decide` call that reaches the host another way —

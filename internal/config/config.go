@@ -576,6 +576,9 @@ type DeciderConfig struct {
 	BaseURL string `yaml:"base_url"` // backend endpoint (required)
 	APIKey  string `yaml:"api_key"`  // optional bearer / auth token
 	Model   string `yaml:"model"`    // served model id (local-logits, jev, subq)
+	// Cost is the price per 1M tokens, like a provider model's; it prices the
+	// decider's decide/<name> usage. Zero = unpriced.
+	Cost CostConfig `yaml:"cost"`
 }
 
 type ProviderConfig struct {

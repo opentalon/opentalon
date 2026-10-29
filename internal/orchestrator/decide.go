@@ -74,7 +74,7 @@ func (o *Orchestrator) registerDeciders(reg *decideprovider.Registry) {
 		}
 		// CheckDeciderNames and decideprovider.ValidateName reject both failure
 		// causes at startup; reaching this means the caller skipped them.
-		if err := o.registry.Register(cap, &decideExecutor{orch: o, provider: p}); err != nil {
+		if err := o.registry.Register(cap, &decideExecutor{orch: o, provider: p, cost: reg.Cost(name)}); err != nil {
 			slog.Error("decider not registered", "decider", name, "error", err)
 		}
 	}
@@ -83,6 +83,7 @@ func (o *Orchestrator) registerDeciders(reg *decideprovider.Registry) {
 type decideExecutor struct {
 	orch     *Orchestrator
 	provider decideprovider.Provider
+	cost     decideprovider.Cost
 }
 
 func (e *decideExecutor) Execute(ctx context.Context, call ToolCall) ToolResult {
@@ -115,7 +116,7 @@ func (e *decideExecutor) Execute(ctx context.Context, call ToolCall) ToolResult 
 	if dec == nil {
 		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("decider %q returned no decision", e.provider.ID())}
 	}
-	e.orch.recordDecideUsage(ctx, e.provider.ID(), dec.Usage)
+	e.orch.recordDecideUsage(ctx, e.provider.ID(), e.cost.Price(dec.Usage))
 
 	body, err := json.Marshal(dec)
 	if err != nil {
@@ -142,7 +143,7 @@ func (e *decideExecutor) executeMany(ctx context.Context, call ToolCall) ToolRes
 	if err != nil {
 		return ToolResult{CallID: call.ID, Error: err.Error()}
 	}
-	e.orch.recordDecideUsage(ctx, e.provider.ID(), dec.Usage)
+	e.orch.recordDecideUsage(ctx, e.provider.ID(), e.cost.Price(dec.Usage))
 	body, err := json.Marshal(struct {
 		Answers map[string]*decideprovider.Decision `json:"answers"`
 		Model   string                              `json:"model,omitempty"`
@@ -235,7 +236,7 @@ func (o *Orchestrator) decideOverLimit(ctx context.Context) string {
 // with no profile in context is recorded under unattributedEntity, so its
 // spend is visible rather than free, and warned about once per decider.
 func (o *Orchestrator) recordDecideUsage(ctx context.Context, decider string, u decideprovider.Usage) {
-	o.observePluginUsage(ctx, decideModelPrefix+decider, provider.Usage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens})
+	o.observePluginUsage(ctx, decideModelPrefix+decider, provider.Usage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, InputCost: u.InputCost, OutputCost: u.OutputCost})
 	if o.usageRecorder == nil {
 		return
 	}
@@ -246,9 +247,9 @@ func (o *Orchestrator) recordDecideUsage(ctx context.Context, decider string, u 
 				"decider", decider, "entity", unattributedEntity)
 		}
 		o.usageRecorder.RecordUsage(ctx, unattributedEntity, "", "", actor.SessionID(ctx),
-			decideModelPrefix+decider, profile.KindSystem, "decide", u.InputTokens, u.OutputTokens, 0, 0, 0)
+			decideModelPrefix+decider, profile.KindSystem, "decide", u.InputTokens, u.OutputTokens, 0, u.InputCost, u.OutputCost)
 		return
 	}
 	o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group, p.ChannelID, actor.SessionID(ctx),
-		decideModelPrefix+decider, p.Kind, p.SystemSource, u.InputTokens, u.OutputTokens, 0, 0, 0)
+		decideModelPrefix+decider, p.Kind, p.SystemSource, u.InputTokens, u.OutputTokens, 0, u.InputCost, u.OutputCost)
 }
