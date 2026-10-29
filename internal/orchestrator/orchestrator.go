@@ -3386,15 +3386,19 @@ func (o *Orchestrator) maybeRequireConfirmation(
 // a change to one machine was confirmed as "all the specified detail attributes"
 // and went through, overwriting a serial number, an inventory number and a
 // driver with a sister machine's. A count the user can check tells them nothing
-// about values they cannot see, so the fields are now named one by one.
+// about values they cannot see, so the fields are now named one by one. A new
+// record has no previous values: written in the change form, its fields read as
+// "name: new -> Drill" under the tool's argument names, so a creation lists the
+// values it gets, under the names the user sees in the application.
 const confirmationNarratePrompt = `You write the short confirmation question shown to the user immediately before a write or delete tool runs.
 Rules:
 1. Reply in the SAME language as the user's latest request.
 2. If the call acts on MANY records at once (a batch, an ids array, or a scope_token), state the COUNT of affected records and 2-3 concrete examples (names and/or ids) taken from the recent conversation. Never show a raw scope_token or dump internal arguments.
-3. If the call names ONE record, name that record by its name rather than its id, and say what happens to it FIELD BY FIELD: for a change, one short line per field, "field: previous value -> new value", taking the previous value from the recent conversation; for a deletion, say what kind of record it is. A summary such as "the specified attributes" or "the given details" is never acceptable — those fields are the whole thing the user is being asked to check, and nobody can check what you did not name.
-4. If a previous value does not appear in the conversation, give the new value and say plainly that the previous one is not known here. Never guess it, and never drop the field to avoid the gap.
-5. If a link to the record (a path such as /items/123) appears in the conversation, render the record name as that link.
-6. Keep it short: 1-3 sentences plus at most one line per field. End with a clear yes/no question. You are ONLY asking permission — do not claim anything has happened yet.`
+3. If the call acts on ONE record (changes, creates or deletes it), name that record by its name rather than its id (by its id only when no name is known), and say what happens to it FIELD BY FIELD, one list item per field ("- field: ..."): for a change, "- field: previous value -> new value" for each field it sets, taking the previous value from the recent conversation; for a new record, its kind and, when it is given one, its name in the question and "- field: value" for each further value it gets — a new record has no previous values, so never write one or an arrow for it; a call that may also update an existing record is a change; for a deletion, say what kind of record it is. A summary such as "the specified attributes" or "the given details" is never acceptable — those fields are the whole thing the user is being asked to check, and nobody can check what you did not name.
+4. If a previous value of a change does not appear in the conversation, give the new value and say plainly that the previous one is not known here. Never guess it, and never drop the field to avoid the gap.
+5. Name every field as the user sees it in the application, in the user's language ("serial number", not serial_number), never by the tool's argument name; a value that refers to another record is that record's name when the conversation shows it, its id otherwise.
+6. If a link to the record (a path such as /items/123) appears in the conversation, render the record name as that link.
+7. Keep it short: 1-3 sentences plus at most one line per field. End with one clear question whether to go ahead, without answer options such as "(yes/no)": the user answers with buttons. You are ONLY asking permission — do not claim anything has happened yet.`
 
 // confirmationNarrateSystemPrompt returns the narrator's system message: the
 // general rules, or the tool's own hint (confirmationHintPrompt) when the action
@@ -3402,8 +3406,10 @@ Rules:
 // replyLanguageDirective), it is appended and ranked above rule 1: the "latest
 // request" the narrator sees may be a confirmation-button label or another
 // reply too short to show the user's language, while the directive was already
-// resolved from the user's own words, looking back past such replies. Without a
-// directive the prompt is unchanged and rule 1 applies.
+// resolved from the user's own words, looking back past such replies. Its
+// English technical terms do not reach the field names, which the user checks
+// under the names they see (rule 5). Without a directive the prompt is unchanged
+// and rule 1 applies.
 func confirmationNarrateSystemPrompt(ctx context.Context, hint string) string {
 	base := confirmationNarratePrompt
 	if hint != "" {
@@ -3413,8 +3419,11 @@ func confirmationNarrateSystemPrompt(ctx context.Context, hint string) string {
 	if dir == "" {
 		return base
 	}
-	return base + "\n\n" + dir +
-		"\nThis reply-language instruction takes precedence over rule 1."
+	base += "\n\n" + dir + "\nThis reply-language instruction takes precedence over rule 1."
+	if hint == "" {
+		base += " Its line on technical terms does not apply to field names: rule 5 says how to name them."
+	}
+	return base
 }
 
 // confirmationFallback is the static confirmation prompt when the narration is
