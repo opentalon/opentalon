@@ -23,6 +23,8 @@ type DeciderConfig struct {
 	// jev-latest) and SubQ (default subq-snap-preview); ignored by laya, which
 	// serves a fixed model per endpoint.
 	Model string
+	// Cost is the price per 1M tokens its usage is metered at; zero = unpriced.
+	Cost Cost
 }
 
 // nameRe is the decider-name charset. A decider is registered as a plugin
@@ -80,6 +82,7 @@ func RegistryFromConfigs(cfgs map[string]DeciderConfig) (*Registry, error) {
 	sort.Strings(names)
 
 	providers := make([]Provider, 0, len(cfgs))
+	costs := make(map[string]Cost, len(cfgs))
 	seen := make(map[string]bool, len(cfgs))
 	for _, name := range names {
 		cfg := cfgs[name]
@@ -95,6 +98,7 @@ func RegistryFromConfigs(cfgs map[string]DeciderConfig) (*Registry, error) {
 		}
 		seen[cfg.Name] = true
 		providers = append(providers, p)
+		costs[cfg.Name] = cfg.Cost
 	}
-	return NewRegistry(providers...), nil
+	return NewRegistry(providers...).WithCosts(costs), nil
 }

@@ -92,6 +92,31 @@ func TestDecideCallbackRoutesAndMeters(t *testing.T) {
 	}
 }
 
+// A priced decider's usage is metered with its cost, for decide and for
+// several questions in one call.
+func TestDecideUsageIsPriced(t *testing.T) {
+	d := &fakeDecider{name: "snap", dec: &decideprovider.Decision{
+		Chosen:        "match",
+		Confidence:    0.95,
+		Probabilities: map[string]float64{"match": 0.95, "mismatch": 0.05},
+		Usage:         decideprovider.Usage{InputTokens: 2_000_000, OutputTokens: 500_000},
+	}}
+	usage := &usageSpy{}
+	reg := decideprovider.NewRegistry(d).WithCosts(map[string]decideprovider.Cost{"snap": {Input: 0.5, Output: 4}})
+	orch := NewWithRules(&fakeLLM{}, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), state.NewSessionStore(""),
+		OrchestratorOpts{UsageRecorder: usage, Deciders: reg})
+
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{EntityID: "ent1"})
+	if _, _, err := orch.RunActionResult(ctx, "snap", "decide", map[string]string{
+		"state": "s", "choices": `["match","mismatch"]`,
+	}); err != nil {
+		t.Fatalf("RunActionResult: %v", err)
+	}
+	if len(usage.calls) != 1 || usage.calls[0].inCost != 1 || usage.calls[0].outCost != 2 {
+		t.Errorf("usage = %+v, want cost 1 / 2", usage.calls)
+	}
+}
+
 // A callback without identity (the plugin omitted the identity args, or the
 // external gateway) is still metered — under the unattributed entity — never free.
 func TestDecideWithoutProfileIsMeteredUnattributed(t *testing.T) {

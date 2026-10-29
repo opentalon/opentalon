@@ -1324,7 +1324,8 @@ func seedBootstrapGroupPlugins(ctx context.Context, gps *store.GroupPluginStore,
 func buildDeciders(cfgs map[string]config.DeciderConfig) (*decideprovider.Registry, error) {
 	m := make(map[string]decideprovider.DeciderConfig, len(cfgs))
 	for name, d := range cfgs {
-		m[name] = decideprovider.DeciderConfig{Name: name, Backend: d.Backend, BaseURL: d.BaseURL, APIKey: d.APIKey, Model: d.Model}
+		m[name] = decideprovider.DeciderConfig{Name: name, Backend: d.Backend, BaseURL: d.BaseURL, APIKey: d.APIKey, Model: d.Model,
+			Cost: decideprovider.Cost{Input: d.Cost.Input, Output: d.Cost.Output}}
 	}
 	return decideprovider.RegistryFromConfigs(m)
 }
