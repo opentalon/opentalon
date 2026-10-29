@@ -3402,7 +3402,9 @@ func (o *Orchestrator) maybeRequireConfirmation(
 // about values they cannot see, so the fields are now named one by one. A new
 // record has no previous values: written in the change form, its fields read as
 // "name: new -> Drill" under the tool's argument names, so a creation lists the
-// values it gets, under the names the user sees in the application.
+// values it gets, under the names the user sees in the application. The rules
+// alone left the name as a field line under its argument name; the two examples
+// show the form.
 const confirmationNarratePrompt = `You write the short confirmation question shown to the user immediately before a write or delete tool runs.
 Rules:
 1. Reply in the SAME language as the user's latest request.
@@ -3411,7 +3413,18 @@ Rules:
 4. If a previous value of a change does not appear in the conversation, give the new value and say plainly that the previous one is not known here. Never guess it, and never drop the field to avoid the gap.
 5. Name every field as the user sees it in the application, in the user's language ("serial number", not serial_number), never by the tool's argument name; a value that refers to another record is that record's name when the conversation shows it, its id otherwise.
 6. If a link to the record (a path such as /items/123) appears in the conversation, render the record name as that link.
-7. Keep it short: 1-3 sentences plus at most one line per field. End with one clear question whether to go ahead, without answer options such as "(yes/no)": the user answers with buttons. You are ONLY asking permission — do not claim anything has happened yet.`
+7. Keep it short: 1-3 sentences plus at most one line per field. End with one clear question whether to go ahead, without answer options such as "(yes/no)": the user answers with buttons. You are ONLY asking permission — do not claim anything has happened yet.
+
+The form, shown in English with made-up records; write yours in the user's language, with the names from the conversation.
+A new record:
+The item **Cordless drill** would be created:
+- Category: Tools
+- Location: Main office
+Shall I create it?
+A change:
+The item **Machine 7** would change:
+- Serial number: A-1 -> X-9
+Shall I change it?`
 
 // confirmationNarrateSystemPrompt returns the narrator's system message: the
 // general rules, or the tool's own hint (confirmationHintPrompt) when the action
