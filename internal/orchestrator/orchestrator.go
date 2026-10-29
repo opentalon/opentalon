@@ -3349,7 +3349,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	if s, gerr := sessions.Get(sessionID); gerr == nil && s != nil {
 		recentMsgs = s.Messages
 	}
-	confirmMsg := o.narrateConfirmation(ctx, recentMsgs, call, userMessage)
+	spokenQuestion, confirmMsg := takeSpoken(ctx, o.narrateConfirmation(ctx, recentMsgs, call, userMessage))
 	if confirmMsg == "" {
 		confirmMsg = o.confirmationFallback(call)
 	}
@@ -3366,7 +3366,10 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// persist the confirmation-frame metadata on that row so a reloaded client
 	// rebuilds the Approve/Reject buttons from the transcript (the live frame's
 	// metadata below is transient). Same map, so reload and live path match.
-	frameMeta := speakAsIs(ctx, confirmMsg, toolConfirmationFrameMetadata(call.ID))
+	if spokenQuestion == "" {
+		spokenQuestion = confirmMsg
+	}
+	frameMeta := speakAsIs(ctx, spokenQuestion, toolConfirmationFrameMetadata(call.ID))
 	_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg}, frameMeta)
 	// Buttons are deterministic approve/reject only; amend is a free-text-classifier
 	// outcome with no button by design, so the Choices set stays two-way.
@@ -3413,18 +3416,20 @@ Rules:
 // request" the narrator sees may be a confirmation-button label or another
 // reply too short to show the user's language, while the directive was already
 // resolved from the user's own words, looking back past such replies. Without a
-// directive the prompt is unchanged and rule 1 applies.
+// directive the prompt is unchanged and rule 1 applies. In a spoken turn the
+// narrator also writes the question as it is asked aloud (spokenConfirmationInstruction).
 func confirmationNarrateSystemPrompt(ctx context.Context, hint string) string {
 	base := confirmationNarratePrompt
 	if hint != "" {
 		base = confirmationHintPrompt(hint)
 	}
-	dir := strings.TrimSpace(replyLanguageDirectiveFromContext(ctx))
-	if dir == "" {
-		return base
+	if dir := strings.TrimSpace(replyLanguageDirectiveFromContext(ctx)); dir != "" {
+		base += "\n\n" + dir + "\nThis reply-language instruction takes precedence over rule 1."
 	}
-	return base + "\n\n" + dir +
-		"\nThis reply-language instruction takes precedence over rule 1."
+	if actor.SpokenReply(ctx) {
+		base += "\n\n" + spokenConfirmationInstruction
+	}
+	return base
 }
 
 // confirmationFallback is the static confirmation prompt when the narration is

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"github.com/opentalon/opentalon/internal/actor"
@@ -15,12 +16,16 @@ import (
 // (takeSpoken), so tool parsing, the checks on the response, what is stored and
 // what is shown never see the markers; the spoken version of the final reply goes
 // into the result's metadata and onto the stored reply (spokenMetadata), and a
-// final reply without one is stored with spoken_missing and stays silent. Text
-// the main model did not write for the person this turn (a confirmation prompt,
-// a plan, a pipeline's summary, any other way a turn ends) is its own spoken
-// version when it is short enough (speakAsIs; Run applies it to every result
-// that carries neither key). Spoken turns are not streamed: the spoken version
-// must be out before anything is shown.
+// final reply without one is stored with spoken_missing and stays silent. The
+// confirmation question is written by its own narrator, which in a spoken turn
+// writes the question as it is asked aloud the same way
+// (spokenConfirmationInstruction). Text no model wrote a spoken version for (a
+// confirmation the narrator wrote without one, a plan, a pipeline's summary, any
+// other way a turn ends) is its own spoken version when it is short enough
+// (speakAsIs; Run applies it to every result that carries neither key). Whatever
+// is read goes through speakable first: what a screen shows and an ear cannot
+// take (lists, field changes, markdown) is never read. Spoken turns are not
+// streamed: the spoken version must be out before anything is shown.
 
 const (
 	// SpokenMetadataKey carries the spoken version on the result and the stored reply.
@@ -44,6 +49,14 @@ const spokenReplyInstruction = "## SPOKEN REPLY\n" +
 	"characters. No lists, tables, markdown, ids, record numbers, links or code in it; say what you found, did or " +
 	"need, and that the details are in the chat when there are any. Then write your answer as you otherwise " +
 	"would. Write the markers once, at the very start.\n"
+
+const spokenConfirmationInstruction = "## SPOKEN QUESTION\n" +
+	"The user spoke their request and will hear this question read aloud. Begin your reply with the question as " +
+	"you would ask it aloud, between " + spokenOpen + " and " + spokenClose + ": one or two short sentences in " +
+	"the language of your reply, at most 300 characters, under the same rules as the question for the screen. " +
+	"Name what will be created, changed or deleted by its name and say a change in words, never as a field list " +
+	"or with arrows; no markdown, ids, links or code in it. Then write the question for the screen as the rules " +
+	"above say. Write the markers once, at the very start.\n"
 
 // splitSpoken returns the first spoken version a response carries and the
 // response without any: every block goes, and a marker the model left unpaired
@@ -113,10 +126,10 @@ func markUnspoken(ctx context.Context, result *RunResult) {
 	result.Metadata = speakAsIs(ctx, result.Response, result.Metadata)
 }
 
-// speakAsIs adds to meta, in a spoken turn, the text itself as its spoken
-// version when it is short enough, or spoken_missing when it is not (cut in the
-// middle of a sentence, it would say less than silence). meta comes back as is
-// in any other turn.
+// speakAsIs adds to meta, in a spoken turn, what of the text can be read aloud
+// (speakable) as its spoken version when it is short enough, or spoken_missing
+// when it is not or nothing is left (cut in the middle of a sentence, it would
+// say less than silence). meta comes back as is in any other turn.
 func speakAsIs(ctx context.Context, text string, meta map[string]string) map[string]string {
 	if !actor.SpokenReply(ctx) {
 		return meta
@@ -125,13 +138,107 @@ func speakAsIs(ctx context.Context, text string, meta map[string]string) map[str
 	for k, v := range meta {
 		out[k] = v
 	}
-	text = strings.TrimSpace(text)
+	text = speakable(text)
 	if text != "" && len([]rune(text)) <= spokenLimit {
 		out[SpokenMetadataKey] = text
 	} else {
 		out[SpokenMissingMetadataKey] = "true"
 	}
 	return out
+}
+
+var (
+	speechHeading  = regexp.MustCompile(`^#{1,6}(\s|$)`)
+	speechRule     = regexp.MustCompile(`^([-*_]\s*){3,}$`)
+	speechBullet   = regexp.MustCompile(`^[-*+•]\s`)
+	speechNumbered = regexp.MustCompile(`^\d+[.)]\s`)
+	speechImage    = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)`)
+	speechLink     = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
+	speechAddress  = regexp.MustCompile(`(https?://|www\.)\S+`)
+	speechIndented = regexp.MustCompile(`^( {4}|\t)`)
+	speechFence    = regexp.MustCompile("^(`{3,}|~{3,})")
+	// Emphasis marks touch a word on their inner side and no letter or digit on
+	// their outer one; a lone "*" or "~" between spaces or digits is not one.
+	speechOpening = regexp.MustCompile(`(^|[^\p{L}\p{N}*_~])(\*+|_+|~~)(\S)`)
+	speechClosing = regexp.MustCompile(`(\S)(\*+|_+|~~)([^\p{L}\p{N}*_~]|$)`)
+)
+
+// speakable is what of a text written for a screen can be read aloud: the
+// sentences, without their markdown (a link keeps its words, an identifier's
+// underscores become spaces). A line that is structure rather than a sentence
+// (a heading, a list item, a table row, a field change "field: old -> new",
+// code, an indented line, which is code or belongs to a list) is left out whole,
+// quoted or not: read aloud it is noise, and the person sees it in the chat. ""
+// when nothing is left.
+func speakable(text string) string {
+	var lines []string
+	fence := ""
+	for _, raw := range strings.Split(text, "\n") {
+		body := unquoted(raw)
+		line := strings.TrimSpace(body)
+		indented := speechIndented.MatchString(body)
+		if mark := speechFence.FindString(line); mark != "" && !indented && (fence == "" || closesFence(line, mark, fence)) {
+			if fence == "" {
+				fence = mark
+			} else {
+				fence = ""
+			}
+			continue
+		}
+		if fence == "" && line != "" && !indented {
+			lines = append(lines, line)
+		}
+	}
+	numbered := 0
+	for _, line := range lines {
+		if speechNumbered.MatchString(line) {
+			numbered++
+		}
+	}
+	var kept []string
+	for _, line := range lines {
+		if !structural(line, numbered > 1) {
+			kept = append(kept, plainWords(line))
+		}
+	}
+	return strings.Join(strings.Fields(strings.Join(kept, " ")), " ")
+}
+
+// unquoted is the line without its blockquote marks (each ">" with one space
+// after it), its own indentation kept.
+func unquoted(line string) string {
+	rest := strings.TrimLeft(line, " ")
+	if !strings.HasPrefix(rest, ">") || len(line)-len(rest) > 3 {
+		return line
+	}
+	for strings.HasPrefix(rest, ">") {
+		rest = strings.TrimPrefix(rest[1:], " ")
+	}
+	return rest
+}
+
+// closesFence tells whether a fence line closes the open code block: the same
+// character, at least as long, nothing after it.
+func closesFence(line, mark, open string) bool {
+	return mark[0] == open[0] && len(mark) >= len(open) && strings.TrimSpace(line[len(mark):]) == ""
+}
+
+// structural tells a line that is not a sentence. A numbered line is a list
+// item only when the text has another (inList), so "1. Januar ..." stays a sentence.
+func structural(line string, inList bool) bool {
+	return strings.Contains(line, "|") || strings.Contains(line, "->") || strings.Contains(line, "→") ||
+		speechHeading.MatchString(line) || speechRule.MatchString(line) || speechBullet.MatchString(line) ||
+		(inList && speechNumbered.MatchString(line))
+}
+
+func plainWords(line string) string {
+	line = speechImage.ReplaceAllString(line, "")
+	line = speechLink.ReplaceAllString(line, "$1")
+	line = speechAddress.ReplaceAllString(line, "")
+	line = strings.ReplaceAll(line, "`", "")
+	line = speechOpening.ReplaceAllString(line, "$1$3")
+	line = speechClosing.ReplaceAllString(line, "$1$3")
+	return strings.ReplaceAll(line, "_", " ")
 }
 
 // voiceInputMetadata marks a user turn the person spoke; extra (a confirmation
