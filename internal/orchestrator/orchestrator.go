@@ -1519,14 +1519,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if pendingPlan.confID != "" {
 			resolvedCtx = emit.WithParent(ctx, pendingPlan.confID)
 		}
-		// Pipelines are two-way (approve / cancel): the single-call amend
-		// re-plan does not apply to a multi-step plan, so anything that isn't a
-		// clean approve cancels. classifyConfirmationReply still gives us the
-		// button bypass, the LLM classifier, and "im Zweifel reject" in one place.
+		// A plan is approved or cancelled as a whole: there is no corrected plan
+		// to re-run, so a reply that is neither yes nor no (amend) cancels the
+		// plan and is answered as an ordinary message, as for a single call
+		// below. classifyConfirmationReply still gives us the button bypass, the
+		// LLM classifier, and "im Zweifel reject" in one place.
 		decision, reason, resolvedBy := o.classifyConfirmationReply(ctx, userMessage, "pipeline_plan", map[string]string{"steps": fmt.Sprintf("%d", len(p.Steps))})
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
-		_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, voiceInputMetadata(ctx, confirmationReplyMetadata(decision)))
-		if decision == pipeline.DecisionApprove {
+		switch decision {
+		case pipeline.DecisionApprove:
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, voiceInputMetadata(ctx, confirmationReplyMetadata(decision)))
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionApprove, ResolvedBy: resolvedBy})
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
 			res, err := o.executePipeline(ctx, sessionID, p)
@@ -1537,19 +1539,20 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				}
 			}
 			return res, err
+		case pipeline.DecisionAmend:
+			// No reply row and no return: the normal turn below adds the reply
+			// to history once and answers it.
+			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionAmend, ResolvedBy: resolvedBy, Reason: reason})
+			log.Debug("pipeline cancelled, answering the reply", "pipeline_id", p.ID)
+		default: // pipeline.DecisionReject
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, voiceInputMetadata(ctx, confirmationReplyMetadata(decision)))
+			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionReject, ResolvedBy: resolvedBy, Reason: reason})
+			// The classifier's reason is written for the log and stays in the event.
+			res := notApprovedResult(resolvedBy, pipelineCancelledReply, "pipeline_cancelled")
+			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: res.Response})
+			log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
+			return res, nil
 		}
-		emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionReject, ResolvedBy: resolvedBy, Reason: reason})
-		// The classifier's reason is written for the log and stays in the event.
-		resp := pipelineCancelledReply
-		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
-		log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
-		return &RunResult{
-			Response: resp,
-			Metadata: map[string]string{
-				"type":   "system",
-				"action": "pipeline_cancelled",
-			},
-		}, nil
 	}
 
 	// Block A2: Check for pending tool call confirmation. The persisted
@@ -1688,13 +1691,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// The classifier's reason is written for the log and stays in the
 			// event; the user gets a fixed notice their client can word in
 			// their language by its action.
-			return &RunResult{
-				Response: confirmationRejectedReply,
-				Metadata: map[string]string{
-					"type":   "system",
-					"action": "confirmation_rejected",
-				},
-			}, nil
+			return notApprovedResult(resolvedBy, confirmationRejectedReply, "confirmation_rejected"), nil
 		}
 	}
 
@@ -3119,10 +3116,10 @@ func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCal
 	return o.onStreamChunk
 }
 
-// confirmationUninterpretableReply is the deterministic reason logged when no
+// confirmationUninterpretableReply answers, and is logged as the reason, when no
 // classifier is available or the classifier call fails — the "im Zweifel
-// reject" branch. Like the classifier's own reason it goes to the event; the
-// user gets confirmationRejectedReply.
+// reject" branch: the user's reply was not read, so they are asked to repeat
+// it rather than told it was a no (notApprovedResult).
 const confirmationUninterpretableReply = "I couldn't reliably interpret your reply, so I cancelled the pending action to be safe. Please tell me again — confirm, change, or cancel?"
 
 // Confirmation resolution provenance (confirmation_resolved.resolved_by).
@@ -3483,6 +3480,18 @@ const (
 	confirmationRejectedReply = "OK, action cancelled."
 	pipelineCancelledReply    = "Pipeline cancelled."
 )
+
+// notApprovedResult answers a confirmation that was not approved: the fixed
+// notice for a reject, or, when the reply could not be read at all
+// (resolvedByFallback), confirmationUninterpretableReply with the action
+// confirmation_uninterpretable, so the user repeats it.
+func notApprovedResult(resolvedBy, cancelledReply, cancelledAction string) *RunResult {
+	reply, action := cancelledReply, cancelledAction
+	if resolvedBy == resolvedByFallback {
+		reply, action = confirmationUninterpretableReply, "confirmation_uninterpretable"
+	}
+	return &RunResult{Response: reply, Metadata: map[string]string{"type": "system", "action": action}}
+}
 
 // confirmationFallback is the static confirmation prompt when the narration is
 // unavailable or failed. An action with a confirmation hint keeps its arguments
