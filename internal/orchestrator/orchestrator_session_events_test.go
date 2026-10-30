@@ -3236,8 +3236,9 @@ func TestOrchestrator_PendingToolCall_Amended(t *testing.T) {
 	}
 }
 
-// On reject, the user-facing response carries the classifier's reason rather
-// than the generic cancellation line.
+// On reject, the user gets the fixed notice their client words by its action;
+// the classifier's reason, written for the log, stays in the event and never
+// reaches the user.
 func TestOrchestrator_PendingToolCall_RejectedWithReason(t *testing.T) {
 	sink := &recordingEventSink{}
 	llm := &fakeLLM{responses: []string{`{"decision":"reject","reason":"You asked to cancel, so I stopped."}`}}
@@ -3250,8 +3251,14 @@ func TestOrchestrator_PendingToolCall_RejectedWithReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Response != "You asked to cancel, so I stopped." {
-		t.Errorf("Response = %q, want the classifier's reason", result.Response)
+	if result.Response != confirmationRejectedReply || result.Metadata["action"] != "confirmation_rejected" {
+		t.Errorf("Response = %q, action = %q, want the fixed notice", result.Response, result.Metadata["action"])
+	}
+	sess, _ := orch.sessions.Get(sessID)
+	for _, m := range sess.Messages {
+		if m.Content == "nein, lass es" {
+			t.Errorf("the rejecting reply was stored: %+v", m)
+		}
 	}
 	got := findConfirmationResolvedPayloads(t, sink.snapshot())
 	if len(got) != 1 || got[0].Choice != "reject" {
@@ -3376,8 +3383,8 @@ func TestOrchestrator_PendingToolCall_ApproveWithChange_CoercedToAmend(t *testin
 }
 
 // A classifier LLM error / garbage reply must fail closed: resolve to reject via
-// the "fallback" path (never a free-text approve) and surface the safe cancel
-// message — verified end-to-end through Run, not just at the planner.
+// the "fallback" path (never a free-text approve), show the cancel notice and
+// log why — verified end-to-end through Run, not just at the planner.
 func TestOrchestrator_PendingToolCall_ClassifierError_FallsBackToReject(t *testing.T) {
 	sink := &recordingEventSink{}
 	// Non-JSON classifier output → ClassifyConfirmation returns an error.
@@ -3391,12 +3398,15 @@ func TestOrchestrator_PendingToolCall_ClassifierError_FallsBackToReject(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Response != confirmationUninterpretableReply {
-		t.Errorf("Response = %q, want the safe uninterpretable-reply line", result.Response)
+	if result.Response != confirmationRejectedReply {
+		t.Errorf("Response = %q, want the fixed cancel notice", result.Response)
 	}
 	got := findConfirmationResolvedPayloads(t, sink.snapshot())
 	if len(got) != 1 || got[0].Choice != "reject" {
 		t.Fatalf("want one reject resolved, got %+v", got)
+	}
+	if got[0].Reason != confirmationUninterpretableReply {
+		t.Errorf("Reason = %q, want the uninterpretable-reply line in the event", got[0].Reason)
 	}
 	if got[0].ResolvedBy != "fallback" {
 		t.Errorf("ResolvedBy = %q, want fallback", got[0].ResolvedBy)
