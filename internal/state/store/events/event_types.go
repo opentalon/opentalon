@@ -779,9 +779,11 @@ type ToolCallExtractedPayload struct {
 const ToolCallExtractedVersion = 1
 
 // ToolCallResultPayload — emitted after the tool dispatch returns or
-// errors out. Status mirrors plugin convention ("ok" / "error"). Parent
-// event_id of the corresponding tool_call_extracted is linked via the
-// session_events.parent_id column, not duplicated in payload.
+// errors out. Status mirrors plugin convention ("ok" / "error"), or is
+// "not_run" for a call answered without running it (a call to a tool that
+// was not loaded, which loads it). Parent event_id of the corresponding
+// tool_call_extracted is linked via the session_events.parent_id column,
+// not duplicated in payload.
 //
 // Content/StructuredContent split mirrors the ToolResult shape: a tool
 // may return a human-readable response (Content) and a structured JSON

@@ -2823,8 +2823,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			result.Results = append(result.Results, toolResult)
 			totalToolCalls++
 
-			log.Info("plugin call", "plugin", call.Plugin, "action", call.Action, "duration", pluginDuration.Round(time.Millisecond).String(), "error", toolResult.Error != "")
-			if toolResult.Error != "" {
+			// A call answered without running (NotRun) did not fail: it is
+			// logged as no tool error, and the plugin-call metrics and the
+			// error counters (recordToolOutcome) leave it out.
+			failed := toolResult.Error != "" && !toolResult.NotRun
+			log.Info("plugin call", "plugin", call.Plugin, "action", call.Action, "duration", pluginDuration.Round(time.Millisecond).String(), "error", failed)
+			if failed {
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
 			}
 
@@ -2867,8 +2871,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if warning := o.recordToolOutcome(ctx, sessionID, call, toolResult, repaired); warning != nil {
 				transientMessages = append(transientMessages, *warning)
 			}
-			if o.pluginCallObserver != nil {
-				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", perCallInput, perCallOutput)
+			if o.pluginCallObserver != nil && !toolResult.NotRun {
+				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, failed, perCallInput, perCallOutput)
 			}
 
 			if nativeToolCalls {

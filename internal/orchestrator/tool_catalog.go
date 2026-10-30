@@ -10,6 +10,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/state"
+	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 )
 
 // Tool-catalog discovery model. The native provider `tools` array carries
@@ -151,7 +152,8 @@ func (o *Orchestrator) callToUnloadedTool(ctx context.Context, call ToolCall) bo
 //     store — and also recorded in the turn's toolLoadsOnCall, so the next
 //     request of the turn carries its schema whether or not the store saved the
 //     promotion. The answer tells the model to call it again from its
-//     description.
+//     description; it is marked NotRun, and its tool_call_result has the status
+//     not_run.
 //   - A demoted tool keeps the answer it had before loading on call existed
 //     (load it first): promoting it would clear the demotion.
 //   - Anything else (a preparer or guard action, an action the session palette
@@ -178,11 +180,18 @@ func (o *Orchestrator) answerUnloadedCall(ctx context.Context, call ToolCall, di
 	}
 	toolLoadsOnCallFromContext(ctx).record(canonical)
 	slog.Info("LLM called an unloaded tool: loaded it, call not run", "plugin", call.Plugin, "action", call.Action)
-	return o.emitRefusalResult(ctx, call, fmt.Sprintf(
+	answer := fmt.Sprintf(
 		"tool %q was NOT run: it was not loaded, so its parameters were not in your context. "+
 			"It is loaded now: its description and parameters are in your tools. "+
 			"Read its description, then call %s again with the parameters it defines.",
-		canonical, canonical), dispatchStart)
+		canonical, canonical)
+	emit.EmitToolCallResult(ctx, o.eventSink, emit.ToolCallResultArgs{
+		CallID:    call.ID,
+		Status:    "not_run",
+		Response:  answer,
+		LatencyMS: time.Since(dispatchStart).Milliseconds(),
+	})
+	return ToolResult{CallID: call.ID, Error: answer, NotRun: true}
 }
 
 // retriesOfUnrunCalls returns the calls that repeat, with the same arguments, a

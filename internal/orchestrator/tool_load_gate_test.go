@@ -94,7 +94,8 @@ func TestToolIsNative(t *testing.T) {
 // A call to a tool that was NOT in the sent native array never runs. The tool is
 // loaded the way _meta__load_tools loads it — a sticky promotion in the session
 // store — and recorded in the turn's in-memory loads, and the answer tells the
-// model to call it again with the parameters from its description.
+// model to call it again with the parameters from its description. The result
+// is marked NotRun.
 func TestExecuteCall_LoadsToolNotInSentArrayWithoutRunningIt(t *testing.T) {
 	store := &fakeInjectionStateStore{}
 	orch, exec := gateOrchWithStore(t, store)
@@ -114,8 +115,9 @@ func TestExecuteCall_LoadsToolNotInSentArrayWithoutRunningIt(t *testing.T) {
 	if kt, ok := storedTool(store, "p__catalog"); !ok || kt.Demoted {
 		t.Errorf("the tool must be promoted in the session store, got %+v (found=%v)", kt, ok)
 	}
-	if !loads.loaded()["p__catalog"] || loads.answered != 1 {
-		t.Errorf("the turn must record the load and the unrun call, got tools=%v answered=%d", loads.loaded(), loads.answered)
+	if !loads.loaded()["p__catalog"] || loads.answered != 1 || !res.NotRun {
+		t.Errorf("the turn must record the load and the unrun call, marked not run, got tools=%v answered=%d NotRun=%v",
+			loads.loaded(), loads.answered, res.NotRun)
 	}
 }
 
@@ -172,7 +174,7 @@ func TestExecuteCall_IgnoresStorePromotionNotInSentArray(t *testing.T) {
 // A call to a tool _meta__load_tools could not load for this session is refused
 // as before and loads nothing: a plugin the profile hides and a user-only action
 // by their own gates, a preparer action as not available, an unknown name as
-// not found.
+// not found. The refusals stay errors, with the status "error".
 func TestExecuteCall_UnloadableToolIsRefusedAndNotLoaded(t *testing.T) {
 	exec := &countingExecutor{}
 	registry := NewToolRegistry()
@@ -190,9 +192,11 @@ func TestExecuteCall_UnloadableToolIsRefusedAndNotLoaded(t *testing.T) {
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
 	store := &fakeInjectionStateStore{}
+	sink := &recordingEventSink{}
 	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
 		ContentPreparers:    []ContentPreparerEntry{{Plugin: "p", Action: "prepare"}},
 		InjectionStateStore: store,
+		EventSink:           sink,
 	})
 	prof := &profile.Profile{EntityID: "u1", Plugins: []string{"p"}}
 
@@ -208,8 +212,8 @@ func TestExecuteCall_UnloadableToolIsRefusedAndNotLoaded(t *testing.T) {
 				actor.WithSessionID(profile.WithProfile(context.Background(), prof), "s1"), map[string]struct{}{}), loads)
 
 			res := orch.executeCall(ctx, ToolCall{ID: "c1", Plugin: tc.plugin, Action: tc.action, FromLLM: true})
-			if !strings.Contains(res.Error, tc.want) {
-				t.Errorf("want a refusal containing %q, got %q", tc.want, res.Error)
+			if !strings.Contains(res.Error, tc.want) || res.NotRun {
+				t.Errorf("want a refusal containing %q, not marked not run, got %q (NotRun=%v)", tc.want, res.Error, res.NotRun)
 			}
 			if len(loads.loaded()) != 0 {
 				t.Errorf("nothing may be loaded, got %v", loads.loaded())
@@ -218,6 +222,16 @@ func TestExecuteCall_UnloadableToolIsRefusedAndNotLoaded(t *testing.T) {
 	}
 	if exec.count != 0 || store.updateCalls != 0 {
 		t.Errorf("no refused call may run or be promoted, ran %d, store writes %d", exec.count, store.updateCalls)
+	}
+	// The unknown name is reported as not found, without a tool_call_result.
+	results := findToolCallResultPayloads(t, sink.snapshot())
+	if len(results) != 3 {
+		t.Fatalf("want a tool_call_result for each of the 3 refusals, got %+v", results)
+	}
+	for _, r := range results {
+		if r.Status != "error" {
+			t.Errorf("a refusal must keep the status error, got %q (%s)", r.Status, r.ResponseExcerpt)
+		}
 	}
 }
 
@@ -228,6 +242,8 @@ func TestExecuteCall_DemotedToolNotInSentArrayKeepsLoadFirstAnswer(t *testing.T)
 		"s1": {KnownTools: []state.KnownToolEntry{{ToolName: "p__catalog", LRURank: 1, Demoted: true}}},
 	}}
 	orch, exec := gateOrchWithStore(t, store)
+	sink := &recordingEventSink{}
+	orch.eventSink = sink
 	loads := &toolLoadsOnCall{}
 	ctx := withToolLoadsOnCall(sentCtx("p__always"), loads)
 
@@ -238,6 +254,9 @@ func TestExecuteCall_DemotedToolNotInSentArrayKeepsLoadFirstAnswer(t *testing.T)
 	if exec.count != 0 || store.updateCalls != 0 || len(loads.loaded()) != 0 {
 		t.Errorf("a demoted tool must not run or be loaded, ran %d, store writes %d, loads %v",
 			exec.count, store.updateCalls, loads.loaded())
+	}
+	if results := findToolCallResultPayloads(t, sink.snapshot()); res.NotRun || len(results) != 1 || results[0].Status != "error" {
+		t.Errorf("a demoted tool's refusal must stay an error, got NotRun=%v results %+v", res.NotRun, results)
 	}
 }
 
@@ -842,5 +861,48 @@ func TestRun_SeveralUnloadedCallsInOneResponse(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// End-to-end through Run: a call answered without running is not a failed tool
+// call. Its tool_call_result has the status not_run; it is not observed as a
+// plugin call, not logged as a tool error, and with both protections at their
+// lowest threshold it gets no repeated-failure hint and no demotion. The call
+// of the same response that ran is observed as before.
+func TestRun_UnrunCallIsNotAFailedToolCall(t *testing.T) {
+	store := &fakeInjectionStateStore{}
+	orch, llm, exec := loadOnCallOrch(t, store, provider.CompletionResponse{ToolCalls: []provider.ToolCall{
+		{ID: "a1", Name: "p__always", Arguments: map[string]string{}},
+		{ID: "c1", Name: "p__catalog", Arguments: map[string]string{"q": "x"}},
+	}})
+	sink, obs := &recordingEventSink{}, &fakeObserver{}
+	orch.eventSink, orch.pluginCallObserver = sink, obs
+	orch.toolErrorHandling = ToolErrorHandlingConfig{LoopCapPerTurn: 1, StickyDemotionThreshold: 1}
+	warnings := captureWarnings(t)
+
+	runTurn(t, orch)
+	if exec.count != 1 {
+		t.Fatalf("only p__always may run, ran %d time(s)", exec.count)
+	}
+	var statuses []string
+	for _, r := range findToolCallResultPayloads(t, sink.snapshot()) {
+		statuses = append(statuses, r.Status)
+	}
+	if !reflect.DeepEqual(statuses, []string{"ok", "not_run"}) {
+		t.Errorf("tool_call_result statuses = %v, want [ok not_run]", statuses)
+	}
+	if len(obs.calls) != 1 || obs.calls[0].action != "always" || obs.calls[0].failed {
+		t.Errorf("only the call that ran may be observed, as a success, got %+v", obs.calls)
+	}
+	if strings.Contains(warnings.String(), "tool call error") {
+		t.Errorf("the unrun call must not be logged as a tool error, got %s", warnings.String())
+	}
+	for _, m := range llm.requests[1].Messages {
+		if strings.Contains(m.Content, "failed 1 times") {
+			t.Errorf("the unrun call must not trigger the repeated-failure hint, got %q", m.Content)
+		}
+	}
+	if kt, ok := storedTool(store, "p__catalog"); !ok || kt.Demoted {
+		t.Errorf("the loaded tool must stay promoted and not demoted, got %+v (found=%v)", kt, ok)
 	}
 }
