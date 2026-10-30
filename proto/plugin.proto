@@ -194,6 +194,14 @@ message Action {
   // mcp-plugin) typically propagate this from the upstream protocol's
   // own read-only hint (MCP: `annotations.readOnlyHint`).
   bool read_only = 7;
+  // Names of other actions of this plugin that the orchestrator loads
+  // together with this one, typically the lookups that supply this action's
+  // parameter values. When the model loads this action (through
+  // _meta__load_tools, or by calling it before it was loaded), each
+  // companion the session may see is loaded too, unless it is already
+  // loaded, always included or demoted. Companions of a companion are not
+  // loaded. Empty (the default) means the action loads alone.
+  repeated string companions = 8;
 }
 
 message Parameter {

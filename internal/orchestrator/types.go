@@ -42,6 +42,9 @@ type Parameter struct {
 // that builds that prompt. Set for actions that don't mutate user-
 // visible state (list/show/get/query). Default false — fail-safe to
 // "treat as potential write".
+// Companions names other actions of the same plugin that are loaded together
+// with this one, through _meta__load_tools and on call; companions of a
+// companion are not loaded.
 type Action struct {
 	Name              string      `yaml:"name"`
 	Description       string      `yaml:"description"`
@@ -51,6 +54,7 @@ type Action struct {
 	UserOnly          bool        `yaml:"user_only,omitempty"`      // if true, hidden from LLM and blocked from LLM-sourced calls
 	AlwaysInclude     bool        `yaml:"always_include,omitempty"` // RFC #249 Phase 4: pin to Tier 0 regardless of RAG score
 	ReadOnly          bool        `yaml:"read_only,omitempty"`      // if true, skip per-call user-confirmation gate (pure query)
+	Companions        []string    `yaml:"companions,omitempty"`     // actions of the same plugin loaded together with this one
 }
 
 type PluginCapability struct {
