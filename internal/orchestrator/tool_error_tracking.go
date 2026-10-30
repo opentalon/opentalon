@@ -24,10 +24,15 @@ import (
 //   - Session-level sticky demotion: at StickyDemotionThreshold
 //     consecutive errors for a tool across the entire session, the
 //     orchestrator flips Demoted=true on the tool's KnownToolEntry. There
-//     are no tiers: promotedToolSet selects the sticky set on Demoted +
-//     LRURank, so a Demoted tool is the preferred eviction target when
-//     the sticky cap is exceeded. A later load_tools call re-promotes it
-//     (and clears Demoted) — demotion is a soft penalty, not a block.
+//     are no tiers: storedPromotedToolSet leaves Demoted entries out of
+//     the persisted sticky selection before it applies the cap, whatever
+//     their rank, so the tool drops out of the native tools array the
+//     next time that array is built. The tools promotedToolSet keeps for
+//     the current turn on top of the stored set stay in the array until
+//     the turn ends, demoted or not. A call to the unloaded, demoted
+//     tool is refused with "load it first" rather than loaded on call;
+//     an explicit load_tools call re-promotes it (and clears Demoted) —
+//     demotion is a soft penalty, not a block.
 //
 // Self-healing: any successful invocation clears the demoted flag. We
 // reset BOTH the per-turn and per-session counters on success AND flip
@@ -209,11 +214,12 @@ func (o *Orchestrator) recordRepairAttempt(ctx context.Context, sessionID string
 	}
 }
 
-// markDemotedFlag flips KnownToolEntry.Demoted=true for fqn. If the
-// entry doesn't exist yet (the tool was never loaded), the function still
-// inserts a Demoted=true row so the next request's sticky set prefers it
-// for eviction. Same defensive copy + warn-and-continue contract as
-// persistToolPromotion.
+// markDemotedFlag flips KnownToolEntry.Demoted=true for fqn, which takes
+// the tool out of the persisted sticky selection (storedPromotedToolSet).
+// If the entry doesn't exist yet (the tool was never loaded), the function
+// still inserts a Demoted=true row, so a later call to the unloaded tool is
+// refused rather than loaded on call until load_tools re-promotes it. Same
+// defensive copy + warn-and-continue contract as persistToolPromotion.
 func (o *Orchestrator) markDemotedFlag(ctx context.Context, sessionID, fqn string) {
 	o.updateToolDemotion(ctx, sessionID, fqn, true)
 }
