@@ -3404,7 +3404,9 @@ func (o *Orchestrator) maybeRequireConfirmation(
 // "name: new -> Drill" under the tool's argument names, so a creation lists the
 // values it gets, under the names the user sees in the application. The rules
 // alone left the name as a field line under its argument name; the two examples
-// show the form.
+// show the form. They speak as the one who would act: copied from a passive
+// ("would be created"), a German narration opened "Es würde ein neues Ticket …
+// angelegt".
 const confirmationNarratePrompt = `You write the short confirmation question shown to the user immediately before a write or delete tool runs.
 Rules:
 1. Reply in the SAME language as the user's latest request.
@@ -3413,16 +3415,16 @@ Rules:
 4. If a previous value of a change does not appear in the conversation, give the new value and say plainly that the previous one is not known here. Never guess it, and never drop the field to avoid the gap.
 5. Field names are words of your reply: name every field as the user sees it in the application, in the language of your reply like every other word (in a German reply "Kategorie", not "Category"), never by the tool's argument name ("serial number", not serial_number); a value that refers to another record is that record's name when the conversation shows it, its id otherwise.
 6. If a link to the record (a path such as /items/123) appears in the conversation, render the record name as that link.
-7. Keep it short: 1-3 sentences plus at most one line per field. End with one clear question whether to go ahead, without answer options such as "(yes/no)": the user answers with buttons. You are ONLY asking permission — do not claim anything has happened yet.
+7. Keep it short: 1-3 sentences plus at most one line per field. Say what you would do as the one who does it ("I would create …"), not in the passive. End with one clear question whether to go ahead, without answer options such as "(yes/no)": the user answers with buttons. You are ONLY asking permission — do not claim anything has happened yet.
 
 The form, shown in English with made-up records; write yours entirely in the language of your reply, field names included, with the names from the conversation.
 A new record:
-The item **Cordless drill** would be created:
+I would create the item **Cordless drill**:
 - Category: Tools
 - Location: Main office
 Shall I create it?
 A change:
-The item **Machine 7** would change:
+I would change the item **Machine 7**:
 - Serial number: A-1 -> X-9
 Shall I change it?`
 

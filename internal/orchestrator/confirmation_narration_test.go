@@ -102,7 +102,8 @@ func TestNarrateConfirmation_SingleRecordPromptDemandsFields(t *testing.T) {
 		"never by the tool's argument name",
 		"field names included",
 		"without answer options", // the buttons answer, not "(yes/no)"
-		"The item **Cordless drill** would be created:\n- Category: Tools", // the name in the sentence, labels for the rest
+		"not in the passive",     // "I would create …", not "… would be created"
+		"I would create the item **Cordless drill**:\n- Category: Tools", // the name in the sentence, labels for the rest
 	} {
 		if !strings.Contains(sys, want) {
 			t.Errorf("system prompt must cover %q, got: %q", want, sys)
