@@ -107,6 +107,12 @@ type ActionMsg struct {
 	// — every action is treated as a potential write until the plugin
 	// declares otherwise.
 	ReadOnly bool `json:"read_only,omitempty"`
+	// ConfirmationHint, when set, is how the host words the confirmation
+	// question for this action: the narration follows it instead of the
+	// host's general rules (a field-by-field listing and a yes/no
+	// question). For actions whose arguments are not what the user
+	// decides on, such as a demonstration or a report.
+	ConfirmationHint string `json:"confirmation_hint,omitempty"`
 }
 
 // ParameterMsg describes one parameter of an action.
