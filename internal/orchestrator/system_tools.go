@@ -194,25 +194,29 @@ func (e *loadToolsExecutor) Execute(ctx context.Context, call ToolCall) ToolResu
 	allowedPlugins := e.orch.resolveAllowedPlugins(ctx)
 
 	var loaded, failed []string
-	seen := make(map[string]bool, len(names))
+	requested := make(map[string]bool, len(names))
+	listed := make(map[string]bool, len(names))
 	for _, name := range names {
 		canonical, ok := e.orch.resolveVisibleTool(name, allowed, allowedPlugins)
 		if !ok {
 			failed = append(failed, name)
 			continue
 		}
-		if seen[canonical] {
+		if requested[canonical] {
 			continue
 		}
-		seen[canonical] = true
-		if sessionID != "" && e.orch.injectionStateStore != nil {
-			e.orch.persistToolPromotion(ctx, sessionID, canonical)
+		requested[canonical] = true
+		if !listed[canonical] {
+			listed[canonical] = true
+			if sessionID != "" && e.orch.injectionStateStore != nil {
+				e.orch.persistToolPromotion(ctx, sessionID, canonical)
+			}
+			turnToolLoadsFromContext(ctx).record(canonical)
+			loaded = append(loaded, canonical)
 		}
-		turnToolLoadsFromContext(ctx).record(canonical)
-		loaded = append(loaded, canonical)
 		for _, companion := range e.orch.loadCompanions(ctx, canonical, allowed, allowedPlugins) {
-			if !seen[companion] {
-				seen[companion] = true
+			if !listed[companion] {
+				listed[companion] = true
 				loaded = append(loaded, companion)
 			}
 		}
@@ -391,10 +395,18 @@ func (o *Orchestrator) loadCompanions(
 	var out []string
 	for _, companion := range action.Companions {
 		fqn, visible := o.resolveVisibleTool(toolFQN(plugin, companion), allowed, allowedPlugins)
-		if !visible || loaded[fqn] {
+		if !visible {
 			continue
 		}
-		if a := o.resolveAction(plugin, companion); a == nil || a.AlwaysInclude || o.toolDemoted(ctx, sessionID, fqn) {
+		if a := o.resolveAction(plugin, companion); a == nil || a.AlwaysInclude {
+			continue
+		}
+		if loaded[fqn] {
+			// Later promotions this turn can push it out of the capped sticky set.
+			turnToolLoadsFromContext(ctx).record(fqn)
+			continue
+		}
+		if o.toolDemoted(ctx, sessionID, fqn) {
 			continue
 		}
 		if sessionID != "" && o.injectionStateStore != nil {

@@ -677,8 +677,8 @@ func (l *scriptedNativeLLM) SupportsFeature(f provider.Feature) bool {
 }
 
 // loadOnCallOrch builds an orchestrator over an always-include tool, two
-// catalog tools with a parameter and the first one's companion, driven by a
-// scripted native model; store is wired when not nil.
+// catalog tools with a parameter and the first one's two companions, driven by
+// a scripted native model; store is wired when not nil.
 func loadOnCallOrch(t *testing.T, store *fakeInjectionStateStore, rounds ...provider.CompletionResponse) (
 	*Orchestrator, *scriptedNativeLLM, *countingExecutor,
 ) {
@@ -690,9 +690,11 @@ func loadOnCallOrch(t *testing.T, store *fakeInjectionStateStore, rounds ...prov
 		Name: "p", Description: "load-on-call fixtures",
 		Actions: []Action{
 			{Name: "always", Description: "Always-include tool.", AlwaysInclude: true, ReadOnly: true},
-			{Name: "catalog", Description: "Catalog tool.", ReadOnly: true, Parameters: query, Companions: []string{"lookup"}},
+			{Name: "catalog", Description: "Catalog tool.", ReadOnly: true, Parameters: query,
+				Companions: []string{"lookup", "list"}},
 			{Name: "other", Description: "Another catalog tool.", ReadOnly: true, Parameters: query},
-			{Name: "lookup", Description: "The catalog tool's companion.", ReadOnly: true, Parameters: query},
+			{Name: "lookup", Description: "The catalog tool's first companion.", ReadOnly: true, Parameters: query},
+			{Name: "list", Description: "The catalog tool's second companion.", ReadOnly: true, Parameters: query},
 		},
 	}, exec); err != nil {
 		t.Fatalf("register: %v", err)
@@ -780,28 +782,34 @@ func TestRun_IdenticalRetryRunsOnlyTheUnrunCallsOnce(t *testing.T) {
 }
 
 // After _meta__load_tools or a call to an unloaded tool, the next request of the
-// turn carries the tool and its companion with their full schemas, in the same
+// turn carries the tool and its companions with their full schemas, in the same
 // array on both paths — also when the session store cannot save the promotion,
-// when there is no store, and when the stored sticky set is full with tools
-// ranked above them.
+// when there is no store, when the stored sticky set is full with tools ranked
+// above them, and when a companion that was already loaded sits at the bottom
+// of a full sticky set and the other companion's promotion pushes it out.
 func TestRun_LoadedToolAndCompanionsAreInTheNextRequest(t *testing.T) {
 	loadTools := callOf("l1", "_meta__load_tools", map[string]string{"names": "p__catalog"})
 	refOrch, ref, _ := loadOnCallOrch(t, &fakeInjectionStateStore{}, loadTools)
 	runTurn(t, refOrch)
 	want := sentToolsJSON(t, ref.requests[1])
-	for _, tool := range []string{"p__catalog", "p__lookup"} {
+	for _, tool := range []string{"p__catalog", "p__lookup", "p__list"} {
 		if !strings.Contains(want, `"name":"`+tool+`","description":"`) {
 			t.Fatalf("reference array after load_tools must carry %s, got %s", tool, want)
 		}
 	}
-	if strings.Count(want, `"q":`) != 2 {
-		t.Fatalf("reference array must carry both schemas, got %s", want)
+	if strings.Count(want, `"q":`) != 3 {
+		t.Fatalf("reference array must carry all three schemas, got %s", want)
 	}
 
 	full := make([]state.KnownToolEntry, maxStickyTools)
 	for i := range full {
 		full[i] = state.KnownToolEntry{ToolName: fmt.Sprintf("p__filler%02d", i), LRURank: 1000}
 	}
+	// 38 tools ranked above everything this turn promotes, then p__lookup ranked
+	// below it: the tool's promotion fills the 40th place, p__list's pushes
+	// p__lookup out of the stored set.
+	lookupLast := append(append([]state.KnownToolEntry(nil), full[:maxStickyTools-2]...),
+		state.KnownToolEntry{ToolName: "p__lookup", LRURank: 0})
 	for _, path := range []struct {
 		name string
 		call provider.CompletionResponse
@@ -823,6 +831,9 @@ func TestRun_LoadedToolAndCompanionsAreInTheNextRequest(t *testing.T) {
 			{"no store", func() *fakeInjectionStateStore { return nil }},
 			{"sticky set at its cap", func() *fakeInjectionStateStore {
 				return &fakeInjectionStateStore{store: map[string]state.InjectionState{"s1": {KnownTools: full}}}
+			}},
+			{"loaded companion pushed out of the sticky set", func() *fakeInjectionStateStore {
+				return &fakeInjectionStateStore{store: map[string]state.InjectionState{"s1": {KnownTools: lookupLast}}}
 			}},
 		} {
 			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
@@ -960,10 +971,11 @@ func companionOrch(t *testing.T, store *fakeInjectionStateStore, companions ...s
 // call alike: promoted in the session store, recorded in the turn's loads and
 // named in the answer. A companion the session may not see is skipped and the
 // tool still loads; a demoted one is skipped and stays demoted; one already
-// loaded (stored, or earlier this turn) or always included is left as it is; a
-// companion's own companions are not loaded; a tool without companions loads
-// alone. (A companion is an action of the tool's own plugin, so the profile
-// cannot hide it while the tool stays visible.)
+// loaded (stored, or earlier this turn) or always included is left as it is,
+// though a stored one is kept in the turn's loads; a companion's own companions
+// are not loaded; a tool without companions loads alone. (A companion is an
+// action of the tool's own plugin, so the profile cannot hide it while the tool
+// stays visible.)
 func TestLoad_CompanionsLoadWithTheTool(t *testing.T) {
 	demoted := state.KnownToolEntry{ToolName: "p__lookup", LRURank: 1, Demoted: true}
 	stored := state.KnownToolEntry{ToolName: "p__lookup"}
@@ -973,14 +985,15 @@ func TestLoad_CompanionsLoadWithTheTool(t *testing.T) {
 		stored     []state.KnownToolEntry // the session's tools before the load
 		earlier    string                 // a tool loaded earlier this turn
 		want       []string               // the companions loaded with p__write
+		kept       string                 // a companion kept in the turn's loads without loading it
 	}{
-		{"companion, not its own", []string{"lookup"}, nil, "", []string{"p__lookup"}},
-		{"companions the session may not see", []string{"admin", "prepare", "nope", "lookup"}, nil, "", []string{"p__lookup"}},
-		{"demoted companion", []string{"lookup"}, []state.KnownToolEntry{demoted}, "", nil},
-		{"stored companion", []string{"lookup"}, []state.KnownToolEntry{stored}, "", nil},
-		{"companion loaded earlier this turn", []string{"lookup"}, nil, "p__lookup", nil},
-		{"always-included companion", []string{"always"}, nil, "", nil},
-		{"no companions", nil, nil, "", nil},
+		{"companion, not its own", []string{"lookup"}, nil, "", []string{"p__lookup"}, ""},
+		{"companions the session may not see", []string{"admin", "prepare", "nope", "lookup"}, nil, "", []string{"p__lookup"}, ""},
+		{"demoted companion", []string{"lookup"}, []state.KnownToolEntry{demoted}, "", nil, ""},
+		{"stored companion", []string{"lookup"}, []state.KnownToolEntry{stored}, "", nil, "p__lookup"},
+		{"companion loaded earlier this turn", []string{"lookup"}, nil, "p__lookup", nil, ""},
+		{"always-included companion", []string{"always"}, nil, "", nil, ""},
+		{"no companions", nil, nil, "", nil, ""},
 	} {
 		for _, path := range []string{"load_tools", "on call"} {
 			t.Run(tc.name+"/"+path, func(t *testing.T) {
@@ -1020,8 +1033,10 @@ func TestLoad_CompanionsLoadWithTheTool(t *testing.T) {
 				for _, fqn := range want {
 					wantLoads[fqn] = true
 				}
-				if tc.earlier != "" {
-					wantLoads[tc.earlier] = true
+				for _, fqn := range []string{tc.earlier, tc.kept} {
+					if fqn != "" {
+						wantLoads[fqn] = true
+					}
 				}
 				if got := loads.snapshot(); !reflect.DeepEqual(got, wantLoads) {
 					t.Errorf("the turn's loads = %v, want %v", got, wantLoads)
@@ -1042,6 +1057,30 @@ func TestLoad_CompanionsLoadWithTheTool(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A tool named in a _meta__load_tools batch loads its own companions also when
+// an earlier name of the batch already loaded it as a companion: the order of
+// the names does not change what loads, and each tool is promoted once.
+func TestLoadTools_BatchOrderDoesNotChangeWhatLoads(t *testing.T) {
+	for _, tc := range []struct {
+		names string
+		want  []string
+	}{
+		{"p__write,p__lookup", []string{"p__write", "p__lookup", "p__deep"}},
+		{"p__lookup,p__write", []string{"p__lookup", "p__deep", "p__write"}},
+	} {
+		t.Run(tc.names, func(t *testing.T) {
+			store := &fakeInjectionStateStore{}
+			orch := companionOrch(t, store, "lookup")
+			exec, _ := orch.registry.GetExecutor(metaPluginName)
+			res := exec.Execute(withTurnToolLoads(sentCtx("p__always"), newTurnToolLoads()),
+				ToolCall{ID: "c1", Args: map[string]string{"names": tc.names}})
+			if got := decodeLoadResult(t, res).Loaded; !reflect.DeepEqual(got, tc.want) || store.updateCalls != 3 {
+				t.Errorf("loaded = %v with %d store writes, want %v with 3", got, store.updateCalls, tc.want)
+			}
+		})
 	}
 }
 
