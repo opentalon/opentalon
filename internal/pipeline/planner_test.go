@@ -426,6 +426,31 @@ func TestClassifyConfirmationMarkdownWrapped(t *testing.T) {
 	}
 }
 
+// A reply that asks for something else is answered, not dropped: the prompt sends
+// another instruction and a question to amend, and keeps the reason out of the
+// user's sight.
+func TestClassifyConfirmationPromptSendsRequestsAndQuestionsToAmend(t *testing.T) {
+	llm := &capturingPlannerLLM{response: `{"decision": "amend"}`}
+	planner := NewPlanner(llm, 0)
+	if _, err := planner.ClassifyConfirmation(context.Background(), "check first whether it exists", "create_category", nil); err != nil {
+		t.Fatal(err)
+	}
+	prompt := llm.captured.Messages[0].Content
+	for _, want := range []string{
+		`another instruction (e.g. "check`,
+		"or a question",
+		`"amend" when the reply asks for anything`,
+		"never shown to the user",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("classifier prompt lacks %q", want)
+		}
+	}
+	if strings.Contains(prompt, "a question, or you are not confident") {
+		t.Error("classifier prompt still sends a question to reject")
+	}
+}
+
 // Any unrecognized decision value falls to the restrictive reject default.
 func TestClassifyConfirmationRestrictiveDefault(t *testing.T) {
 	llm := &fakePlannerLLM{response: `{"decision": "maybe"}`}
