@@ -1537,10 +1537,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			return res, err
 		}
 		emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionReject, ResolvedBy: resolvedBy, Reason: reason})
-		resp := events.SanitizeUTF8(strings.TrimSpace(reason))
-		if resp == "" {
-			resp = "Pipeline cancelled."
-		}
+		// The classifier's reason is written for the log and stays in the event.
+		resp := pipelineCancelledReply
 		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
 		log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
 		return &RunResult{
@@ -1642,7 +1640,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			toolCallConfirmed = true
 
 		case pipeline.DecisionAmend:
-			// The user replied with a correction, not a yes/no. The pending call
+			// The user replied with neither a yes nor a no: a correction,
+			// another instruction or a question. The pending call
 			// is already torn down (in-memory maps + persisted metadata cleared
 			// above). Do NOT execute and do NOT roll back: fall through to the
 			// normal turn so the planner / agent loop re-plans from history + the
@@ -1684,15 +1683,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if s, _ := sessions.Get(sessionID); s != nil && msgCountAtStart < len(s.Messages) {
 				_ = sessions.SetSummary(sessionID, s.Summary, s.Messages[:msgCountAtStart])
 			}
-			// Prefer the classifier's one-sentence reason so the user learns why
-			// it was cancelled; fall back to the generic line. Sanitized to match
-			// the event copy (the reason is model-authored free text).
-			resp := events.SanitizeUTF8(strings.TrimSpace(reason))
-			if resp == "" {
-				resp = "OK, action cancelled."
-			}
+			// The classifier's reason is written for the log and stays in the
+			// event; the user gets a fixed notice their client can word in
+			// their language by its action.
 			return &RunResult{
-				Response: resp,
+				Response: confirmationRejectedReply,
 				Metadata: map[string]string{
 					"type":   "system",
 					"action": "confirmation_rejected",
@@ -3114,10 +3109,10 @@ func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCal
 	return o.onStreamChunk
 }
 
-// confirmationUninterpretableReply is the deterministic, language-neutral reply
-// used when no classifier is available or the classifier call fails — the
-// "im Zweifel reject" branch. (When the classifier itself returns reject, its
-// own one-sentence reason is preferred over this template.)
+// confirmationUninterpretableReply is the deterministic reason logged when no
+// classifier is available or the classifier call fails — the "im Zweifel
+// reject" branch. Like the classifier's own reason it goes to the event; the
+// user gets confirmationRejectedReply.
 const confirmationUninterpretableReply = "I couldn't reliably interpret your reply, so I cancelled the pending action to be safe. Please tell me again — confirm, change, or cancel?"
 
 // Confirmation resolution provenance (confirmation_resolved.resolved_by).
@@ -3462,6 +3457,15 @@ func confirmationNarrateSystemPrompt(ctx context.Context, hint string) string {
 	}
 	return base
 }
+
+// confirmationRejectedReply and pipelineCancelledReply answer a rejected
+// confirmation. A client words the notice in the user's language by the
+// result's action (confirmation_rejected, pipeline_cancelled); this English line
+// is what a client without its own wording shows.
+const (
+	confirmationRejectedReply = "OK, action cancelled."
+	pipelineCancelledReply    = "Pipeline cancelled."
+)
 
 // confirmationFallback is the static confirmation prompt when the narration is
 // unavailable or failed. An action with a confirmation hint keeps its arguments
@@ -4074,7 +4078,7 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 //
 // Only APPROVED-and-executed exchanges are stripped — a prompt row directly
 // followed by its reply row. A prompt WITHOUT a reply row stays: single-call
-// rejects never persist a reply, an amend correction arrives as a plain user
+// rejects never persist a reply, an amend reply arrives as a plain user
 // message, and the re-planning paths need the proposed action for context.
 // Pipeline plan confirmations (prompt_type=confirmation) are untouched. The
 // user-facing transcript is untouched too — this filters only what the LLM
