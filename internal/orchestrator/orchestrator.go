@@ -4186,12 +4186,6 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	return messages, system
 }
 
-func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
-	inclSI := len(includeServerInstructions) == 0 || includeServerInstructions[0]
-	messages, _ := o.appendConversation(ctx, sess, o.buildSystemPrompt(ctx, userMessage, inclSI))
-	return messages
-}
-
 // Context-window accounting — the token estimate, the input budget and the
 // oldest-first trim — lives in context_budget.go.
 
@@ -5403,13 +5397,6 @@ func toolCallSignature(calls []ToolCall) string {
 		sb.WriteByte('\n')
 	}
 	return sb.String()
-}
-
-func formatToolResultMessage(result ToolResult) string {
-	if result.Error != "" {
-		return fmt.Sprintf("[tool_result] error: %s", result.Error)
-	}
-	return fmt.Sprintf("[tool_result] %s", result.Content)
 }
 
 // turnStartContextKey is the ctx slot the preparer phase fills in

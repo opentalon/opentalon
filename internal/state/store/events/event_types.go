@@ -45,7 +45,7 @@ const (
 	// Emitted children of user_message: each RAG retrieval becomes one
 	// *_retrieval event, then preparer_decision is the composite outcome
 	// the orchestrator landed on. messages_truncated fires from
-	// buildMessages inside the agent loop and parents to turn_start
+	// appendConversation inside the agent loop and parents to turn_start
 	// (it can fire more than once per turn when the cutter applies on
 	// successive iterations as the conversation grows during tool
 	// rounds).

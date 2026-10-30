@@ -2935,7 +2935,7 @@ func TestOrchestrator_MessagesTruncated_EmittedWhenSlidingWindowCuts(t *testing.
 	if err := json.Unmarshal(mt.Payload, &p); err != nil {
 		t.Fatalf("unmarshal messages_truncated payload: %v", err)
 	}
-	// 12 seeded + 1 current-turn user message (added before buildMessages
+	// 12 seeded + 1 current-turn user message (added before appendConversation
 	// runs) = 13; ContextMessages = 4 → drop 9 oldest (indices 0..8).
 	if p.DroppedCount != 9 {
 		t.Errorf("DroppedCount = %d, want 9 (12 seeded + 1 current = 13, keep 4)", p.DroppedCount)
