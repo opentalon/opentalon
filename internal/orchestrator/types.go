@@ -112,6 +112,11 @@ type ToolResult struct {
 	// mutation could spoof — because a same-approval re-execution is only
 	// safe when the failed attempt cannot have mutated anything.
 	ArgsInvalid bool `yaml:"-"`
+	// NotRun marks a call answered without running it: a call to a tool that
+	// was not loaded, which loads it (answerUnloadedCall). Error carries the
+	// answer the model reads, but the call did not fail, so no failed-call
+	// count takes it.
+	NotRun bool `yaml:"-"`
 }
 
 type WorkflowStep struct {

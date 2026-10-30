@@ -6,9 +6,11 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/state"
+	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 )
 
 // Tool-catalog discovery model. The native provider `tools` array carries
@@ -28,12 +30,26 @@ const maxStickyTools = 40
 
 // promotedToolSet returns the session's sticky tool set — the tools the
 // LLM has loaded via load_tools (and any prior invocations) that should
-// stay in the native tools array. Reads the session's KnownTools, keeps
-// the non-demoted entries, sorts by LRURank descending, and takes the top
+// stay in the native tools array: the stored set (storedPromotedToolSet)
+// plus the tools the agent loop loaded on call this turn
+// (answerUnloadedCall). The latter come from memory, so they stay in the
+// array for the rest of the turn even when the store did not save their
+// promotion, and they are exempt from the sticky cap, so a tool just
+// loaded is never missing from the next request.
+func (o *Orchestrator) promotedToolSet(ctx context.Context) map[string]bool {
+	out := o.storedPromotedToolSet(ctx)
+	for fqn := range toolLoadsOnCallFromContext(ctx) {
+		out[fqn] = true
+	}
+	return out
+}
+
+// storedPromotedToolSet reads the session's KnownTools, keeps the
+// non-demoted entries, sorts by LRURank descending, and takes the top
 // maxStickyTools. Returns an empty map when there's no session, no state
 // store, or a read failure (logged) — the always-include core still
 // renders, so the LLM is never left with no tools.
-func (o *Orchestrator) promotedToolSet(ctx context.Context) map[string]bool {
+func (o *Orchestrator) storedPromotedToolSet(ctx context.Context) map[string]bool {
 	sessionID := actor.SessionID(ctx)
 	if sessionID == "" || o.injectionStateStore == nil {
 		return map[string]bool{}
@@ -93,16 +109,17 @@ func toolIsNative(action Action, fqn string, promoted map[string]bool) bool {
 // arguments from the catalog's one-line summary (which carries no parameter
 // schema). It is the shared decision behind the tool-load gate, consulted by the
 // two sites that MUST agree:
-//   - executeCall refuses the call (the enforcement point in the agent loop);
+//   - executeCall answers the call without running it (answerUnloadedCall, the
+//     enforcement point in the agent loop);
 //   - maybeRequireConfirmation declines to raise an approval prompt for it — a
-//     call executeCall will refuse must not cost the user a confirmation, so an
+//     call executeCall will not run must not cost the user a confirmation, so an
 //     unloaded write never even reaches the approval question.
 //
 // It checks membership in the set actually sent this request (sentNativeTools on
 // ctx), not a fresh read of session state, so it cannot disagree with the array
 // the model saw: a tool that was sent stays admissible even if it is later
 // demoted or evicted mid-turn, and a tool loaded by an earlier call in the SAME
-// response is refused until its schema arrives on the next round. The action is
+// response is not run until its schema arrives on the next round. The action is
 // resolved canonically (resolveAction applies the same LLM-mangling
 // normalizations as executeCall), so the lookup keys off the registered name
 // regardless of separator drift or a dropped MCP prefix in the model's name.
@@ -124,6 +141,110 @@ func (o *Orchestrator) callToUnloadedTool(ctx context.Context, call ToolCall) bo
 	}
 	_, isNative := sent[toolFQN(call.Plugin, action.Name)]
 	return !isNative
+}
+
+// answerUnloadedCall answers a model-originated call to a tool that was not in
+// the native tools array sent this request (callToUnloadedTool). The call never
+// runs: its arguments were guessed from a catalog line, which carries no
+// parameters and none of the rules the tool's description states.
+//   - A tool _meta__load_tools could load for this session (resolveVisibleTool)
+//     is loaded the way load_tools loads it — a sticky promotion in the session
+//     store — and also recorded in the turn's toolLoadsOnCall, so the next
+//     request of the turn carries its schema whether or not the store saved the
+//     promotion. The answer tells the model to call it again from its
+//     description; it is marked NotRun, and its tool_call_result has the status
+//     not_run.
+//   - A demoted tool keeps the answer it had before loading on call existed
+//     (load it first): promoting it would clear the demotion.
+//   - Anything else (a preparer or guard action, an action the session palette
+//     excludes) is not available. Hidden plugins, user-only actions and unknown
+//     names never get here: executeCall's earlier gates refuse them first.
+func (o *Orchestrator) answerUnloadedCall(ctx context.Context, call ToolCall, dispatchStart time.Time) ToolResult {
+	fqn := toolFQN(call.Plugin, call.Action)
+	canonical, visible := o.resolveVisibleTool(fqn, allowedToolsSet(ctx, o), o.resolveAllowedPlugins(ctx))
+	if !visible {
+		slog.Warn("BLOCKED LLM call to a tool not available to this session", "plugin", call.Plugin, "action", call.Action)
+		return o.emitRefusalResult(ctx, call, fmt.Sprintf("tool %q is not available", fqn), dispatchStart)
+	}
+	sessionID := actor.SessionID(ctx)
+	if o.toolDemoted(ctx, sessionID, canonical) {
+		loadTools := toolFQN(metaPluginName, metaLoadTools)
+		slog.Warn("BLOCKED LLM call to unloaded demoted tool", "plugin", call.Plugin, "action", call.Action, "load_tools", loadTools)
+		return o.emitRefusalResult(ctx, call, fmt.Sprintf(
+			"tool %q is not loaded: its parameters are not in your context, so you cannot call it yet. "+
+				"First call %s(names=%q), then call %s on your next step. Do not guess the parameters.",
+			canonical, loadTools, canonical, canonical), dispatchStart)
+	}
+	if sessionID != "" && o.injectionStateStore != nil {
+		o.persistToolPromotion(ctx, sessionID, canonical)
+	}
+	toolLoadsOnCallFromContext(ctx).record(canonical)
+	slog.Info("LLM called an unloaded tool: loaded it, call not run", "plugin", call.Plugin, "action", call.Action)
+	answer := fmt.Sprintf(
+		"tool %q was NOT run: it was not loaded, so its parameters were not in your context. "+
+			"It is loaded now: its description and parameters are in your tools. "+
+			"Read its description, then call %s again with the parameters it defines.",
+		canonical, canonical)
+	emit.EmitToolCallResult(ctx, o.eventSink, emit.ToolCallResultArgs{
+		CallID:    call.ID,
+		Status:    "not_run",
+		Response:  answer,
+		LatencyMS: time.Since(dispatchStart).Milliseconds(),
+	})
+	return ToolResult{CallID: call.ID, Error: answer, NotRun: true}
+}
+
+// retriesOfUnrunCalls returns the calls that repeat, with the same arguments, a
+// call of the previous response that was answered without running (unrun holds
+// those calls' signatures, see toolCallSignature).
+func retriesOfUnrunCalls(calls []ToolCall, unrun map[string]bool) []ToolCall {
+	var retries []ToolCall
+	for i := range calls {
+		if unrun[toolCallSignature(calls[i:i+1])] {
+			retries = append(retries, calls[i])
+		}
+	}
+	return retries
+}
+
+// toolDemoted reports whether the session store marks the tool demoted. No
+// session, no store, no entry or a failed read all read as not demoted.
+func (o *Orchestrator) toolDemoted(ctx context.Context, sessionID, fqn string) bool {
+	if sessionID == "" || o.injectionStateStore == nil {
+		return false
+	}
+	st, err := o.injectionStateStore.GetInjectionState(ctx, sessionID)
+	if err != nil {
+		return false
+	}
+	for _, kt := range st.KnownTools {
+		if kt.ToolName == fqn {
+			return kt.Demoted
+		}
+	}
+	return false
+}
+
+// toolLoadsOnCall is one agent-loop turn's set of the tools answerUnloadedCall
+// loaded, which promotedToolSet keeps in the native array for the rest of the
+// turn. Outside the agent loop there is none (nil), and record does nothing.
+type toolLoadsOnCall map[string]bool
+
+type toolLoadsOnCallKey struct{}
+
+func withToolLoadsOnCall(ctx context.Context, loads toolLoadsOnCall) context.Context {
+	return context.WithValue(ctx, toolLoadsOnCallKey{}, loads)
+}
+
+func toolLoadsOnCallFromContext(ctx context.Context) toolLoadsOnCall {
+	loads, _ := ctx.Value(toolLoadsOnCallKey{}).(toolLoadsOnCall)
+	return loads
+}
+
+func (l toolLoadsOnCall) record(fqn string) {
+	if l != nil {
+		l[fqn] = true
+	}
 }
 
 // catalogEntry is one row of the rendered tool catalog: the tool's
