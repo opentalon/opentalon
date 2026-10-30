@@ -84,6 +84,21 @@ func TestRecordToolOutcome_SuccessResetsCounters(t *testing.T) {
 	}
 }
 
+// A call answered without running neither failed nor succeeded: it adds no
+// error and resets none, so the next error continues the count.
+func TestRecordToolOutcome_NotRunLeavesCountersAsTheyWere(t *testing.T) {
+	orch := newOrchForErrorTrackingTests(t, nil)
+	ctx := actor.WithSessionID(context.Background(), "s1")
+	notRun := ToolResult{Error: `tool "p__a" was NOT run`, NotRun: true}
+	_ = orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false) // count=1
+	if w := orch.recordToolOutcome(ctx, "s1", sampleCall(), notRun, false); w != nil {
+		t.Errorf("a not-run call must not count as an error, got %+v", w)
+	}
+	if w := orch.recordToolOutcome(ctx, "s1", sampleCall(), errorResult(), false); w == nil || !strings.Contains(w.Content, "failed 2 times") {
+		t.Errorf("a not-run call must not reset the count: the next error must be the second, got %+v", w)
+	}
+}
+
 func TestRecordToolOutcome_DifferentToolsCountIndependently(t *testing.T) {
 	orch := newOrchForErrorTrackingTests(t, nil)
 	ctx := actor.WithSessionID(context.Background(), "s1")
