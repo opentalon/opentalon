@@ -3063,17 +3063,16 @@ func (o *Orchestrator) prepareTurnStart(ctx context.Context, systemPrompt, model
 	sort.Slice(args.AvailableTools, func(i, j int) bool {
 		return args.AvailableTools[i].Name < args.AvailableTools[j].Name
 	})
-	// RFC #249 Pillar C: quote the preparer-phase references back into
-	// turn_start so consumers can render the preparer outcome in-place
-	// without walking sibling events by parent_id. The ctx slot is
-	// populated by the preparer-loop after emitPreparerDecision; absent
-	// on early-exit paths (no preparer ran / no signal) — the zero
-	// values then leave the new fields omitted from the payload.
+	// RFC #249 Pillar C: quote the preparer decision back into turn_start
+	// so consumers can render the preparer outcome in-place without
+	// walking sibling events by parent_id. The ctx slot is populated by
+	// the preparer-loop after emitPreparerDecision; absent on early-exit
+	// paths (no preparer ran / no signal) — the field is then omitted
+	// from the payload. InjectedKnowledge and the tool tier counts stay
+	// unset: knowledge is pull-only and tool discovery is the registry
+	// catalog, so there is nothing to quote for them.
 	if tsc, ok := turnStartContextFromContext(ctx); ok {
 		args.PreparerDecisionID = tsc.PreparerDecisionID
-		args.InjectedKnowledge = tsc.InjectedKnowledge
-		args.ToolTier1Count = tsc.Tier1Count
-		args.ToolTier3Count = tsc.Tier3Count
 	}
 	return args
 }
@@ -5414,23 +5413,19 @@ func formatToolResultMessage(result ToolResult) string {
 
 // turnStartContextKey is the ctx slot the preparer phase fills in
 // after emitPreparerDecision so prepareTurnStart can quote the
-// decision back as TurnStartPayload.PreparerDecisionID +
-// InjectedKnowledge + tier1/tier3 counts (RFC #249 Pillar C). Set
-// inside the same Run call, before EmitTurnStart fires.
+// decision back as TurnStartPayload.PreparerDecisionID (RFC #249
+// Pillar C). Set inside the same Run call, before EmitTurnStart fires.
 type turnStartContextKey struct{}
 
-// turnStartContext carries the preparer-phase references the next
+// turnStartContext carries the preparer-phase reference the next
 // turn_start event quotes. PreparerDecisionID may be "" when no
 // preparer_decision event was emitted (no signal in the aggregate).
-// Knowledge is pull-only and tool discovery is the registry catalog, so
-// InjectedKnowledge / Tier1Count / Tier3Count are always zero values now
-// (the retrieved candidates surface on preparer_decision instead); they
-// remain on the payload for schema stability and `omitempty` drops them.
+// The payload's InjectedKnowledge and tool tier counts are never set:
+// knowledge is pull-only and tool discovery is the registry catalog (the
+// retrieved candidates surface on preparer_decision instead); they remain
+// on the payload for schema stability and `omitempty` drops them.
 type turnStartContext struct {
 	PreparerDecisionID string
-	InjectedKnowledge  []events.KnowledgeRef
-	Tier1Count         int
-	Tier3Count         int
 }
 
 func withTurnStartContext(ctx context.Context, tsc turnStartContext) context.Context {
