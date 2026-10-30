@@ -42,9 +42,6 @@ type Parameter struct {
 // that builds that prompt. Set for actions that don't mutate user-
 // visible state (list/show/get/query). Default false — fail-safe to
 // "treat as potential write".
-// Companions names other actions of the same plugin that are loaded together
-// with this one, through _meta__load_tools and on call; companions of a
-// companion are not loaded.
 type Action struct {
 	Name              string      `yaml:"name"`
 	Description       string      `yaml:"description"`

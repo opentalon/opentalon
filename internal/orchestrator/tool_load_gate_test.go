@@ -99,15 +99,15 @@ func TestToolIsNative(t *testing.T) {
 func TestExecuteCall_LoadsToolNotInSentArrayWithoutRunningIt(t *testing.T) {
 	store := &fakeInjectionStateStore{}
 	orch, exec := gateOrchWithStore(t, store)
-	loads := toolLoadsOnCall{}
-	ctx := withToolLoadsOnCall(sentCtx("p__always"), loads) // catalog was NOT sent
+	loads := newTurnToolLoads()
+	ctx := withTurnToolLoads(sentCtx("p__always"), loads) // catalog was NOT sent
 
 	res := orch.executeCall(ctx, ToolCall{ID: "c1", Plugin: "p", Action: "catalog", FromLLM: true})
 
 	if exec.count != 0 {
 		t.Errorf("a tool not in the sent array must NOT execute, ran %d time(s)", exec.count)
 	}
-	for _, want := range []string{"NOT run", "loaded now", "call p__catalog again with the parameters"} {
+	for _, want := range []string{"NOT run", "loaded now", "call p__catalog again directly with the parameters"} {
 		if !strings.Contains(res.Error, want) {
 			t.Errorf("answer must say %q, got %q", want, res.Error)
 		}
@@ -115,8 +115,9 @@ func TestExecuteCall_LoadsToolNotInSentArrayWithoutRunningIt(t *testing.T) {
 	if kt, ok := storedTool(store, "p__catalog"); !ok || kt.Demoted {
 		t.Errorf("the tool must be promoted in the session store, got %+v (found=%v)", kt, ok)
 	}
-	if !loads["p__catalog"] || !res.NotRun {
-		t.Errorf("the turn must record the load and the result must be marked not run, got loads=%v NotRun=%v", loads, res.NotRun)
+	if !loads.snapshot()["p__catalog"] || !res.NotRun {
+		t.Errorf("the turn must record the load and the result must be marked not run, got loads=%v NotRun=%v",
+			loads.snapshot(), res.NotRun)
 	}
 }
 
@@ -206,16 +207,16 @@ func TestExecuteCall_UnloadableToolIsRefusedAndNotLoaded(t *testing.T) {
 		{"unknown action", "p", "nope", "not found"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			loads := toolLoadsOnCall{}
-			ctx := withToolLoadsOnCall(withSentNativeTools(
+			loads := newTurnToolLoads()
+			ctx := withTurnToolLoads(withSentNativeTools(
 				actor.WithSessionID(profile.WithProfile(context.Background(), prof), "s1"), map[string]struct{}{}), loads)
 
 			res := orch.executeCall(ctx, ToolCall{ID: "c1", Plugin: tc.plugin, Action: tc.action, FromLLM: true})
 			if !strings.Contains(res.Error, tc.want) || res.NotRun {
 				t.Errorf("want a refusal containing %q, not marked not run, got %q (NotRun=%v)", tc.want, res.Error, res.NotRun)
 			}
-			if len(loads) != 0 {
-				t.Errorf("nothing may be loaded, got %v", loads)
+			if got := loads.snapshot(); len(got) != 0 {
+				t.Errorf("nothing may be loaded, got %v", got)
 			}
 		})
 	}
@@ -243,16 +244,16 @@ func TestExecuteCall_DemotedToolNotInSentArrayKeepsLoadFirstAnswer(t *testing.T)
 	orch, exec := gateOrchWithStore(t, store)
 	sink := &recordingEventSink{}
 	orch.eventSink = sink
-	loads := toolLoadsOnCall{}
-	ctx := withToolLoadsOnCall(sentCtx("p__always"), loads)
+	loads := newTurnToolLoads()
+	ctx := withTurnToolLoads(sentCtx("p__always"), loads)
 
 	res := orch.executeCall(ctx, ToolCall{ID: "c1", Plugin: "p", Action: "catalog", FromLLM: true})
 	if !strings.Contains(res.Error, "is not loaded") || !strings.Contains(res.Error, `_meta__load_tools(names="p__catalog")`) {
 		t.Errorf("a demoted tool must get the load-first answer, got %q", res.Error)
 	}
-	if exec.count != 0 || store.updateCalls != 0 || len(loads) != 0 {
+	if exec.count != 0 || store.updateCalls != 0 || len(loads.snapshot()) != 0 {
 		t.Errorf("a demoted tool must not run or be loaded, ran %d, store writes %d, loads %v",
-			exec.count, store.updateCalls, loads)
+			exec.count, store.updateCalls, loads.snapshot())
 	}
 	if results := findToolCallResultPayloads(t, sink.snapshot()); res.NotRun || len(results) != 1 || results[0].Status != "error" {
 		t.Errorf("a demoted tool's refusal must stay an error, got NotRun=%v results %+v", res.NotRun, results)
@@ -675,9 +676,9 @@ func (l *scriptedNativeLLM) SupportsFeature(f provider.Feature) bool {
 	return f == provider.FeatureTools
 }
 
-// loadOnCallOrch builds an orchestrator over an always-include tool and two
-// catalog tools with a parameter, driven by a scripted native model; store is
-// wired when not nil.
+// loadOnCallOrch builds an orchestrator over an always-include tool, two
+// catalog tools with a parameter and the first one's companion, driven by a
+// scripted native model; store is wired when not nil.
 func loadOnCallOrch(t *testing.T, store *fakeInjectionStateStore, rounds ...provider.CompletionResponse) (
 	*Orchestrator, *scriptedNativeLLM, *countingExecutor,
 ) {
@@ -689,8 +690,9 @@ func loadOnCallOrch(t *testing.T, store *fakeInjectionStateStore, rounds ...prov
 		Name: "p", Description: "load-on-call fixtures",
 		Actions: []Action{
 			{Name: "always", Description: "Always-include tool.", AlwaysInclude: true, ReadOnly: true},
-			{Name: "catalog", Description: "Catalog tool.", ReadOnly: true, Parameters: query},
+			{Name: "catalog", Description: "Catalog tool.", ReadOnly: true, Parameters: query, Companions: []string{"lookup"}},
 			{Name: "other", Description: "Another catalog tool.", ReadOnly: true, Parameters: query},
+			{Name: "lookup", Description: "The catalog tool's companion.", ReadOnly: true, Parameters: query},
 		},
 	}, exec); err != nil {
 		t.Fatalf("register: %v", err)
@@ -777,46 +779,66 @@ func TestRun_IdenticalRetryRunsOnlyTheUnrunCallsOnce(t *testing.T) {
 	}
 }
 
-// After a call to an unloaded tool, the next request of the turn carries the
-// tool's full schema, in exactly the array _meta__load_tools would have
-// produced — also when the session store cannot save the promotion, when there
-// is no store, and when the stored sticky set is full with tools ranked above
-// the new one.
-func TestRun_ToolLoadedOnCallIsInTheNextRequest(t *testing.T) {
-	refOrch, ref, _ := loadOnCallOrch(t, &fakeInjectionStateStore{},
-		callOf("l1", "_meta__load_tools", map[string]string{"names": "p__catalog"}))
+// After _meta__load_tools or a call to an unloaded tool, the next request of the
+// turn carries the tool and its companion with their full schemas, in the same
+// array on both paths — also when the session store cannot save the promotion,
+// when there is no store, and when the stored sticky set is full with tools
+// ranked above them.
+func TestRun_LoadedToolAndCompanionsAreInTheNextRequest(t *testing.T) {
+	loadTools := callOf("l1", "_meta__load_tools", map[string]string{"names": "p__catalog"})
+	refOrch, ref, _ := loadOnCallOrch(t, &fakeInjectionStateStore{}, loadTools)
 	runTurn(t, refOrch)
 	want := sentToolsJSON(t, ref.requests[1])
-	if !strings.Contains(want, `"name":"p__catalog"`) || !strings.Contains(want, `"q":`) {
-		t.Fatalf("reference array after load_tools must carry p__catalog with its schema, got %s", want)
+	for _, tool := range []string{"p__catalog", "p__lookup"} {
+		if !strings.Contains(want, `"name":"`+tool+`","description":"`) {
+			t.Fatalf("reference array after load_tools must carry %s, got %s", tool, want)
+		}
+	}
+	if strings.Count(want, `"q":`) != 2 {
+		t.Fatalf("reference array must carry both schemas, got %s", want)
 	}
 
 	full := make([]state.KnownToolEntry, maxStickyTools)
 	for i := range full {
 		full[i] = state.KnownToolEntry{ToolName: fmt.Sprintf("p__filler%02d", i), LRURank: 1000}
 	}
-	for _, tc := range []struct {
-		name  string
-		store *fakeInjectionStateStore
+	for _, path := range []struct {
+		name string
+		call provider.CompletionResponse
 	}{
-		{"store saves the promotion", &fakeInjectionStateStore{}},
-		{"store write fails", &fakeInjectionStateStore{failUpdateErr: errors.New("simulated db write failure")}},
-		{"no store", nil},
-		{"sticky set at its cap", &fakeInjectionStateStore{store: map[string]state.InjectionState{"s1": {KnownTools: full}}}},
+		{"load_tools", loadTools},
+		{"on call", callOf("r1", "p__catalog", map[string]string{"q": "x"})},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			orch, llm, exec := loadOnCallOrch(t, tc.store, callOf("r1", "p__catalog", map[string]string{"q": "x"}))
-			runTurn(t, orch)
-			if exec.count != 0 {
-				t.Errorf("the unloaded call must not run, ran %d time(s)", exec.count)
-			}
-			if len(llm.requests) < 2 {
-				t.Fatalf("want a request after the unloaded call, got %d", len(llm.requests))
-			}
-			if got := sentToolsJSON(t, llm.requests[1]); got != want {
-				t.Errorf("next request's tools differ from the array after load_tools:\n got %s\nwant %s", got, want)
-			}
-		})
+		for _, tc := range []struct {
+			name  string
+			store func() *fakeInjectionStateStore
+		}{
+			{"store saves the promotion", func() *fakeInjectionStateStore { return &fakeInjectionStateStore{} }},
+			{"store write fails", func() *fakeInjectionStateStore {
+				return &fakeInjectionStateStore{failUpdateErr: errors.New("simulated db write failure")}
+			}},
+			{"store read fails", func() *fakeInjectionStateStore {
+				return &fakeInjectionStateStore{failGetErr: errors.New("simulated db read failure")}
+			}},
+			{"no store", func() *fakeInjectionStateStore { return nil }},
+			{"sticky set at its cap", func() *fakeInjectionStateStore {
+				return &fakeInjectionStateStore{store: map[string]state.InjectionState{"s1": {KnownTools: full}}}
+			}},
+		} {
+			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
+				orch, llm, exec := loadOnCallOrch(t, tc.store(), path.call)
+				runTurn(t, orch)
+				if exec.count != 0 {
+					t.Errorf("no business tool may run, ran %d time(s)", exec.count)
+				}
+				if len(llm.requests) < 2 {
+					t.Fatalf("want a request after the load, got %d", len(llm.requests))
+				}
+				if got := sentToolsJSON(t, llm.requests[1]); got != want {
+					t.Errorf("next request's tools differ from the array after load_tools:\n got %s\nwant %s", got, want)
+				}
+			})
+		}
 	}
 }
 
@@ -903,5 +925,179 @@ func TestRun_UnrunCallIsNotAFailedToolCall(t *testing.T) {
 	}
 	if kt, ok := storedTool(store, "p__catalog"); !ok || kt.Demoted {
 		t.Errorf("the loaded tool must stay promoted and not demoted, got %+v (found=%v)", kt, ok)
+	}
+}
+
+// companionOrch builds an orchestrator whose catalog tool p__write names the
+// given companions, next to one tool of each kind a companion can be: a lookup
+// (which names p__deep as its own companion), p__deep, an always-included tool,
+// a user-only action and a preparer action.
+func companionOrch(t *testing.T, store *fakeInjectionStateStore, companions ...string) *Orchestrator {
+	t.Helper()
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "p", Description: "companion fixtures",
+		Actions: []Action{
+			{Name: "write", Description: "A write tool.", Companions: companions},
+			{Name: "lookup", Description: "A lookup.", ReadOnly: true, Companions: []string{"deep"}},
+			{Name: "deep", Description: "The lookup's companion.", ReadOnly: true},
+			{Name: "always", Description: "Always-include tool.", AlwaysInclude: true, ReadOnly: true},
+			{Name: "admin", Description: "User-only action.", UserOnly: true},
+			{Name: "prepare", Description: "Preparer action."},
+		},
+	}, &countingExecutor{}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "s1"})
+	return NewWithRules(&fakeLLM{}, &fakeParser{}, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
+		ContentPreparers:    []ContentPreparerEntry{{Plugin: "p", Action: "prepare"}},
+		InjectionStateStore: store,
+	})
+}
+
+// Loading a tool loads its companions with it, through _meta__load_tools and on
+// call alike: promoted in the session store, recorded in the turn's loads and
+// named in the answer. A companion the session may not see is skipped and the
+// tool still loads; a demoted one is skipped and stays demoted; one already
+// loaded (stored, or earlier this turn) or always included is left as it is; a
+// companion's own companions are not loaded; a tool without companions loads
+// alone. (A companion is an action of the tool's own plugin, so the profile
+// cannot hide it while the tool stays visible.)
+func TestLoad_CompanionsLoadWithTheTool(t *testing.T) {
+	demoted := state.KnownToolEntry{ToolName: "p__lookup", LRURank: 1, Demoted: true}
+	stored := state.KnownToolEntry{ToolName: "p__lookup"}
+	for _, tc := range []struct {
+		name       string
+		companions []string
+		stored     []state.KnownToolEntry // the session's tools before the load
+		earlier    string                 // a tool loaded earlier this turn
+		want       []string               // the companions loaded with p__write
+	}{
+		{"companion, not its own", []string{"lookup"}, nil, "", []string{"p__lookup"}},
+		{"companions the session may not see", []string{"admin", "prepare", "nope", "lookup"}, nil, "", []string{"p__lookup"}},
+		{"demoted companion", []string{"lookup"}, []state.KnownToolEntry{demoted}, "", nil},
+		{"stored companion", []string{"lookup"}, []state.KnownToolEntry{stored}, "", nil},
+		{"companion loaded earlier this turn", []string{"lookup"}, nil, "p__lookup", nil},
+		{"always-included companion", []string{"always"}, nil, "", nil},
+		{"no companions", nil, nil, "", nil},
+	} {
+		for _, path := range []string{"load_tools", "on call"} {
+			t.Run(tc.name+"/"+path, func(t *testing.T) {
+				store := &fakeInjectionStateStore{store: map[string]state.InjectionState{
+					"s1": {KnownTools: append([]state.KnownToolEntry(nil), tc.stored...)},
+				}}
+				orch := companionOrch(t, store, tc.companions...)
+				loads := newTurnToolLoads()
+				if tc.earlier != "" {
+					loads.record(tc.earlier)
+				}
+				ctx := withTurnToolLoads(sentCtx("p__always"), loads)
+
+				var named []string
+				if path == "load_tools" {
+					exec, _ := orch.registry.GetExecutor(metaPluginName)
+					res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": "p__write"}})
+					named = decodeLoadResult(t, res).Loaded
+				} else {
+					res := orch.executeCall(ctx, ToolCall{ID: "c1", Plugin: "p", Action: "write", FromLLM: true})
+					if !res.NotRun {
+						t.Fatalf("the call must be answered without running, got %+v", res)
+					}
+					named = []string{"p__write"}
+					for _, fqn := range []string{"p__lookup", "p__deep", "p__always", "p__admin", "p__prepare", "p__nope"} {
+						if strings.Contains(res.Error, fqn) {
+							named = append(named, fqn)
+						}
+					}
+				}
+				want := append([]string{"p__write"}, tc.want...)
+				if !reflect.DeepEqual(named, want) {
+					t.Errorf("the answer names %v as loaded, want %v", named, want)
+				}
+
+				wantLoads := map[string]bool{}
+				for _, fqn := range want {
+					wantLoads[fqn] = true
+				}
+				if tc.earlier != "" {
+					wantLoads[tc.earlier] = true
+				}
+				if got := loads.snapshot(); !reflect.DeepEqual(got, wantLoads) {
+					t.Errorf("the turn's loads = %v, want %v", got, wantLoads)
+				}
+
+				if got := len(store.store["s1"].KnownTools); got != len(tc.stored)+len(want) {
+					t.Errorf("the store holds %d tools, want %d: %+v", got, len(tc.stored)+len(want), store.store["s1"].KnownTools)
+				}
+				for _, before := range tc.stored {
+					if after, _ := storedTool(store, before.ToolName); after != before {
+						t.Errorf("%s must be left as it was, got %+v, want %+v", before.ToolName, after, before)
+					}
+				}
+				for _, fqn := range want {
+					if kt, ok := storedTool(store, fqn); !ok || kt.Demoted {
+						t.Errorf("%s must be promoted, got %+v (found=%v)", fqn, kt, ok)
+					}
+				}
+			})
+		}
+	}
+}
+
+// The answer to a call of an unloaded tool keeps its first sentence, with the
+// tool's name as the first quoted string, names the companions loaded with it,
+// and tells the model to call the tools directly instead of loading them again.
+// Its tool_call_result keeps the status not_run.
+func TestExecuteCall_LoadOnCallAnswer(t *testing.T) {
+	const first = `tool "p__write" was NOT run: it was not loaded, so its parameters were not in your context. `
+	for _, tc := range []struct {
+		name       string
+		companions []string
+		want       string
+	}{
+		{"no companions", nil, first +
+			"It is loaded now: its description and parameters are in your tools. " +
+			"Read its description, then call p__write again directly with the parameters it defines; " +
+			"do not load it again with _meta__load_tools."},
+		{"two companions", []string{"lookup", "deep"}, first +
+			"It is loaded now, together with p__lookup, p__deep: their descriptions and parameters are in your tools. " +
+			"Read its description, then call p__write again directly with the parameters it defines, " +
+			"and call p__lookup, p__deep directly when you need them; " +
+			"do not load any of these tools again with _meta__load_tools."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orch := companionOrch(t, &fakeInjectionStateStore{}, tc.companions...)
+			sink := &recordingEventSink{}
+			orch.eventSink = sink
+			res := orch.executeCall(withTurnToolLoads(sentCtx("p__always"), newTurnToolLoads()),
+				ToolCall{ID: "c1", Plugin: "p", Action: "write", FromLLM: true})
+			if res.Error != tc.want || !res.NotRun {
+				t.Errorf("answer (NotRun=%v):\n got %q\nwant %q", res.NotRun, res.Error, tc.want)
+			}
+			if results := findToolCallResultPayloads(t, sink.snapshot()); len(results) != 1 || results[0].Status != "not_run" {
+				t.Errorf("want one tool_call_result with the status not_run, got %+v", results)
+			}
+		})
+	}
+}
+
+// The load_tools executor records on its own goroutine, which can outlive its
+// deadline while the agent loop reads the turn's loads; run with -race.
+func TestTurnToolLoads_RecordWhileRead(t *testing.T) {
+	loads := newTurnToolLoads()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			loads.record(fmt.Sprintf("p__t%d", i))
+		}
+	}()
+	for i := 0; i < 100; i++ {
+		_ = loads.snapshot()
+	}
+	<-done
+	if got := len(loads.snapshot()); got != 100 {
+		t.Errorf("want 100 recorded tools, got %d", got)
 	}
 }

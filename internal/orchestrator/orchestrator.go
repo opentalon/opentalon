@@ -2276,8 +2276,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var writeToolLoaded bool // load_tools promoted a non-read-only action this turn
 	var writeToolCalled bool // the model attempted any non-read-only call this turn
 	var actionNudged bool    // the one-shot phantom nudge was already spent
-	// The tools loaded on call this turn (answerUnloadedCall).
-	ctx = withToolLoadsOnCall(ctx, toolLoadsOnCall{})
+	ctx = withTurnToolLoads(ctx, newTurnToolLoads())
 	agentRound := 0
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		agentRound = i + 1
@@ -2829,9 +2828,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 
 			// Same-turn load completion for _meta__load_tools and for a tool
-			// loaded on call. The executor (system_tools.go) already persisted
-			// a sticky KnownToolEntry for each loaded tool, and a tool loaded
-			// on call is also in toolLoadsOnCall, so a fresh buildToolDefinitions
+			// loaded on call. Both paths already persisted a sticky
+			// KnownToolEntry for each loaded tool and its companions, and
+			// recorded them in turnToolLoads, so a fresh buildToolDefinitions
 			// picks them up via promotedToolSet and puts their full schemas
 			// into the tools array for the rest of THIS turn. Without the
 			// rebuild below the load would only take effect on the NEXT
