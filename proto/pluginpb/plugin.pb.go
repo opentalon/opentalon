@@ -860,12 +860,11 @@ type Action struct {
 	Parameters        []*Parameter           `protobuf:"bytes,3,rep,name=parameters,proto3" json:"parameters,omitempty"`
 	UserOnly          bool                   `protobuf:"varint,4,opt,name=user_only,json=userOnly,proto3" json:"user_only,omitempty"`                             // if true, hidden from LLM and blocked from LLM-sourced calls; only invocable directly by the user
 	InjectContextArgs []string               `protobuf:"bytes,5,rep,name=inject_context_args,json=injectContextArgs,proto3" json:"inject_context_args,omitempty"` // context arg names (e.g. "actor_id") the host injects from request context before calling Execute
-	// RFC #249 Phase 4 tool-tier flag: if true, the orchestrator pins this
-	// action into Tier 0 (always present in the LLM's `tools` array, full
-	// schema). RAG-derived scores still feed into the per-turn ranking for
-	// event diagnostics, but never demote an always_include action below
-	// Tier 0. Use for capabilities a plugin considers non-negotiable for
-	// its domain (e.g. an emergency-stop or session-reset action).
+	// If true, the orchestrator keeps this action in the LLM's `tools` array
+	// with its full schema on every request, instead of listing it in the
+	// tool catalog for the model to load first. Use for capabilities a
+	// plugin considers non-negotiable for its domain (e.g. an emergency-stop
+	// or session-reset action).
 	AlwaysInclude bool `protobuf:"varint,6,opt,name=always_include,json=alwaysInclude,proto3" json:"always_include,omitempty"`
 	// If true, the action is a pure query — it does not mutate any state
 	// the user cares about. The orchestrator's per-tool-call confirmation

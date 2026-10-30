@@ -933,21 +933,21 @@ func (s *invokeStepsUnmarshal) UnmarshalJSON(data []byte) error {
 // Candidate fields (knowledge / glossary / tool) are RFC #249 additions
 // — preparers that retrieve from a RAG corpus may return the structured
 // candidate list alongside (or instead of) the legacy `message` /
-// `relevant_tools` fields so the orchestrator can apply per-session
-// dedup + tier-promotion logic in Phase 3+.
+// `relevant_tools` fields.
 //
-// In Phase 2 the candidate slices are deserialized for instrumentation
-// (knowledge_retrieval / glossary_retrieval / tool_retrieval events
-// carry the hits) but do not yet drive injection decisions — the
-// `message` body remains authoritative for what reaches the LLM.
-// Plugins returning only the legacy fields stay fully backwards-
-// compatible: the candidate slices unmarshal to nil and the
-// orchestrator falls through to the legacy path.
+// The candidate slices and relevant_tools are instrumentation only: the
+// knowledge_retrieval / glossary_retrieval / tool_retrieval and
+// preparer_decision events carry them. They do not decide which tools
+// the model gets (the registry catalog and load_tools do) or which
+// knowledge reaches it (knowledge is pull-only) — the `message` body
+// remains authoritative for what reaches the LLM. Plugins returning only
+// the legacy fields stay fully backwards-compatible: the candidate
+// slices unmarshal to nil and the tool events report relevant_tools.
 type preparerResponse struct {
 	SendToLLM     *bool                `json:"send_to_llm"`
 	Message       string               `json:"message"`
 	Invoke        invokeStepsUnmarshal `json:"invoke"`
-	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional: filter system prompt to these tools (format: "plugin__action")
+	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional, instrumentation only: reported as the retrieved tools when tool_candidates is empty (format: "plugin__action")
 
 	KnowledgeCandidates []KnowledgeCandidate `json:"knowledge_candidates,omitempty"`
 	GlossaryCandidates  []GlossaryCandidate  `json:"glossary_candidates,omitempty"`

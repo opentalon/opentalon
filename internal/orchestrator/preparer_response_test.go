@@ -8,10 +8,10 @@ import (
 // preparerResponse is the JSON contract between RAG plugins (weaviate,
 // future per-tenant corpora, …) and Core's preparer-loop. RFC #249 Phase
 // 2 extends it with optional `knowledge_candidates` / `glossary_candidates`
-// / `tool_candidates` slices plus a `retrieval_metrics` summary so Phase
-// 3+ can apply session-aware dedup + tier-promotion logic. The contract
-// must stay strictly backwards-compatible: legacy plugins emitting only
-// the old fields keep working as if nothing changed.
+// / `tool_candidates` slices plus a `retrieval_metrics` summary, which the
+// retrieval and preparer_decision events report (instrumentation only).
+// The contract must stay strictly backwards-compatible: legacy plugins
+// emitting only the old fields keep working as if nothing changed.
 
 func TestPreparerResponse_LegacyShapeStillUnmarshals(t *testing.T) {
 	// A pre-RFC plugin response: only message + send_to_llm +
