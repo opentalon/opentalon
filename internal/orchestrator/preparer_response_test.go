@@ -108,9 +108,6 @@ func TestPreparerResponse_FullCandidatesShape(t *testing.T) {
 	if len(pr.ToolCandidates) != 2 {
 		t.Fatalf("ToolCandidates len = %d, want 2", len(pr.ToolCandidates))
 	}
-	if pr.ToolCandidates[1].PositionInResults != 1 {
-		t.Errorf("ToolCandidates[1].PositionInResults = %d, want 1", pr.ToolCandidates[1].PositionInResults)
-	}
 
 	if pr.RetrievalMetrics == nil {
 		t.Fatal("RetrievalMetrics nil; want populated")

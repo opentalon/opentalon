@@ -986,13 +986,14 @@ type GlossaryCandidate struct {
 	PositionInResults int     `json:"position_in_results,omitempty"`
 }
 
-// ToolCandidate is the RAG-retrieved tool entry with score so the
-// orchestrator (Phase 4) can apply the LRU + tier-promotion logic and
-// the *_retrieval event can publish ranked hits.
+// ToolCandidate is one tool a preparer's retrieval returned, with its
+// score. It is instrumentation only: the tool_retrieval and
+// preparer_decision events publish it, and it does not decide which
+// tools the model gets (that is the catalog and load_tools). A
+// "position_in_results" key in the incoming JSON is ignored.
 type ToolCandidate struct {
-	ToolName          string  `json:"tool_name"`
-	Score             float64 `json:"score"`
-	PositionInResults int     `json:"position_in_results,omitempty"`
+	ToolName string  `json:"tool_name"`
+	Score    float64 `json:"score"`
 }
 
 // PreparerRetrievalMetrics is a per-corpus optional summary returned
