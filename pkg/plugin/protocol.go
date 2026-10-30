@@ -91,11 +91,12 @@ type ActionMsg struct {
 	Parameters        []ParameterMsg `json:"parameters,omitempty"`
 	InjectContextArgs []string       `json:"inject_context_args,omitempty"` // context arg names (e.g. "actor_id") the host injects before calling Execute
 	UserOnly          bool           `json:"user_only,omitempty"`           // if true, hidden from LLM and only invocable directly by the user
-	// AlwaysInclude is the RFC #249 Phase 4 pin-to-Tier-0 flag — when true
-	// the host's tier decision keeps this action in the LLM's `tools`
-	// array (full schema) regardless of RAG score. The pkg/plugin SDK
-	// surfaces it here so external plugins built on this SDK can declare
-	// it; internal/orchestrator/system_tools registers in-process actions
+	// AlwaysInclude, when true, makes the host keep this action in the
+	// LLM's `tools` array (full schema, native tool calling) for every
+	// session that may use it, instead of listing it in the tool catalog
+	// for the model to load first. The pkg/plugin SDK surfaces it here so
+	// external plugins built on this SDK can declare it;
+	// internal/orchestrator/system_tools registers in-process actions
 	// against orchestrator.Action directly and bypasses this struct.
 	AlwaysInclude bool `json:"always_include,omitempty"`
 	// ReadOnly is true for actions that do not mutate any user-visible
@@ -106,6 +107,12 @@ type ActionMsg struct {
 	// — every action is treated as a potential write until the plugin
 	// declares otherwise.
 	ReadOnly bool `json:"read_only,omitempty"`
+	// ConfirmationHint, when set, is how the host words the confirmation
+	// question for this action: the narration follows it instead of the
+	// host's general rules (a field-by-field listing and a yes/no
+	// question). For actions whose arguments are not what the user
+	// decides on, such as a demonstration or a report.
+	ConfirmationHint string `json:"confirmation_hint,omitempty"`
 	// Companions names other actions of this plugin that the host loads
 	// together with this one, typically the lookups that supply its
 	// parameter values, so the model does not spend a step loading them.

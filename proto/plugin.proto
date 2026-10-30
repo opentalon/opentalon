@@ -176,12 +176,12 @@ message Action {
   repeated Parameter parameters = 3;
   bool user_only = 4; // if true, hidden from LLM and blocked from LLM-sourced calls; only invocable directly by the user
   repeated string inject_context_args = 5; // context arg names (e.g. "actor_id") the host injects from request context before calling Execute
-  // RFC #249 Phase 4 tool-tier flag: if true, the orchestrator pins this
-  // action into Tier 0 (always present in the LLM's `tools` array, full
-  // schema). RAG-derived scores still feed into the per-turn ranking for
-  // event diagnostics, but never demote an always_include action below
-  // Tier 0. Use for capabilities a plugin considers non-negotiable for
-  // its domain (e.g. an emergency-stop or session-reset action).
+  // If true and the LLM takes native tool calls, the orchestrator keeps
+  // this action in the LLM's `tools` array with its full schema for every
+  // session that may use it, instead of listing it in the tool catalog for
+  // the model to load first. Use for capabilities a plugin considers
+  // non-negotiable for its domain (e.g. an emergency-stop or session-reset
+  // action).
   bool always_include = 6;
   // If true, the action is a pure query — it does not mutate any state
   // the user cares about. The orchestrator's per-tool-call confirmation
@@ -194,6 +194,14 @@ message Action {
   // mcp-plugin) typically propagate this from the upstream protocol's
   // own read-only hint (MCP: `annotations.readOnlyHint`).
   bool read_only = 7;
+  // Optional. How the confirmation question for this action is to be
+  // worded, in the plugin's own terms. The orchestrator's narration
+  // follows it instead of its general rules (a field-by-field listing
+  // and a yes/no question), which fit a record change but not an action
+  // whose arguments are not what the user decides on (a demonstration,
+  // a report). Plugins that aggregate upstream tools (e.g. the
+  // mcp-plugin) propagate it from the tool's `_meta.confirmation_hint`.
+  string confirmation_hint = 8;
   // Names of other actions of this plugin that the orchestrator loads
   // together with this one, typically the lookups that supply this action's
   // parameter values. When the model loads this action (through
@@ -201,7 +209,7 @@ message Action {
   // companion the session may see is loaded too, unless it is already
   // loaded, always included or demoted. Companions of a companion are not
   // loaded. Empty (the default) means the action loads alone.
-  repeated string companions = 8;
+  repeated string companions = 9;
 }
 
 message Parameter {

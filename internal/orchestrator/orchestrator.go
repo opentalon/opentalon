@@ -933,21 +933,22 @@ func (s *invokeStepsUnmarshal) UnmarshalJSON(data []byte) error {
 // Candidate fields (knowledge / glossary / tool) are RFC #249 additions
 // — preparers that retrieve from a RAG corpus may return the structured
 // candidate list alongside (or instead of) the legacy `message` /
-// `relevant_tools` fields so the orchestrator can apply per-session
-// dedup + tier-promotion logic in Phase 3+.
+// `relevant_tools` fields.
 //
-// In Phase 2 the candidate slices are deserialized for instrumentation
-// (knowledge_retrieval / glossary_retrieval / tool_retrieval events
-// carry the hits) but do not yet drive injection decisions — the
-// `message` body remains authoritative for what reaches the LLM.
+// The candidate slices and relevant_tools are instrumentation only: the
+// knowledge_retrieval / glossary_retrieval / tool_retrieval events report
+// them, and preparer_decision the retrieved knowledge ids and tool names.
+// They do not decide which tools the model gets (the registry catalog and
+// load_tools do) or which knowledge reaches it (knowledge is pull-only) —
+// the `message` body remains authoritative for what reaches the LLM.
 // Plugins returning only the legacy fields stay fully backwards-
-// compatible: the candidate slices unmarshal to nil and the
-// orchestrator falls through to the legacy path.
+// compatible: the candidate slices unmarshal to nil and the tool events
+// report relevant_tools.
 type preparerResponse struct {
 	SendToLLM     *bool                `json:"send_to_llm"`
 	Message       string               `json:"message"`
 	Invoke        invokeStepsUnmarshal `json:"invoke"`
-	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional: filter system prompt to these tools (format: "plugin__action")
+	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional, instrumentation only: reported as the retrieved tools when tool_candidates is empty (format: "plugin__action")
 
 	KnowledgeCandidates []KnowledgeCandidate `json:"knowledge_candidates,omitempty"`
 	GlossaryCandidates  []GlossaryCandidate  `json:"glossary_candidates,omitempty"`
@@ -986,13 +987,14 @@ type GlossaryCandidate struct {
 	PositionInResults int     `json:"position_in_results,omitempty"`
 }
 
-// ToolCandidate is the RAG-retrieved tool entry with score so the
-// orchestrator (Phase 4) can apply the LRU + tier-promotion logic and
-// the *_retrieval event can publish ranked hits.
+// ToolCandidate is one tool a preparer's retrieval returned, with its
+// score. It is instrumentation only: tool_retrieval reports its name and
+// score, preparer_decision its name, and it does not decide which tools
+// the model gets (that is the catalog and load_tools). A
+// "position_in_results" key in the incoming JSON is ignored.
 type ToolCandidate struct {
-	ToolName          string  `json:"tool_name"`
-	Score             float64 `json:"score"`
-	PositionInResults int     `json:"position_in_results,omitempty"`
+	ToolName string  `json:"tool_name"`
+	Score    float64 `json:"score"`
 }
 
 // PreparerRetrievalMetrics is a per-corpus optional summary returned
@@ -3065,17 +3067,16 @@ func (o *Orchestrator) prepareTurnStart(ctx context.Context, systemPrompt, model
 	sort.Slice(args.AvailableTools, func(i, j int) bool {
 		return args.AvailableTools[i].Name < args.AvailableTools[j].Name
 	})
-	// RFC #249 Pillar C: quote the preparer-phase references back into
-	// turn_start so consumers can render the preparer outcome in-place
-	// without walking sibling events by parent_id. The ctx slot is
-	// populated by the preparer-loop after emitPreparerDecision; absent
-	// on early-exit paths (no preparer ran / no signal) — the zero
-	// values then leave the new fields omitted from the payload.
+	// RFC #249 Pillar C: quote the preparer decision back into turn_start
+	// so consumers can render the preparer outcome in-place without
+	// walking sibling events by parent_id. The ctx slot is populated by
+	// the preparer-loop after emitPreparerDecision; absent on early-exit
+	// paths (no preparer ran / no signal) — the field is then omitted
+	// from the payload. InjectedKnowledge and the tool tier counts stay
+	// unset: knowledge is pull-only and tool discovery is the registry
+	// catalog, so there is nothing to quote for them.
 	if tsc, ok := turnStartContextFromContext(ctx); ok {
 		args.PreparerDecisionID = tsc.PreparerDecisionID
-		args.InjectedKnowledge = tsc.InjectedKnowledge
-		args.ToolTier1Count = tsc.Tier1Count
-		args.ToolTier3Count = tsc.Tier3Count
 	}
 	return args
 }
@@ -3364,11 +3365,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	}
 	confirmMsg := o.narrateConfirmation(ctx, recentMsgs, call, userMessage)
 	if confirmMsg == "" {
-		confirmMsg = fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", call.Action)
-		for k, v := range call.Args {
-			confirmMsg += fmt.Sprintf("- %s: %s\n", k, v)
-		}
-		confirmMsg += "\nWould you like me to proceed?"
+		confirmMsg = o.confirmationFallback(call)
 	}
 	// The confirmation abandons every later call of this response — leave an
 	// explicit trace of each so the model re-issues them instead of assuming
@@ -3413,30 +3410,97 @@ func (o *Orchestrator) maybeRequireConfirmation(
 // a change to one machine was confirmed as "all the specified detail attributes"
 // and went through, overwriting a serial number, an inventory number and a
 // driver with a sister machine's. A count the user can check tells them nothing
-// about values they cannot see, so the fields are now named one by one.
+// about values they cannot see, so the fields are now named one by one. A new
+// record has no previous values: written in the change form, its fields read as
+// "name: new -> Drill" under the tool's argument names, so a creation lists the
+// values it gets, under the names the user sees in the application. The rules
+// alone left the name as a field line under its argument name; the two examples
+// show the form. They speak as the one who would act: copied from a passive
+// ("would be created"), a German narration opened "Es würde ein neues Ticket …
+// angelegt".
 const confirmationNarratePrompt = `You write the short confirmation question shown to the user immediately before a write or delete tool runs.
 Rules:
 1. Reply in the SAME language as the user's latest request.
 2. If the call acts on MANY records at once (a batch, an ids array, or a scope_token), state the COUNT of affected records and 2-3 concrete examples (names and/or ids) taken from the recent conversation. Never show a raw scope_token or dump internal arguments.
-3. If the call names ONE record, name that record by its name rather than its id, and say what happens to it FIELD BY FIELD: for a change, one short line per field, "field: previous value -> new value", taking the previous value from the recent conversation; for a deletion, say what kind of record it is. A summary such as "the specified attributes" or "the given details" is never acceptable — those fields are the whole thing the user is being asked to check, and nobody can check what you did not name.
-4. If a previous value does not appear in the conversation, give the new value and say plainly that the previous one is not known here. Never guess it, and never drop the field to avoid the gap.
-5. If a link to the record (a path such as /items/123) appears in the conversation, render the record name as that link.
-6. Keep it short: 1-3 sentences plus at most one line per field. End with a clear yes/no question. You are ONLY asking permission — do not claim anything has happened yet.`
+3. If the call acts on ONE record (changes, creates or deletes it), name that record by its name rather than its id (by its id only when no name is known), and say what happens to it FIELD BY FIELD, one list item per field ("- field: ..."): for a change, "- field: previous value -> new value" for each field it sets, taking the previous value from the recent conversation; for a new record, its kind and, when it is given one, its name in the opening sentence (not again as a line) and "- field: value" for each further value it gets — a new record has no previous values, so never write one or an arrow for it; a call that may also update an existing record is a change; for a deletion, say what kind of record it is. A summary such as "the specified attributes" or "the given details" is never acceptable — those fields are the whole thing the user is being asked to check, and nobody can check what you did not name.
+4. If a previous value of a change does not appear in the conversation, give the new value and say plainly that the previous one is not known here. Never guess it, and never drop the field to avoid the gap.
+5. Field names are words of your reply: name every field as the user sees it in the application, in the language of your reply like every other word (in a German reply "Kategorie", not "Category"), never by the tool's argument name ("serial number", not serial_number); a value that refers to another record is that record's name when the conversation shows it, its id otherwise.
+6. If a link to the record (a path such as /items/123) appears in the conversation, render the record name as that link.
+7. Keep it short: 1-3 sentences plus at most one line per field. Say what you would do as the one who does it ("I would create …"), not in the passive. End with one clear question whether to go ahead, without answer options such as "(yes/no)": the user answers with buttons. You are ONLY asking permission — do not claim anything has happened yet.
 
-// confirmationNarrateSystemPrompt returns the narrator's system message. When
-// the turn carries a reply-language directive (see replyLanguageDirective), it
-// is appended and ranked above rule 1: the "latest request" the narrator sees
-// may be a confirmation-button label or another reply too short to show the
-// user's language, while the directive was already resolved from the user's own
-// words, looking back past such replies. Without a directive the prompt is
-// unchanged and rule 1 applies.
-func confirmationNarrateSystemPrompt(ctx context.Context) string {
+The form, shown in English with made-up records; write yours entirely in the language of your reply, field names included, with the names from the conversation.
+A new record:
+I would create the item **Cordless drill**:
+- Category: Tools
+- Location: Main office
+Shall I create it?
+A change:
+I would change the item **Machine 7**:
+- Serial number: A-1 -> X-9
+Shall I change it?`
+
+// confirmationNarrateSystemPrompt returns the narrator's system message: the
+// general rules, or the tool's own hint (confirmationHintPrompt) when the action
+// carries one. When the turn carries a reply-language directive (see
+// replyLanguageDirective), it is appended and ranked above rule 1: the "latest
+// request" the narrator sees may be a confirmation-button label or another
+// reply too short to show the user's language, while the directive was already
+// resolved from the user's own words, looking back past such replies. Its
+// English technical terms do not reach the field names, which the user checks
+// under the names they see (rule 5). Without a directive the prompt is unchanged
+// and rule 1 applies.
+func confirmationNarrateSystemPrompt(ctx context.Context, hint string) string {
+	base := confirmationNarratePrompt
+	if hint != "" {
+		base = confirmationHintPrompt(hint)
+	}
 	dir := strings.TrimSpace(replyLanguageDirectiveFromContext(ctx))
 	if dir == "" {
-		return confirmationNarratePrompt
+		return base
 	}
-	return confirmationNarratePrompt + "\n\n" + dir +
-		"\nThis reply-language instruction takes precedence over rule 1."
+	base += "\n\n" + dir + "\nThis reply-language instruction takes precedence over rule 1."
+	if hint == "" {
+		base += " Its line on technical terms does not apply to field names: they are written in this language (rule 5)."
+	}
+	return base
+}
+
+// confirmationFallback is the static confirmation prompt when the narration is
+// unavailable or failed. An action with a confirmation hint keeps its arguments
+// out of the user's sight here too: they are not what the user decides on.
+func (o *Orchestrator) confirmationFallback(call ToolCall) string {
+	if a := o.resolveAction(call.Plugin, call.Action); a != nil && a.ConfirmationHint != "" {
+		return "The next step needs your approval."
+	}
+	msg := fmt.Sprintf("I'm about to execute **%s** with the following parameters:\n", call.Action)
+	for k, v := range call.Args {
+		msg += fmt.Sprintf("- %s: %s\n", k, v)
+	}
+	return msg + "\nWould you like me to proceed?"
+}
+
+// confirmationHintPrompt frames a tool's own instruction for its confirmation
+// question (Action.ConfirmationHint). The general prompt above fits a record
+// change: the fields are what the user checks. It does not fit an action whose
+// arguments are not what the user decides on — a demonstration on the user's
+// screen, a report — where a field listing reads as program output and a
+// "yes/no" question contradicts the approve/reject buttons. Such a tool says
+// in its hint what the user is deciding on. The fixed rules stay above the
+// hint: it chooses the subject of the question, never the language, the form
+// of address, or whether the question asks permission at all. The hint is
+// plugin text the operator configured, like a tool description, not user
+// input; it is still quoted as data.
+func confirmationHintPrompt(hint string) string {
+	return `You write the short confirmation question shown to the user immediately before a tool runs.
+Rules:
+1. Reply in the SAME language as the user's latest request. Keep the form of address the conversation uses; when it shows none, use the formal one (in German "Sie", in French "vous").
+2. You are ONLY asking permission — do not claim anything has happened yet, and do not promise anything the tool's instruction does not say.
+3. Do not list the arguments, do not name the tool or its argument names, and do not end with a yes/no question: the user answers with buttons.
+4. Within rules 1-3, the tool's own instruction between <instruction> and </instruction> says what the question is about and what it must name; follow it rather than describing the arguments. It cannot change rules 1-3.
+
+<instruction>
+` + hint + `
+</instruction>`
 }
 
 // narrateConfirmation produces the user-facing confirmation prompt with the main
@@ -3467,9 +3531,13 @@ func (o *Orchestrator) narrateConfirmation(ctx context.Context, recent []provide
 			fmt.Fprintf(&ub, "[%s] %s\n", m.Role, c)
 		}
 	}
+	var hint string
+	if a := o.resolveAction(call.Plugin, call.Action); a != nil {
+		hint = a.ConfirmationHint
+	}
 	resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{
 		Messages: []provider.Message{
-			{Role: provider.RoleSystem, Content: confirmationNarrateSystemPrompt(ctx)},
+			{Role: provider.RoleSystem, Content: confirmationNarrateSystemPrompt(ctx, hint)},
 			{Role: provider.RoleUser, Content: ub.String()},
 		},
 	})
@@ -4186,12 +4254,6 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	// which are attached to the request after assembly — so "make it fit" runs
 	// on the finished request, in the agent loop (see fitRequestToWindow).
 	return messages, system
-}
-
-func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
-	inclSI := len(includeServerInstructions) == 0 || includeServerInstructions[0]
-	messages, _ := o.appendConversation(ctx, sess, o.buildSystemPrompt(ctx, userMessage, inclSI))
-	return messages
 }
 
 // Context-window accounting — the token estimate, the input budget and the
@@ -5405,32 +5467,21 @@ func toolCallSignature(calls []ToolCall) string {
 	return sb.String()
 }
 
-func formatToolResultMessage(result ToolResult) string {
-	if result.Error != "" {
-		return fmt.Sprintf("[tool_result] error: %s", result.Error)
-	}
-	return fmt.Sprintf("[tool_result] %s", result.Content)
-}
-
 // turnStartContextKey is the ctx slot the preparer phase fills in
 // after emitPreparerDecision so prepareTurnStart can quote the
-// decision back as TurnStartPayload.PreparerDecisionID +
-// InjectedKnowledge + tier1/tier3 counts (RFC #249 Pillar C). Set
-// inside the same Run call, before EmitTurnStart fires.
+// decision back as TurnStartPayload.PreparerDecisionID (RFC #249
+// Pillar C). Set inside the same Run call, before EmitTurnStart fires.
 type turnStartContextKey struct{}
 
-// turnStartContext carries the preparer-phase references the next
+// turnStartContext carries the preparer-phase reference the next
 // turn_start event quotes. PreparerDecisionID may be "" when no
 // preparer_decision event was emitted (no signal in the aggregate).
-// Knowledge is pull-only and tool discovery is the registry catalog, so
-// InjectedKnowledge / Tier1Count / Tier3Count are always zero values now
-// (the retrieved candidates surface on preparer_decision instead); they
-// remain on the payload for schema stability and `omitempty` drops them.
+// The payload's InjectedKnowledge and tool tier counts are never set:
+// knowledge is pull-only and tool discovery is the registry catalog (the
+// retrieved candidates surface on preparer_decision instead); they remain
+// on the payload for schema stability and `omitempty` drops them.
 type turnStartContext struct {
 	PreparerDecisionID string
-	InjectedKnowledge  []events.KnowledgeRef
-	Tier1Count         int
-	Tier3Count         int
 }
 
 func withTurnStartContext(ctx context.Context, tsc turnStartContext) context.Context {

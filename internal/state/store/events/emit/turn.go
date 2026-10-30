@@ -13,9 +13,11 @@ import (
 //
 // RFC #249 Pillar C: InjectedKnowledge / PreparerDecisionID /
 // ToolTier1Count / ToolTier3Count cross-reference the preparer phase
-// emitted just before turn_start. Callers populate them from the
-// preparer aggregate stashed on ctx; pre-preparer-phase code paths
-// leave them zero/nil and the JSON payload omits them.
+// emitted just before turn_start. The orchestrator sets only
+// PreparerDecisionID, from the preparer decision stashed on ctx, and
+// leaves it empty on turns without one. Knowledge is pull-only and tool
+// discovery is the registry catalog, so the other three stay zero/nil;
+// the JSON payload omits every empty one.
 type TurnStartArgs struct {
 	SystemPromptSHA256 string
 	ServerInstructions []events.ServerInstructionRef

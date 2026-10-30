@@ -385,6 +385,7 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 			InjectContextArgs: a.InjectContextArgs,
 			AlwaysInclude:     a.AlwaysInclude,
 			ReadOnly:          a.ReadOnly,
+			ConfirmationHint:  a.ConfirmationHint,
 			Companions:        a.Companions,
 		}
 	}

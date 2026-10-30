@@ -25,9 +25,11 @@ import (
 
 // maxStickyTools backstops the sticky (loaded) set: once promoted, a tool
 // stays in the native tools array for the session, but the promoted set is
-// capped here. When more tools are loaded than the cap, the most-recently-
-// used win (highest LRURank). Always-include core tools are EXEMPT from
-// the cap — they are never dropped.
+// capped here. When more tools are loaded than the cap, the most recently
+// promoted win: highest LRURank (the turn of the tool's latest promotion,
+// see persistToolPromotion), ties broken by name. Calling a tool does not
+// refresh its rank. Always-include core tools are EXEMPT from the cap —
+// they are never dropped.
 const maxStickyTools = 40
 
 // promotedToolSet returns the session's sticky tool set — the tools the
@@ -69,8 +71,8 @@ func (o *Orchestrator) storedPromotedToolSet(ctx context.Context) map[string]boo
 		}
 		entries = append(entries, kt)
 	}
-	// Most-recently-used win when over the cap. Tie-break by name so the
-	// cap is deterministic across requests.
+	// The most recently promoted win when over the cap. Tie-break by name
+	// so the cap is deterministic across requests.
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].LRURank != entries[j].LRURank {
 			return entries[i].LRURank > entries[j].LRURank

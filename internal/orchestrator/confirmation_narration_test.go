@@ -70,7 +70,10 @@ func TestNarrateConfirmation_NilLLMReturnsEmpty(t *testing.T) {
 // detail attributes?", which a user can only answer yes to blind — three fields
 // on a machine were overwritten with another machine's values that way. The
 // fields have to be named individually, with the value they change from, and a
-// missing previous value has to be admitted rather than invented or dropped.
+// missing previous value has to be admitted rather than invented or dropped. A
+// new record lists the values it gets, never "new -> value", every field goes by
+// the name the user sees rather than the argument's, and the question offers no
+// "(yes/no)": the user answers with buttons.
 func TestNarrateConfirmation_SingleRecordPromptDemandsFields(t *testing.T) {
 	llm := &capturingLLM{responses: []string{"ok?"}}
 	orch := NewWithRules(llm, &fakeParser{}, NewToolRegistry(),
@@ -94,6 +97,13 @@ func TestNarrateConfirmation_SingleRecordPromptDemandsFields(t *testing.T) {
 		"previous value -> new value", // and named with what they change from
 		"the specified attributes",    // the phrasing that is called out as unacceptable
 		"not known here",              // a missing previous value is admitted
+		"never write one or an arrow", // a new record lists its values, not "new -> value"
+		"may also update an existing record is a change",
+		"never by the tool's argument name",
+		"field names included",
+		"without answer options", // the buttons answer, not "(yes/no)"
+		"not in the passive",     // "I would create …", not "… would be created"
+		"I would create the item **Cordless drill**:\n- Category: Tools", // the name in the sentence, labels for the rest
 	} {
 		if !strings.Contains(sys, want) {
 			t.Errorf("system prompt must cover %q, got: %q", want, sys)
@@ -155,6 +165,9 @@ func TestNarrateConfirmation_ReplyLanguageDirectiveReachesNarrator(t *testing.T)
 	if !strings.Contains(sys, "takes precedence over rule 1") {
 		t.Errorf("directive must be ranked above the latest-request language rule, got: %q", sys)
 	}
+	if !strings.Contains(sys, "does not apply to field names") {
+		t.Errorf("the directive's English technical terms must not reach the field names the user checks, got: %q", sys)
+	}
 	if !strings.HasPrefix(sys, confirmationNarratePrompt) {
 		t.Errorf("the standing narration rules must stay intact ahead of the directive, got: %q", sys)
 	}
@@ -173,5 +186,86 @@ func TestNarrateConfirmation_NoDirectiveKeepsPromptUnchanged(t *testing.T) {
 				t.Errorf("system prompt must be byte-for-byte the standing rules, got: %q", sys)
 			}
 		})
+	}
+}
+
+// TestNarrateConfirmation_FollowsTheToolsHint pins the per-tool wording: an
+// action that carries a ConfirmationHint is narrated under that hint (what the
+// user decides on, no argument listing, no yes/no question) instead of the
+// general field-by-field rules, which fit a record change only.
+func TestNarrateConfirmation_FollowsTheToolsHint(t *testing.T) {
+	llm := &capturingLLM{responses: []string{"Ich zeige Ihnen, wie Sie „Bleistift HB“ anlegen. Loslegen?"}}
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "timly",
+		Actions: []Action{{
+			Name:             "walk-through-task",
+			ConfirmationHint: "Ask in one sentence whether to show how the example item is created.",
+		}},
+	}, &echoExecutor{}); err != nil {
+		t.Fatal(err)
+	}
+	orch := NewWithRules(llm, &fakeParser{}, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
+
+	call := ToolCall{Plugin: "timly", Action: "walk-through-task", Args: map[string]string{"task": "create_item", "example_name": "Bleistift HB"}}
+	got := orch.narrateConfirmation(context.Background(), nil, call, "Wie lege ich einen Bleistift an?")
+
+	if got != "Ich zeige Ihnen, wie Sie „Bleistift HB“ anlegen. Loslegen?" {
+		t.Errorf("must return the LLM narration verbatim, got %q", got)
+	}
+	var sys string
+	for _, m := range llm.requests[0].Messages {
+		if m.Role == provider.RoleSystem {
+			sys = m.Content
+		}
+	}
+	if !strings.Contains(sys, "show how the example item is created") {
+		t.Errorf("system prompt must carry the tool's hint, got: %q", sys)
+	}
+	if strings.Contains(sys, "field: previous value") {
+		t.Errorf("the field-by-field rules must give way to the hint, got: %q", sys)
+	}
+	if !strings.Contains(strings.ToLower(sys), "form of address") || !strings.Contains(sys, `"Sie"`) {
+		t.Errorf("system prompt must keep the form of address and fall back to the formal one, got: %q", sys)
+	}
+
+	// Without a hint the general rules apply as before.
+	plain := ToolCall{Plugin: "timly", Action: "update-item", Args: map[string]string{"id": "7"}}
+	orch.narrateConfirmation(context.Background(), nil, plain, "ändere die Seriennummer")
+	for _, m := range llm.requests[1].Messages {
+		if m.Role == provider.RoleSystem && !strings.Contains(m.Content, "field: previous value") {
+			t.Errorf("an action without a hint keeps the general rules, got: %q", m.Content)
+		}
+	}
+
+	// The static fallback (narration unavailable) keeps a hinted action's arguments out of sight as well.
+	if got := orch.confirmationFallback(call); strings.Contains(got, "example_name") || strings.Contains(got, "walk-through-task") {
+		t.Errorf("fallback for a hinted action shows neither its arguments nor its name, got: %q", got)
+	}
+	if got := orch.confirmationFallback(plain); !strings.Contains(got, "- id: 7") {
+		t.Errorf("fallback for a plain action lists its arguments, got: %q", got)
+	}
+}
+
+// TestNarrateConfirmation_HintFoundUnderMCPNames pins the lookup through the
+// name normalisation the mcp-plugin needs: the manifest carries the prefixed
+// form ("timly__walk-through-task"), the model emits the bare one.
+func TestNarrateConfirmation_HintFoundUnderMCPNames(t *testing.T) {
+	llm := &capturingLLM{responses: []string{"Loslegen?"}}
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name:    "timly",
+		Actions: []Action{{Name: "timly__walk-through-task", ConfirmationHint: "Ask whether to show it."}},
+	}, &echoExecutor{}); err != nil {
+		t.Fatal(err)
+	}
+	orch := NewWithRules(llm, &fakeParser{}, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
+
+	orch.narrateConfirmation(context.Background(), nil, ToolCall{Plugin: "timly", Action: "walk-through-task"}, "zeig es mir")
+
+	for _, m := range llm.requests[0].Messages {
+		if m.Role == provider.RoleSystem && !strings.Contains(m.Content, "Ask whether to show it.") {
+			t.Errorf("the hint must be found under the normalised action name, got: %q", m.Content)
+		}
 	}
 }

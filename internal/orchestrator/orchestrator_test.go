@@ -400,22 +400,6 @@ func TestFormatToolCallMessageWithArgs(t *testing.T) {
 	}
 }
 
-func TestFormatToolResultMessageSuccess(t *testing.T) {
-	result := ToolResult{CallID: "1", Content: "all good"}
-	got := formatToolResultMessage(result)
-	if got != "[tool_result] all good" {
-		t.Errorf("formatToolResultMessage = %q", got)
-	}
-}
-
-func TestFormatToolResultMessageError(t *testing.T) {
-	result := ToolResult{CallID: "1", Error: "not found"}
-	got := formatToolResultMessage(result)
-	if got != "[tool_result] error: not found" {
-		t.Errorf("formatToolResultMessage = %q", got)
-	}
-}
-
 // --- Invoke steps (preparer-driven plugin runs without LLM) ---
 
 func TestRunInvokeStepsSingleStep(t *testing.T) {
@@ -1803,6 +1787,14 @@ func TestChannelFormatHint(t *testing.T) {
 			}
 		})
 	}
+}
+
+// buildMessages assembles the message list one agent-loop round sends: the
+// system prompt buildSystemPrompt builds for userMessage, server instructions
+// included, folded into appendConversation's history.
+func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string) []provider.Message {
+	messages, _ := o.appendConversation(ctx, sess, o.buildSystemPrompt(ctx, userMessage, true))
+	return messages
 }
 
 func TestBuildSystemPromptIncludesFormatSection(t *testing.T) {

@@ -165,6 +165,25 @@ func TestCapsToProto_ReadOnly(t *testing.T) {
 	}
 }
 
+// TestCapsToProto_ConfirmationHint locks in the ConfirmationHint flow plugin SDK -> proto.
+func TestCapsToProto_ConfirmationHint(t *testing.T) {
+	msg := CapabilitiesMsg{
+		Name: "myplugin",
+		Actions: []ActionMsg{
+			{Name: "show_how", ConfirmationHint: "Ask whether to show it."},
+			{Name: "delete_thing"},
+		},
+	}
+	pb := capsToProto(msg)
+
+	if pb.Actions[0].ConfirmationHint != "Ask whether to show it." {
+		t.Errorf("show_how should carry its confirmation hint to proto, got %q", pb.Actions[0].ConfirmationHint)
+	}
+	if pb.Actions[1].ConfirmationHint != "" {
+		t.Error("delete_thing should default to no confirmation hint")
+	}
+}
+
 func TestCapsToProto_Companions(t *testing.T) {
 	msg := CapabilitiesMsg{
 		Name:        "myplugin",

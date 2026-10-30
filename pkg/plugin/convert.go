@@ -51,6 +51,7 @@ func capsToProto(c CapabilitiesMsg) *pluginpb.PluginCapabilities {
 			InjectContextArgs: a.InjectContextArgs,
 			AlwaysInclude:     a.AlwaysInclude,
 			ReadOnly:          a.ReadOnly,
+			ConfirmationHint:  a.ConfirmationHint,
 			Companions:        a.Companions,
 		}
 	}

@@ -568,3 +568,26 @@ func TestManagerLoadAndUnload(t *testing.T) {
 		t.Error("echo should be deregistered")
 	}
 }
+
+func TestConfirmationHintMappedFromProto(t *testing.T) {
+	// The per-action confirmation hint (how the host words the approval question) crosses from the proto
+	// into orchestrator.Action; an action without one stays without.
+	pb := &pluginpb.PluginCapabilities{
+		Name:        "myplugin",
+		Description: "Test plugin",
+		Actions: []*pluginpb.Action{
+			{Name: "show_how", Description: "Show", ConfirmationHint: "Ask whether to show it."},
+			{Name: "delete_thing", Description: "Delete"},
+		},
+	}
+	cap := toPluginCapability(pb)
+	if len(cap.Actions) != 2 {
+		t.Fatalf("expected 2 actions, got %d", len(cap.Actions))
+	}
+	if cap.Actions[0].ConfirmationHint != "Ask whether to show it." {
+		t.Errorf("ConfirmationHint = %q, want the proto's hint", cap.Actions[0].ConfirmationHint)
+	}
+	if cap.Actions[1].ConfirmationHint != "" {
+		t.Errorf("delete_thing should have no ConfirmationHint, got %q", cap.Actions[1].ConfirmationHint)
+	}
+}
