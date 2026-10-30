@@ -176,10 +176,10 @@ func (o *Orchestrator) loadedAnyWriteTool(resultPayload string) bool {
 // Batch contract: names is a comma-separated list (tool-call args are
 // map[string]string), with a single-name fallback. A failure on one name
 // adds it to failed and does NOT abort the rest of the batch. Each loaded
-// tool's companions are loaded after it (loadCompanions). The promotion
-// write is best-effort: a store failure logs a warning and the name still
-// counts as loaded; the turn's turnToolLoads keeps it in the requests of
-// this turn, later turns won't see it.
+// tool's companions are loaded after it (loadToolAndCompanions). The
+// promotion write is best-effort: a store failure logs a warning and the
+// name still counts as loaded; the turn's turnToolLoads keeps it in the
+// requests of this turn, later turns won't see it.
 func (e *loadToolsExecutor) Execute(ctx context.Context, call ToolCall) ToolResult {
 	names := splitToolNames(call.Args["names"])
 	if len(names) == 0 {
@@ -206,15 +206,16 @@ func (e *loadToolsExecutor) Execute(ctx context.Context, call ToolCall) ToolResu
 			continue
 		}
 		requested[canonical] = true
-		if !listed[canonical] {
+		var companions []string
+		if listed[canonical] {
+			// An earlier name of this batch loaded it as a companion.
+			companions = e.orch.loadCompanions(ctx, canonical, allowed, allowedPlugins)
+		} else {
 			listed[canonical] = true
-			if sessionID != "" && e.orch.injectionStateStore != nil {
-				e.orch.persistToolPromotion(ctx, sessionID, canonical)
-			}
-			turnToolLoadsFromContext(ctx).record(canonical)
 			loaded = append(loaded, canonical)
+			companions = e.orch.loadToolAndCompanions(ctx, sessionID, canonical, allowed, allowedPlugins)
 		}
-		for _, companion := range e.orch.loadCompanions(ctx, canonical, allowed, allowedPlugins) {
+		for _, companion := range companions {
 			if !listed[companion] {
 				listed[companion] = true
 				loaded = append(loaded, companion)
@@ -377,6 +378,27 @@ func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name
 	}
 }
 
+// loadTool loads one tool, the same way on every load path: a sticky promotion
+// in the session store when there is one, which also clears a demotion, and an
+// entry in the turn's turnToolLoads, which keeps the tool in the requests of
+// this turn even when the store did not save the promotion.
+func (o *Orchestrator) loadTool(ctx context.Context, sessionID, fqn string) {
+	if sessionID != "" && o.injectionStateStore != nil {
+		o.persistToolPromotion(ctx, sessionID, fqn)
+	}
+	turnToolLoadsFromContext(ctx).record(fqn)
+}
+
+// loadToolAndCompanions loads the tool canonical and then its companions, for
+// _meta__load_tools and for a load on call alike, and returns the companions
+// it loaded.
+func (o *Orchestrator) loadToolAndCompanions(
+	ctx context.Context, sessionID, canonical string, allowed map[string]struct{}, allowedPlugins cachedAllowedPlugins,
+) []string {
+	o.loadTool(ctx, sessionID, canonical)
+	return o.loadCompanions(ctx, canonical, allowed, allowedPlugins)
+}
+
 // loadCompanions loads the companions declared by the action of the loaded tool
 // canonical, the way that tool was loaded, and returns the ones it loaded.
 func (o *Orchestrator) loadCompanions(
@@ -409,10 +431,7 @@ func (o *Orchestrator) loadCompanions(
 		if o.toolDemoted(ctx, sessionID, fqn) {
 			continue
 		}
-		if sessionID != "" && o.injectionStateStore != nil {
-			o.persistToolPromotion(ctx, sessionID, fqn)
-		}
-		turnToolLoadsFromContext(ctx).record(fqn)
+		o.loadTool(ctx, sessionID, fqn)
 		loaded[fqn] = true
 		out = append(out, fqn)
 	}

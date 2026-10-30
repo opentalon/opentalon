@@ -152,10 +152,10 @@ func (o *Orchestrator) callToUnloadedTool(ctx context.Context, call ToolCall) bo
 //     is loaded the way load_tools loads it — a sticky promotion in the session
 //     store — and also recorded in the turn's turnToolLoads, so the next
 //     request of the turn carries its schema whether or not the store saved the
-//     promotion. Its companions are loaded with it (loadCompanions). The answer
-//     names them and tells the model to call the tool again, directly, from its
-//     description (loadOnCallAnswer); it is marked NotRun, and its
-//     tool_call_result has the status not_run.
+//     promotion. Its companions are loaded with it (loadToolAndCompanions).
+//     The answer names them and tells the model to call the tool again,
+//     directly, from its description (loadOnCallAnswer); it is marked NotRun,
+//     and its tool_call_result has the status not_run.
 //   - A demoted tool keeps the answer it had before loading on call existed
 //     (load it first): promoting it would clear the demotion.
 //   - Anything else (a preparer or guard action, an action the session palette
@@ -178,11 +178,7 @@ func (o *Orchestrator) answerUnloadedCall(ctx context.Context, call ToolCall, di
 				"First call %s(names=%q), then call %s on your next step. Do not guess the parameters.",
 			canonical, loadTools, canonical, canonical), dispatchStart)
 	}
-	if sessionID != "" && o.injectionStateStore != nil {
-		o.persistToolPromotion(ctx, sessionID, canonical)
-	}
-	turnToolLoadsFromContext(ctx).record(canonical)
-	companions := o.loadCompanions(ctx, canonical, allowed, allowedPlugins)
+	companions := o.loadToolAndCompanions(ctx, sessionID, canonical, allowed, allowedPlugins)
 	slog.Info("LLM called an unloaded tool: loaded it, call not run",
 		"plugin", call.Plugin, "action", call.Action, "companions", companions)
 	answer := loadOnCallAnswer(canonical, companions)
