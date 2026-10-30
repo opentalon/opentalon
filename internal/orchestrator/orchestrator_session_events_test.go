@@ -471,8 +471,9 @@ func TestOrchestrator_SessionNotFound_NoEventEmitted(t *testing.T) {
 
 func TestOrchestrator_PendingToolCallRejected_EmitsUserMessageButNotTurnStart(t *testing.T) {
 	// When the user rejects a previously-queued tool-call confirmation,
-	// the orchestrator returns "OK, action cancelled." without entering
-	// the agent loop. Per the doc-comment at the EmitTurnStart call site,
+	// the orchestrator answers without entering the agent loop (without a
+	// classifier a typed reply cannot be read, so it is asked again: action
+	// confirmation_uninterpretable). Per the doc-comment at the EmitTurnStart call site,
 	// turn_start must NOT fire in this path (no LLM turn was started),
 	// but user_message must (the user did send "no").
 	sink := &recordingEventSink{}
@@ -492,8 +493,8 @@ func TestOrchestrator_PendingToolCallRejected_EmitsUserMessageButNotTurnStart(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Metadata["action"] != "confirmation_rejected" {
-		t.Fatalf("expected confirmation_rejected metadata, got: %+v", result.Metadata)
+	if result.Metadata["action"] != "confirmation_uninterpretable" {
+		t.Fatalf("expected confirmation_uninterpretable metadata, got: %+v", result.Metadata)
 	}
 
 	var users, turns int
@@ -3236,8 +3237,51 @@ func TestOrchestrator_PendingToolCall_Amended(t *testing.T) {
 	}
 }
 
-// On reject, the user-facing response carries the classifier's reason rather
-// than the generic cancellation line.
+// A reply to a plan confirmation that is neither yes nor no cancels the plan
+// and is answered as an ordinary message, like a single call's amend: no reply
+// row, no "Pipeline cancelled.", the reply stored once by the normal turn.
+func TestOrchestrator_PendingPipeline_AmendCancelsAndAnswers(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &fakeLLM{responses: []string{`{"decision":"amend","reason":"asks to check first"}`, "There is no such category yet."}}
+	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
+	orch.pendingMu.Lock()
+	orch.pendingPipelines[sessID] = pendingPipeline{plan: pipeline.NewPipeline(nil, pipeline.PipelineConfig{})}
+	orch.pendingMu.Unlock()
+
+	reply := "check first whether it already exists"
+	result, err := orch.Run(context.Background(), sessID, reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Metadata["action"] == "pipeline_cancelled" || result.Response != "There is no such category yet." {
+		t.Errorf("Response = %q, action = %q, want the reply answered", result.Response, result.Metadata["action"])
+	}
+	if orch.pendingPipelines[sessID].plan != nil {
+		t.Error("the plan must be cancelled")
+	}
+	got := findConfirmationResolvedPayloads(t, sink.snapshot())
+	if len(got) != 1 || got[0].Choice != "amend" {
+		t.Fatalf("want one amend resolved, got %+v", got)
+	}
+	sess, _ := orch.sessions.Get(sessID)
+	stored := 0
+	for _, m := range sess.Messages {
+		if m.Role == provider.RoleUser && m.Content == reply {
+			stored++
+			if m.PromptType != "" {
+				t.Errorf("the reply was stored as a confirmation reply: %+v", m)
+			}
+		}
+	}
+	if stored != 1 {
+		t.Errorf("reply stored %d times, want once", stored)
+	}
+}
+
+// On reject, the user gets the fixed notice their client words by its action;
+// the classifier's reason, written for the log, stays in the event and never
+// reaches the user.
 func TestOrchestrator_PendingToolCall_RejectedWithReason(t *testing.T) {
 	sink := &recordingEventSink{}
 	llm := &fakeLLM{responses: []string{`{"decision":"reject","reason":"You asked to cancel, so I stopped."}`}}
@@ -3250,8 +3294,14 @@ func TestOrchestrator_PendingToolCall_RejectedWithReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Response != "You asked to cancel, so I stopped." {
-		t.Errorf("Response = %q, want the classifier's reason", result.Response)
+	if result.Response != confirmationRejectedReply || result.Metadata["action"] != "confirmation_rejected" {
+		t.Errorf("Response = %q, action = %q, want the fixed notice", result.Response, result.Metadata["action"])
+	}
+	sess, _ := orch.sessions.Get(sessID)
+	for _, m := range sess.Messages {
+		if m.Content == "nein, lass es" {
+			t.Errorf("the rejecting reply was stored: %+v", m)
+		}
 	}
 	got := findConfirmationResolvedPayloads(t, sink.snapshot())
 	if len(got) != 1 || got[0].Choice != "reject" {
@@ -3376,8 +3426,8 @@ func TestOrchestrator_PendingToolCall_ApproveWithChange_CoercedToAmend(t *testin
 }
 
 // A classifier LLM error / garbage reply must fail closed: resolve to reject via
-// the "fallback" path (never a free-text approve) and surface the safe cancel
-// message — verified end-to-end through Run, not just at the planner.
+// the "fallback" path (never a free-text approve) and ask the user to repeat
+// the reply rather than treat it as a no — verified end-to-end through Run.
 func TestOrchestrator_PendingToolCall_ClassifierError_FallsBackToReject(t *testing.T) {
 	sink := &recordingEventSink{}
 	// Non-JSON classifier output → ClassifyConfirmation returns an error.
@@ -3391,12 +3441,15 @@ func TestOrchestrator_PendingToolCall_ClassifierError_FallsBackToReject(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Response != confirmationUninterpretableReply {
-		t.Errorf("Response = %q, want the safe uninterpretable-reply line", result.Response)
+	if result.Response != confirmationUninterpretableReply || result.Metadata["action"] != "confirmation_uninterpretable" {
+		t.Errorf("Response = %q, action = %q, want the ask-again reply, not a no", result.Response, result.Metadata["action"])
 	}
 	got := findConfirmationResolvedPayloads(t, sink.snapshot())
 	if len(got) != 1 || got[0].Choice != "reject" {
 		t.Fatalf("want one reject resolved, got %+v", got)
+	}
+	if got[0].Reason != confirmationUninterpretableReply {
+		t.Errorf("Reason = %q, want the uninterpretable-reply line in the event", got[0].Reason)
 	}
 	if got[0].ResolvedBy != "fallback" {
 		t.Errorf("ResolvedBy = %q, want fallback", got[0].ResolvedBy)

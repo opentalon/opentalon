@@ -1517,14 +1517,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if pendingPlan.confID != "" {
 			resolvedCtx = emit.WithParent(ctx, pendingPlan.confID)
 		}
-		// Pipelines are two-way (approve / cancel): the single-call amend
-		// re-plan does not apply to a multi-step plan, so anything that isn't a
-		// clean approve cancels. classifyConfirmationReply still gives us the
-		// button bypass, the LLM classifier, and "im Zweifel reject" in one place.
+		// A plan is approved or cancelled as a whole: there is no corrected plan
+		// to re-run, so a reply that is neither yes nor no (amend) cancels the
+		// plan and is answered as an ordinary message, as for a single call
+		// below. classifyConfirmationReply still gives us the button bypass, the
+		// LLM classifier, and "im Zweifel reject" in one place.
 		decision, reason, resolvedBy := o.classifyConfirmationReply(ctx, userMessage, "pipeline_plan", map[string]string{"steps": fmt.Sprintf("%d", len(p.Steps))})
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
-		_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, confirmationReplyMetadata(decision))
-		if decision == pipeline.DecisionApprove {
+		switch decision {
+		case pipeline.DecisionApprove:
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, confirmationReplyMetadata(decision))
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionApprove, ResolvedBy: resolvedBy})
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
 			res, err := o.executePipeline(ctx, sessionID, p)
@@ -1535,21 +1537,20 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				}
 			}
 			return res, err
+		case pipeline.DecisionAmend:
+			// No reply row and no return: the normal turn below adds the reply
+			// to history once and answers it.
+			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionAmend, ResolvedBy: resolvedBy, Reason: reason})
+			log.Debug("pipeline cancelled, answering the reply", "pipeline_id", p.ID)
+		default: // pipeline.DecisionReject
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, confirmationReplyMetadata(decision))
+			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionReject, ResolvedBy: resolvedBy, Reason: reason})
+			// The classifier's reason is written for the log and stays in the event.
+			res := notApprovedResult(resolvedBy, pipelineCancelledReply, "pipeline_cancelled")
+			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: res.Response})
+			log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
+			return res, nil
 		}
-		emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionReject, ResolvedBy: resolvedBy, Reason: reason})
-		resp := events.SanitizeUTF8(strings.TrimSpace(reason))
-		if resp == "" {
-			resp = "Pipeline cancelled."
-		}
-		_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp})
-		log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
-		return &RunResult{
-			Response: resp,
-			Metadata: map[string]string{
-				"type":   "system",
-				"action": "pipeline_cancelled",
-			},
-		}, nil
 	}
 
 	// Block A2: Check for pending tool call confirmation. The persisted
@@ -1642,7 +1643,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			toolCallConfirmed = true
 
 		case pipeline.DecisionAmend:
-			// The user replied with a correction, not a yes/no. The pending call
+			// The user replied with neither a yes nor a no: a correction,
+			// another instruction or a question. The pending call
 			// is already torn down (in-memory maps + persisted metadata cleared
 			// above). Do NOT execute and do NOT roll back: fall through to the
 			// normal turn so the planner / agent loop re-plans from history + the
@@ -1684,20 +1686,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if s, _ := sessions.Get(sessionID); s != nil && msgCountAtStart < len(s.Messages) {
 				_ = sessions.SetSummary(sessionID, s.Summary, s.Messages[:msgCountAtStart])
 			}
-			// Prefer the classifier's one-sentence reason so the user learns why
-			// it was cancelled; fall back to the generic line. Sanitized to match
-			// the event copy (the reason is model-authored free text).
-			resp := events.SanitizeUTF8(strings.TrimSpace(reason))
-			if resp == "" {
-				resp = "OK, action cancelled."
-			}
-			return &RunResult{
-				Response: resp,
-				Metadata: map[string]string{
-					"type":   "system",
-					"action": "confirmation_rejected",
-				},
-			}, nil
+			// The classifier's reason is written for the log and stays in the
+			// event; the user gets a fixed notice their client can word in
+			// their language by its action.
+			return notApprovedResult(resolvedBy, confirmationRejectedReply, "confirmation_rejected"), nil
 		}
 	}
 
@@ -3114,10 +3106,10 @@ func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCal
 	return o.onStreamChunk
 }
 
-// confirmationUninterpretableReply is the deterministic, language-neutral reply
-// used when no classifier is available or the classifier call fails — the
-// "im Zweifel reject" branch. (When the classifier itself returns reject, its
-// own one-sentence reason is preferred over this template.)
+// confirmationUninterpretableReply answers, and is logged as the reason, when no
+// classifier is available or the classifier call fails — the "im Zweifel
+// reject" branch: the user's reply was not read, so they are asked to repeat
+// it rather than told it was a no (notApprovedResult).
 const confirmationUninterpretableReply = "I couldn't reliably interpret your reply, so I cancelled the pending action to be safe. Please tell me again — confirm, change, or cancel?"
 
 // Confirmation resolution provenance (confirmation_resolved.resolved_by).
@@ -3461,6 +3453,27 @@ func confirmationNarrateSystemPrompt(ctx context.Context, hint string) string {
 		base += " Its line on technical terms does not apply to field names: they are written in this language (rule 5)."
 	}
 	return base
+}
+
+// confirmationRejectedReply and pipelineCancelledReply answer a rejected
+// confirmation. A client words the notice in the user's language by the
+// result's action (confirmation_rejected, pipeline_cancelled); this English line
+// is what a client without its own wording shows.
+const (
+	confirmationRejectedReply = "OK, action cancelled."
+	pipelineCancelledReply    = "Pipeline cancelled."
+)
+
+// notApprovedResult answers a confirmation that was not approved: the fixed
+// notice for a reject, or, when the reply could not be read at all
+// (resolvedByFallback), confirmationUninterpretableReply with the action
+// confirmation_uninterpretable, so the user repeats it.
+func notApprovedResult(resolvedBy, cancelledReply, cancelledAction string) *RunResult {
+	reply, action := cancelledReply, cancelledAction
+	if resolvedBy == resolvedByFallback {
+		reply, action = confirmationUninterpretableReply, "confirmation_uninterpretable"
+	}
+	return &RunResult{Response: reply, Metadata: map[string]string{"type": "system", "action": action}}
 }
 
 // confirmationFallback is the static confirmation prompt when the narration is
@@ -4074,7 +4087,7 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 //
 // Only APPROVED-and-executed exchanges are stripped — a prompt row directly
 // followed by its reply row. A prompt WITHOUT a reply row stays: single-call
-// rejects never persist a reply, an amend correction arrives as a plain user
+// rejects never persist a reply, an amend reply arrives as a plain user
 // message, and the re-planning paths need the proposed action for context.
 // Pipeline plan confirmations (prompt_type=confirmation) are untouched. The
 // user-facing transcript is untouched too — this filters only what the LLM
