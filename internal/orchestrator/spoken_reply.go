@@ -35,6 +35,9 @@ const (
 	// InputMetadataKey with InputVoice marks a stored user turn the person spoke.
 	InputMetadataKey = "input"
 	InputVoice       = "voice"
+	// ReplyMetadataKey with ReplySpoken asks for a spoken answer; a channel echoes it on the answer's frame.
+	ReplyMetadataKey = "reply"
+	ReplySpoken      = "spoken"
 
 	spokenOpen  = "<spoken>"
 	spokenClose = "</spoken>"
@@ -250,6 +253,16 @@ func voiceInputMetadata(ctx context.Context, extra map[string]string) map[string
 	meta := map[string]string{InputMetadataKey: InputVoice}
 	for k, v := range extra {
 		meta[k] = v
+	}
+	return meta
+}
+
+// resumedSpoken gives a re-emitted confirmation (PendingConfirmationFrame) the
+// reply=spoken its live frame carried as the echo of the spoken message: a
+// client answers it aloud, whichever button is pressed.
+func resumedSpoken(meta map[string]string, spoken bool) map[string]string {
+	if spoken {
+		meta[ReplyMetadataKey] = ReplySpoken
 	}
 	return meta
 }
