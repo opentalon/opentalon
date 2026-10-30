@@ -38,7 +38,7 @@ const maxStickyTools = 40
 // loaded is never missing from the next request.
 func (o *Orchestrator) promotedToolSet(ctx context.Context) map[string]bool {
 	out := o.storedPromotedToolSet(ctx)
-	for fqn := range toolLoadsOnCallFromContext(ctx).loaded() {
+	for fqn := range toolLoadsOnCallFromContext(ctx) {
 		out[fqn] = true
 	}
 	return out
@@ -225,43 +225,26 @@ func (o *Orchestrator) toolDemoted(ctx context.Context, sessionID, fqn string) b
 	return false
 }
 
-// toolLoadsOnCall is one agent-loop turn's record of the tools answerUnloadedCall
-// loaded: tools feeds promotedToolSet for the rest of the turn, answered counts
-// the calls answered that way, so the loop can tell a call that was not run
-// from one that was. A nil record (any caller outside the agent loop) records
-// nothing.
-type toolLoadsOnCall struct {
-	tools    map[string]bool
-	answered int
-}
+// toolLoadsOnCall is one agent-loop turn's set of the tools answerUnloadedCall
+// loaded, which promotedToolSet keeps in the native array for the rest of the
+// turn. Outside the agent loop there is none (nil), and record does nothing.
+type toolLoadsOnCall map[string]bool
 
 type toolLoadsOnCallKey struct{}
 
-func withToolLoadsOnCall(ctx context.Context, loads *toolLoadsOnCall) context.Context {
+func withToolLoadsOnCall(ctx context.Context, loads toolLoadsOnCall) context.Context {
 	return context.WithValue(ctx, toolLoadsOnCallKey{}, loads)
 }
 
-func toolLoadsOnCallFromContext(ctx context.Context) *toolLoadsOnCall {
-	loads, _ := ctx.Value(toolLoadsOnCallKey{}).(*toolLoadsOnCall)
+func toolLoadsOnCallFromContext(ctx context.Context) toolLoadsOnCall {
+	loads, _ := ctx.Value(toolLoadsOnCallKey{}).(toolLoadsOnCall)
 	return loads
 }
 
-func (l *toolLoadsOnCall) record(fqn string) {
-	if l == nil {
-		return
+func (l toolLoadsOnCall) record(fqn string) {
+	if l != nil {
+		l[fqn] = true
 	}
-	if l.tools == nil {
-		l.tools = make(map[string]bool)
-	}
-	l.tools[fqn] = true
-	l.answered++
-}
-
-func (l *toolLoadsOnCall) loaded() map[string]bool {
-	if l == nil {
-		return nil
-	}
-	return l.tools
 }
 
 // catalogEntry is one row of the rendered tool catalog: the tool's

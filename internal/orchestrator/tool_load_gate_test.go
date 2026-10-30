@@ -99,7 +99,7 @@ func TestToolIsNative(t *testing.T) {
 func TestExecuteCall_LoadsToolNotInSentArrayWithoutRunningIt(t *testing.T) {
 	store := &fakeInjectionStateStore{}
 	orch, exec := gateOrchWithStore(t, store)
-	loads := &toolLoadsOnCall{}
+	loads := toolLoadsOnCall{}
 	ctx := withToolLoadsOnCall(sentCtx("p__always"), loads) // catalog was NOT sent
 
 	res := orch.executeCall(ctx, ToolCall{ID: "c1", Plugin: "p", Action: "catalog", FromLLM: true})
@@ -115,9 +115,8 @@ func TestExecuteCall_LoadsToolNotInSentArrayWithoutRunningIt(t *testing.T) {
 	if kt, ok := storedTool(store, "p__catalog"); !ok || kt.Demoted {
 		t.Errorf("the tool must be promoted in the session store, got %+v (found=%v)", kt, ok)
 	}
-	if !loads.loaded()["p__catalog"] || loads.answered != 1 || !res.NotRun {
-		t.Errorf("the turn must record the load and the unrun call, marked not run, got tools=%v answered=%d NotRun=%v",
-			loads.loaded(), loads.answered, res.NotRun)
+	if !loads["p__catalog"] || !res.NotRun {
+		t.Errorf("the turn must record the load and the result must be marked not run, got loads=%v NotRun=%v", loads, res.NotRun)
 	}
 }
 
@@ -207,7 +206,7 @@ func TestExecuteCall_UnloadableToolIsRefusedAndNotLoaded(t *testing.T) {
 		{"unknown action", "p", "nope", "not found"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			loads := &toolLoadsOnCall{}
+			loads := toolLoadsOnCall{}
 			ctx := withToolLoadsOnCall(withSentNativeTools(
 				actor.WithSessionID(profile.WithProfile(context.Background(), prof), "s1"), map[string]struct{}{}), loads)
 
@@ -215,8 +214,8 @@ func TestExecuteCall_UnloadableToolIsRefusedAndNotLoaded(t *testing.T) {
 			if !strings.Contains(res.Error, tc.want) || res.NotRun {
 				t.Errorf("want a refusal containing %q, not marked not run, got %q (NotRun=%v)", tc.want, res.Error, res.NotRun)
 			}
-			if len(loads.loaded()) != 0 {
-				t.Errorf("nothing may be loaded, got %v", loads.loaded())
+			if len(loads) != 0 {
+				t.Errorf("nothing may be loaded, got %v", loads)
 			}
 		})
 	}
@@ -244,16 +243,16 @@ func TestExecuteCall_DemotedToolNotInSentArrayKeepsLoadFirstAnswer(t *testing.T)
 	orch, exec := gateOrchWithStore(t, store)
 	sink := &recordingEventSink{}
 	orch.eventSink = sink
-	loads := &toolLoadsOnCall{}
+	loads := toolLoadsOnCall{}
 	ctx := withToolLoadsOnCall(sentCtx("p__always"), loads)
 
 	res := orch.executeCall(ctx, ToolCall{ID: "c1", Plugin: "p", Action: "catalog", FromLLM: true})
 	if !strings.Contains(res.Error, "is not loaded") || !strings.Contains(res.Error, `_meta__load_tools(names="p__catalog")`) {
 		t.Errorf("a demoted tool must get the load-first answer, got %q", res.Error)
 	}
-	if exec.count != 0 || store.updateCalls != 0 || len(loads.loaded()) != 0 {
+	if exec.count != 0 || store.updateCalls != 0 || len(loads) != 0 {
 		t.Errorf("a demoted tool must not run or be loaded, ran %d, store writes %d, loads %v",
-			exec.count, store.updateCalls, loads.loaded())
+			exec.count, store.updateCalls, loads)
 	}
 	if results := findToolCallResultPayloads(t, sink.snapshot()); res.NotRun || len(results) != 1 || results[0].Status != "error" {
 		t.Errorf("a demoted tool's refusal must stay an error, got NotRun=%v results %+v", res.NotRun, results)

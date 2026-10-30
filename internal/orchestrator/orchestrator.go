@@ -2276,10 +2276,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var writeToolLoaded bool // load_tools promoted a non-read-only action this turn
 	var writeToolCalled bool // the model attempted any non-read-only call this turn
 	var actionNudged bool    // the one-shot phantom nudge was already spent
-	// Calls to unloaded tools answered "now loaded, call again" this turn
-	// (answerUnloadedCall): the tools they loaded and how many went unrun.
-	loadsOnCall := &toolLoadsOnCall{}
-	ctx = withToolLoadsOnCall(ctx, loadsOnCall)
+	// The tools loaded on call this turn (answerUnloadedCall).
+	ctx = withToolLoadsOnCall(ctx, toolLoadsOnCall{})
 	agentRound := 0
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		agentRound = i + 1
@@ -2794,10 +2792,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				timing.begin("tool_" + toolFQN(calls[i].Plugin, calls[i].Action))
 			}
 			pluginStart := time.Now()
-			answeredBefore := loadsOnCall.answered
 			toolResult := o.executeCall(ctx, calls[i])
-			loadedOnCall := loadsOnCall.answered > answeredBefore
-			if loadedOnCall {
+			if toolResult.NotRun {
 				unrun[toolCallSignature(calls[i:i+1])] = true
 			}
 			// Captured before the repair block so the "plugin call" log line
@@ -2835,7 +2831,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// Same-turn load completion for _meta__load_tools and for a tool
 			// loaded on call. The executor (system_tools.go) already persisted
 			// a sticky KnownToolEntry for each loaded tool, and a tool loaded
-			// on call is also in loadsOnCall, so a fresh buildToolDefinitions
+			// on call is also in toolLoadsOnCall, so a fresh buildToolDefinitions
 			// picks them up via promotedToolSet and puts their full schemas
 			// into the tools array for the rest of THIS turn. Without the
 			// rebuild below the load would only take effect on the NEXT
@@ -2848,11 +2844,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// inline in the system prompt on the next round; cachedTools is
 			// irrelevant on that path) and, for load_tools, a successful
 			// result (a failed batch promoted nothing).
-			if nativeMode && (loadedOnCall || (toolResult.Error == "" &&
+			if nativeMode && (toolResult.NotRun || (toolResult.Error == "" &&
 				call.Plugin == metaPluginName && call.Action == metaLoadTools)) {
 				cachedTools = o.buildToolDefinitions(ctx)
 				log.Debug("cachedTools refreshed after a tool load",
-					"tools_count", len(cachedTools), "loaded_on_call", loadedOnCall)
+					"tools_count", len(cachedTools), "loaded_on_call", toolResult.NotRun)
 			}
 			// Phantom-completion guard: remember when this load promoted a
 			// write tool. Parsed from the executor's result payload — the
