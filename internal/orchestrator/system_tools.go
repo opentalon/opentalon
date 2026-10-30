@@ -194,7 +194,7 @@ func (e *loadToolsExecutor) Execute(ctx context.Context, call ToolCall) ToolResu
 	var loaded, failed []string
 	seen := make(map[string]bool, len(names))
 	for _, name := range names {
-		canonical, ok := e.resolveVisibleTool(name, allowed, allowedPlugins)
+		canonical, ok := e.orch.resolveVisibleTool(name, allowed, allowedPlugins)
 		if !ok {
 			failed = append(failed, name)
 			continue
@@ -238,18 +238,20 @@ func (e *loadToolsExecutor) Execute(ctx context.Context, call ToolCall) ToolResu
 // "what this session can see" — blocks actions filtered out of the
 // per-session palette (preparer/guard actions, UserOnly actions, MCP
 // tools an upstream manifest filter excluded for this auth path).
-func (e *loadToolsExecutor) resolveVisibleTool(
+// answerUnloadedCall decides with it too, so a tool is loaded on call
+// exactly when load_tools could load it.
+func (o *Orchestrator) resolveVisibleTool(
 	name string, allowed map[string]struct{}, allowedPlugins cachedAllowedPlugins,
 ) (string, bool) {
 	plugin, action, err := parseToolName(name)
 	if err != nil {
 		return "", false
 	}
-	cap, ok := e.orch.registry.GetCapability(plugin)
+	cap, ok := o.registry.GetCapability(plugin)
 	if !ok {
 		return "", false
 	}
-	if !e.orch.pluginAllowed(cap, allowedPlugins) {
+	if !o.pluginAllowed(cap, allowedPlugins) {
 		return "", false
 	}
 	found := false
