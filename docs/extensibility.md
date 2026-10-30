@@ -89,6 +89,27 @@ Three limits are worth knowing:
   as JSON `null` rather than forwarding it, so a nullable type in your fragment
   does not give the model a way to send an explicit null.
 
+### Loading lookups with the action that needs them
+
+The model sees most actions only as a catalog line until it loads them, and
+every load costs a model call. An action can name other actions of the same
+plugin in its `companions` list (`Companions` in the Go SDK), typically the
+lookups that supply its parameter values:
+
+```json
+{"name": "create_issue", "companions": ["list_projects", "list_users"]}
+```
+
+When the model loads the action, through `_meta__load_tools` or by calling it
+before it was loaded, the host loads its companions too and names them in its
+answer, so the model can call them in its next step.
+
+- A companion the session may not see (a user-only or preparer action, or a
+  name the plugin does not have) is skipped; the action itself still loads.
+- A companion that is already loaded, always included or demoted is left as
+  it is.
+- Only the action's own companions load, not theirs.
+
 ### Context arguments the host injects
 
 An action can ask the host for facts about the request it runs in — facts the

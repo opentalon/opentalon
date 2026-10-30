@@ -102,9 +102,10 @@ type loadToolsExecutor struct {
 }
 
 // loadToolsResult is the status-only payload load_tools returns. loaded
-// carries the canonical FQNs that were promoted this call; failed carries
-// the names that didn't resolve or aren't visible to this session (omitted
-// when empty). ready is true whenever at least one tool loaded.
+// carries the canonical FQNs that were promoted this call, companions
+// included; failed carries the names that didn't resolve or aren't visible
+// to this session (omitted when empty). ready is true whenever at least one
+// tool loaded.
 // instruction is set exactly when ready: models routinely treat the load
 // status as a result worth reporting and end the turn without ever calling
 // the tool they just asked for — the inline instruction steers them back to
@@ -174,10 +175,11 @@ func (o *Orchestrator) loadedAnyWriteTool(resultPayload string) bool {
 //
 // Batch contract: names is a comma-separated list (tool-call args are
 // map[string]string), with a single-name fallback. A failure on one name
-// adds it to failed and does NOT abort the rest of the batch. The
+// adds it to failed and does NOT abort the rest of the batch. Each loaded
+// tool's companions are loaded after it (loadToolAndCompanions). The
 // promotion write is best-effort: a store failure logs a warning and the
-// name still counts as loaded for this round-trip (the next request
-// rebuild simply won't see it).
+// name still counts as loaded; the turn's turnToolLoads keeps it in the
+// requests of this turn, later turns won't see it.
 func (e *loadToolsExecutor) Execute(ctx context.Context, call ToolCall) ToolResult {
 	names := splitToolNames(call.Args["names"])
 	if len(names) == 0 {
@@ -192,21 +194,33 @@ func (e *loadToolsExecutor) Execute(ctx context.Context, call ToolCall) ToolResu
 	allowedPlugins := e.orch.resolveAllowedPlugins(ctx)
 
 	var loaded, failed []string
-	seen := make(map[string]bool, len(names))
+	requested := make(map[string]bool, len(names))
+	listed := make(map[string]bool, len(names))
 	for _, name := range names {
 		canonical, ok := e.orch.resolveVisibleTool(name, allowed, allowedPlugins)
 		if !ok {
 			failed = append(failed, name)
 			continue
 		}
-		if seen[canonical] {
+		if requested[canonical] {
 			continue
 		}
-		seen[canonical] = true
-		if sessionID != "" && e.orch.injectionStateStore != nil {
-			e.orch.persistToolPromotion(ctx, sessionID, canonical)
+		requested[canonical] = true
+		var companions []string
+		if listed[canonical] {
+			// An earlier name of this batch loaded it as a companion.
+			companions = e.orch.loadCompanions(ctx, canonical, allowed, allowedPlugins)
+		} else {
+			listed[canonical] = true
+			loaded = append(loaded, canonical)
+			companions = e.orch.loadToolAndCompanions(ctx, sessionID, canonical, allowed, allowedPlugins)
 		}
-		loaded = append(loaded, canonical)
+		for _, companion := range companions {
+			if !listed[companion] {
+				listed[companion] = true
+				loaded = append(loaded, companion)
+			}
+		}
 	}
 
 	payload := loadToolsResult{
@@ -326,8 +340,8 @@ func splitToolNames(raw string) []string {
 //
 // Read/write failures log a warning and return — the LLM's load_tools
 // call already succeeded for this round-trip; only the durable promotion
-// is lost (the next request's rebuild won't see the tool until a
-// successful write).
+// is lost (later turns won't see the tool until a successful write; the
+// callers record it in the turn's turnToolLoads for this turn).
 func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name string) {
 	existing, err := o.injectionStateStore.GetInjectionState(ctx, sessionID)
 	if err != nil {
@@ -362,6 +376,66 @@ func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name
 			"component", "orchestrator", "session", sessionID, "tool", name, "error", err)
 		return
 	}
+}
+
+// loadTool loads one tool, the same way on every load path: a sticky promotion
+// in the session store when there is one, which also clears a demotion, and an
+// entry in the turn's turnToolLoads, which keeps the tool in the requests of
+// this turn even when the store did not save the promotion.
+func (o *Orchestrator) loadTool(ctx context.Context, sessionID, fqn string) {
+	if sessionID != "" && o.injectionStateStore != nil {
+		o.persistToolPromotion(ctx, sessionID, fqn)
+	}
+	turnToolLoadsFromContext(ctx).record(fqn)
+}
+
+// loadToolAndCompanions loads the tool canonical and then its companions, for
+// _meta__load_tools and for a load on call alike, and returns the companions
+// it loaded.
+func (o *Orchestrator) loadToolAndCompanions(
+	ctx context.Context, sessionID, canonical string, allowed map[string]struct{}, allowedPlugins cachedAllowedPlugins,
+) []string {
+	o.loadTool(ctx, sessionID, canonical)
+	return o.loadCompanions(ctx, canonical, allowed, allowedPlugins)
+}
+
+// loadCompanions loads the companions declared by the action of the loaded tool
+// canonical, the way that tool was loaded, and returns the ones it loaded.
+func (o *Orchestrator) loadCompanions(
+	ctx context.Context, canonical string, allowed map[string]struct{}, allowedPlugins cachedAllowedPlugins,
+) []string {
+	plugin, name, err := parseToolName(canonical)
+	if err != nil {
+		return nil
+	}
+	action := o.resolveAction(plugin, name)
+	if action == nil || len(action.Companions) == 0 {
+		return nil
+	}
+	sessionID := actor.SessionID(ctx)
+	loaded := o.promotedToolSet(ctx)
+	var out []string
+	for _, companion := range action.Companions {
+		fqn, visible := o.resolveVisibleTool(toolFQN(plugin, companion), allowed, allowedPlugins)
+		if !visible {
+			continue
+		}
+		if a := o.resolveAction(plugin, companion); a == nil || a.AlwaysInclude {
+			continue
+		}
+		if loaded[fqn] {
+			// Later promotions this turn can push it out of the capped sticky set.
+			turnToolLoadsFromContext(ctx).record(fqn)
+			continue
+		}
+		if o.toolDemoted(ctx, sessionID, fqn) {
+			continue
+		}
+		o.loadTool(ctx, sessionID, fqn)
+		loaded[fqn] = true
+		out = append(out, fqn)
+	}
+	return out
 }
 
 // registerLoadToolsTool wires the meta-tool into the registry so the LLM

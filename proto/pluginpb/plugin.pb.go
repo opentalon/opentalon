@@ -886,8 +886,16 @@ type Action struct {
 	// a report). Plugins that aggregate upstream tools (e.g. the
 	// mcp-plugin) propagate it from the tool's `_meta.confirmation_hint`.
 	ConfirmationHint string `protobuf:"bytes,8,opt,name=confirmation_hint,json=confirmationHint,proto3" json:"confirmation_hint,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Names of other actions of this plugin that the orchestrator loads
+	// together with this one, typically the lookups that supply this action's
+	// parameter values. When the model loads this action (through
+	// _meta__load_tools, or by calling it before it was loaded), each
+	// companion the session may see is loaded too, unless it is already
+	// loaded, always included or demoted. Companions of a companion are not
+	// loaded. Empty (the default) means the action loads alone.
+	Companions    []string `protobuf:"bytes,9,rep,name=companions,proto3" json:"companions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Action) Reset() {
@@ -974,6 +982,13 @@ func (x *Action) GetConfirmationHint() string {
 		return x.ConfirmationHint
 	}
 	return ""
+}
+
+func (x *Action) GetCompanions() []string {
+	if x != nil {
+		return x.Companions
+	}
+	return nil
 }
 
 type Parameter struct {
@@ -1137,7 +1152,7 @@ const file_plugin_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x18\n" +
 	"\acontent\x18\x03 \x01(\tR\acontent\x12\x12\n" +
-	"\x04tags\x18\x04 \x03(\tR\x04tags\"\xbc\x02\n" +
+	"\x04tags\x18\x04 \x03(\tR\x04tags\"\xdc\x02\n" +
 	"\x06Action\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12>\n" +
@@ -1148,7 +1163,10 @@ const file_plugin_proto_rawDesc = "" +
 	"\x13inject_context_args\x18\x05 \x03(\tR\x11injectContextArgs\x12%\n" +
 	"\x0ealways_include\x18\x06 \x01(\bR\ralwaysInclude\x12\x1b\n" +
 	"\tread_only\x18\a \x01(\bR\breadOnly\x12+\n" +
-	"\x11confirmation_hint\x18\b \x01(\tR\x10confirmationHint\"\x89\x01\n" +
+	"\x11confirmation_hint\x18\b \x01(\tR\x10confirmationHint\x12\x1e\n" +
+	"\n" +
+	"companions\x18\t \x03(\tR\n" +
+	"companions\"\x89\x01\n" +
 	"\tParameter\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x12\n" +

@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -180,6 +181,25 @@ func TestCapsToProto_ConfirmationHint(t *testing.T) {
 	}
 	if pb.Actions[1].ConfirmationHint != "" {
 		t.Error("delete_thing should default to no confirmation hint")
+	}
+}
+
+func TestCapsToProto_Companions(t *testing.T) {
+	msg := CapabilitiesMsg{
+		Name:        "myplugin",
+		Description: "Test",
+		Actions: []ActionMsg{
+			{Name: "create_thing", Description: "Write", Companions: []string{"list_groups", "list_kinds"}},
+			{Name: "list_groups", Description: "Lookup"},
+		},
+	}
+	pb := capsToProto(msg)
+
+	if got := pb.Actions[0].Companions; !slices.Equal(got, []string{"list_groups", "list_kinds"}) {
+		t.Errorf("create_thing companions = %v, want [list_groups list_kinds]", got)
+	}
+	if got := pb.Actions[1].Companions; len(got) != 0 {
+		t.Errorf("list_groups declares no companions, got %v", got)
 	}
 }
 

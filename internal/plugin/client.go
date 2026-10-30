@@ -386,6 +386,7 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 			AlwaysInclude:     a.AlwaysInclude,
 			ReadOnly:          a.ReadOnly,
 			ConfirmationHint:  a.ConfirmationHint,
+			Companions:        a.Companions,
 		}
 	}
 	knowledge := make([]orchestrator.KnowledgeArticle, len(pb.KnowledgeArticles))

@@ -6,9 +6,11 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 )
@@ -33,14 +35,14 @@ const maxStickyTools = 40
 // promotedToolSet returns the session's sticky tool set — the tools the
 // LLM has loaded via load_tools (and any prior invocations) that should
 // stay in the native tools array: the stored set (storedPromotedToolSet)
-// plus the tools the agent loop loaded on call this turn
-// (answerUnloadedCall). The latter come from memory, so they stay in the
-// array for the rest of the turn even when the store did not save their
+// plus the tools loaded this turn (turnToolLoads: through load_tools, on
+// call, and their companions). The latter come from memory, so they stay in
+// the array for the rest of the turn even when the store did not save their
 // promotion, and they are exempt from the sticky cap, so a tool just
 // loaded is never missing from the next request.
 func (o *Orchestrator) promotedToolSet(ctx context.Context) map[string]bool {
 	out := o.storedPromotedToolSet(ctx)
-	for fqn := range toolLoadsOnCallFromContext(ctx) {
+	for fqn := range turnToolLoadsFromContext(ctx).snapshot() {
 		out[fqn] = true
 	}
 	return out
@@ -151,11 +153,12 @@ func (o *Orchestrator) callToUnloadedTool(ctx context.Context, call ToolCall) bo
 // parameters and none of the rules the tool's description states.
 //   - A tool _meta__load_tools could load for this session (resolveVisibleTool)
 //     is loaded the way load_tools loads it — a sticky promotion in the session
-//     store — and also recorded in the turn's toolLoadsOnCall, so the next
+//     store — and also recorded in the turn's turnToolLoads, so the next
 //     request of the turn carries its schema whether or not the store saved the
-//     promotion. The answer tells the model to call it again from its
-//     description; it is marked NotRun, and its tool_call_result has the status
-//     not_run.
+//     promotion. Its companions are loaded with it (loadToolAndCompanions).
+//     The answer names them and tells the model to call the tool again,
+//     directly, from its description (loadOnCallAnswer); it is marked NotRun,
+//     and its tool_call_result has the status not_run.
 //   - A demoted tool keeps the answer it had before loading on call existed
 //     (load it first): promoting it would clear the demotion.
 //   - Anything else (a preparer or guard action, an action the session palette
@@ -163,7 +166,8 @@ func (o *Orchestrator) callToUnloadedTool(ctx context.Context, call ToolCall) bo
 //     names never get here: executeCall's earlier gates refuse them first.
 func (o *Orchestrator) answerUnloadedCall(ctx context.Context, call ToolCall, dispatchStart time.Time) ToolResult {
 	fqn := toolFQN(call.Plugin, call.Action)
-	canonical, visible := o.resolveVisibleTool(fqn, allowedToolsSet(ctx, o), o.resolveAllowedPlugins(ctx))
+	allowed, allowedPlugins := allowedToolsSet(ctx, o), o.resolveAllowedPlugins(ctx)
+	canonical, visible := o.resolveVisibleTool(fqn, allowed, allowedPlugins)
 	if !visible {
 		slog.Warn("BLOCKED LLM call to a tool not available to this session", "plugin", call.Plugin, "action", call.Action)
 		return o.emitRefusalResult(ctx, call, fmt.Sprintf("tool %q is not available", fqn), dispatchStart)
@@ -177,16 +181,10 @@ func (o *Orchestrator) answerUnloadedCall(ctx context.Context, call ToolCall, di
 				"First call %s(names=%q), then call %s on your next step. Do not guess the parameters.",
 			canonical, loadTools, canonical, canonical), dispatchStart)
 	}
-	if sessionID != "" && o.injectionStateStore != nil {
-		o.persistToolPromotion(ctx, sessionID, canonical)
-	}
-	toolLoadsOnCallFromContext(ctx).record(canonical)
-	slog.Info("LLM called an unloaded tool: loaded it, call not run", "plugin", call.Plugin, "action", call.Action)
-	answer := fmt.Sprintf(
-		"tool %q was NOT run: it was not loaded, so its parameters were not in your context. "+
-			"It is loaded now: its description and parameters are in your tools. "+
-			"Read its description, then call %s again with the parameters it defines.",
-		canonical, canonical)
+	companions := o.loadToolAndCompanions(ctx, sessionID, canonical, allowed, allowedPlugins)
+	slog.Info("LLM called an unloaded tool: loaded it, call not run",
+		"plugin", call.Plugin, "action", call.Action, "companions", companions)
+	answer := loadOnCallAnswer(canonical, companions)
 	emit.EmitToolCallResult(ctx, o.eventSink, emit.ToolCallResultArgs{
 		CallID:    call.ID,
 		Status:    "not_run",
@@ -194,6 +192,23 @@ func (o *Orchestrator) answerUnloadedCall(ctx context.Context, call ToolCall, di
 		LatencyMS: time.Since(dispatchStart).Milliseconds(),
 	})
 	return ToolResult{CallID: call.ID, Error: answer, NotRun: true}
+}
+
+// loadOnCallAnswer's first sentence, with the tool's name as the first quoted
+// string, is what measurements of chat sessions key on.
+func loadOnCallAnswer(tool string, companions []string) string {
+	loadTools := toolFQN(metaPluginName, metaLoadTools)
+	answer := fmt.Sprintf("tool %q was NOT run: it was not loaded, so its parameters were not in your context. ", tool)
+	if len(companions) == 0 {
+		return answer + fmt.Sprintf("It is loaded now: its description and parameters are in your tools. "+
+			"Read its description, then call %s again directly with the parameters it defines; "+
+			"do not load it again with %s.", tool, loadTools)
+	}
+	names := strings.Join(companions, ", ")
+	return answer + fmt.Sprintf("It is loaded now, together with %s: their descriptions and parameters are in your tools. "+
+		"Read its description, then call %s again directly with the parameters it defines, "+
+		"and call %s directly when you need them; do not load any of these tools again with %s.",
+		names, tool, names, loadTools)
 }
 
 // retriesOfUnrunCalls returns the calls that repeat, with the same arguments, a
@@ -227,26 +242,48 @@ func (o *Orchestrator) toolDemoted(ctx context.Context, sessionID, fqn string) b
 	return false
 }
 
-// toolLoadsOnCall is one agent-loop turn's set of the tools answerUnloadedCall
-// loaded, which promotedToolSet keeps in the native array for the rest of the
-// turn. Outside the agent loop there is none (nil), and record does nothing.
-type toolLoadsOnCall map[string]bool
-
-type toolLoadsOnCallKey struct{}
-
-func withToolLoadsOnCall(ctx context.Context, loads toolLoadsOnCall) context.Context {
-	return context.WithValue(ctx, toolLoadsOnCallKey{}, loads)
+// turnToolLoads is one agent-loop turn's set of the tools loaded this turn, by
+// either load path; outside the agent loop there is none (nil).
+type turnToolLoads struct {
+	mu    sync.Mutex // the load_tools executor records from its own goroutine, which outlives its deadline
+	tools map[string]bool
 }
 
-func toolLoadsOnCallFromContext(ctx context.Context) toolLoadsOnCall {
-	loads, _ := ctx.Value(toolLoadsOnCallKey{}).(toolLoadsOnCall)
+type turnToolLoadsKey struct{}
+
+func newTurnToolLoads() *turnToolLoads {
+	return &turnToolLoads{tools: map[string]bool{}}
+}
+
+func withTurnToolLoads(ctx context.Context, loads *turnToolLoads) context.Context {
+	return context.WithValue(ctx, turnToolLoadsKey{}, loads)
+}
+
+func turnToolLoadsFromContext(ctx context.Context) *turnToolLoads {
+	loads, _ := ctx.Value(turnToolLoadsKey{}).(*turnToolLoads)
 	return loads
 }
 
-func (l toolLoadsOnCall) record(fqn string) {
-	if l != nil {
-		l[fqn] = true
+func (l *turnToolLoads) record(fqn string) {
+	if l == nil {
+		return
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.tools[fqn] = true
+}
+
+func (l *turnToolLoads) snapshot() map[string]bool {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make(map[string]bool, len(l.tools))
+	for fqn := range l.tools {
+		out[fqn] = true
+	}
+	return out
 }
 
 // catalogEntry is one row of the rendered tool catalog: the tool's
@@ -312,6 +349,20 @@ func (o *Orchestrator) renderToolCatalog(promoted map[string]bool, allowedPlugin
 	}
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+// toolArraySet is the promoted set under which renderToolCatalog lists exactly the allowed tools the array lacks.
+func toolArraySet(tools []provider.ToolDefinition) map[string]bool {
+	set := make(map[string]bool, len(tools))
+	for _, td := range tools {
+		set[td.Name] = true
+	}
+	return set
+}
+
+func withToolCatalog(segs provider.SystemSegments, catalog string) provider.SystemSegments {
+	segs.Conversation = catalog + segs.Conversation
+	return segs
 }
 
 // preparerActionSet pre-computes the FQNs the preparer pipeline itself

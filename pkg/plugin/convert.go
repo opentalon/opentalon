@@ -52,6 +52,7 @@ func capsToProto(c CapabilitiesMsg) *pluginpb.PluginCapabilities {
 			AlwaysInclude:     a.AlwaysInclude,
 			ReadOnly:          a.ReadOnly,
 			ConfirmationHint:  a.ConfirmationHint,
+			Companions:        a.Companions,
 		}
 	}
 	glossary := make([]*pluginpb.GlossaryEntry, len(c.Glossary))

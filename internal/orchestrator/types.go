@@ -55,6 +55,7 @@ type Action struct {
 	AlwaysInclude     bool        `yaml:"always_include,omitempty"`    // if true, always in the native tools array, never a catalog entry
 	ReadOnly          bool        `yaml:"read_only,omitempty"`         // if true, skip per-call user-confirmation gate (pure query)
 	ConfirmationHint  string      `yaml:"confirmation_hint,omitempty"` // how to word this action's confirmation question; see narrateConfirmation
+	Companions        []string    `yaml:"companions,omitempty"`        // actions of the same plugin loaded together with this one
 }
 
 type PluginCapability struct {
