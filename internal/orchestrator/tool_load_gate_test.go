@@ -853,6 +853,57 @@ func TestRun_LoadedToolAndCompanionsAreInTheNextRequest(t *testing.T) {
 	}
 }
 
+func TestRun_LoadedToolsLeaveTheNextRequestsCatalog(t *testing.T) {
+	descriptions := map[string]string{
+		"p__catalog": "Catalog tool.",
+		"p__other":   "Another catalog tool.",
+		"p__lookup":  "The catalog tool's first companion.",
+		"p__list":    "The catalog tool's second companion.",
+	}
+	always := callOf("a1", "p__always", map[string]string{})
+	for _, tc := range []struct {
+		name   string
+		load   provider.CompletionResponse
+		loaded []string
+	}{
+		{"load_tools", callOf("l1", "_meta__load_tools", map[string]string{"names": "p__other"}), []string{"p__other"}},
+		{"on call", callOf("r1", "p__other", map[string]string{"q": "x"}), []string{"p__other"}},
+		{"as a companion", callOf("r1", "p__catalog", map[string]string{"q": "x"}),
+			[]string{"p__catalog", "p__lookup", "p__list"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orch, llm, _ := loadOnCallOrch(t, &fakeInjectionStateStore{}, tc.load, always)
+			runTurn(t, orch)
+			if len(llm.requests) != 3 {
+				t.Fatalf("want 3 requests (load, call, answer), got %d", len(llm.requests))
+			}
+			before, after, next := *llm.requests[0].Segments, *llm.requests[1].Segments, *llm.requests[2].Segments
+			tools := sentToolsJSON(t, llm.requests[1])
+			want := before.Conversation
+			for _, fqn := range tc.loaded {
+				line := "- " + fqn + ": " + descriptions[fqn] + "\n"
+				if !strings.Contains(want, line) {
+					t.Fatalf("the first request's catalog must list %s, got %q", fqn, before.Conversation)
+				}
+				want = strings.Replace(want, line, "", 1)
+				if !strings.Contains(tools, `"name":"`+fqn+`"`) {
+					t.Errorf("the next request's tools must carry %s, got %s", fqn, tools)
+				}
+			}
+			if after.Fixed != before.Fixed {
+				t.Errorf("a load changed the Fixed segment:\n got %q\nwant %q", after.Fixed, before.Fixed)
+			}
+			if after.Conversation != want {
+				t.Errorf("after the load, the Conversation segment must only lose the loaded tools' catalog lines:\n got %q\nwant %q",
+					after.Conversation, want)
+			}
+			if next.Fixed != after.Fixed || next.Conversation != after.Conversation {
+				t.Errorf("a request without a load changed the segments before the per-round one:\n got %#v\nwant %#v", next, after)
+			}
+		})
+	}
+}
+
 // Several unloaded calls in one response, or _meta__load_tools(X) together with
 // X(...): every unloaded call gets the call-again answer, none runs, and the
 // next request carries every tool so loaded.

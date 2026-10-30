@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 )
@@ -346,6 +347,20 @@ func (o *Orchestrator) renderToolCatalog(promoted map[string]bool, allowedPlugin
 	}
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+// toolArraySet is the promoted set under which renderToolCatalog lists exactly the allowed tools the array lacks.
+func toolArraySet(tools []provider.ToolDefinition) map[string]bool {
+	set := make(map[string]bool, len(tools))
+	for _, td := range tools {
+		set[td.Name] = true
+	}
+	return set
+}
+
+func withToolCatalog(segs provider.SystemSegments, catalog string) provider.SystemSegments {
+	segs.Conversation = catalog + segs.Conversation
+	return segs
 }
 
 // preparerActionSet pre-computes the FQNs the preparer pipeline itself

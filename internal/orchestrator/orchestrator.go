@@ -2224,13 +2224,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// cache hits (vLLM automatic prefix caching, OpenAI prompt caching) and
 	// avoids rebuilding ~25k tokens of tool definitions on every round.
 	var cachedTools []provider.ToolDefinition
+	var toolCatalog string
 	nativeMode := o.supportsNativeTools()
 	if nativeMode {
 		cachedTools = o.buildToolDefinitions(ctx)
+		toolCatalog = o.renderToolCatalog(toolArraySet(cachedTools), o.resolveAllowedPlugins(ctx))
 	}
 	// Build the system prompt once per Run; appendConversation derives each
 	// round's per-round segment from it.
-	sysPrompt := o.buildSystemPrompt(ctx, content, true)
+	sysPrompt := o.buildSystemPromptWithoutCatalog(ctx, content, true)
 
 	// Emit turn_start once per Run — captures the static request shape
 	// (system prompt digest, tool catalogue, model intent) that all agent
@@ -2248,7 +2250,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// confirmation) intentionally bypass this emission: the LLM is not
 	// driving those decisions, so there's no "turn" to start. They still
 	// emit user_message (above) because the user did send input.
-	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, sysPrompt.Join(), profileModel, cachedTools))
+	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, withToolCatalog(sysPrompt, toolCatalog).Join(), profileModel, cachedTools))
 	// Root every subsequent event in this turn under turn_start by
 	// stamping it as the default parent on ctx. Specific spans (planner,
 	// llm_response, tool_call_extracted) overwrite this slot with their
@@ -2282,7 +2284,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		agentRound = i + 1
 		sess, _ := sessions.Get(sessionID)
 
-		messages, system := o.appendConversation(ctx, sess, sysPrompt)
+		messages, system := o.appendConversation(ctx, sess, withToolCatalog(sysPrompt, toolCatalog))
 		messages = append(messages, transientMessages...)
 		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
@@ -2846,6 +2848,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if nativeMode && (toolResult.NotRun || (toolResult.Error == "" &&
 				call.Plugin == metaPluginName && call.Action == metaLoadTools)) {
 				cachedTools = o.buildToolDefinitions(ctx)
+				toolCatalog = o.renderToolCatalog(toolArraySet(cachedTools), o.resolveAllowedPlugins(ctx))
 				log.Debug("cachedTools refreshed after a tool load",
 					"tools_count", len(cachedTools), "loaded_on_call", toolResult.NotRun)
 			}
@@ -4259,6 +4262,14 @@ func (o *Orchestrator) buildAgentGroundingPrompt(ctx context.Context, agentID st
 // by how often they change. Round holds the output-format section, which
 // appendConversation leaves out until a tool result exists.
 func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string, includeServerInstructions bool) provider.SystemSegments {
+	segs := o.buildSystemPromptWithoutCatalog(ctx, userMessage, includeServerInstructions)
+	if !o.supportsNativeTools() {
+		return segs
+	}
+	return withToolCatalog(segs, o.renderToolCatalog(o.promotedToolSet(ctx), o.resolveAllowedPlugins(ctx)))
+}
+
+func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, userMessage string, includeServerInstructions bool) provider.SystemSegments {
 	var fixed, conversation, round strings.Builder
 
 	// Agent-scoped chat: when the turn is scoped to a workflow agent, lead with
@@ -4364,16 +4375,6 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 
 	if o.subprocessConfig.Enabled {
 		fixed.WriteString(prompts.OrchestratorSubprocess)
-	}
-
-	// Native mode: render the tool catalog — a one-line summary of every
-	// allowed tool not already in the native tools array (i.e. not
-	// always-include core and not yet loaded). The LLM loads what it needs
-	// via load_tools. Sourced directly from the registry, no RAG/tier
-	// decision. Non-native mode lists every action inline above, so no
-	// catalog is needed.
-	if o.supportsNativeTools() {
-		conversation.WriteString(o.renderToolCatalog(o.promotedToolSet(ctx), allowedPlugins))
 	}
 
 	// Expose the caller's channel and conversation id so the LLM knows what
