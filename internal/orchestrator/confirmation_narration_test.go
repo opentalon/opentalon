@@ -70,7 +70,10 @@ func TestNarrateConfirmation_NilLLMReturnsEmpty(t *testing.T) {
 // detail attributes?", which a user can only answer yes to blind — three fields
 // on a machine were overwritten with another machine's values that way. The
 // fields have to be named individually, with the value they change from, and a
-// missing previous value has to be admitted rather than invented or dropped.
+// missing previous value has to be admitted rather than invented or dropped. A
+// new record lists the values it gets, never "new -> value", every field goes by
+// the name the user sees rather than the argument's, and the question offers no
+// "(yes/no)": the user answers with buttons.
 func TestNarrateConfirmation_SingleRecordPromptDemandsFields(t *testing.T) {
 	llm := &capturingLLM{responses: []string{"ok?"}}
 	orch := NewWithRules(llm, &fakeParser{}, NewToolRegistry(),
@@ -94,6 +97,13 @@ func TestNarrateConfirmation_SingleRecordPromptDemandsFields(t *testing.T) {
 		"previous value -> new value", // and named with what they change from
 		"the specified attributes",    // the phrasing that is called out as unacceptable
 		"not known here",              // a missing previous value is admitted
+		"never write one or an arrow", // a new record lists its values, not "new -> value"
+		"may also update an existing record is a change",
+		"never by the tool's argument name",
+		"field names included",
+		"without answer options", // the buttons answer, not "(yes/no)"
+		"not in the passive",     // "I would create …", not "… would be created"
+		"I would create the item **Cordless drill**:\n- Category: Tools", // the name in the sentence, labels for the rest
 	} {
 		if !strings.Contains(sys, want) {
 			t.Errorf("system prompt must cover %q, got: %q", want, sys)
@@ -154,6 +164,9 @@ func TestNarrateConfirmation_ReplyLanguageDirectiveReachesNarrator(t *testing.T)
 	}
 	if !strings.Contains(sys, "takes precedence over rule 1") {
 		t.Errorf("directive must be ranked above the latest-request language rule, got: %q", sys)
+	}
+	if !strings.Contains(sys, "does not apply to field names") {
+		t.Errorf("the directive's English technical terms must not reach the field names the user checks, got: %q", sys)
 	}
 	if !strings.HasPrefix(sys, confirmationNarratePrompt) {
 		t.Errorf("the standing narration rules must stay intact ahead of the directive, got: %q", sys)
