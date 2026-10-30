@@ -92,11 +92,12 @@ type ActionMsg struct {
 	InjectContextArgs []string       `json:"inject_context_args,omitempty"` // context arg names (e.g. "actor_id") the host injects before calling Execute
 	UserOnly          bool           `json:"user_only,omitempty"`           // if true, hidden from LLM and only invocable directly by the user
 	// AlwaysInclude, when true, makes the host keep this action in the
-	// LLM's `tools` array (full schema) on every request instead of listing
-	// it in the tool catalog for the model to load first. The pkg/plugin SDK
-	// surfaces it here so external plugins built on this SDK can declare
-	// it; internal/orchestrator/system_tools registers in-process actions
-	// against orchestrator.Action directly and bypasses this struct.
+	// LLM's `tools` array (full schema, native tool calling) on every
+	// request instead of listing it in the tool catalog for the model to
+	// load first. The pkg/plugin SDK surfaces it here so external plugins
+	// built on this SDK can declare it; internal/orchestrator/system_tools
+	// registers in-process actions against orchestrator.Action directly and
+	// bypasses this struct.
 	AlwaysInclude bool `json:"always_include,omitempty"`
 	// ReadOnly is true for actions that do not mutate any user-visible
 	// state (queries, lookups). The host's confirmation gate skips the

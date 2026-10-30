@@ -936,13 +936,14 @@ func (s *invokeStepsUnmarshal) UnmarshalJSON(data []byte) error {
 // `relevant_tools` fields.
 //
 // The candidate slices and relevant_tools are instrumentation only: the
-// knowledge_retrieval / glossary_retrieval / tool_retrieval and
-// preparer_decision events carry them. They do not decide which tools
-// the model gets (the registry catalog and load_tools do) or which
-// knowledge reaches it (knowledge is pull-only) — the `message` body
-// remains authoritative for what reaches the LLM. Plugins returning only
-// the legacy fields stay fully backwards-compatible: the candidate
-// slices unmarshal to nil and the tool events report relevant_tools.
+// knowledge_retrieval / glossary_retrieval / tool_retrieval events report
+// them, and preparer_decision the retrieved knowledge ids and tool names.
+// They do not decide which tools the model gets (the registry catalog and
+// load_tools do) or which knowledge reaches it (knowledge is pull-only) —
+// the `message` body remains authoritative for what reaches the LLM.
+// Plugins returning only the legacy fields stay fully backwards-
+// compatible: the candidate slices unmarshal to nil and the tool events
+// report relevant_tools.
 type preparerResponse struct {
 	SendToLLM     *bool                `json:"send_to_llm"`
 	Message       string               `json:"message"`
@@ -987,9 +988,9 @@ type GlossaryCandidate struct {
 }
 
 // ToolCandidate is one tool a preparer's retrieval returned, with its
-// score. It is instrumentation only: the tool_retrieval and
-// preparer_decision events publish it, and it does not decide which
-// tools the model gets (that is the catalog and load_tools). A
+// score. It is instrumentation only: tool_retrieval reports its name and
+// score, preparer_decision its name, and it does not decide which tools
+// the model gets (that is the catalog and load_tools). A
 // "position_in_results" key in the incoming JSON is ignored.
 type ToolCandidate struct {
 	ToolName string  `json:"tool_name"`
