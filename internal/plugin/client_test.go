@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -319,6 +320,24 @@ func TestAlwaysIncludeMappedFromProto(t *testing.T) {
 	}
 	if !cap.Actions[1].AlwaysInclude {
 		t.Error("pinned_action should have AlwaysInclude=true")
+	}
+}
+
+func TestCompanionsMappedFromProto(t *testing.T) {
+	pb := &pluginpb.PluginCapabilities{
+		Name:        "myplugin",
+		Description: "Test plugin",
+		Actions: []*pluginpb.Action{
+			{Name: "create_thing", Description: "Write", Companions: []string{"list_groups", "list_kinds"}},
+			{Name: "list_groups", Description: "Lookup"},
+		},
+	}
+	cap := toPluginCapability(pb)
+	if got := cap.Actions[0].Companions; !slices.Equal(got, []string{"list_groups", "list_kinds"}) {
+		t.Errorf("create_thing companions = %v, want [list_groups list_kinds]", got)
+	}
+	if got := cap.Actions[1].Companions; len(got) != 0 {
+		t.Errorf("list_groups declares no companions, got %v", got)
 	}
 }
 

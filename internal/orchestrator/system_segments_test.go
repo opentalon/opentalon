@@ -235,6 +235,64 @@ func TestRun_SystemPromptSegments(t *testing.T) {
 	}
 }
 
+func TestRun_RoundWithoutALoadKeepsTheCatalog(t *testing.T) {
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "p", Description: "catalog fixtures",
+		Actions: []Action{
+			{Name: "always", Description: "Always-include tool.", AlwaysInclude: true, ReadOnly: true},
+			{Name: "loaded", Description: "A tool loaded in an earlier turn.", ReadOnly: true},
+			{Name: "catalog", Description: "Catalog tool.", ReadOnly: true},
+		},
+	}, &callbackExecutor{fn: func(call ToolCall) ToolResult {
+		if call.Action == "loaded" {
+			return ToolResult{CallID: call.ID, Error: "backend unavailable"}
+		}
+		return ToolResult{CallID: call.ID, Content: "ok"}
+	}}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	store := &fakeInjectionStateStore{store: map[string]state.InjectionState{
+		"s1": {KnownTools: []state.KnownToolEntry{{ToolName: "p__loaded", LRURank: 1}}},
+	}}
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "s1"})
+	// The demotion comes before the always-included call, so a rebuild after any call would show it.
+	llm := &scriptedNativeLLM{rounds: []provider.CompletionResponse{{ToolCalls: []provider.ToolCall{
+		{ID: "f1", Name: "p__loaded", Arguments: map[string]string{}},
+		{ID: "a1", Name: "p__always", Arguments: map[string]string{}},
+	}}}}
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
+		state.NewMemoryStore(""), sessions, OrchestratorOpts{InjectionStateStore: store})
+	orch.toolErrorHandling = ToolErrorHandlingConfig{StickyDemotionThreshold: 1}
+	ctx := pkgchannel.WithCapabilities(actor.WithSessionID(context.Background(), "s1"),
+		pkgchannel.Capabilities{ResponseFormat: pkgchannel.FormatMarkdown})
+	if _, err := orch.Run(ctx, "s1", "look it up"); err != nil {
+		t.Fatal(err)
+	}
+	if len(llm.requests) != 2 {
+		t.Fatalf("chat loop made %d model calls, want 2", len(llm.requests))
+	}
+	if kt, ok := storedTool(store, "p__loaded"); !ok || !kt.Demoted {
+		t.Fatalf("the failed tool must be demoted between the rounds, got %+v (found=%v)", kt, ok)
+	}
+	first, second := *llm.requests[0].Segments, *llm.requests[1].Segments
+	if !strings.Contains(first.Conversation, "- p__catalog: Catalog tool.\n") || strings.Contains(first.Conversation, "p__loaded") {
+		t.Fatalf("the catalog must list p__catalog and not the loaded p__loaded, got %q", first.Conversation)
+	}
+	if second.Fixed != first.Fixed || second.Conversation != first.Conversation {
+		t.Errorf("a round without a load changed the segments before the per-round one:\n got %#v\nwant %#v", second, first)
+	}
+	if got, want := sentToolsJSON(t, llm.requests[1]), sentToolsJSON(t, llm.requests[0]); got != want {
+		t.Errorf("a round without a load changed the tools array:\n got %s\nwant %s", got, want)
+	}
+	reminder := "[IMPORTANT — output format reminder] " + prompts.FormatMarkdown
+	if strings.Contains(first.Round, reminder) || !strings.Contains(second.Round, "## OUTPUT FORMAT\n") ||
+		!strings.Contains(second.Round, reminder) {
+		t.Errorf("the tool result must bring in the output-format section and its reminder, rounds:\n%q\n%q", first.Round, second.Round)
+	}
+}
+
 func TestRun_FetchesAgentGroundingOnce(t *testing.T) {
 	f := newSegmentsFixture(t, toolRounds())
 	if _, err := f.orch.Run(f.ctx, "s1", segmentsUserMessage); err != nil {

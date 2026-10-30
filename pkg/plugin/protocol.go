@@ -113,6 +113,11 @@ type ActionMsg struct {
 	// question). For actions whose arguments are not what the user
 	// decides on, such as a demonstration or a report.
 	ConfirmationHint string `json:"confirmation_hint,omitempty"`
+	// Companions names other actions of this plugin that the host loads
+	// together with this one, typically the lookups that supply its
+	// parameter values, so the model does not spend a step loading them.
+	// Companions of a companion are not loaded.
+	Companions []string `json:"companions,omitempty"`
 }
 
 // ParameterMsg describes one parameter of an action.

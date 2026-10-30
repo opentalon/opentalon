@@ -202,6 +202,14 @@ message Action {
   // a report). Plugins that aggregate upstream tools (e.g. the
   // mcp-plugin) propagate it from the tool's `_meta.confirmation_hint`.
   string confirmation_hint = 8;
+  // Names of other actions of this plugin that the orchestrator loads
+  // together with this one, typically the lookups that supply this action's
+  // parameter values. When the model loads this action (through
+  // _meta__load_tools, or by calling it before it was loaded), each
+  // companion the session may see is loaded too, unless it is already
+  // loaded, always included or demoted. Companions of a companion are not
+  // loaded. Empty (the default) means the action loads alone.
+  repeated string companions = 9;
 }
 
 message Parameter {
