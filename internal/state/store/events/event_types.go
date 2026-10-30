@@ -45,7 +45,7 @@ const (
 	// Emitted children of user_message: each RAG retrieval becomes one
 	// *_retrieval event, then preparer_decision is the composite outcome
 	// the orchestrator landed on. messages_truncated fires from
-	// buildMessages inside the agent loop and parents to turn_start
+	// appendConversation inside the agent loop and parents to turn_start
 	// (it can fire more than once per turn when the cutter applies on
 	// successive iterations as the conversation grows during tool
 	// rounds).
@@ -297,6 +297,9 @@ type Header struct {
 // turn's preparer outcome in-place without walking sibling events by
 // parent_id. All four are omitempty so pre-Phase-3 deployments and
 // no-preparer turns emit a payload byte-identical to the original shape.
+// The orchestrator sets only PreparerDecisionID today: knowledge is
+// pull-only and tool discovery is the registry catalog, so the other
+// three stay empty.
 type TurnStartPayload struct {
 	Header
 	SystemPromptSHA256 string                 `json:"system_prompt_sha256,omitempty"`
@@ -779,9 +782,11 @@ type ToolCallExtractedPayload struct {
 const ToolCallExtractedVersion = 1
 
 // ToolCallResultPayload — emitted after the tool dispatch returns or
-// errors out. Status mirrors plugin convention ("ok" / "error"). Parent
-// event_id of the corresponding tool_call_extracted is linked via the
-// session_events.parent_id column, not duplicated in payload.
+// errors out. Status mirrors plugin convention ("ok" / "error"), or is
+// "not_run" for a call answered without running it (a call to a tool that
+// was not loaded, which loads it). Parent event_id of the corresponding
+// tool_call_extracted is linked via the session_events.parent_id column,
+// not duplicated in payload.
 //
 // Content/StructuredContent split mirrors the ToolResult shape: a tool
 // may return a human-readable response (Content) and a structured JSON

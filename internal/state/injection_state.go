@@ -18,10 +18,13 @@ type InjectionState struct {
 }
 
 // KnownToolEntry is the sticky tool-promotion bookkeeping shape:
-// load_tools records a tool here so it stays in the LLM's native tools
+// loading a tool records it here so it stays in the LLM's native tools
 // array across turns, and the tool-error tracker can flip Demoted to
-// make it the preferred eviction target. LRURank carries the turn it was
-// last touched; promotedToolSet selects on Demoted + LRURank (no tiers).
+// leave it out of that sticky selection until an explicit load_tools
+// re-promotes it or the tracker clears the flag. LRURank carries the
+// turn of the tool's most recent promotion; the orchestrator's sticky
+// selection skips Demoted entries and keeps the highest LRURank ones up
+// to its cap (no tiers).
 //
 // A legacy `tier` JSON key is ignored on read — older rows that still
 // carry "tier":"tier1" unmarshal cleanly, the unknown key is dropped,

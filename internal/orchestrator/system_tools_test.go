@@ -415,8 +415,8 @@ func TestAllowedToolsSet_ConsistentWithFQNs(t *testing.T) {
 }
 
 func TestLoadTools_PromotionPersistsStickyEntry(t *testing.T) {
-	// Loading a tool not yet in KnownTools must add a tier="tier1" entry
-	// with LRURank=currentTurn so the next request's tools array keeps it.
+	// Loading a tool not yet in KnownTools must add a sticky entry with
+	// LRURank=currentTurn so the next request's tools array keeps it.
 	store := &fakeInjectionStateStore{}
 	orch := newOrchForMetaTests(t, store)
 	exec, _ := orch.registry.GetExecutor(metaPluginName)

@@ -933,21 +933,22 @@ func (s *invokeStepsUnmarshal) UnmarshalJSON(data []byte) error {
 // Candidate fields (knowledge / glossary / tool) are RFC #249 additions
 // — preparers that retrieve from a RAG corpus may return the structured
 // candidate list alongside (or instead of) the legacy `message` /
-// `relevant_tools` fields so the orchestrator can apply per-session
-// dedup + tier-promotion logic in Phase 3+.
+// `relevant_tools` fields.
 //
-// In Phase 2 the candidate slices are deserialized for instrumentation
-// (knowledge_retrieval / glossary_retrieval / tool_retrieval events
-// carry the hits) but do not yet drive injection decisions — the
-// `message` body remains authoritative for what reaches the LLM.
+// The candidate slices and relevant_tools are instrumentation only: the
+// knowledge_retrieval / glossary_retrieval / tool_retrieval events report
+// them, and preparer_decision the retrieved knowledge ids and tool names.
+// They do not decide which tools the model gets (the registry catalog and
+// load_tools do) or which knowledge reaches it (knowledge is pull-only) —
+// the `message` body remains authoritative for what reaches the LLM.
 // Plugins returning only the legacy fields stay fully backwards-
-// compatible: the candidate slices unmarshal to nil and the
-// orchestrator falls through to the legacy path.
+// compatible: the candidate slices unmarshal to nil and the tool events
+// report relevant_tools.
 type preparerResponse struct {
 	SendToLLM     *bool                `json:"send_to_llm"`
 	Message       string               `json:"message"`
 	Invoke        invokeStepsUnmarshal `json:"invoke"`
-	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional: filter system prompt to these tools (format: "plugin__action")
+	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional, instrumentation only: reported as the retrieved tools when tool_candidates is empty (format: "plugin__action")
 
 	KnowledgeCandidates []KnowledgeCandidate `json:"knowledge_candidates,omitempty"`
 	GlossaryCandidates  []GlossaryCandidate  `json:"glossary_candidates,omitempty"`
@@ -986,13 +987,14 @@ type GlossaryCandidate struct {
 	PositionInResults int     `json:"position_in_results,omitempty"`
 }
 
-// ToolCandidate is the RAG-retrieved tool entry with score so the
-// orchestrator (Phase 4) can apply the LRU + tier-promotion logic and
-// the *_retrieval event can publish ranked hits.
+// ToolCandidate is one tool a preparer's retrieval returned, with its
+// score. It is instrumentation only: tool_retrieval reports its name and
+// score, preparer_decision its name, and it does not decide which tools
+// the model gets (that is the catalog and load_tools). A
+// "position_in_results" key in the incoming JSON is ignored.
 type ToolCandidate struct {
-	ToolName          string  `json:"tool_name"`
-	Score             float64 `json:"score"`
-	PositionInResults int     `json:"position_in_results,omitempty"`
+	ToolName string  `json:"tool_name"`
+	Score    float64 `json:"score"`
 }
 
 // PreparerRetrievalMetrics is a per-corpus optional summary returned
@@ -2262,6 +2264,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var lastCallSig string          // "plugin__action\x00arg1=val1\x00..." for loop detection
 	var pairingSeen pairingReported // tool-pairing repairs already reported this turn
 	var repeatCount int
+	var lastUnrun map[string]bool // signatures of the previous response's calls answered without running
 	// Phantom-completion guard state (consumed in the calls==nil branch). The
 	// model sometimes loads a write tool, resolves every parameter through
 	// lookups — and then NARRATES the mutation instead of calling it ("The
@@ -2275,6 +2278,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var writeToolLoaded bool // load_tools promoted a non-read-only action this turn
 	var writeToolCalled bool // the model attempted any non-read-only call this turn
 	var actionNudged bool    // the one-shot phantom nudge was already spent
+	// The tools loaded on call this turn (answerUnloadedCall).
+	ctx = withToolLoadsOnCall(ctx, toolLoadsOnCall{})
 	agentRound := 0
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		agentRound = i + 1
@@ -2314,10 +2319,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// tool-load gate (executeCall / maybeRequireConfirmation) can admit a
 			// call iff its tool was in this array — no per-call state re-read, and
 			// no divergence from what the model actually saw. cachedTools is
-			// rebuilt after a successful load_tools, so the next round's set
-			// widens accordingly; a tool loaded by an earlier call in THIS
-			// response is deliberately absent here, so calling it before its
-			// next-round schema arrives is refused.
+			// rebuilt after a successful load_tools or a tool loaded on call,
+			// so the next round's set widens accordingly; a tool loaded by an
+			// earlier call in THIS response is deliberately absent here, so a
+			// call to it before its next-round schema arrives does not run.
 			sent := make(map[string]struct{}, len(cachedTools))
 			for _, td := range cachedTools {
 				sent[td.Name] = struct{}{}
@@ -2524,7 +2529,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				escaped := strings.ReplaceAll(resp.Content, "{{", "{ {")
 				transientMessages = []provider.Message{
 					{Role: provider.RoleAssistant, Content: escaped},
-					{Role: provider.RoleUser, Content: "[system] Your previous response contained placeholder variables instead of real data. You MUST call the tool first using [tool_call] format, then answer with the actual results."},
+					{Role: provider.RoleUser, Content: recoveryHint(nativeMode, nativeInventedResultHint, textInventedResultHint)},
 				}
 				continue
 			}
@@ -2533,7 +2538,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if stripped == "" {
 				// Empty response — either the LLM returned nothing, or its output
 				// was entirely unparseable tool call blocks that got stripped.
-				// Retry once asking for a plain-language answer.
+				// Retry with a hint for the request's tool-calling mode.
 				if stripRetries >= 5 {
 					log.Debug("LLM repeatedly produced empty/unparseable response, giving up", "round", i+1)
 					result.Response = "(no response)"
@@ -2549,7 +2554,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					Attempt:   stripRetries,
 					LastError: "empty or unparseable response",
 				})
-				retryHint := "[system] Your previous response was empty or contained only unparseable tool call blocks. Please respond to the user in natural language. If you need to call a tool, use the [tool_call] format shown in your instructions."
+				retryHint := recoveryHint(nativeMode, nativeEmptyReplyHint, textEmptyReplyHint)
 				if resp.Content != "" {
 					transientMessages = []provider.Message{
 						{Role: provider.RoleAssistant, Content: resp.Content},
@@ -2612,7 +2617,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				})
 				log.Warn("planner expected tool calls but LLM returned plain text, retrying",
 					"round", i+1, "retry", toolRetries, "expected_steps", len(steps))
-				nudge := buildToolCallNudge(steps)
+				nudge := buildToolCallNudge(steps, nativeMode)
 				transientMessages = []provider.Message{
 					{Role: provider.RoleAssistant, Content: resp.Content},
 					{Role: provider.RoleUser, Content: nudge},
@@ -2693,12 +2698,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 
 		// The LLM narrated a tool call ("We need to call plugin__action")
-		// instead of using [tool_call] format. Retry with an explicit nudge.
+		// instead of making it. Retry with an explicit nudge.
 		if IsNarratedPlaceholder(calls) {
 			log.Debug("narrated tool call detected, retrying with nudge", "round", i+1)
 			transientMessages = []provider.Message{
 				{Role: provider.RoleAssistant, Content: resp.Content},
-				{Role: provider.RoleUser, Content: "[system] Do not describe what you will do. Execute the tool call NOW using the [tool_call] format shown in your instructions."},
+				{Role: provider.RoleUser, Content: recoveryHint(nativeMode, nativeNarratedCallHint, textNarratedCallHint)},
 			}
 			continue
 		}
@@ -2710,6 +2715,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		} else {
 			lastCallSig = callSig
 			repeatCount = 1
+		}
+		// The previous response's calls answered "loaded now, call again" did
+		// not run, so repeating the response is the retry they asked for: only
+		// those calls run, never again the ones that did.
+		if retries := retriesOfUnrunCalls(calls, lastUnrun); repeatCount >= 2 && len(retries) > 0 {
+			log.Info("identical response retries calls that did not run, running only those",
+				"round", i+1, "calls", len(calls), "retries", len(retries))
+			calls, repeatCount = retries, 1
 		}
 		if repeatCount >= 2 {
 			log.Warn("repeated identical tool call detected, breaking loop", "round", i+1, "repeat", repeatCount)
@@ -2738,6 +2751,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			thinking = responseThinking{Blocks: resp.Thinking, Fingerprint: resp.ThinkingFingerprint}
 		}
 
+		unrun := make(map[string]bool)
 		for i := range calls {
 			calls[i].FromLLM = true
 
@@ -2745,11 +2759,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// action counts as "the model is acting, not narrating" — even
 			// one that goes on to fail or raise a confirmation. Only calls
 			// that resolve count; a hallucinated tool name is not an attempt.
-			// Known tradeoff: an attempt refused by the native load gate
-			// ("tool not loaded") also disarms, so a model that then narrates
-			// instead of load-and-retry slips through. Deliberate — counting
-			// refused attempts as narration would instead tax every honest
-			// load-and-retry with a needless nudge round.
+			// Known tradeoff: an attempt the native load gate answers without
+			// running it ("loaded now, call it again") also disarms, so a model
+			// that then narrates instead of calling again slips through.
+			// Deliberate — counting those attempts as narration would instead
+			// tax every honest retry with a needless nudge round.
 			if calls[i].Plugin != metaPluginName && !writeToolCalled {
 				if a := o.resolveAction(calls[i].Plugin, calls[i].Action); a != nil && !a.ReadOnly {
 					writeToolCalled = true
@@ -2781,6 +2795,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			pluginStart := time.Now()
 			toolResult := o.executeCall(ctx, calls[i])
+			if toolResult.NotRun {
+				unrun[toolCallSignature(calls[i:i+1])] = true
+			}
 			// Captured before the repair block so the "plugin call" log line
 			// times the plugin, not the corrector side-call — repair logs its
 			// own per-attempt timing.
@@ -2804,31 +2821,36 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			result.Results = append(result.Results, toolResult)
 			totalToolCalls++
 
-			log.Info("plugin call", "plugin", call.Plugin, "action", call.Action, "duration", pluginDuration.Round(time.Millisecond).String(), "error", toolResult.Error != "")
-			if toolResult.Error != "" {
+			// A call answered without running (NotRun) did not fail: it is
+			// logged as no tool error, and the plugin-call metrics and the
+			// error counters (recordToolOutcome) leave it out.
+			failed := toolResult.Error != "" && !toolResult.NotRun
+			log.Info("plugin call", "plugin", call.Plugin, "action", call.Action, "duration", pluginDuration.Round(time.Millisecond).String(), "error", failed)
+			if failed {
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
 			}
 
-			// Same-turn load completion for _meta__load_tools. The executor
-			// (system_tools.go) already persisted a sticky KnownToolEntry for
-			// each loaded tool, so a fresh buildToolDefinitions picks them up
-			// via promotedToolSet and puts their full schemas into the tools
-			// array for the rest of THIS turn. Without the rebuild below the
-			// load would only take effect on the NEXT request for native-
-			// tools-mode providers — the per-Run cachedTools snapshot built
-			// before the loop would still drive every subsequent round's
-			// `req.Tools`, leaving the LLM with the same catalog-only entry it
-			// just loaded.
+			// Same-turn load completion for _meta__load_tools and for a tool
+			// loaded on call. The executor (system_tools.go) already persisted
+			// a sticky KnownToolEntry for each loaded tool, and a tool loaded
+			// on call is also in toolLoadsOnCall, so a fresh buildToolDefinitions
+			// picks them up via promotedToolSet and puts their full schemas
+			// into the tools array for the rest of THIS turn. Without the
+			// rebuild below the load would only take effect on the NEXT
+			// request for native-tools-mode providers — the per-Run
+			// cachedTools snapshot built before the loop would still drive
+			// every subsequent round's `req.Tools`, leaving the LLM with the
+			// same catalog-only entry it just loaded.
 			//
 			// Gated on native-tools mode (text-mode LLMs list the loaded tools
 			// inline in the system prompt on the next round; cachedTools is
-			// irrelevant on that path) and a successful result (a failed batch
-			// promoted nothing).
-			if nativeMode && toolResult.Error == "" &&
-				call.Plugin == metaPluginName && call.Action == metaLoadTools {
+			// irrelevant on that path) and, for load_tools, a successful
+			// result (a failed batch promoted nothing).
+			if nativeMode && (toolResult.NotRun || (toolResult.Error == "" &&
+				call.Plugin == metaPluginName && call.Action == metaLoadTools)) {
 				cachedTools = o.buildToolDefinitions(ctx)
-				log.Debug("cachedTools refreshed after _meta__load_tools",
-					"tools_count", len(cachedTools))
+				log.Debug("cachedTools refreshed after a tool load",
+					"tools_count", len(cachedTools), "loaded_on_call", toolResult.NotRun)
 			}
 			// Phantom-completion guard: remember when this load promoted a
 			// write tool. Parsed from the executor's result payload — the
@@ -2847,8 +2869,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if warning := o.recordToolOutcome(ctx, sessionID, call, toolResult, repaired); warning != nil {
 				transientMessages = append(transientMessages, *warning)
 			}
-			if o.pluginCallObserver != nil {
-				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", perCallInput, perCallOutput)
+			if o.pluginCallObserver != nil && !toolResult.NotRun {
+				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, failed, perCallInput, perCallOutput)
 			}
 
 			if nativeToolCalls {
@@ -2880,6 +2902,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				})
 			}
 		}
+		lastUnrun = unrun
 	}
 
 	return nil, fmt.Errorf("agent loop exceeded %d iterations", maxAgentLoopIterations)
@@ -3042,17 +3065,16 @@ func (o *Orchestrator) prepareTurnStart(ctx context.Context, systemPrompt, model
 	sort.Slice(args.AvailableTools, func(i, j int) bool {
 		return args.AvailableTools[i].Name < args.AvailableTools[j].Name
 	})
-	// RFC #249 Pillar C: quote the preparer-phase references back into
-	// turn_start so consumers can render the preparer outcome in-place
-	// without walking sibling events by parent_id. The ctx slot is
-	// populated by the preparer-loop after emitPreparerDecision; absent
-	// on early-exit paths (no preparer ran / no signal) — the zero
-	// values then leave the new fields omitted from the payload.
+	// RFC #249 Pillar C: quote the preparer decision back into turn_start
+	// so consumers can render the preparer outcome in-place without
+	// walking sibling events by parent_id. The ctx slot is populated by
+	// the preparer-loop after emitPreparerDecision; absent on early-exit
+	// paths (no preparer ran / no signal) — the field is then omitted
+	// from the payload. InjectedKnowledge and the tool tier counts stay
+	// unset: knowledge is pull-only and tool discovery is the registry
+	// catalog, so there is nothing to quote for them.
 	if tsc, ok := turnStartContextFromContext(ctx); ok {
 		args.PreparerDecisionID = tsc.PreparerDecisionID
-		args.InjectedKnowledge = tsc.InjectedKnowledge
-		args.ToolTier1Count = tsc.Tier1Count
-		args.ToolTier3Count = tsc.Tier3Count
 	}
 	return args
 }
@@ -3268,15 +3290,15 @@ func (o *Orchestrator) maybeRequireConfirmation(
 		return nil, false
 	}
 	// A call to a tool the model has not loaded (a native-mode catalog tool)
-	// will be refused by executeCall with a "load it first" hint, so it must
+	// is never run: executeCall answers it (answerUnloadedCall), so it must
 	// not cost the user an approval — skip the gate and let it fall through to
-	// that refusal. Same principle as the unknown-args skip below: the model
-	// corrects itself (here: loads the tool's schema and retries) without a
-	// prompt. This is why an unloaded write never reaches a confirmation
-	// request — the model must know the tool before the user is asked to
-	// approve running it.
+	// that answer. Same principle as the unknown-args skip below: the model
+	// corrects itself (here: calls the tool again once its schema is loaded)
+	// without a prompt. This is why an unloaded write never reaches a
+	// confirmation request — the model must know the tool before the user is
+	// asked to approve running it.
 	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
-		logger.FromContext(ctx).Debug("skipping confirmation for unloaded catalog tool; executeCall will refuse it with a load_tools hint",
+		logger.FromContext(ctx).Debug("skipping confirmation for unloaded catalog tool; executeCall answers it without running it",
 			"plugin", call.Plugin, "action", call.Action)
 		return nil, false
 	}
@@ -4232,12 +4254,6 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	return messages, system
 }
 
-func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
-	inclSI := len(includeServerInstructions) == 0 || includeServerInstructions[0]
-	messages, _ := o.appendConversation(ctx, sess, o.buildSystemPrompt(ctx, userMessage, inclSI))
-	return messages
-}
-
 // Context-window accounting — the token estimate, the input budget and the
 // oldest-first trim — lives in context_budget.go.
 
@@ -4650,9 +4666,10 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 
 	if call.Plugin == "" {
 		o.emitToolCallNotFound(ctx, call)
+		_, native := sentNativeToolsFromContext(ctx)
 		return ToolResult{
 			CallID: call.ID,
-			Error:  `tool call format not recognized. You MUST use this exact format: [tool_call] {"tool": "plugin__action", "args": {"key": "value"}} [/tool_call]. Do NOT use XML or any other format. Retry the same action now using the correct format.`,
+			Error:  recoveryHint(native, nativeWrongNameFormError, textWrongNameFormError),
 		}
 	}
 	exec, ok := o.registry.GetExecutor(call.Plugin)
@@ -4756,23 +4773,18 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	// via _meta__load_tools); every other allowed tool appears in the
 	// system-prompt catalog as a name + one-line summary with NO parameter
 	// schema. A call to a tool that was NOT in the sent array means the model is
-	// inventing arguments from that summary — refuse it and point at load_tools
-	// so it loads the full schema and retries on its next step. The gate keys off
-	// the set actually sent this request (recorded on ctx by the agent loop), so
-	// it fires exactly where "unloaded" is meaningful: it is a no-op for text
-	// mode and the sub-agent loop (both list every tool in full inline, no native
-	// array) and for host-constructed calls (FromLLM=false). Placed after the
-	// plugin / user-only gates (a hidden tool is refused for that stronger reason
-	// first) and before arg validation (loading the real schema is the actionable
-	// fix, not the guessed args).
+	// inventing arguments from that summary — the call never runs:
+	// answerUnloadedCall loads the tool when load_tools could, and tells the
+	// model to call it again from its description. The gate keys off the set
+	// actually sent this request (recorded on ctx by the agent loop), so it fires
+	// exactly where "unloaded" is meaningful: it is a no-op for text mode and the
+	// sub-agent loop (both list every tool in full inline, no native array) and
+	// for host-constructed calls (FromLLM=false). Placed after the plugin /
+	// user-only gates (a hidden tool is refused for that stronger reason first)
+	// and before arg validation (loading the real schema is the actionable fix,
+	// not the guessed args).
 	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
-		fqn := toolFQN(call.Plugin, call.Action)
-		loadTools := toolFQN(metaPluginName, metaLoadTools)
-		slog.Warn("BLOCKED LLM call to unloaded catalog tool", "plugin", call.Plugin, "action", call.Action, "load_tools", loadTools)
-		return o.emitRefusalResult(ctx, call, fmt.Sprintf(
-			"tool %q is not loaded: its parameters are not in your context, so you cannot call it yet. "+
-				"First call %s(names=%q), then call %s on your next step. Do not guess the parameters.",
-			fqn, loadTools, fqn, fqn), dispatchStart)
+		return o.answerUnloadedCall(ctx, call, dispatchStart)
 	}
 	// Reject unknown args from LLM-originated calls. Without this, stray keys
 	// (e.g. Haiku emitting `message=` at top level instead of inside `args`)
@@ -5455,32 +5467,21 @@ func toolCallSignature(calls []ToolCall) string {
 	return sb.String()
 }
 
-func formatToolResultMessage(result ToolResult) string {
-	if result.Error != "" {
-		return fmt.Sprintf("[tool_result] error: %s", result.Error)
-	}
-	return fmt.Sprintf("[tool_result] %s", result.Content)
-}
-
 // turnStartContextKey is the ctx slot the preparer phase fills in
 // after emitPreparerDecision so prepareTurnStart can quote the
-// decision back as TurnStartPayload.PreparerDecisionID +
-// InjectedKnowledge + tier1/tier3 counts (RFC #249 Pillar C). Set
-// inside the same Run call, before EmitTurnStart fires.
+// decision back as TurnStartPayload.PreparerDecisionID (RFC #249
+// Pillar C). Set inside the same Run call, before EmitTurnStart fires.
 type turnStartContextKey struct{}
 
-// turnStartContext carries the preparer-phase references the next
+// turnStartContext carries the preparer-phase reference the next
 // turn_start event quotes. PreparerDecisionID may be "" when no
 // preparer_decision event was emitted (no signal in the aggregate).
-// Knowledge is pull-only and tool discovery is the registry catalog, so
-// InjectedKnowledge / Tier1Count / Tier3Count are always zero values now
-// (the retrieved candidates surface on preparer_decision instead); they
-// remain on the payload for schema stability and `omitempty` drops them.
+// The payload's InjectedKnowledge and tool tier counts are never set:
+// knowledge is pull-only and tool discovery is the registry catalog (the
+// retrieved candidates surface on preparer_decision instead); they remain
+// on the payload for schema stability and `omitempty` drops them.
 type turnStartContext struct {
 	PreparerDecisionID string
-	InjectedKnowledge  []events.KnowledgeRef
-	Tier1Count         int
-	Tier3Count         int
 }
 
 func withTurnStartContext(ctx context.Context, tsc turnStartContext) context.Context {
@@ -5596,11 +5597,47 @@ func sentNativeToolsFromContext(ctx context.Context) (map[string]struct{}, bool)
 	return v.fqns, true
 }
 
-// buildToolCallNudge creates a retry nudge message that includes a concrete
-// tool call example derived from the planner's expected steps. Weak LLMs that
-// ignore the generic "use [tool_call] format" instruction are much more likely
-// to comply when they see the exact JSON they need to produce.
-func buildToolCallNudge(steps []*pipeline.Step) string {
+// Recovery hints: what the agent loop tells the model after a reply it cannot
+// use. Text tool mode asks for the [tool_call] block its prompt teaches; native
+// tool mode has no such format, so its hints ask for a native call by the
+// tool's exact name.
+const (
+	textInventedResultHint   = "[system] Your previous response contained placeholder variables instead of real data. You MUST call the tool first using [tool_call] format, then answer with the actual results."
+	nativeInventedResultHint = "[system] Your previous response contained placeholder variables instead of real data. " +
+		"You MUST call the tool first as a native tool call, using the tool's exact name, then answer with the actual results."
+
+	// The native empty-reply hint also allows a plain answer: a model whose
+	// task is already done must not be pushed into repeating a write.
+	textEmptyReplyHint   = "[system] Your previous response was empty or contained only unparseable tool call blocks. Please respond to the user in natural language. If you need to call a tool, use the [tool_call] format shown in your instructions."
+	nativeEmptyReplyHint = "[system] Your previous response was empty or could not be read. " +
+		"If the request still needs a tool, call it now as a native tool call, using the tool's exact name. " +
+		"If the request is already done, answer the user in plain language instead; do not repeat a call that already succeeded."
+
+	textNarratedCallHint   = "[system] Do not describe what you will do. Execute the tool call NOW using the [tool_call] format shown in your instructions."
+	nativeNarratedCallHint = "[system] Do not describe what you will do. Make the tool call NOW as a native tool call, using the tool's exact name."
+
+	// Tool-result errors for an LLM call whose tool name is not plugin__action
+	// (or, in text mode, whose [tool_call] block could not be decoded).
+	textWrongNameFormError   = `tool call format not recognized. You MUST use this exact format: [tool_call] {"tool": "plugin__action", "args": {"key": "value"}} [/tool_call]. Do NOT use XML or any other format. Retry the same action now using the correct format.`
+	nativeWrongNameFormError = "tool name not recognized: tool names have the form plugin__action. " +
+		"Retry the same action now as a native tool call, using the tool's exact name as listed."
+)
+
+// recoveryHint returns the native-mode text when the model was offered its
+// tools natively, else the text-mode one.
+func recoveryHint(native bool, nativeText, text string) string {
+	if native {
+		return nativeText
+	}
+	return text
+}
+
+// buildToolCallNudge creates a retry nudge message that names the tool and
+// arguments from the planner's expected steps. Weak LLMs that ignore the
+// generic nudge are much more likely to comply when they see the exact call
+// they need to produce: in text mode the JSON [tool_call] block, in native
+// mode the tool's exact native name and its arguments.
+func buildToolCallNudge(steps []*pipeline.Step, native bool) string {
 	// Find the first step with a concrete command to use as the example.
 	for _, s := range steps {
 		if s.Command == nil || s.Command.Plugin == "" || s.Command.Action == "" {
@@ -5608,8 +5645,8 @@ func buildToolCallNudge(steps []*pipeline.Step) string {
 		}
 		tool := toolFQN(s.Command.Plugin, s.Command.Action)
 		// Marshal typed args directly — JSON preserves number/bool/array
-		// shape exactly as the LLM should re-emit them in the [tool_call]
-		// block. Stringification (used for the gRPC wire) would force the
+		// shape exactly as the LLM should re-emit them in its call.
+		// Stringification (used for the gRPC wire) would force the
 		// LLM to read "2037838" and decide whether to quote it; better to
 		// hand the JSON form straight back.
 		args := s.Command.Args
@@ -5620,13 +5657,18 @@ func buildToolCallNudge(steps []*pipeline.Step) string {
 		if err != nil {
 			break
 		}
-		return "[system] You answered without calling a tool — your answer may be fabricated. " +
-			"You MUST call the tool first, then answer with real data. " +
+		const preamble = "[system] You answered without calling a tool — your answer may be fabricated. " +
+			"You MUST call the tool first, then answer with real data. "
+		if native {
+			return preamble + "Call " + tool + " now as a native tool call, using exactly this name, " +
+				"with these arguments:\n\n" + string(argsJSON)
+		}
+		return preamble +
 			"Output ONLY a [tool_call] block like this:\n\n" +
 			"[tool_call]\n{\"tool\": \"" + tool + "\", \"args\": " + string(argsJSON) + "}\n[/tool_call]"
 	}
 	// Fallback: no concrete step available (sentinel "direct" step).
-	return "[system] Do not describe what you will do. Execute the tool call NOW using the [tool_call] format shown in your instructions."
+	return recoveryHint(native, nativeNarratedCallHint, textNarratedCallHint)
 }
 
 // plannerStepsToInvoke converts planner pipeline steps to InvokeSteps for
