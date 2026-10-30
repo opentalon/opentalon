@@ -2524,7 +2524,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				escaped := strings.ReplaceAll(resp.Content, "{{", "{ {")
 				transientMessages = []provider.Message{
 					{Role: provider.RoleAssistant, Content: escaped},
-					{Role: provider.RoleUser, Content: "[system] Your previous response contained placeholder variables instead of real data. You MUST call the tool first using [tool_call] format, then answer with the actual results."},
+					{Role: provider.RoleUser, Content: recoveryHint(nativeMode, nativeInventedResultHint, textInventedResultHint)},
 				}
 				continue
 			}
@@ -2533,7 +2533,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if stripped == "" {
 				// Empty response — either the LLM returned nothing, or its output
 				// was entirely unparseable tool call blocks that got stripped.
-				// Retry once asking for a plain-language answer.
+				// Retry with a hint for the request's tool-calling mode.
 				if stripRetries >= 5 {
 					log.Debug("LLM repeatedly produced empty/unparseable response, giving up", "round", i+1)
 					result.Response = "(no response)"
@@ -2549,7 +2549,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					Attempt:   stripRetries,
 					LastError: "empty or unparseable response",
 				})
-				retryHint := "[system] Your previous response was empty or contained only unparseable tool call blocks. Please respond to the user in natural language. If you need to call a tool, use the [tool_call] format shown in your instructions."
+				retryHint := recoveryHint(nativeMode, nativeEmptyReplyHint, textEmptyReplyHint)
 				if resp.Content != "" {
 					transientMessages = []provider.Message{
 						{Role: provider.RoleAssistant, Content: resp.Content},
@@ -2612,7 +2612,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				})
 				log.Warn("planner expected tool calls but LLM returned plain text, retrying",
 					"round", i+1, "retry", toolRetries, "expected_steps", len(steps))
-				nudge := buildToolCallNudge(steps)
+				nudge := buildToolCallNudge(steps, nativeMode)
 				transientMessages = []provider.Message{
 					{Role: provider.RoleAssistant, Content: resp.Content},
 					{Role: provider.RoleUser, Content: nudge},
@@ -2693,12 +2693,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 
 		// The LLM narrated a tool call ("We need to call plugin__action")
-		// instead of using [tool_call] format. Retry with an explicit nudge.
+		// instead of making it. Retry with an explicit nudge.
 		if IsNarratedPlaceholder(calls) {
 			log.Debug("narrated tool call detected, retrying with nudge", "round", i+1)
 			transientMessages = []provider.Message{
 				{Role: provider.RoleAssistant, Content: resp.Content},
-				{Role: provider.RoleUser, Content: "[system] Do not describe what you will do. Execute the tool call NOW using the [tool_call] format shown in your instructions."},
+				{Role: provider.RoleUser, Content: recoveryHint(nativeMode, nativeNarratedCallHint, textNarratedCallHint)},
 			}
 			continue
 		}
@@ -4583,9 +4583,10 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 
 	if call.Plugin == "" {
 		o.emitToolCallNotFound(ctx, call)
+		_, native := sentNativeToolsFromContext(ctx)
 		return ToolResult{
 			CallID: call.ID,
-			Error:  `tool call format not recognized. You MUST use this exact format: [tool_call] {"tool": "plugin__action", "args": {"key": "value"}} [/tool_call]. Do NOT use XML or any other format. Retry the same action now using the correct format.`,
+			Error:  recoveryHint(native, nativeWrongNameFormError, textWrongNameFormError),
 		}
 	}
 	exec, ok := o.registry.GetExecutor(call.Plugin)
@@ -5529,11 +5530,47 @@ func sentNativeToolsFromContext(ctx context.Context) (map[string]struct{}, bool)
 	return v.fqns, true
 }
 
-// buildToolCallNudge creates a retry nudge message that includes a concrete
-// tool call example derived from the planner's expected steps. Weak LLMs that
-// ignore the generic "use [tool_call] format" instruction are much more likely
-// to comply when they see the exact JSON they need to produce.
-func buildToolCallNudge(steps []*pipeline.Step) string {
+// Recovery hints: what the agent loop tells the model after a reply it cannot
+// use. Text tool mode asks for the [tool_call] block its prompt teaches; native
+// tool mode has no such format, so its hints ask for a native call by the
+// tool's exact name.
+const (
+	textInventedResultHint   = "[system] Your previous response contained placeholder variables instead of real data. You MUST call the tool first using [tool_call] format, then answer with the actual results."
+	nativeInventedResultHint = "[system] Your previous response contained placeholder variables instead of real data. " +
+		"You MUST call the tool first as a native tool call, using the tool's exact name, then answer with the actual results."
+
+	// The native empty-reply hint also allows a plain answer: a model whose
+	// task is already done must not be pushed into repeating a write.
+	textEmptyReplyHint   = "[system] Your previous response was empty or contained only unparseable tool call blocks. Please respond to the user in natural language. If you need to call a tool, use the [tool_call] format shown in your instructions."
+	nativeEmptyReplyHint = "[system] Your previous response was empty or could not be read. " +
+		"If the request still needs a tool, call it now as a native tool call, using the tool's exact name. " +
+		"If the request is already done, answer the user in plain language instead; do not repeat a call that already succeeded."
+
+	textNarratedCallHint   = "[system] Do not describe what you will do. Execute the tool call NOW using the [tool_call] format shown in your instructions."
+	nativeNarratedCallHint = "[system] Do not describe what you will do. Make the tool call NOW as a native tool call, using the tool's exact name."
+
+	// Tool-result errors for an LLM call whose tool name is not plugin__action
+	// (or, in text mode, whose [tool_call] block could not be decoded).
+	textWrongNameFormError   = `tool call format not recognized. You MUST use this exact format: [tool_call] {"tool": "plugin__action", "args": {"key": "value"}} [/tool_call]. Do NOT use XML or any other format. Retry the same action now using the correct format.`
+	nativeWrongNameFormError = "tool name not recognized: tool names have the form plugin__action. " +
+		"Retry the same action now as a native tool call, using the tool's exact name as listed."
+)
+
+// recoveryHint returns the native-mode text when the model was offered its
+// tools natively, else the text-mode one.
+func recoveryHint(native bool, nativeText, text string) string {
+	if native {
+		return nativeText
+	}
+	return text
+}
+
+// buildToolCallNudge creates a retry nudge message that names the tool and
+// arguments from the planner's expected steps. Weak LLMs that ignore the
+// generic nudge are much more likely to comply when they see the exact call
+// they need to produce: in text mode the JSON [tool_call] block, in native
+// mode the tool's exact native name and its arguments.
+func buildToolCallNudge(steps []*pipeline.Step, native bool) string {
 	// Find the first step with a concrete command to use as the example.
 	for _, s := range steps {
 		if s.Command == nil || s.Command.Plugin == "" || s.Command.Action == "" {
@@ -5541,8 +5578,8 @@ func buildToolCallNudge(steps []*pipeline.Step) string {
 		}
 		tool := toolFQN(s.Command.Plugin, s.Command.Action)
 		// Marshal typed args directly — JSON preserves number/bool/array
-		// shape exactly as the LLM should re-emit them in the [tool_call]
-		// block. Stringification (used for the gRPC wire) would force the
+		// shape exactly as the LLM should re-emit them in its call.
+		// Stringification (used for the gRPC wire) would force the
 		// LLM to read "2037838" and decide whether to quote it; better to
 		// hand the JSON form straight back.
 		args := s.Command.Args
@@ -5553,13 +5590,18 @@ func buildToolCallNudge(steps []*pipeline.Step) string {
 		if err != nil {
 			break
 		}
-		return "[system] You answered without calling a tool — your answer may be fabricated. " +
-			"You MUST call the tool first, then answer with real data. " +
+		const preamble = "[system] You answered without calling a tool — your answer may be fabricated. " +
+			"You MUST call the tool first, then answer with real data. "
+		if native {
+			return preamble + "Call " + tool + " now as a native tool call, using exactly this name, " +
+				"with these arguments:\n\n" + string(argsJSON)
+		}
+		return preamble +
 			"Output ONLY a [tool_call] block like this:\n\n" +
 			"[tool_call]\n{\"tool\": \"" + tool + "\", \"args\": " + string(argsJSON) + "}\n[/tool_call]"
 	}
 	// Fallback: no concrete step available (sentinel "direct" step).
-	return "[system] Do not describe what you will do. Execute the tool call NOW using the [tool_call] format shown in your instructions."
+	return recoveryHint(native, nativeNarratedCallHint, textNarratedCallHint)
 }
 
 // plannerStepsToInvoke converts planner pipeline steps to InvokeSteps for

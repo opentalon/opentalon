@@ -3290,7 +3290,7 @@ func TestBuildToolCallNudgeWithConcreteStep(t *testing.T) {
 			},
 		},
 	}
-	nudge := buildToolCallNudge(steps)
+	nudge := buildToolCallNudge(steps, false)
 	if !strings.Contains(nudge, `"tool": "inventory__inventory__list-person-types"`) {
 		t.Errorf("nudge should contain concrete tool name, got: %s", nudge)
 	}
@@ -3302,7 +3302,7 @@ func TestBuildToolCallNudgeWithConcreteStep(t *testing.T) {
 func TestBuildToolCallNudgeSentinel(t *testing.T) {
 	// Sentinel step from "direct" planner result — no command.
 	steps := []*pipeline.Step{{ID: "direct"}}
-	nudge := buildToolCallNudge(steps)
+	nudge := buildToolCallNudge(steps, false)
 	if !strings.Contains(nudge, "Execute the tool call NOW") {
 		t.Errorf("sentinel nudge should use generic fallback, got: %s", nudge)
 	}
@@ -3320,7 +3320,7 @@ func TestBuildToolCallNudgeWithArgs(t *testing.T) {
 			},
 		},
 	}
-	nudge := buildToolCallNudge(steps)
+	nudge := buildToolCallNudge(steps, false)
 	if !strings.Contains(nudge, `"inventory__inventory__list-items"`) {
 		t.Errorf("nudge should contain tool name, got: %s", nudge)
 	}
