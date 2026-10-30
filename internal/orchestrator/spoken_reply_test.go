@@ -358,6 +358,20 @@ func TestASpokenConfirmationWithoutTheQuestionAloudReadsOnlyItsSentences(t *test
 	}
 }
 
+func TestAConfirmationComesBackAfterAReconnectAsSpokenAsItWasAsked(t *testing.T) {
+	for _, spoken := range []bool{true, false} {
+		ctx := sentCtx("p__create_category")
+		if spoken {
+			ctx = actor.WithSpokenReply(ctx)
+		}
+		_, _, _, orch := raiseConfirmation(t, ctx, shownQuestion)
+		_, meta, ok := orch.PendingConfirmationFrame("s1")
+		if !ok || (meta[ReplyMetadataKey] == ReplySpoken) != spoken {
+			t.Errorf("asked in a spoken turn %v: re-emitted with %v", spoken, meta)
+		}
+	}
+}
+
 func TestATypedConfirmationIsNarratedAsBefore(t *testing.T) {
 	rr, system, _, _ := raiseConfirmation(t, sentCtx("p__create_category"), shownQuestion)
 	if strings.Contains(system, "## SPOKEN QUESTION") {

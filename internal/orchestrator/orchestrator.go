@@ -2043,7 +2043,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					Choices: []string{"approve", "reject"},
 				})
 				o.pendingMu.Lock()
-				o.pendingPipelines[sessionID] = pendingPipeline{plan: p, confID: confID}
+				o.pendingPipelines[sessionID] = pendingPipeline{plan: p, confID: confID, spoken: actor.SpokenReply(ctx)}
 				o.pendingMu.Unlock()
 				return &RunResult{
 					Response: planText,
@@ -2067,7 +2067,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				Choices: []string{"approve", "reject"},
 			})
 			o.pendingMu.Lock()
-			o.pendingPipelines[sessionID] = pendingPipeline{plan: p, confID: confID}
+			o.pendingPipelines[sessionID] = pendingPipeline{plan: p, confID: confID, spoken: actor.SpokenReply(ctx)}
 			o.pendingMu.Unlock()
 			return &RunResult{
 				Response: planText,
@@ -3206,6 +3206,7 @@ func toolConfirmationFrameMetadata(toolCallID string) map[string]string {
 type pendingPipeline struct {
 	plan   *pipeline.Pipeline
 	confID string
+	spoken bool // raised in a spoken turn (resumedSpoken)
 }
 
 // pipelineConfirmationFrameMetadata is toolConfirmationFrameMetadata for a
@@ -3247,13 +3248,14 @@ func confirmationReplyMetadata(action string) map[string]string {
 // blob, so after a restart a transcript prompt can reference a call nothing
 // can act on. This method answers from the authoritative live state — a
 // client should treat its result, not the transcript, as the only signal to
-// render *active* buttons; history rebuilds answered rows only.
+// render *active* buttons; history rebuilds answered rows only. A confirmation
+// raised in a spoken turn comes back with reply=spoken (resumedSpoken).
 func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content string, metadata map[string]string, ok bool) {
 	// Tool call: the persisted blob is the single source of pending tool-call
 	// state (survives restart / failover, shared across pods) and carries the
 	// approved-intent prompt it was stored with.
-	if pendingCall, _, prompt, _ := loadPendingToolCall(o.sessions, sessionID); pendingCall != nil {
-		return prompt, toolConfirmationFrameMetadata(pendingCall.ID), true
+	if pending, found := readPendingToolCall(o.sessions, sessionID); found {
+		return pending.Prompt, resumedSpoken(toolConfirmationFrameMetadata(pending.ID), pending.Spoken), true
 	}
 
 	// Pipeline plan: in-memory only (no persistence), so this covers a live
@@ -3264,7 +3266,7 @@ func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content strin
 	pendingPlan := o.pendingPipelines[sessionID]
 	o.pendingMu.Unlock()
 	if p := pendingPlan.plan; p != nil {
-		return p.FormatForConfirmation(), pipelineConfirmationFrameMetadata(p.ID), true
+		return p.FormatForConfirmation(), resumedSpoken(pipelineConfirmationFrameMetadata(p.ID), pendingPlan.spoken), true
 	}
 	return "", nil, false
 }
@@ -3406,7 +3408,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// actually approves, kept with the call so a post-approval repair can hand
 	// the corrector the approved intent without the session history.
 	pending := call
-	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg, thinking)
+	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg, actor.SpokenReply(ctx), thinking)
 	return &RunResult{
 		Response: confirmMsg,
 		Metadata: frameMeta,
@@ -5350,6 +5352,9 @@ type pendingToolCallMeta struct {
 	// passes executeCall's unknown-args validation. Rows persisted before
 	// this field unmarshal to false — exactly how they were restored then.
 	FromLLM bool `json:"from_llm,omitempty"`
+	// Spoken marks a confirmation raised in a spoken turn, so its re-emit says
+	// so too (resumedSpoken). Rows persisted before this field are not spoken.
+	Spoken bool `json:"spoken,omitempty"`
 	// The thinking of the response that issued the call, for the assistant
 	// message the approval stores. A blob written before the fingerprint
 	// existed holds blocks without one, which are never replayed.
@@ -5429,8 +5434,9 @@ func (o *Orchestrator) recordConfirmationInterruptedCalls(
 }
 
 // savePendingToolCall persists the pending call with the thinking in
-// *thinking, which it takes (takeThinking).
-func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID, prompt string, thinking *responseThinking) {
+// *thinking, which it takes (takeThinking); spoken says it was raised in a
+// spoken turn.
+func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID, prompt string, spoken bool, thinking *responseThinking) {
 	meta := pendingToolCallMeta{
 		ID:                      tc.ID,
 		Plugin:                  tc.Plugin,
@@ -5439,6 +5445,7 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 		ConfirmationRequestedID: confirmationRequestedID,
 		Prompt:                  prompt,
 		FromLLM:                 tc.FromLLM,
+		Spoken:                  spoken,
 		responseThinking:        takeThinking(thinking),
 	}
 	data, err := json.Marshal(meta)
@@ -5454,19 +5461,28 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 // the field or nothing was captured), and the thinking of the response that
 // issued the call.
 func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string, string, responseThinking) {
-	sess, err := sessions.Get(sessionID)
-	if err != nil || sess == nil {
-		return nil, "", "", responseThinking{}
-	}
-	raw := sess.Metadata["pending_tool_call"]
-	if raw == "" {
-		return nil, "", "", responseThinking{}
-	}
-	var meta pendingToolCallMeta
-	if json.Unmarshal([]byte(raw), &meta) != nil {
+	meta, found := readPendingToolCall(sessions, sessionID)
+	if !found {
 		return nil, "", "", responseThinking{}
 	}
 	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args, FromLLM: meta.FromLLM}, meta.ConfirmationRequestedID, meta.Prompt, meta.responseThinking
+}
+
+// readPendingToolCall returns the persisted pending call as stored; found is
+// false when none is, or it cannot be read.
+func readPendingToolCall(sessions SessionStoreInterface, sessionID string) (meta pendingToolCallMeta, found bool) {
+	sess, err := sessions.Get(sessionID)
+	if err != nil || sess == nil {
+		return pendingToolCallMeta{}, false
+	}
+	raw := sess.Metadata["pending_tool_call"]
+	if raw == "" {
+		return pendingToolCallMeta{}, false
+	}
+	if json.Unmarshal([]byte(raw), &meta) != nil {
+		return pendingToolCallMeta{}, false
+	}
+	return meta, true
 }
 
 // toolCallSignature builds a deterministic string from a set of tool calls

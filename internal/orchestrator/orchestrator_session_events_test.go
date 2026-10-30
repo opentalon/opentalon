@@ -486,7 +486,7 @@ func TestOrchestrator_PendingToolCallRejected_EmitsUserMessageButNotTurnStart(t 
 		Plugin: "gitlab",
 		Action: "analyze_code",
 		Args:   map[string]string{"repo": "myrepo"},
-	}, "", "", nil)
+	}, "", "", false, nil)
 
 	result, err := orch.Run(context.Background(), sessID, "no")
 	if err != nil {
@@ -1987,7 +1987,7 @@ func TestOrchestrator_Confirmation_ToolCallApproved_EmitsResolved(t *testing.T) 
 		Action: "analyze_code",
 		Args:   map[string]string{},
 	}
-	savePendingToolCall(orch.sessions, sessID, pending, "", "", nil)
+	savePendingToolCall(orch.sessions, sessID, pending, "", "", false, nil)
 
 	// Approve via the deterministic frontend button signal (metadata["confirmation"]).
 	ctx := actor.WithConfirmationDecision(context.Background(), "approve")
@@ -2019,7 +2019,7 @@ func TestOrchestrator_Confirmation_ToolCallRejected_EmitsResolved(t *testing.T) 
 		Action: "analyze_code",
 		Args:   map[string]string{},
 	}
-	savePendingToolCall(orch.sessions, sessID, pending, "", "", nil)
+	savePendingToolCall(orch.sessions, sessID, pending, "", "", false, nil)
 
 	if _, err := orch.Run(context.Background(), sessID, "no"); err != nil {
 		t.Fatal(err)
@@ -3201,7 +3201,7 @@ func TestOrchestrator_PendingToolCall_Amended(t *testing.T) {
 	savePendingToolCall(orch.sessions, sessID, &ToolCall{
 		ID: "pending-amend", Plugin: "gitlab", Action: "analyze_code",
 		Args: map[string]string{"assignee_id": "131349"},
-	}, "", "", nil)
+	}, "", "", false, nil)
 
 	result, err := orch.Run(context.Background(), sessID, "bitte auf Hans Meier zuweisen")
 	if err != nil {
@@ -3244,7 +3244,7 @@ func TestOrchestrator_PendingToolCall_RejectedWithReason(t *testing.T) {
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-rej", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", nil)
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-rej", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", false, nil)
 
 	result, err := orch.Run(context.Background(), sessID, "nein, lass es")
 	if err != nil {
@@ -3355,7 +3355,7 @@ func TestOrchestrator_PendingToolCall_ApproveWithChange_CoercedToAmend(t *testin
 	savePendingToolCall(orch.sessions, sessID, &ToolCall{
 		ID: "pending-coerce", Plugin: "gitlab", Action: "analyze_code",
 		Args: map[string]string{"assignee_id": "131349"},
-	}, "", "", nil)
+	}, "", "", false, nil)
 
 	result, err := orch.Run(context.Background(), sessID, "ja, aber an Hans Meier")
 	if err != nil {
@@ -3385,7 +3385,7 @@ func TestOrchestrator_PendingToolCall_ClassifierError_FallsBackToReject(t *testi
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-err", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", nil)
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-err", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", false, nil)
 
 	result, err := orch.Run(context.Background(), sessID, "asdf qwer")
 	if err != nil {
@@ -3420,7 +3420,7 @@ func TestOrchestrator_PendingToolCall_ClassifierApprove_Executes(t *testing.T) {
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-ok", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", nil)
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-ok", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", false, nil)
 
 	if _, err := orch.Run(context.Background(), sessID, "ja, bitte ausführen"); err != nil {
 		t.Fatal(err)
@@ -3482,7 +3482,7 @@ func TestOrchestrator_ClassifierSpan_NestsUnderInvoked(t *testing.T) {
 	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
 
-	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-nest", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", nil)
+	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-nest", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", false, nil)
 
 	if _, err := orch.Run(context.Background(), sessID, "nein"); err != nil {
 		t.Fatal(err)
