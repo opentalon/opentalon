@@ -2262,6 +2262,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var lastCallSig string          // "plugin__action\x00arg1=val1\x00..." for loop detection
 	var pairingSeen pairingReported // tool-pairing repairs already reported this turn
 	var repeatCount int
+	var lastUnrun map[string]bool // signatures of the previous response's calls answered without running
 	// Phantom-completion guard state (consumed in the calls==nil branch). The
 	// model sometimes loads a write tool, resolves every parameter through
 	// lookups — and then NARRATES the mutation instead of calling it ("The
@@ -2275,6 +2276,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var writeToolLoaded bool // load_tools promoted a non-read-only action this turn
 	var writeToolCalled bool // the model attempted any non-read-only call this turn
 	var actionNudged bool    // the one-shot phantom nudge was already spent
+	// The tools loaded on call this turn (answerUnloadedCall).
+	ctx = withToolLoadsOnCall(ctx, toolLoadsOnCall{})
 	agentRound := 0
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		agentRound = i + 1
@@ -2314,10 +2317,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// tool-load gate (executeCall / maybeRequireConfirmation) can admit a
 			// call iff its tool was in this array — no per-call state re-read, and
 			// no divergence from what the model actually saw. cachedTools is
-			// rebuilt after a successful load_tools, so the next round's set
-			// widens accordingly; a tool loaded by an earlier call in THIS
-			// response is deliberately absent here, so calling it before its
-			// next-round schema arrives is refused.
+			// rebuilt after a successful load_tools or a tool loaded on call,
+			// so the next round's set widens accordingly; a tool loaded by an
+			// earlier call in THIS response is deliberately absent here, so a
+			// call to it before its next-round schema arrives does not run.
 			sent := make(map[string]struct{}, len(cachedTools))
 			for _, td := range cachedTools {
 				sent[td.Name] = struct{}{}
@@ -2711,6 +2714,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			lastCallSig = callSig
 			repeatCount = 1
 		}
+		// The previous response's calls answered "loaded now, call again" did
+		// not run, so repeating the response is the retry they asked for: only
+		// those calls run, never again the ones that did.
+		if retries := retriesOfUnrunCalls(calls, lastUnrun); repeatCount >= 2 && len(retries) > 0 {
+			log.Info("identical response retries calls that did not run, running only those",
+				"round", i+1, "calls", len(calls), "retries", len(retries))
+			calls, repeatCount = retries, 1
+		}
 		if repeatCount >= 2 {
 			log.Warn("repeated identical tool call detected, breaking loop", "round", i+1, "repeat", repeatCount)
 			transientMessages = []provider.Message{
@@ -2738,6 +2749,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			thinking = responseThinking{Blocks: resp.Thinking, Fingerprint: resp.ThinkingFingerprint}
 		}
 
+		unrun := make(map[string]bool)
 		for i := range calls {
 			calls[i].FromLLM = true
 
@@ -2745,11 +2757,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// action counts as "the model is acting, not narrating" — even
 			// one that goes on to fail or raise a confirmation. Only calls
 			// that resolve count; a hallucinated tool name is not an attempt.
-			// Known tradeoff: an attempt refused by the native load gate
-			// ("tool not loaded") also disarms, so a model that then narrates
-			// instead of load-and-retry slips through. Deliberate — counting
-			// refused attempts as narration would instead tax every honest
-			// load-and-retry with a needless nudge round.
+			// Known tradeoff: an attempt the native load gate answers without
+			// running it ("loaded now, call it again") also disarms, so a model
+			// that then narrates instead of calling again slips through.
+			// Deliberate — counting those attempts as narration would instead
+			// tax every honest retry with a needless nudge round.
 			if calls[i].Plugin != metaPluginName && !writeToolCalled {
 				if a := o.resolveAction(calls[i].Plugin, calls[i].Action); a != nil && !a.ReadOnly {
 					writeToolCalled = true
@@ -2781,6 +2793,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			pluginStart := time.Now()
 			toolResult := o.executeCall(ctx, calls[i])
+			if toolResult.NotRun {
+				unrun[toolCallSignature(calls[i:i+1])] = true
+			}
 			// Captured before the repair block so the "plugin call" log line
 			// times the plugin, not the corrector side-call — repair logs its
 			// own per-attempt timing.
@@ -2804,31 +2819,36 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			result.Results = append(result.Results, toolResult)
 			totalToolCalls++
 
-			log.Info("plugin call", "plugin", call.Plugin, "action", call.Action, "duration", pluginDuration.Round(time.Millisecond).String(), "error", toolResult.Error != "")
-			if toolResult.Error != "" {
+			// A call answered without running (NotRun) did not fail: it is
+			// logged as no tool error, and the plugin-call metrics and the
+			// error counters (recordToolOutcome) leave it out.
+			failed := toolResult.Error != "" && !toolResult.NotRun
+			log.Info("plugin call", "plugin", call.Plugin, "action", call.Action, "duration", pluginDuration.Round(time.Millisecond).String(), "error", failed)
+			if failed {
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
 			}
 
-			// Same-turn load completion for _meta__load_tools. The executor
-			// (system_tools.go) already persisted a sticky KnownToolEntry for
-			// each loaded tool, so a fresh buildToolDefinitions picks them up
-			// via promotedToolSet and puts their full schemas into the tools
-			// array for the rest of THIS turn. Without the rebuild below the
-			// load would only take effect on the NEXT request for native-
-			// tools-mode providers — the per-Run cachedTools snapshot built
-			// before the loop would still drive every subsequent round's
-			// `req.Tools`, leaving the LLM with the same catalog-only entry it
-			// just loaded.
+			// Same-turn load completion for _meta__load_tools and for a tool
+			// loaded on call. The executor (system_tools.go) already persisted
+			// a sticky KnownToolEntry for each loaded tool, and a tool loaded
+			// on call is also in toolLoadsOnCall, so a fresh buildToolDefinitions
+			// picks them up via promotedToolSet and puts their full schemas
+			// into the tools array for the rest of THIS turn. Without the
+			// rebuild below the load would only take effect on the NEXT
+			// request for native-tools-mode providers — the per-Run
+			// cachedTools snapshot built before the loop would still drive
+			// every subsequent round's `req.Tools`, leaving the LLM with the
+			// same catalog-only entry it just loaded.
 			//
 			// Gated on native-tools mode (text-mode LLMs list the loaded tools
 			// inline in the system prompt on the next round; cachedTools is
-			// irrelevant on that path) and a successful result (a failed batch
-			// promoted nothing).
-			if nativeMode && toolResult.Error == "" &&
-				call.Plugin == metaPluginName && call.Action == metaLoadTools {
+			// irrelevant on that path) and, for load_tools, a successful
+			// result (a failed batch promoted nothing).
+			if nativeMode && (toolResult.NotRun || (toolResult.Error == "" &&
+				call.Plugin == metaPluginName && call.Action == metaLoadTools)) {
 				cachedTools = o.buildToolDefinitions(ctx)
-				log.Debug("cachedTools refreshed after _meta__load_tools",
-					"tools_count", len(cachedTools))
+				log.Debug("cachedTools refreshed after a tool load",
+					"tools_count", len(cachedTools), "loaded_on_call", toolResult.NotRun)
 			}
 			// Phantom-completion guard: remember when this load promoted a
 			// write tool. Parsed from the executor's result payload — the
@@ -2847,8 +2867,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if warning := o.recordToolOutcome(ctx, sessionID, call, toolResult, repaired); warning != nil {
 				transientMessages = append(transientMessages, *warning)
 			}
-			if o.pluginCallObserver != nil {
-				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", perCallInput, perCallOutput)
+			if o.pluginCallObserver != nil && !toolResult.NotRun {
+				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, failed, perCallInput, perCallOutput)
 			}
 
 			if nativeToolCalls {
@@ -2880,6 +2900,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				})
 			}
 		}
+		lastUnrun = unrun
 	}
 
 	return nil, fmt.Errorf("agent loop exceeded %d iterations", maxAgentLoopIterations)
@@ -3268,15 +3289,15 @@ func (o *Orchestrator) maybeRequireConfirmation(
 		return nil, false
 	}
 	// A call to a tool the model has not loaded (a native-mode catalog tool)
-	// will be refused by executeCall with a "load it first" hint, so it must
+	// is never run: executeCall answers it (answerUnloadedCall), so it must
 	// not cost the user an approval — skip the gate and let it fall through to
-	// that refusal. Same principle as the unknown-args skip below: the model
-	// corrects itself (here: loads the tool's schema and retries) without a
-	// prompt. This is why an unloaded write never reaches a confirmation
-	// request — the model must know the tool before the user is asked to
-	// approve running it.
+	// that answer. Same principle as the unknown-args skip below: the model
+	// corrects itself (here: calls the tool again once its schema is loaded)
+	// without a prompt. This is why an unloaded write never reaches a
+	// confirmation request — the model must know the tool before the user is
+	// asked to approve running it.
 	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
-		logger.FromContext(ctx).Debug("skipping confirmation for unloaded catalog tool; executeCall will refuse it with a load_tools hint",
+		logger.FromContext(ctx).Debug("skipping confirmation for unloaded catalog tool; executeCall answers it without running it",
 			"plugin", call.Plugin, "action", call.Action)
 		return nil, false
 	}
@@ -4690,23 +4711,18 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	// via _meta__load_tools); every other allowed tool appears in the
 	// system-prompt catalog as a name + one-line summary with NO parameter
 	// schema. A call to a tool that was NOT in the sent array means the model is
-	// inventing arguments from that summary — refuse it and point at load_tools
-	// so it loads the full schema and retries on its next step. The gate keys off
-	// the set actually sent this request (recorded on ctx by the agent loop), so
-	// it fires exactly where "unloaded" is meaningful: it is a no-op for text
-	// mode and the sub-agent loop (both list every tool in full inline, no native
-	// array) and for host-constructed calls (FromLLM=false). Placed after the
-	// plugin / user-only gates (a hidden tool is refused for that stronger reason
-	// first) and before arg validation (loading the real schema is the actionable
-	// fix, not the guessed args).
+	// inventing arguments from that summary — the call never runs:
+	// answerUnloadedCall loads the tool when load_tools could, and tells the
+	// model to call it again from its description. The gate keys off the set
+	// actually sent this request (recorded on ctx by the agent loop), so it fires
+	// exactly where "unloaded" is meaningful: it is a no-op for text mode and the
+	// sub-agent loop (both list every tool in full inline, no native array) and
+	// for host-constructed calls (FromLLM=false). Placed after the plugin /
+	// user-only gates (a hidden tool is refused for that stronger reason first)
+	// and before arg validation (loading the real schema is the actionable fix,
+	// not the guessed args).
 	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
-		fqn := toolFQN(call.Plugin, call.Action)
-		loadTools := toolFQN(metaPluginName, metaLoadTools)
-		slog.Warn("BLOCKED LLM call to unloaded catalog tool", "plugin", call.Plugin, "action", call.Action, "load_tools", loadTools)
-		return o.emitRefusalResult(ctx, call, fmt.Sprintf(
-			"tool %q is not loaded: its parameters are not in your context, so you cannot call it yet. "+
-				"First call %s(names=%q), then call %s on your next step. Do not guess the parameters.",
-			fqn, loadTools, fqn, fqn), dispatchStart)
+		return o.answerUnloadedCall(ctx, call, dispatchStart)
 	}
 	// Reject unknown args from LLM-originated calls. Without this, stray keys
 	// (e.g. Haiku emitting `message=` at top level instead of inside `args`)

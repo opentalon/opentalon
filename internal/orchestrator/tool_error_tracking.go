@@ -149,12 +149,15 @@ func (t *toolErrorTracker) stateFor(sessionID string) *sessionErrorState {
 //     (sticky_demotion_threshold tripped this call) or
 //     Demoted=false self-heal (success on a previously-failing tool)
 //
+// A call answered without running (result.NotRun) neither failed nor
+// succeeded, so it leaves every counter as it was.
+//
 // The Demoted flag lives in InjectionState, so the demotion side of the
 // tracker only does durable work when a state store is wired; the loop-cap
 // nudge works without one. The per-turn counter cost is trivial (two
 // integer increments + a map lookup per tool call).
 func (o *Orchestrator) recordToolOutcome(ctx context.Context, sessionID string, call ToolCall, result ToolResult, repaired bool) *provider.Message {
-	if sessionID == "" {
+	if sessionID == "" || result.NotRun {
 		return nil
 	}
 	fqn := toolFQN(call.Plugin, call.Action)
