@@ -471,7 +471,10 @@ func (p *Planner) ClassifyConfirmation(
 }
 
 // confirmationClassifyPrompt is filled with (pendingAction, pendingArgs, userReply).
-// It must stay language-agnostic — no keyword lists — and bias every ambiguity to reject.
+// It must stay language-agnostic — no keyword lists — and bias every ambiguity away
+// from approve. A reply that asks for something else (another instruction, a
+// question) is amend, not reject: reject drops the reply, so the user's request
+// would go unanswered, e.g. "check first whether it already exists".
 const confirmationClassifyPrompt = `An action is pending the user's confirmation and has NOT been executed.
 
 Pending action: %q
@@ -487,17 +490,23 @@ Classify the reply into EXACTLY one decision:
   EXACTLY AS PROPOSED, with no new information and no requested change
   (e.g. "yes", "ja", "go ahead", "ok do it").
 
-- "amend": the user gives a clear new instruction or correction that changes the
-  action (e.g. "assign it to Hans Meier instead", "no, use category B",
-  "make the title X"). Also choose "amend" for a MIXED reply that consents AND
-  asks for a change (e.g. "yes, but assign it to Hans") — the change must win.
+- "amend": the reply is neither a plain yes nor a plain no but asks for something:
+  a correction or a different value (e.g. "assign it to Hans Meier instead",
+  "no, use category B", "make the title X"), another instruction (e.g. "check
+  first whether it already exists"), or a question (e.g. "how many items does
+  this affect?"). Also choose "amend" for a MIXED reply that consents AND asks
+  for a change (e.g. "yes, but assign it to Hans") — the change must win. The
+  pending action is then dropped and the reply is answered as a new message.
 
-- "reject": the user cancels (e.g. "no", "nein", "cancel", "stop"), OR the reply
-  is ambiguous, unrelated, a question, or you are not confident which applies.
+- "reject": the user declines or cancels (e.g. "no", "nein", "cancel", "stop"),
+  OR the reply says nothing that could be done or answered (e.g. "hmm").
 
 RULES:
-- Be restrictive. If in ANY doubt, choose "reject".
+- Be restrictive about consent. If in ANY doubt whether the user consents, never
+  choose "approve".
 - "approve" ONLY for unambiguous consent with NO requested change.
+- Between "amend" and "reject": "amend" when the reply asks for anything,
+  "reject" when it only declines or says nothing.
 - A reply that contains BOTH consent and a change is "amend", never "approve".
 - Set "requests_change" to true whenever the reply asks for ANY change to the
   pending action or its arguments, even if you also chose "approve".
@@ -507,7 +516,7 @@ RULES:
   compose prose — the decision matters, the reason is optional.
 
 Respond ONLY with valid JSON, no prose:
-{"decision":"approve|amend|reject","requests_change":true|false,"reason":"<one short sentence in the user's language explaining the classification; shown to the user on reject>"}`
+{"decision":"approve|amend|reject","requests_change":true|false,"reason":"<one short sentence explaining the classification, for the log; never shown to the user>"}`
 
 // formatPendingArgs renders the pending action's arguments as a stable,
 // human-readable list (sorted keys, one "- key: value" per line) for the
