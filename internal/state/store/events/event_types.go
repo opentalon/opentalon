@@ -297,6 +297,9 @@ type Header struct {
 // turn's preparer outcome in-place without walking sibling events by
 // parent_id. All four are omitempty so pre-Phase-3 deployments and
 // no-preparer turns emit a payload byte-identical to the original shape.
+// The orchestrator sets only PreparerDecisionID today: knowledge is
+// pull-only and tool discovery is the registry catalog, so the other
+// three stay empty.
 type TurnStartPayload struct {
 	Header
 	SystemPromptSHA256 string                 `json:"system_prompt_sha256,omitempty"`

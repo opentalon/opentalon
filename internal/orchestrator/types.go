@@ -32,11 +32,13 @@ type Parameter struct {
 // AuditLog, when true, causes the orchestrator to log each invocation (actor, plugin, action, args) for audit; no plugin or action names are hardcoded in the core.
 // UserOnly, when true, hides the action from the LLM system prompt and blocks it from being called via LLM-generated tool calls; it can only be invoked directly by the user (e.g. via RunAction).
 // AlwaysInclude, when true, keeps this action in the native `tools` array
-// (native tool calling) with its full schema on every request, whether or
-// not the model loaded it, so a plugin can guarantee critical capabilities
-// (e.g. emergency-stop) are never reduced to a one-line tool-catalog entry
-// the model must load first. The sticky cap and demotion do not apply to
-// it. Without native tool calling every tool is listed in full anyway.
+// (native tool calling) with its full schema, whether or not the model
+// loaded it, for every session that may use it (the profile, preparer and
+// user-only filters still apply), so a plugin can guarantee critical
+// capabilities (e.g. emergency-stop) are never reduced to a one-line
+// tool-catalog entry the model must load first. The sticky cap and
+// demotion do not apply to it. Without native tool calling every tool is
+// listed in full anyway.
 // ReadOnly is the per-call confirmation-gate hint: when true the
 // orchestrator skips the "I'm about to execute X" user prompt that
 // normally precedes a tool call, and the planner-narration LLM call
