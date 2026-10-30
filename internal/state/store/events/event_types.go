@@ -45,7 +45,7 @@ const (
 	// Emitted children of user_message: each RAG retrieval becomes one
 	// *_retrieval event, then preparer_decision is the composite outcome
 	// the orchestrator landed on. messages_truncated fires from
-	// buildMessages inside the agent loop and parents to turn_start
+	// appendConversation inside the agent loop and parents to turn_start
 	// (it can fire more than once per turn when the cutter applies on
 	// successive iterations as the conversation grows during tool
 	// rounds).
@@ -297,6 +297,9 @@ type Header struct {
 // turn's preparer outcome in-place without walking sibling events by
 // parent_id. All four are omitempty so pre-Phase-3 deployments and
 // no-preparer turns emit a payload byte-identical to the original shape.
+// The orchestrator sets only PreparerDecisionID today: knowledge is
+// pull-only and tool discovery is the registry catalog, so the other
+// three stay empty.
 type TurnStartPayload struct {
 	Header
 	SystemPromptSHA256 string                 `json:"system_prompt_sha256,omitempty"`

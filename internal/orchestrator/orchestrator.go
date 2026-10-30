@@ -933,21 +933,22 @@ func (s *invokeStepsUnmarshal) UnmarshalJSON(data []byte) error {
 // Candidate fields (knowledge / glossary / tool) are RFC #249 additions
 // — preparers that retrieve from a RAG corpus may return the structured
 // candidate list alongside (or instead of) the legacy `message` /
-// `relevant_tools` fields so the orchestrator can apply per-session
-// dedup + tier-promotion logic in Phase 3+.
+// `relevant_tools` fields.
 //
-// In Phase 2 the candidate slices are deserialized for instrumentation
-// (knowledge_retrieval / glossary_retrieval / tool_retrieval events
-// carry the hits) but do not yet drive injection decisions — the
-// `message` body remains authoritative for what reaches the LLM.
+// The candidate slices and relevant_tools are instrumentation only: the
+// knowledge_retrieval / glossary_retrieval / tool_retrieval events report
+// them, and preparer_decision the retrieved knowledge ids and tool names.
+// They do not decide which tools the model gets (the registry catalog and
+// load_tools do) or which knowledge reaches it (knowledge is pull-only) —
+// the `message` body remains authoritative for what reaches the LLM.
 // Plugins returning only the legacy fields stay fully backwards-
-// compatible: the candidate slices unmarshal to nil and the
-// orchestrator falls through to the legacy path.
+// compatible: the candidate slices unmarshal to nil and the tool events
+// report relevant_tools.
 type preparerResponse struct {
 	SendToLLM     *bool                `json:"send_to_llm"`
 	Message       string               `json:"message"`
 	Invoke        invokeStepsUnmarshal `json:"invoke"`
-	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional: filter system prompt to these tools (format: "plugin__action")
+	RelevantTools []string             `json:"relevant_tools,omitempty"` // optional, instrumentation only: reported as the retrieved tools when tool_candidates is empty (format: "plugin__action")
 
 	KnowledgeCandidates []KnowledgeCandidate `json:"knowledge_candidates,omitempty"`
 	GlossaryCandidates  []GlossaryCandidate  `json:"glossary_candidates,omitempty"`
@@ -986,13 +987,14 @@ type GlossaryCandidate struct {
 	PositionInResults int     `json:"position_in_results,omitempty"`
 }
 
-// ToolCandidate is the RAG-retrieved tool entry with score so the
-// orchestrator (Phase 4) can apply the LRU + tier-promotion logic and
-// the *_retrieval event can publish ranked hits.
+// ToolCandidate is one tool a preparer's retrieval returned, with its
+// score. It is instrumentation only: tool_retrieval reports its name and
+// score, preparer_decision its name, and it does not decide which tools
+// the model gets (that is the catalog and load_tools). A
+// "position_in_results" key in the incoming JSON is ignored.
 type ToolCandidate struct {
-	ToolName          string  `json:"tool_name"`
-	Score             float64 `json:"score"`
-	PositionInResults int     `json:"position_in_results,omitempty"`
+	ToolName string  `json:"tool_name"`
+	Score    float64 `json:"score"`
 }
 
 // PreparerRetrievalMetrics is a per-corpus optional summary returned
@@ -3063,17 +3065,16 @@ func (o *Orchestrator) prepareTurnStart(ctx context.Context, systemPrompt, model
 	sort.Slice(args.AvailableTools, func(i, j int) bool {
 		return args.AvailableTools[i].Name < args.AvailableTools[j].Name
 	})
-	// RFC #249 Pillar C: quote the preparer-phase references back into
-	// turn_start so consumers can render the preparer outcome in-place
-	// without walking sibling events by parent_id. The ctx slot is
-	// populated by the preparer-loop after emitPreparerDecision; absent
-	// on early-exit paths (no preparer ran / no signal) — the zero
-	// values then leave the new fields omitted from the payload.
+	// RFC #249 Pillar C: quote the preparer decision back into turn_start
+	// so consumers can render the preparer outcome in-place without
+	// walking sibling events by parent_id. The ctx slot is populated by
+	// the preparer-loop after emitPreparerDecision; absent on early-exit
+	// paths (no preparer ran / no signal) — the field is then omitted
+	// from the payload. InjectedKnowledge and the tool tier counts stay
+	// unset: knowledge is pull-only and tool discovery is the registry
+	// catalog, so there is nothing to quote for them.
 	if tsc, ok := turnStartContextFromContext(ctx); ok {
 		args.PreparerDecisionID = tsc.PreparerDecisionID
-		args.InjectedKnowledge = tsc.InjectedKnowledge
-		args.ToolTier1Count = tsc.Tier1Count
-		args.ToolTier3Count = tsc.Tier3Count
 	}
 	return args
 }
@@ -4184,12 +4185,6 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	// which are attached to the request after assembly — so "make it fit" runs
 	// on the finished request, in the agent loop (see fitRequestToWindow).
 	return messages, system
-}
-
-func (o *Orchestrator) buildMessages(ctx context.Context, sess *state.Session, userMessage string, includeServerInstructions ...bool) []provider.Message {
-	inclSI := len(includeServerInstructions) == 0 || includeServerInstructions[0]
-	messages, _ := o.appendConversation(ctx, sess, o.buildSystemPrompt(ctx, userMessage, inclSI))
-	return messages
 }
 
 // Context-window accounting — the token estimate, the input budget and the
@@ -5405,32 +5400,21 @@ func toolCallSignature(calls []ToolCall) string {
 	return sb.String()
 }
 
-func formatToolResultMessage(result ToolResult) string {
-	if result.Error != "" {
-		return fmt.Sprintf("[tool_result] error: %s", result.Error)
-	}
-	return fmt.Sprintf("[tool_result] %s", result.Content)
-}
-
 // turnStartContextKey is the ctx slot the preparer phase fills in
 // after emitPreparerDecision so prepareTurnStart can quote the
-// decision back as TurnStartPayload.PreparerDecisionID +
-// InjectedKnowledge + tier1/tier3 counts (RFC #249 Pillar C). Set
-// inside the same Run call, before EmitTurnStart fires.
+// decision back as TurnStartPayload.PreparerDecisionID (RFC #249
+// Pillar C). Set inside the same Run call, before EmitTurnStart fires.
 type turnStartContextKey struct{}
 
-// turnStartContext carries the preparer-phase references the next
+// turnStartContext carries the preparer-phase reference the next
 // turn_start event quotes. PreparerDecisionID may be "" when no
 // preparer_decision event was emitted (no signal in the aggregate).
-// Knowledge is pull-only and tool discovery is the registry catalog, so
-// InjectedKnowledge / Tier1Count / Tier3Count are always zero values now
-// (the retrieved candidates surface on preparer_decision instead); they
-// remain on the payload for schema stability and `omitempty` drops them.
+// The payload's InjectedKnowledge and tool tier counts are never set:
+// knowledge is pull-only and tool discovery is the registry catalog (the
+// retrieved candidates surface on preparer_decision instead); they remain
+// on the payload for schema stability and `omitempty` drops them.
 type turnStartContext struct {
 	PreparerDecisionID string
-	InjectedKnowledge  []events.KnowledgeRef
-	Tier1Count         int
-	Tier3Count         int
 }
 
 func withTurnStartContext(ctx context.Context, tsc turnStartContext) context.Context {
