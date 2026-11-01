@@ -1197,8 +1197,8 @@ func TestPreparerErrorFailOpenContinues(t *testing.T) {
 	}
 }
 
-// firstNonOrphanIndex is shared by the sliding-window cutter and the
-// context-window fit; the fit itself is tested in context_budget_test.go.
+// firstNonOrphanIndex serves the context-window fit, which is tested in
+// context_budget_test.go; the sliding window cuts with summaryCut.
 func TestFirstNonOrphanIndex(t *testing.T) {
 	// Leading native result + text-format [plugin_output] are skipped; the first
 	// real message (an assistant summary here) is the boundary.

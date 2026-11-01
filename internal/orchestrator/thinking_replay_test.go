@@ -26,10 +26,10 @@ var replayThinking = []json.RawMessage{
 	json.RawMessage(`{"type":"redacted_thinking","data":"enc-1"}`),
 }
 
-// One response with thinking blocks and two tool calls is stored as one
-// assistant message per call: the first carries the blocks, the second does
-// not. The final text answer stores none, though its response had blocks too.
-func TestRun_ThinkingRidesOnFirstToolCallMessage(t *testing.T) {
+// One response with text, thinking blocks and two tool calls is stored as one
+// assistant message that carries the text, the blocks and both calls. The
+// final text answer stores no blocks, though its response had them too.
+func TestRun_ThinkingRidesOnTheResponsesToolCallMessage(t *testing.T) {
 	registry := NewToolRegistry()
 	if err := registry.Register(PluginCapability{
 		Name: "p", Description: "thinking fixtures",
@@ -60,20 +60,25 @@ func TestRun_ThinkingRidesOnFirstToolCallMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
-	got := map[string]responseThinking{}
+	var rows []provider.Message
 	for _, m := range s.Messages {
-		if m.Role != provider.RoleAssistant {
-			continue
+		if m.Role == provider.RoleAssistant {
+			rows = append(rows, m)
 		}
-		key := m.Content
-		if len(m.ToolCalls) > 0 {
-			key = m.ToolCalls[0].ID
-		}
-		got[key] = responseThinking{Blocks: m.Thinking, Fingerprint: m.ThinkingFingerprint}
 	}
-	want := map[string]responseThinking{"c-a": {Blocks: replayThinking, Fingerprint: "fp-1"}, "c-b": {}, "Done.": {}}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("thinking per assistant message:\n got %+v\nwant %+v", got, want)
+	if len(rows) != 2 {
+		t.Fatalf("want the tool-call message and the answer, got %d assistant rows: %+v", len(rows), rows)
+	}
+	var ids []string
+	for _, tc := range rows[0].ToolCalls {
+		ids = append(ids, tc.ID)
+	}
+	if rows[0].Content != "Checking." || !reflect.DeepEqual(ids, []string{"c-a", "c-b"}) ||
+		!reflect.DeepEqual(rows[0].Thinking, replayThinking) || rows[0].ThinkingFingerprint != "fp-1" {
+		t.Errorf("tool-call message = %+v, want the text, both calls and the blocks with fingerprint fp-1", rows[0])
+	}
+	if rows[1].Content != "Done." || len(rows[1].Thinking) != 0 || rows[1].ThinkingFingerprint != "" {
+		t.Errorf("answer = %+v, want the text without blocks", rows[1])
 	}
 }
 
