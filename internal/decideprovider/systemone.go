@@ -24,6 +24,12 @@ const (
 
 const systemOneQuestion = "decision"
 
+// systemOneChoiceInstructions is the question a single decide asks: tln sends
+// {state, choices} and no instruction of its own, while the wire format requires
+// one — SubQ Snap rejects a question without it (422, required property
+// 'instructions'), which silently failed every `tool "<decider>" "decide"` step.
+const systemOneChoiceInstructions = "Choose the single option that best applies to the state."
+
 // subQMaxQuestions is the most questions SubQ Snap answers in one request; a
 // larger MultiRequest is split into requests of this size. Jev has no such cap
 // below MaxQuestions.
@@ -38,6 +44,7 @@ const subQMaxQuestions = 16
 //	POST <base_url>            (Authorization: Bearer <api_key>)
 //	  { "state": "<state>", "model": "jev-latest",
 //	    "questions": { "decision": { "type": "choice",
+//	                                 "instructions": "Choose the single option that best applies to the state.",
 //	                                 "criteria": { "A": "A", "B": "B" } } } }
 //	-> { "model": "jev-1.13.0",
 //	     "answers": { "decision": { "type": "choice", "choice": "A",
@@ -117,7 +124,8 @@ type systemOneResponse struct {
 }
 
 // Decide asks one choice question whose criteria are the bare choice labels —
-// the shape tln's `decide` block sends.
+// the shape tln's `decide` block sends. The question carries a fixed
+// instruction, because the wire format needs one and the caller has none.
 func (p *SystemOneProvider) Decide(ctx context.Context, req *Request) (*Decision, error) {
 	if len(req.Choices) == 0 {
 		return nil, fmt.Errorf("%s %q: %w", p.backend, p.id, errNoChoices)
@@ -126,7 +134,11 @@ func (p *SystemOneProvider) Decide(ctx context.Context, req *Request) (*Decision
 	for _, c := range req.Choices {
 		criteria[c] = c
 	}
-	resp, err := p.ask(ctx, req.State, map[string]systemOneChoiceQuestion{systemOneQuestion: {Type: "choice", Criteria: criteria}})
+	resp, err := p.ask(ctx, req.State, map[string]systemOneChoiceQuestion{systemOneQuestion: {
+		Type:         "choice",
+		Instructions: systemOneChoiceInstructions,
+		Criteria:     criteria,
+	}})
 	if err != nil {
 		return nil, err
 	}
