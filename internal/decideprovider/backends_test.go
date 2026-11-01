@@ -89,8 +89,9 @@ func TestJev_SendsSystemOneChoiceQuestion(t *testing.T) {
 		"model": "jev-latest",
 		"questions": map[string]any{
 			"decision": map[string]any{
-				"type":     "choice",
-				"criteria": map[string]any{"Legitimate": "Legitimate", "Spam": "Spam"},
+				"type":         "choice",
+				"instructions": systemOneChoiceInstructions,
+				"criteria":     map[string]any{"Legitimate": "Legitimate", "Spam": "Spam"},
 			},
 		},
 	}
@@ -148,6 +149,13 @@ func TestSubQ_SendsDefaultModelAndPassesUsage(t *testing.T) {
 	}
 	if gotBody["model"] != "subq-snap-preview" {
 		t.Errorf("model = %v, want subq-snap-preview", gotBody["model"])
+	}
+	// SubQ rejects a question without instructions (422), so a single decide
+	// must still send a non-empty one.
+	questions, _ := gotBody["questions"].(map[string]any)
+	question, _ := questions["decision"].(map[string]any)
+	if s, _ := question["instructions"].(string); strings.TrimSpace(s) == "" {
+		t.Errorf("single decide sent no instructions, which SubQ rejects: %#v", gotBody)
 	}
 	if dec.Chosen != "widens" || math.Abs(dec.Confidence-0.9) > 1e-9 {
 		t.Errorf("decision = %#v, want widens at 0.9", dec)

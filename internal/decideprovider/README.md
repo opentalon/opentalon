@@ -58,6 +58,12 @@ with the invariants enforced in `normalize.go`:
 Calibration is honored **here**, so a backend that returns overconfident argmax
 or an un-normalized vector is still made honest before the gate sees it.
 
+A single decide (tln sends only `state` and `choices`) has no question of its
+own, so the hosted backends are asked one with a fixed instruction —
+`Choose the single option that best applies to the state.` SubQ Snap rejects a
+question without one (`422`, required property `instructions`), and no
+instruction is what made every typed-decision step fail on it.
+
 ### Several questions about one state
 
 A caller with many questions about the same text — a code review asking one
