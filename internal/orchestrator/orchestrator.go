@@ -2747,12 +2747,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		perCallInput := resp.Usage.InputTokens / max(len(calls), 1)
 		perCallOutput := resp.Usage.OutputTokens / max(len(calls), 1)
 
-		// The response's thinking blocks, until the first native tool-call
-		// message stored for the response takes them (takeThinking).
-		var thinking responseThinking
+		// What the response says once — its text and its thinking — for the
+		// first native tool-call row stored for it (takeHead), and the round
+		// that collects the calls that run into that row.
+		var head responseHead
 		if nativeToolCalls {
-			thinking = responseThinking{Blocks: resp.Thinking, Fingerprint: resp.ThinkingFingerprint}
+			head = responseHead{Content: resp.Content,
+				responseThinking: responseThinking{Blocks: resp.Thinking, Fingerprint: resp.ThinkingFingerprint}}
 		}
+		round := toolRound{head: &head}
 
 		unrun := make(map[string]bool)
 		for i := range calls {
@@ -2785,12 +2788,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// planner-narration round-trip per call). The flag originates
 			// from the plugin's manifest (for MCP-sourced tools, propagated
 			// from `annotations.readOnlyHint`).
-			// Same gate as the server-side single-step path (shared helper) so
-			// the two sites can't drift. Narrates the prompt in the user's
-			// language, stores + persists the pending call, and returns the
-			// confirmation; read-only / bypass calls fall through to execution.
-			if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, calls[i], userMessage, calls[i+1:], nativeToolCalls, &thinking); raised {
-				return rr, nil
+			// Same gate as the server-side single-step path (the two halves of
+			// maybeRequireConfirmation) so the two sites can't drift. Narrates
+			// the prompt in the user's language, stores + persists the pending
+			// call, and returns the confirmation; read-only / bypass calls fall
+			// through to execution. The calls that ran go into history first:
+			// the narration reads their results, and the prompt row has to come
+			// after them so that its reply row follows it directly.
+			if o.confirmationRequired(ctx, calls[i]) {
+				round.store(sessions, sessionID)
+				return o.raiseConfirmation(ctx, sessions, sessionID, calls[i], userMessage, calls[i+1:], nativeToolCalls, &head), nil
 			}
 
 			if timing != nil {
@@ -2878,22 +2885,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 
 			if nativeToolCalls {
-				// Native tool calling: store assistant message with tool_calls
-				// and tool result as role=tool with tool_call_id.
-				_ = sessions.AddMessage(sessionID, takeThinking(&thinking).attach(provider.Message{
-					Role:    provider.RoleAssistant,
-					Content: resp.Content,
-					ToolCalls: []provider.ToolCall{{
-						ID:        call.ID,
-						Name:      toolFQN(call.Plugin, call.Action),
-						Arguments: call.Args,
-					}},
-				}))
-				_ = sessions.AddMessage(sessionID, provider.Message{
-					Role:       provider.RoleTool,
-					Content:    nativeToolContent(toolResult),
-					ToolCallID: call.ID,
-				})
+				// Native tool calling: the response's calls share one assistant
+				// message, stored with their results once the round is over.
+				round.add(call, toolResult)
 			} else {
 				// Text-based tool calling: store as assistant + user messages.
 				_ = sessions.AddMessage(sessionID, provider.Message{
@@ -2906,6 +2900,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				})
 			}
 		}
+		round.store(sessions, sessionID)
 		lastUnrun = unrun
 	}
 
@@ -3276,24 +3271,34 @@ func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content strin
 //
 // interrupted carries the not-yet-executed calls from the SAME model response
 // that this confirmation abandons (the agent loop stops at the gated call and
-// returns). Each one is recorded into history as an explicit "not executed"
-// exchange BEFORE the confirmation prompt row — without that trace the model
+// returns). They are recorded into history with an explicit "not executed"
+// result each BEFORE the confirmation prompt row — without that trace the model
 // later treats its own issued-but-dropped calls as done and reports phantom
 // results (observed: structure/create_category_and_container_type — the second
 // create of a two-call batch vanished and the model announced both as created,
-// inventing an id). The pairs sit before the prompt row so the resolved
+// inventing an id). The rows sit before the prompt row so the resolved
 // prompt+reply pair stays adjacent for stripApprovedConfirmationExchanges.
 // interruptedNative says how THIS response's calls are being recorded (the
-// loop's per-response native flag), so the pairs match the surrounding format.
-// thinking holds the response's thinking blocks no stored message has taken
-// yet: a raised confirmation hands them to the first interrupted call's
-// message, else to the pending call (takeThinking). nil holds none.
+// loop's per-response native flag), so the rows match the surrounding format.
+// head holds the response's text and thinking while no stored message has
+// taken them: a raised confirmation hands them to the interrupted calls'
+// message, else the thinking to the pending call (takeHead). nil holds none.
 func (o *Orchestrator) maybeRequireConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
-	interrupted []ToolCall, interruptedNative bool, thinking *responseThinking,
+	interrupted []ToolCall, interruptedNative bool, head *responseHead,
 ) (*RunResult, bool) {
-	if call.ConfirmationBypass {
+	if !o.confirmationRequired(ctx, call) {
 		return nil, false
+	}
+	return o.raiseConfirmation(ctx, sessions, sessionID, call, userMessage, interrupted, interruptedNative, head), true
+}
+
+// confirmationRequired is the gate's decision alone: whether call has to be
+// approved before it runs. The agent loop asks it apart from raiseConfirmation
+// so that it can store the calls that ran in between.
+func (o *Orchestrator) confirmationRequired(ctx context.Context, call ToolCall) bool {
+	if call.ConfirmationBypass {
+		return false
 	}
 	// A call to a tool the model has not loaded (a native-mode catalog tool)
 	// is never run: executeCall answers it (answerUnloadedCall), so it must
@@ -3306,7 +3311,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
 		logger.FromContext(ctx).Debug("skipping confirmation for unloaded catalog tool; executeCall answers it without running it",
 			"plugin", call.Plugin, "action", call.Action)
-		return nil, false
+		return false
 	}
 	// A call whose action does not resolve at all — a hallucinated or mangled
 	// name (e.g. plugin "timly", action "timly__load_tools") — will be refused
@@ -3326,7 +3331,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	if call.FromLLM && o.resolveAction(call.Plugin, call.Action) == nil {
 		logger.FromContext(ctx).Debug("skipping confirmation for unresolvable tool call; executeCall will refuse it as not-found",
 			"plugin", call.Plugin, "action", call.Action)
-		return nil, false
+		return false
 	}
 	// Validate argument names BEFORE narrating and storing the pending call.
 	// A call that executeCall's rejectUnknownArgs would refuse anyway must
@@ -3350,15 +3355,23 @@ func (o *Orchestrator) maybeRequireConfirmation(
 			if err := rejectUnknownArgs(call, action); err != nil {
 				logger.FromContext(ctx).Debug("skipping confirmation for call with unknown args; executeCall will reject it",
 					"plugin", call.Plugin, "action", call.Action, "error", err.Error())
-				return nil, false
+				return false
 			}
 		}
 	}
 	// Shared head with the repair phase's consent boundary: gate configured,
 	// action not read-only, confirmation plugin says yes.
-	if !o.callRequiresConfirmation(ctx, call) {
-		return nil, false
-	}
+	return o.callRequiresConfirmation(ctx, call)
+}
+
+// raiseConfirmation turns the gate's yes into the confirmation: it narrates
+// the prompt, records the calls the confirmation interrupts, stores the prompt
+// row, emits the request and persists the pending call. head is the issuing
+// response's text and thinking, if no stored row has taken them yet.
+func (o *Orchestrator) raiseConfirmation(
+	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
+	interrupted []ToolCall, interruptedNative bool, head *responseHead,
+) *RunResult {
 	log := logger.FromContext(ctx)
 	log.Info("tool call requires confirmation", "plugin", call.Plugin, "action", call.Action)
 	// Narrate with the main LLM so the prompt is in the user's language and the
@@ -3379,7 +3392,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// crowd the real conversation out of the window it reads; and before the
 	// prompt row below, so a resolved prompt+reply pair stays adjacent for
 	// stripApprovedConfirmationExchanges.
-	o.recordConfirmationInterruptedCalls(sessionID, sessions, call, interrupted, interruptedNative, thinking)
+	o.recordConfirmationInterruptedCalls(sessionID, sessions, call, interrupted, interruptedNative, head)
 	// Store the prompt so the next turn has context for the reply/amend, and
 	// persist the confirmation-frame metadata on that row so a reloaded client
 	// rebuilds the Approve/Reject buttons from the transcript (the live frame's
@@ -3402,11 +3415,15 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// actually approves, kept with the call so a post-approval repair can hand
 	// the corrector the approved intent without the session history.
 	pending := call
+	var thinking *responseThinking
+	if head != nil {
+		thinking = &head.responseThinking
+	}
 	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg, actor.SpokenReply(ctx), thinking)
 	return &RunResult{
 		Response: confirmMsg,
 		Metadata: frameMeta,
-	}, true
+	}
 }
 
 // confirmationNarratePrompt steers the pre-write confirmation: it must be in the
@@ -4207,8 +4224,11 @@ func isToolResultMessage(m provider.Message) bool {
 	return m.Role == provider.RoleTool || (m.Role == provider.RoleUser && strings.Contains(m.Content, "[plugin_output]"))
 }
 
-// applySlidingWindow keeps only the last o.contextMessages entries
-// from msgs when configured. When the cut fires, it emits one
+// applySlidingWindow keeps the last o.contextMessages entries from msgs when
+// configured, and a tool exchange on the boundary whole (summaryCut): the cut
+// moves back to the tool-calling message rather than forward past its results,
+// which would drop the whole exchange — all of the window, when the exchange
+// was the last thing in it. When the cut fires, it emits one
 // messages_truncated event with the dropped index range so analytics
 // can correlate context-window pressure across sessions. Returns the
 // (possibly shortened) slice; when contextMessages is zero or the
@@ -4223,10 +4243,10 @@ func (o *Orchestrator) applySlidingWindow(ctx context.Context, msgs []provider.M
 	if o.contextMessages <= 0 || len(msgs) <= o.contextMessages {
 		return msgs
 	}
-	dropped := len(msgs) - o.contextMessages
-	// Don't cut between a tool-call and its result — advance the boundary past
-	// any leading orphaned results so the kept slice stays a valid transcript.
-	dropped = firstNonOrphanIndex(msgs, dropped)
+	dropped := summaryCut(msgs, o.contextMessages)
+	if dropped <= 0 {
+		return msgs
+	}
 	emit.EmitMessagesTruncated(ctx, o.eventSink, emit.MessagesTruncatedArgs{
 		DroppedSeqFrom: 0,
 		DroppedSeqTo:   dropped - 1,
@@ -5404,9 +5424,69 @@ func takeThinking(pending *responseThinking) responseThinking {
 	return t
 }
 
-// recordConfirmationInterruptedCalls writes one history exchange per tool call
-// that a confirmation interrupt drops: the call itself plus a deterministic
-// "NOT EXECUTED" result. The agent loop executes a response's calls one by one
+// responseHead is what a model response says once — its text and its
+// thinking — however many tool calls it carries. It goes on the first
+// assistant row stored for the response: the row of the calls that ran
+// (toolRound), else the row of the calls a confirmation interrupted
+// (recordConfirmationInterruptedCalls). The call a confirmation gates is
+// stored once approved, in a later turn: that row takes the thinking, which
+// the provider wants ahead of the tool_use, but not the text, which would read
+// out of order there (savePendingToolCall).
+type responseHead struct {
+	Content string
+	responseThinking
+}
+
+func (h responseHead) attach(m provider.Message) provider.Message {
+	m.Content = h.Content
+	return h.responseThinking.attach(m)
+}
+
+// takeHead returns the head left in pending and empties it, so that a
+// response's text and thinking are stored once.
+func takeHead(pending *responseHead) responseHead {
+	if pending == nil {
+		return responseHead{}
+	}
+	h := *pending
+	*pending = responseHead{}
+	return h
+}
+
+// toolRound collects a response's native tool calls as they run and stores
+// them in the shape the tool-calling protocol has (pairToolMessages names what
+// providers reject): one assistant message with the response's head and all of
+// the calls, then one tool result per call, in order. Stored one by one, each
+// call's message carried the response's text, which then stood in the history,
+// the transcript and every later request once per call.
+type toolRound struct {
+	head    *responseHead
+	calls   []provider.ToolCall
+	results []provider.Message
+}
+
+func (r *toolRound) add(call ToolCall, result ToolResult) {
+	r.calls = append(r.calls, provider.ToolCall{ID: call.ID, Name: toolFQN(call.Plugin, call.Action), Arguments: call.Args})
+	r.results = append(r.results, provider.Message{Role: provider.RoleTool, Content: nativeToolContent(result), ToolCallID: call.ID})
+}
+
+// store writes the collected calls and their results and empties the round;
+// an empty round writes nothing.
+func (r *toolRound) store(sessions SessionStoreInterface, sessionID string) {
+	if len(r.calls) == 0 {
+		return
+	}
+	_ = sessions.AddMessage(sessionID, takeHead(r.head).attach(provider.Message{Role: provider.RoleAssistant, ToolCalls: r.calls}))
+	for _, m := range r.results {
+		_ = sessions.AddMessage(sessionID, m)
+	}
+	r.calls, r.results = nil, nil
+}
+
+// recordConfirmationInterruptedCalls records the tool calls that a
+// confirmation interrupt drops: the calls themselves, as one assistant message
+// in native mode (toolRound) and as a message per call in text mode, each with
+// a deterministic "NOT EXECUTED" result. The agent loop executes a response's calls one by one
 // and returns to the user as soon as one call needs approval, so every later
 // call of that response would otherwise vanish without any trace — and a model
 // that sees its own announcement but no failure treats the dropped call as
@@ -5414,30 +5494,19 @@ func takeThinking(pending *responseThinking) responseThinking {
 // carries a result) and tells the model in plain words to re-issue the call
 // after the confirmation resolves. `native` mirrors how the surrounding loop
 // records THIS response's calls (per-response flag, not the provider
-// capability), so transcript formats stay uniform within the turn. The first
-// native call message takes the response's thinking blocks left in thinking.
+// capability), so transcript formats stay uniform within the turn. The native
+// call message takes what is left of the response's head.
 func (o *Orchestrator) recordConfirmationInterruptedCalls(
-	sessionID string, sessions SessionStoreInterface, gated ToolCall, dropped []ToolCall, native bool, thinking *responseThinking,
+	sessionID string, sessions SessionStoreInterface, gated ToolCall, dropped []ToolCall, native bool, head *responseHead,
 ) {
 	notice := fmt.Sprintf(
 		"NOT EXECUTED — this call was issued in the same response as %s, which is now waiting for the user's confirmation. It did not run and changed nothing. Issue it again after that confirmation is resolved if it is still needed.",
 		toolFQN(gated.Plugin, gated.Action))
+	round := toolRound{head: head}
 	for _, dc := range dropped {
 		result := ToolResult{CallID: dc.ID, Content: notice}
 		if native {
-			_ = sessions.AddMessage(sessionID, takeThinking(thinking).attach(provider.Message{
-				Role: provider.RoleAssistant,
-				ToolCalls: []provider.ToolCall{{
-					ID:        dc.ID,
-					Name:      toolFQN(dc.Plugin, dc.Action),
-					Arguments: dc.Args,
-				}},
-			}))
-			_ = sessions.AddMessage(sessionID, provider.Message{
-				Role:       provider.RoleTool,
-				Content:    nativeToolContent(result),
-				ToolCallID: dc.ID,
-			})
+			round.add(dc, result)
 			continue
 		}
 		_ = sessions.AddMessage(sessionID, provider.Message{
@@ -5449,6 +5518,7 @@ func (o *Orchestrator) recordConfirmationInterruptedCalls(
 			Content: o.guard.WrapContent(result),
 		})
 	}
+	round.store(sessions, sessionID)
 }
 
 // savePendingToolCall persists the pending call with the thinking in
