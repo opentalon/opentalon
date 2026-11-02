@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +44,35 @@ func TestGatewayForwardsExecute(t *testing.T) {
 	resp, err := rpc.Execute(ctx, &pluginpb.ToolCallRequest{Id: "g1", Args: map[string]string{"text": "hi"}})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
+	}
+	if resp.Content != "echo: hi" {
+		t.Errorf("content = %q, want %q", resp.Content, "echo: hi")
+	}
+}
+
+// A large PR's facts ride inline in one Execute arg; the gateway must accept
+// more than grpc-go's 4 MiB default, as every other plugin path does.
+func TestGatewayAcceptsMessagesOverDefaultLimit(t *testing.T) {
+	cc := startFakePluginServer(t)
+	client := &Client{conn: cc, client: pluginpb.NewPluginServiceClient(cc)}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.fetchCapabilities(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	gw, err := startGateway("echo", client, 0, NewManager(nil))
+	if err != nil {
+		t.Fatalf("startGateway: %v", err)
+	}
+	gw.startServing()
+	t.Cleanup(gw.stop)
+
+	rpc := dialGateway(t, gw.addr())
+	pad := strings.Repeat("x", 5<<20)
+	resp, err := rpc.Execute(ctx, &pluginpb.ToolCallRequest{Id: "g1", Args: map[string]string{"text": "hi", "pad": pad}})
+	if err != nil {
+		t.Fatalf("Execute with a 5 MiB arg: %v", err)
 	}
 	if resp.Content != "echo: hi" {
 		t.Errorf("content = %q, want %q", resp.Content, "echo: hi")

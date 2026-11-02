@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opentalon/opentalon/internal/grpclimit"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/proto/pluginpb"
@@ -55,17 +56,17 @@ func (s *fakePluginService) Execute(_ context.Context, req *pluginpb.ToolCallReq
 func startFakePluginServer(t *testing.T) *grpc.ClientConn {
 	t.Helper()
 	lis := bufconn.Listen(bufSize)
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(grpclimit.ServerOptions()...)
 	pluginpb.RegisterPluginServiceServer(srv, &fakePluginService{})
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(func() { srv.Stop() })
 
-	cc, err := grpc.NewClient("passthrough:///bufnet",
+	cc, err := grpc.NewClient("passthrough:///bufnet", append([]grpc.DialOption{
 		grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) {
 			return lis.Dial()
 		}),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+	}, grpclimit.DialOptions()...)...)
 	if err != nil {
 		t.Fatal(err)
 	}

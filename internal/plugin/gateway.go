@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 
+	"github.com/opentalon/opentalon/internal/grpclimit"
 	"github.com/opentalon/opentalon/proto/pluginpb"
 	"google.golang.org/grpc"
 )
@@ -58,7 +59,12 @@ func startGateway(name string, client *Client, port int, mgr *Manager) (*gateway
 		return nil, fmt.Errorf("plugin gateway %s: listen :%d: %w", name, port, err)
 	}
 
-	g := &gateway{name: name, client: client, mgr: mgr, server: grpc.NewServer(), lis: lis}
+	// The gateway's caller is remote (a CI job), but what it carries is the
+	// same as any other plugin path: a serialised fact set inline in one
+	// Execute arg. grpc-go's 4 MiB default rejects a large PR's facts before
+	// the plugin sees them, so the gateway uses the shared limit too.
+	srv := grpc.NewServer(grpclimit.ServerOptions()...)
+	g := &gateway{name: name, client: client, mgr: mgr, server: srv, lis: lis}
 	pluginpb.RegisterPluginServiceServer(g.server, g)
 
 	return g, nil
