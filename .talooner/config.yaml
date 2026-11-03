@@ -1,0 +1,5 @@
+checks:
+  tests:
+    - Test
+  lint:
+    - Lint
