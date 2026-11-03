@@ -9,6 +9,8 @@
 
 # Test binary
 *.test
+# ...but keep Talooner rule tests, which share the .test suffix
+!.talooner/*.tln.test
 
 # Output of go coverage
 *.out

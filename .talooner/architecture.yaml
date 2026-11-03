@@ -1,0 +1,15 @@
+- path: internal/prompts/
+  kind: model
+  doc_ref: docs/guides/prompts.md
+
+- path: internal/state/store/
+  kind: service
+  doc_ref: docs/guides/state-store.md
+
+- path: internal/provider/
+  kind: service
+  doc_ref: docs/guides/providers.md
+
+- path: internal/decideprovider/
+  kind: service
+  doc_ref: docs/guides/decide-providers.md
