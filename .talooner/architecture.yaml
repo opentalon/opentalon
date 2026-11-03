@@ -13,3 +13,15 @@
 - path: internal/decideprovider/
   kind: service
   doc_ref: docs/guides/decide-providers.md
+
+- path: pkg/channel/
+  kind: service
+
+- path: pkg/plugin/
+  kind: service
+
+- path: pkg/requestpkg/
+  kind: service
+
+- path: pkg/toolfqn/
+  kind: service
