@@ -1,0 +1,103 @@
+# .github/workflows/talooner.yml
+# Settings → Secrets and variables → Actions:
+#   secret   TALOONER_LICENSE_KEY     your Talooner license key
+#   secret   ANTHROPIC_API_KEY        AI review model provider (billed by Anthropic, not by Talooner)
+#   variable CDM_URL                  decision-model endpoint (SubQ Snap or Jev)
+#   secret   CDM_TOKEN                decision-model token
+# Settings → Actions → General: allow GitHub Actions to create and approve pull requests.
+# A push to a pull request from a fork gets no secrets, so Talooner can't review it;
+# a member's !talooner comment can (comments from others are ignored).
+# Advice mode is on: blocking verdicts report as advisory and exit 0. Remove
+# TALOONER_ADVICE_MODE below to let Talooner actually block merges.
+# Branch protection: require the talooner check, not the review job, to block merges (a !talooner run's job never reports on the PR's commit).
+name: talooner
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, closed]
+  pull_request_review:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: read
+concurrency:
+  group: talooner-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  # Rules are tested on push. A review or comment doesn't run them again: the
+  # review checks that the push's rules job didn't fail on the head commit.
+  rules:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run --rm -v "$PWD:/repo" -w /repo --entrypoint tln ghcr.io/talooner/talooner-runner:1.1.2 test .talooner/
+  review:
+    needs: rules
+    # Runs when rules passed or was skipped (review, comment events). Only
+    # !talooner comments on a PR by the repository's owner, members or
+    # collaborators start it: anyone else's would spend the license's LLM calls.
+    if: >-
+      !cancelled() && needs.rules.result != 'failure' &&
+      (github.event_name != 'issue_comment' || (github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '!talooner') &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+      statuses: read
+    outputs:
+      resolve_threads: ${{ steps.talooner.outputs.resolve_threads }}
+      unresolve_threads: ${{ steps.talooner.outputs.unresolve_threads }}
+    steps:
+      - name: rules passed on the head commit
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)
+          result=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=rules" --jq '.check_runs[0].conclusion // ""')
+          if [ "$result" = failure ]; then
+            echo "::error::the rules test failed on $sha — fix .talooner/ and push before asking for a review"
+            exit 1
+          fi
+      - id: talooner
+        # -gh: root, because only root can append to the runner's $GITHUB_OUTPUT
+        # (0644, owned by the runner's uid) for the resolve job below. The rules
+        # step only reads and stays on the non-root image.
+        uses: docker://ghcr.io/talooner/talooner-runner:1.1.2-gh
+        env:
+          TALOONER_PROVIDER: github
+          TALOONER_LICENSE_KEY: ${{ secrets.TALOONER_LICENSE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TALOONER_MODEL: claude-haiku-5-5
+          CDM_URL: ${{ vars.CDM_URL }}
+          CDM_TOKEN: ${{ secrets.CDM_TOKEN }}
+          TALOONER_ADVICE_MODE: "1"
+          TALOONER_CHECK_RUN_ID: ${{ job.check_run_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+  # Resolving a review thread needs contents: write, which the Talooner image
+  # never gets: this job has no image and only flips the threads review named.
+  resolve:
+    needs: review
+    if: >-
+      !cancelled() &&
+      (needs.review.outputs.resolve_threads != '' || needs.review.outputs.unresolve_threads != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RESOLVE: ${{ needs.review.outputs.resolve_threads }}
+      UNRESOLVE: ${{ needs.review.outputs.unresolve_threads }}
+    steps:
+      - run: |
+          for id in $RESOLVE; do
+            gh api graphql -F id="$id" -f query='mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }'
+          done
+          for id in $UNRESOLVE; do
+            gh api graphql -F id="$id" -f query='mutation($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { thread { id } } }'
+          done
