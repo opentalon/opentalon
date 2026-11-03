@@ -4,6 +4,7 @@
 
 Changes here wait for a review before merge.
 
+- `.talooner/` — the review policy itself (rules, tests, teams, guides index) — owner assigned for review
 - `internal/prompts/` — system prompts; edits change model behaviour everywhere and invalidate VCR cassettes — owner assigned for review
 - `internal/auth/` — credential rotation and cooldown — owner assigned for review
 - `internal/provider/` — chat-LLM clients: keys, headers, retries, context overflow — owner assigned for review

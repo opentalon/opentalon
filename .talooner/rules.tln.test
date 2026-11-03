@@ -52,6 +52,9 @@ test "Every sensitive path needs its reviewer" {
 
     record 6 type "pr"
     attr 6 "pr.changed_files" [".github/workflows/ci.yml"]
+
+    record 7 type "pr"
+    attr 7 "pr.changed_files" [".talooner/rules.tln"]
   }
 
   when rule "Sensitive path needs review"
@@ -63,6 +66,7 @@ test "Every sensitive path needs its reviewer" {
     flagged 4
     flagged 5
     flagged 6
+    flagged 7
     did 1 assign "pr"
     did 6 assign "pr"
   }
@@ -84,6 +88,9 @@ test "Path lookalikes do not match a sensitive path" {
 
     record 5 type "pr"
     attr 5 "pr.changed_files" [".github/workflows-bak/ci.yml"]
+
+    record 6 type "pr"
+    attr 6 "pr.changed_files" [".talooner-bak/rules.tln"]
   }
 
   when rule "Sensitive path needs review"
@@ -94,6 +101,7 @@ test "Path lookalikes do not match a sensitive path" {
     not flagged 3
     not flagged 4
     not flagged 5
+    not flagged 6
     did_not 3 assign "pr"
   }
 }

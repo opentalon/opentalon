@@ -1,5 +1,6 @@
 define "critical_path" {
-  attr "pr.changed_files" contains "internal/prompts/"
+  attr "pr.changed_files" contains ".talooner/"
+    or attr "pr.changed_files" contains "internal/prompts/"
     or attr "pr.changed_files" contains "internal/auth/"
     or attr "pr.changed_files" contains "internal/provider/"
     or attr "pr.changed_files" contains "internal/state/"
