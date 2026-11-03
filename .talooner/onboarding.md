@@ -4,12 +4,12 @@
 
 Changes here wait for a review before merge.
 
-- `internal/prompts/` — system prompts; edits change model behaviour everywhere and invalidate VCR cassettes — reviewed by @opentalon/opentalon
-- `internal/auth/` — credential rotation and cooldown — reviewed by @opentalon/opentalon
-- `internal/provider/` — chat-LLM clients: keys, headers, retries, context overflow — reviewed by @opentalon/opentalon
-- `internal/state/` — sessions, memories and plugin state on disk — reviewed by @opentalon/opentalon
-- `proto/` — wire contract for third-party plugins and channels — reviewed by @opentalon/opentalon
-- `.github/workflows/` — CI and release path — reviewed by @opentalon/opentalon
+- `internal/prompts/` — system prompts; edits change model behaviour everywhere and invalidate VCR cassettes — owner assigned for review
+- `internal/auth/` — credential rotation and cooldown — owner assigned for review
+- `internal/provider/` — chat-LLM clients: keys, headers, retries, context overflow — owner assigned for review
+- `internal/state/` — sessions, memories and plugin state on disk — owner assigned for review
+- `proto/` — wire contract for third-party plugins and channels — owner assigned for review
+- `.github/workflows/` — CI and release path — owner assigned for review
 
 ## Extra rules
 
@@ -36,3 +36,5 @@ on — backend and model as configured by `CDM_URL` / `CDM_MODEL`
 - Advice mode for the first weeks.
 - Check runs come from the CI jobs named `Test` and `Lint`.
 - One reviewer target (`review.opentalon`) for every gate; no separate "senior" concept.
+- The review is requested by assigning `user.owner`: with `GITHUB_TOKEN`, GitHub rejects
+  a team review request with 422, so `do require` is not used.

@@ -22,8 +22,8 @@ rule "Sensitive path needs review" {
   for records where type == "pr" and is "critical_path"
   requires "review.opentalon"
   do block "pr.merge"
-  do require "review.opentalon"
-  do comment "pr" "This changes a sensitive path (see .talooner/onboarding.md); a review from the opentalon team is required."
+  do assign "pr" attr "user.owner"
+  do comment "pr" "This changes a sensitive path (see .talooner/onboarding.md); the owner is assigned for review."
   reason "sensitive path"
   priority HIGH
 }
@@ -45,7 +45,7 @@ rule "Confident high risk needs a review" {
     and attr "pr.risk_certainty" >= 0.85
   requires "review.opentalon"
   do block "pr.merge"
-  do require "review.opentalon"
+  do assign "pr" attr "user.owner"
   do comment "pr" "The decision model rates this change high risk."
   reason "high risk"
   priority HIGH
@@ -75,7 +75,7 @@ rule "AI review inconclusive needs a human" {
   for records where type == "code_unit" and attr "unit.llm_result" == "unclear"
   requires "review.opentalon"
   do block "pr.merge"
-  do require "review.opentalon"
+  do assign "pr" attr "user.owner"
   do comment "pr" "The AI review could not decide on a changed unit. A human read is required."
   reason "ai review inconclusive"
   priority MEDIUM
@@ -85,7 +85,7 @@ rule "AI review failed needs a human" {
   for records where type == "code_unit" and attr "unit.llm_result" == "error"
   requires "review.opentalon"
   do block "pr.merge"
-  do require "review.opentalon"
+  do assign "pr" attr "user.owner"
   do comment "pr" "The AI review failed on a changed unit. A human read is required."
   reason "ai review failed"
   priority MEDIUM
