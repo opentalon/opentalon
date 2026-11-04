@@ -32,6 +32,11 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: make test-structural
 
+      # The eval tests sit behind the `eval` build tag, so plain `go test ./...`
+      # never compiles them and a broken call sat unnoticed for four weeks.
+      - name: Vet eval tests
+        run: go vet -tags eval ./internal/eval/...
+
   eval:
     name: Eval (minor/major releases; always on manual trigger)
     runs-on: ubuntu-latest
