@@ -262,9 +262,7 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 
 	// Trim if maxMessages is set.
 	if s.maxMessages > 0 {
-		_, _ = tx.ExecContext(ctx,
-			d.Rebind(`DELETE FROM messages WHERE session_id = ? AND seq <= (SELECT MAX(seq) - ? FROM messages WHERE session_id = ?)`),
-			id, s.maxMessages, id)
+		trimMessages(ctx, tx, d, id, s.maxMessages)
 	}
 
 	// Touch session updated_at.
@@ -272,6 +270,39 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 		d.Rebind(`UPDATE sessions SET updated_at = ? WHERE id = ?`), now, id)
 
 	return tx.Commit()
+}
+
+// trimMessages deletes the session's oldest rows beyond keep, never between a
+// tool-calling assistant row and the results that answer it: when the first row
+// kept would be a tool result, the cut moves back to the row with its call, so
+// the exchange stays whole (the session then holds more than keep rows, as the
+// orchestrator's summaryCut keeps more than asked for the same reason). A result
+// whose call is gone already (a user turn closer than any call) is left as it
+// is; the orchestrator's pairToolMessages drops it from requests. Best effort,
+// like the trim always was: a failed step leaves the rows in place.
+func trimMessages(ctx context.Context, tx ExclusiveTx, d Dialect, id string, keep int) {
+	var cut int64
+	if err := tx.QueryRowContext(ctx,
+		d.Rebind(`SELECT COALESCE(MAX(seq), 0) - ? FROM messages WHERE session_id = ?`), keep, id).Scan(&cut); err != nil || cut <= 0 {
+		return
+	}
+	var firstKept string
+	err := tx.QueryRowContext(ctx,
+		d.Rebind(`SELECT role FROM messages WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT 1`), id, cut).Scan(&firstKept)
+	if err == nil && firstKept == string(provider.RoleTool) {
+		var seq int64
+		var role string
+		err = tx.QueryRowContext(ctx, d.Rebind(`SELECT seq, role FROM messages
+			WHERE session_id = ? AND seq <= ? AND (role = ? OR (role = ? AND tool_calls IS NOT NULL))
+			ORDER BY seq DESC LIMIT 1`), id, cut, string(provider.RoleUser), string(provider.RoleAssistant)).Scan(&seq, &role)
+		if err == nil && role == string(provider.RoleAssistant) {
+			cut = seq - 1
+		}
+	}
+	if cut <= 0 {
+		return
+	}
+	_, _ = tx.ExecContext(ctx, d.Rebind(`DELETE FROM messages WHERE session_id = ? AND seq <= ?`), id, cut)
 }
 
 // SetModel updates the active model and persists.

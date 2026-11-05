@@ -197,6 +197,53 @@ func TestSessionStore_MaxMessagesTrim(t *testing.T) {
 	}
 }
 
+// The cap never splits a tool exchange: a trim that would keep results without
+// the assistant row with their calls keeps that row too, across a reopen.
+func TestSessionStore_MaxMessagesTrimKeepsAToolExchangeWhole(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DBConfig{}, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	sessStore := NewSessionStore(db, 3, 0) // keep last 3
+	sessStore.Create(state.SessionParams{ID: "s1"})
+	for _, m := range []provider.Message{
+		{Role: provider.RoleUser, Content: "show and list"},
+		{Role: provider.RoleAssistant, Content: "Looking both up.", ToolCalls: []provider.ToolCall{
+			{ID: "c1", Name: "p__show"}, {ID: "c2", Name: "p__list"},
+		}},
+		{Role: provider.RoleTool, Content: "one", ToolCallID: "c1"},
+		{Role: provider.RoleTool, Content: "two", ToolCallID: "c2"},
+		{Role: provider.RoleAssistant, Content: "Done."},
+	} {
+		if err := sessStore.AddMessage("s1", m); err != nil {
+			t.Fatalf("AddMessage: %v", err)
+		}
+	}
+	_ = db.Close()
+
+	db, err = Open(config.DBConfig{}, dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	sess, err := NewSessionStore(db, 3, 0).Get("s1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	var got []string
+	for _, m := range sess.Messages {
+		got = append(got, string(m.Role)+":"+m.Content)
+	}
+	want := []string{"assistant:Looking both up.", "tool:one", "tool:two", "assistant:Done."}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("kept rows = %q, want %q", got, want)
+	}
+	if len(sess.Messages[0].ToolCalls) != 2 {
+		t.Errorf("the kept call row carries %d calls, want 2", len(sess.Messages[0].ToolCalls))
+	}
+}
+
 // SetTitle is a one-shot fill: it labels an empty session but must never
 // overwrite an existing title. This protects a title set through another path
 // (e.g. a user rename via the REST API) from being clobbered by the async
