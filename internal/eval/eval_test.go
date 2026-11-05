@@ -81,7 +81,7 @@ func newOrchestrator(llm orchestrator.LLMClient) (*orchestrator.Orchestrator, st
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
 	sessID := "eval-session"
-	sessions.Create(sessID)
+	sessions.Create(state.SessionParams{ID: sessID})
 	return orchestrator.New(llm, orchestrator.DefaultParser, registry, memory, sessions), sessID
 }
 
