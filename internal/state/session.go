@@ -36,10 +36,24 @@ type Session struct {
 type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
-	opened   map[openIdentity]string    // OpenSession's create-or-find index: identity -> session id
-	claims   map[string]time.Time       // ClaimOpener's claim per session id
-	notes    map[noteIdentity]time.Time // ReserveNote's reservation per session and note key
+	opened   map[openIdentity]string // OpenSession's create-or-find index: identity -> session id
+	claims   map[string]*claim       // ClaimOpener's claim per session id
+	notes    map[noteIdentity]*claim // ReserveNote's reservation per session and note key
 	dir      string
+}
+
+// claim is an opener claim or a note reservation: when it was taken, and
+// whether the message it was taken for has been stored since. Like the
+// DB-backed markers, stored survives ClearMessages and SetSummary.
+type claim struct {
+	at     time.Time
+	stored bool
+}
+
+// won reports whether a claim may be taken at now: there is none yet, or it
+// is older than staleAfter and its message was never stored.
+func (c *claim) won(now time.Time, staleAfter time.Duration) bool {
+	return c == nil || (!c.stored && c.at.Before(now.Add(-staleAfter)))
 }
 
 // openIdentity is what OpenSession is idempotent on: the DB-backed store's
@@ -53,8 +67,8 @@ func NewSessionStore(dir string) *SessionStore {
 	return &SessionStore{
 		sessions: make(map[string]*Session),
 		opened:   make(map[openIdentity]string),
-		claims:   make(map[string]time.Time),
-		notes:    make(map[noteIdentity]time.Time),
+		claims:   make(map[string]*claim),
+		notes:    make(map[noteIdentity]*claim),
 		dir:      dir,
 	}
 }
@@ -125,9 +139,7 @@ func (s *SessionStore) OpenSession(p SessionParams) (*Session, bool, error) {
 
 	key := openIdentity{entityID: p.EntityID, openedBy: p.OpenedBy, openKey: p.OpenKey}
 	if id, ok := s.opened[key]; ok {
-		if existing, ok := s.sessions[id]; ok {
-			return existing, false, nil
-		}
+		return s.sessions[id], false, nil
 	}
 	if _, taken := s.sessions[p.ID]; taken {
 		return nil, false, fmt.Errorf("open session %q: id already taken by another session", p.ID)
@@ -148,41 +160,34 @@ func (s *SessionStore) OpenSession(p SessionParams) (*Session, bool, error) {
 }
 
 // ClaimOpener mirrors the DB-backed compare-and-set: the claim is won when the
-// session has none, or when its claim is older than staleAfter and the session
-// still has no message. An unknown session is never won.
+// session has none, or when its claim is older than staleAfter and no message
+// was stored since it was taken. An unknown session is never won.
 func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	sess, ok := s.sessions[sessionID]
-	if !ok {
+	if _, ok := s.sessions[sessionID]; !ok {
 		return false, nil
 	}
-	if at, claimed := s.claims[sessionID]; claimed {
-		if !at.Before(now.Add(-staleAfter)) || len(sess.Messages) > 0 {
-			return false, nil
-		}
+	if !s.claims[sessionID].won(now, staleAfter) {
+		return false, nil
 	}
-	s.claims[sessionID] = now
+	s.claims[sessionID] = &claim{at: now}
 	return true, nil
 }
 
 // ReserveNote mirrors the DB-backed reservation of a note key: the first call
-// for a session and key wins, a fresh reservation refuses. In-memory messages
-// record no note key, so "no message carries the key" is provable only for a
-// session without messages: only then is a stale reservation won again.
+// for a session and key wins, a fresh reservation refuses, and a stale one is
+// won again only while no message with that note key was stored.
 func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	key := noteIdentity{sessionID: sessionID, noteKey: noteKey}
-	if at, reserved := s.notes[key]; reserved {
-		sess, ok := s.sessions[sessionID]
-		if !at.Before(now.Add(-staleAfter)) || (ok && len(sess.Messages) > 0) {
-			return false, nil
-		}
+	if !s.notes[key].won(now, staleAfter) {
+		return false, nil
 	}
-	s.notes[key] = now
+	s.notes[key] = &claim{at: now}
 	return true, nil
 }
 
@@ -198,6 +203,18 @@ func (s *SessionStore) Get(id string) (*Session, error) {
 }
 
 func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
+	return s.AddMessageWithMetadata(id, msg, nil)
+}
+
+// AddMessageWithMetadata mirrors the persistent store's signature. Two
+// metadata keys are consumed, as in the DB-backed store: "prompt_type", which
+// the orchestrator's stripApprovedConfirmationExchanges uses to keep resolved
+// confirmation exchanges out of the LLM history, is mirrored onto the stored
+// message; "note_key" marks the session's reservation of that key as stored.
+// Any message marks a pending opener claim as stored. The rest of the map is
+// presentation state and is dropped.
+func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
+	msg.PromptType = metadata["prompt_type"]
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -207,18 +224,15 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	}
 	sess.Messages = append(sess.Messages, msg)
 	sess.UpdatedAt = time.Now()
+	if c := s.claims[id]; c != nil {
+		c.stored = true
+	}
+	if k := metadata["note_key"]; k != "" {
+		if c := s.notes[noteIdentity{sessionID: id, noteKey: k}]; c != nil {
+			c.stored = true
+		}
+	}
 	return nil
-}
-
-// AddMessageWithMetadata mirrors the persistent store's signature. The one
-// metadata key a reader consumes — "prompt_type", which the orchestrator's
-// stripApprovedConfirmationExchanges uses to keep resolved confirmation
-// exchanges out of the LLM history — is mirrored onto the stored message so
-// the in-memory store behaves like the DB-backed one; the rest of the map is
-// presentation state and is dropped.
-func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
-	msg.PromptType = metadata["prompt_type"]
-	return s.AddMessage(id, msg)
 }
 
 func (s *SessionStore) SetModel(id string, model provider.ModelRef) error {
@@ -318,6 +332,12 @@ func (s *SessionStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sessions, id)
+	delete(s.claims, id)
+	for key, sid := range s.opened {
+		if sid == id {
+			delete(s.opened, key)
+		}
+	}
 	for key := range s.notes {
 		if key.sessionID == id {
 			delete(s.notes, key)

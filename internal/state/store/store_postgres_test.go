@@ -68,8 +68,13 @@ func TestPostgres_OpenAndMigrations(t *testing.T) {
 func TestPostgres_OpenSessionCreateOrFind(t *testing.T) { checkOpenSessionCreateOrFind(t, pgDB(t)) }
 func TestPostgres_OpenSessionRefusals(t *testing.T)     { checkOpenSessionRefusals(t, pgDB(t)) }
 func TestPostgres_OpenSessionConcurrent(t *testing.T)   { checkOpenSessionConcurrent(t, pgDB(t)) }
-func TestPostgres_ClaimOpener(t *testing.T)             { checkClaimOpener(t, pgDB(t)) }
-func TestPostgres_ReserveNote(t *testing.T)             { checkReserveNote(t, pgDB(t)) }
+func TestPostgres_ClaimOpener(t *testing.T) {
+	checkClaimOpener(t, NewSessionStore(pgDB(t), 0, 0))
+}
+func TestPostgres_ReserveNote(t *testing.T) {
+	db := pgDB(t)
+	checkReserveNote(t, NewSessionStore(db, 0, 0), db)
+}
 func TestPostgres_NoteReservationsGoWithSession(t *testing.T) {
 	checkNoteReservationsGoWithSession(t, pgDB(t))
 }

@@ -491,88 +491,30 @@ func checkOpenSessionConcurrent(t *testing.T, db *DB) {
 	}
 }
 
-// checkClaimOpener: of concurrent claimers exactly one wins; a fresh claim
-// refuses; a stale claim on a session without a message is won again; a stale
-// claim on a session with a message, and an unknown session, are refused.
-func checkClaimOpener(t *testing.T, db *DB) {
-	t.Helper()
-	store := NewSessionStore(db, 0, 0)
-	sess, _, err := store.OpenSession(state.SessionParams{ID: "claim-1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-claim"})
-	if err != nil {
-		t.Fatalf("OpenSession: %v", err)
-	}
-	now := time.Now()
-	const stale = time.Minute
-
-	const n = 8
-	var won sync.WaitGroup
-	wins := make([]bool, n)
-	for i := range n {
-		won.Add(1)
-		go func(i int) {
-			defer won.Done()
-			ok, err := store.ClaimOpener(sess.ID, now, stale)
-			if err != nil {
-				t.Errorf("concurrent ClaimOpener: %v", err)
-			}
-			wins[i] = ok
-		}(i)
-	}
-	won.Wait()
-	winners := 0
-	for _, w := range wins {
-		if w {
-			winners++
-		}
-	}
-	if winners != 1 {
-		t.Fatalf("concurrent claim winners = %d, want exactly 1", winners)
-	}
-
-	claim := func(step, id string, at time.Time, want bool) {
-		t.Helper()
-		got, err := store.ClaimOpener(id, at, stale)
-		if err != nil {
-			t.Fatalf("%s: ClaimOpener: %v", step, err)
-		}
-		if got != want {
-			t.Errorf("%s: ClaimOpener = %v, want %v", step, got, want)
-		}
-	}
-	claim("fresh claim stands", sess.ID, now.Add(30*time.Second), false)
-	claim("stale claim, no message", sess.ID, now.Add(2*time.Minute), true)
-	if err := store.AddMessage(sess.ID, provider.Message{Role: provider.RoleUser, Content: "context", Visibility: "hidden"}); err != nil {
-		t.Fatalf("AddMessage: %v", err)
-	}
-	claim("stale claim, first turn stored", sess.ID, now.Add(10*time.Minute), false)
-	claim("unknown session", "no-such-session", now, false)
+// claimStore is what the claim checks need. The DB-backed store and the
+// in-memory state.SessionStore both satisfy it, so one check pins both.
+type claimStore interface {
+	OpenSession(p state.SessionParams) (*state.Session, bool, error)
+	ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (bool, error)
+	ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error)
+	AddMessage(id string, msg provider.Message) error
+	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
+	ClearMessages(id string) error
 }
 
-// checkReserveNote: of concurrent reservations for one key exactly one wins; a
-// fresh reservation refuses; another key or another session reserves on its
-// own; a stale reservation is won again while no message carries the key (other
-// messages do not count) and refused once one does.
-func checkReserveNote(t *testing.T, db *DB) {
+// concurrentWinners calls try from n goroutines at once and counts the calls
+// that answered true.
+func concurrentWinners(t *testing.T, n int, try func() (bool, error)) int {
 	t.Helper()
-	store := NewSessionStore(db, 0, 0)
-	for _, id := range []string{"note-s1", "note-s2"} {
-		if _, _, err := store.OpenSession(state.SessionParams{ID: id, EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-" + id}); err != nil {
-			t.Fatalf("OpenSession %s: %v", id, err)
-		}
-	}
-	now := time.Now()
-	const stale = time.Minute
-
-	const n = 8
 	var wg sync.WaitGroup
 	wins := make([]bool, n)
 	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			ok, err := store.ReserveNote("note-s1", "chapter-1", now, stale)
+			ok, err := try()
 			if err != nil {
-				t.Errorf("concurrent ReserveNote: %v", err)
+				t.Errorf("concurrent call: %v", err)
 			}
 			wins[i] = ok
 		}(i)
@@ -584,39 +526,112 @@ func checkReserveNote(t *testing.T, db *DB) {
 			winners++
 		}
 	}
-	if winners != 1 {
-		t.Fatalf("concurrent reservation winners = %d, want exactly 1", winners)
+	return winners
+}
+
+// claimStep calls try and fails the test unless it answers want.
+func claimStep(t *testing.T, step string, want bool, try func() (bool, error)) {
+	t.Helper()
+	got, err := try()
+	if err != nil {
+		t.Fatalf("%s: %v", step, err)
+	}
+	if got != want {
+		t.Errorf("%s: answered %v, want %v", step, got, want)
+	}
+}
+
+// checkClaimOpener: of concurrent claimers exactly one wins; a fresh claim
+// refuses; a stale claim is won again while no message was stored after it;
+// once the first turn's message is stored the claim is refused for good, also
+// after the transcript is cleared; an unknown session is refused.
+func checkClaimOpener(t *testing.T, store claimStore) {
+	t.Helper()
+	sess, _, err := store.OpenSession(state.SessionParams{ID: "claim-1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-claim"})
+	if err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	now := time.Now()
+	const stale = time.Minute
+	claimAt := func(id string, at time.Time) func() (bool, error) {
+		return func() (bool, error) { return store.ClaimOpener(id, at, stale) }
 	}
 
-	reserve := func(step, sid, key string, at time.Time, want bool) {
-		t.Helper()
-		got, err := store.ReserveNote(sid, key, at, stale)
-		if err != nil {
-			t.Fatalf("%s: ReserveNote: %v", step, err)
-		}
-		if got != want {
-			t.Errorf("%s: ReserveNote = %v, want %v", step, got, want)
+	if winners := concurrentWinners(t, 8, claimAt(sess.ID, now)); winners != 1 {
+		t.Fatalf("concurrent claim winners = %d, want exactly 1", winners)
+	}
+	claimStep(t, "fresh claim stands", false, claimAt(sess.ID, now.Add(30*time.Second)))
+	claimStep(t, "stale claim, no message", true, claimAt(sess.ID, now.Add(2*time.Minute)))
+	if err := store.AddMessage(sess.ID, provider.Message{Role: provider.RoleUser, Content: "context", Visibility: "hidden"}); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+	claimStep(t, "stale claim, first turn stored", false, claimAt(sess.ID, now.Add(10*time.Minute)))
+	if err := store.ClearMessages(sess.ID); err != nil {
+		t.Fatalf("ClearMessages: %v", err)
+	}
+	claimStep(t, "stale claim, transcript cleared", false, claimAt(sess.ID, now.Add(20*time.Minute)))
+	claimStep(t, "unknown session", false, claimAt("no-such-session", now))
+}
+
+// checkReserveNote: of concurrent reservations for one key exactly one wins; a
+// fresh reservation refuses; another key or another session reserves on its
+// own; a stale reservation is won again while no message with its key was
+// stored (other messages do not count); once the keyed note is stored it is
+// refused for good, also after the transcript is cleared. With a db, the note's
+// key is on its row and a second note with that key is refused by the index.
+func checkReserveNote(t *testing.T, store claimStore, db *DB) {
+	t.Helper()
+	for _, id := range []string{"note-s1", "note-s2"} {
+		if _, _, err := store.OpenSession(state.SessionParams{ID: id, EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-" + id}); err != nil {
+			t.Fatalf("OpenSession %s: %v", id, err)
 		}
 	}
-	reserve("fresh reservation stands", "note-s1", "chapter-1", now.Add(30*time.Second), false)
-	reserve("another key", "note-s1", "chapter-2", now, true)
-	reserve("another session", "note-s2", "chapter-1", now, true)
+	now := time.Now()
+	const stale = time.Minute
+	reserveAt := func(sid, key string, at time.Time) func() (bool, error) {
+		return func() (bool, error) { return store.ReserveNote(sid, key, at, stale) }
+	}
+
+	if winners := concurrentWinners(t, 8, reserveAt("note-s1", "chapter-1", now)); winners != 1 {
+		t.Fatalf("concurrent reservation winners = %d, want exactly 1", winners)
+	}
+	claimStep(t, "fresh reservation stands", false, reserveAt("note-s1", "chapter-1", now.Add(30*time.Second)))
+	claimStep(t, "another key", true, reserveAt("note-s1", "chapter-2", now))
+	claimStep(t, "another session", true, reserveAt("note-s2", "chapter-1", now))
 
 	if err := store.AddMessage("note-s1", provider.Message{Role: provider.RoleUser, Content: "opener", Visibility: "hidden"}); err != nil {
 		t.Fatalf("AddMessage opener: %v", err)
 	}
-	reserve("stale, only other messages", "note-s1", "chapter-1", now.Add(2*time.Minute), true)
+	claimStep(t, "stale, only other messages", true, reserveAt("note-s1", "chapter-1", now.Add(2*time.Minute)))
 
-	if err := store.AddMessage("note-s1", provider.Message{Role: provider.RoleUser, Content: "chapter note", Visibility: "hidden"}); err != nil {
-		t.Fatalf("AddMessage note: %v", err)
+	note := provider.Message{Role: provider.RoleUser, Content: "chapter note", Visibility: "hidden"}
+	if err := store.AddMessageWithMetadata("note-s1", note, map[string]string{"note_key": "chapter-1"}); err != nil {
+		t.Fatalf("AddMessageWithMetadata note: %v", err)
 	}
-	// The turn runner stores the note with its key; mark it the way it will.
-	if _, err := db.SQLDB().Exec(
-		db.Dialect().Rebind(`UPDATE messages SET note_key = ? WHERE session_id = ? AND content = ?`),
-		"chapter-1", "note-s1", "chapter note"); err != nil {
-		t.Fatalf("mark note_key: %v", err)
+	claimStep(t, "stale, note stored", false, reserveAt("note-s1", "chapter-1", now.Add(10*time.Minute)))
+	if err := store.ClearMessages("note-s1"); err != nil {
+		t.Fatalf("ClearMessages: %v", err)
 	}
-	reserve("stale, note stored", "note-s1", "chapter-1", now.Add(10*time.Minute), false)
+	claimStep(t, "stale, transcript cleared", false, reserveAt("note-s1", "chapter-1", now.Add(20*time.Minute)))
+
+	if db == nil {
+		return
+	}
+	if err := store.AddMessageWithMetadata("note-s2", note, map[string]string{"note_key": "chapter-1"}); err != nil {
+		t.Fatalf("AddMessageWithMetadata note-s2: %v", err)
+	}
+	var key sql.NullString
+	if err := db.SQLDB().QueryRow(
+		db.Dialect().Rebind(`SELECT note_key FROM messages WHERE session_id = ?`), "note-s2",
+	).Scan(&key); err != nil {
+		t.Fatalf("read messages.note_key: %v", err)
+	}
+	if key.String != "chapter-1" {
+		t.Errorf("messages.note_key = %#v, want chapter-1", key)
+	}
+	if err := store.AddMessageWithMetadata("note-s2", note, map[string]string{"note_key": "chapter-1"}); err == nil {
+		t.Error("a second note with the same key was stored, want the unique index to refuse it")
+	}
 }
 
 func countNoteReservations(t *testing.T, db *DB, sid string) int {
@@ -676,11 +691,48 @@ func TestSessionStore_OpenSessionConcurrent(t *testing.T) {
 }
 
 func TestSessionStore_ClaimOpener(t *testing.T) {
-	checkClaimOpener(t, openTestDB(t))
+	checkClaimOpener(t, NewSessionStore(openTestDB(t), 0, 0))
 }
 
 func TestSessionStore_ReserveNote(t *testing.T) {
-	checkReserveNote(t, openTestDB(t))
+	db := openTestDB(t)
+	checkReserveNote(t, NewSessionStore(db, 0, 0), db)
+}
+
+func TestInMemorySessionStore_ClaimOpener(t *testing.T) {
+	checkClaimOpener(t, state.NewSessionStore(""))
+}
+
+func TestInMemorySessionStore_ReserveNote(t *testing.T) {
+	checkReserveNote(t, state.NewSessionStore(""), nil)
+}
+
+// Deleting an in-memory session forgets its open identity, its claim and its
+// reservations: a session later created under the same id answers only for
+// its own key and claims afresh.
+func TestInMemorySessionStore_DeleteForgetsOpenedSession(t *testing.T) {
+	store := state.NewSessionStore("")
+	now := time.Now()
+	open := func(id, key string) (*state.Session, bool, error) {
+		return store.OpenSession(state.SessionParams{ID: id, EntityID: "user-1", OpenedBy: "origin-a", OpenKey: key})
+	}
+	if _, _, err := open("s", "key-a"); err != nil {
+		t.Fatalf("OpenSession key-a: %v", err)
+	}
+	claimStep(t, "first claim", true, func() (bool, error) { return store.ClaimOpener("s", now, time.Minute) })
+	claimStep(t, "first reservation", true, func() (bool, error) { return store.ReserveNote("s", "note-1", now, time.Minute) })
+	if err := store.Delete("s"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if _, created, err := open("s", "key-b"); err != nil || !created {
+		t.Fatalf("OpenSession key-b under the old id = (created=%v, err=%v), want created", created, err)
+	}
+	claimStep(t, "claim after delete", true, func() (bool, error) { return store.ClaimOpener("s", now, time.Minute) })
+	claimStep(t, "reservation after delete", true, func() (bool, error) { return store.ReserveNote("s", "note-1", now, time.Minute) })
+	if sess, created, err := open("t", "key-a"); err != nil || !created || sess.ID != "t" {
+		t.Errorf("OpenSession key-a after delete = (%v, created=%v, err=%v), want a new session t", sess, created, err)
+	}
 }
 
 func TestSessionStore_NoteReservationsGoWithSession(t *testing.T) {

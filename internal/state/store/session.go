@@ -250,12 +250,15 @@ func (s *SessionStore) OpenSession(p state.SessionParams) (*state.Session, bool,
 // ClaimOpener is the one atomic "this request runs the first turn" mark of an
 // opened session: a compare-and-set on opener_claimed_at that exactly one of
 // any number of concurrent callers wins. It is won when the session has no
-// claim yet, or when its claim is older than staleAfter and the session still
-// has no message — the claimant died before its run stored the hidden message,
-// so the first turn never started and may be claimed once more. A fresh claim,
-// a session with messages and an unknown id answer false. The claim is
-// separate from the message on purpose: the turn runner stores that message,
-// as for every turn.
+// claim yet, or when its claim is older than staleAfter and no message was
+// stored since (opener_stored_at, which AddMessageWithMetadata sets) — the
+// claimant died before its run stored the hidden message, so the first turn
+// never started and may be claimed once more. A fresh claim, a claim whose
+// message was stored and an unknown id answer false. The marker, not the
+// transcript, is the proof: clearing, summarising or trimming the messages
+// must not make a first turn that ran claimable again. The claim is separate
+// from the message on purpose: the turn runner stores that message, as for
+// every turn.
 //
 // On Postgres a second UPDATE waits for the first one's row lock and then
 // re-checks the WHERE against the claimed row, so it matches nothing; SQLite
@@ -264,7 +267,7 @@ func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter t
 	res, err := s.db.SQLDB().Exec(
 		s.db.Dialect().Rebind(`UPDATE sessions SET opener_claimed_at = ?
 		WHERE id = ? AND (opener_claimed_at IS NULL
-			OR (opener_claimed_at < ? AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.session_id = sessions.id)))`),
+			OR (opener_claimed_at < ? AND opener_stored_at IS NULL))`),
 		now.UTC().Format(time.RFC3339), sessionID, now.Add(-staleAfter).UTC().Format(time.RFC3339))
 	if err != nil {
 		return false, fmt.Errorf("claim opener %q: %w", sessionID, err)
@@ -279,11 +282,12 @@ func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter t
 // ReserveNote is the once-per-key claim to post a note into an existing
 // session: the first call for a session and note key inserts the reservation
 // and answers true; a later call answers false while that reservation is
-// fresh, and true once more when it is older than staleAfter and no message of
-// the session carries the key — the reserving run died before the turn runner
-// stored the note. A database failure is an error, never a refusal. Same split
-// as ClaimOpener: the reservation is the compare-and-set, the turn runner
-// stores the note with its note_key, and that key is the proof it was stored.
+// fresh, and true once more when it is older than staleAfter and no message
+// with that note key was stored — the reserving run died before the turn
+// runner stored the note. A database failure is an error, never a refusal.
+// Same split as ClaimOpener: the reservation is the compare-and-set, the turn
+// runner stores the note with its note_key (AddMessageWithMetadata), and that
+// store marks the reservation's stored_at, which no transcript rewrite erases.
 //
 // The insert is ON CONFLICT DO NOTHING against the reservation's primary key;
 // the re-claim is a compare-and-set UPDATE, which on Postgres a concurrent
@@ -304,10 +308,7 @@ func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, sta
 
 	res, err = s.db.SQLDB().Exec(
 		d.Rebind(`UPDATE session_note_reservations SET reserved_at = ?
-		WHERE session_id = ? AND note_key = ? AND reserved_at < ?
-			AND NOT EXISTS (SELECT 1 FROM messages
-				WHERE messages.session_id = session_note_reservations.session_id
-				AND messages.note_key = session_note_reservations.note_key)`),
+		WHERE session_id = ? AND note_key = ? AND reserved_at < ? AND stored_at IS NULL`),
 		at, sessionID, noteKey, now.Add(-staleAfter).UTC().Format(time.RFC3339))
 	if err != nil {
 		return false, fmt.Errorf("reserve note %q in %q: %w", noteKey, sessionID, err)
@@ -360,6 +361,12 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 // confirmation exchanges out of the LLM history; everything else in the map
 // never reaches the model. A nil/empty map persists as SQL NULL, leaving
 // ordinary chat turns byte-identical to the pre-013 shape.
+//
+// "note_key" is the key of a note posted into an existing session (migration
+// 018): it is written to messages.note_key, whose unique index stores one note
+// per key, and marks that key's reservation stored (ReserveNote). Any message
+// marks a pending opener claim stored (ClaimOpener). Both marks are written in
+// this transaction, so they exist exactly when the message does.
 func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
 	ctx := context.Background()
 	d := s.db.Dialect()
@@ -375,6 +382,7 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	}
 	toolCallID := sql.NullString{String: msg.ToolCallID, Valid: msg.ToolCallID != ""}
 	visibility := sql.NullString{String: msg.Visibility, Valid: msg.Visibility != ""}
+	noteKey := sql.NullString{String: metadata["note_key"], Valid: metadata["note_key"] != ""}
 	metadataJSON, err := metadataAsNullString(metadata)
 	if err != nil {
 		return err
@@ -397,10 +405,17 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, thinking, metadata, visibility, created_at)
-		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
-		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, thinkingJSON, metadataJSON, visibility, now, id); err != nil {
+		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, thinking, metadata, visibility, note_key, created_at)
+		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
+		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, thinkingJSON, metadataJSON, visibility, noteKey, now, id); err != nil {
 		return fmt.Errorf("add message insert: %w", err)
+	}
+	if noteKey.Valid {
+		if _, err := tx.ExecContext(ctx,
+			d.Rebind(`UPDATE session_note_reservations SET stored_at = COALESCE(stored_at, ?) WHERE session_id = ? AND note_key = ?`),
+			now, id, noteKey.String); err != nil {
+			return fmt.Errorf("add message mark note stored: %w", err)
+		}
 	}
 
 	// Trim if maxMessages is set.
@@ -410,9 +425,14 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 			id, s.maxMessages, id)
 	}
 
-	// Touch session updated_at.
-	_, _ = tx.ExecContext(ctx,
-		d.Rebind(`UPDATE sessions SET updated_at = ? WHERE id = ?`), now, id)
+	// Touch session updated_at, and mark a pending opener claim stored. The
+	// mark is load-bearing for ClaimOpener, so a failed touch fails the write.
+	if _, err := tx.ExecContext(ctx,
+		d.Rebind(`UPDATE sessions SET updated_at = ?,
+			opener_stored_at = CASE WHEN opener_claimed_at IS NOT NULL AND opener_stored_at IS NULL THEN ? ELSE opener_stored_at END
+		WHERE id = ?`), now, now, id); err != nil {
+		return fmt.Errorf("add message touch: %w", err)
+	}
 
 	return tx.Commit()
 }
