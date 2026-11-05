@@ -1410,6 +1410,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		return nil, err
 	}
 	defer unlock()
+	// The in-pod session mutex waits regardless of ctx. A turn whose context
+	// ended while it queued behind another turn never starts: its caller's
+	// deadline bounds how late it may still store its message.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Request-scoped session cache: avoids redundant DB roundtrips for
 	// sessions.Get() on every agent loop iteration. The per-session lock

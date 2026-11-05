@@ -285,9 +285,10 @@ const ControlResumeHello = "resume_hello"
 // The core answers every attempt with one frame carrying that correlation id,
 // sent before any model run: FrameSessionOpened, with session_id (the session
 // key) and created ("true" or "false"), or FrameOpenRejected, with error_code
-// forbidden, bad_request, not_found or internal_error. No other frame carries
-// the correlation id: the turn's reply and its error frame reach the session's
-// conversation as every reply does.
+// forbidden, bad_request, not_found or internal_error, or the code any message
+// gets for the same refusal (token_required, auth_failed, ...). No other frame
+// carries the correlation id: the turn's reply and its error frame reach the
+// session's conversation as every reply does.
 const (
 	OpenSessionMetadataKey   = "open_session"
 	OpenedByMetadataKey      = "opened_by"

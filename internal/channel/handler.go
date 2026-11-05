@@ -335,6 +335,10 @@ func kindOf(msg pkg.InboundMessage) string {
 // by frontends for translated copy — adding one is an API change, not just
 // a log message tweak.
 func errorFrame(msg pkg.InboundMessage, text, errorCode string) pkg.OutboundMessage {
+	// Refusing an open-session request answers its waiting caller.
+	if msg.Metadata[pkg.OpenSessionMetadataKey] == "true" {
+		return openRejected(msg, text, errorCode)
+	}
 	return errorResponse(msg, text, map[string]string{
 		"type": "error", "error_code": errorCode,
 	})

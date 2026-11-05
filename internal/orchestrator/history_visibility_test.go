@@ -2,8 +2,10 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,5 +153,48 @@ func TestRun_StoresTheNoteKeyWithTheUserMessage(t *testing.T) {
 				t.Errorf("stale reservation taken again = %v (%v), want %v", again, err, tc.reclaimable)
 			}
 		})
+	}
+}
+
+// A turn queued behind a long turn of the same session, whose deadline passed
+// while it waited for the session, never starts and stores nothing: a keyed
+// note's deadline bounds how late it may store, which keeps a stale reservation
+// from being taken while the original can still store the same note.
+func TestRun_QueuedTurnPastItsDeadlineStoresNothing(t *testing.T) {
+	llm := newBlockingLLM("done")
+	orch, sid, _ := newConcurrentOrch(t, 2, llm)
+
+	long := make(chan error, 1)
+	go func() {
+		_, err := orch.Run(context.Background(), sid, "a long user turn")
+		long <- err
+	}()
+	for atomic.LoadInt32(&llm.inflight) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	const note = "[context] chapter two was caught up"
+	ctx, cancel := context.WithTimeout(
+		WithNoteKey(actor.WithVisibility(context.Background(), provider.VisibilityHidden), "chapter-2"), 200*time.Millisecond)
+	defer cancel()
+	queued := make(chan error, 1)
+	go func() {
+		_, err := orch.Run(ctx, sid, note)
+		queued <- err
+	}()
+	<-ctx.Done()
+	llm.releaseAll()
+
+	if err := <-long; err != nil {
+		t.Fatalf("long turn: %v", err)
+	}
+	if err := <-queued; !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("queued turn returned %v, want its deadline", err)
+	}
+	sess, _ := orch.sessions.Get(sid)
+	for _, m := range sess.Messages {
+		if m.Content == note {
+			t.Errorf("the queued turn stored its message after its deadline: %+v", m)
+		}
 	}
 }

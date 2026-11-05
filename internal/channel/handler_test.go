@@ -1137,30 +1137,31 @@ func TestHandler_OpenSession_NoteForMissingOrForeignSessionIsNotFound(t *testing
 }
 
 // TestHandler_OpenSession_Rejections: an attempt that may not or cannot open a
-// session is answered with open_rejected and its correlation id, leaves no
-// session and runs nothing. A chat token is refused like any privileged option.
+// session is answered with open_rejected and its correlation id, also when the
+// refusal comes before the open path (the token check), leaves no session and
+// runs nothing. A chat token is refused like any privileged option.
 func TestHandler_OpenSession_Rejections(t *testing.T) {
 	chat := welcomeProfile
 	chat.Kind, chat.SystemSource = profile.KindChat, ""
+	unverifiable := func(cfg *HandlerConfig) { cfg.Verifier = &stubVerifier{err: errors.New("bad token")} }
+	failingStore := func(cfg *HandlerConfig) { cfg.Opener = failingOpener{} }
+	keep := func(*HandlerConfig) {}
 	for _, tc := range []struct {
 		name      string
 		p         profile.Profile
 		set       map[string]string
-		opener    SessionOpener
+		override  func(*HandlerConfig)
 		code      string
 		requestID string
 	}{
-		{"chat token", chat, nil, nil, "forbidden", "req-c1"},
-		{"missing key", welcomeProfile, map[string]string{pkg.OpenKeyMetadataKey: ""}, nil, "bad_request", "req-c1"},
-		{"missing request id", welcomeProfile, map[string]string{pkg.OpenRequestIDMetadataKey: ""}, nil, "bad_request", ""},
-		{"store failure", welcomeProfile, nil, failingOpener{}, "internal_error", "req-c1"},
+		{"unverifiable token", welcomeProfile, nil, unverifiable, "auth_failed", "req-c1"},
+		{"chat token", chat, nil, keep, "forbidden", "req-c1"},
+		{"missing key", welcomeProfile, map[string]string{pkg.OpenKeyMetadataKey: ""}, keep, "bad_request", "req-c1"},
+		{"missing request id", welcomeProfile, map[string]string{pkg.OpenRequestIDMetadataKey: ""}, keep, "bad_request", ""},
+		{"store failure", welcomeProfile, nil, failingStore, "internal_error", "req-c1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rec, h := newOpenHandler(tc.p, func(cfg *HandlerConfig) {
-				if tc.opener != nil {
-					cfg.Opener = tc.opener
-				}
-			})
+			rec, h := newOpenHandler(tc.p, tc.override)
 
 			out := callOpen(h, "c1", tc.set)
 
@@ -1178,23 +1179,34 @@ func TestHandler_OpenSession_Rejections(t *testing.T) {
 	}
 }
 
-// TestRegistry_OpenSessionSkipsDebounce: an open-session request is a server's
-// call waiting for its answer, so the debouncer dispatches it at once instead
-// of holding it for the window (and never merges it with chat text).
-func TestRegistry_OpenSessionSkipsDebounce(t *testing.T) {
+// duplicateDedup answers every message as a duplicate another pod already took.
+type duplicateDedup struct{}
+
+func (duplicateDedup) TryAcquire(context.Context, string, time.Duration) (bool, error) {
+	return false, nil
+}
+
+// TestRegistry_OpenSessionSkipsDedupAndDebounce: an open-session request is a
+// server's call waiting for its answer, so the registry dispatches it at once:
+// never dropped as a transport duplicate (the store keeps a repeat from running
+// its turn twice) and never held or merged by the debouncer.
+func TestRegistry_OpenSessionSkipsDedupAndDebounce(t *testing.T) {
 	handled := make(chan pkg.InboundMessage, 1)
 	reg := NewRegistry(func(_ context.Context, _ string, m pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		handled <- m
 		return pkg.OutboundMessage{}, nil
 	})
 	reg.SetDebounceWindow(time.Hour)
+	reg.SetDeduplicator(duplicateDedup{}, time.Minute)
 	ch := newMockChannel("websocket")
 	if err := reg.Register(ch); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	defer reg.StopAll()
 
-	ch.pushMessage(openRequest("c1", nil))
+	msg := openRequest("c1", nil)
+	msg.Timestamp = time.Now()
+	ch.pushMessage(msg)
 
 	select {
 	case m := <-handled:
@@ -1202,6 +1214,6 @@ func TestRegistry_OpenSessionSkipsDebounce(t *testing.T) {
 			t.Errorf("handled %+v, want the open-session request", m.Metadata)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("the open-session request was held by the debouncer")
+		t.Fatal("the open-session request was dropped as a duplicate or held by the debouncer")
 	}
 }

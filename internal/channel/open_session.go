@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"errors"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -158,7 +159,11 @@ func (o *openSessions) acknowledge(ctx context.Context, sessionKey string, msg p
 // a recovery), so the reply goes whole through SendToSession and the registry's
 // stream writer, bound to the inbound conversation, is dropped.
 func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.InboundMessage, entityID string) {
+	// The turn's frames belong to the conversation, not to the request: its
+	// error frame is the channel's ordinary one (see errorFrame).
 	turn := msg
+	turn.Metadata = maps.Clone(msg.Metadata)
+	delete(turn.Metadata, pkg.OpenSessionMetadataKey)
 	turn.ConversationID, turn.ThreadID = "", ""
 	if conv, thread, ok := sessionConversation(sessionID, entityID); ok {
 		turn.ConversationID, turn.ThreadID = conv, thread

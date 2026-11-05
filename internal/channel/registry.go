@@ -205,6 +205,12 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 			dedup, dedupTTL := r.dedup, r.dedupTTL
 			r.mu.RUnlock()
 
+			// An open-session request skips dedup and debounce: it is a server's
+			// call waiting for its own answer frame, never chat text, and the
+			// session store's create-or-find and claims already keep a repeated
+			// request from running its turn twice.
+			openRequest := msg.Metadata[pkg.OpenSessionMetadataKey] == "true"
+
 			// Dedup runs before debounce — this ordering is load-bearing.
 			// Each original message is deduped by its own timestamp so that
 			// pod-level duplicates (delivered by at-least-once channels) are
@@ -212,7 +218,7 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 			// after debounce, the merged message would carry only the last
 			// original's timestamp, and earlier duplicates arriving on another
 			// pod could slip through.
-			if dedup != nil {
+			if dedup != nil && !openRequest {
 				if msg.Timestamp.IsZero() {
 					slog.Warn("dedup skipped: message has no timestamp", "channel", ch.ID())
 				} else {
@@ -230,10 +236,8 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 			sessionKey := pkg.SessionKey(ch.ID(), msg.ConversationID, msg.ThreadID)
 
 			// Try debouncing. If the message bypasses debounce (confirmation, typing),
-			// or debouncing is disabled, dispatch immediately. An open-session
-			// request is never merged: it is a server's call waiting for its own
-			// answer frame, not chat text.
-			if debouncer != nil && msg.Metadata[pkg.OpenSessionMetadataKey] != "true" && debouncer.submit(sessionKey, msg) {
+			// or debouncing is disabled, dispatch immediately.
+			if debouncer != nil && !openRequest && debouncer.submit(sessionKey, msg) {
 				slog.Debug("message debounced", "channel", ch.ID(), "session", sessionKey)
 				continue
 			}
