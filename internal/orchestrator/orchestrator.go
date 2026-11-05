@@ -3414,7 +3414,7 @@ const confirmationNarratePrompt = `You write the short confirmation question sho
 Rules:
 1. Reply in the SAME language as the user's latest request.
 2. If the call acts on MANY records at once (a batch, an ids array, or a scope_token), state the COUNT of affected records and 2-3 concrete examples (names and/or ids) taken from the recent conversation. Never show a raw scope_token or dump internal arguments.
-3. If the call acts on ONE record (changes, creates or deletes it), name that record by its name rather than its id (by its id only when no name is known), and say what happens to it FIELD BY FIELD, one list item per field ("- field: ..."): for a change, "- field: previous value -> new value" for each field it sets, taking the previous value from the recent conversation; for a new record, its kind and, when it is given one, its name in the opening sentence (not again as a line) and "- field: value" for each further value it gets — a new record has no previous values, so never write one or an arrow for it; a call that may also update an existing record is a change; for a deletion, say what kind of record it is. A summary such as "the specified attributes" or "the given details" is never acceptable — those fields are the whole thing the user is being asked to check, and nobody can check what you did not name.
+3. If the call acts on ONE record (changes, creates or deletes it), name that record by its name rather than its id (by its id only when no name is known), and say what happens to it FIELD BY FIELD, one list item per field ("- field: ..."): for a change, "- field: previous value -> new value" for each field it sets, taking the previous value from the recent conversation; for a new record, its kind and, when it is given one, its name in the opening sentence (not again as a line) and "- field: value" for each further value it gets — a new record has no previous values, so never write one or an arrow for it; a call that may also update an existing record is a change; for a deletion, say what kind of record it is. The fields are THAT record's own, and only those this call changes: first the change the action itself makes without an argument for it (returning something changes who has it), then each field its arguments set; a value the call records with the action rather than on the record, such as a remark on a return, is a "- field: value" line with no previous value. A value the conversation shows for ANOTHER record — the status of an assignment, a field of the person something goes to — is not a field of this record, so never list it as one. A summary such as "the specified attributes" or "the given details" is never acceptable — those fields are the whole thing the user is being asked to check, and nobody can check what you did not name.
 4. If a previous value of a change does not appear in the conversation, give the new value and say plainly that the previous one is not known here. Never guess it, and never drop the field to avoid the gap.
 5. Field names are words of your reply: name every field as the user sees it in the application, in the language of your reply like every other word (in a German reply "Kategorie", not "Category"), never by the tool's argument name ("serial number", not serial_number); a value that refers to another record is that record's name when the conversation shows it, its id otherwise.
 6. If a link to the record (a path such as /items/123) appears in the conversation, render the record name as that link.
@@ -3429,7 +3429,12 @@ Shall I create it?
 A change:
 I would change the item **Machine 7**:
 - Serial number: A-1 -> X-9
-Shall I change it?`
+Shall I change it?
+A change the action makes by itself, beside a value it is given (in a German reply the lines read "- Zugewiesen an: …" and "- Bemerkung: …"):
+I would return the item **Cordless drill**:
+- Assigned to: Anna Meier -> nobody
+- Remark: battery is faulty
+Shall I return it?`
 
 // confirmationNarrateSystemPrompt returns the narrator's system message: the
 // general rules, or the tool's own hint (confirmationHintPrompt) when the action

@@ -73,7 +73,9 @@ func TestNarrateConfirmation_NilLLMReturnsEmpty(t *testing.T) {
 // missing previous value has to be admitted rather than invented or dropped. A
 // new record lists the values it gets, never "new -> value", every field goes by
 // the name the user sees rather than the argument's, and the question offers no
-// "(yes/no)": the user answers with buttons.
+// "(yes/no)": the user answers with buttons. Only the record's own fields count:
+// a return was narrated as "Status: assigned -> returned", the status of the
+// assignment the conversation showed, while the item's own status stays.
 func TestNarrateConfirmation_SingleRecordPromptDemandsFields(t *testing.T) {
 	llm := &capturingLLM{responses: []string{"ok?"}}
 	orch := NewWithRules(llm, &fakeParser{}, NewToolRegistry(),
@@ -104,6 +106,12 @@ func TestNarrateConfirmation_SingleRecordPromptDemandsFields(t *testing.T) {
 		"without answer options", // the buttons answer, not "(yes/no)"
 		"not in the passive",     // "I would create …", not "… would be created"
 		"I would create the item **Cordless drill**:\n- Category: Tools", // the name in the sentence, labels for the rest
+		"first the change the action itself makes",                       // a return lists who has it, beside a remark
+		"- Assigned to: Anna Meier -> nobody\n- Remark:",                 // shown, not only told
+		"records with the action rather than on the record",              // a remark on a return ...
+		"line with no previous value.",                                   // ... has no previous value
+		"- Remark: battery is faulty\nShall I return it?",                // and the example shows none
+		"is not a field of this record",                                  // not the status of the assignment beside it
 	} {
 		if !strings.Contains(sys, want) {
 			t.Errorf("system prompt must cover %q, got: %q", want, sys)
