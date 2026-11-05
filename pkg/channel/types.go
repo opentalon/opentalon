@@ -269,6 +269,37 @@ const ControlMetadataKey = "control"
 // token so the handler can scope the session and validate it exists.
 const ControlResumeHello = "resume_hello"
 
+// OpenSessionMetadataKey="true" marks an inbound message as a server's
+// request to open a chat session for the verified user and run its first
+// turn, the message content, hidden from the transcript. Only a verified
+// system invocation may send it. Keys of the request:
+//
+//   - OpenedByMetadataKey, OpenKeyMetadataKey: the origin label and the
+//     idempotency key; the same user, origin and key always answer the same
+//     session, and its first turn runs once.
+//   - OpenSessionIDMetadataKey and NoteKeyMetadataKey instead: continue that
+//     session of the user with the content as a hidden note, stored and
+//     answered once per note key.
+//   - OpenRequestIDMetadataKey: the attempt's correlation id.
+//
+// The core answers every attempt with one frame carrying that correlation id,
+// sent before any model run: FrameSessionOpened, with session_id (the session
+// key) and created ("true" or "false"), or FrameOpenRejected, with error_code
+// forbidden, bad_request, not_found or internal_error. No other frame carries
+// the correlation id: the turn's reply and its error frame reach the session's
+// conversation as every reply does.
+const (
+	OpenSessionMetadataKey   = "open_session"
+	OpenedByMetadataKey      = "opened_by"
+	OpenKeyMetadataKey       = "open_key"
+	OpenSessionIDMetadataKey = "session_id"
+	NoteKeyMetadataKey       = "note_key"
+	OpenRequestIDMetadataKey = "open_request_id"
+
+	FrameSessionOpened = "session_opened"
+	FrameOpenRejected  = "open_rejected"
+)
+
 // OwnerEntityMetadataKey carries the conversation-owning entity on outbound
 // metadata. This is the authoritative statement of the contract:
 //

@@ -1097,6 +1097,11 @@ func main() {
 		// Read-only re-emit of a still-pending tool confirmation on a resume
 		// handshake, so a reconnected client redraws its Approve/Reject buttons.
 		PendingConfirmation: orch.PendingConfirmationFrame,
+		// Server-opened sessions: both session stores implement the opener
+		// (asserted next to newInMemoryState), and frames reach a session's
+		// conversation through the same late-bound registry as the title push.
+		Opener:        sessions.(channel.SessionOpener),
+		SendToSession: notifier.SendToSession,
 	})
 
 	reg := channel.NewRegistry(handler)
@@ -1401,6 +1406,13 @@ func enablePluginCostMetrics(plugins map[string]config.PluginConfig, collector *
 	}
 	return n, nil
 }
+
+// Both session stores main may pick serve as the handler's
+// channel.SessionOpener, so its type assertion on sessions cannot fail.
+var (
+	_ channel.SessionOpener = (*store.SessionStore)(nil)
+	_ channel.SessionOpener = (*state.SessionStore)(nil)
+)
 
 // newInMemoryState returns in-memory memory and session stores (used when data_dir is unset or DB open fails).
 func newInMemoryState() (orchestrator.MemoryStoreInterface, orchestrator.SessionStoreInterface) {

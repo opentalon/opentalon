@@ -230,8 +230,10 @@ func (r *Registry) dispatch(ch pkg.Channel, inbox <-chan pkg.InboundMessage) {
 			sessionKey := pkg.SessionKey(ch.ID(), msg.ConversationID, msg.ThreadID)
 
 			// Try debouncing. If the message bypasses debounce (confirmation, typing),
-			// or debouncing is disabled, dispatch immediately.
-			if debouncer != nil && debouncer.submit(sessionKey, msg) {
+			// or debouncing is disabled, dispatch immediately. An open-session
+			// request is never merged: it is a server's call waiting for its own
+			// answer frame, not chat text.
+			if debouncer != nil && msg.Metadata[pkg.OpenSessionMetadataKey] != "true" && debouncer.submit(sessionKey, msg) {
 				slog.Debug("message debounced", "channel", ch.ID(), "session", sessionKey)
 				continue
 			}
