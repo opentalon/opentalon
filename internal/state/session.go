@@ -27,6 +27,8 @@ type Session struct {
 	Title       string             `yaml:"title,omitempty"`   // short LLM-generated label; empty until maybeGenerateTitle has run
 	ActiveModel provider.ModelRef  `yaml:"active_model,omitempty"`
 	Metadata    map[string]string  `yaml:"metadata,omitempty"`
+	OpenedBy    string             `yaml:"opened_by,omitempty"` // origin of a session a server opened (OpenSession); empty otherwise
+	OpenKey     string             `yaml:"open_key,omitempty"`  // the opener's idempotency key; empty otherwise
 	CreatedAt   time.Time          `yaml:"created_at"`
 	UpdatedAt   time.Time          `yaml:"updated_at"`
 }
@@ -34,12 +36,39 @@ type Session struct {
 type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	opened   map[openIdentity]string // OpenSession's create-or-find index: identity -> session id
+	claims   map[string]*claim       // ClaimOpener's claim per session id
+	notes    map[noteIdentity]*claim // ReserveNote's reservation per session and note key
 	dir      string
 }
+
+// claim is an opener claim or a note reservation: when it was taken, and
+// whether the message it was taken for has been stored since. Like the
+// DB-backed markers, stored survives ClearMessages and SetSummary.
+type claim struct {
+	at     time.Time
+	stored bool
+}
+
+// won reports whether a claim may be taken at now: there is none yet, or it
+// is older than staleAfter and its message was never stored.
+func (c *claim) won(now time.Time, staleAfter time.Duration) bool {
+	return c == nil || (!c.stored && c.at.Before(now.Add(-staleAfter)))
+}
+
+// openIdentity is what OpenSession is idempotent on: the DB-backed store's
+// unique index over (entity_id, opened_by, open_key).
+type openIdentity struct{ entityID, openedBy, openKey string }
+
+// noteIdentity is what ReserveNote is idempotent on.
+type noteIdentity struct{ sessionID, noteKey string }
 
 func NewSessionStore(dir string) *SessionStore {
 	return &SessionStore{
 		sessions: make(map[string]*Session),
+		opened:   make(map[openIdentity]string),
+		claims:   make(map[string]*claim),
+		notes:    make(map[noteIdentity]*claim),
 		dir:      dir,
 	}
 }
@@ -50,13 +79,26 @@ func NewSessionStore(dir string) *SessionStore {
 // "chat") and SystemSource the per-feature label of the feature that opened a
 // system session (empty is stored as NULL). Named fields on purpose: two
 // labels of the same type can no longer be swapped and still compile.
+//
+// OpenedBy, OpenKey and ChannelID are read by OpenSession only, which opens a
+// chat session for a user on a server's behalf: OpenedBy is the caller's
+// origin label, OpenKey its idempotency key, ChannelID the channel the session
+// belongs to. Create ignores all three; Kind and SystemSource are ignored by
+// OpenSession, which always stamps "chat" with no source.
 type SessionParams struct {
 	ID           string
 	EntityID     string
 	GroupID      string
 	Kind         string
 	SystemSource string
+	OpenedBy     string
+	OpenKey      string
+	ChannelID    string
 }
+
+// ErrOpenParams is returned by OpenSession when the origin or the key is empty:
+// without both there is nothing to be idempotent on.
+var ErrOpenParams = errors.New("open session: origin and key are required")
 
 // Create returns the session for p.ID, minting a fresh empty record if absent.
 // Idempotent on existing ids so a "fresh-intent" call from a reconnecting
@@ -84,6 +126,71 @@ func (s *SessionStore) Create(p SessionParams) *Session {
 	return sess
 }
 
+// OpenSession is the in-memory mirror of the DB-backed store's create-or-find
+// (see store/session.go OpenSession): the first call for an entity, origin and
+// key creates the session and answers created=true; every later call answers
+// the stored session with created=false, whatever id it minted.
+func (s *SessionStore) OpenSession(p SessionParams) (*Session, bool, error) {
+	if p.OpenedBy == "" || p.OpenKey == "" {
+		return nil, false, ErrOpenParams
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := openIdentity{entityID: p.EntityID, openedBy: p.OpenedBy, openKey: p.OpenKey}
+	if id, ok := s.opened[key]; ok {
+		return s.sessions[id], false, nil
+	}
+	if _, taken := s.sessions[p.ID]; taken {
+		return nil, false, fmt.Errorf("open session %q: id already taken by another session", p.ID)
+	}
+	now := time.Now()
+	sess := &Session{
+		ID:        p.ID,
+		Messages:  make([]provider.Message, 0),
+		Metadata:  make(map[string]string),
+		OpenedBy:  p.OpenedBy,
+		OpenKey:   p.OpenKey,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.sessions[p.ID] = sess
+	s.opened[key] = p.ID
+	return sess, true, nil
+}
+
+// ClaimOpener mirrors the DB-backed compare-and-set: the claim is won when the
+// session has none, or when its claim is older than staleAfter and no message
+// was stored since it was taken. An unknown session is never won.
+func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.sessions[sessionID]; !ok {
+		return false, nil
+	}
+	if !s.claims[sessionID].won(now, staleAfter) {
+		return false, nil
+	}
+	s.claims[sessionID] = &claim{at: now}
+	return true, nil
+}
+
+// ReserveNote mirrors the DB-backed reservation of a note key: the first call
+// for a session and key wins, a fresh reservation refuses, and a stale one is
+// won again only while no message with that note key was stored.
+func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := noteIdentity{sessionID: sessionID, noteKey: noteKey}
+	if !s.notes[key].won(now, staleAfter) {
+		return false, nil
+	}
+	s.notes[key] = &claim{at: now}
+	return true, nil
+}
+
 func (s *SessionStore) Get(id string) (*Session, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -96,6 +203,18 @@ func (s *SessionStore) Get(id string) (*Session, error) {
 }
 
 func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
+	return s.AddMessageWithMetadata(id, msg, nil)
+}
+
+// AddMessageWithMetadata mirrors the persistent store's signature. Two
+// metadata keys are consumed, as in the DB-backed store: "prompt_type", which
+// the orchestrator's stripApprovedConfirmationExchanges uses to keep resolved
+// confirmation exchanges out of the LLM history, is mirrored onto the stored
+// message; "note_key" marks the session's reservation of that key as stored.
+// Any message marks a pending opener claim as stored. The rest of the map is
+// presentation state and is dropped.
+func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
+	msg.PromptType = metadata["prompt_type"]
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -105,18 +224,15 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	}
 	sess.Messages = append(sess.Messages, msg)
 	sess.UpdatedAt = time.Now()
+	if c := s.claims[id]; c != nil {
+		c.stored = true
+	}
+	if k := metadata["note_key"]; k != "" {
+		if c := s.notes[noteIdentity{sessionID: id, noteKey: k}]; c != nil {
+			c.stored = true
+		}
+	}
 	return nil
-}
-
-// AddMessageWithMetadata mirrors the persistent store's signature. The one
-// metadata key a reader consumes — "prompt_type", which the orchestrator's
-// stripApprovedConfirmationExchanges uses to keep resolved confirmation
-// exchanges out of the LLM history — is mirrored onto the stored message so
-// the in-memory store behaves like the DB-backed one; the rest of the map is
-// presentation state and is dropped.
-func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
-	msg.PromptType = metadata["prompt_type"]
-	return s.AddMessage(id, msg)
 }
 
 func (s *SessionStore) SetModel(id string, model provider.ModelRef) error {
@@ -216,6 +332,17 @@ func (s *SessionStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sessions, id)
+	delete(s.claims, id)
+	for key, sid := range s.opened {
+		if sid == id {
+			delete(s.opened, key)
+		}
+	}
+	for key := range s.notes {
+		if key.sessionID == id {
+			delete(s.notes, key)
+		}
+	}
 	return nil
 }
 

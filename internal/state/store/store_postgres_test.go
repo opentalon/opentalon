@@ -37,6 +37,7 @@ func pgDB(t *testing.T) *DB {
 		// this list in sync with internal/state/store/migrations/*.sql.
 		db.SQLDB().Exec(`DROP TABLE IF EXISTS
 			session_events,
+			session_note_reservations,
 			prompt_snapshots,
 			ai_debug_events,
 			messages,
@@ -57,9 +58,25 @@ func TestPostgres_OpenAndMigrations(t *testing.T) {
 	if err := db.SQLDB().QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 17 {
-		t.Errorf("schema_version = %d, want 17", v)
+	if v != 18 {
+		t.Errorf("schema_version = %d, want 18", v)
 	}
+}
+
+// The open-session contracts on Postgres; the checks are shared with the
+// SQLite tests in session_test.go.
+func TestPostgres_OpenSessionCreateOrFind(t *testing.T) { checkOpenSessionCreateOrFind(t, pgDB(t)) }
+func TestPostgres_OpenSessionRefusals(t *testing.T)     { checkOpenSessionRefusals(t, pgDB(t)) }
+func TestPostgres_OpenSessionConcurrent(t *testing.T)   { checkOpenSessionConcurrent(t, pgDB(t)) }
+func TestPostgres_ClaimOpener(t *testing.T) {
+	checkClaimOpener(t, NewSessionStore(pgDB(t), 0, 0))
+}
+func TestPostgres_ReserveNote(t *testing.T) {
+	db := pgDB(t)
+	checkReserveNote(t, NewSessionStore(db, 0, 0), db)
+}
+func TestPostgres_NoteReservationsGoWithSession(t *testing.T) {
+	checkNoteReservationsGoWithSession(t, pgDB(t))
 }
 
 func TestPostgres_AddMessageConcurrent(t *testing.T) {

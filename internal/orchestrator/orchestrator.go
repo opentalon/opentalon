@@ -1410,6 +1410,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		return nil, err
 	}
 	defer unlock()
+	// The in-pod session mutex waits regardless of ctx. A turn whose context
+	// ended while it queued behind another turn never starts: its caller's
+	// deadline bounds how late it may still store its message.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Request-scoped session cache: avoids redundant DB roundtrips for
 	// sessions.Get() on every agent loop iteration. The per-session lock
@@ -1939,13 +1945,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if !confResult.RequiresConfirmation {
 				// All read-only — execute pipeline directly.
 				log.Info("pipeline confirmation skipped by plugin", "steps", len(planResult.Steps))
-				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+				_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
 				p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
 				return o.executePipeline(ctx, sessionID, p)
 			}
 			// Partial execution: run read prefix before the first write step,
 			// then pause for confirmation with real data.
-			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+			_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
 			if confResult.ConfirmBeforeStep > 0 {
 				// Execute read steps directly (not through executePipeline which
 				// enters the LLM agent loop). Collect their context so the write
@@ -2090,7 +2096,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				toolResult := o.executeCall(ctx, call)
 				if toolResult.Error == "" {
 					// Seed session: user message, assistant tool call, tool result.
-					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+					_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
 					if o.supportsNativeTools() {
 						// Native format: assistant with tool_calls + tool result with tool_call_id.
 						_ = sessions.AddMessage(sessionID, provider.Message{
@@ -2158,7 +2164,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			content = "[The user sent a file attachment.]"
 		}
 
-		if err := sessions.AddMessage(sessionID, provider.Message{
+		if err := addUserMessage(ctx, sessions, sessionID, provider.Message{
 			Role:       provider.RoleUser,
 			Content:    content,
 			Files:      files,
@@ -5027,7 +5033,7 @@ func (o *Orchestrator) maybeGenerateTitle(ctx context.Context, sessionID string)
 	var firstUser string
 	hasAssistant := false
 	for _, m := range sess.Messages {
-		if firstUser == "" && m.Role == provider.RoleUser {
+		if firstUser == "" && isVisibleUserMessage(m) {
 			firstUser = m.Content
 		}
 		if m.Role == provider.RoleAssistant {
@@ -5953,6 +5959,34 @@ func deduplicateKnowledgeOutput(m provider.Message, seen map[uint64]bool) provid
 // includes hidden turns.
 func isVisibleUserMessage(m provider.Message) bool {
 	return m.Role == provider.RoleUser && m.Visibility != provider.VisibilityHidden
+}
+
+type noteKeyCtxKey struct{}
+
+// WithNoteKey marks the turn as the note posted under key into an existing
+// session: Run stores the turn's user message with metadata note_key=key, which
+// the session store keeps once per session and key and which marks that key's
+// reservation stored. An empty key leaves ctx unchanged.
+func WithNoteKey(ctx context.Context, key string) context.Context {
+	if key == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, noteKeyCtxKey{}, key)
+}
+
+// NoteKey returns the note key set by WithNoteKey, or "".
+func NoteKey(ctx context.Context) string {
+	k, _ := ctx.Value(noteKeyCtxKey{}).(string)
+	return k
+}
+
+// addUserMessage stores the turn's own user message, with the note key when the
+// turn is a keyed note (WithNoteKey).
+func addUserMessage(ctx context.Context, sessions SessionStoreInterface, sessionID string, msg provider.Message) error {
+	if key := NoteKey(ctx); key != "" {
+		return sessions.AddMessageWithMetadata(sessionID, msg, map[string]string{"note_key": key})
+	}
+	return sessions.AddMessage(sessionID, msg)
 }
 
 // lastUserMessage returns the most recent VISIBLE user message from the session,
