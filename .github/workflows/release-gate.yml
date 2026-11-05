@@ -26,16 +26,18 @@ jobs:
         with:
           go-version: "1.25"
 
+      # Build-tagged tests are compiled by no other job, so a broken call in one
+      # can sit unnoticed for weeks (the eval tests did, for six).
+      - name: Vet tag-gated tests
+        run: |
+          go vet -tags eval ./internal/eval/...
+          go vet -tags postgres ./internal/state/store/...
+
       - name: Run structural tests
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: make test-structural
-
-      # The eval tests sit behind the `eval` build tag, so plain `go test ./...`
-      # never compiles them and a broken call sat unnoticed for four weeks.
-      - name: Vet eval tests
-        run: go vet -tags eval ./internal/eval/...
 
   eval:
     name: Eval (minor/major releases; always on manual trigger)
