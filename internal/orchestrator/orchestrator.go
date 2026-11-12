@@ -2590,6 +2590,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 
 			stripped := StripInternalBlocks(resp.Content)
+			if stripped == "" && turnSpoken != "" {
+				// A reply that is nothing but its spoken version shows that too (spoken_reply.go).
+				resp.Content, stripped = turnSpoken, turnSpoken
+			}
 			if stripped == "" {
 				// Empty response — either the LLM returned nothing, or its output
 				// was entirely unparseable tool call blocks that got stripped.
@@ -3419,6 +3423,9 @@ func (o *Orchestrator) maybeRequireConfirmation(
 		recentMsgs = s.Messages
 	}
 	spokenQuestion, confirmMsg := takeSpoken(ctx, o.narrateConfirmation(ctx, recentMsgs, call, userMessage))
+	if confirmMsg == "" {
+		confirmMsg = spokenQuestion
+	}
 	if confirmMsg == "" {
 		confirmMsg = o.confirmationFallback(call)
 	}

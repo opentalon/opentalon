@@ -43,6 +43,11 @@ func TestSplitSpoken(t *testing.T) {
 		{"Angelegt.", "", "Angelegt."},
 		{"<spoken>nie geschlossen Angelegt.", "", "nie geschlossen Angelegt."},
 		{"<spoken></spoken>Angelegt.", "", "Angelegt."},
+		{"<spoken>Ich sehe nach. [tool_call]p__a[/tool_call]</spoken>Antwort.", "Ich sehe nach.", "Antwort."},
+		{"<spoken>Erledigt. <invoke name=\"p__a\"><parameter name=\"id\">7</parameter></invoke></spoken>", "Erledigt.", ""},
+		{"[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt.", "", "[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt."},
+		{"[tool_call]{\"tool\":\"p__a\",\"args\":{\"text\":\"<spoken>x</spoken>\"}}[/tool_call]",
+			"", "[tool_call]{\"tool\":\"p__a\",\"args\":{\"text\":\"<spoken>x</spoken>\"}}[/tool_call]"},
 	}
 	for _, c := range cases {
 		spoken, rest, found := splitSpoken(c.reply)
@@ -63,14 +68,17 @@ func TestSplitSpoken(t *testing.T) {
 }
 
 func TestALongSpokenOnlyReplyStaysWholeAndIsNotRead(t *testing.T) {
-	long := strings.Repeat("Das ist ein langer Satz. ", 30)
-	spokenCtx := actor.WithSpokenReply(context.Background())
-	spoken, rest := takeSpoken(spokenCtx, "<spoken>"+long+"</spoken>")
-	if rest != strings.TrimSpace(long) {
-		t.Errorf("the shown text lost words: %d of %d characters", len(rest), len(strings.TrimSpace(long)))
+	long := strings.TrimSpace(strings.Repeat("Das ist ein langer Satz. ", 30))
+	orch, sessionID := setupOrchestrator(&fakeLLM{responses: []string{"<spoken>" + long + "</spoken>"}}, DefaultParser)
+	result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Erzähl")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if meta := spokenMetadata(spokenCtx, spoken); meta[SpokenMissingMetadataKey] != "true" {
-		t.Errorf("an over-long spoken version is read: %v", meta)
+	if result.Response != long {
+		t.Errorf("the shown text lost words: %d of %d characters", len(result.Response), len(long))
+	}
+	if result.Metadata[SpokenMissingMetadataKey] != "true" {
+		t.Errorf("an over-long spoken version is read: %v", result.Metadata)
 	}
 }
 
@@ -313,6 +321,55 @@ func TestAnEmptySpokenVersionIsAnEmptyResponse(t *testing.T) {
 	}
 }
 
+// lookupOrchestrator answers with llm in a session where p__lookup runs on executor.
+func lookupOrchestrator(t *testing.T, llm LLMClient, parser ToolCallParser, executor *countingExecutor) (*Orchestrator, string) {
+	t.Helper()
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{Name: "p", Actions: []Action{{Name: "lookup", Description: "Looks up."}}}, executor); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "s1"})
+	return NewWithRules(llm, parser, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{}), "s1"
+}
+
+func TestWhatASpokenBlockHoldsIsNeverRunAsACall(t *testing.T) {
+	executor := &countingExecutor{}
+	llm := &fakeLLM{responses: []string{
+		`<spoken>[tool_call]{"tool":"p__lookup","args":{}}[/tool_call]</spoken>`,
+		`<spoken>Erledigt. <invoke name="p__lookup"><parameter name="id">geheim</parameter></invoke></spoken>`,
+	}}
+	orch, sessionID := lookupOrchestrator(t, llm, DefaultParser, executor)
+	result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Schau nach")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executor.count != 0 || result.Response != "Erledigt." || result.Metadata[SpokenMetadataKey] != "Erledigt." {
+		t.Errorf("calls run %d, reply %q, spoken %q; want no call, the spoken words shown and read", executor.count, result.Response, result.Metadata[SpokenMetadataKey])
+	}
+
+	executor = &countingExecutor{}
+	orch, sessionID = lookupOrchestrator(t, &fakeLLM{responses: []string{`<spoken>{"tool":"p__lookup","args":{}}</spoken>`}}, DefaultParser, executor)
+	if _, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Schau nach"); err != nil {
+		t.Fatal(err)
+	}
+	if executor.count != 0 {
+		t.Errorf("a bare JSON call that was the whole spoken version ran %d times", executor.count)
+	}
+}
+
+func TestASpokenBlockInsideAProtocolBlockIsNotRead(t *testing.T) {
+	llm := &fakeLLM{responses: []string{"[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt."}}
+	orch, sessionID := setupOrchestrator(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }})
+	result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Leg an")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != "Erledigt." || result.Metadata[SpokenMissingMetadataKey] != "true" || strings.Contains(result.Metadata[SpokenMetadataKey], "geheim") {
+		t.Errorf("reply %q, metadata %v; want the block neither shown nor read", result.Response, result.Metadata)
+	}
+}
+
 func TestTextWrittenWithoutMarkersIsItsOwnSpokenVersionWhenShort(t *testing.T) {
 	spoken := actor.WithSpokenReply(context.Background())
 	short := speakAsIs(spoken, "Soll ich den Akkuschrauber anlegen?", map[string]string{"prompt_type": "tool_confirmation"})
@@ -417,6 +474,14 @@ func TestASpokenConfirmationReadsTheQuestionAsTheNarratorAskedItAloud(t *testing
 	}
 	if prompt, _, _ := orch.PendingConfirmationFrame("s1"); prompt != shownQuestion {
 		t.Errorf("pending prompt = %q, want the question without the spoken version", prompt)
+	}
+}
+
+func TestANarratorThatWroteOnlyTheQuestionAloudShowsItToo(t *testing.T) {
+	aloud := "Soll ich die Hauptkategorie Werkzeuge anlegen?"
+	rr, _, _, _ := raiseConfirmation(t, actor.WithSpokenReply(sentCtx("p__create_category")), spokenOpen+aloud+spokenClose)
+	if rr.Response != aloud || rr.Metadata[SpokenMetadataKey] != aloud {
+		t.Errorf("shown %q, read %q; want the question aloud as both", rr.Response, rr.Metadata[SpokenMetadataKey])
 	}
 }
 

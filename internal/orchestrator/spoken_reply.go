@@ -13,22 +13,25 @@ import (
 // metadata["reply"] == "spoken") gets its answer read aloud. The model writes a
 // short spoken version at the start of its reply to the user, between markers
 // (spokenReplyInstruction, added to the per-round system segment in every round
-// by appendConversation, so the cached prefix stays the same). Run takes it out of every response the moment it arrives
-// (takeSpoken), so tool parsing, the checks on the response, what is stored and
-// what is shown never see the markers; the spoken version of the final reply goes
-// into the result's metadata and onto the stored reply (spokenMetadata), and a
-// final reply without one is stored with spoken_missing and stays silent. The
-// confirmation question is written by its own narrator, which in a spoken turn
-// writes the question as it is asked aloud the same way
+// by appendConversation, so the cached prefix stays the same). Run takes it out
+// of every response the moment it arrives (takeSpoken), so tool parsing, the
+// checks on the response, what is stored and what is shown never see the
+// markers. What a spoken block holds is speech only: never parsed for a call,
+// and shown only when a reply is nothing else. The spoken version of the final
+// reply goes into the result's metadata and onto the stored reply
+// (spokenMetadata), and a final reply without one is stored with spoken_missing
+// and stays silent. The confirmation question is written by its own narrator,
+// which in a spoken turn writes the question as it is asked aloud the same way
 // (spokenConfirmationInstruction). Text no model wrote a spoken version for (a
 // confirmation the narrator wrote without one, a plan, a pipeline's summary, any
 // other way a turn ends) is its own spoken version when it is short enough
 // (speakAsIs; Run applies it to every result that carries neither key, and a
 // reply it stores carries the same, storeReply). An error result is never read,
-// like an error frame. Whatever is read loses the protocol blocks the shown text
-// loses (StripInternalBlocks) and goes through speakable: what a screen shows and
-// an ear cannot take (lists, field changes, markdown) is never read. Spoken turns
-// are not streamed: the spoken version must be out before anything is shown.
+// like an error frame. A protocol block (protocolTags) is never read, and a
+// spoken block inside one is not a spoken version; whatever is read goes through
+// speakable: what a screen shows and an ear cannot take (lists, field changes,
+// markdown) is never read. Spoken turns are not streamed: the spoken version
+// must be out before anything is shown.
 
 const (
 	// SpokenMetadataKey carries the spoken version on the result and the stored reply.
@@ -64,48 +67,90 @@ const spokenConfirmationInstruction = "## SPOKEN QUESTION\n" +
 	"or with arrows; no markdown, ids, links or code in it. Then write the question for the screen as the rules " +
 	"above say. Write the markers once, at the very start.\n"
 
+// protocolTags are the blocks a response carries for the orchestrator, not for
+// the person: the ones the shown text drops (internalBlockTags) and a bare
+// <invoke>, which the parser runs as a call.
+var protocolTags = append(internalBlockTags[:len(internalBlockTags):len(internalBlockTags)], [2]string{"<invoke", "</invoke>"})
+
+// withoutProtocol is s without its protocol blocks; an unclosed one takes the
+// rest of s with it, as in StripInternalBlocks.
+func withoutProtocol(s string) string {
+	for _, tags := range protocolTags {
+		s = stripTaggedBlocks(s, tags[0], tags[1])
+	}
+	return s
+}
+
 // splitSpoken returns the first spoken version a response carries and the
-// response without any: every block goes, and a marker the model left unpaired
-// or nested goes with it (an unclosed block keeps its text in the response).
-// found is false when it carries none.
+// response without any. Every spoken block goes, with whatever it holds: a call
+// or a protocol block in it is never run, and is not read either. A protocol
+// block outside them is kept as it is, a spoken block in it too: the parser
+// reads it, the shown text drops it, nothing of it is read. A marker the model
+// left unpaired or nested goes (an unclosed block keeps its text in the
+// response). found is false when it carries none.
 func splitSpoken(response string) (spoken, rest string, found bool) {
 	var kept strings.Builder
-	remaining := response
-	for {
-		start := strings.Index(remaining, spokenOpen)
-		if start < 0 {
-			kept.WriteString(remaining)
+	for i := 0; i < len(response); {
+		at, open, closing := nextSpokenOrProtocolTag(response, i)
+		if at < 0 {
+			kept.WriteString(response[i:])
 			break
 		}
-		kept.WriteString(remaining[:start])
-		inner := remaining[start+len(spokenOpen):]
-		end := strings.Index(inner, spokenClose)
-		if end < 0 {
-			kept.WriteString(inner)
-			break
+		kept.WriteString(response[i:at])
+		switch open {
+		case spokenClose: // unpaired
+			i = at + len(spokenClose)
+		case spokenOpen:
+			i = at + len(spokenOpen)
+			end := strings.Index(response[i:], spokenClose)
+			if end < 0 {
+				continue // unclosed: its text stays
+			}
+			if text := strings.TrimSpace(markers.Replace(withoutProtocol(response[i : i+end]))); !found && text != "" {
+				spoken, found = text, true
+			}
+			i += end + len(spokenClose)
+		default: // a protocol block, kept whole
+			end := len(response)
+			if j := strings.Index(response[at+len(open):], closing); j >= 0 {
+				end = at + len(open) + j + len(closing)
+			}
+			kept.WriteString(response[at:end])
+			i = end
 		}
-		if text := strings.TrimSpace(markers.Replace(inner[:end])); !found && text != "" {
-			spoken, found = text, true
-		}
-		remaining = inner[end+len(spokenClose):]
 	}
-	rest = strings.TrimSpace(markers.Replace(kept.String()))
-	return spoken, rest, found
+	return spoken, strings.TrimSpace(kept.String()), found
+}
+
+// nextSpokenOrProtocolTag finds the first spoken marker or protocol block
+// opening at or after from: its position, the tag, and for a protocol block its
+// closing tag. at is -1 when there is none.
+func nextSpokenOrProtocolTag(s string, from int) (at int, open, closing string) {
+	at = -1
+	consider := func(tag, closeTag string) {
+		if j := strings.Index(s[from:], tag); j >= 0 && (at < 0 || from+j < at) {
+			at, open, closing = from+j, tag, closeTag
+		}
+	}
+	consider(spokenOpen, "")
+	consider(spokenClose, "")
+	for _, tags := range protocolTags {
+		consider(tags[0], tags[1])
+	}
+	return at, open, closing
 }
 
 var markers = strings.NewReplacer(spokenOpen, "", spokenClose, "")
 
-// takeSpoken takes the spoken version out of a model response in a spoken turn;
-// in any other turn the response stays as it is. A response that was nothing but
-// its spoken version keeps that, whole, as its text.
+// takeSpoken takes the spoken version out of a model response in a spoken turn
+// (splitSpoken); in any other turn the response stays as it is. rest is "" for
+// a response that was nothing but its spoken version: the caller shows the
+// spoken version then, without ever parsing it for a call.
 func takeSpoken(ctx context.Context, response string) (spoken, rest string) {
 	if !actor.SpokenReply(ctx) || (!strings.Contains(response, spokenOpen) && !strings.Contains(response, spokenClose)) {
 		return "", response
 	}
-	spoken, rest, found := splitSpoken(response)
-	if found && rest == "" {
-		rest = spoken
-	}
+	spoken, rest, _ = splitSpoken(response)
 	return spoken, rest
 }
 
@@ -137,9 +182,8 @@ func markUnspoken(ctx context.Context, result *RunResult) {
 // speakAsIs adds to meta, in a spoken turn, what of the text can be read aloud
 // (speakable) as its spoken version when it is short enough, or spoken_missing
 // when it is not or nothing is left (cut in the middle of a sentence, it would
-// say less than silence). A protocol block is no more read than shown
-// (StripInternalBlocks): a spoken version is taken out before the response is
-// stripped. meta comes back as is in any other turn.
+// say less than silence). A protocol block in the text is not read
+// (withoutProtocol). meta comes back as is in any other turn.
 func speakAsIs(ctx context.Context, text string, meta map[string]string) map[string]string {
 	if !actor.SpokenReply(ctx) {
 		return meta
@@ -148,7 +192,7 @@ func speakAsIs(ctx context.Context, text string, meta map[string]string) map[str
 	for k, v := range meta {
 		out[k] = v
 	}
-	text = speakable(StripInternalBlocks(text))
+	text = speakable(withoutProtocol(text))
 	if text != "" && len([]rune(text)) <= spokenLimit {
 		out[SpokenMetadataKey] = text
 	} else {
