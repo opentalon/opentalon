@@ -344,6 +344,43 @@ func TestRun_ClaimTakenOverRunsNoPlannedTool(t *testing.T) {
 	}
 }
 
+// A claimed turn whose content is empty once prepared (a request holding only a
+// [knowledge_context] block) ends before the planner, whether its claim is
+// still held or was taken over: no planned tool runs and nothing is stored.
+func TestRun_ClaimedTurnWithEmptyPreparedContentRunsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lost bool
+	}{{"claim held", false}, {"claim taken over", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &countingExecutor{}
+			registry := NewToolRegistry()
+			_ = registry.Register(PluginCapability{Name: "gitlab", Actions: []Action{{Name: "analyze_code"}}}, exec)
+			orch, sessions, now := claimedTurnFixture(t, registry, OrchestratorOpts{},
+				`{"type":"pipeline","steps":[{"id":"1","name":"Analyze","plugin":"gitlab","action":"analyze_code"}]}`,
+				"Analyzed.")
+			if tc.lost {
+				if result, err := sessions.ReserveNote("s1", "chapter-2", now.Add(2*time.Minute), time.Minute); err != nil || result != state.ClaimWon {
+					t.Fatalf("re-claim = %v, %v", result, err)
+				}
+			}
+
+			ctx := WithTurnClaim(actor.WithVisibility(context.Background(), provider.VisibilityHidden), state.TurnClaim{NoteKey: "chapter-2", At: now})
+			result, err := orch.Run(ctx, "s1", "[knowledge_context]chapter two[/knowledge_context]")
+
+			if err != nil || result.Metadata["error_code"] != "empty_content" {
+				t.Errorf("Run = %+v, %v; want the empty-content answer", result, err)
+			}
+			if exec.count != 0 {
+				t.Errorf("planned tool ran %d times, want 0", exec.count)
+			}
+			if sess, _ := sessions.Get("s1"); len(sess.Messages) != 0 {
+				t.Errorf("stored messages = %+v, want none", sess.Messages)
+			}
+		})
+	}
+}
+
 // invokingPreparer is a trusted content preparer that answers every message by
 // invoking gitlab.analyze_code, whose runs exec counts.
 func invokingPreparer(exec *countingExecutor) (*ToolRegistry, OrchestratorOpts) {

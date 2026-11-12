@@ -1887,9 +1887,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// run a tool or end the turn with a confirmation: that store is what marks
 	// the claim's turn as run, and the store refuses it when another run took
 	// the claim over, so a run that lost its claim stops before it acts. The
-	// later stores of the input below are skipped for it.
+	// later stores of the input below are skipped for it. Content the
+	// preparers left empty gets the agent loop's empty-content treatment here
+	// already, so the planner never acts on a claimed turn without its store.
 	inputStored := false
-	if _, claimed := TurnClaimFrom(ctx); claimed && !toolCallSeeded && content != "" {
+	if _, claimed := TurnClaimFrom(ctx); claimed && !toolCallSeeded {
+		if content == "" && len(files) == 0 {
+			return emptyContentResult(), nil
+		}
+		if content == "" {
+			content = fileOnlyContent
+		}
 		if err := addUserMessage(ctx, sessions, sessionID, provider.Message{
 			Role:       provider.RoleUser,
 			Content:    content,
@@ -2196,16 +2204,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	if !singleStepSeeded {
 		if content == "" && len(files) == 0 {
 			log.Debug("empty content and no files, returning fallback")
-			return &RunResult{
-				Response: "I received your message but couldn't read its content. Could you try sending it as text?",
-				Metadata: map[string]string{
-					"type":       "error",
-					"error_code": "empty_content",
-				},
-			}, nil
+			return emptyContentResult(), nil
 		}
 		if content == "" && len(files) > 0 {
-			content = "[The user sent a file attachment.]"
+			content = fileOnlyContent
 		}
 
 		if !inputStored {
@@ -6022,6 +6024,21 @@ func WithTurnClaim(ctx context.Context, c state.TurnClaim) context.Context {
 func TurnClaimFrom(ctx context.Context) (state.TurnClaim, bool) {
 	c, ok := ctx.Value(turnClaimCtxKey{}).(state.TurnClaim)
 	return c, ok
+}
+
+// fileOnlyContent stands in for the text of a message that brought only files.
+const fileOnlyContent = "[The user sent a file attachment.]"
+
+// emptyContentResult answers a turn left with neither text nor files: an empty
+// user message is never sent to the LLM.
+func emptyContentResult() *RunResult {
+	return &RunResult{
+		Response: "I received your message but couldn't read its content. Could you try sending it as text?",
+		Metadata: map[string]string{
+			"type":       "error",
+			"error_code": "empty_content",
+		},
+	}
 }
 
 // addUserMessage stores the turn's own user message, under the turn's claim
