@@ -272,6 +272,12 @@ func take[K comparable](claims map[K]*claim, key K, now time.Time, staleAfter ti
 	}
 }
 
+// Identity is Get for the open path (see store/session.go Identity), whose
+// wait ctx would end; the in-memory store does not wait.
+func (s *SessionStore) Identity(_ context.Context, id string) (*Session, error) {
+	return s.Get(id)
+}
+
 func (s *SessionStore) Get(id string) (*Session, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

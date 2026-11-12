@@ -846,7 +846,7 @@ func (v systemVerifier) Verify(context.Context, string, string, map[string]strin
 // failingOpener fails every store call, as a store whose database is gone.
 type failingOpener struct{}
 
-func (failingOpener) Get(string) (*state.Session, error) {
+func (failingOpener) Identity(context.Context, string) (*state.Session, error) {
 	return nil, errors.New("database connection lost")
 }
 
@@ -1349,10 +1349,11 @@ func TestHandler_OpenSession_FailedClaimIsRefusedThenRetried(t *testing.T) {
 	}
 }
 
-// stuckOpener's open (stuck "open") or first-turn claim (stuck "claim") waits
-// until its context ends, as an open waits for another transaction's insert of
-// its key and a claim for a session row another transaction holds, and
-// records whether that context carried a deadline.
+// stuckOpener's open (stuck "open"), a note's lookup (stuck "lookup") or the
+// first-turn claim (stuck "claim") waits until its context ends, as an open
+// waits for another transaction's insert of its key, a lookup for a table lock
+// or a free connection, and a claim for a session row another transaction
+// holds, and records whether that context carried a deadline.
 type stuckOpener struct {
 	*state.SessionStore
 	stuck    string
@@ -1373,6 +1374,13 @@ func (o *stuckOpener) OpenSession(ctx context.Context, p state.SessionParams) (*
 	return o.SessionStore.OpenSession(ctx, p)
 }
 
+func (o *stuckOpener) Identity(ctx context.Context, id string) (*state.Session, error) {
+	if o.stuck == "lookup" {
+		return nil, o.wait(ctx)
+	}
+	return o.SessionStore.Identity(ctx, id)
+}
+
 func (o *stuckOpener) ClaimOpener(ctx context.Context, id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	if o.stuck == "claim" {
 		return state.ClaimHeld, o.wait(ctx)
@@ -1380,10 +1388,10 @@ func (o *stuckOpener) ClaimOpener(ctx context.Context, id string, now time.Time,
 	return o.SessionStore.ClaimOpener(ctx, id, now, staleAfter)
 }
 
-// TestHandler_OpenSession_StoreWaitIsBounded: an open or a claim that waits for
-// another transaction gives up once the turn timeout passed, or as soon as the
-// request's context ends; the attempt is refused with internal_error and
-// nothing is sent or run.
+// TestHandler_OpenSession_StoreWaitIsBounded: an open, a note's lookup or a
+// claim whose store call waits gives up once the turn timeout passed, or as
+// soon as the request's context ends; the attempt is refused with
+// internal_error and nothing is sent or run.
 func TestHandler_OpenSession_StoreWaitIsBounded(t *testing.T) {
 	shortOpenerTiming(t)
 	for _, tc := range []struct {
@@ -1392,6 +1400,8 @@ func TestHandler_OpenSession_StoreWaitIsBounded(t *testing.T) {
 	}{
 		{"open, turn timeout", "open", false},
 		{"open, request ends", "open", true},
+		{"note lookup, turn timeout", "lookup", false},
+		{"note lookup, request ends", "lookup", true},
 		{"claim, turn timeout", "claim", false},
 		{"claim, request ends", "claim", true},
 	} {
@@ -1401,6 +1411,14 @@ func TestHandler_OpenSession_StoreWaitIsBounded(t *testing.T) {
 				op.SessionStore = cfg.Opener.(*state.SessionStore)
 				cfg.Opener = op
 			})
+			req := openRequest("c1", nil)
+			if tc.stuck == "lookup" {
+				storeOpened(t, rec.store, openedSession, "u1")
+				req = openRequest("c1", map[string]string{
+					pkg.OpenSessionIDMetadataKey: openedSession, pkg.NoteKeyMetadataKey: "chapter-2",
+					pkg.OpenedByMetadataKey: "", pkg.OpenKeyMetadataKey: "",
+				})
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if tc.cancel {
@@ -1408,7 +1426,7 @@ func TestHandler_OpenSession_StoreWaitIsBounded(t *testing.T) {
 			}
 
 			start := time.Now()
-			out, _ := h(ctx, "websocket:c1", openRequest("c1", nil))
+			out, _ := h(ctx, "websocket:c1", req)
 			waited := time.Since(start)
 
 			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "internal_error" {

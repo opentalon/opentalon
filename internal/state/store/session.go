@@ -192,7 +192,9 @@ func (s *SessionStore) Create(p state.SessionParams) *state.Session {
 // inserts the row, stamped "chat" with no system_source, and answers
 // created=true; every later call, concurrent or after a restart, answers the
 // stored session with created=false — never the id it minted itself, and
-// never a changed row (the existing session's labels stay as they were).
+// never a changed row (the existing session's labels stay as they were). The
+// stored session is answered as Identity reads it: its id, owner, channel and
+// open key.
 //
 // Unlike Create, it tells created from found and has no transient fallback:
 // an insert that fails, or conflicts on anything but the key (the minted id
@@ -203,7 +205,7 @@ func (s *SessionStore) Create(p state.SessionParams) *state.Session {
 // so the uniqueness is decided by the database in one statement: Postgres
 // makes a concurrent duplicate wait for the first insert's commit, SQLite
 // serialises writers; ctx ends the wait. The lookup after a conflict reads the
-// committed row.
+// committed row by its key, under ctx as well.
 func (s *SessionStore) OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error) {
 	if p.OpenedBy == "" || p.OpenKey == "" {
 		return nil, false, state.ErrOpenParams
@@ -236,22 +238,43 @@ func (s *SessionStore) OpenSession(ctx context.Context, p state.SessionParams) (
 		}, true, nil
 	}
 
-	var existingID string
-	err = s.db.SQLDB().QueryRowContext(ctx,
-		d.Rebind(`SELECT id FROM sessions WHERE entity_id = ? AND opened_by = ? AND open_key = ?`),
-		p.EntityID, p.OpenedBy, p.OpenKey,
-	).Scan(&existingID)
+	existing, err := s.identityWhere(ctx, `entity_id = ? AND opened_by = ? AND open_key = ?`, p.EntityID, p.OpenedBy, p.OpenKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, fmt.Errorf("open session %q: id already taken by another session", p.ID)
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("open session %q lookup: %w", p.ID, err)
 	}
-	existing, err := s.Get(existingID)
-	if err != nil {
-		return nil, false, err
-	}
 	return existing, false, nil
+}
+
+// Identity reads what authorises an open-session request for session id: its
+// id, owner, channel and open key, and nothing else. Unlike Get it does not
+// load the transcript, and ctx ends a wait for the database. A row that is
+// absent answers a wrapped state.ErrSessionNotFound.
+func (s *SessionStore) Identity(ctx context.Context, id string) (*state.Session, error) {
+	sess, err := s.identityWhere(ctx, `id = ?`, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("session %q: %w", id, state.ErrSessionNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("session %q load: %w", id, err)
+	}
+	return sess, nil
+}
+
+// identityWhere reads the identity (see Identity) of the session whose row
+// matches where, with args.
+func (s *SessionStore) identityWhere(ctx context.Context, where string, args ...any) (*state.Session, error) {
+	var sess state.Session
+	err := s.db.SQLDB().QueryRowContext(ctx,
+		s.db.Dialect().Rebind(`SELECT id, COALESCE(entity_id,''), COALESCE(opened_by,''), COALESCE(open_key,''), COALESCE(channel_id,'') FROM sessions WHERE `+where),
+		args...,
+	).Scan(&sess.ID, &sess.EntityID, &sess.OpenedBy, &sess.OpenKey, &sess.ChannelID)
+	if err != nil {
+		return nil, err
+	}
+	return &sess, nil
 }
 
 // ClaimOpener is the one atomic "this request runs the first turn" mark of an

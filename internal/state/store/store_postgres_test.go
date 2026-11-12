@@ -317,6 +317,85 @@ func TestPostgres_OpenWaitEndsWithItsContext(t *testing.T) {
 	}
 }
 
+// TestPostgres_FoundOpenReadsNoTranscript: an open of a key whose session
+// exists answers that session as Identity reads it, so a lock on the messages
+// table, which a transcript read would wait for, does not hold it.
+func TestPostgres_FoundOpenReadsNoTranscript(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 0)
+	first := state.SessionParams{ID: "first", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-1", ChannelID: "websocket"}
+	if _, _, err := store.OpenSession(context.Background(), first); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	if err := store.AddMessage("first", provider.Message{Role: provider.RoleUser, Content: "the first turn"}); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+	ctx := context.Background()
+	holder, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.ExecContext(ctx, `LOCK TABLE messages IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock the messages: %v", err)
+	}
+	inUse := db.SQLDB().Stats().InUse
+
+	again := first
+	again.ID = "second"
+	openCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	start := time.Now()
+	sess, created, err := store.OpenSession(openCtx, again)
+	cancel()
+
+	if err != nil || created || sess.ID != "first" || sess.EntityID != "u1" || sess.ChannelID != "websocket" || sess.OpenKey != "event-1" {
+		t.Errorf("OpenSession = %+v, created=%v, %v; want the found session first of u1 on websocket", sess, created, err)
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Errorf("OpenSession returned after %v", waited)
+	}
+	if n := db.SQLDB().Stats().InUse; n != inUse {
+		t.Errorf("connections in use = %d, want %d", n, inUse)
+	}
+}
+
+// TestPostgres_IdentityWaitEndsWithItsContext: a note's lookup of its session
+// waits for a lock on the sessions table, and gives up when its context ends,
+// with an error, not a missing session, and its database connection returned
+// to the pool.
+func TestPostgres_IdentityWaitEndsWithItsContext(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 0)
+	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "held", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-1"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	ctx := context.Background()
+	holder, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.ExecContext(ctx, `LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock the sessions: %v", err)
+	}
+	inUse := db.SQLDB().Stats().InUse
+
+	lookupCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	start := time.Now()
+	sess, err := store.Identity(lookupCtx, "held")
+	cancel()
+
+	if err == nil || sess != nil || errors.Is(err, state.ErrSessionNotFound) {
+		t.Errorf("Identity = %+v, %v; want an error once its context ended", sess, err)
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Errorf("Identity returned after %v, want soon after its context ended", waited)
+	}
+	if n := db.SQLDB().Stats().InUse; n != inUse {
+		t.Errorf("connections in use = %d, want %d", n, inUse)
+	}
+}
+
 func TestPostgres_AddMessageConcurrent(t *testing.T) {
 	db := pgDB(t)
 	store := NewSessionStore(db, 0, 0)

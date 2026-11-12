@@ -21,10 +21,12 @@ import (
 
 // SessionOpener is the store side of a server-opened session: the
 // create-or-find, the first-turn claim and the note reservation (see
-// state.SessionStore.OpenSession), and the lookup a note's target is
-// authorised by. Both session stores implement it.
+// state.SessionStore.OpenSession), and the read of what a note's target is
+// authorised by. These are the open path's store calls before its turn runs,
+// and each takes the request's context (see storeContext). Both session
+// stores implement it.
 type SessionOpener interface {
-	Get(id string) (*state.Session, error)
+	Identity(ctx context.Context, id string) (*state.Session, error)
 	OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error)
 	ClaimOpener(ctx context.Context, sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
 	ReserveNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
@@ -182,7 +184,9 @@ func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessa
 	if noteKey == "" {
 		return openRejected(msg, "A note needs a note key.", "bad_request")
 	}
-	sess, err := o.cfg.Opener.Get(target)
+	lookupCtx, cancel := o.storeContext(ctx)
+	sess, err := o.cfg.Opener.Identity(lookupCtx, target)
+	cancel()
 	if err != nil && !errors.Is(err, state.ErrSessionNotFound) {
 		logger.FromContext(ctx).Error("note session lookup failed", "session", target, "error", err)
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
@@ -325,11 +329,12 @@ func (o *openSessions) claim(ctx context.Context, key recoveryKey, now time.Time
 	return o.cfg.Opener.ReserveNote(ctx, key.sessionID, key.noteKey, now, o.staleAfter)
 }
 
-// storeContext bounds a store call of the open path that may wait for another
-// transaction: an open for a concurrent insert of its key, a claim for its
-// session's row. The call waits no longer than the turn it is for may run, and
-// not past ctx, so neither another transaction nor a shutdown keeps it and its
-// database connection.
+// storeContext bounds the open path's store calls before its turn runs: the
+// open, a note's lookup and the claims, which may wait for another
+// transaction, a table lock or a free connection. Each waits no longer than
+// the turn it is for may run, and not past ctx, so neither another
+// transaction nor a shutdown keeps it and its database connection. The turn's
+// own store calls (Runner.Run) take no context, as every turn's.
 func (o *openSessions) storeContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, o.timeout)
 }
