@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -847,12 +848,12 @@ func (failingOpener) OpenSession(state.SessionParams) (*state.Session, bool, err
 	return nil, false, errors.New("database connection lost")
 }
 
-func (failingOpener) ClaimOpener(string, time.Time, time.Duration) (bool, error) {
-	return false, errors.New("database connection lost")
+func (failingOpener) ClaimOpener(string, time.Time, time.Duration) (state.ClaimResult, error) {
+	return state.ClaimHeld, errors.New("database connection lost")
 }
 
-func (failingOpener) ReserveNote(string, string, time.Time, time.Duration) (bool, error) {
-	return false, errors.New("database connection lost")
+func (failingOpener) ReserveNote(string, string, time.Time, time.Duration) (state.ClaimResult, error) {
+	return state.ClaimHeld, errors.New("database connection lost")
 }
 
 var welcomeProfile = profile.Profile{EntityID: "u1", Group: "g1", Kind: profile.KindSystem, SystemSource: "welcome_label"}
@@ -1010,8 +1011,8 @@ func TestHandler_OpenSession_RecoversAnInterruptedFirstTurnOnce(t *testing.T) {
 			shortOpenerTiming(t)
 			rec, h := newOpenHandler(welcomeProfile)
 			storeOpened(t, rec.store, openedSession, "u1")
-			if won, err := rec.store.ClaimOpener(openedSession, time.Now(), openerStaleAfter); err != nil || !won {
-				t.Fatalf("crashed attempt's claim = %v, %v", won, err)
+			if result, err := rec.store.ClaimOpener(openedSession, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				t.Fatalf("crashed attempt's claim = %v, %v", result, err)
 			}
 			if tc.stale {
 				time.Sleep(2 * openerStaleAfter)
@@ -1167,17 +1168,17 @@ type lateClaimOpener struct {
 	release chan struct{}
 }
 
-func (o *lateClaimOpener) ClaimOpener(id string, now time.Time, staleAfter time.Duration) (bool, error) {
+func (o *lateClaimOpener) ClaimOpener(id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	first := false
 	o.once.Do(func() { first = true })
 	if !first {
 		return o.SessionStore.ClaimOpener(id, now, staleAfter)
 	}
 	time.Sleep(2 * staleAfter)
-	won, err := o.SessionStore.ClaimOpener(id, now, staleAfter)
+	result, err := o.SessionStore.ClaimOpener(id, now, staleAfter)
 	close(o.claimed)
 	<-o.release
-	return won, err
+	return result, err
 }
 
 // TestHandler_OpenSession_FirstTurnClaimTakenOverRunsOnce: a claim granted
@@ -1237,6 +1238,103 @@ func TestHandler_OpenSession_NoteReservationTakenOverRunsOnce(t *testing.T) {
 	}
 	if n := rec.replies(); n != 1 {
 		t.Errorf("replies = %d, want 1", n)
+	}
+}
+
+// TestHandler_OpenSession_RecoversAnInterruptedNoteOnce: an attempt that
+// reserved a note and died before it stored the note leaves the reservation
+// held. A retry while it is fresh is answered created=false and recovers the
+// note once the reservation is stale: the note is stored and answered once.
+func TestHandler_OpenSession_RecoversAnInterruptedNoteOnce(t *testing.T) {
+	shortOpenerTiming(t)
+	rec, h := newOpenHandler(welcomeProfile)
+	storeOpened(t, rec.store, openedSession, "u1")
+	if result, err := rec.store.ReserveNote(openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+		t.Fatalf("crashed attempt's reservation = %v, %v", result, err)
+	}
+	note := map[string]string{
+		pkg.OpenSessionIDMetadataKey: openedSession, pkg.NoteKeyMetadataKey: "chapter-2",
+		pkg.OpenedByMetadataKey: "", pkg.OpenKeyMetadataKey: "",
+	}
+
+	callOpen(h, "c8", note)
+	if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "false" {
+		t.Fatalf("answers = %+v, want created=false", acks)
+	}
+	if _, runs, _ := rec.snapshot(); len(runs) != 0 {
+		t.Fatalf("the note ran while the reservation was fresh: %+v", runs)
+	}
+	rec.waitForRuns(t, 1)
+	time.Sleep(pastRecovery())
+
+	_, runs, _ := rec.snapshot()
+	if claim, _ := orchestrator.TurnClaimFrom(runs[0].ctx); len(runs) != 1 || runs[0].sessionID != openedSession || claim.NoteKey != "chapter-2" {
+		t.Fatalf("turns = %+v, want one recovered note chapter-2 on %s", runs, openedSession)
+	}
+	if n := countStored(t, rec.store, openedSession, openRequest("c8", note).Content); n != 1 {
+		t.Errorf("note stored %d times, want once", n)
+	}
+	if n := rec.replies(); n != 1 {
+		t.Errorf("replies = %d, want 1", n)
+	}
+}
+
+// countingOpener counts the first-turn claims that reach the store.
+type countingOpener struct {
+	*state.SessionStore
+	claims atomic.Int32
+}
+
+func (o *countingOpener) ClaimOpener(id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	o.claims.Add(1)
+	return o.SessionStore.ClaimOpener(id, now, staleAfter)
+}
+
+// TestHandler_OpenSession_RecoveryOnlyForAHeldClaimAndOnce: duplicates of a
+// request whose first turn ran schedule no recovery; duplicates that find the
+// claim held by a dead attempt schedule one recovery between them, which runs
+// the first turn once.
+func TestHandler_OpenSession_RecoveryOnlyForAHeldClaimAndOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		ran        bool
+		recoveries int32
+	}{
+		{"first turn ran", true, 0},
+		{"claim held by a dead attempt", false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortOpenerTiming(t)
+			op := &countingOpener{}
+			rec, h := newOpenHandler(welcomeProfile, func(cfg *HandlerConfig) {
+				op.SessionStore = cfg.Opener.(*state.SessionStore)
+				cfg.Opener = op
+			})
+			if tc.ran {
+				callOpen(h, "c1", nil)
+			} else {
+				storeOpened(t, rec.store, openedSession, "u1")
+				if result, err := rec.store.ClaimOpener(openedSession, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+					t.Fatalf("dead attempt's claim = %v, %v", result, err)
+				}
+			}
+			before := op.claims.Load()
+
+			const duplicates = 6
+			var wg sync.WaitGroup
+			for i := range duplicates {
+				wg.Go(func() { callOpen(h, fmt.Sprintf("d%d", i), nil) })
+			}
+			wg.Wait()
+			time.Sleep(pastRecovery())
+
+			if got := op.claims.Load() - before - duplicates; got != tc.recoveries {
+				t.Errorf("recovery claims = %d, want %d", got, tc.recoveries)
+			}
+			if _, runs, _ := rec.snapshot(); len(runs) != 1 {
+				t.Errorf("first turn ran %d times, want 1", len(runs))
+			}
+		})
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"maps"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
@@ -24,8 +25,8 @@ import (
 type SessionOpener interface {
 	Get(id string) (*state.Session, error)
 	OpenSession(p state.SessionParams) (*state.Session, bool, error)
-	ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (bool, error)
-	ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error)
+	ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
+	ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
 }
 
 // A server-opened turn is claimed before it runs (ClaimOpener, ReserveNote),
@@ -51,10 +52,18 @@ type openSessions struct {
 	timeout    time.Duration
 	staleAfter time.Duration
 	leeway     time.Duration
+
+	mu         sync.Mutex
+	recovering map[recoveryKey]bool // the claims a recovery is scheduled for in this process
 }
 
+// recoveryKey names a claim: a session's first turn (noteKey empty) or one of
+// its notes.
+type recoveryKey struct{ sessionID, noteKey string }
+
 func newOpenSessions(cfg HandlerConfig) *openSessions {
-	return &openSessions{cfg: cfg, timeout: openerTimeout, staleAfter: openerStaleAfter, leeway: recoveryLeeway}
+	return &openSessions{cfg: cfg, timeout: openerTimeout, staleAfter: openerStaleAfter, leeway: recoveryLeeway,
+		recovering: make(map[recoveryKey]bool)}
 }
 
 // handle answers an open-session message. kind, entityID and groupID are the
@@ -97,19 +106,20 @@ func (o *openSessions) open(ctx context.Context, sessionKey string, msg pkg.Inbo
 	o.acknowledge(ctx, sessionKey, msg, sess.ID, created)
 
 	now := time.Now()
-	won, err := o.cfg.Opener.ClaimOpener(sess.ID, now, o.staleAfter)
+	result, err := o.cfg.Opener.ClaimOpener(sess.ID, now, o.staleAfter)
 	if err != nil {
 		logger.FromContext(ctx).Warn("opener claim failed", "session", sess.ID, "error", err)
 	}
-	if won {
+	switch {
+	case err == nil && result == state.ClaimWon:
 		o.run(ctx, sess.ID, msg, entityID, state.TurnClaim{At: now})
-		return pkg.OutboundMessage{}
+	case err != nil || result == state.ClaimHeld:
+		// Another attempt holds the claim (or the store could not say). A
+		// claimant that dies before its turn stored a message leaves a claim
+		// that goes stale, so the turn is recovered then. A first turn that ran
+		// is settled and needs nothing.
+		o.scheduleRecovery(ctx, recoveryKey{sessionID: sess.ID}, msg, entityID)
 	}
-	// Another attempt holds the claim, or the first turn ran. A claimant that
-	// died before its turn stored a message leaves a claim that goes stale, so
-	// a recovery is scheduled for every lost claim; ClaimOpener refuses it for
-	// a turn that ran (the transcript is no proof: clearing rewrites it).
-	o.scheduleRecovery(ctx, sess.ID, msg, entityID)
 	return pkg.OutboundMessage{}
 }
 
@@ -134,14 +144,20 @@ func (o *openSessions) continueSession(ctx context.Context, sessionKey string, m
 		return openRejected(msg, gone, "not_found")
 	}
 	now := time.Now()
-	reserved, err := o.cfg.Opener.ReserveNote(target, noteKey, now, o.staleAfter)
+	result, err := o.cfg.Opener.ReserveNote(target, noteKey, now, o.staleAfter)
 	if err != nil {
 		logger.FromContext(ctx).Error("note reservation failed", "session", target, "error", err)
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
 	}
-	o.acknowledge(ctx, sessionKey, msg, target, reserved)
-	if reserved {
+	o.acknowledge(ctx, sessionKey, msg, target, result == state.ClaimWon)
+	switch result {
+	case state.ClaimWon:
 		o.run(ctx, target, msg, entityID, state.TurnClaim{NoteKey: noteKey, At: now})
+	case state.ClaimHeld:
+		// As for the first turn: the attempt holding the reservation may have
+		// died before it stored the note, which is then recovered once the
+		// reservation is stale.
+		o.scheduleRecovery(ctx, recoveryKey{sessionID: target, noteKey: noteKey}, msg, entityID)
 	}
 	return pkg.OutboundMessage{}
 }
@@ -189,26 +205,62 @@ func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.Inboun
 	}
 }
 
-// scheduleRecovery claims sessionID's first turn again once the lost claim is
-// stale and runs the turn when that claim is won: its claimant died before the
-// turn stored a message. The timer lives in this process; a restart before it
-// fires leaves the recovery to the next identical request.
-func (o *openSessions) scheduleRecovery(ctx context.Context, sessionID string, msg pkg.InboundMessage, entityID string) {
+// scheduleRecovery takes the claim key again once the claim another run holds
+// is stale, and runs the turn with msg when that claim is won: its claimant
+// died before the turn stored its input. One recovery per claim is scheduled
+// in this process, however many requests find it held; it looks again while
+// the claim is held by yet another run, and ends when the claim is settled.
+// The timer lives in this process; a restart before it fires leaves the
+// recovery to the next identical request.
+func (o *openSessions) scheduleRecovery(ctx context.Context, key recoveryKey, msg pkg.InboundMessage, entityID string) {
+	o.mu.Lock()
+	scheduled := o.recovering[key]
+	o.recovering[key] = true
+	o.mu.Unlock()
+	if !scheduled {
+		o.recoverWhenStale(ctx, key, msg, entityID)
+	}
+}
+
+func (o *openSessions) recoverWhenStale(ctx context.Context, key recoveryKey, msg pkg.InboundMessage, entityID string) {
 	time.AfterFunc(o.staleAfter+o.leeway, func() {
 		if ctx.Err() != nil {
+			o.forget(key)
 			return
 		}
 		now := time.Now()
-		won, err := o.cfg.Opener.ClaimOpener(sessionID, now, o.staleAfter)
-		if err != nil {
-			logger.FromContext(ctx).Warn("opener recovery claim failed", "session", sessionID, "error", err)
-			return
-		}
-		if won {
-			logger.FromContext(ctx).Info("recovering an interrupted first turn", "session", sessionID)
-			o.run(ctx, sessionID, msg, entityID, state.TurnClaim{At: now})
+		result, err := o.claim(key, now)
+		switch {
+		case err != nil:
+			o.forget(key)
+			logger.FromContext(ctx).Warn("recovery claim failed", "session", key.sessionID, "note_key", key.noteKey, "error", err)
+		case result == state.ClaimHeld:
+			// Yet another run took the claim meanwhile: look again once
+			// that claim is stale.
+			o.recoverWhenStale(ctx, key, msg, entityID)
+		case result == state.ClaimWon:
+			o.forget(key)
+			logger.FromContext(ctx).Info("recovering an interrupted turn", "session", key.sessionID, "note_key", key.noteKey)
+			o.run(ctx, key.sessionID, msg, entityID, state.TurnClaim{NoteKey: key.noteKey, At: now})
+		default:
+			o.forget(key)
 		}
 	})
+}
+
+// forget ends the scheduled recovery of key.
+func (o *openSessions) forget(key recoveryKey) {
+	o.mu.Lock()
+	delete(o.recovering, key)
+	o.mu.Unlock()
+}
+
+// claim takes key's claim at now: the first turn's or the note's.
+func (o *openSessions) claim(key recoveryKey, now time.Time) (state.ClaimResult, error) {
+	if key.noteKey == "" {
+		return o.cfg.Opener.ClaimOpener(key.sessionID, now, o.staleAfter)
+	}
+	return o.cfg.Opener.ReserveNote(key.sessionID, key.noteKey, now, o.staleAfter)
 }
 
 // openRejected refuses the open attempt msg with a typed error frame.

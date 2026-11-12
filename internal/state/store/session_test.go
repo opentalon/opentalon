@@ -496,16 +496,16 @@ func checkOpenSessionConcurrent(t *testing.T, db *DB) {
 type claimStore interface {
 	Get(id string) (*state.Session, error)
 	OpenSession(p state.SessionParams) (*state.Session, bool, error)
-	ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (bool, error)
-	ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error)
+	ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
+	ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
 	AddMessage(id string, msg provider.Message) error
 	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
 	ClearMessages(id string) error
 }
 
 // concurrentWinners calls try from n goroutines at once and counts the calls
-// that answered true.
-func concurrentWinners(t *testing.T, n int, try func() (bool, error)) int {
+// that won the claim.
+func concurrentWinners(t *testing.T, n int, try func() (state.ClaimResult, error)) int {
 	t.Helper()
 	var wg sync.WaitGroup
 	wins := make([]bool, n)
@@ -513,11 +513,11 @@ func concurrentWinners(t *testing.T, n int, try func() (bool, error)) int {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			ok, err := try()
+			result, err := try()
 			if err != nil {
 				t.Errorf("concurrent call: %v", err)
 			}
-			wins[i] = ok
+			wins[i] = result == state.ClaimWon
 		}(i)
 	}
 	wg.Wait()
@@ -531,7 +531,7 @@ func concurrentWinners(t *testing.T, n int, try func() (bool, error)) int {
 }
 
 // claimStep calls try and fails the test unless it answers want.
-func claimStep(t *testing.T, step string, want bool, try func() (bool, error)) {
+func claimStep(t *testing.T, step string, want state.ClaimResult, try func() (state.ClaimResult, error)) {
 	t.Helper()
 	got, err := try()
 	if err != nil {
@@ -586,19 +586,19 @@ func checkClaimOpener(t *testing.T, store claimStore) {
 	}
 	now := time.Now()
 	const stale = time.Minute
-	claimAt := func(id string, at time.Time) func() (bool, error) {
-		return func() (bool, error) { return store.ClaimOpener(id, at, stale) }
+	claimAt := func(id string, at time.Time) func() (state.ClaimResult, error) {
+		return func() (state.ClaimResult, error) { return store.ClaimOpener(id, at, stale) }
 	}
 
 	if winners := concurrentWinners(t, 8, claimAt(sess.ID, now)); winners != 1 {
 		t.Fatalf("concurrent claim winners = %d, want exactly 1", winners)
 	}
-	claimStep(t, "fresh claim stands", false, claimAt(sess.ID, now.Add(30*time.Second)))
+	claimStep(t, "fresh claim stands", state.ClaimHeld, claimAt(sess.ID, now.Add(30*time.Second)))
 	if err := store.AddMessage(sess.ID, provider.Message{Role: provider.RoleUser, Content: "the user's own turn"}); err != nil {
 		t.Fatalf("AddMessage: %v", err)
 	}
 	retaken := now.Add(2 * time.Minute)
-	claimStep(t, "stale claim, only another message stored", true, claimAt(sess.ID, retaken))
+	claimStep(t, "stale claim, only another message stored", state.ClaimWon, claimAt(sess.ID, retaken))
 
 	input := provider.Message{Role: provider.RoleUser, Content: "context", Visibility: "hidden"}
 	storeStep(t, "input under the claim taken over", store, sess.ID, input, state.TurnClaim{At: now}.Metadata(), state.ErrClaimLost)
@@ -607,12 +607,12 @@ func checkClaimOpener(t *testing.T, store claimStore) {
 	if n := countContent(t, store, sess.ID, "context"); n != 1 {
 		t.Errorf("first turn's input stored %d times, want once", n)
 	}
-	claimStep(t, "stale claim, first turn stored", false, claimAt(sess.ID, now.Add(10*time.Minute)))
+	claimStep(t, "stale claim, first turn stored", state.ClaimSettled, claimAt(sess.ID, now.Add(10*time.Minute)))
 	if err := store.ClearMessages(sess.ID); err != nil {
 		t.Fatalf("ClearMessages: %v", err)
 	}
-	claimStep(t, "stale claim, transcript cleared", false, claimAt(sess.ID, now.Add(20*time.Minute)))
-	claimStep(t, "unknown session", false, claimAt("no-such-session", now))
+	claimStep(t, "stale claim, transcript cleared", state.ClaimSettled, claimAt(sess.ID, now.Add(20*time.Minute)))
+	claimStep(t, "unknown session", state.ClaimSettled, claimAt("no-such-session", now))
 }
 
 // checkReserveNote: of concurrent reservations for one key exactly one wins; a
@@ -632,16 +632,16 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	}
 	now := time.Now()
 	const stale = time.Minute
-	reserveAt := func(sid, key string, at time.Time) func() (bool, error) {
-		return func() (bool, error) { return store.ReserveNote(sid, key, at, stale) }
+	reserveAt := func(sid, key string, at time.Time) func() (state.ClaimResult, error) {
+		return func() (state.ClaimResult, error) { return store.ReserveNote(sid, key, at, stale) }
 	}
 
 	if winners := concurrentWinners(t, 8, reserveAt("note-s1", "chapter-1", now)); winners != 1 {
 		t.Fatalf("concurrent reservation winners = %d, want exactly 1", winners)
 	}
-	claimStep(t, "fresh reservation stands", false, reserveAt("note-s1", "chapter-1", now.Add(30*time.Second)))
-	claimStep(t, "another key", true, reserveAt("note-s1", "chapter-2", now))
-	claimStep(t, "another session", true, reserveAt("note-s2", "chapter-1", now))
+	claimStep(t, "fresh reservation stands", state.ClaimHeld, reserveAt("note-s1", "chapter-1", now.Add(30*time.Second)))
+	claimStep(t, "another key", state.ClaimWon, reserveAt("note-s1", "chapter-2", now))
+	claimStep(t, "another session", state.ClaimWon, reserveAt("note-s2", "chapter-1", now))
 
 	if err := store.AddMessage("note-s1", provider.Message{Role: provider.RoleUser, Content: "opener", Visibility: "hidden"}); err != nil {
 		t.Fatalf("AddMessage opener: %v", err)
@@ -649,7 +649,7 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	other := provider.Message{Role: provider.RoleUser, Content: "chapter two", Visibility: "hidden"}
 	storeStep(t, "another key's note", store, "note-s1", other, state.TurnClaim{NoteKey: "chapter-2", At: now}.Metadata(), nil)
 	retaken := now.Add(2 * time.Minute)
-	claimStep(t, "stale, only other messages", true, reserveAt("note-s1", "chapter-1", retaken))
+	claimStep(t, "stale, only other messages", state.ClaimWon, reserveAt("note-s1", "chapter-1", retaken))
 
 	note := provider.Message{Role: provider.RoleUser, Content: "chapter note", Visibility: "hidden"}
 	storeStep(t, "note under the reservation taken over", store, "note-s1", note, state.TurnClaim{NoteKey: "chapter-1", At: now}.Metadata(), state.ErrClaimLost)
@@ -658,11 +658,11 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	if n := countContent(t, store, "note-s1", "chapter note"); n != 1 {
 		t.Errorf("note stored %d times, want once", n)
 	}
-	claimStep(t, "stale, note stored", false, reserveAt("note-s1", "chapter-1", now.Add(10*time.Minute)))
+	claimStep(t, "stale, note stored", state.ClaimSettled, reserveAt("note-s1", "chapter-1", now.Add(10*time.Minute)))
 	if err := store.ClearMessages("note-s1"); err != nil {
 		t.Fatalf("ClearMessages: %v", err)
 	}
-	claimStep(t, "stale, transcript cleared", false, reserveAt("note-s1", "chapter-1", now.Add(20*time.Minute)))
+	claimStep(t, "stale, transcript cleared", state.ClaimSettled, reserveAt("note-s1", "chapter-1", now.Add(20*time.Minute)))
 	if err := store.AddMessageWithMetadata("note-s1", note, map[string]string{state.NoteKeyMetadataKey: "chapter-3"}); err == nil {
 		t.Error("a note key without its reservation was stored, want an error")
 	}
@@ -717,8 +717,8 @@ func checkNoteReservationsGoWithSession(t *testing.T, db *DB) {
 		}},
 	} {
 		store.Create(state.SessionParams{ID: tc.sid, EntityID: "user-1"})
-		if ok, err := store.ReserveNote(tc.sid, "chapter-1", time.Now(), time.Minute); err != nil || !ok {
-			t.Fatalf("%s: ReserveNote = (%v, %v), want reserved", tc.name, ok, err)
+		if result, err := store.ReserveNote(tc.sid, "chapter-1", time.Now(), time.Minute); err != nil || result != state.ClaimWon {
+			t.Fatalf("%s: ReserveNote = (%v, %v), want reserved", tc.name, result, err)
 		}
 		if err := tc.remove(tc.sid); err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
@@ -805,8 +805,8 @@ func TestInMemorySessionStore_DeleteForgetsOpenedSession(t *testing.T) {
 	if _, _, err := open("s", "key-a"); err != nil {
 		t.Fatalf("OpenSession key-a: %v", err)
 	}
-	claimStep(t, "first claim", true, func() (bool, error) { return store.ClaimOpener("s", now, time.Minute) })
-	claimStep(t, "first reservation", true, func() (bool, error) { return store.ReserveNote("s", "note-1", now, time.Minute) })
+	claimStep(t, "first claim", state.ClaimWon, func() (state.ClaimResult, error) { return store.ClaimOpener("s", now, time.Minute) })
+	claimStep(t, "first reservation", state.ClaimWon, func() (state.ClaimResult, error) { return store.ReserveNote("s", "note-1", now, time.Minute) })
 	if err := store.Delete("s"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
@@ -814,8 +814,8 @@ func TestInMemorySessionStore_DeleteForgetsOpenedSession(t *testing.T) {
 	if _, created, err := open("s", "key-b"); err != nil || !created {
 		t.Fatalf("OpenSession key-b under the old id = (created=%v, err=%v), want created", created, err)
 	}
-	claimStep(t, "claim after delete", true, func() (bool, error) { return store.ClaimOpener("s", now, time.Minute) })
-	claimStep(t, "reservation after delete", true, func() (bool, error) { return store.ReserveNote("s", "note-1", now, time.Minute) })
+	claimStep(t, "claim after delete", state.ClaimWon, func() (state.ClaimResult, error) { return store.ClaimOpener("s", now, time.Minute) })
+	claimStep(t, "reservation after delete", state.ClaimWon, func() (state.ClaimResult, error) { return store.ReserveNote("s", "note-1", now, time.Minute) })
 	if sess, created, err := open("t", "key-a"); err != nil || !created || sess.ID != "t" {
 		t.Errorf("OpenSession key-a after delete = (%v, created=%v, err=%v), want a new session t", sess, created, err)
 	}
@@ -836,12 +836,14 @@ func TestSessionStore_PersistenceFailureIsAnError(t *testing.T) {
 	if err == nil || sess != nil || created {
 		t.Errorf("OpenSession on a closed DB = (%v, created=%v, err=%v), want an error and no session", sess, created, err)
 	}
-	for name, call := range map[string]func() (bool, error){
-		"ClaimOpener": func() (bool, error) { return store.ClaimOpener("down-1", time.Now(), time.Minute) },
-		"ReserveNote": func() (bool, error) { return store.ReserveNote("down-1", "chapter-1", time.Now(), time.Minute) },
+	for name, call := range map[string]func() (state.ClaimResult, error){
+		"ClaimOpener": func() (state.ClaimResult, error) { return store.ClaimOpener("down-1", time.Now(), time.Minute) },
+		"ReserveNote": func() (state.ClaimResult, error) {
+			return store.ReserveNote("down-1", "chapter-1", time.Now(), time.Minute)
+		},
 	} {
-		if ok, err := call(); err == nil || ok {
-			t.Errorf("%s on a closed DB = (%v, %v), want an error", name, ok, err)
+		if result, err := call(); err == nil || result == state.ClaimWon {
+			t.Errorf("%s on a closed DB = (%v, %v), want an error", name, result, err)
 		}
 	}
 }

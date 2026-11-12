@@ -259,8 +259,10 @@ func (s *SessionStore) OpenSession(p state.SessionParams) (*state.Session, bool,
 // AddMessageWithMetadata sets for the input stored with that claim's
 // state.TurnClaim, and for nothing else) — the claimant died before its run
 // stored the hidden message, so the first turn never started and may be
-// claimed once more. A fresh claim, a claim whose input was stored and an
-// unknown id answer false. The marker, not the transcript, is the proof:
+// claimed once more. Otherwise the claim is not won: a fresh one answers
+// state.ClaimHeld, a stored one and an unknown id state.ClaimSettled, which a
+// caller tells apart to recover only a turn that may still need its run. The
+// marker, not the transcript, is the proof:
 // clearing, summarising or trimming the messages must not make a first turn
 // that ran claimable again. The claim is separate from the message on
 // purpose: the turn runner stores that message, as for every turn, and a
@@ -269,28 +271,57 @@ func (s *SessionStore) OpenSession(p state.SessionParams) (*state.Session, bool,
 // On Postgres a second UPDATE waits for the first one's row lock and then
 // re-checks the WHERE against the claimed row, so it matches nothing; SQLite
 // serialises writers.
-func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (bool, error) {
+func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	res, err := s.db.SQLDB().Exec(
 		s.db.Dialect().Rebind(`UPDATE sessions SET opener_claimed_at = ?
 		WHERE id = ? AND (opener_claimed_at IS NULL
 			OR (opener_claimed_at < ? AND opener_stored_at IS NULL))`),
 		now.UTC().Format(time.RFC3339), sessionID, now.Add(-staleAfter).UTC().Format(time.RFC3339))
 	if err != nil {
-		return false, fmt.Errorf("claim opener %q: %w", sessionID, err)
+		return state.ClaimHeld, fmt.Errorf("claim opener %q: %w", sessionID, err)
 	}
 	claimed, err := affectedOne(res)
 	if err != nil {
-		return false, fmt.Errorf("claim opener %q: %w", sessionID, err)
+		return state.ClaimHeld, fmt.Errorf("claim opener %q: %w", sessionID, err)
 	}
-	return claimed, nil
+	if claimed {
+		return state.ClaimWon, nil
+	}
+	result, err := s.claimNotWon(`SELECT COALESCE(opener_stored_at, '') FROM sessions WHERE id = ?`, sessionID)
+	if err != nil {
+		return result, fmt.Errorf("claim opener %q: %w", sessionID, err)
+	}
+	return result, nil
+}
+
+// claimNotWon tells why a claim's compare-and-set matched nothing; query reads
+// the claim's stored mark (empty while unset). A set mark is final, so a stored
+// claim, or a row that is gone, is settled; an unset mark means a fresh claim
+// another run holds. The read follows the write, so a claim that went stale or
+// was stored in between is reported as it is now, which a caller only uses to
+// decide whether to look again later.
+func (s *SessionStore) claimNotWon(query string, args ...any) (state.ClaimResult, error) {
+	var stored string
+	err := s.db.SQLDB().QueryRow(s.db.Dialect().Rebind(query), args...).Scan(&stored)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return state.ClaimSettled, nil
+	case err != nil:
+		return state.ClaimHeld, err
+	case stored != "":
+		return state.ClaimSettled, nil
+	default:
+		return state.ClaimHeld, nil
+	}
 }
 
 // ReserveNote is the once-per-key claim to post a note into an existing
 // session: the first call for a session and note key inserts the reservation
-// and answers true; a later call answers false while that reservation is
-// fresh, and true once more when it is older than staleAfter and the note was
-// not stored under it — the reserving run died before the turn runner stored
-// the note. A database failure is an error, never a refusal. Same split as
+// and answers state.ClaimWon; a later call answers state.ClaimHeld while that
+// reservation is fresh, state.ClaimSettled once the note was stored under it,
+// and state.ClaimWon once more when it is older than staleAfter and the note
+// was not stored under it — the reserving run died before the turn runner
+// stored the note. A database failure is an error, never a refusal. Same split as
 // ClaimOpener: the reservation is the compare-and-set, the turn runner stores
 // the note under the reservation's state.TurnClaim (AddMessageWithMetadata),
 // and that store marks the reservation's stored_at, which no transcript
@@ -299,18 +330,24 @@ func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter t
 // The insert is ON CONFLICT DO NOTHING against the reservation's primary key;
 // the re-claim is a compare-and-set UPDATE, which on Postgres a concurrent
 // caller re-checks against the row the winner wrote.
-func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error) {
+func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	d := s.db.Dialect()
 	at := now.UTC().Format(time.RFC3339)
+	fail := func(err error) (state.ClaimResult, error) {
+		return state.ClaimHeld, fmt.Errorf("reserve note %q in %q: %w", noteKey, sessionID, err)
+	}
 	res, err := s.db.SQLDB().Exec(
 		d.Rebind(`INSERT INTO session_note_reservations (session_id, note_key, reserved_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`),
 		sessionID, noteKey, at)
 	if err != nil {
-		return false, fmt.Errorf("reserve note %q in %q: %w", noteKey, sessionID, err)
+		return fail(err)
 	}
 	reserved, err := affectedOne(res)
-	if err != nil || reserved {
-		return reserved, err
+	if err != nil {
+		return fail(err)
+	}
+	if reserved {
+		return state.ClaimWon, nil
 	}
 
 	res, err = s.db.SQLDB().Exec(
@@ -318,9 +355,19 @@ func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, sta
 		WHERE session_id = ? AND note_key = ? AND reserved_at < ? AND stored_at IS NULL`),
 		at, sessionID, noteKey, now.Add(-staleAfter).UTC().Format(time.RFC3339))
 	if err != nil {
-		return false, fmt.Errorf("reserve note %q in %q: %w", noteKey, sessionID, err)
+		return fail(err)
 	}
-	return affectedOne(res)
+	if reserved, err = affectedOne(res); err != nil {
+		return fail(err)
+	}
+	if reserved {
+		return state.ClaimWon, nil
+	}
+	result, err := s.claimNotWon(`SELECT COALESCE(stored_at, '') FROM session_note_reservations WHERE session_id = ? AND note_key = ?`, sessionID, noteKey)
+	if err != nil {
+		return fail(err)
+	}
+	return result, nil
 }
 
 // affectedOne reports whether a single-row write took effect.

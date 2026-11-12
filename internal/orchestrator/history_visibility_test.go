@@ -143,11 +143,11 @@ func TestRun_StoresAClaimedTurnUnderItsClaim(t *testing.T) {
 				&fakeParser{parseFn: func(string) []ToolCall { return nil }},
 				NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
 			now := time.Now()
-			if ok, err := sessions.ClaimOpener("s1", now, time.Minute); err != nil || !ok {
-				t.Fatalf("ClaimOpener = %v, %v", ok, err)
+			if result, err := sessions.ClaimOpener("s1", now, time.Minute); err != nil || result != state.ClaimWon {
+				t.Fatalf("ClaimOpener = %v, %v", result, err)
 			}
-			if ok, err := sessions.ReserveNote("s1", "chapter-2", now, time.Minute); err != nil || !ok {
-				t.Fatalf("ReserveNote = %v, %v", ok, err)
+			if result, err := sessions.ReserveNote("s1", "chapter-2", now, time.Minute); err != nil || result != state.ClaimWon {
+				t.Fatalf("ReserveNote = %v, %v", result, err)
 			}
 
 			ctx := actor.WithVisibility(context.Background(), provider.VisibilityHidden)
@@ -162,12 +162,12 @@ func TestRun_StoresAClaimedTurnUnderItsClaim(t *testing.T) {
 
 			later := now.Add(time.Hour)
 			opener, err := sessions.ClaimOpener("s1", later, time.Minute)
-			if err != nil || opener != (tc.settled != "opener") {
-				t.Errorf("stale opener claim taken again = %v (%v), want %v", opener, err, tc.settled != "opener")
+			if err != nil || (opener == state.ClaimWon) != (tc.settled != "opener") {
+				t.Errorf("stale opener claim taken again = %v (%v), want won %v", opener, err, tc.settled != "opener")
 			}
 			note, err := sessions.ReserveNote("s1", "chapter-2", later, time.Minute)
-			if err != nil || note != (tc.settled != "note") {
-				t.Errorf("stale note reservation taken again = %v (%v), want %v", note, err, tc.settled != "note")
+			if err != nil || (note == state.ClaimWon) != (tc.settled != "note") {
+				t.Errorf("stale note reservation taken again = %v (%v), want won %v", note, err, tc.settled != "note")
 			}
 		})
 	}
@@ -186,8 +186,8 @@ func TestRun_ClaimTakenOverStopsTheTurn(t *testing.T) {
 		NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
 	lost := time.Now()
 	for _, at := range []time.Time{lost, lost.Add(2 * time.Minute)} {
-		if ok, err := sessions.ClaimOpener("s1", at, time.Minute); err != nil || !ok {
-			t.Fatalf("ClaimOpener(%v) = %v, %v", at, ok, err)
+		if result, err := sessions.ClaimOpener("s1", at, time.Minute); err != nil || result != state.ClaimWon {
+			t.Fatalf("ClaimOpener(%v) = %v, %v", at, result, err)
 		}
 	}
 
@@ -258,11 +258,11 @@ func claimedTurnFixture(t *testing.T, registry *ToolRegistry, opts OrchestratorO
 		t.Fatalf("OpenSession: %v", err)
 	}
 	now := time.Now()
-	if ok, err := sessions.ClaimOpener("s1", now, time.Minute); err != nil || !ok {
-		t.Fatalf("ClaimOpener = %v, %v", ok, err)
+	if result, err := sessions.ClaimOpener("s1", now, time.Minute); err != nil || result != state.ClaimWon {
+		t.Fatalf("ClaimOpener = %v, %v", result, err)
 	}
-	if ok, err := sessions.ReserveNote("s1", "chapter-2", now, time.Minute); err != nil || !ok {
-		t.Fatalf("ReserveNote = %v, %v", ok, err)
+	if result, err := sessions.ReserveNote("s1", "chapter-2", now, time.Minute); err != nil || result != state.ClaimWon {
+		t.Fatalf("ReserveNote = %v, %v", result, err)
 	}
 	opts.PipelineEnabled = true
 	orch := NewWithRules(&fakeLLM{responses: responses}, &fakeParser{parseFn: func(string) []ToolCall { return nil }},
@@ -307,12 +307,14 @@ func TestRun_ClaimedTurnStoredBeforeASingleStepConfirmation(t *testing.T) {
 				t.Errorf("stored messages = %+v, want the input, then the confirmation prompt", sess.Messages)
 			}
 			later := now.Add(time.Hour)
-			reclaim := func() (bool, error) { return sessions.ClaimOpener("s1", later, time.Minute) }
+			reclaim := func() (state.ClaimResult, error) { return sessions.ClaimOpener("s1", later, time.Minute) }
 			if claim.NoteKey != "" {
-				reclaim = func() (bool, error) { return sessions.ReserveNote("s1", claim.NoteKey, later, time.Minute) }
+				reclaim = func() (state.ClaimResult, error) {
+					return sessions.ReserveNote("s1", claim.NoteKey, later, time.Minute)
+				}
 			}
-			if again, err := reclaim(); err != nil || again {
-				t.Errorf("stale claim taken again = %v (%v), want refused: the turn ran", again, err)
+			if again, err := reclaim(); err != nil || again != state.ClaimSettled {
+				t.Errorf("stale claim = %v (%v), want settled: the turn ran", again, err)
 			}
 		})
 	}
@@ -327,8 +329,8 @@ func TestRun_ClaimTakenOverRunsNoPlannedTool(t *testing.T) {
 	orch, sessions, now := claimedTurnFixture(t, registry, OrchestratorOpts{},
 		`{"type":"pipeline","steps":[{"id":"1","name":"Analyze","plugin":"gitlab","action":"analyze_code"}]}`,
 		"Analyzed.")
-	if ok, err := sessions.ReserveNote("s1", "chapter-2", now.Add(2*time.Minute), time.Minute); err != nil || !ok {
-		t.Fatalf("re-claim = %v, %v", ok, err)
+	if result, err := sessions.ReserveNote("s1", "chapter-2", now.Add(2*time.Minute), time.Minute); err != nil || result != state.ClaimWon {
+		t.Fatalf("re-claim = %v, %v", result, err)
 	}
 
 	ctx := WithTurnClaim(actor.WithVisibility(context.Background(), provider.VisibilityHidden), state.TurnClaim{NoteKey: "chapter-2", At: now})

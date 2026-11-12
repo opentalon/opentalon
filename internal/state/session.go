@@ -101,6 +101,21 @@ type SessionParams struct {
 // without both there is nothing to be idempotent on.
 var ErrOpenParams = errors.New("open session: origin and key are required")
 
+// ClaimResult is what a claim call (ClaimOpener, ReserveNote) found.
+type ClaimResult int
+
+const (
+	// ClaimHeld: another run holds a fresh claim, and the turn's input was
+	// not stored under it yet. Should that run die, the claim goes stale and
+	// may be taken again.
+	ClaimHeld ClaimResult = iota
+	// ClaimWon: the call took the claim; its turn may run.
+	ClaimWon
+	// ClaimSettled: the turn's input was stored under a claim, or there is no
+	// such session: nothing is left to run.
+	ClaimSettled
+)
+
 // TurnClaim names the claim a turn runs under: the first turn of an opened
 // session (ClaimOpener; NoteKey empty) or a keyed note (ReserveNote). At is
 // the now the claim was taken with; it tells this claim from a later one that
@@ -213,34 +228,42 @@ func (s *SessionStore) OpenSession(p SessionParams) (*Session, bool, error) {
 
 // ClaimOpener mirrors the DB-backed compare-and-set: the claim is won when the
 // session has none, or when its claim is older than staleAfter and the first
-// turn's input was not stored under it. An unknown session is never won.
-func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (bool, error) {
+// turn's input was not stored under it. A fresh claim is held, a stored one
+// settled; an unknown session is settled, never won.
+func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (ClaimResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if _, ok := s.sessions[sessionID]; !ok {
-		return false, nil
+		return ClaimSettled, nil
 	}
-	if !s.claims[sessionID].won(now, staleAfter) {
-		return false, nil
-	}
-	s.claims[sessionID] = &claim{at: now}
-	return true, nil
+	return take(s.claims, sessionID, now, staleAfter), nil
 }
 
 // ReserveNote mirrors the DB-backed reservation of a note key: the first call
-// for a session and key wins, a fresh reservation refuses, and a stale one is
-// won again only while the note was not stored under it.
-func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error) {
+// for a session and key wins, a fresh reservation is held, and a stale one is
+// won again only while the note was not stored under it; a stored one is
+// settled.
+func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (ClaimResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := noteIdentity{sessionID: sessionID, noteKey: noteKey}
-	if !s.notes[key].won(now, staleAfter) {
-		return false, nil
+	return take(s.notes, noteIdentity{sessionID: sessionID, noteKey: noteKey}, now, staleAfter), nil
+}
+
+// take takes claims[key] at now when it may be taken (claim.won) and reports
+// what it found. The caller holds the store's lock.
+func take[K comparable](claims map[K]*claim, key K, now time.Time, staleAfter time.Duration) ClaimResult {
+	c := claims[key]
+	switch {
+	case c.won(now, staleAfter):
+		claims[key] = &claim{at: now}
+		return ClaimWon
+	case c.stored:
+		return ClaimSettled
+	default:
+		return ClaimHeld
 	}
-	s.notes[key] = &claim{at: now}
-	return true, nil
 }
 
 func (s *SessionStore) Get(id string) (*Session, error) {
