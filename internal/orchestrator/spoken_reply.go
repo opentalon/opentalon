@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/provider"
 )
 
 // A turn the person spoke (actor.SpokenReply, set from a channel's inbound
@@ -22,10 +23,12 @@ import (
 // (spokenConfirmationInstruction). Text no model wrote a spoken version for (a
 // confirmation the narrator wrote without one, a plan, a pipeline's summary, any
 // other way a turn ends) is its own spoken version when it is short enough
-// (speakAsIs; Run applies it to every result that carries neither key). Whatever
-// is read goes through speakable first: what a screen shows and an ear cannot
-// take (lists, field changes, markdown) is never read. Spoken turns are not
-// streamed: the spoken version must be out before anything is shown.
+// (speakAsIs; Run applies it to every result that carries neither key, and a
+// reply it stores carries the same, storeReply). An error result is never read,
+// like an error frame. Whatever is read loses the protocol blocks the shown text
+// loses (StripInternalBlocks) and goes through speakable: what a screen shows and
+// an ear cannot take (lists, field changes, markdown) is never read. Spoken turns
+// are not streamed: the spoken version must be out before anything is shown.
 
 const (
 	// SpokenMetadataKey carries the spoken version on the result and the stored reply.
@@ -116,8 +119,10 @@ func spokenMetadata(ctx context.Context, spoken string) map[string]string {
 // markUnspoken gives a spoken turn's result that carries neither key the
 // treatment of text written without markers (speakAsIs): every way a turn can
 // end — a cancellation, a fallback, a command — tells the channel what to read.
+// An error result (type=error, e.g. a blocked guard or an empty message) gets
+// neither: its client words it by error_code, and an error frame is not read.
 func markUnspoken(ctx context.Context, result *RunResult) {
-	if result == nil || !actor.SpokenReply(ctx) {
+	if result == nil || !actor.SpokenReply(ctx) || result.Metadata["type"] == "error" {
 		return
 	}
 	if _, ok := result.Metadata[SpokenMetadataKey]; ok {
@@ -132,7 +137,9 @@ func markUnspoken(ctx context.Context, result *RunResult) {
 // speakAsIs adds to meta, in a spoken turn, what of the text can be read aloud
 // (speakable) as its spoken version when it is short enough, or spoken_missing
 // when it is not or nothing is left (cut in the middle of a sentence, it would
-// say less than silence). meta comes back as is in any other turn.
+// say less than silence). A protocol block is no more read than shown
+// (StripInternalBlocks): a spoken version is taken out before the response is
+// stripped. meta comes back as is in any other turn.
 func speakAsIs(ctx context.Context, text string, meta map[string]string) map[string]string {
 	if !actor.SpokenReply(ctx) {
 		return meta
@@ -141,7 +148,7 @@ func speakAsIs(ctx context.Context, text string, meta map[string]string) map[str
 	for k, v := range meta {
 		out[k] = v
 	}
-	text = speakable(text)
+	text = speakable(StripInternalBlocks(text))
 	if text != "" && len([]rune(text)) <= spokenLimit {
 		out[SpokenMetadataKey] = text
 	} else {
@@ -265,6 +272,15 @@ func resumedSpoken(meta map[string]string, spoken bool) map[string]string {
 		meta[ReplyMetadataKey] = ReplySpoken
 	}
 	return meta
+}
+
+// storeReply stores the result's text as the turn's reply and, in a spoken turn,
+// gives the stored row and the result the same spoken version (spokenMetadata),
+// so a reloaded transcript says what the live answer said.
+func storeReply(ctx context.Context, sessions SessionStoreInterface, sessionID string, result *RunResult) {
+	meta := spokenMetadata(ctx, result.Response)
+	mergeMetadata(result, meta)
+	_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: result.Response}, meta)
 }
 
 // mergeMetadata adds extra to the result's metadata.

@@ -1554,7 +1554,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionReject, ResolvedBy: resolvedBy, Reason: reason})
 			// The classifier's reason is written for the log and stays in the event.
 			res := notApprovedResult(resolvedBy, pipelineCancelledReply, "pipeline_cancelled")
-			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: res.Response})
+			storeReply(ctx, sessions, sessionID, res)
 			log.Debug("pipeline rejected", "pipeline_id", p.ID, "input", userMessage)
 			return res, nil
 		}
@@ -2597,10 +2597,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				if stripRetries >= 5 {
 					log.Debug("LLM repeatedly produced empty/unparseable response, giving up", "round", i+1)
 					result.Response = "(no response)"
-					_ = sessions.AddMessage(sessionID, provider.Message{
-						Role:    provider.RoleAssistant,
-						Content: result.Response,
-					})
+					storeReply(ctx, sessions, sessionID, result)
 					return result, nil
 				}
 				stripRetries++

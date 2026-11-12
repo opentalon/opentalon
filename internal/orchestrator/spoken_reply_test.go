@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
@@ -83,10 +84,79 @@ func TestEveryWayASpokenTurnEndsSaysWhatToRead(t *testing.T) {
 	markUnspoken(spokenCtx, kept)
 	typed := &RunResult{Response: "Abgebrochen."}
 	markUnspoken(context.Background(), typed)
+	failed := &RunResult{Response: "Request blocked: guard g failed.", Metadata: map[string]string{"type": "error", "error_code": "guard_blocked"}}
+	markUnspoken(spokenCtx, failed)
 
 	if short.Metadata[SpokenMetadataKey] != "Abgebrochen." || long.Metadata[SpokenMissingMetadataKey] != "true" ||
-		kept.Metadata[SpokenMetadataKey] != "Zwei gefunden." || typed.Metadata != nil {
-		t.Errorf("short %v, long %v, kept %v, typed %v", short.Metadata, long.Metadata, kept.Metadata, typed.Metadata)
+		kept.Metadata[SpokenMetadataKey] != "Zwei gefunden." || typed.Metadata != nil || len(failed.Metadata) != 2 {
+		t.Errorf("short %v, long %v, kept %v, typed %v, failed %v", short.Metadata, long.Metadata, kept.Metadata, typed.Metadata, failed.Metadata)
+	}
+}
+
+func TestASpokenTurnsErrorIsNotRead(t *testing.T) {
+	orch, sessionID := setupOrchestrator(&fakeLLM{}, DefaultParser)
+	result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, spoken := result.Metadata[SpokenMetadataKey]
+	_, missing := result.Metadata[SpokenMissingMetadataKey]
+	if result.Metadata["error_code"] != "empty_content" || spoken || missing {
+		t.Errorf("error result metadata = %v, want the error without spoken or spoken_missing", result.Metadata)
+	}
+}
+
+func TestARejectedPlanIsStoredWithWhatIsRead(t *testing.T) {
+	orch, sessionID := setupOrchestrator(&fakeLLM{}, DefaultParser)
+	rec := &metadataRecorder{SessionStoreInterface: orch.sessions}
+	orch.sessions = rec
+	orch.pendingPipelines[sessionID] = pendingPipeline{plan: pipeline.NewPipeline(nil, pipeline.PipelineConfig{}), spoken: true}
+
+	ctx := actor.WithConfirmationDecision(actor.WithSpokenReply(context.Background()), pipeline.DecisionReject)
+	result, err := orch.Run(ctx, sessionID, "Nein")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := rec.last(provider.RoleAssistant)
+	if result.Metadata[SpokenMetadataKey] == "" || stored.msg.Content != result.Response ||
+		stored.meta[SpokenMetadataKey] != result.Metadata[SpokenMetadataKey] {
+		t.Errorf("result %q %v, stored %q %v; want the stored reply read as the live one", result.Response, result.Metadata, stored.msg.Content, stored.meta)
+	}
+}
+
+func TestAGivenUpSpokenTurnIsStoredWithWhatIsRead(t *testing.T) {
+	t.Parallel() // the empty-response retries back off for 15 seconds
+	responses := make([]string, 6)
+	for i := range responses {
+		responses[i] = unparseableToolBlock
+	}
+	orch, sessionID := setupOrchestrator(&fakeLLM{responses: responses}, &fakeParser{parseFn: func(string) []ToolCall { return nil }})
+	rec := &metadataRecorder{SessionStoreInterface: orch.sessions}
+	orch.sessions = rec
+
+	result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Hallo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := rec.last(provider.RoleAssistant)
+	if result.Response != "(no response)" || result.Metadata[SpokenMetadataKey] == "" ||
+		stored.meta[SpokenMetadataKey] != result.Metadata[SpokenMetadataKey] {
+		t.Errorf("result %q %v, stored %q %v; want the stored reply read as the live one", result.Response, result.Metadata, stored.msg.Content, stored.meta)
+	}
+}
+
+func TestAProtocolBlockIsNoMoreReadThanShown(t *testing.T) {
+	llm := &fakeLLM{responses: []string{"<spoken>Erledigt. [plugin_output]geheim[/plugin_output]</spoken>Erledigt."}}
+	orch, sessionID := setupOrchestrator(llm, DefaultParser)
+	result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Leg an")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Metadata[SpokenMetadataKey]; got != "Erledigt." {
+		t.Errorf("spoken = %q, want it without the protocol block", got)
+	}
+	if meta := spokenMetadata(actor.WithSpokenReply(context.Background()), "[tool_call]x[/tool_call]"); meta[SpokenMissingMetadataKey] != "true" {
+		t.Errorf("a spoken version that is only a protocol block: %v; want spoken_missing", meta)
 	}
 }
 
