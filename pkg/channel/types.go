@@ -284,7 +284,8 @@ const ControlResumeHello = "resume_hello"
 //
 // The core answers every attempt with one frame carrying that correlation id,
 // sent before any model run: FrameSessionOpened, with session_id (the session
-// key) and created ("true" or "false"), or FrameOpenRejected, with error_code
+// key) and created ("true" exactly when this attempt took the turn's claim and
+// so runs the first turn or the note), or FrameOpenRejected, with error_code
 // forbidden, bad_request, not_found or internal_error, or the code any message
 // gets for the same refusal (token_required, auth_failed, ...). No other frame
 // carries the correlation id: the turn's reply and its error frame reach the

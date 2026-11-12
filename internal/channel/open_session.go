@@ -125,14 +125,14 @@ func (o *openSessions) handle(ctx context.Context, sessionKey string, msg pkg.In
 // session that is gone.
 const unavailable = "This conversation is not available."
 
-// open creates or finds the user's session for the origin and key, answers the
-// caller, and runs the first turn when this attempt wins the session's claim.
+// open creates or finds the user's session for the origin and key and claims
+// its first turn (see claimAndRun).
 func (o *openSessions) open(ctx context.Context, sessionKey string, msg pkg.InboundMessage, scope openScope, groupID string) pkg.OutboundMessage {
 	openedBy, openKey := msg.Metadata[pkg.OpenedByMetadataKey], msg.Metadata[pkg.OpenKeyMetadataKey]
 	if openedBy == "" || openKey == "" {
 		return openRejected(msg, "An open-session request needs an origin and a key.", "bad_request")
 	}
-	sess, created, err := o.cfg.Opener.OpenSession(state.SessionParams{
+	sess, _, err := o.cfg.Opener.OpenSession(state.SessionParams{
 		ID: sessionKey, EntityID: scope.entityID, GroupID: groupID,
 		OpenedBy: openedBy, OpenKey: openKey, ChannelID: scope.channel,
 	})
@@ -144,28 +144,11 @@ func (o *openSessions) open(ctx context.Context, sessionKey string, msg pkg.Inbo
 		// The user's session for this origin and key is on another channel.
 		return openRejected(msg, unavailable, "not_found")
 	}
-	o.acknowledge(ctx, msg, scope, sess.ID, created)
-
-	now := time.Now()
-	result, err := o.cfg.Opener.ClaimOpener(sess.ID, now, o.staleAfter)
-	if err != nil {
-		logger.FromContext(ctx).Warn("opener claim failed", "session", sess.ID, "error", err)
-	}
-	switch {
-	case err == nil && result == state.ClaimWon:
-		o.run(ctx, sess.ID, msg, scope, state.TurnClaim{At: now})
-	case err != nil || result == state.ClaimHeld:
-		// Another attempt holds the claim (or the store could not say). A
-		// claimant that dies before its turn stored a message leaves a claim
-		// that goes stale, so the turn is recovered then. A first turn that ran
-		// is settled and needs nothing.
-		o.scheduleRecovery(ctx, recoveryKey{sessionID: sess.ID}, msg, scope)
-	}
-	return pkg.OutboundMessage{}
+	return o.claimAndRun(ctx, msg, scope, recoveryKey{sessionID: sess.ID})
 }
 
 // continueSession posts the content as a hidden note into target, a session of
-// the user on the request's channel, stored and answered once per note key.
+// the user on the request's channel, once per note key (see claimAndRun).
 func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessage, target string, scope openScope) pkg.OutboundMessage {
 	noteKey := msg.Metadata[pkg.NoteKeyMetadataKey]
 	if noteKey == "" {
@@ -180,21 +163,29 @@ func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessa
 		// Gone, or another user's or channel's: alike to the caller.
 		return openRejected(msg, unavailable, "not_found")
 	}
+	return o.claimAndRun(ctx, msg, scope, recoveryKey{sessionID: target, noteKey: noteKey})
+}
+
+// claimAndRun takes key's claim, the first turn's or the note's, and answers
+// the attempt, before any model run, with created=true exactly when it won the
+// claim: this attempt then runs the turn. When another run holds the claim,
+// the turn is recovered once that claim is stale, should its claimant have
+// died before it stored the turn's input; a settled turn needs nothing. A
+// claim the store cannot answer refuses the attempt, which the caller may
+// retry with the same key.
+func (o *openSessions) claimAndRun(ctx context.Context, msg pkg.InboundMessage, scope openScope, key recoveryKey) pkg.OutboundMessage {
 	now := time.Now()
-	result, err := o.cfg.Opener.ReserveNote(target, noteKey, now, o.staleAfter)
+	result, err := o.claim(key, now)
 	if err != nil {
-		logger.FromContext(ctx).Error("note reservation failed", "session", target, "error", err)
+		logger.FromContext(ctx).Error("open session claim failed", "session", key.sessionID, "note_key", key.noteKey, "error", err)
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
 	}
-	o.acknowledge(ctx, msg, scope, target, result == state.ClaimWon)
+	o.acknowledge(ctx, msg, scope, key.sessionID, result == state.ClaimWon)
 	switch result {
 	case state.ClaimWon:
-		o.run(ctx, target, msg, scope, state.TurnClaim{NoteKey: noteKey, At: now})
+		o.run(ctx, key.sessionID, msg, scope, state.TurnClaim{NoteKey: key.noteKey, At: now})
 	case state.ClaimHeld:
-		// As for the first turn: the attempt holding the reservation may have
-		// died before it stored the note, which is then recovered once the
-		// reservation is stale.
-		o.scheduleRecovery(ctx, recoveryKey{sessionID: target, noteKey: noteKey}, msg, scope)
+		o.scheduleRecovery(ctx, key, msg, scope)
 	}
 	return pkg.OutboundMessage{}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1011,8 +1012,9 @@ func TestHandler_OpenSession_SameKeyAnswersFoundWithoutSecondTurn(t *testing.T) 
 // TestHandler_OpenSession_RecoversAnInterruptedFirstTurnOnce: an attempt that
 // claimed the first turn and died before it ran leaves a session without a
 // message. The next identical request recovers it exactly once, on the stored
-// session: after the claim's expiry when the claim is still fresh, at once when
-// it is already stale.
+// session: after the claim's expiry when the claim is still fresh, answered
+// created=false, at once when it is already stale, answered created=true since
+// that request takes the claim and runs the turn.
 func TestHandler_OpenSession_RecoversAnInterruptedFirstTurnOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1033,9 +1035,9 @@ func TestHandler_OpenSession_RecoversAnInterruptedFirstTurnOnce(t *testing.T) {
 			}
 
 			callOpen(h, "c2", nil)
-			if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "false" ||
+			if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != strconv.FormatBool(tc.stale) ||
 				acks[0].Metadata[pkg.OpenSessionIDMetadataKey] != openedSession {
-				t.Fatalf("answers = %+v, want created=false for %s", acks, openedSession)
+				t.Fatalf("answers = %+v, want created=%v for %s", acks, tc.stale, openedSession)
 			}
 			if _, runs, _ := rec.snapshot(); (len(runs) == 1) != tc.stale {
 				t.Fatalf("turns right after the retry = %d, want %d", len(runs), map[bool]int{true: 1}[tc.stale])
@@ -1293,19 +1295,58 @@ func TestHandler_OpenSession_RecoversAnInterruptedNoteOnce(t *testing.T) {
 	}
 }
 
-// flakyNoteOpener fails reservation call number failAt, as a database that is
-// briefly unavailable.
-type flakyNoteOpener struct {
+// flakyOpener fails claim call number failAt (ClaimOpener and ReserveNote
+// counted together), as a database that is briefly unavailable.
+type flakyOpener struct {
 	*state.SessionStore
 	calls  atomic.Int32
 	failAt int32
 }
 
-func (o *flakyNoteOpener) ReserveNote(id, key string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+func (o *flakyOpener) ClaimOpener(id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	if o.calls.Add(1) == o.failAt {
+		return state.ClaimHeld, errors.New("database unavailable")
+	}
+	return o.SessionStore.ClaimOpener(id, now, staleAfter)
+}
+
+func (o *flakyOpener) ReserveNote(id, key string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	if o.calls.Add(1) == o.failAt {
 		return state.ClaimHeld, errors.New("database unavailable")
 	}
 	return o.SessionStore.ReserveNote(id, key, now, staleAfter)
+}
+
+// TestHandler_OpenSession_FailedClaimIsRefusedThenRetried: an open whose
+// first-turn claim the store cannot answer is refused with internal_error
+// before any answer or run; the session it opened stays, and a retry with the
+// same key takes the claim, is answered created=true and runs the turn once.
+func TestHandler_OpenSession_FailedClaimIsRefusedThenRetried(t *testing.T) {
+	shortOpenerTiming(t)
+	op := &flakyOpener{failAt: 1}
+	rec, h := newOpenHandler(welcomeProfile, func(cfg *HandlerConfig) {
+		op.SessionStore = cfg.Opener.(*state.SessionStore)
+		cfg.Opener = op
+	})
+
+	out := callOpen(h, "c1", nil)
+	if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "internal_error" ||
+		out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c1" {
+		t.Fatalf("answer = %+v, want open_rejected internal_error with req-c1", out.Metadata)
+	}
+	if events, _, _ := rec.snapshot(); len(events) != 0 {
+		t.Fatalf("events = %v, want nothing sent or run", events)
+	}
+
+	callOpen(h, "c2", nil)
+	time.Sleep(pastRecovery())
+	if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "true" ||
+		acks[0].Metadata[pkg.OpenSessionIDMetadataKey] != openedSession {
+		t.Errorf("answers = %+v, want the retry's created=true for %s", acks, openedSession)
+	}
+	if _, runs, _ := rec.snapshot(); len(runs) != 1 || runs[0].sessionID != openedSession {
+		t.Errorf("turns = %+v, want one on %s", runs, openedSession)
+	}
 }
 
 // TestHandler_OpenSession_RecoveryOutlivesAFailedClaim: a recovery whose claim
@@ -1313,7 +1354,7 @@ func (o *flakyNoteOpener) ReserveNote(id, key string, now time.Time, staleAfter 
 // while a dead attempt held its reservation still runs once.
 func TestHandler_OpenSession_RecoveryOutlivesAFailedClaim(t *testing.T) {
 	shortOpenerTiming(t)
-	op := &flakyNoteOpener{failAt: 2} // 1: the request's own reservation, 2: the first recovery
+	op := &flakyOpener{failAt: 2} // 1: the request's own reservation, 2: the first recovery
 	rec, h := newOpenHandler(welcomeProfile, func(cfg *HandlerConfig) {
 		op.SessionStore = cfg.Opener.(*state.SessionStore)
 		cfg.Opener = op
