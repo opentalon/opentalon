@@ -1863,6 +1863,25 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 	}
 
+	// A claimed turn (WithTurnClaim: the first turn of a session a server
+	// opened, or a keyed note) stores its input here, before the planner may
+	// run a tool or end the turn with a confirmation: that store is what marks
+	// the claim's turn as run, and the store refuses it when another run took
+	// the claim over, so a run that lost its claim stops before it acts. The
+	// later stores of the input below are skipped for it.
+	inputStored := false
+	if _, claimed := TurnClaimFrom(ctx); claimed && !toolCallSeeded && content != "" {
+		if err := addUserMessage(ctx, sessions, sessionID, provider.Message{
+			Role:       provider.RoleUser,
+			Content:    content,
+			Files:      files,
+			Visibility: actor.Visibility(ctx),
+		}); err != nil {
+			return nil, fmt.Errorf("adding user message: %w", err)
+		}
+		inputStored = true
+	}
+
 	if timing != nil {
 		timing.begin("planner")
 	}
@@ -1945,13 +1964,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if !confResult.RequiresConfirmation {
 				// All read-only — execute pipeline directly.
 				log.Info("pipeline confirmation skipped by plugin", "steps", len(planResult.Steps))
-				_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+				if !inputStored {
+					_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+				}
 				p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
 				return o.executePipeline(ctx, sessionID, p)
 			}
 			// Partial execution: run read prefix before the first write step,
 			// then pause for confirmation with real data.
-			_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+			if !inputStored {
+				_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+			}
 			if confResult.ConfirmBeforeStep > 0 {
 				// Execute read steps directly (not through executePipeline which
 				// enters the LLM agent loop). Collect their context so the write
@@ -2096,7 +2119,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				toolResult := o.executeCall(ctx, call)
 				if toolResult.Error == "" {
 					// Seed session: user message, assistant tool call, tool result.
-					_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+					if !inputStored {
+						_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+					}
 					if o.supportsNativeTools() {
 						// Native format: assistant with tool_calls + tool result with tool_call_id.
 						_ = sessions.AddMessage(sessionID, provider.Message{
@@ -2164,13 +2189,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			content = "[The user sent a file attachment.]"
 		}
 
-		if err := addUserMessage(ctx, sessions, sessionID, provider.Message{
-			Role:       provider.RoleUser,
-			Content:    content,
-			Files:      files,
-			Visibility: actor.Visibility(ctx),
-		}); err != nil {
-			return nil, fmt.Errorf("adding user message: %w", err)
+		if !inputStored {
+			if err := addUserMessage(ctx, sessions, sessionID, provider.Message{
+				Role:       provider.RoleUser,
+				Content:    content,
+				Files:      files,
+				Visibility: actor.Visibility(ctx),
+			}); err != nil {
+				return nil, fmt.Errorf("adding user message: %w", err)
+			}
 		}
 	}
 	// Run summarization asynchronously so it doesn't block the user's request.

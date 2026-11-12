@@ -247,3 +247,97 @@ func TestRun_QueuedTurnPastItsDeadlineStoresNothing(t *testing.T) {
 		}
 	}
 }
+
+// claimedTurnFixture is a server-opened session s1 whose first-turn claim and
+// chapter-2 reservation were both taken at now, and an orchestrator with the
+// planner on whose model answers responses in order.
+func claimedTurnFixture(t *testing.T, registry *ToolRegistry, opts OrchestratorOpts, responses ...string) (*Orchestrator, *state.SessionStore, time.Time) {
+	t.Helper()
+	sessions := state.NewSessionStore("")
+	if _, _, err := sessions.OpenSession(state.SessionParams{ID: "s1", EntityID: "u1", OpenedBy: "origin", OpenKey: "event-1"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	now := time.Now()
+	if ok, err := sessions.ClaimOpener("s1", now, time.Minute); err != nil || !ok {
+		t.Fatalf("ClaimOpener = %v, %v", ok, err)
+	}
+	if ok, err := sessions.ReserveNote("s1", "chapter-2", now, time.Minute); err != nil || !ok {
+		t.Fatalf("ReserveNote = %v, %v", ok, err)
+	}
+	opts.PipelineEnabled = true
+	orch := NewWithRules(&fakeLLM{responses: responses}, &fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		registry, state.NewMemoryStore(""), sessions, opts)
+	return orch, sessions, now
+}
+
+// A claimed turn stores its input before the planner may run a tool or ask for
+// a confirmation. A single write step that needs the user's approval ends the
+// turn with the confirmation prompt; the input is stored once, before it, and
+// the claim is settled, so a stale re-claim cannot run the turn and ask for the
+// same write again.
+func TestRun_ClaimedTurnStoredBeforeASingleStepConfirmation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim state.TurnClaim
+	}{
+		{"first turn", state.TurnClaim{}},
+		{"keyed note", state.TurnClaim{NoteKey: "chapter-2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := NewToolRegistry()
+			_ = registry.Register(PluginCapability{Name: "gitlab", Actions: []Action{{Name: "analyze_code"}}}, &echoExecutor{})
+			_ = registry.Register(PluginCapability{Name: "conf", Actions: []Action{{Name: "check"}}}, confirmingExecutor{})
+			orch, sessions, now := claimedTurnFixture(t, registry,
+				OrchestratorOpts{ConfirmationPlugin: "conf", ConfirmationAction: "check"},
+				`{"type":"pipeline","steps":[{"id":"1","name":"Analyze","plugin":"gitlab","action":"analyze_code"}]}`,
+				"Shall I analyze the repository?")
+			claim := tc.claim
+			claim.At = now
+			const input = "[context] chapter two was caught up"
+
+			result, err := orch.Run(WithTurnClaim(actor.WithVisibility(context.Background(), provider.VisibilityHidden), claim), "s1", input)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if result.Metadata["type"] != "confirmation" {
+				t.Fatalf("result = %+v, want the single step's confirmation", result)
+			}
+			sess, _ := sessions.Get("s1")
+			if len(sess.Messages) != 2 || sess.Messages[0].Content != input || sess.Messages[1].Role != provider.RoleAssistant {
+				t.Errorf("stored messages = %+v, want the input, then the confirmation prompt", sess.Messages)
+			}
+			later := now.Add(time.Hour)
+			reclaim := func() (bool, error) { return sessions.ClaimOpener("s1", later, time.Minute) }
+			if claim.NoteKey != "" {
+				reclaim = func() (bool, error) { return sessions.ReserveNote("s1", claim.NoteKey, later, time.Minute) }
+			}
+			if again, err := reclaim(); err != nil || again {
+				t.Errorf("stale claim taken again = %v (%v), want refused: the turn ran", again, err)
+			}
+		})
+	}
+}
+
+// A claimed turn whose claim was taken over stops before the planner's single
+// step runs its tool.
+func TestRun_ClaimTakenOverRunsNoPlannedTool(t *testing.T) {
+	exec := &countingExecutor{}
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{Name: "gitlab", Actions: []Action{{Name: "analyze_code"}}}, exec)
+	orch, sessions, now := claimedTurnFixture(t, registry, OrchestratorOpts{},
+		`{"type":"pipeline","steps":[{"id":"1","name":"Analyze","plugin":"gitlab","action":"analyze_code"}]}`,
+		"Analyzed.")
+	if ok, err := sessions.ReserveNote("s1", "chapter-2", now.Add(2*time.Minute), time.Minute); err != nil || !ok {
+		t.Fatalf("re-claim = %v, %v", ok, err)
+	}
+
+	ctx := WithTurnClaim(actor.WithVisibility(context.Background(), provider.VisibilityHidden), state.TurnClaim{NoteKey: "chapter-2", At: now})
+	_, err := orch.Run(ctx, "s1", "[context] chapter two was caught up")
+
+	if !errors.Is(err, state.ErrClaimLost) {
+		t.Errorf("Run = %v, want state.ErrClaimLost", err)
+	}
+	if exec.count != 0 {
+		t.Errorf("planned tool ran %d times, want 0", exec.count)
+	}
+}
