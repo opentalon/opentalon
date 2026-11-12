@@ -551,6 +551,35 @@ func TestABareJSONCallKeepsItsArgumentsInASpokenTurn(t *testing.T) {
 	}
 }
 
+// Many bare calls in a row before a spoken block: the check that only speech
+// follows the first call stops at the second, so the response is split in one
+// pass, not once more for every call after the first.
+func TestManyCallsBeforeASpokenBlockAreSplitInOnePass(t *testing.T) {
+	calls := strings.Repeat(`{"tool":"p__noop"}`, 2000)
+	response := "<spoken>Erledigt.</spoken>" + calls + "<spoken>Erledigt.</spoken>"
+	if _, rest, shown := splitSpoken(response); rest != calls || shown != calls {
+		t.Fatalf("rest and shown differ from the calls as written (%d, %d bytes of %d)", len(rest), len(shown), len(calls))
+	}
+	if allocs := testing.AllocsPerRun(3, func() { splitSpoken(response) }); allocs > 100 {
+		t.Errorf("splitting took %v allocations, want a bound that does not grow with the number of calls", allocs)
+	}
+}
+
+// A response of many short blocks is split, and its protocol blocks are left
+// out of what is read, in a time that grows with its length: each marker and
+// tag is searched for across the text once, not again from every block.
+func TestManyBlocksAreSplitInLinearTime(t *testing.T) {
+	for _, unit := range []string{"<spoken>a</spoken>", "[plugin_output]x[/plugin_output]"} {
+		response := "<spoken>Hallo.</spoken>" + strings.Repeat(unit, 30000)
+		start := time.Now()
+		splitSpoken(response)
+		withoutProtocol(response)
+		if took := time.Since(start); took > 2*time.Second {
+			t.Errorf("%q 30000 times took %v", unit, took)
+		}
+	}
+}
+
 func TestAnInventedResultInWhatIsShownOrReadIsRetried(t *testing.T) {
 	for _, first := range []string{
 		"<spoken>Es gibt {{result.items.count}} Objekte.</spoken>",

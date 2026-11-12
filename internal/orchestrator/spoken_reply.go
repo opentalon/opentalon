@@ -86,6 +86,32 @@ type protocolBlock struct {
 	closed        bool
 }
 
+// textScan finds the markers and tags of one text. It keeps where it found each
+// one last, so a scan that moves on through the text searches it for each of
+// them once, however many blocks the text holds: a search from scratch at every
+// block would read the rest of the text again for each tag it does not hold.
+type textScan struct {
+	s     string
+	found map[string][2]int // what -> {searched from, found at (-1: nowhere after)}
+}
+
+func newTextScan(s string) *textScan {
+	return &textScan{s: s, found: make(map[string][2]int)}
+}
+
+// index is the position of the first what at or after from, or -1.
+func (x *textScan) index(what string, from int) int {
+	if f, ok := x.found[what]; ok && f[0] <= from && (f[1] < 0 || f[1] >= from) {
+		return f[1]
+	}
+	at := strings.Index(x.s[from:], what)
+	if at >= 0 {
+		at += from
+	}
+	x.found[what] = [2]int{from, at}
+	return at
+}
+
 // nextProtocolBlock finds the first protocol block opening at or after from; ok
 // is false when there is none. It is the one place that says where a protocol
 // block ends, for what is taken out of a response (splitSpoken) and for what is
@@ -93,36 +119,37 @@ type protocolBlock struct {
 // the first closing tag of its kind, every tag in between part of it; an
 // <invoke> whose opening tag ends in "/>" right there, as the parser reads it
 // (extractInvokeBody); one never closed at the end of the text.
-func nextProtocolBlock(s string, from int) (b protocolBlock, ok bool) {
+func (x *textScan) nextProtocolBlock(from int) (b protocolBlock, ok bool) {
 	closing := ""
 	b.at = -1
 	for _, tags := range protocolTags {
-		if j := strings.Index(s[from:], tags[0]); j >= 0 && (b.at < 0 || from+j < b.at) {
-			b.at, b.body, closing = from+j, from+j+len(tags[0]), tags[1]
+		if j := x.index(tags[0], from); j >= 0 && (b.at < 0 || j < b.at) {
+			b.at, b.body, closing = j, j+len(tags[0]), tags[1]
 		}
 	}
 	if b.at < 0 {
 		return b, false
 	}
 	if closing == invokeClose {
-		if gt := strings.Index(s[b.at:], ">"); gt > 0 && s[b.at+gt-1] == '/' {
-			b.end, b.closed = b.at+gt+1, true
+		if gt := x.index(">", b.at); gt > b.at && x.s[gt-1] == '/' {
+			b.end, b.closed = gt+1, true
 			return b, true
 		}
 	}
-	if j := strings.Index(s[b.body:], closing); j >= 0 {
-		b.end, b.closed = b.body+j+len(closing), true
+	if j := x.index(closing, b.body); j >= 0 {
+		b.end, b.closed = j+len(closing), true
 	} else {
-		b.end = len(s)
+		b.end = len(x.s)
 	}
 	return b, true
 }
 
 // withoutProtocol is s without its protocol blocks (nextProtocolBlock).
 func withoutProtocol(s string) string {
+	x := newTextScan(s)
 	var out strings.Builder
 	for i := 0; ; {
-		b, ok := nextProtocolBlock(s, i)
+		b, ok := x.nextProtocolBlock(i)
 		if !ok {
 			out.WriteString(s[i:])
 			return out.String()
@@ -147,9 +174,10 @@ func withoutProtocol(s string) string {
 // The parser also runs a response that is one {"tool": ...} object without any
 // tags (bareToolCall). When the text from the first character outside the
 // spoken blocks opens with such an object and nothing but spoken blocks and
-// space follows it, rest and shown are that object as the model wrote it:
-// markers in its arguments are the arguments' own.
+// space follows it (onlySpeech), rest and shown are that object as the model
+// wrote it: markers in its arguments are the arguments' own.
 func splitSpoken(response string) (spoken, rest, shown string) {
+	x := newTextScan(response)
 	var kept strings.Builder
 	unclosed := ""
 	afterUnclosedProtocol := false
@@ -163,7 +191,7 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 		kept.WriteString(response[from:to])
 	}
 	for i := 0; i < len(response); {
-		at, marker, block := nextSpokenOrProtocol(response, i)
+		at, marker, block := x.next(i)
 		if at < 0 {
 			keep(i, len(response))
 			break
@@ -173,7 +201,7 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 		case spokenClose: // unpaired
 			i = at + len(spokenClose)
 		case spokenOpen:
-			body, end, closed := spokenBlock(response, at)
+			body, end, closed := x.spokenBlock(at)
 			text := markers.Replace(withoutProtocol(body))
 			switch {
 			case !closed:
@@ -194,14 +222,12 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 		}
 	}
 	if outsideAt >= 0 {
-		if n, ok := bareToolCall(response[outsideAt:]); ok {
-			if _, after, _ := splitSpoken(response[outsideAt+n:]); after == "" {
-				if spokenAt > outsideAt {
-					spoken = ""
-				}
-				rest = response[outsideAt : outsideAt+n]
-				return spoken, rest, rest
+		if n, ok := bareToolCall(response[outsideAt:]); ok && x.onlySpeech(outsideAt+n) {
+			if spokenAt > outsideAt {
+				spoken = ""
 			}
+			rest = response[outsideAt : outsideAt+n]
+			return spoken, rest, rest
 		}
 	}
 	rest = strings.TrimSpace(kept.String())
@@ -211,15 +237,35 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 	return spoken, rest, shown
 }
 
+// onlySpeech reports whether the text from from on holds nothing but space,
+// spoken blocks (spokenBlock, closed or not) and unpaired closing markers: what
+// splitSpoken leaves no rest of. It stops at the first other character.
+func (x *textScan) onlySpeech(from int) bool {
+	for i := from; ; {
+		i = len(x.s) - len(strings.TrimLeftFunc(x.s[i:], unicode.IsSpace))
+		switch {
+		case i == len(x.s):
+			return true
+		case strings.HasPrefix(x.s[i:], spokenOpen):
+			_, i, _ = x.spokenBlock(i)
+		case strings.HasPrefix(x.s[i:], spokenClose):
+			i += len(spokenClose)
+		default:
+			return false
+		}
+	}
+}
+
 // spokenBlock returns the body of the spoken block that opens at at, where the
 // response goes on after it, and whether it is closed: a nested block is part of
 // it, a marker inside a closed protocol block in it does not count (one in a
 // protocol block never closed does, so that block ends with the spoken one), and
-// a block never closed runs to the end of s.
-func spokenBlock(s string, at int) (body string, end int, closed bool) {
+// a block never closed runs to the end of the text.
+func (x *textScan) spokenBlock(at int) (body string, end int, closed bool) {
+	s := x.s
 	depth := 0
 	for i := at; ; {
-		next, marker, block := nextSpokenOrProtocol(s, i)
+		next, marker, block := x.next(i)
 		switch {
 		case next < 0:
 			return s[at+len(spokenOpen):], len(s), false
@@ -239,17 +285,17 @@ func spokenBlock(s string, at int) (body string, end int, closed bool) {
 	}
 }
 
-// nextSpokenOrProtocol finds the first spoken marker or protocol block at or
-// after from: its position, and the marker, or "" and the block for a protocol
-// block. at is -1 when there is neither.
-func nextSpokenOrProtocol(s string, from int) (at int, marker string, block protocolBlock) {
+// next finds the first spoken marker or protocol block at or after from: its
+// position, and the marker, or "" and the block for a protocol block. at is -1
+// when there is neither.
+func (x *textScan) next(from int) (at int, marker string, block protocolBlock) {
 	at = -1
-	if b, ok := nextProtocolBlock(s, from); ok {
+	if b, ok := x.nextProtocolBlock(from); ok {
 		at, block = b.at, b
 	}
 	for _, m := range []string{spokenOpen, spokenClose} {
-		if j := strings.Index(s[from:], m); j >= 0 && (at < 0 || from+j < at) {
-			at, marker = from+j, m
+		if j := x.index(m, from); j >= 0 && (at < 0 || j < at) {
+			at, marker = j, m
 		}
 	}
 	return at, marker, block
