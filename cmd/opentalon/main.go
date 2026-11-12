@@ -1098,10 +1098,10 @@ func main() {
 		// handshake, so a reconnected client redraws its Approve/Reject buttons.
 		PendingConfirmation: orch.PendingConfirmationFrame,
 		// Server-opened sessions: both session stores implement the opener
-		// (asserted next to newInMemoryState), and frames reach a session's
-		// conversation through the same late-bound registry as the title push.
-		Opener:        sessions.(channel.SessionOpener),
-		SendToSession: notifier.SendToSession,
+		// (asserted next to newInMemoryState); frames reach the request's
+		// channel through the late-bound registry.
+		Opener:             sessions.(channel.SessionOpener),
+		SendToConversation: notifier.SendToConversation,
 	})
 
 	reg := channel.NewRegistry(handler)

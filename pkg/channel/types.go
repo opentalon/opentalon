@@ -289,6 +289,11 @@ const ControlResumeHello = "resume_hello"
 // gets for the same refusal (token_required, auth_failed, ...). No other frame
 // carries the correlation id: the turn's reply and its error frame reach the
 // session's conversation as every reply does.
+//
+// A request reaches only the user's sessions on the channel it arrives on: a
+// session the origin and key name, or a note's session, on another channel
+// answers not_found like a missing one. A channel with threads, or a request
+// in a thread, is refused with bad_request.
 const (
 	OpenSessionMetadataKey   = "open_session"
 	OpenedByMetadataKey      = "opened_by"

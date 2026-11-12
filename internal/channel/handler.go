@@ -54,11 +54,11 @@ type HandlerConfig struct {
 	// (pkg.OpenSessionMetadataKey): create-or-find, first-turn claim and note
 	// reservation. Required.
 	Opener SessionOpener
-	// SendToSession delivers a frame to the conversation a session key names.
-	// The open-session path answers its caller and delivers its turn through
-	// it, because the session it opens or continues need not be the inbound
+	// SendToConversation delivers a frame to a channel's conversation. The
+	// open-session path answers its caller and delivers its turn through it,
+	// because the session it opens or continues need not be the inbound
 	// message's conversation. Required.
-	SendToSession orchestrator.ChannelSender
+	SendToConversation orchestrator.ConversationSender
 }
 
 // NewMessageHandler returns a MessageHandler that: ensures session, verifies profile token (if
@@ -66,9 +66,9 @@ type HandlerConfig struct {
 // message through the Runner and returns the response.
 //
 // Panics at construction if ResumeSession, CreateSession, Runner, Opener or
-// SendToSession is nil: these are required for the strict-session contract
-// and a missing one is a boot-time misconfiguration that must surface
-// immediately rather than as a nil-deref under load. Verifier and
+// SendToConversation is nil: these are required for the strict-session
+// contract and a missing one is a boot-time misconfiguration that must
+// surface immediately rather than as a nil-deref under load. Verifier and
 // LimitChecker remain optional.
 func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	if cfg.ResumeSession == nil {
@@ -83,8 +83,8 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	if cfg.Opener == nil {
 		panic("channel.NewMessageHandler: Opener is required")
 	}
-	if cfg.SendToSession == nil {
-		panic("channel.NewMessageHandler: SendToSession is required")
+	if cfg.SendToConversation == nil {
+		panic("channel.NewMessageHandler: SendToConversation is required")
 	}
 	opens := newOpenSessions(cfg)
 	return func(ctx context.Context, sessionKey string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {

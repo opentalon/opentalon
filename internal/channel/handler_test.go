@@ -58,9 +58,11 @@ func baseHandlerConfig() HandlerConfig {
 		RunAction: func(_ context.Context, _, _ string, _ map[string]string) (string, error) {
 			return "", errors.New("no actions")
 		},
-		HasAction:     func(_, _ string) bool { return false },
-		Opener:        state.NewSessionStore(""),
-		SendToSession: func(context.Context, string, pkg.OutboundMessage) error { return nil },
+		HasAction: func(_, _ string) bool { return false },
+		Opener:    state.NewSessionStore(""),
+		SendToConversation: func(context.Context, string, string, pkg.OutboundMessage) error {
+			return nil
+		},
 	}
 }
 
@@ -741,8 +743,8 @@ type sessionRun struct {
 }
 
 type sentFrame struct {
-	sessionID string
-	msg       pkg.OutboundMessage
+	channel string
+	msg     pkg.OutboundMessage
 }
 
 // openRecorder is the open-session test double. Its Run stores the turn's user
@@ -785,7 +787,10 @@ func (r *openRecorder) Run(ctx context.Context, sessionKey, content string, _ ..
 	return "reply: " + content, "", nil, nil
 }
 
-func (r *openRecorder) send(_ context.Context, sessionID string, msg pkg.OutboundMessage) error {
+func (r *openRecorder) send(_ context.Context, channel, conversation string, msg pkg.OutboundMessage) error {
+	if conversation != msg.ConversationID {
+		return fmt.Errorf("sent to conversation %q a frame of %q", conversation, msg.ConversationID)
+	}
 	kind := msg.Metadata["type"]
 	if kind == "" {
 		kind = "reply"
@@ -796,7 +801,7 @@ func (r *openRecorder) send(_ context.Context, sessionID string, msg pkg.Outboun
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events = append(r.events, "send "+kind)
-	r.frames = append(r.frames, sentFrame{sessionID: sessionID, msg: msg})
+	r.frames = append(r.frames, sentFrame{channel: channel, msg: msg})
 	return nil
 }
 
@@ -866,7 +871,7 @@ func newOpenHandler(p profile.Profile, override ...func(*HandlerConfig)) (*openR
 	cfg.Verifier = systemVerifier{p: p}
 	cfg.Runner = rec
 	cfg.Opener = rec.store
-	cfg.SendToSession = rec.send
+	cfg.SendToConversation = rec.send
 	cfg.ResumeSession = func(key string) error {
 		_, err := rec.store.Get(key)
 		return err
@@ -951,7 +956,7 @@ func TestHandler_OpenSession_OpensAndRunsHiddenFirstTurn(t *testing.T) {
 		t.Fatalf("events = %v, want %v (the answer before the model runs)", events, want)
 	}
 	ack := frames[0]
-	if ack.sessionID != openedSession || ack.msg.ConversationID != "c1" ||
+	if ack.channel != "websocket" || ack.msg.ConversationID != "c1" ||
 		ack.msg.Metadata[pkg.OpenSessionIDMetadataKey] != openedSession ||
 		ack.msg.Metadata["created"] != "true" || ack.msg.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c1" {
 		t.Errorf("answer = %+v, want session_opened for %s, created=true, open_request_id=req-c1", ack, openedSession)
@@ -966,11 +971,17 @@ func TestHandler_OpenSession_OpensAndRunsHiddenFirstTurn(t *testing.T) {
 		t.Errorf("turn profile = %+v, want kind system with its label", p)
 	}
 	reply := frames[1]
-	if reply.sessionID != openedSession || reply.msg.ConversationID != "c1" || reply.msg.Content != "reply: "+run.content {
+	if reply.channel != "websocket" || reply.msg.ConversationID != "c1" || reply.msg.Content != "reply: "+run.content {
 		t.Errorf("reply = %+v, want the turn's reply to the session's conversation", reply)
 	}
 	if _, ok := reply.msg.Metadata[pkg.OpenRequestIDMetadataKey]; ok {
 		t.Error("the reply carries open_request_id; only the answer to the attempt may")
+	}
+	// Both frames name the verified owner, which the sender keeps.
+	for _, f := range frames {
+		if owner := f.msg.Metadata[pkg.OwnerEntityMetadataKey]; owner != "u1" {
+			t.Errorf("%s frame owner = %q, want u1", f.msg.Metadata["type"], owner)
+		}
 	}
 }
 
@@ -1033,9 +1044,9 @@ func TestHandler_OpenSession_RecoversAnInterruptedFirstTurnOnce(t *testing.T) {
 			if len(runs) != 1 || runs[0].sessionID != openedSession {
 				t.Fatalf("turns = %+v, want exactly one on %s", runs, openedSession)
 			}
-			if last := frames[len(frames)-1]; last.sessionID != openedSession || last.msg.ConversationID != "c1" {
+			if last := frames[len(frames)-1]; last.channel != "websocket" || last.msg.ConversationID != "c1" {
 				t.Errorf("reply went to %q conversation %q, want the stored session's conversation c1",
-					last.sessionID, last.msg.ConversationID)
+					last.channel, last.msg.ConversationID)
 			}
 		})
 	}
@@ -1087,7 +1098,7 @@ func TestHandler_OpenSession_ModelErrorReachesTheConversation(t *testing.T) {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
 	errFrame := frames[1]
-	if errFrame.sessionID != openedSession || errFrame.msg.ConversationID != "c1" ||
+	if errFrame.channel != "websocket" || errFrame.msg.ConversationID != "c1" ||
 		errFrame.msg.Metadata["error_code"] != "rate_limited" {
 		t.Errorf("error frame = %+v, want rate_limited to the session's conversation", errFrame)
 	}
@@ -1125,7 +1136,7 @@ func TestHandler_OpenSession_NoteRunsOncePerKey(t *testing.T) {
 		t.Errorf("note ran on %q (key %q, visibility %q, conversation %q), want a hidden keyed turn of %s",
 			r.sessionID, claim.NoteKey, actor.Visibility(r.ctx), actor.ConversationID(r.ctx), openedSession)
 	}
-	if reply := frames[1]; reply.sessionID != openedSession || reply.msg.ConversationID != "c1" {
+	if reply := frames[1]; reply.channel != "websocket" || reply.msg.ConversationID != "c1" {
 		t.Errorf("note reply = %+v, want it in the session's conversation c1", reply)
 	}
 }
@@ -1384,18 +1395,88 @@ func TestHandler_OpenSession_RecoveryOnlyForAHeldClaimAndOnce(t *testing.T) {
 	}
 }
 
-// TestHandler_OpenSession_NoteForMissingOrForeignSessionIsNotFound: a note for
-// a session that is gone, or that belongs to another user, is refused with
-// not_found, so the caller may open a new one; nothing is stored or run. The
-// owner is the one the session was stored with: an entity id may contain a
-// colon, so u1:other:websocket:c1 belongs to u1:other although it starts with
-// u1's prefix.
-func TestHandler_OpenSession_NoteForMissingOrForeignSessionIsNotFound(t *testing.T) {
-	rec, h := newOpenHandler(welcomeProfile)
-	storeOpened(t, rec.store, "u2:websocket:c1", "u2")
-	storeOpened(t, rec.store, "u1:other:websocket:c1", "u1:other")
+// TestHandler_OpenSession_ReplyReachesItsConversation: the answer goes to the
+// request's own conversation and the turn, run on the session's whole key, to
+// the session's conversation, on the request's channel. The conversation is
+// everything after "<entity>:<channel>:", also when it holds colons that would
+// read as a channel or a thread: on a channel without threads no thread
+// follows it. The turn runs with that channel and conversation, the address
+// work it defers (a reminder) is delivered to.
+func TestHandler_OpenSession_ReplyReachesItsConversation(t *testing.T) {
+	note := func(target string) map[string]string {
+		return map[string]string{
+			pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2",
+			pkg.OpenedByMetadataKey: "", pkg.OpenKeyMetadataKey: "",
+		}
+	}
+	for _, tc := range []struct {
+		name          string
+		channel, conv string
+		target        string // a session the note goes to; empty for a first turn
+		wantConv      string
+	}{
+		{name: "first turn", channel: "websocket", conv: "room:42", wantConv: "room:42"},
+		{name: "first turn in a conversation named like a channel", channel: "ws-a", conv: "ws-b:42", wantConv: "ws-b:42"},
+		{name: "note", channel: "websocket", conv: "c9", target: "u1:websocket:room:42", wantConv: "room:42"},
+		{name: "note into a conversation named like a channel", channel: "ws-a", conv: "c9", target: "u1:ws-a:ws-b:42", wantConv: "ws-b:42"},
+		{name: "note into a conversation named like one with a thread", channel: "websocket", conv: "c9", target: "u1:websocket:C1:t1", wantConv: "C1:t1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, h := newOpenHandler(welcomeProfile)
+			session, set := "u1:"+pkg.SessionKey(tc.channel, tc.conv, ""), map[string]string(nil)
+			if tc.target != "" {
+				storeOpened(t, rec.store, tc.target, "u1")
+				session, set = tc.target, note(tc.target)
+			}
+			msg := openRequest(tc.conv, set)
+			msg.ChannelID = tc.channel
+			_, _ = h(context.Background(), pkg.SessionKey(tc.channel, tc.conv, ""), msg)
 
-	for _, target := range []string{"u1:websocket:gone", "u2:websocket:c1", "u1:other:websocket:c1"} {
+			_, runs, frames := rec.snapshot()
+			if len(runs) != 1 || runs[0].sessionID != session || actor.ConversationID(runs[0].ctx) != tc.wantConv ||
+				profile.FromContext(runs[0].ctx).ChannelID != tc.channel {
+				t.Fatalf("turns = %+v, want one on %s in %s/%q", runs, session, tc.channel, tc.wantConv)
+			}
+			if len(frames) != 2 {
+				t.Fatalf("frames = %+v, want the answer and the reply", frames)
+			}
+			if ack := frames[0]; ack.channel != tc.channel || ack.msg.ConversationID != tc.conv {
+				t.Errorf("answer to %s/%q, want the request's %s/%q", ack.channel, ack.msg.ConversationID, tc.channel, tc.conv)
+			}
+			if reply := frames[1]; reply.channel != tc.channel || reply.msg.ConversationID != tc.wantConv || reply.msg.ThreadID != "" {
+				t.Errorf("reply to %s/%q thread %q, want %s/%q", reply.channel, reply.msg.ConversationID,
+					reply.msg.ThreadID, tc.channel, tc.wantConv)
+			}
+		})
+	}
+}
+
+// TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound: a note reaches
+// a session of the user on the request's channel only. A session that is gone,
+// another user's, or the user's on another channel is refused with not_found,
+// so the caller may open a new one, and nothing is stored, reserved, run or
+// sent. The owner is the one the session was stored with: an entity id may
+// contain a colon, so the session of u1:websocket below starts with u1's
+// prefix on this channel and is still another user's.
+func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
+	rec, h := newOpenHandler(welcomeProfile)
+	var foreign []string
+	for _, s := range []struct{ id, owner string }{
+		{"u2:websocket:c1", "u2"},                     // another user's
+		{"u1:websocket:websocket:c1", "u1:websocket"}, // another user's, under u1's prefix
+		{"u1:slack:c1", "u1"},                         // u1's on another channel
+		{"u1:other:websocket:c1", "u1:other"},         // another user's on this channel
+		{"u1-job-7", "u1"},                            // u1's, no conversation's session
+	} {
+		if _, created, err := rec.store.OpenSession(state.SessionParams{
+			ID: s.id, EntityID: s.owner, OpenedBy: "welcome", OpenKey: s.id,
+		}); err != nil || !created {
+			t.Fatalf("OpenSession(%s) = created %v, %v", s.id, created, err)
+		}
+		foreign = append(foreign, s.id)
+	}
+
+	for _, target := range append([]string{"u1:websocket:gone"}, foreign...) {
 		out := callOpen(h, "c8", map[string]string{pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2"})
 		if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" ||
 			out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c8" {
@@ -1405,46 +1486,75 @@ func TestHandler_OpenSession_NoteForMissingOrForeignSessionIsNotFound(t *testing
 	if events, _, _ := rec.snapshot(); len(events) != 0 {
 		t.Errorf("events = %v, want nothing sent or run", events)
 	}
+	for _, id := range foreign {
+		if sess, _ := rec.store.Get(id); len(sess.Messages) != 0 {
+			t.Errorf("%s holds %+v, want nothing stored", id, sess.Messages)
+		}
+		if result, err := rec.store.ReserveNote(id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+			t.Errorf("%s note reservation = %v, %v; want it still free", id, result, err)
+		}
+	}
 }
 
 // TestHandler_OpenSession_Rejections: an attempt that may not or cannot open a
 // session is answered with open_rejected and its correlation id, also when the
-// refusal comes before the open path (the token check), leaves no session and
-// runs nothing. A chat token is refused like any privileged option.
+// refusal comes before the open path (the token check), and opens, claims,
+// reserves, runs and sends nothing. A chat token is refused like any
+// privileged option. A request on a channel with threads, even for the user's
+// session there, or in a thread, is refused before the store is asked; the
+// user's session for the origin and key on another channel is out of reach.
 func TestHandler_OpenSession_Rejections(t *testing.T) {
 	chat := welcomeProfile
 	chat.Kind, chat.SystemSource = profile.KindChat, ""
 	unverifiable := func(cfg *HandlerConfig) { cfg.Verifier = &stubVerifier{err: errors.New("bad token")} }
 	failingStore := func(cfg *HandlerConfig) { cfg.Opener = failingOpener{} }
 	keep := func(*HandlerConfig) {}
+	const elsewhere = "u1:slack:c0" // the user's session for the origin and key, on a channel with threads
+	note := map[string]string{pkg.OpenSessionIDMetadataKey: elsewhere, pkg.NoteKeyMetadataKey: "chapter-2"}
 	for _, tc := range []struct {
-		name      string
-		p         profile.Profile
-		set       map[string]string
-		override  func(*HandlerConfig)
-		code      string
-		requestID string
+		name            string
+		p               profile.Profile
+		channel, thread string
+		threads         bool
+		set             map[string]string
+		override        func(*HandlerConfig)
+		code, requestID string
 	}{
-		{"unverifiable token", welcomeProfile, nil, unverifiable, "auth_failed", "req-c1"},
-		{"chat token", chat, nil, keep, "forbidden", "req-c1"},
-		{"missing key", welcomeProfile, map[string]string{pkg.OpenKeyMetadataKey: ""}, keep, "bad_request", "req-c1"},
-		{"missing request id", welcomeProfile, map[string]string{pkg.OpenRequestIDMetadataKey: ""}, keep, "bad_request", ""},
-		{"store failure", welcomeProfile, nil, failingStore, "internal_error", "req-c1"},
+		{"unverifiable token", welcomeProfile, "websocket", "", false, nil, unverifiable, "auth_failed", "req-c1"},
+		{"chat token", chat, "websocket", "", false, nil, keep, "forbidden", "req-c1"},
+		{"missing key", welcomeProfile, "websocket", "", false, map[string]string{pkg.OpenKeyMetadataKey: ""}, keep, "bad_request", "req-c1"},
+		{"missing request id", welcomeProfile, "websocket", "", false, map[string]string{pkg.OpenRequestIDMetadataKey: ""}, keep, "bad_request", ""},
+		{"store failure", welcomeProfile, "websocket", "", false, nil, failingStore, "internal_error", "req-c1"},
+		{"session on another channel", welcomeProfile, "websocket", "", false, nil, keep, "not_found", "req-c1"},
+		{"open on a channel with threads", welcomeProfile, "slack", "", true, nil, keep, "bad_request", "req-c1"},
+		{"note on a channel with threads", welcomeProfile, "slack", "", true, note, keep, "bad_request", "req-c1"},
+		{"open in a thread", welcomeProfile, "websocket", "t1", false, nil, keep, "bad_request", "req-c1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec, h := newOpenHandler(tc.p, tc.override)
+			storeOpened(t, rec.store, elsewhere, "u1")
+			msg := openRequest("c1", tc.set)
+			msg.ChannelID, msg.ThreadID = tc.channel, tc.thread
+			ctx := pkg.WithCapabilities(context.Background(), pkg.Capabilities{ID: tc.channel, Threads: tc.threads})
 
-			out := callOpen(h, "c1", tc.set)
+			out, _ := h(ctx, pkg.SessionKey(tc.channel, "c1", tc.thread), msg)
 
 			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != tc.code ||
 				out.Metadata[pkg.OpenRequestIDMetadataKey] != tc.requestID {
 				t.Errorf("answer = %+v, want open_rejected %s with open_request_id %q", out.Metadata, tc.code, tc.requestID)
 			}
-			if _, err := rec.store.Get(openedSession); !errors.Is(err, state.ErrSessionNotFound) {
+			own := "u1:" + pkg.SessionKey(tc.channel, "c1", tc.thread)
+			if _, err := rec.store.Get(own); !errors.Is(err, state.ErrSessionNotFound) {
 				t.Errorf("a rejected attempt left a session (Get err = %v)", err)
 			}
 			if events, _, _ := rec.snapshot(); len(events) != 0 || len(rec.minted) != 0 {
 				t.Errorf("events = %v, minted = %v, want nothing", events, rec.minted)
+			}
+			if result, err := rec.store.ClaimOpener(elsewhere, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				t.Errorf("first-turn claim = %v, %v; want it still free", result, err)
+			}
+			if result, err := rec.store.ReserveNote(elsewhere, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				t.Errorf("note reservation = %v, %v; want it still free", result, err)
 			}
 		})
 	}

@@ -61,6 +61,18 @@ type openSessions struct {
 // its notes.
 type recoveryKey struct{ sessionID, noteKey string }
 
+// openScope is what an open-session request may reach: the sessions of its
+// verified entity on the channel it arrived on (see handle).
+type openScope struct{ entityID, channel string }
+
+// conversation returns the conversation of sessionID when it is a session in
+// the scope: the handler keys a conversation's session
+// "<entity>:<channel>:<conversation>".
+func (s openScope) conversation(sessionID string) (string, bool) {
+	conv, ok := strings.CutPrefix(sessionID, s.entityID+":"+s.channel+":")
+	return conv, ok && conv != ""
+}
+
 func newOpenSessions(cfg HandlerConfig) *openSessions {
 	return &openSessions{cfg: cfg, timeout: openerTimeout, staleAfter: openerStaleAfter, leeway: recoveryLeeway,
 		recovering: make(map[recoveryKey]bool)}
@@ -81,29 +93,48 @@ func (o *openSessions) handle(ctx context.Context, sessionKey string, msg pkg.In
 	if msg.Metadata[pkg.OpenRequestIDMetadataKey] == "" || strings.TrimSpace(msg.Content) == "" {
 		return openRejected(msg, "An open-session request needs a request id and content.", "bad_request")
 	}
+	// A request reaches sessions on the channel it arrived on only, which its
+	// own key names. A session is addressed by its key, and a key reads
+	// "<entity>:<channel>:<conversation>" only where no thread follows the
+	// conversation: a thread could not be told from the end of a conversation
+	// id holding a colon, so neither a channel with threads nor a request in
+	// a thread can open sessions.
+	channel, ok := strings.CutSuffix(strings.TrimPrefix(sessionKey, entityID+":"), ":"+msg.ConversationID)
+	if !ok || msg.ConversationID == "" || msg.ThreadID != "" || pkg.CapabilitiesFromContext(ctx).Threads {
+		return openRejected(msg, "This channel cannot open a session.", "bad_request")
+	}
+	scope := openScope{entityID: entityID, channel: channel}
 	ctx = actor.WithVisibility(ctx, provider.VisibilityHidden)
 	if target := msg.Metadata[pkg.OpenSessionIDMetadataKey]; target != "" {
-		return o.continueSession(ctx, sessionKey, msg, target, entityID)
+		return o.continueSession(ctx, msg, target, scope)
 	}
-	return o.open(ctx, sessionKey, msg, entityID, groupID)
+	return o.open(ctx, sessionKey, msg, scope, groupID)
 }
+
+// unavailable answers a request for a session it may not reach, like one for a
+// session that is gone.
+const unavailable = "This conversation is not available."
 
 // open creates or finds the user's session for the origin and key, answers the
 // caller, and runs the first turn when this attempt wins the session's claim.
-func (o *openSessions) open(ctx context.Context, sessionKey string, msg pkg.InboundMessage, entityID, groupID string) pkg.OutboundMessage {
+func (o *openSessions) open(ctx context.Context, sessionKey string, msg pkg.InboundMessage, scope openScope, groupID string) pkg.OutboundMessage {
 	openedBy, openKey := msg.Metadata[pkg.OpenedByMetadataKey], msg.Metadata[pkg.OpenKeyMetadataKey]
 	if openedBy == "" || openKey == "" {
 		return openRejected(msg, "An open-session request needs an origin and a key.", "bad_request")
 	}
 	sess, created, err := o.cfg.Opener.OpenSession(state.SessionParams{
-		ID: sessionKey, EntityID: entityID, GroupID: groupID,
+		ID: sessionKey, EntityID: scope.entityID, GroupID: groupID,
 		OpenedBy: openedBy, OpenKey: openKey, ChannelID: msg.ChannelID,
 	})
 	if err != nil {
 		logger.FromContext(ctx).Error("open session failed", "session", sessionKey, "opened_by", openedBy, "error", err)
 		return openRejected(msg, "Something went wrong opening the session. Please try again.", "internal_error")
 	}
-	o.acknowledge(ctx, sessionKey, msg, sess.ID, created)
+	if _, ok := scope.conversation(sess.ID); !ok {
+		// The user's session for this origin and key is on another channel.
+		return openRejected(msg, unavailable, "not_found")
+	}
+	o.acknowledge(ctx, msg, scope, sess.ID, created)
 
 	now := time.Now()
 	result, err := o.cfg.Opener.ClaimOpener(sess.ID, now, o.staleAfter)
@@ -112,36 +143,37 @@ func (o *openSessions) open(ctx context.Context, sessionKey string, msg pkg.Inbo
 	}
 	switch {
 	case err == nil && result == state.ClaimWon:
-		o.run(ctx, sess.ID, msg, entityID, state.TurnClaim{At: now})
+		o.run(ctx, sess.ID, msg, scope, state.TurnClaim{At: now})
 	case err != nil || result == state.ClaimHeld:
 		// Another attempt holds the claim (or the store could not say). A
 		// claimant that dies before its turn stored a message leaves a claim
 		// that goes stale, so the turn is recovered then. A first turn that ran
 		// is settled and needs nothing.
-		o.scheduleRecovery(ctx, recoveryKey{sessionID: sess.ID}, msg, entityID)
+		o.scheduleRecovery(ctx, recoveryKey{sessionID: sess.ID}, msg, scope)
 	}
 	return pkg.OutboundMessage{}
 }
 
-// continueSession posts the content as a hidden note into the user's session
-// target, stored and answered once per note key.
-func (o *openSessions) continueSession(ctx context.Context, sessionKey string, msg pkg.InboundMessage, target, entityID string) pkg.OutboundMessage {
+// continueSession posts the content as a hidden note into target, a session of
+// the user on the request's channel, stored and answered once per note key.
+func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessage, target string, scope openScope) pkg.OutboundMessage {
 	noteKey := msg.Metadata[pkg.NoteKeyMetadataKey]
 	if noteKey == "" {
 		return openRejected(msg, "A note needs a note key.", "bad_request")
 	}
-	const gone = "This conversation is no longer available."
-	// The target is the user's only if the store says so: the key's prefix
-	// is no proof, since an entity id may itself contain a colon ("u1" is a
-	// prefix of the keys of "u1:other"). Another user's session answers like
-	// a missing one.
+	// Any other target answers like a missing session. The key names the
+	// channel, but only the store names the owner: an entity id may itself
+	// contain a colon ("u1" is a prefix of the keys of "u1:other").
+	if _, ok := scope.conversation(target); !ok {
+		return openRejected(msg, unavailable, "not_found")
+	}
 	sess, err := o.cfg.Opener.Get(target)
 	if err != nil && !errors.Is(err, state.ErrSessionNotFound) {
 		logger.FromContext(ctx).Error("note session lookup failed", "session", target, "error", err)
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
 	}
-	if err != nil || sess.EntityID != entityID {
-		return openRejected(msg, gone, "not_found")
+	if err != nil || sess.EntityID != scope.entityID {
+		return openRejected(msg, unavailable, "not_found")
 	}
 	now := time.Now()
 	result, err := o.cfg.Opener.ReserveNote(target, noteKey, now, o.staleAfter)
@@ -149,50 +181,53 @@ func (o *openSessions) continueSession(ctx context.Context, sessionKey string, m
 		logger.FromContext(ctx).Error("note reservation failed", "session", target, "error", err)
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
 	}
-	o.acknowledge(ctx, sessionKey, msg, target, result == state.ClaimWon)
+	o.acknowledge(ctx, msg, scope, target, result == state.ClaimWon)
 	switch result {
 	case state.ClaimWon:
-		o.run(ctx, target, msg, entityID, state.TurnClaim{NoteKey: noteKey, At: now})
+		o.run(ctx, target, msg, scope, state.TurnClaim{NoteKey: noteKey, At: now})
 	case state.ClaimHeld:
 		// As for the first turn: the attempt holding the reservation may have
 		// died before it stored the note, which is then recovered once the
 		// reservation is stale.
-		o.scheduleRecovery(ctx, recoveryKey{sessionID: target, noteKey: noteKey}, msg, entityID)
+		o.scheduleRecovery(ctx, recoveryKey{sessionID: target, noteKey: noteKey}, msg, scope)
 	}
 	return pkg.OutboundMessage{}
 }
 
 // acknowledge answers the attempt with its session, through the inbound
 // message's own conversation, before any turn runs.
-func (o *openSessions) acknowledge(ctx context.Context, sessionKey string, msg pkg.InboundMessage, sessionID string, created bool) {
+func (o *openSessions) acknowledge(ctx context.Context, msg pkg.InboundMessage, scope openScope, sessionID string, created bool) {
 	ack := openFrame(msg, "", map[string]string{
 		"type":                       pkg.FrameSessionOpened,
 		pkg.OpenSessionIDMetadataKey: sessionID,
 		"created":                    strconv.FormatBool(created),
 	})
-	if err := o.cfg.SendToSession(ctx, sessionKey, ack); err != nil {
-		logger.FromContext(ctx).Warn("open session answer not delivered", "session", sessionID, "error", err)
+	o.deliver(ctx, scope, ack, "open session answer not delivered")
+}
+
+// deliver sends frame to its conversation on the request's channel, logging
+// what if it cannot be delivered.
+func (o *openSessions) deliver(ctx context.Context, scope openScope, frame pkg.OutboundMessage, what string) {
+	if err := o.cfg.SendToConversation(ctx, scope.channel, frame.ConversationID, frame); err != nil {
+		logger.FromContext(ctx).Warn(what, "channel", scope.channel, "conversation", frame.ConversationID, "error", err)
 	}
 }
 
-// run runs the content as a hidden turn of sessionID under claim and the turn
-// timeout, and delivers the reply, or its error frame, to that session's
-// conversation. The session need not be the inbound message's (a found or
-// continued session, a recovery), so the reply goes whole through
-// SendToSession and the registry's stream writer, bound to the inbound
-// conversation, is dropped. A run whose claim another run took over delivers
-// nothing: that run answers the turn.
-func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.InboundMessage, entityID string, claim state.TurnClaim) {
+// run runs the content as a hidden turn of sessionID, a session in scope, under
+// claim and the turn timeout, and delivers the reply, or its error frame, to
+// that session's conversation. The session need not be the inbound message's
+// (a found or continued session, a recovery), so the reply goes whole to the
+// session's conversation and the registry's stream writer, bound to the
+// inbound conversation, is dropped. A run whose claim another run took over
+// delivers nothing: that run answers the turn.
+func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.InboundMessage, scope openScope, claim state.TurnClaim) {
 	// The turn's frames belong to the conversation, not to the request: its
 	// error frame is the channel's ordinary one (see errorFrame).
 	turn := msg
 	turn.Metadata = maps.Clone(msg.Metadata)
 	delete(turn.Metadata, pkg.OpenSessionMetadataKey)
-	turn.ConversationID, turn.ThreadID = "", ""
-	if conv, thread, ok := sessionConversation(sessionID, entityID); ok {
-		turn.ConversationID, turn.ThreadID = conv, thread
-		ctx = actor.WithConversationID(ctx, conv)
-	}
+	turn.ConversationID, _ = scope.conversation(sessionID)
+	ctx = actor.WithConversationID(ctx, turn.ConversationID)
 	runCtx, cancel := context.WithTimeout(orchestrator.WithTurnClaim(pkg.WithStreamWriter(ctx, nil), claim), o.timeout)
 	reply, err := runTurn(runCtx, o.cfg, sessionID, msg.Content, turn)
 	cancel()
@@ -200,9 +235,7 @@ func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.Inboun
 		logger.FromContext(ctx).Info("turn taken over by another run", "session", sessionID, "note_key", claim.NoteKey)
 		return
 	}
-	if err := o.cfg.SendToSession(ctx, sessionID, reply); err != nil {
-		logger.FromContext(ctx).Warn("open session reply not delivered", "session", sessionID, "error", err)
-	}
+	o.deliver(ctx, scope, reply, "open session reply not delivered")
 }
 
 // scheduleRecovery takes the claim key again once the claim another run holds
@@ -213,17 +246,17 @@ func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.Inboun
 // when the claim is settled or the process's context ends.
 // The timer lives in this process; a restart before it fires leaves the
 // recovery to the next identical request.
-func (o *openSessions) scheduleRecovery(ctx context.Context, key recoveryKey, msg pkg.InboundMessage, entityID string) {
+func (o *openSessions) scheduleRecovery(ctx context.Context, key recoveryKey, msg pkg.InboundMessage, scope openScope) {
 	o.mu.Lock()
 	scheduled := o.recovering[key]
 	o.recovering[key] = true
 	o.mu.Unlock()
 	if !scheduled {
-		o.recoverWhenStale(ctx, key, msg, entityID)
+		o.recoverWhenStale(ctx, key, msg, scope)
 	}
 }
 
-func (o *openSessions) recoverWhenStale(ctx context.Context, key recoveryKey, msg pkg.InboundMessage, entityID string) {
+func (o *openSessions) recoverWhenStale(ctx context.Context, key recoveryKey, msg pkg.InboundMessage, scope openScope) {
 	time.AfterFunc(o.staleAfter+o.leeway, func() {
 		if ctx.Err() != nil {
 			o.forget(key)
@@ -239,11 +272,11 @@ func (o *openSessions) recoverWhenStale(ctx context.Context, key recoveryKey, ms
 			if err != nil {
 				logger.FromContext(ctx).Warn("recovery claim failed", "session", key.sessionID, "note_key", key.noteKey, "error", err)
 			}
-			o.recoverWhenStale(ctx, key, msg, entityID)
+			o.recoverWhenStale(ctx, key, msg, scope)
 		case result == state.ClaimWon:
 			o.forget(key)
 			logger.FromContext(ctx).Info("recovering an interrupted turn", "session", key.sessionID, "note_key", key.noteKey)
-			o.run(ctx, key.sessionID, msg, entityID, state.TurnClaim{NoteKey: key.noteKey, At: now})
+			o.run(ctx, key.sessionID, msg, scope, state.TurnClaim{NoteKey: key.noteKey, At: now})
 		default:
 			o.forget(key)
 		}
@@ -278,23 +311,4 @@ func openFrame(msg pkg.InboundMessage, text string, meta map[string]string) pkg.
 		meta[pkg.OpenRequestIDMetadataKey] = id
 	}
 	return errorResponse(msg, text, meta)
-}
-
-// sessionConversation returns the conversation and thread a session key of
-// entityID addresses, in the form the handler builds:
-// "<entity>:<channel>:<conversation>[:<thread>]". ok is false for a key of
-// another entity or of another shape.
-func sessionConversation(sessionID, entityID string) (conversation, thread string, ok bool) {
-	rest, found := strings.CutPrefix(sessionID, entityID+":")
-	if entityID == "" || !found {
-		return "", "", false
-	}
-	parts := strings.SplitN(rest, ":", 3)
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
-	}
-	if len(parts) == 3 {
-		thread = parts[2]
-	}
-	return parts[1], thread, true
 }
