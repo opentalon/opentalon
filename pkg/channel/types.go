@@ -294,8 +294,11 @@ const ControlResumeHello = "resume_hello"
 // A request reaches only the sessions opened this way that the store records
 // for the user and the channel it arrives on: any other note target, or the
 // user's session for the origin and key on another channel, answers not_found
-// like a missing one. A channel with threads, a request in a thread, or one
-// whose channel id is not its channel's, is refused with bad_request.
+// like a missing one. A channel with threads, a request in a thread, one
+// whose channel id is not its channel's, one whose user, channel or
+// conversation id is empty or holds a colon, and a note whose target is not
+// "<entity>:<channel>:<conversation>" of such ids are refused with
+// bad_request.
 const (
 	OpenSessionMetadataKey   = "open_session"
 	OpenedByMetadataKey      = "opened_by"

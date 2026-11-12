@@ -1441,11 +1441,9 @@ func TestHandler_OpenSession_RecoveryOnlyForAHeldClaimAndOnce(t *testing.T) {
 
 // TestHandler_OpenSession_ReplyReachesItsConversation: the answer goes to the
 // request's own conversation and the turn, run on the session's whole key, to
-// the session's conversation, on the request's channel. The conversation is
-// everything after "<entity>:<channel>:", also when it holds colons that would
-// read as a channel or a thread: on a channel without threads no thread
-// follows it. The turn runs with that channel and conversation, the address
-// work it defers (a reminder) is delivered to.
+// the session's conversation, the part after "<entity>:<channel>:", on the
+// request's channel. The turn runs with that channel and conversation, the
+// address work it defers (a reminder) is delivered to.
 func TestHandler_OpenSession_ReplyReachesItsConversation(t *testing.T) {
 	note := func(target string) map[string]string {
 		return map[string]string{
@@ -1459,11 +1457,10 @@ func TestHandler_OpenSession_ReplyReachesItsConversation(t *testing.T) {
 		target        string // a session the note goes to; empty for a first turn
 		wantConv      string
 	}{
-		{name: "first turn", channel: "websocket", conv: "room:42", wantConv: "room:42"},
-		{name: "first turn in a conversation named like a channel", channel: "ws-a", conv: "ws-b:42", wantConv: "ws-b:42"},
-		{name: "note", channel: "websocket", conv: "c9", target: "u1:websocket:room:42", wantConv: "room:42"},
-		{name: "note into a conversation named like a channel", channel: "ws-a", conv: "c9", target: "u1:ws-a:ws-b:42", wantConv: "ws-b:42"},
-		{name: "note into a conversation named like one with a thread", channel: "websocket", conv: "c9", target: "u1:websocket:C1:t1", wantConv: "C1:t1"},
+		{name: "first turn", channel: "websocket", conv: "room-42", wantConv: "room-42"},
+		{name: "first turn on another channel", channel: "ws-a", conv: "room-42", wantConv: "room-42"},
+		{name: "note", channel: "websocket", conv: "c9", target: "u1:websocket:room-42", wantConv: "room-42"},
+		{name: "note on another channel", channel: "ws-a", conv: "c9", target: "u1:ws-a:room-42", wantConv: "room-42"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec, h := newOpenHandler(welcomeProfile)
@@ -1500,20 +1497,13 @@ func TestHandler_OpenSession_ReplyReachesItsConversation(t *testing.T) {
 // request's channel only. A session that is gone, another user's, the user's
 // on another channel, or an ordinary chat, also one whose channel the store
 // backfilled, is refused with not_found, so the caller may open a new one, and
-// nothing is stored, reserved, run or sent. The key proves neither owner nor
-// channel: an entity id and a channel id may each hold a colon, so several
-// targets below start with the prefix "u1:websocket:" of the request's own
-// sessions.
+// nothing is stored, reserved, run or sent.
 func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
 	rec, h := newOpenHandler(welcomeProfile)
 	var foreign []string
 	for _, s := range []struct{ id, owner, channel string }{
-		{"u2:websocket:c1", "u2", "websocket"},                     // another user's
-		{"u1:websocket:websocket:c1", "u1:websocket", "websocket"}, // another user's, under u1's prefix
-		{"u1:slack:c1", "u1", "slack"},                             // u1's on another channel
-		{"u1:websocket:admin:c1", "u1", "websocket:admin"},         // u1's on another channel, under the prefix
-		{"u1:other:websocket:c1", "u1:other", "websocket"},         // another user's on this channel
-		{"u1-job-7", "u1", ""},                                     // u1's, no conversation's session
+		{"u2:websocket:c1", "u2", "websocket"}, // another user's
+		{"u1:slack:c1", "u1", "slack"},         // u1's on another channel
 	} {
 		if _, created, err := rec.store.OpenSession(state.SessionParams{
 			ID: s.id, EntityID: s.owner, OpenedBy: "welcome", OpenKey: s.id, ChannelID: s.channel,
@@ -1544,6 +1534,167 @@ func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
 		if result, err := rec.store.ReserveNote(id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 			t.Errorf("%s note reservation = %v, %v; want it still free", id, result, err)
 		}
+	}
+}
+
+// TestHandler_OpenSession_KeyPartsWithAColonAreRefused: a session key names its
+// user, channel and conversation only while none of them is empty or holds a
+// colon: "u1:websocket:websocket:c1" is u1's conversation "websocket:c1" and
+// u1:websocket's conversation "c1". An open-session request whose entity,
+// channel or conversation id is not such a part, and a note whose target is
+// not a key of three such parts, is refused with bad_request naming the field
+// before the store is asked: nothing is opened, stored, claimed, reserved, run
+// or sent, also in the sessions those keys name.
+func TestHandler_OpenSession_KeyPartsWithAColonAreRefused(t *testing.T) {
+	note := func(target string) map[string]string {
+		return map[string]string{pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2"}
+	}
+	for _, tc := range []struct {
+		name, entity, channel, conv string
+		set                         map[string]string
+		field                       string
+	}{
+		{"entity id with a colon", "u1:websocket", "websocket", "c1", nil, "entity id"},
+		{"empty entity id", "", "websocket", "c1", nil, "entity id"},
+		{"channel id with a colon", "u1", "websocket:admin", "c1", nil, "channel id"},
+		{"conversation id with a colon", "u1", "websocket", "websocket:c1", nil, "conversation id"},
+		{"note into a conversation id with a colon", "u1", "websocket", "c8", note("u1:websocket:websocket:c1"), "session id"},
+		{"note on a channel id with a colon", "u1", "websocket", "c8", note("u1:websocket:admin:c1"), "session id"},
+		{"note for a user id with a colon", "u1", "websocket", "c8", note("u1:other:websocket:c1"), "session id"},
+		{"note for a key of no conversation", "u1", "websocket", "c8", note("u1-job-7"), "session id"},
+		{"note for a key with an empty conversation", "u1", "websocket", "c8", note("u1:websocket:"), "session id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := welcomeProfile
+			p.EntityID = tc.entity
+			rec, h := newOpenHandler(p)
+			// The sessions those keys name: u1:websocket's chat "c1", which is
+			// also the key of u1's conversation "websocket:c1", u1's chat
+			// "admin:c1", u1:other's chat "c1" and u1's session of no
+			// conversation.
+			existing := []state.SessionParams{
+				{ID: "u1:websocket:websocket:c1", EntityID: "u1:websocket"},
+				{ID: "u1:websocket:admin:c1", EntityID: "u1"},
+				{ID: "u1:other:websocket:c1", EntityID: "u1:other"},
+				{ID: "u1-job-7", EntityID: "u1"},
+			}
+			for _, e := range existing {
+				rec.store.Create(e)
+			}
+			msg := openRequest(tc.conv, tc.set)
+			msg.ChannelID = tc.channel
+
+			out, _ := h(context.Background(), pkg.SessionKey(tc.channel, tc.conv, ""), msg)
+
+			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "bad_request" ||
+				out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-"+tc.conv || !strings.Contains(out.Content, tc.field) {
+				t.Errorf("answer = %q %+v, want open_rejected bad_request naming the %s", out.Content, out.Metadata, tc.field)
+			}
+			if events, _, _ := rec.snapshot(); len(events) != 0 || len(rec.minted) != 0 {
+				t.Errorf("events = %v, minted = %v, want nothing", events, rec.minted)
+			}
+			if n := len(rec.store.List()); n != len(existing) {
+				t.Errorf("store holds %d sessions, want the %d it had", n, len(existing))
+			}
+			for _, e := range existing {
+				if sess, err := rec.store.Get(e.ID); err != nil || sess.OpenKey != "" || len(sess.Messages) != 0 {
+					t.Errorf("%s = %+v, %v; want it unopened and empty", e.ID, sess, err)
+				}
+				if result, err := rec.store.ClaimOpener(e.ID, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+					t.Errorf("%s first-turn claim = %v, %v; want it still free", e.ID, result, err)
+				}
+				if result, err := rec.store.ReserveNote(e.ID, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+					t.Errorf("%s note reservation = %v, %v; want it still free", e.ID, result, err)
+				}
+			}
+		})
+	}
+}
+
+// TestHandler_OpenSession_KeyWithoutAnOwnerIsNeitherReachedNorTaken: the
+// handler keys a message without a verified profile "<channel>:<conversation>"
+// with any thread after it, and such a key may read like a user's:
+// "u1:websocket:c4" is thread c4 of conversation "websocket" on a channel u1.
+// That session has no open key, so a note for it is not_found, and an open
+// whose own key it is finds the id taken and answers internal_error; neither
+// stores, claims, runs or sends anything in it, also when the store backfilled
+// the key's first part as its owner and a channel for it.
+func TestHandler_OpenSession_KeyWithoutAnOwnerIsNeitherReachedNorTaken(t *testing.T) {
+	const id = "u1:websocket:c4"
+	for _, tc := range []struct{ name, owner, channel string }{
+		{"as keyed", "", ""},
+		{"owner and channel backfilled", "u1", "websocket"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, h := newOpenHandler(welcomeProfile)
+			unowned := rec.store.Create(state.SessionParams{ID: id, EntityID: tc.owner})
+			unowned.ChannelID = tc.channel
+
+			for _, attempt := range []struct {
+				conv string
+				set  map[string]string
+				code string
+			}{
+				{"c8", map[string]string{pkg.OpenSessionIDMetadataKey: id, pkg.NoteKeyMetadataKey: "chapter-2"}, "not_found"},
+				{"c4", nil, "internal_error"}, // the open's own key is u1:websocket:c4
+			} {
+				out := callOpen(h, attempt.conv, attempt.set)
+				if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != attempt.code {
+					t.Errorf("attempt on %s answered %+v, want open_rejected %s", attempt.conv, out.Metadata, attempt.code)
+				}
+			}
+			if events, _, _ := rec.snapshot(); len(events) != 0 || len(rec.minted) != 0 {
+				t.Errorf("events = %v, minted = %v, want nothing", events, rec.minted)
+			}
+			if sess, err := rec.store.Get(id); err != nil || sess.OpenKey != "" || sess.EntityID != tc.owner || len(sess.Messages) != 0 {
+				t.Errorf("%s = %+v, %v; want it as it was", id, sess, err)
+			}
+			if result, err := rec.store.ClaimOpener(id, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				t.Errorf("first-turn claim = %v, %v; want it still free", result, err)
+			}
+			if result, err := rec.store.ReserveNote(id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				t.Errorf("note reservation = %v, %v; want it still free", result, err)
+			}
+		})
+	}
+}
+
+// TestHandler_OrdinaryChatTakesAConversationIdWithAColon: the open path's
+// refusal leaves ordinary chats as they are: a chat's conversation id may hold
+// a colon, and its session, keyed with it, is created, resumed and answered
+// in that conversation.
+func TestHandler_OrdinaryChatTakesAConversationIdWithAColon(t *testing.T) {
+	chat := welcomeProfile
+	chat.Kind, chat.SystemSource = profile.KindChat, ""
+	var rec *openRecorder
+	var h pkg.MessageHandler
+	rec, h = newOpenHandler(chat, func(cfg *HandlerConfig) {
+		mint := cfg.CreateSession
+		cfg.CreateSession = func(p state.SessionParams) {
+			mint(p)
+			rec.store.Create(p)
+		}
+	})
+	const conv, session = "websocket:c1", "u1:websocket:websocket:c1"
+	for _, resume := range []bool{false, true} {
+		meta := map[string]string{"profile_token": "tok"}
+		if resume {
+			meta[pkg.ResumeIntentMetadataKey] = "true"
+		}
+		msg := pkg.InboundMessage{ChannelID: "websocket", ConversationID: conv, Content: "hello", Metadata: meta}
+
+		out, err := h(context.Background(), pkg.SessionKey("websocket", conv, ""), msg)
+
+		if err != nil || out.Content != "reply: hello" || out.ConversationID != conv {
+			t.Errorf("resume %v: answer = %q to %q, %v; want the reply in %q", resume, out.Content, out.ConversationID, err, conv)
+		}
+	}
+	_, runs, _ := rec.snapshot()
+	if len(runs) != 2 || runs[0].sessionID != session || runs[1].sessionID != session {
+		t.Errorf("turns = %+v, want two in %s", runs, session)
+	}
+	if len(rec.minted) != 1 || rec.minted[0] != session {
+		t.Errorf("minted = %v, want %s once", rec.minted, session)
 	}
 }
 

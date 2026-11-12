@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,20 +68,28 @@ type recoveryKey struct{ sessionID, noteKey string }
 type openScope struct{ entityID, channel string }
 
 // reaches reports whether sess is in the scope: the open path opened it (it
-// has an open key) and the store records it for the scope's entity and
-// channel. Its key proves neither, since an entity id and a channel id may
-// each hold a colon ("u1:ws:admin:c1" may be u1's on channel ws:admin), and an
-// ordinary session may record a channel too (the store backfilled it).
+// has an open key), the store records it for the scope's entity and channel,
+// and its key names a conversation of theirs. The key proves neither the
+// opening nor the owner: an ordinary session's key has the same form, also
+// one keyed without a profile ("<channel>:<conversation>:<thread>"), and the
+// store may have backfilled such a session's owner and channel.
 func (s openScope) reaches(sess *state.Session) bool {
 	_, ok := s.conversation(sess.ID)
 	return ok && sess.OpenKey != "" && sess.EntityID == s.entityID && sess.ChannelID == s.channel
 }
 
 // conversation returns the conversation of sessionID, a session in the scope:
-// the handler keys a conversation's session "<entity>:<channel>:<conversation>".
+// the handler keys a conversation's session "<entity>:<channel>:<conversation>",
+// and the open path takes conversations that are key parts only (see handle).
 func (s openScope) conversation(sessionID string) (string, bool) {
 	conv, ok := strings.CutPrefix(sessionID, s.entityID+":"+s.channel+":")
-	return conv, ok && conv != ""
+	return conv, ok && keyPart(conv)
+}
+
+// keyPart reports whether id can be one part of a session key the open path
+// reads back: not empty, and without the colon the parts are joined with.
+func keyPart(id string) bool {
+	return id != "" && !strings.Contains(id, ":")
 }
 
 func newOpenSessions(cfg HandlerConfig) *openSessions {
@@ -103,21 +112,36 @@ func (o *openSessions) handle(ctx context.Context, sessionKey string, msg pkg.In
 	if msg.Metadata[pkg.OpenRequestIDMetadataKey] == "" || strings.TrimSpace(msg.Content) == "" {
 		return openRejected(msg, "An open-session request needs a request id and content.", "bad_request")
 	}
+	// A session is addressed by its key, "<entity>:<channel>:<conversation>",
+	// which names one user, channel and conversation only while each of the
+	// three is a key part and no thread follows: otherwise another user's
+	// session may have the same key ("u1:ws:a:c1" is u1's conversation "a:c1"
+	// on channel ws, and u1:ws's conversation "c1" on channel a), and a turn
+	// authorised for one would run in the other. So the request's user,
+	// channel and conversation ids, and a note's target, must be such parts
+	// and such a key, and neither a channel with threads nor a request in a
+	// thread can open sessions.
+	for _, part := range []struct{ field, id string }{
+		{"entity id", entityID}, {"channel id", msg.ChannelID}, {"conversation id", msg.ConversationID},
+	} {
+		if !keyPart(part.id) {
+			return openRejected(msg, "The "+part.field+" of an open-session request must not be empty or hold a colon.", "bad_request")
+		}
+	}
+	target := msg.Metadata[pkg.OpenSessionIDMetadataKey]
+	if parts := strings.Split(target, ":"); target != "" && (len(parts) != 3 || slices.Contains(parts, "")) {
+		return openRejected(msg, "The session id of a note must read <entity>:<channel>:<conversation>, each part not empty and without a colon.", "bad_request")
+	}
 	// A request reaches sessions on the channel it arrived on only, which its
 	// own key names and its channel id must name alike: a session it opens
-	// records that id. A session is addressed by its key, and a key reads
-	// "<entity>:<channel>:<conversation>" only where no thread follows the
-	// conversation: a thread could not be told from the end of a conversation
-	// id holding a colon, so neither a channel with threads nor a request in
-	// a thread can open sessions.
+	// records that id.
 	channel, ok := strings.CutSuffix(strings.TrimPrefix(sessionKey, entityID+":"), ":"+msg.ConversationID)
-	if !ok || channel != msg.ChannelID || msg.ConversationID == "" || msg.ThreadID != "" ||
-		pkg.CapabilitiesFromContext(ctx).Threads {
+	if !ok || channel != msg.ChannelID || msg.ThreadID != "" || pkg.CapabilitiesFromContext(ctx).Threads {
 		return openRejected(msg, "This channel cannot open a session.", "bad_request")
 	}
 	scope := openScope{entityID: entityID, channel: channel}
 	ctx = actor.WithVisibility(ctx, provider.VisibilityHidden)
-	if target := msg.Metadata[pkg.OpenSessionIDMetadataKey]; target != "" {
+	if target != "" {
 		return o.continueSession(ctx, msg, target, scope)
 	}
 	return o.open(ctx, sessionKey, msg, scope, groupID)
