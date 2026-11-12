@@ -62,6 +62,7 @@ func TestSplitSpoken(t *testing.T) {
 		{"<invoke name=\"q__a\"/><spoken>A</spoken><invoke name=\"q__b\"></invoke>B", "A",
 			"<invoke name=\"q__a\"/><invoke name=\"q__b\"></invoke>B", "<invoke name=\"q__a\"/><invoke name=\"q__b\"></invoke>B"},
 		{"Hallo. <invoke name=\"q__a\"><spoken>A</spoken>", "", "Hallo. <invoke name=\"q__a\">", "Hallo. <invoke name=\"q__a\">"},
+		{"<spoken>A <invoke name=\"q__a\"/>B</spoken>", "A B", "", "A B"},
 		{"Hallo. [plugin_output]x <spoken>geheim</spoken>Danke.", "", "Hallo. [plugin_output]x Danke.", "Hallo. [plugin_output]x Danke."},
 	}
 	for _, c := range cases {
@@ -376,6 +377,76 @@ func TestWhatASpokenBlockHoldsIsNeverRunAsACall(t *testing.T) {
 		}
 		if executor.count != 0 || (c.shown != "" && result.Response != c.shown) || strings.Contains(result.Metadata[SpokenMetadataKey], "geheim") {
 			t.Errorf("%s: calls run %d, reply %q, metadata %v; want no call", c.name, executor.count, result.Response, result.Metadata)
+		}
+	}
+}
+
+func TestTextAfterASelfClosingInvokeInASpokenBlockIsKept(t *testing.T) {
+	for _, c := range []struct{ response, kept string }{
+		{`<spoken>The export finished. <invoke name="p__lookup"/>The backup failed.</spoken>`, "The backup failed."},
+		{`<spoken><invoke name="p__lookup"/>The next appointment is Monday.</spoken>`, "The next appointment is Monday."},
+	} {
+		executor := &countingExecutor{}
+		orch, sessionID := lookupOrchestrator(t, &fakeLLM{responses: []string{c.response, "Fertig."}}, DefaultParser, executor)
+		rec := &metadataRecorder{SessionStoreInterface: orch.sessions}
+		orch.sessions = rec
+		result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Wie steht es?")
+		if err != nil {
+			t.Fatalf("%q: %v", c.response, err)
+		}
+		reply := rec.last(provider.RoleAssistant)
+		for what, got := range map[string]string{
+			"shown":         result.Response,
+			"stored":        reply.msg.Content,
+			"spoken":        result.Metadata[SpokenMetadataKey],
+			"stored spoken": reply.meta[SpokenMetadataKey],
+		} {
+			if !strings.Contains(got, c.kept) || strings.Contains(got, "<invoke") {
+				t.Errorf("%q: %s = %q; want it to keep %q, without the invoke", c.response, what, got, c.kept)
+			}
+		}
+		if executor.count != 0 {
+			t.Errorf("%q: calls run %d; want none", c.response, executor.count)
+		}
+	}
+}
+
+// Extraction (splitSpoken) and filtering (withoutProtocol) cut a text at the
+// same protocol blocks. The parts of each text alternate between text outside
+// any protocol block and a protocol block.
+func TestExtractionAndFilteringCutAtTheSameProtocolBlocks(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		parts []string
+	}{
+		{"closing tag", []string{"Vorher. ", `[tool_call]{"tool":"p__a","args":{}}[/tool_call]`, " Danach."}},
+		{"self-closing", []string{"Vorher. ", `<invoke name="p__a"/>`, " Danach."}},
+		{"unclosed", []string{"Vorher. ", `[plugin_output]{"n":1} Danach.`}},
+		{"unclosed invoke", []string{"Vorher. ", `<invoke name="p__a"><parameter name="id">7</parameter> Danach.`}},
+		{"nested", []string{"Vorher. ", `<function_calls><invoke name="p__a"><parameter name="id">7</parameter></invoke></function_calls>`, " Danach."}},
+		{"a self-closing one inside a closed one", []string{"Vorher. ", `[plugin_output]<invoke name="p__a"/>x[/plugin_output]`, " Danach."}},
+		{"an unclosed one inside a closed one", []string{"Vorher. ", `<invoke name="p__a">[tool_call]x</invoke>`, " Mitte [/tool_call] Danach."}},
+		{"a self-closing one followed by a later closing tag", []string{"Vorher. ", `<invoke name="p__a"/>`, " Mitte. ", `<invoke name="p__b"></invoke>`, " Danach."}},
+	} {
+		var text, outside, blocks, probed strings.Builder
+		for i, part := range c.parts {
+			text.WriteString(part)
+			if i%2 == 0 {
+				outside.WriteString(part)
+				probed.WriteString(spokenOpen + part + spokenClose)
+			} else {
+				blocks.WriteString(part)
+				probed.WriteString(part)
+			}
+		}
+		if got := withoutProtocol(text.String()); got != outside.String() {
+			t.Errorf("%s: filtering keeps %q, want %q", c.name, got, outside.String())
+		}
+		// Every text outside the blocks, put in a spoken block: extraction takes
+		// each one out and keeps exactly the blocks for the parser.
+		spoken, rest, _ := splitSpoken(probed.String())
+		if want := strings.TrimSpace(blocks.String()); spoken != strings.TrimSpace(c.parts[0]) || rest != want {
+			t.Errorf("%s: extraction = %q, %q; want %q, %q", c.name, spoken, rest, strings.TrimSpace(c.parts[0]), want)
 		}
 	}
 }

@@ -74,15 +74,62 @@ const spokenConfirmationInstruction = "## SPOKEN QUESTION\n" +
 // protocolTags are the blocks a response carries for the orchestrator, not for
 // the person: the ones the shown text drops (internalBlockTags) and a bare
 // <invoke>, which the parser runs as a call.
-var protocolTags = append(internalBlockTags[:len(internalBlockTags):len(internalBlockTags)], [2]string{"<invoke", "</invoke>"})
+var protocolTags = append(internalBlockTags[:len(internalBlockTags):len(internalBlockTags)], [2]string{"<invoke", invokeClose})
 
-// withoutProtocol is s without its protocol blocks; an unclosed one takes the
-// rest of s with it, as in StripInternalBlocks.
-func withoutProtocol(s string) string {
+const invokeClose = "</invoke>"
+
+// protocolBlock is where a protocol block lies in a text: it opens at at, what
+// follows its opening tag starts at body, and the text goes on at end. A block
+// never closed (closed false) runs to the end of the text.
+type protocolBlock struct {
+	at, body, end int
+	closed        bool
+}
+
+// nextProtocolBlock finds the first protocol block opening at or after from; ok
+// is false when there is none. It is the one place that says where a protocol
+// block ends, for what is taken out of a response (splitSpoken) and for what is
+// never read (withoutProtocol), so the two cannot cut a text differently: after
+// the first closing tag of its kind, every tag in between part of it; an
+// <invoke> whose opening tag ends in "/>" right there, as the parser reads it
+// (extractInvokeBody); one never closed at the end of the text.
+func nextProtocolBlock(s string, from int) (b protocolBlock, ok bool) {
+	closing := ""
+	b.at = -1
 	for _, tags := range protocolTags {
-		s = stripTaggedBlocks(s, tags[0], tags[1])
+		if j := strings.Index(s[from:], tags[0]); j >= 0 && (b.at < 0 || from+j < b.at) {
+			b.at, b.body, closing = from+j, from+j+len(tags[0]), tags[1]
+		}
 	}
-	return s
+	if b.at < 0 {
+		return b, false
+	}
+	if closing == invokeClose {
+		if gt := strings.Index(s[b.at:], ">"); gt > 0 && s[b.at+gt-1] == '/' {
+			b.end, b.closed = b.at+gt+1, true
+			return b, true
+		}
+	}
+	if j := strings.Index(s[b.body:], closing); j >= 0 {
+		b.end, b.closed = b.body+j+len(closing), true
+	} else {
+		b.end = len(s)
+	}
+	return b, true
+}
+
+// withoutProtocol is s without its protocol blocks (nextProtocolBlock).
+func withoutProtocol(s string) string {
+	var out strings.Builder
+	for i := 0; ; {
+		b, ok := nextProtocolBlock(s, i)
+		if !ok {
+			out.WriteString(s[i:])
+			return out.String()
+		}
+		out.WriteString(s[i:b.at])
+		i = b.end
+	}
 }
 
 // splitSpoken returns the first spoken version a response carries, the rest of
@@ -90,10 +137,11 @@ func withoutProtocol(s string) string {
 // block goes from rest with whatever it holds (a nested one, too, and one never
 // closed up to the end of the response): a call or a protocol block in one is
 // never run, and is not read either. A block never closed is no spoken version:
-// its text is shown instead. A closed protocol block is kept as it is, a spoken
-// block in it too: the parser reads it, the shown text drops it, nothing of it
-// is read. After a protocol tag that is never closed spoken blocks still go
-// from rest, but none is read: the shown text drops what follows such a tag. An unpaired closing marker goes. shown is rest
+// its text is shown instead. A closed protocol block (nextProtocolBlock) is kept
+// as it is, a spoken block in it too: the parser reads it, the shown text drops
+// it, nothing of it is read. A protocol block never closed runs to the end of
+// the response: it stays in rest as written, but a spoken block in it still goes
+// from rest, and none is read. An unpaired closing marker goes. shown is rest
 // plus an unclosed block's text, or the spoken version when both are empty.
 //
 // The parser also runs a response that is one {"tool": ...} object without any
@@ -114,13 +162,13 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 		kept.WriteString(response[from:to])
 	}
 	for i := 0; i < len(response); {
-		at, open, closing := nextSpokenOrProtocolTag(response, i)
+		at, marker, block := nextSpokenOrProtocol(response, i)
 		if at < 0 {
 			keep(i, len(response))
 			break
 		}
 		keep(i, at)
-		switch open {
+		switch marker {
 		case spokenClose: // unpaired
 			i = at + len(spokenClose)
 		case spokenOpen:
@@ -134,15 +182,14 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 			}
 			i = end
 		default: // a protocol block, kept whole
-			end := protocolBlockEnd(response, at, open, closing)
-			if end < 0 {
-				keep(at, at+len(open))
+			if !block.closed {
+				keep(at, block.body)
 				afterUnclosedProtocol = true
-				i = at + len(open)
+				i = block.body
 				continue
 			}
-			keep(at, end)
-			i = end
+			keep(at, block.end)
+			i = block.end
 		}
 	}
 	if outsideAt >= 0 && isBareToolCall(response[outsideAt:]) {
@@ -159,65 +206,48 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 	return spoken, rest, shown
 }
 
-// protocolBlockEnd is where the protocol block that opens at at with open ends,
-// after its closing tag; -1 when it is never closed. An <invoke> whose opening
-// tag ends in "/>" is a whole block, as the parser reads it (extractInvokeBody).
-func protocolBlockEnd(s string, at int, open, closing string) int {
-	if open == "<invoke" {
-		if gt := strings.Index(s[at:], ">"); gt > 0 && s[at+gt-1] == '/' {
-			return at + gt + 1
-		}
-	}
-	j := strings.Index(s[at+len(open):], closing)
-	if j < 0 {
-		return -1
-	}
-	return at + len(open) + j + len(closing)
-}
-
 // spokenBlock returns the body of the spoken block that opens at at, where the
 // response goes on after it, and whether it is closed: a nested block is part of
-// it, a marker inside a closed protocol block in it does not count, and a block
-// never closed runs to the end of s.
+// it, a marker inside a closed protocol block in it does not count (one in a
+// protocol block never closed does, so that block ends with the spoken one), and
+// a block never closed runs to the end of s.
 func spokenBlock(s string, at int) (body string, end int, closed bool) {
 	depth := 0
 	for i := at; ; {
-		next, open, closing := nextSpokenOrProtocolTag(s, i)
-		switch open {
-		case "":
+		next, marker, block := nextSpokenOrProtocol(s, i)
+		switch {
+		case next < 0:
 			return s[at+len(spokenOpen):], len(s), false
-		case spokenOpen:
+		case marker == spokenOpen:
 			depth++
 			i = next + len(spokenOpen)
-		case spokenClose:
+		case marker == spokenClose:
 			if depth--; depth == 0 {
 				return s[at+len(spokenOpen) : next], next + len(spokenClose), true
 			}
 			i = next + len(spokenClose)
+		case block.closed:
+			i = block.end
 		default:
-			if i = protocolBlockEnd(s, next, open, closing); i < 0 {
-				i = next + len(open)
-			}
+			i = block.body
 		}
 	}
 }
 
-// nextSpokenOrProtocolTag finds the first spoken marker or protocol block
-// opening at or after from: its position, the tag, and for a protocol block its
-// closing tag. at is -1 when there is none.
-func nextSpokenOrProtocolTag(s string, from int) (at int, open, closing string) {
+// nextSpokenOrProtocol finds the first spoken marker or protocol block at or
+// after from: its position, and the marker, or "" and the block for a protocol
+// block. at is -1 when there is neither.
+func nextSpokenOrProtocol(s string, from int) (at int, marker string, block protocolBlock) {
 	at = -1
-	consider := func(tag, closeTag string) {
-		if j := strings.Index(s[from:], tag); j >= 0 && (at < 0 || from+j < at) {
-			at, open, closing = from+j, tag, closeTag
+	if b, ok := nextProtocolBlock(s, from); ok {
+		at, block = b.at, b
+	}
+	for _, m := range []string{spokenOpen, spokenClose} {
+		if j := strings.Index(s[from:], m); j >= 0 && (at < 0 || from+j < at) {
+			at, marker = from+j, m
 		}
 	}
-	consider(spokenOpen, "")
-	consider(spokenClose, "")
-	for _, tags := range protocolTags {
-		consider(tags[0], tags[1])
-	}
-	return at, open, closing
+	return at, marker, block
 }
 
 var markers = strings.NewReplacer(spokenOpen, "", spokenClose, "")
