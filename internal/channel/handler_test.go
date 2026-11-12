@@ -832,6 +832,10 @@ func (v systemVerifier) Verify(context.Context, string, string, map[string]strin
 // failingOpener fails every store call, as a store whose database is gone.
 type failingOpener struct{}
 
+func (failingOpener) Get(string) (*state.Session, error) {
+	return nil, errors.New("database connection lost")
+}
+
 func (failingOpener) OpenSession(state.SessionParams) (*state.Session, bool, error) {
 	return nil, false, errors.New("database connection lost")
 }
@@ -1119,12 +1123,16 @@ func TestHandler_OpenSession_NoteRunsOncePerKey(t *testing.T) {
 
 // TestHandler_OpenSession_NoteForMissingOrForeignSessionIsNotFound: a note for
 // a session that is gone, or that belongs to another user, is refused with
-// not_found, so the caller may open a new one; nothing is stored or run.
+// not_found, so the caller may open a new one; nothing is stored or run. The
+// owner is the one the session was stored with: an entity id may contain a
+// colon, so u1:other:websocket:c1 belongs to u1:other although it starts with
+// u1's prefix.
 func TestHandler_OpenSession_NoteForMissingOrForeignSessionIsNotFound(t *testing.T) {
 	rec, h := newOpenHandler(welcomeProfile)
 	storeOpened(t, rec.store, "u2:websocket:c1", "u2")
+	storeOpened(t, rec.store, "u1:other:websocket:c1", "u1:other")
 
-	for _, target := range []string{"u1:websocket:gone", "u2:websocket:c1"} {
+	for _, target := range []string{"u1:websocket:gone", "u2:websocket:c1", "u1:other:websocket:c1"} {
 		out := callOpen(h, "c8", map[string]string{pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2"})
 		if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" ||
 			out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c8" {

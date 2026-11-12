@@ -75,6 +75,9 @@ func TestPostgres_ReserveNote(t *testing.T) {
 	db := pgDB(t)
 	checkReserveNote(t, NewSessionStore(db, 0, 0), db)
 }
+func TestPostgres_SessionOwner(t *testing.T) {
+	checkSessionOwner(t, NewSessionStore(pgDB(t), 0, 0))
+}
 func TestPostgres_NoteReservationsGoWithSession(t *testing.T) {
 	checkNoteReservationsGoWithSession(t, pgDB(t))
 }

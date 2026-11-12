@@ -678,6 +678,41 @@ func checkNoteReservationsGoWithSession(t *testing.T, db *DB) {
 	}
 }
 
+// ownerStore is what checkSessionOwner needs; both session stores satisfy it.
+type ownerStore interface {
+	Create(p state.SessionParams) *state.Session
+	OpenSession(p state.SessionParams) (*state.Session, bool, error)
+	Get(id string) (*state.Session, error)
+}
+
+// checkSessionOwner: a session keeps the entity it was created or opened for,
+// whatever its key looks like, and Get returns it; that owner, not a prefix of
+// the key, authorises a note into the session.
+func checkSessionOwner(t *testing.T, store ownerStore) {
+	t.Helper()
+	store.Create(state.SessionParams{ID: "u1:other:websocket:c1", EntityID: "u1:other"})
+	if _, _, err := store.OpenSession(state.SessionParams{ID: "u1:websocket:c1", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-owner"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	for id, want := range map[string]string{"u1:other:websocket:c1": "u1:other", "u1:websocket:c1": "u1"} {
+		sess, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if sess.EntityID != want {
+			t.Errorf("Get(%s).EntityID = %q, want %q", id, sess.EntityID, want)
+		}
+	}
+}
+
+func TestSessionStore_SessionOwner(t *testing.T) {
+	checkSessionOwner(t, NewSessionStore(openTestDB(t), 0, 0))
+}
+
+func TestInMemorySessionStore_SessionOwner(t *testing.T) {
+	checkSessionOwner(t, state.NewSessionStore(""))
+}
+
 func TestSessionStore_OpenSessionCreateOrFind(t *testing.T) {
 	checkOpenSessionCreateOrFind(t, openTestDB(t))
 }

@@ -19,8 +19,10 @@ import (
 
 // SessionOpener is the store side of a server-opened session: the
 // create-or-find, the first-turn claim and the note reservation (see
-// state.SessionStore.OpenSession). Both session stores implement it.
+// state.SessionStore.OpenSession), and the lookup a note's target is
+// authorised by. Both session stores implement it.
 type SessionOpener interface {
+	Get(id string) (*state.Session, error)
 	OpenSession(p state.SessionParams) (*state.Session, bool, error)
 	ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (bool, error)
 	ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error)
@@ -117,16 +119,17 @@ func (o *openSessions) continueSession(ctx context.Context, sessionKey string, m
 		return openRejected(msg, "A note needs a note key.", "bad_request")
 	}
 	const gone = "This conversation is no longer available."
-	// Scoped like a resume: a key of another entity is never looked up.
-	if _, _, ok := sessionConversation(target, entityID); !ok {
-		return openRejected(msg, gone, "not_found")
-	}
-	if err := o.cfg.ResumeSession(target); err != nil {
-		if errors.Is(err, state.ErrSessionNotFound) {
-			return openRejected(msg, gone, "not_found")
-		}
+	// The target is the user's only if the store says so: the key's prefix
+	// is no proof, since an entity id may itself contain a colon ("u1" is a
+	// prefix of the keys of "u1:other"). Another user's session answers like
+	// a missing one.
+	sess, err := o.cfg.Opener.Get(target)
+	if err != nil && !errors.Is(err, state.ErrSessionNotFound) {
 		logger.FromContext(ctx).Error("note session lookup failed", "session", target, "error", err)
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
+	}
+	if err != nil || sess.EntityID != entityID {
+		return openRejected(msg, gone, "not_found")
 	}
 	reserved, err := o.cfg.Opener.ReserveNote(target, noteKey, time.Now(), o.staleAfter)
 	if err != nil {

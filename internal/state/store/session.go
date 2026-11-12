@@ -98,11 +98,11 @@ func NewSessionStore(db *DB, maxMessages, maxIdleDays int) *SessionStore {
 // user their conversation expired" and "tell the user to retry".
 func (s *SessionStore) Get(id string) (*state.Session, error) {
 	d := s.db.Dialect()
-	var summary, title, activeModel, metadataJSON, createdAt, updatedAt, openedBy, openKey string
+	var summary, title, activeModel, metadataJSON, createdAt, updatedAt, entityID, openedBy, openKey string
 	err := s.db.SQLDB().QueryRow(
-		d.Rebind(`SELECT COALESCE(summary,''), COALESCE(title,''), active_model, metadata, created_at, updated_at, COALESCE(opened_by,''), COALESCE(open_key,'') FROM sessions WHERE id = ?`),
+		d.Rebind(`SELECT COALESCE(summary,''), COALESCE(title,''), active_model, metadata, created_at, updated_at, COALESCE(entity_id,''), COALESCE(opened_by,''), COALESCE(open_key,'') FROM sessions WHERE id = ?`),
 		id,
-	).Scan(&summary, &title, &activeModel, &metadataJSON, &createdAt, &updatedAt, &openedBy, &openKey)
+	).Scan(&summary, &title, &activeModel, &metadataJSON, &createdAt, &updatedAt, &entityID, &openedBy, &openKey)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("session %q: %w", id, state.ErrSessionNotFound)
@@ -128,6 +128,7 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 		Title:       title,
 		ActiveModel: provider.ModelRef(activeModel),
 		Metadata:    metadata,
+		EntityID:    entityID,
 		OpenedBy:    openedBy,
 		OpenKey:     openKey,
 		CreatedAt:   ca,
@@ -178,6 +179,7 @@ func (s *SessionStore) Create(p state.SessionParams) *state.Session {
 		ID:        p.ID,
 		Messages:  []provider.Message{},
 		Metadata:  map[string]string{},
+		EntityID:  p.EntityID,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -222,6 +224,7 @@ func (s *SessionStore) OpenSession(p state.SessionParams) (*state.Session, bool,
 			ID:        p.ID,
 			Messages:  []provider.Message{},
 			Metadata:  map[string]string{},
+			EntityID:  p.EntityID,
 			OpenedBy:  p.OpenedBy,
 			OpenKey:   p.OpenKey,
 			CreatedAt: now,
