@@ -343,3 +343,77 @@ func TestRun_ClaimTakenOverRunsNoPlannedTool(t *testing.T) {
 		t.Errorf("planned tool ran %d times, want 0", exec.count)
 	}
 }
+
+// invokingPreparer is a trusted content preparer that answers every message by
+// invoking gitlab.analyze_code, whose runs exec counts.
+func invokingPreparer(exec *countingExecutor) (*ToolRegistry, OrchestratorOpts) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{Name: "invoker", Actions: []Action{{Name: "prepare"}}},
+		&fixedResultExecutor{content: `{"send_to_llm": false, "invoke": {"plugin": "gitlab", "action": "analyze_code"}}`})
+	_ = registry.Register(PluginCapability{Name: "gitlab", Actions: []Action{{Name: "analyze_code"}}}, exec)
+	return registry, OrchestratorOpts{ContentPreparers: []ContentPreparerEntry{{Plugin: "invoker", Action: "prepare"}}}
+}
+
+// A claimed turn a preparer answers with actions stores its input before the
+// actions run, so the claim is settled and a stale re-claim cannot run them
+// again.
+func TestRun_ClaimedTurnStoredBeforeAPreparerInvokes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim state.TurnClaim
+	}{
+		{"first turn", state.TurnClaim{}},
+		{"keyed note", state.TurnClaim{NoteKey: "chapter-2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &countingExecutor{}
+			registry, opts := invokingPreparer(exec)
+			orch, sessions, now := claimedTurnFixture(t, registry, opts)
+			claim := tc.claim
+			claim.At = now
+			const input = "[context] chapter two was caught up"
+
+			ctx := WithTurnClaim(actor.WithVisibility(context.Background(), provider.VisibilityHidden), claim)
+			if _, err := orch.Run(ctx, "s1", input); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if exec.count != 1 {
+				t.Errorf("invoked action ran %d times, want 1", exec.count)
+			}
+			sess, _ := sessions.Get("s1")
+			if len(sess.Messages) != 1 || sess.Messages[0].Content != input {
+				t.Errorf("stored messages = %+v, want the input", sess.Messages)
+			}
+			later := now.Add(time.Hour)
+			reclaim := func() (state.ClaimResult, error) { return sessions.ClaimOpener("s1", later, time.Minute) }
+			if claim.NoteKey != "" {
+				reclaim = func() (state.ClaimResult, error) {
+					return sessions.ReserveNote("s1", claim.NoteKey, later, time.Minute)
+				}
+			}
+			if again, err := reclaim(); err != nil || again != state.ClaimSettled {
+				t.Errorf("stale claim = %v (%v), want settled: the turn ran", again, err)
+			}
+		})
+	}
+}
+
+// A claimed turn whose claim was taken over runs no action a preparer invokes.
+func TestRun_ClaimTakenOverRunsNoPreparerInvoke(t *testing.T) {
+	exec := &countingExecutor{}
+	registry, opts := invokingPreparer(exec)
+	orch, sessions, now := claimedTurnFixture(t, registry, opts)
+	if result, err := sessions.ReserveNote("s1", "chapter-2", now.Add(2*time.Minute), time.Minute); err != nil || result != state.ClaimWon {
+		t.Fatalf("re-claim = %v, %v", result, err)
+	}
+
+	ctx := WithTurnClaim(actor.WithVisibility(context.Background(), provider.VisibilityHidden), state.TurnClaim{NoteKey: "chapter-2", At: now})
+	_, err := orch.Run(ctx, "s1", "[context] chapter two was caught up")
+
+	if !errors.Is(err, state.ErrClaimLost) {
+		t.Errorf("Run = %v, want state.ErrClaimLost", err)
+	}
+	if exec.count != 0 {
+		t.Errorf("invoked action ran %d times, want 0", exec.count)
+	}
+}

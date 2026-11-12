@@ -1120,9 +1120,9 @@ func (o *Orchestrator) runSTTPreparer(ctx context.Context, prep ContentPreparerE
 	return result.Content, nil
 }
 
-// preparerOutcome is the result of one preparer pass. Content / Blocked
-// drive what the orchestrator does next; Response holds the parsed plugin
-// JSON so callers can read the RFC #249 candidate fields and emit
+// preparerOutcome is the result of one preparer pass. Content / Blocked /
+// Invoke drive what the orchestrator does next; Response holds the parsed
+// plugin JSON so callers can read the RFC #249 candidate fields and emit
 // retrieval events without re-deserializing. For Lua preparers (no plugin
 // protocol) Response stays zero-valued — its KnowledgeCandidates /
 // GlossaryCandidates / ToolCandidates slices are nil and downstream emit
@@ -1130,6 +1130,7 @@ func (o *Orchestrator) runSTTPreparer(ctx context.Context, prep ContentPreparerE
 type preparerOutcome struct {
 	Content  string
 	Blocked  *RunResult
+	Invoke   []InvokeStep // the steps that answer the turn instead of the LLM; the caller runs them
 	Response preparerResponse
 }
 
@@ -1153,8 +1154,8 @@ func (o *Orchestrator) runSinglePreparerWithSearch(ctx context.Context, prep Con
 // runSinglePreparer executes one content preparer. Errors and "fail
 // open" preparer failures both return a non-blocked outcome with
 // Content == the input content; an explicit guard block returns
-// Blocked set; an `invoke` directive returns Content == "" and Blocked
-// holding the invoke result. The Response field carries the parsed
+// Blocked set; an `invoke` directive returns Content == "" and Invoke
+// holding its steps, run by the caller. The Response field carries the parsed
 // plugin JSON (RFC #249 candidate fields included) so callers can emit
 // retrieval events without re-parsing.
 func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPreparerEntry, content, callPrefix string, allowInvoke bool) (preparerOutcome, error) {
@@ -1174,8 +1175,7 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 				for i, s := range result.InvokeSteps {
 					steps[i] = InvokeStep{Plugin: s.Plugin, Action: s.Action, Args: s.Args}
 				}
-				invokeResult, err := o.runInvokeSteps(ctx, steps)
-				return preparerOutcome{Blocked: invokeResult}, err
+				return preparerOutcome{Invoke: steps}, nil
 			}
 			msg := result.Content
 			if msg == "" {
@@ -1223,8 +1223,7 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 				slog.Warn("insecure preparer cannot run invoke, ignoring", "plugin", prep.Plugin, "action", prep.Action)
 				return preparerOutcome{Content: content, Response: pr}, nil
 			}
-			invokeResult, err := o.runInvokeSteps(ctx, pr.Invoke)
-			return preparerOutcome{Blocked: invokeResult, Response: pr}, err
+			return preparerOutcome{Invoke: pr.Invoke, Response: pr}, nil
 		}
 		msg := pr.Message
 		if msg == "" {
@@ -1825,6 +1824,26 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 			if outcome.Blocked != nil {
 				return outcome.Blocked, nil
+			}
+			if len(outcome.Invoke) > 0 {
+				// The steps answer the turn. A claimed turn stores its input
+				// first, as before the planner below: the store settles the
+				// claim, or refuses a run that lost it before any step acts.
+				if _, claimed := TurnClaimFrom(ctx); claimed {
+					if err := addUserMessage(ctx, sessions, sessionID, provider.Message{
+						Role:       provider.RoleUser,
+						Content:    stripKnowledgeContext(content),
+						Files:      files,
+						Visibility: actor.Visibility(ctx),
+					}); err != nil {
+						return nil, fmt.Errorf("adding user message: %w", err)
+					}
+				}
+				invokeResult, err := o.runInvokeSteps(ctx, outcome.Invoke)
+				if err != nil {
+					return nil, err
+				}
+				return invokeResult, nil
 			}
 			content = outcome.Content
 			// A preparer's relevant_tools no longer narrows the LLM's tools
