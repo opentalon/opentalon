@@ -37,32 +37,30 @@ func (r *metadataRecorder) last(role provider.Role) recordedMessage {
 }
 
 func TestSplitSpoken(t *testing.T) {
-	cases := []struct{ reply, spoken, rest string }{
-		{"<spoken>Zwei gefunden.</spoken>\nHier die Liste:\n- A", "Zwei gefunden.", "Hier die Liste:\n- A"},
-		{"  <spoken> Fertig. </spoken>  Angelegt.", "Fertig.", "Angelegt."},
-		{"Angelegt.", "", "Angelegt."},
-		{"<spoken>nie geschlossen Angelegt.", "", "nie geschlossen Angelegt."},
-		{"<spoken></spoken>Angelegt.", "", "Angelegt."},
-		{"<spoken>Ich sehe nach. [tool_call]p__a[/tool_call]</spoken>Antwort.", "Ich sehe nach.", "Antwort."},
-		{"<spoken>Erledigt. <invoke name=\"p__a\"><parameter name=\"id\">7</parameter></invoke></spoken>", "Erledigt.", ""},
-		{"[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt.", "", "[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt."},
-		{"[tool_call]{\"tool\":\"p__a\",\"args\":{\"text\":\"<spoken>x</spoken>\"}}[/tool_call]",
-			"", "[tool_call]{\"tool\":\"p__a\",\"args\":{\"text\":\"<spoken>x</spoken>\"}}[/tool_call]"},
+	const call = `[tool_call]{"tool":"p__a","args":{}}[/tool_call]`
+	const argWithMarkers = `[tool_call]{"tool":"p__a","args":{"text":"<spoken>x</spoken>"}}[/tool_call]`
+	cases := []struct{ reply, spoken, rest, shown string }{
+		{"<spoken>Zwei gefunden.</spoken>\nHier die Liste:\n- A", "Zwei gefunden.", "Hier die Liste:\n- A", "Hier die Liste:\n- A"},
+		{"  <spoken> Fertig. </spoken>  Angelegt.", "Fertig.", "Angelegt.", "Angelegt."},
+		{"Angelegt.", "", "Angelegt.", "Angelegt."},
+		{"<spoken>Erledigt.</spoken>", "Erledigt.", "", "Erledigt."},
+		{"<spoken>nie geschlossen Angelegt.", "", "", "nie geschlossen Angelegt."},
+		{"Vorweg.\n<spoken>nie geschlossen.", "", "Vorweg.", "Vorweg.\nnie geschlossen."},
+		{"<spoken></spoken>Angelegt.", "", "Angelegt.", "Angelegt."},
+		{"<spoken>Erstens.</spoken><spoken>Zweitens.</spoken>Antwort.</spoken>", "Erstens.", "Antwort.", "Antwort."},
+		{"<spoken>A<spoken>B</spoken>C</spoken>D", "ABC", "D", "D"},
+		{"<spoken>A<spoken>B</spoken>C", "", "", "ABC"},
+		{"<spoken>Ich sehe nach. " + call + "</spoken>Antwort.", "Ich sehe nach.", "Antwort.", "Antwort."},
+		{"<spoken>A<spoken>B</spoken>" + call + "</spoken>Antwort.", "AB", "Antwort.", "Antwort."},
+		{"<spoken>" + call, "", "", ""},
+		{"<spoken>Erledigt. <invoke name=\"p__a\"><parameter name=\"id\">7</parameter></invoke></spoken>", "Erledigt.", "", "Erledigt."},
+		{"[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt.", "",
+			"[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt.", "[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt."},
+		{argWithMarkers, "", argWithMarkers, argWithMarkers},
 	}
 	for _, c := range cases {
-		spoken, rest, found := splitSpoken(c.reply)
-		if spoken != c.spoken || rest != c.rest || found != (c.spoken != "") {
-			t.Errorf("splitSpoken(%q) = %q, %q, %v; want %q, %q", c.reply, spoken, rest, found, c.spoken, c.rest)
-		}
-	}
-	repeated := "<spoken>Erstens.</spoken><spoken>Zweitens.</spoken>Antwort.</spoken>"
-	if spoken, rest, _ := splitSpoken(repeated); spoken != "Erstens." || rest != "Antwort." {
-		t.Errorf("repeated blocks: %q, %q; want the first spoken and every marker gone", spoken, rest)
-	}
-	for _, nested := range []string{"<spoken>A<spoken>B</spoken>C", "<spoken>A<spoken>B"} {
-		spoken, rest, _ := splitSpoken(nested)
-		if strings.Contains(spoken+rest, "<spoken") || strings.Contains(spoken+rest, "</spoken") {
-			t.Errorf("nested %q left a marker: %q, %q", nested, spoken, rest)
+		if spoken, rest, shown := splitSpoken(c.reply); spoken != c.spoken || rest != c.rest || shown != c.shown {
+			t.Errorf("splitSpoken(%q) = %q, %q, %q; want %q, %q, %q", c.reply, spoken, rest, shown, c.spoken, c.rest, c.shown)
 		}
 	}
 }
@@ -334,27 +332,29 @@ func lookupOrchestrator(t *testing.T, llm LLMClient, parser ToolCallParser, exec
 }
 
 func TestWhatASpokenBlockHoldsIsNeverRunAsACall(t *testing.T) {
-	executor := &countingExecutor{}
-	llm := &fakeLLM{responses: []string{
-		`<spoken>[tool_call]{"tool":"p__lookup","args":{}}[/tool_call]</spoken>`,
-		`<spoken>Erledigt. <invoke name="p__lookup"><parameter name="id">geheim</parameter></invoke></spoken>`,
-	}}
-	orch, sessionID := lookupOrchestrator(t, llm, DefaultParser, executor)
-	result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Schau nach")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if executor.count != 0 || result.Response != "Erledigt." || result.Metadata[SpokenMetadataKey] != "Erledigt." {
-		t.Errorf("calls run %d, reply %q, spoken %q; want no call, the spoken words shown and read", executor.count, result.Response, result.Metadata[SpokenMetadataKey])
-	}
-
-	executor = &countingExecutor{}
-	orch, sessionID = lookupOrchestrator(t, &fakeLLM{responses: []string{`<spoken>{"tool":"p__lookup","args":{}}</spoken>`}}, DefaultParser, executor)
-	if _, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Schau nach"); err != nil {
-		t.Fatal(err)
-	}
-	if executor.count != 0 {
-		t.Errorf("a bare JSON call that was the whole spoken version ran %d times", executor.count)
+	const call = `[tool_call]{"tool":"p__lookup","args":{}}[/tool_call]`
+	for _, c := range []struct {
+		name      string
+		responses []string
+		shown     string
+	}{
+		{"closed", []string{"<spoken>" + call + "</spoken>", "Fertig."}, "Fertig."},
+		{"unclosed", []string{"<spoken>" + call, "Fertig."}, "Fertig."},
+		{"nested", []string{"<spoken>A<spoken>B</spoken>" + call + "</spoken>Fertig.", "Fertig."}, "Fertig."},
+		{"bare invoke", []string{`<spoken>Fertig. <invoke name="p__lookup"><parameter name="id">geheim</parameter></invoke></spoken>`, "Fertig."}, "Fertig."},
+		{"bare JSON", []string{`<spoken>{"tool":"p__lookup","args":{}}</spoken>`, "Fertig."}, ""},
+		{"unclosed bare JSON", []string{`<spoken>{"tool":"p__lookup","args":{}}`, "Fertig."}, ""},
+	} {
+		// A trailing answer lets a regression that runs the call end its turn.
+		executor := &countingExecutor{}
+		orch, sessionID := lookupOrchestrator(t, &fakeLLM{responses: c.responses}, DefaultParser, executor)
+		result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Schau nach")
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if executor.count != 0 || (c.shown != "" && result.Response != c.shown) || strings.Contains(result.Metadata[SpokenMetadataKey], "geheim") {
+			t.Errorf("%s: calls run %d, reply %q, metadata %v; want no call", c.name, executor.count, result.Response, result.Metadata)
+		}
 	}
 }
 

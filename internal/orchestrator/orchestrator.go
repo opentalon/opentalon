@@ -2492,7 +2492,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
-		turnSpoken, rest := takeSpoken(ctx, resp.Content)
+		turnSpoken, rest, turnShown := takeSpoken(ctx, resp.Content)
 		resp.Content = rest
 		// The provider's own count of what it just charged for. Free, exact,
 		// and the only ground truth the estimate ever gets.
@@ -2590,9 +2590,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 
 			stripped := StripInternalBlocks(resp.Content)
-			if stripped == "" && turnSpoken != "" {
-				// A reply that is nothing but its spoken version shows that too (spoken_reply.go).
-				resp.Content, stripped = turnSpoken, turnSpoken
+			if turnShown != resp.Content {
+				// What a spoken block holds is shown, never parsed (spoken_reply.go).
+				resp.Content, stripped = turnShown, StripInternalBlocks(turnShown)
 			}
 			if stripped == "" {
 				// Empty response — either the LLM returned nothing, or its output
@@ -3422,10 +3422,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	if s, gerr := sessions.Get(sessionID); gerr == nil && s != nil {
 		recentMsgs = s.Messages
 	}
-	spokenQuestion, confirmMsg := takeSpoken(ctx, o.narrateConfirmation(ctx, recentMsgs, call, userMessage))
-	if confirmMsg == "" {
-		confirmMsg = spokenQuestion
-	}
+	spokenQuestion, _, confirmMsg := takeSpoken(ctx, o.narrateConfirmation(ctx, recentMsgs, call, userMessage))
 	if confirmMsg == "" {
 		confirmMsg = o.confirmationFallback(call)
 	}

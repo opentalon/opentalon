@@ -17,7 +17,8 @@ import (
 // of every response the moment it arrives (takeSpoken), so tool parsing, the
 // checks on the response, what is stored and what is shown never see the
 // markers. What a spoken block holds is speech only: never parsed for a call,
-// and shown only when a reply is nothing else. The spoken version of the final
+// and shown only when a reply is nothing else (or the block was never closed).
+// The spoken version of the final
 // reply goes into the result's metadata and onto the stored reply
 // (spokenMetadata), and a final reply without one is stored with spoken_missing
 // and stays silent. The confirmation question is written by its own narrator,
@@ -81,15 +82,18 @@ func withoutProtocol(s string) string {
 	return s
 }
 
-// splitSpoken returns the first spoken version a response carries and the
-// response without any. Every spoken block goes, with whatever it holds: a call
-// or a protocol block in it is never run, and is not read either. A protocol
-// block outside them is kept as it is, a spoken block in it too: the parser
-// reads it, the shown text drops it, nothing of it is read. A marker the model
-// left unpaired or nested goes (an unclosed block keeps its text in the
-// response). found is false when it carries none.
-func splitSpoken(response string) (spoken, rest string, found bool) {
+// splitSpoken returns the first spoken version a response carries, the rest of
+// the response for the parser, and the text the response shows. Every spoken
+// block goes from rest with whatever it holds (a nested one, too, and one never
+// closed up to the end of the response): a call or a protocol block in one is
+// never run, and is not read either. A block never closed is no spoken version:
+// its text is shown instead. A protocol block outside them is kept as it is, a
+// spoken block in it too: the parser reads it, the shown text drops it, nothing
+// of it is read. An unpaired closing marker goes. shown is rest plus an
+// unclosed block's text, or the spoken version when both are empty.
+func splitSpoken(response string) (spoken, rest, shown string) {
 	var kept strings.Builder
+	unclosed := ""
 	for i := 0; i < len(response); {
 		at, open, closing := nextSpokenOrProtocolTag(response, i)
 		if at < 0 {
@@ -101,15 +105,14 @@ func splitSpoken(response string) (spoken, rest string, found bool) {
 		case spokenClose: // unpaired
 			i = at + len(spokenClose)
 		case spokenOpen:
-			i = at + len(spokenOpen)
-			end := strings.Index(response[i:], spokenClose)
-			if end < 0 {
-				continue // unclosed: its text stays
+			body, end, closed := spokenBlock(response, at)
+			text := markers.Replace(withoutProtocol(body))
+			if !closed {
+				unclosed = text
+			} else if spoken == "" {
+				spoken = strings.TrimSpace(text)
 			}
-			if text := strings.TrimSpace(markers.Replace(withoutProtocol(response[i : i+end]))); !found && text != "" {
-				spoken, found = text, true
-			}
-			i += end + len(spokenClose)
+			i = end
 		default: // a protocol block, kept whole
 			end := len(response)
 			if j := strings.Index(response[at+len(open):], closing); j >= 0 {
@@ -119,7 +122,35 @@ func splitSpoken(response string) (spoken, rest string, found bool) {
 			i = end
 		}
 	}
-	return spoken, strings.TrimSpace(kept.String()), found
+	rest = strings.TrimSpace(kept.String())
+	if shown = strings.TrimSpace(kept.String() + unclosed); shown == "" {
+		shown = spoken
+	}
+	return spoken, rest, shown
+}
+
+// spokenBlock returns the body of the spoken block that opens at at, where the
+// response goes on after it, and whether it is closed: a nested block is part of
+// it, and one never closed runs to the end of s.
+func spokenBlock(s string, at int) (body string, end int, closed bool) {
+	depth := 0
+	for i := at; ; {
+		o := strings.Index(s[i:], spokenOpen)
+		c := strings.Index(s[i:], spokenClose)
+		switch {
+		case c < 0:
+			return s[at+len(spokenOpen):], len(s), false
+		case o >= 0 && o < c:
+			depth++
+			i += o + len(spokenOpen)
+		default:
+			depth--
+			if depth == 0 {
+				return s[at+len(spokenOpen) : i+c], i + c + len(spokenClose), true
+			}
+			i += c + len(spokenClose)
+		}
+	}
 }
 
 // nextSpokenOrProtocolTag finds the first spoken marker or protocol block
@@ -143,15 +174,13 @@ func nextSpokenOrProtocolTag(s string, from int) (at int, open, closing string) 
 var markers = strings.NewReplacer(spokenOpen, "", spokenClose, "")
 
 // takeSpoken takes the spoken version out of a model response in a spoken turn
-// (splitSpoken); in any other turn the response stays as it is. rest is "" for
-// a response that was nothing but its spoken version: the caller shows the
-// spoken version then, without ever parsing it for a call.
-func takeSpoken(ctx context.Context, response string) (spoken, rest string) {
+// (splitSpoken): rest goes to the parser, shown is what the response shows once
+// nothing in rest is a call. In any other turn the response stays as it is.
+func takeSpoken(ctx context.Context, response string) (spoken, rest, shown string) {
 	if !actor.SpokenReply(ctx) || (!strings.Contains(response, spokenOpen) && !strings.Contains(response, spokenClose)) {
-		return "", response
+		return "", response, response
 	}
-	spoken, rest, _ = splitSpoken(response)
-	return spoken, rest
+	return splitSpoken(response)
 }
 
 // spokenMetadata is the metadata of a final reply in a spoken turn: its spoken
