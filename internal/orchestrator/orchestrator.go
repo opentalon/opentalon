@@ -1393,6 +1393,8 @@ func turnFinishedArgs(result *RunResult, runErr error, startedAt time.Time) emit
 }
 
 func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, files ...provider.MessageFile) (runResult *RunResult, runErr error) {
+	// A spoken turn tells the channel what to read however it ends (spoken_reply.go).
+	defer func() { markUnspoken(ctx, runResult) }()
 	// Global concurrency cap. The per-session locks come next via
 	// lockSessionTurn — see its lock-ordering contract.
 	select {
@@ -1531,7 +1533,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
 		switch decision {
 		case pipeline.DecisionApprove:
-			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, confirmationReplyMetadata(decision))
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, voiceInputMetadata(ctx, confirmationReplyMetadata(decision)))
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionApprove, ResolvedBy: resolvedBy})
 			log.Debug("pipeline executing", "pipeline_id", p.ID, "steps", len(p.Steps))
 			res, err := o.executePipeline(ctx, sessionID, p)
@@ -1548,7 +1550,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionAmend, ResolvedBy: resolvedBy, Reason: reason})
 			log.Debug("pipeline cancelled, answering the reply", "pipeline_id", p.ID)
 		default: // pipeline.DecisionReject
-			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, confirmationReplyMetadata(decision))
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, voiceInputMetadata(ctx, confirmationReplyMetadata(decision)))
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{Choice: pipeline.DecisionReject, ResolvedBy: resolvedBy, Reason: reason})
 			// The classifier's reason is written for the log and stays in the event.
 			res := notApprovedResult(resolvedBy, pipelineCancelledReply, "pipeline_cancelled")
@@ -1605,7 +1607,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// kept out so the LLM doesn't avoid re-calling the tool later. Mark
 			// the reply so a reloaded transcript can pair it with the answered
 			// prompt and show the Approve button as the pressed one.
-			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, confirmationReplyMetadata(pipeline.DecisionApprove))
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleUser, Content: userMessage}, voiceInputMetadata(ctx, confirmationReplyMetadata(pipeline.DecisionApprove)))
 			emit.EmitConfirmationResolved(resolvedCtx, o.eventSink, emit.ConfirmationResolvedArgs{
 				Choice:     pipeline.DecisionApprove,
 				ToolCallID: tc.ID,
@@ -2080,7 +2082,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				} else {
 					planText = narrated
 				}
-				pipelineMeta := pipelineConfirmationFrameMetadata(p.ID)
+				pipelineMeta := speakAsIs(ctx, planText, pipelineConfirmationFrameMetadata(p.ID))
 				_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText}, pipelineMeta)
 				log.Debug("pipeline stored, awaiting confirmation for write steps",
 					"pipeline_id", p.ID, "session", sessionID, "write_steps", len(writeSteps))
@@ -2089,7 +2091,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					Choices: []string{"approve", "reject"},
 				})
 				o.pendingMu.Lock()
-				o.pendingPipelines[sessionID] = pendingPipeline{plan: p, confID: confID}
+				o.pendingPipelines[sessionID] = pendingPipeline{plan: p, confID: confID, spoken: actor.SpokenReply(ctx)}
 				o.pendingMu.Unlock()
 				return &RunResult{
 					Response: planText,
@@ -2105,7 +2107,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			} else {
 				planText = narrated
 			}
-			pipelineMeta := pipelineConfirmationFrameMetadata(p.ID)
+			pipelineMeta := speakAsIs(ctx, planText, pipelineConfirmationFrameMetadata(p.ID))
 			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: planText}, pipelineMeta)
 			log.Debug("pipeline stored, awaiting confirmation", "pipeline_id", p.ID, "session", sessionID, "steps", len(p.Steps))
 			confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
@@ -2113,7 +2115,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				Choices: []string{"approve", "reject"},
 			})
 			o.pendingMu.Lock()
-			o.pendingPipelines[sessionID] = pendingPipeline{plan: p, confID: confID}
+			o.pendingPipelines[sessionID] = pendingPipeline{plan: p, confID: confID, spoken: actor.SpokenReply(ctx)}
 			o.pendingMu.Unlock()
 			return &RunResult{
 				Response: planText,
@@ -2423,6 +2425,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 		llmStart := time.Now()
 		streamCB := o.resolveStreamCallback(ctx)
+		if actor.SpokenReply(ctx) {
+			// The spoken version must be out before anything is shown (spoken_reply.go).
+			streamCB = nil
+		}
 		// Repair broken tool-call pairing before measuring, so the estimate
 		// counts what is sent. The fit keeps pairs intact, so once is enough.
 		var pairing toolPairingReport
@@ -2486,6 +2492,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
+		turnSpoken, rest := takeSpoken(ctx, resp.Content)
+		resp.Content = rest
 		// The provider's own count of what it just charged for. Free, exact,
 		// and the only ground truth the estimate ever gets.
 		o.calibrators.observe(req.Model, estimatedTokens, resp.Usage.InputTokens)
@@ -2708,7 +2716,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				continue
 			}
 
+			spokenMeta := spokenMetadata(ctx, turnSpoken)
 			result.Response = stripped
+			mergeMetadata(result, spokenMeta)
 			if len(result.Results) > 0 {
 				var parts []string
 				for i, r := range result.Results {
@@ -2727,10 +2737,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				}
 				result.InputForDisplay = strings.TrimSpace(strings.Join(parts, "\n"))
 			}
-			_ = sessions.AddMessage(sessionID, provider.Message{
+			_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{
 				Role:    provider.RoleAssistant,
 				Content: resp.Content,
-			})
+			}, spokenMeta)
 			o.applyShowToolCalls(result)
 			if timing != nil {
 				timing.begin("format")
@@ -3244,6 +3254,7 @@ func toolConfirmationFrameMetadata(toolCallID string) map[string]string {
 type pendingPipeline struct {
 	plan   *pipeline.Pipeline
 	confID string
+	spoken bool // raised in a spoken turn (resumedSpoken)
 }
 
 // pipelineConfirmationFrameMetadata is toolConfirmationFrameMetadata for a
@@ -3285,13 +3296,14 @@ func confirmationReplyMetadata(action string) map[string]string {
 // blob, so after a restart a transcript prompt can reference a call nothing
 // can act on. This method answers from the authoritative live state — a
 // client should treat its result, not the transcript, as the only signal to
-// render *active* buttons; history rebuilds answered rows only.
+// render *active* buttons; history rebuilds answered rows only. A confirmation
+// raised in a spoken turn comes back with reply=spoken (resumedSpoken).
 func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content string, metadata map[string]string, ok bool) {
 	// Tool call: the persisted blob is the single source of pending tool-call
 	// state (survives restart / failover, shared across pods) and carries the
 	// approved-intent prompt it was stored with.
-	if pendingCall, _, prompt, _ := loadPendingToolCall(o.sessions, sessionID); pendingCall != nil {
-		return prompt, toolConfirmationFrameMetadata(pendingCall.ID), true
+	if pending, found := readPendingToolCall(o.sessions, sessionID); found {
+		return pending.Prompt, resumedSpoken(toolConfirmationFrameMetadata(pending.ID), pending.Spoken), true
 	}
 
 	// Pipeline plan: in-memory only (no persistence), so this covers a live
@@ -3302,7 +3314,7 @@ func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content strin
 	pendingPlan := o.pendingPipelines[sessionID]
 	o.pendingMu.Unlock()
 	if p := pendingPlan.plan; p != nil {
-		return p.FormatForConfirmation(), pipelineConfirmationFrameMetadata(p.ID), true
+		return p.FormatForConfirmation(), resumedSpoken(pipelineConfirmationFrameMetadata(p.ID), pendingPlan.spoken), true
 	}
 	return "", nil, false
 }
@@ -3409,7 +3421,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	if s, gerr := sessions.Get(sessionID); gerr == nil && s != nil {
 		recentMsgs = s.Messages
 	}
-	confirmMsg := o.narrateConfirmation(ctx, recentMsgs, call, userMessage)
+	spokenQuestion, confirmMsg := takeSpoken(ctx, o.narrateConfirmation(ctx, recentMsgs, call, userMessage))
 	if confirmMsg == "" {
 		confirmMsg = o.confirmationFallback(call)
 	}
@@ -3426,7 +3438,10 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// persist the confirmation-frame metadata on that row so a reloaded client
 	// rebuilds the Approve/Reject buttons from the transcript (the live frame's
 	// metadata below is transient). Same map, so reload and live path match.
-	frameMeta := toolConfirmationFrameMetadata(call.ID)
+	if spokenQuestion == "" {
+		spokenQuestion = confirmMsg
+	}
+	frameMeta := speakAsIs(ctx, spokenQuestion, toolConfirmationFrameMetadata(call.ID))
 	_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg}, frameMeta)
 	// Buttons are deterministic approve/reject only; amend is a free-text-classifier
 	// outcome with no button by design, so the Choices set stays two-way.
@@ -3441,7 +3456,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// actually approves, kept with the call so a post-approval repair can hand
 	// the corrector the approved intent without the session history.
 	pending := call
-	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg, thinking)
+	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg, actor.SpokenReply(ctx), thinking)
 	return &RunResult{
 		Response: confirmMsg,
 		Metadata: frameMeta,
@@ -3499,19 +3514,21 @@ Shall I return it?`
 // resolved from the user's own words, looking back past such replies. Its
 // English technical terms do not reach the field names, which the user checks
 // under the names they see (rule 5). Without a directive the prompt is unchanged
-// and rule 1 applies.
+// and rule 1 applies. In a spoken turn the
+// narrator also writes the question as it is asked aloud (spokenConfirmationInstruction).
 func confirmationNarrateSystemPrompt(ctx context.Context, hint string) string {
 	base := confirmationNarratePrompt
 	if hint != "" {
 		base = confirmationHintPrompt(hint)
 	}
-	dir := strings.TrimSpace(replyLanguageDirectiveFromContext(ctx))
-	if dir == "" {
-		return base
+	if dir := strings.TrimSpace(replyLanguageDirectiveFromContext(ctx)); dir != "" {
+		base += "\n\n" + dir + "\nThis reply-language instruction takes precedence over rule 1."
+		if hint == "" {
+			base += " Its line on technical terms does not apply to field names: they are written in this language (rule 5)."
+		}
 	}
-	base += "\n\n" + dir + "\nThis reply-language instruction takes precedence over rule 1."
-	if hint == "" {
-		base += " Its line on technical terms does not apply to field names: they are written in this language (rule 5)."
+	if actor.SpokenReply(ctx) {
+		base += "\n\n" + spokenConfirmationInstruction
 	}
 	return base
 }
@@ -4097,12 +4114,14 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)})
 		}
 	}
-	_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: execResult.Summary})
+	summaryMeta := speakAsIs(ctx, execResult.Summary, nil)
+	_ = o.sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: execResult.Summary}, summaryMeta)
 
 	return &RunResult{
 		Response:  execResult.Summary,
 		ToolCalls: toolCalls,
 		Results:   toolResults,
+		Metadata:  summaryMeta,
 	}, nil
 }
 
@@ -4311,6 +4330,11 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	// system block ahead of the conversation rather than as a trailing turn.
 	if len(convMessages) > 2 {
 		system.Round += "\n\n[IMPORTANT] Answer ONLY the user's most recent message. Do NOT repeat or summarize any earlier answers from this conversation. Be concise."
+	}
+	// A spoken turn's instruction holds in every round, the first included
+	// (spoken_reply.go); the per-round segment sits after the cached prefix.
+	if actor.SpokenReply(ctx) {
+		system.Round += "\n\n" + spokenReplyInstruction
 	}
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 	messages = append(messages, provider.Message{Role: provider.RoleSystem, Content: system.Join()})
@@ -5400,6 +5424,9 @@ type pendingToolCallMeta struct {
 	// passes executeCall's unknown-args validation. Rows persisted before
 	// this field unmarshal to false — exactly how they were restored then.
 	FromLLM bool `json:"from_llm,omitempty"`
+	// Spoken marks a confirmation raised in a spoken turn, so its re-emit says
+	// so too (resumedSpoken). Rows persisted before this field are not spoken.
+	Spoken bool `json:"spoken,omitempty"`
 	// The thinking of the response that issued the call, for the assistant
 	// message the approval stores. A blob written before the fingerprint
 	// existed holds blocks without one, which are never replayed.
@@ -5479,8 +5506,9 @@ func (o *Orchestrator) recordConfirmationInterruptedCalls(
 }
 
 // savePendingToolCall persists the pending call with the thinking in
-// *thinking, which it takes (takeThinking).
-func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID, prompt string, thinking *responseThinking) {
+// *thinking, which it takes (takeThinking); spoken says it was raised in a
+// spoken turn.
+func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID, prompt string, spoken bool, thinking *responseThinking) {
 	meta := pendingToolCallMeta{
 		ID:                      tc.ID,
 		Plugin:                  tc.Plugin,
@@ -5489,6 +5517,7 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 		ConfirmationRequestedID: confirmationRequestedID,
 		Prompt:                  prompt,
 		FromLLM:                 tc.FromLLM,
+		Spoken:                  spoken,
 		responseThinking:        takeThinking(thinking),
 	}
 	data, err := json.Marshal(meta)
@@ -5504,19 +5533,28 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 // the field or nothing was captured), and the thinking of the response that
 // issued the call.
 func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string, string, responseThinking) {
-	sess, err := sessions.Get(sessionID)
-	if err != nil || sess == nil {
-		return nil, "", "", responseThinking{}
-	}
-	raw := sess.Metadata["pending_tool_call"]
-	if raw == "" {
-		return nil, "", "", responseThinking{}
-	}
-	var meta pendingToolCallMeta
-	if json.Unmarshal([]byte(raw), &meta) != nil {
+	meta, found := readPendingToolCall(sessions, sessionID)
+	if !found {
 		return nil, "", "", responseThinking{}
 	}
 	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args, FromLLM: meta.FromLLM}, meta.ConfirmationRequestedID, meta.Prompt, meta.responseThinking
+}
+
+// readPendingToolCall returns the persisted pending call as stored; found is
+// false when none is, or it cannot be read.
+func readPendingToolCall(sessions SessionStoreInterface, sessionID string) (meta pendingToolCallMeta, found bool) {
+	sess, err := sessions.Get(sessionID)
+	if err != nil || sess == nil {
+		return pendingToolCallMeta{}, false
+	}
+	raw := sess.Metadata["pending_tool_call"]
+	if raw == "" {
+		return pendingToolCallMeta{}, false
+	}
+	if json.Unmarshal([]byte(raw), &meta) != nil {
+		return pendingToolCallMeta{}, false
+	}
+	return meta, true
 }
 
 // toolCallSignature builds a deterministic string from a set of tool calls
@@ -6047,10 +6085,15 @@ func emptyContentResult() *RunResult {
 }
 
 // addUserMessage stores the turn's own user message, under the turn's claim
-// when it has one (WithTurnClaim).
+// when it has one (WithTurnClaim) and with the voice mark when the person spoke
+// it (voiceInputMetadata).
 func addUserMessage(ctx context.Context, sessions SessionStoreInterface, sessionID string, msg provider.Message) error {
+	var meta map[string]string
 	if c, ok := TurnClaimFrom(ctx); ok {
-		return sessions.AddMessageWithMetadata(sessionID, msg, c.Metadata())
+		meta = c.Metadata()
+	}
+	if meta = voiceInputMetadata(ctx, meta); meta != nil {
+		return sessions.AddMessageWithMetadata(sessionID, msg, meta)
 	}
 	return sessions.AddMessage(sessionID, msg)
 }

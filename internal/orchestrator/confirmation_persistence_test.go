@@ -54,7 +54,7 @@ func TestConfirmationFrameMetadata_KeyContract(t *testing.T) {
 // confirmation must survive, intact, for the real user's next turn.
 func TestRun_HiddenTurnDoesNotResolvePendingConfirmation(t *testing.T) {
 	orch, sid := newConfirmationTestOrchestrator(t)
-	savePendingToolCall(orch.sessions, sid, &ToolCall{ID: "call_9", Plugin: "timly", Action: "delete-item"}, "", "Proceed with deleting 3 items?", nil)
+	savePendingToolCall(orch.sessions, sid, &ToolCall{ID: "call_9", Plugin: "timly", Action: "delete-item"}, "", "Proceed with deleting 3 items?", false, nil)
 
 	ctx := actor.WithVisibility(context.Background(), provider.VisibilityHidden)
 	if _, err := orch.Run(ctx, sid, "[system] Your background job finished."); err != nil {
@@ -69,7 +69,7 @@ func TestRun_HiddenTurnDoesNotResolvePendingConfirmation(t *testing.T) {
 func TestPendingConfirmationFrame_ToolCallFromPersistedBlob(t *testing.T) {
 	orch, sid := newConfirmationTestOrchestrator(t)
 	// The persisted blob is the single source of pending tool-call state.
-	savePendingToolCall(orch.sessions, sid, &ToolCall{ID: "call_restored", Plugin: "timly", Action: "delete-item"}, "", "Proceed after restart?", nil)
+	savePendingToolCall(orch.sessions, sid, &ToolCall{ID: "call_restored", Plugin: "timly", Action: "delete-item"}, "", "Proceed after restart?", false, nil)
 
 	content, meta, ok := orch.PendingConfirmationFrame(sid)
 	if !ok {
