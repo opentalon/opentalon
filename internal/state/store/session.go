@@ -727,14 +727,33 @@ func (s *SessionStore) ClearMessages(id string) error {
 	return tx.Commit()
 }
 
-// Delete removes a session and its messages.
+// Delete removes a session with its messages and note reservations in one
+// transaction that holds the session's row first, like every transcript
+// writer (lockSessionRow): a message or reservation written meanwhile either
+// commits first and goes with the session, or waits and finds it gone.
 func (s *SessionStore) Delete(id string) error {
+	ctx := context.Background()
 	d := s.db.Dialect()
-	// Delete messages and note reservations first (FK may not cascade in all configs).
-	_, _ = s.db.SQLDB().Exec(d.Rebind(`DELETE FROM messages WHERE session_id = ?`), id)
-	_, _ = s.db.SQLDB().Exec(d.Rebind(`DELETE FROM session_note_reservations WHERE session_id = ?`), id)
-	_, err := s.db.SQLDB().Exec(d.Rebind(`DELETE FROM sessions WHERE id = ?`), id)
-	return err
+	tx, cleanup, err := d.BeginExclusive(ctx, s.db.SQLDB())
+	if err != nil {
+		return fmt.Errorf("delete session begin: %w", err)
+	}
+	defer cleanup()
+	defer func() { _ = tx.Rollback() }()
+	if err := lockSessionRow(ctx, tx, d, id); err != nil {
+		return fmt.Errorf("delete session lock: %w", err)
+	}
+	// Messages and note reservations first (FK may not cascade in all configs).
+	for _, q := range []string{
+		`DELETE FROM messages WHERE session_id = ?`,
+		`DELETE FROM session_note_reservations WHERE session_id = ?`,
+		`DELETE FROM sessions WHERE id = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, d.Rebind(q), id); err != nil {
+			return fmt.Errorf("delete session: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // PruneIdleSessions deletes sessions not updated in the last maxIdleDays days,

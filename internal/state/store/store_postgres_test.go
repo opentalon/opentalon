@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -188,6 +189,48 @@ func TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept(t *testing.T) {
 	}
 	if n := countNoteReservations(t, db, "idle"); n != 0 {
 		t.Errorf("reservations = %d, want none left behind the pruned session", n)
+	}
+}
+
+// TestPostgres_NoteReservedWhileItsSessionIsDeletedGoesWithIt: Delete waits
+// for a reservation that holds the session's row, as ReserveNote's insert
+// does, and removes it with the session; no reservation outlives the session,
+// where no prune would find it.
+func TestPostgres_NoteReservedWhileItsSessionIsDeletedGoesWithIt(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 1)
+	store.Create(state.SessionParams{ID: "idle", EntityID: "u1"})
+
+	ctx := context.Background()
+	reservation, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin reservation: %v", err)
+	}
+	defer func() { _ = reservation.Rollback() }()
+	var one int
+	if err := reservation.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = 'idle' FOR UPDATE`).Scan(&one); err != nil {
+		t.Fatalf("lock the session: %v", err)
+	}
+	deleted := make(chan error, 1)
+	go func() { deleted <- store.Delete("idle") }()
+	time.Sleep(300 * time.Millisecond)
+	if _, err := reservation.ExecContext(ctx,
+		`INSERT INTO session_note_reservations (session_id, note_key, reserved_at) VALUES ('idle', 'chapter-1', $1)`,
+		time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if err := reservation.Commit(); err != nil {
+		t.Fatalf("commit reservation: %v", err)
+	}
+	if err := <-deleted; err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if _, err := store.Get("idle"); !errors.Is(err, state.ErrSessionNotFound) {
+		t.Errorf("Get after Delete = %v, want not found", err)
+	}
+	if n := countNoteReservations(t, db, "idle"); n != 0 {
+		t.Errorf("reservations = %d, want none left behind the deleted session", n)
 	}
 }
 
