@@ -92,9 +92,8 @@ func withoutProtocol(s string) string {
 // never run, and is not read either. A block never closed is no spoken version:
 // its text is shown instead. A closed protocol block is kept as it is, a spoken
 // block in it too: the parser reads it, the shown text drops it, nothing of it
-// is read. After a protocol tag that is never closed (a self-closing <invoke/>
-// is one) spoken blocks still go from rest, but none is read: the shown text
-// drops what follows such a tag. An unpaired closing marker goes. shown is rest
+// is read. After a protocol tag that is never closed spoken blocks still go
+// from rest, but none is read: the shown text drops what follows such a tag. An unpaired closing marker goes. shown is rest
 // plus an unclosed block's text, or the spoken version when both are empty.
 //
 // The parser also runs a response that is one {"tool": ...} object without any
@@ -161,8 +160,14 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 }
 
 // protocolBlockEnd is where the protocol block that opens at at with open ends,
-// after its closing tag; -1 when it is never closed.
+// after its closing tag; -1 when it is never closed. An <invoke> whose opening
+// tag ends in "/>" is a whole block, as the parser reads it (extractInvokeBody).
 func protocolBlockEnd(s string, at int, open, closing string) int {
+	if open == "<invoke" {
+		if gt := strings.Index(s[at:], ">"); gt > 0 && s[at+gt-1] == '/' {
+			return at + gt + 1
+		}
+	}
 	j := strings.Index(s[at+len(open):], closing)
 	if j < 0 {
 		return -1

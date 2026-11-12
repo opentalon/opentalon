@@ -58,7 +58,10 @@ func TestSplitSpoken(t *testing.T) {
 		{"[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt.", "",
 			"[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt.", "[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt."},
 		{argWithMarkers, "", argWithMarkers, argWithMarkers},
-		{"<invoke name=\"q__a\"/><spoken>A</spoken>B", "", "<invoke name=\"q__a\"/>B", "<invoke name=\"q__a\"/>B"},
+		{"<invoke name=\"q__a\"/><spoken>A</spoken>B", "A", "<invoke name=\"q__a\"/>B", "<invoke name=\"q__a\"/>B"},
+		{"<invoke name=\"q__a\"/><spoken>A</spoken><invoke name=\"q__b\"></invoke>B", "A",
+			"<invoke name=\"q__a\"/><invoke name=\"q__b\"></invoke>B", "<invoke name=\"q__a\"/><invoke name=\"q__b\"></invoke>B"},
+		{"Hallo. <invoke name=\"q__a\"><spoken>A</spoken>", "", "Hallo. <invoke name=\"q__a\">", "Hallo. <invoke name=\"q__a\">"},
 		{"Hallo. [plugin_output]x <spoken>geheim</spoken>Danke.", "", "Hallo. [plugin_output]x Danke.", "Hallo. [plugin_output]x Danke."},
 	}
 	for _, c := range cases {
@@ -360,6 +363,8 @@ func TestWhatASpokenBlockHoldsIsNeverRunAsACall(t *testing.T) {
 		{"bare JSON", []string{`<spoken>{"tool":"p__lookup","args":{}}</spoken>`, "Fertig."}, ""},
 		{"unclosed bare JSON", []string{`<spoken>{"tool":"p__lookup","args":{}}`, "Fertig."}, ""},
 		{"after a self-closing invoke", []string{`<invoke name="q__noop"/><spoken>` + call + "</spoken>", "Fertig."}, "Fertig."},
+		{"between a self-closing and a closed invoke", []string{`<invoke name="q__noop"/><spoken>` + call + `</spoken><invoke name="q__noop"></invoke>`, "Fertig."}, "Fertig."},
+		{"an invoke in a spoken block after a self-closing one", []string{`<invoke name="q__noop"/><spoken><invoke name="p__lookup"></invoke></spoken>`, "Fertig."}, "Fertig."},
 		{"behind a marker in a call", []string{`<spoken>[tool_call]{"tool":"q__noop","args":{"t":"</spoken>"}}[/tool_call]` + call + "</spoken>Fertig.", "Fertig."}, "Fertig."},
 	} {
 		// A trailing answer lets a regression that runs the call end its turn.
