@@ -209,7 +209,8 @@ func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.Inboun
 // is stale, and runs the turn with msg when that claim is won: its claimant
 // died before the turn stored its input. One recovery per claim is scheduled
 // in this process, however many requests find it held; it looks again while
-// the claim is held by yet another run, and ends when the claim is settled.
+// the claim is held by yet another run or the store fails to answer, and ends
+// when the claim is settled or the process's context ends.
 // The timer lives in this process; a restart before it fires leaves the
 // recovery to the next identical request.
 func (o *openSessions) scheduleRecovery(ctx context.Context, key recoveryKey, msg pkg.InboundMessage, entityID string) {
@@ -231,12 +232,13 @@ func (o *openSessions) recoverWhenStale(ctx context.Context, key recoveryKey, ms
 		now := time.Now()
 		result, err := o.claim(key, now)
 		switch {
-		case err != nil:
-			o.forget(key)
-			logger.FromContext(ctx).Warn("recovery claim failed", "session", key.sessionID, "note_key", key.noteKey, "error", err)
-		case result == state.ClaimHeld:
-			// Yet another run took the claim meanwhile: look again once
-			// that claim is stale.
+		case err != nil || result == state.ClaimHeld:
+			// The store could not say, or yet another run took the claim
+			// meanwhile: look again later. The caller was told the turn is
+			// there, so a failed lookup must not end the recovery.
+			if err != nil {
+				logger.FromContext(ctx).Warn("recovery claim failed", "session", key.sessionID, "note_key", key.noteKey, "error", err)
+			}
 			o.recoverWhenStale(ctx, key, msg, entityID)
 		case result == state.ClaimWon:
 			o.forget(key)

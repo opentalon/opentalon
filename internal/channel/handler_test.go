@@ -1279,6 +1279,52 @@ func TestHandler_OpenSession_RecoversAnInterruptedNoteOnce(t *testing.T) {
 	}
 }
 
+// flakyNoteOpener fails reservation call number failAt, as a database that is
+// briefly unavailable.
+type flakyNoteOpener struct {
+	*state.SessionStore
+	calls  atomic.Int32
+	failAt int32
+}
+
+func (o *flakyNoteOpener) ReserveNote(id, key string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	if o.calls.Add(1) == o.failAt {
+		return state.ClaimHeld, errors.New("database unavailable")
+	}
+	return o.SessionStore.ReserveNote(id, key, now, staleAfter)
+}
+
+// TestHandler_OpenSession_RecoveryOutlivesAFailedClaim: a recovery whose claim
+// call fails looks again later instead of giving up, so a note acknowledged
+// while a dead attempt held its reservation still runs once.
+func TestHandler_OpenSession_RecoveryOutlivesAFailedClaim(t *testing.T) {
+	shortOpenerTiming(t)
+	op := &flakyNoteOpener{failAt: 2} // 1: the request's own reservation, 2: the first recovery
+	rec, h := newOpenHandler(welcomeProfile, func(cfg *HandlerConfig) {
+		op.SessionStore = cfg.Opener.(*state.SessionStore)
+		cfg.Opener = op
+	})
+	storeOpened(t, rec.store, openedSession, "u1")
+	if result, err := rec.store.ReserveNote(openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+		t.Fatalf("crashed attempt's reservation = %v, %v", result, err)
+	}
+	note := map[string]string{
+		pkg.OpenSessionIDMetadataKey: openedSession, pkg.NoteKeyMetadataKey: "chapter-2",
+		pkg.OpenedByMetadataKey: "", pkg.OpenKeyMetadataKey: "",
+	}
+
+	callOpen(h, "c8", note)
+	rec.waitForRuns(t, 1)
+	time.Sleep(pastRecovery())
+
+	if _, runs, _ := rec.snapshot(); len(runs) != 1 {
+		t.Errorf("note ran %d times, want 1", len(runs))
+	}
+	if n := countStored(t, rec.store, openedSession, openRequest("c8", note).Content); n != 1 {
+		t.Errorf("note stored %d times, want once", n)
+	}
+}
+
 // countingOpener counts the first-turn claims that reach the store.
 type countingOpener struct {
 	*state.SessionStore
