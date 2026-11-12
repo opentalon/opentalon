@@ -290,10 +290,12 @@ const ControlResumeHello = "resume_hello"
 // carries the correlation id: the turn's reply and its error frame reach the
 // session's conversation as every reply does.
 //
-// A request reaches only the user's sessions on the channel it arrives on: a
-// session the origin and key name, or a note's session, on another channel
-// answers not_found like a missing one. A channel with threads, or a request
-// in a thread, is refused with bad_request.
+// A request reaches only the sessions the store records for the user and the
+// channel it arrives on, which only sessions opened this way record: any other
+// note target, or the user's session for the origin and key on another
+// channel, answers not_found like a missing one. A channel with threads, a
+// request in a thread, or one whose channel id is not its channel's, is
+// refused with bad_request.
 const (
 	OpenSessionMetadataKey   = "open_session"
 	OpenedByMetadataKey      = "opened_by"

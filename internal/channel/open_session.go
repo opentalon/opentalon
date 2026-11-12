@@ -65,9 +65,17 @@ type recoveryKey struct{ sessionID, noteKey string }
 // verified entity on the channel it arrived on (see handle).
 type openScope struct{ entityID, channel string }
 
-// conversation returns the conversation of sessionID when it is a session in
-// the scope: the handler keys a conversation's session
-// "<entity>:<channel>:<conversation>".
+// reaches reports whether sess is in the scope: the store records it for the
+// scope's entity and channel. Its key proves neither, since an entity id and a
+// channel id may each hold a colon ("u1:ws:admin:c1" may be u1's on channel
+// ws:admin). Only a session the open path opened records a channel.
+func (s openScope) reaches(sess *state.Session) bool {
+	_, ok := s.conversation(sess.ID)
+	return ok && sess.EntityID == s.entityID && sess.ChannelID == s.channel
+}
+
+// conversation returns the conversation of sessionID, a session in the scope:
+// the handler keys a conversation's session "<entity>:<channel>:<conversation>".
 func (s openScope) conversation(sessionID string) (string, bool) {
 	conv, ok := strings.CutPrefix(sessionID, s.entityID+":"+s.channel+":")
 	return conv, ok && conv != ""
@@ -94,13 +102,15 @@ func (o *openSessions) handle(ctx context.Context, sessionKey string, msg pkg.In
 		return openRejected(msg, "An open-session request needs a request id and content.", "bad_request")
 	}
 	// A request reaches sessions on the channel it arrived on only, which its
-	// own key names. A session is addressed by its key, and a key reads
+	// own key names and its channel id must name alike: a session it opens
+	// records that id. A session is addressed by its key, and a key reads
 	// "<entity>:<channel>:<conversation>" only where no thread follows the
 	// conversation: a thread could not be told from the end of a conversation
 	// id holding a colon, so neither a channel with threads nor a request in
 	// a thread can open sessions.
 	channel, ok := strings.CutSuffix(strings.TrimPrefix(sessionKey, entityID+":"), ":"+msg.ConversationID)
-	if !ok || msg.ConversationID == "" || msg.ThreadID != "" || pkg.CapabilitiesFromContext(ctx).Threads {
+	if !ok || channel != msg.ChannelID || msg.ConversationID == "" || msg.ThreadID != "" ||
+		pkg.CapabilitiesFromContext(ctx).Threads {
 		return openRejected(msg, "This channel cannot open a session.", "bad_request")
 	}
 	scope := openScope{entityID: entityID, channel: channel}
@@ -124,13 +134,13 @@ func (o *openSessions) open(ctx context.Context, sessionKey string, msg pkg.Inbo
 	}
 	sess, created, err := o.cfg.Opener.OpenSession(state.SessionParams{
 		ID: sessionKey, EntityID: scope.entityID, GroupID: groupID,
-		OpenedBy: openedBy, OpenKey: openKey, ChannelID: msg.ChannelID,
+		OpenedBy: openedBy, OpenKey: openKey, ChannelID: scope.channel,
 	})
 	if err != nil {
 		logger.FromContext(ctx).Error("open session failed", "session", sessionKey, "opened_by", openedBy, "error", err)
 		return openRejected(msg, "Something went wrong opening the session. Please try again.", "internal_error")
 	}
-	if _, ok := scope.conversation(sess.ID); !ok {
+	if !scope.reaches(sess) {
 		// The user's session for this origin and key is on another channel.
 		return openRejected(msg, unavailable, "not_found")
 	}
@@ -161,18 +171,13 @@ func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessa
 	if noteKey == "" {
 		return openRejected(msg, "A note needs a note key.", "bad_request")
 	}
-	// Any other target answers like a missing session. The key names the
-	// channel, but only the store names the owner: an entity id may itself
-	// contain a colon ("u1" is a prefix of the keys of "u1:other").
-	if _, ok := scope.conversation(target); !ok {
-		return openRejected(msg, unavailable, "not_found")
-	}
 	sess, err := o.cfg.Opener.Get(target)
 	if err != nil && !errors.Is(err, state.ErrSessionNotFound) {
 		logger.FromContext(ctx).Error("note session lookup failed", "session", target, "error", err)
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
 	}
-	if err != nil || sess.EntityID != scope.entityID {
+	if err != nil || !scope.reaches(sess) {
+		// Gone, or another user's or channel's: alike to the caller.
 		return openRejected(msg, unavailable, "not_found")
 	}
 	now := time.Now()

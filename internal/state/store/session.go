@@ -99,11 +99,11 @@ func NewSessionStore(db *DB, maxMessages, maxIdleDays int) *SessionStore {
 // user their conversation expired" and "tell the user to retry".
 func (s *SessionStore) Get(id string) (*state.Session, error) {
 	d := s.db.Dialect()
-	var summary, title, activeModel, metadataJSON, createdAt, updatedAt, entityID, openedBy, openKey string
+	var summary, title, activeModel, metadataJSON, createdAt, updatedAt, entityID, openedBy, openKey, channelID string
 	err := s.db.SQLDB().QueryRow(
-		d.Rebind(`SELECT COALESCE(summary,''), COALESCE(title,''), active_model, metadata, created_at, updated_at, COALESCE(entity_id,''), COALESCE(opened_by,''), COALESCE(open_key,'') FROM sessions WHERE id = ?`),
+		d.Rebind(`SELECT COALESCE(summary,''), COALESCE(title,''), active_model, metadata, created_at, updated_at, COALESCE(entity_id,''), COALESCE(opened_by,''), COALESCE(open_key,''), COALESCE(channel_id,'') FROM sessions WHERE id = ?`),
 		id,
-	).Scan(&summary, &title, &activeModel, &metadataJSON, &createdAt, &updatedAt, &entityID, &openedBy, &openKey)
+	).Scan(&summary, &title, &activeModel, &metadataJSON, &createdAt, &updatedAt, &entityID, &openedBy, &openKey, &channelID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("session %q: %w", id, state.ErrSessionNotFound)
@@ -132,6 +132,7 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 		EntityID:    entityID,
 		OpenedBy:    openedBy,
 		OpenKey:     openKey,
+		ChannelID:   channelID,
 		CreatedAt:   ca,
 		UpdatedAt:   ua,
 	}, nil
@@ -228,6 +229,7 @@ func (s *SessionStore) OpenSession(p state.SessionParams) (*state.Session, bool,
 			EntityID:  p.EntityID,
 			OpenedBy:  p.OpenedBy,
 			OpenKey:   p.OpenKey,
+			ChannelID: p.ChannelID,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}, true, nil

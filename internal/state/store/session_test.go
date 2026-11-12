@@ -741,21 +741,25 @@ type ownerStore interface {
 }
 
 // checkSessionOwner: a session keeps the entity it was created or opened for,
-// whatever its key looks like, and Get returns it; that owner, not a prefix of
-// the key, authorises a note into the session.
+// and an opened session the channel it was opened on, whatever its key looks
+// like, and Get returns them; they, not a prefix of the key, authorise a note
+// into the session.
 func checkSessionOwner(t *testing.T, store ownerStore) {
 	t.Helper()
 	store.Create(state.SessionParams{ID: "u1:other:websocket:c1", EntityID: "u1:other"})
-	if _, _, err := store.OpenSession(state.SessionParams{ID: "u1:websocket:c1", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-owner"}); err != nil {
-		t.Fatalf("OpenSession: %v", err)
+	opened := state.SessionParams{ID: "u1:ws:admin:c1", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-owner", ChannelID: "ws:admin"}
+	for range 2 {
+		if sess, _, err := store.OpenSession(opened); err != nil || sess.ChannelID != "ws:admin" {
+			t.Fatalf("OpenSession = %+v, %v; want channel ws:admin", sess, err)
+		}
 	}
-	for id, want := range map[string]string{"u1:other:websocket:c1": "u1:other", "u1:websocket:c1": "u1"} {
+	for id, want := range map[string][2]string{"u1:other:websocket:c1": {"u1:other", ""}, "u1:ws:admin:c1": {"u1", "ws:admin"}} {
 		sess, err := store.Get(id)
 		if err != nil {
 			t.Fatalf("Get(%s): %v", id, err)
 		}
-		if sess.EntityID != want {
-			t.Errorf("Get(%s).EntityID = %q, want %q", id, sess.EntityID, want)
+		if sess.EntityID != want[0] || sess.ChannelID != want[1] {
+			t.Errorf("Get(%s) owner/channel = %q/%q, want %q/%q", id, sess.EntityID, sess.ChannelID, want[0], want[1])
 		}
 	}
 }

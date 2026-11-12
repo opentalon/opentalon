@@ -27,9 +27,10 @@ type Session struct {
 	Title       string             `yaml:"title,omitempty"`   // short LLM-generated label; empty until maybeGenerateTitle has run
 	ActiveModel provider.ModelRef  `yaml:"active_model,omitempty"`
 	Metadata    map[string]string  `yaml:"metadata,omitempty"`
-	EntityID    string             `yaml:"entity_id,omitempty"` // the owner the session was created for (SessionParams.EntityID); empty without a profile
-	OpenedBy    string             `yaml:"opened_by,omitempty"` // origin of a session a server opened (OpenSession); empty otherwise
-	OpenKey     string             `yaml:"open_key,omitempty"`  // the opener's idempotency key; empty otherwise
+	EntityID    string             `yaml:"entity_id,omitempty"`  // the owner the session was created for (SessionParams.EntityID); empty without a profile
+	OpenedBy    string             `yaml:"opened_by,omitempty"`  // origin of a session a server opened (OpenSession); empty otherwise
+	OpenKey     string             `yaml:"open_key,omitempty"`   // the opener's idempotency key; empty otherwise
+	ChannelID   string             `yaml:"channel_id,omitempty"` // the channel recorded for the session (SessionParams.ChannelID, read by OpenSession); empty when none is
 	CreatedAt   time.Time          `yaml:"created_at"`
 	UpdatedAt   time.Time          `yaml:"updated_at"`
 }
@@ -218,6 +219,7 @@ func (s *SessionStore) OpenSession(p SessionParams) (*Session, bool, error) {
 		EntityID:  p.EntityID,
 		OpenedBy:  p.OpenedBy,
 		OpenKey:   p.OpenKey,
+		ChannelID: p.ChannelID,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
