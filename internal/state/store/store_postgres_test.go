@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/provider"
@@ -80,6 +81,63 @@ func TestPostgres_SessionOwner(t *testing.T) {
 }
 func TestPostgres_NoteReservationsGoWithSession(t *testing.T) {
 	checkNoteReservationsGoWithSession(t, pgDB(t))
+}
+
+// TestPostgres_PruneKeepsASessionWrittenMeanwhile: an idle session that another
+// writer touches while the prune runs keeps its messages and note
+// reservations; it never survives without them, which would make a settled
+// note key claimable again.
+func TestPostgres_PruneKeepsASessionWrittenMeanwhile(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 1)
+	store.Create(state.SessionParams{ID: "idle", EntityID: "u1"})
+	if err := store.AddMessage("idle", provider.Message{Role: provider.RoleUser, Content: "earlier"}); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+	if result, err := store.ReserveNote("idle", "chapter-1", time.Now(), time.Minute); err != nil || result != state.ClaimWon {
+		t.Fatalf("ReserveNote = %v, %v", result, err)
+	}
+	if _, err := db.SQLDB().Exec(`UPDATE sessions SET updated_at = $1 WHERE id = 'idle'`,
+		time.Now().AddDate(0, 0, -2).UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("age the session: %v", err)
+	}
+
+	// Another pod's writer holds the session's row, as AddMessage does, while
+	// the prune starts, then refreshes the session and commits.
+	ctx := context.Background()
+	writer, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin writer: %v", err)
+	}
+	defer func() { _ = writer.Rollback() }()
+	var one int
+	if err := writer.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = 'idle' FOR UPDATE`).Scan(&one); err != nil {
+		t.Fatalf("lock the session: %v", err)
+	}
+	pruned := make(chan error, 1)
+	go func() { pruned <- store.PruneIdleSessions() }()
+	time.Sleep(300 * time.Millisecond)
+	if _, err := writer.ExecContext(ctx, `UPDATE sessions SET updated_at = $1 WHERE id = 'idle'`,
+		time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("refresh the session: %v", err)
+	}
+	if err := writer.Commit(); err != nil {
+		t.Fatalf("commit writer: %v", err)
+	}
+	if err := <-pruned; err != nil {
+		t.Fatalf("PruneIdleSessions: %v", err)
+	}
+
+	sess, err := store.Get("idle")
+	if err != nil {
+		t.Fatalf("the refreshed session was pruned: %v", err)
+	}
+	if len(sess.Messages) != 1 {
+		t.Errorf("messages = %d, want 1: the session survived without its history", len(sess.Messages))
+	}
+	if n := countNoteReservations(t, db, "idle"); n != 1 {
+		t.Errorf("reservations = %d, want 1: the session survived without its note keys", n)
+	}
 }
 
 func TestPostgres_AddMessageConcurrent(t *testing.T) {

@@ -731,18 +731,41 @@ func (s *SessionStore) Delete(id string) error {
 	return err
 }
 
-// PruneIdleSessions deletes sessions not updated in the last maxIdleDays days.
+// PruneIdleSessions deletes sessions not updated in the last maxIdleDays days,
+// with their messages and note reservations, in one transaction. The idle
+// sessions' rows are locked first (on SQLite the transaction holds the write
+// lock), so a writer that touches one of them meanwhile either commits first,
+// and the session is no longer idle, or waits until it is gone: a session
+// never survives without its history and its settled note keys.
 func (s *SessionStore) PruneIdleSessions() error {
 	if s.maxIdleDays <= 0 {
 		return nil
 	}
+	ctx := context.Background()
 	d := s.db.Dialect()
 	cutoff := time.Now().AddDate(0, 0, -s.maxIdleDays).UTC().Format(time.RFC3339)
-	// Delete messages and note reservations for pruned sessions.
-	_, _ = s.db.SQLDB().Exec(d.Rebind(`DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?)`), cutoff)
-	_, _ = s.db.SQLDB().Exec(d.Rebind(`DELETE FROM session_note_reservations WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?)`), cutoff)
-	_, err := s.db.SQLDB().Exec(d.Rebind(`DELETE FROM sessions WHERE updated_at < ?`), cutoff)
-	return err
+	tx, cleanup, err := d.BeginExclusive(ctx, s.db.SQLDB())
+	if err != nil {
+		return fmt.Errorf("prune begin: %w", err)
+	}
+	defer cleanup()
+	defer func() { _ = tx.Rollback() }()
+	var idle int
+	if err := tx.QueryRowContext(ctx,
+		d.Rebind(`SELECT COUNT(*) FROM (SELECT id FROM sessions WHERE updated_at < ?`+d.ForUpdate()+`) idle`),
+		cutoff).Scan(&idle); err != nil {
+		return fmt.Errorf("prune lock: %w", err)
+	}
+	for _, q := range []string{
+		`DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?)`,
+		`DELETE FROM session_note_reservations WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?)`,
+		`DELETE FROM sessions WHERE updated_at < ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, d.Rebind(q), cutoff); err != nil {
+			return fmt.Errorf("prune: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // loadMessages reads all messages for a session from the messages table, ordered by seq.
