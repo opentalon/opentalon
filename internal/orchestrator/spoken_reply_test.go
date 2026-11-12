@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/pipeline"
@@ -207,6 +208,62 @@ func TestSpokenTurnSendsAndStoresTheSpokenVersionApart(t *testing.T) {
 	}
 	if got := rec.last(provider.RoleUser).meta[InputMetadataKey]; got != InputVoice {
 		t.Errorf("stored user turn input = %q, want voice", got)
+	}
+}
+
+// A spoken turn that runs under a claim (the first turn of an opened session,
+// or a keyed note) stores its input with the claim and the voice mark
+// together: the claim is settled, so a stale claim is never taken again, and
+// the stored turn says the person spoke it.
+func TestSpokenClaimedTurnStoresItsInputUnderItsClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim state.TurnClaim
+	}{
+		{"first turn", state.TurnClaim{}},
+		{"keyed note", state.TurnClaim{NoteKey: "chapter-2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sessions := state.NewSessionStore("")
+			if _, _, err := sessions.OpenSession(context.Background(), state.SessionParams{ID: "s1", EntityID: "u1", OpenedBy: "origin", OpenKey: "event-1"}); err != nil {
+				t.Fatalf("OpenSession: %v", err)
+			}
+			now := time.Now()
+			if result, err := sessions.ClaimOpener(context.Background(), "s1", now, time.Minute); err != nil || result != state.ClaimWon {
+				t.Fatalf("ClaimOpener = %v, %v", result, err)
+			}
+			if result, err := sessions.ReserveNote(context.Background(), "s1", "chapter-2", now, time.Minute); err != nil || result != state.ClaimWon {
+				t.Fatalf("ReserveNote = %v, %v", result, err)
+			}
+			orch := NewWithRules(&fakeLLM{responses: []string{"<spoken>Notiert.</spoken>\nNotiert."}},
+				&fakeParser{parseFn: func(string) []ToolCall { return nil }},
+				NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
+			rec := &metadataRecorder{SessionStoreInterface: orch.sessions}
+			orch.sessions = rec
+
+			claim := tc.claim
+			claim.At = now
+			ctx := WithTurnClaim(actor.WithSpokenReply(actor.WithVisibility(context.Background(), provider.VisibilityHidden)), claim)
+			if _, err := orch.Run(ctx, "s1", "[context] chapter two was caught up"); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if got := rec.last(provider.RoleUser).meta[InputMetadataKey]; got != InputVoice {
+				t.Errorf("stored input = %q, want voice", got)
+			}
+			later := now.Add(time.Hour)
+			retake := func() (state.ClaimResult, error) {
+				return sessions.ClaimOpener(context.Background(), "s1", later, time.Minute)
+			}
+			if claim.NoteKey != "" {
+				retake = func() (state.ClaimResult, error) {
+					return sessions.ReserveNote(context.Background(), "s1", claim.NoteKey, later, time.Minute)
+				}
+			}
+			if result, err := retake(); err != nil || result == state.ClaimWon {
+				t.Errorf("stale claim taken again = %v, %v; want it settled by the stored input", result, err)
+			}
+		})
 	}
 }
 
