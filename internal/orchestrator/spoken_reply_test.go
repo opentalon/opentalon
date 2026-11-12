@@ -201,17 +201,17 @@ func TestAToolCallingResponseHandsNoSpokenVersionOn(t *testing.T) {
 	parser := &fakeParser{parseFn: func(response string) []ToolCall {
 		parsed = append(parsed, response)
 		if len(parsed) == 1 {
-			return []ToolCall{{ID: "1", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{"repo": "timly"}, FromLLM: true}}
+			return []ToolCall{{ID: "1", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{"repo": "myrepo"}, FromLLM: true}}
 		}
 		return nil
 	}}
 	llm := &fakeLLM{responses: []string{
 		"<spoken>Ich sehe nach.</spoken>[tool_call] gitlab__analyze_code",
-		"<spoken>Keine Fehler gefunden.</spoken>Keine Fehler in timly.",
+		"<spoken>Keine Fehler gefunden.</spoken>Keine Fehler in myrepo.",
 	}}
 	orch, sessionID := setupOrchestrator(llm, parser)
 
-	result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Prüf timly")
+	result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Prüf myrepo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestAToolCallingResponseHandsNoSpokenVersionOn(t *testing.T) {
 			t.Errorf("stored %s message carries a spoken version: %q", m.Role, m.Content)
 		}
 	}
-	if result.Response != "Keine Fehler in timly." || result.Metadata[SpokenMetadataKey] != "Keine Fehler gefunden." {
+	if result.Response != "Keine Fehler in myrepo." || result.Metadata[SpokenMetadataKey] != "Keine Fehler gefunden." {
 		t.Errorf("reply = %q, spoken = %q", result.Response, result.Metadata[SpokenMetadataKey])
 	}
 }
