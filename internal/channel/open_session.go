@@ -25,9 +25,9 @@ import (
 // authorised by. Both session stores implement it.
 type SessionOpener interface {
 	Get(id string) (*state.Session, error)
-	OpenSession(p state.SessionParams) (*state.Session, bool, error)
-	ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
-	ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
+	OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error)
+	ClaimOpener(ctx context.Context, sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
+	ReserveNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
 }
 
 // A server-opened turn is claimed before it runs (ClaimOpener, ReserveNote),
@@ -158,10 +158,12 @@ func (o *openSessions) open(ctx context.Context, sessionKey string, msg pkg.Inbo
 	if openedBy == "" || openKey == "" {
 		return openRejected(msg, "An open-session request needs an origin and a key.", "bad_request")
 	}
-	sess, _, err := o.cfg.Opener.OpenSession(state.SessionParams{
+	openCtx, cancel := o.storeContext(ctx)
+	sess, _, err := o.cfg.Opener.OpenSession(openCtx, state.SessionParams{
 		ID: sessionKey, EntityID: scope.entityID, GroupID: groupID,
 		OpenedBy: openedBy, OpenKey: openKey, ChannelID: scope.channel,
 	})
+	cancel()
 	if err != nil {
 		logger.FromContext(ctx).Error("open session failed", "session", sessionKey, "opened_by", openedBy, "error", err)
 		return openRejected(msg, "Something went wrong opening the session. Please try again.", "internal_error")
@@ -202,7 +204,7 @@ func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessa
 // retry with the same key.
 func (o *openSessions) claimAndRun(ctx context.Context, msg pkg.InboundMessage, scope openScope, key recoveryKey) pkg.OutboundMessage {
 	now := time.Now()
-	result, err := o.claim(key, now)
+	result, err := o.claim(ctx, key, now)
 	if err != nil {
 		logger.FromContext(ctx).Error("open session claim failed", "session", key.sessionID, "note_key", key.noteKey, "error", err)
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
@@ -286,7 +288,7 @@ func (o *openSessions) recoverWhenStale(ctx context.Context, key recoveryKey, ms
 			return
 		}
 		now := time.Now()
-		result, err := o.claim(key, now)
+		result, err := o.claim(ctx, key, now)
 		switch {
 		case err != nil || result == state.ClaimHeld:
 			// The store could not say, or yet another run took the claim
@@ -314,11 +316,22 @@ func (o *openSessions) forget(key recoveryKey) {
 }
 
 // claim takes key's claim at now: the first turn's or the note's.
-func (o *openSessions) claim(key recoveryKey, now time.Time) (state.ClaimResult, error) {
+func (o *openSessions) claim(ctx context.Context, key recoveryKey, now time.Time) (state.ClaimResult, error) {
+	ctx, cancel := o.storeContext(ctx)
+	defer cancel()
 	if key.noteKey == "" {
-		return o.cfg.Opener.ClaimOpener(key.sessionID, now, o.staleAfter)
+		return o.cfg.Opener.ClaimOpener(ctx, key.sessionID, now, o.staleAfter)
 	}
-	return o.cfg.Opener.ReserveNote(key.sessionID, key.noteKey, now, o.staleAfter)
+	return o.cfg.Opener.ReserveNote(ctx, key.sessionID, key.noteKey, now, o.staleAfter)
+}
+
+// storeContext bounds a store call of the open path that may wait for another
+// transaction: an open for a concurrent insert of its key, a claim for its
+// session's row. The call waits no longer than the turn it is for may run, and
+// not past ctx, so neither another transaction nor a shutdown keeps it and its
+// database connection.
+func (o *openSessions) storeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, o.timeout)
 }
 
 // openRejected refuses the open attempt msg with a typed error frame.

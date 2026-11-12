@@ -95,7 +95,7 @@ func TestPostgres_PruneKeepsASessionWrittenMeanwhile(t *testing.T) {
 	if err := store.AddMessage("idle", provider.Message{Role: provider.RoleUser, Content: "earlier"}); err != nil {
 		t.Fatalf("AddMessage: %v", err)
 	}
-	if result, err := store.ReserveNote("idle", "chapter-1", time.Now(), time.Minute); err != nil || result != state.ClaimWon {
+	if result, err := store.ReserveNote(context.Background(), "idle", "chapter-1", time.Now(), time.Minute); err != nil || result != state.ClaimWon {
 		t.Fatalf("ReserveNote = %v, %v", result, err)
 	}
 	if _, err := db.SQLDB().Exec(`UPDATE sessions SET updated_at = $1 WHERE id = 'idle'`,
@@ -168,7 +168,7 @@ func TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept(t *testing.T) {
 	}
 	done := make(chan reserved, 1)
 	go func() {
-		result, err := store.ReserveNote("idle", "chapter-1", time.Now(), time.Minute)
+		result, err := store.ReserveNote(context.Background(), "idle", "chapter-1", time.Now(), time.Minute)
 		done <- reserved{result, err}
 	}()
 	time.Sleep(300 * time.Millisecond)
@@ -231,6 +231,89 @@ func TestPostgres_NoteReservedWhileItsSessionIsDeletedGoesWithIt(t *testing.T) {
 	}
 	if n := countNoteReservations(t, db, "idle"); n != 0 {
 		t.Errorf("reservations = %d, want none left behind the deleted session", n)
+	}
+}
+
+// TestPostgres_ClaimWaitEndsWithItsContext: a claim waits for its session's
+// row while another transaction holds it, and gives up when its context ends,
+// with an error and its database connection returned to the pool.
+func TestPostgres_ClaimWaitEndsWithItsContext(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 0)
+	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "held", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-1"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	ctx := context.Background()
+	holder, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	var one int
+	if err := holder.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = 'held' FOR UPDATE`).Scan(&one); err != nil {
+		t.Fatalf("lock the session: %v", err)
+	}
+	inUse := db.SQLDB().Stats().InUse
+
+	for _, tc := range []struct {
+		name  string
+		claim func(context.Context) (state.ClaimResult, error)
+	}{
+		{"first turn", func(ctx context.Context) (state.ClaimResult, error) {
+			return store.ClaimOpener(ctx, "held", time.Now(), time.Minute)
+		}},
+		{"note", func(ctx context.Context) (state.ClaimResult, error) {
+			return store.ReserveNote(ctx, "held", "chapter-1", time.Now(), time.Minute)
+		}},
+	} {
+		claimCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		start := time.Now()
+		result, err := tc.claim(claimCtx)
+		cancel()
+		if err == nil || result == state.ClaimWon {
+			t.Errorf("%s: claim = %v, %v; want an error once its context ended", tc.name, result, err)
+		}
+		if waited := time.Since(start); waited > 5*time.Second {
+			t.Errorf("%s: claim returned after %v, want soon after its context ended", tc.name, waited)
+		}
+		if n := db.SQLDB().Stats().InUse; n != inUse {
+			t.Errorf("%s: connections in use = %d, want %d", tc.name, n, inUse)
+		}
+	}
+}
+
+// TestPostgres_OpenWaitEndsWithItsContext: an open waits for another
+// transaction's uncommitted insert of the same key, and gives up when its
+// context ends, with an error and its database connection returned to the
+// pool.
+func TestPostgres_OpenWaitEndsWithItsContext(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 0)
+	ctx := context.Background()
+	holder, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.ExecContext(ctx, `INSERT INTO sessions (id, summary, active_model, metadata, entity_id, opened_by, open_key, created_at, updated_at)
+		VALUES ('first', '', '', '{}', 'u1', 'origin-a', 'event-1', $1, $1)`, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert the key's session: %v", err)
+	}
+	inUse := db.SQLDB().Stats().InUse
+
+	openCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	start := time.Now()
+	sess, _, err := store.OpenSession(openCtx, state.SessionParams{ID: "second", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-1"})
+	cancel()
+
+	if err == nil || sess != nil {
+		t.Errorf("OpenSession = %+v, %v; want an error once its context ended", sess, err)
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Errorf("OpenSession returned after %v, want soon after its context ended", waited)
+	}
+	if n := db.SQLDB().Stats().InUse; n != inUse {
+		t.Errorf("connections in use = %d, want %d", n, inUse)
 	}
 }
 

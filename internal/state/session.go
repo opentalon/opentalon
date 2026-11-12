@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -197,7 +198,7 @@ func (s *SessionStore) Create(p SessionParams) *Session {
 // (see store/session.go OpenSession): the first call for an entity, origin and
 // key creates the session and answers created=true; every later call answers
 // the stored session with created=false, whatever id it minted.
-func (s *SessionStore) OpenSession(p SessionParams) (*Session, bool, error) {
+func (s *SessionStore) OpenSession(_ context.Context, p SessionParams) (*Session, bool, error) {
 	if p.OpenedBy == "" || p.OpenKey == "" {
 		return nil, false, ErrOpenParams
 	}
@@ -232,7 +233,7 @@ func (s *SessionStore) OpenSession(p SessionParams) (*Session, bool, error) {
 // session has none, or when its claim is older than staleAfter and the first
 // turn's input was not stored under it. A fresh claim is held, a stored one
 // settled; an unknown session is settled, never won.
-func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (ClaimResult, error) {
+func (s *SessionStore) ClaimOpener(_ context.Context, sessionID string, now time.Time, staleAfter time.Duration) (ClaimResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -246,7 +247,7 @@ func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter t
 // for a session and key wins, a fresh reservation is held, and a stale one is
 // won again only while the note was not stored under it; a stored one, and an
 // unknown session, is settled.
-func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (ClaimResult, error) {
+func (s *SessionStore) ReserveNote(_ context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (ClaimResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

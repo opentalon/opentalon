@@ -136,17 +136,17 @@ func TestRun_StoresAClaimedTurnUnderItsClaim(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sessions := state.NewSessionStore("")
-			if _, _, err := sessions.OpenSession(state.SessionParams{ID: "s1", EntityID: "u1", OpenedBy: "origin", OpenKey: "event-1"}); err != nil {
+			if _, _, err := sessions.OpenSession(context.Background(), state.SessionParams{ID: "s1", EntityID: "u1", OpenedBy: "origin", OpenKey: "event-1"}); err != nil {
 				t.Fatalf("OpenSession: %v", err)
 			}
 			orch := NewWithRules(&fakeLLM{responses: []string{"Noted."}},
 				&fakeParser{parseFn: func(string) []ToolCall { return nil }},
 				NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
 			now := time.Now()
-			if result, err := sessions.ClaimOpener("s1", now, time.Minute); err != nil || result != state.ClaimWon {
+			if result, err := sessions.ClaimOpener(context.Background(), "s1", now, time.Minute); err != nil || result != state.ClaimWon {
 				t.Fatalf("ClaimOpener = %v, %v", result, err)
 			}
-			if result, err := sessions.ReserveNote("s1", "chapter-2", now, time.Minute); err != nil || result != state.ClaimWon {
+			if result, err := sessions.ReserveNote(context.Background(), "s1", "chapter-2", now, time.Minute); err != nil || result != state.ClaimWon {
 				t.Fatalf("ReserveNote = %v, %v", result, err)
 			}
 
@@ -161,11 +161,11 @@ func TestRun_StoresAClaimedTurnUnderItsClaim(t *testing.T) {
 			}
 
 			later := now.Add(time.Hour)
-			opener, err := sessions.ClaimOpener("s1", later, time.Minute)
+			opener, err := sessions.ClaimOpener(context.Background(), "s1", later, time.Minute)
 			if err != nil || (opener == state.ClaimWon) != (tc.settled != "opener") {
 				t.Errorf("stale opener claim taken again = %v (%v), want won %v", opener, err, tc.settled != "opener")
 			}
-			note, err := sessions.ReserveNote("s1", "chapter-2", later, time.Minute)
+			note, err := sessions.ReserveNote(context.Background(), "s1", "chapter-2", later, time.Minute)
 			if err != nil || (note == state.ClaimWon) != (tc.settled != "note") {
 				t.Errorf("stale note reservation taken again = %v (%v), want won %v", note, err, tc.settled != "note")
 			}
@@ -178,7 +178,7 @@ func TestRun_StoresAClaimedTurnUnderItsClaim(t *testing.T) {
 // nothing and never reaches the model, so the turn runs once.
 func TestRun_ClaimTakenOverStopsTheTurn(t *testing.T) {
 	sessions := state.NewSessionStore("")
-	if _, _, err := sessions.OpenSession(state.SessionParams{ID: "s1", EntityID: "u1", OpenedBy: "origin", OpenKey: "event-1"}); err != nil {
+	if _, _, err := sessions.OpenSession(context.Background(), state.SessionParams{ID: "s1", EntityID: "u1", OpenedBy: "origin", OpenKey: "event-1"}); err != nil {
 		t.Fatalf("OpenSession: %v", err)
 	}
 	llm := &promptRecordingLLM{fakeLLM: fakeLLM{responses: []string{"Hello."}}}
@@ -186,7 +186,7 @@ func TestRun_ClaimTakenOverStopsTheTurn(t *testing.T) {
 		NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
 	lost := time.Now()
 	for _, at := range []time.Time{lost, lost.Add(2 * time.Minute)} {
-		if result, err := sessions.ClaimOpener("s1", at, time.Minute); err != nil || result != state.ClaimWon {
+		if result, err := sessions.ClaimOpener(context.Background(), "s1", at, time.Minute); err != nil || result != state.ClaimWon {
 			t.Fatalf("ClaimOpener(%v) = %v, %v", at, result, err)
 		}
 	}
@@ -254,14 +254,14 @@ func TestRun_QueuedTurnPastItsDeadlineStoresNothing(t *testing.T) {
 func claimedTurnFixture(t *testing.T, registry *ToolRegistry, opts OrchestratorOpts, responses ...string) (*Orchestrator, *state.SessionStore, time.Time) {
 	t.Helper()
 	sessions := state.NewSessionStore("")
-	if _, _, err := sessions.OpenSession(state.SessionParams{ID: "s1", EntityID: "u1", OpenedBy: "origin", OpenKey: "event-1"}); err != nil {
+	if _, _, err := sessions.OpenSession(context.Background(), state.SessionParams{ID: "s1", EntityID: "u1", OpenedBy: "origin", OpenKey: "event-1"}); err != nil {
 		t.Fatalf("OpenSession: %v", err)
 	}
 	now := time.Now()
-	if result, err := sessions.ClaimOpener("s1", now, time.Minute); err != nil || result != state.ClaimWon {
+	if result, err := sessions.ClaimOpener(context.Background(), "s1", now, time.Minute); err != nil || result != state.ClaimWon {
 		t.Fatalf("ClaimOpener = %v, %v", result, err)
 	}
-	if result, err := sessions.ReserveNote("s1", "chapter-2", now, time.Minute); err != nil || result != state.ClaimWon {
+	if result, err := sessions.ReserveNote(context.Background(), "s1", "chapter-2", now, time.Minute); err != nil || result != state.ClaimWon {
 		t.Fatalf("ReserveNote = %v, %v", result, err)
 	}
 	opts.PipelineEnabled = true
@@ -307,10 +307,12 @@ func TestRun_ClaimedTurnStoredBeforeASingleStepConfirmation(t *testing.T) {
 				t.Errorf("stored messages = %+v, want the input, then the confirmation prompt", sess.Messages)
 			}
 			later := now.Add(time.Hour)
-			reclaim := func() (state.ClaimResult, error) { return sessions.ClaimOpener("s1", later, time.Minute) }
+			reclaim := func() (state.ClaimResult, error) {
+				return sessions.ClaimOpener(context.Background(), "s1", later, time.Minute)
+			}
 			if claim.NoteKey != "" {
 				reclaim = func() (state.ClaimResult, error) {
-					return sessions.ReserveNote("s1", claim.NoteKey, later, time.Minute)
+					return sessions.ReserveNote(context.Background(), "s1", claim.NoteKey, later, time.Minute)
 				}
 			}
 			if again, err := reclaim(); err != nil || again != state.ClaimSettled {
@@ -329,7 +331,7 @@ func TestRun_ClaimTakenOverRunsNoPlannedTool(t *testing.T) {
 	orch, sessions, now := claimedTurnFixture(t, registry, OrchestratorOpts{},
 		`{"type":"pipeline","steps":[{"id":"1","name":"Analyze","plugin":"gitlab","action":"analyze_code"}]}`,
 		"Analyzed.")
-	if result, err := sessions.ReserveNote("s1", "chapter-2", now.Add(2*time.Minute), time.Minute); err != nil || result != state.ClaimWon {
+	if result, err := sessions.ReserveNote(context.Background(), "s1", "chapter-2", now.Add(2*time.Minute), time.Minute); err != nil || result != state.ClaimWon {
 		t.Fatalf("re-claim = %v, %v", result, err)
 	}
 
@@ -360,7 +362,7 @@ func TestRun_ClaimedTurnWithEmptyPreparedContentRunsNothing(t *testing.T) {
 				`{"type":"pipeline","steps":[{"id":"1","name":"Analyze","plugin":"gitlab","action":"analyze_code"}]}`,
 				"Analyzed.")
 			if tc.lost {
-				if result, err := sessions.ReserveNote("s1", "chapter-2", now.Add(2*time.Minute), time.Minute); err != nil || result != state.ClaimWon {
+				if result, err := sessions.ReserveNote(context.Background(), "s1", "chapter-2", now.Add(2*time.Minute), time.Minute); err != nil || result != state.ClaimWon {
 					t.Fatalf("re-claim = %v, %v", result, err)
 				}
 			}
@@ -422,10 +424,12 @@ func TestRun_ClaimedTurnStoredBeforeAPreparerInvokes(t *testing.T) {
 				t.Errorf("stored messages = %+v, want the input", sess.Messages)
 			}
 			later := now.Add(time.Hour)
-			reclaim := func() (state.ClaimResult, error) { return sessions.ClaimOpener("s1", later, time.Minute) }
+			reclaim := func() (state.ClaimResult, error) {
+				return sessions.ClaimOpener(context.Background(), "s1", later, time.Minute)
+			}
 			if claim.NoteKey != "" {
 				reclaim = func() (state.ClaimResult, error) {
-					return sessions.ReserveNote("s1", claim.NoteKey, later, time.Minute)
+					return sessions.ReserveNote(context.Background(), "s1", claim.NoteKey, later, time.Minute)
 				}
 			}
 			if again, err := reclaim(); err != nil || again != state.ClaimSettled {
@@ -440,7 +444,7 @@ func TestRun_ClaimTakenOverRunsNoPreparerInvoke(t *testing.T) {
 	exec := &countingExecutor{}
 	registry, opts := invokingPreparer(exec)
 	orch, sessions, now := claimedTurnFixture(t, registry, opts)
-	if result, err := sessions.ReserveNote("s1", "chapter-2", now.Add(2*time.Minute), time.Minute); err != nil || result != state.ClaimWon {
+	if result, err := sessions.ReserveNote(context.Background(), "s1", "chapter-2", now.Add(2*time.Minute), time.Minute); err != nil || result != state.ClaimWon {
 		t.Fatalf("re-claim = %v, %v", result, err)
 	}
 

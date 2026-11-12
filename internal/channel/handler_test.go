@@ -850,15 +850,15 @@ func (failingOpener) Get(string) (*state.Session, error) {
 	return nil, errors.New("database connection lost")
 }
 
-func (failingOpener) OpenSession(state.SessionParams) (*state.Session, bool, error) {
+func (failingOpener) OpenSession(context.Context, state.SessionParams) (*state.Session, bool, error) {
 	return nil, false, errors.New("database connection lost")
 }
 
-func (failingOpener) ClaimOpener(string, time.Time, time.Duration) (state.ClaimResult, error) {
+func (failingOpener) ClaimOpener(context.Context, string, time.Time, time.Duration) (state.ClaimResult, error) {
 	return state.ClaimHeld, errors.New("database connection lost")
 }
 
-func (failingOpener) ReserveNote(string, string, time.Time, time.Duration) (state.ClaimResult, error) {
+func (failingOpener) ReserveNote(context.Context, string, string, time.Time, time.Duration) (state.ClaimResult, error) {
 	return state.ClaimHeld, errors.New("database connection lost")
 }
 
@@ -921,7 +921,7 @@ func callOpen(h pkg.MessageHandler, conv string, set map[string]string) pkg.Outb
 func storeOpened(t *testing.T, store *state.SessionStore, id, entity string) {
 	t.Helper()
 	channel, _, _ := strings.Cut(strings.TrimPrefix(id, entity+":"), ":")
-	if _, created, err := store.OpenSession(state.SessionParams{
+	if _, created, err := store.OpenSession(context.Background(), state.SessionParams{
 		ID: id, EntityID: entity, OpenedBy: "welcome", OpenKey: "event-1", ChannelID: channel,
 	}); err != nil || !created {
 		t.Fatalf("OpenSession(%s) = created %v, %v", id, created, err)
@@ -1027,7 +1027,7 @@ func TestHandler_OpenSession_RecoversAnInterruptedFirstTurnOnce(t *testing.T) {
 			shortOpenerTiming(t)
 			rec, h := newOpenHandler(welcomeProfile)
 			storeOpened(t, rec.store, openedSession, "u1")
-			if result, err := rec.store.ClaimOpener(openedSession, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+			if result, err := rec.store.ClaimOpener(context.Background(), openedSession, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 				t.Fatalf("crashed attempt's claim = %v, %v", result, err)
 			}
 			if tc.stale {
@@ -1184,14 +1184,14 @@ type lateClaimOpener struct {
 	release chan struct{}
 }
 
-func (o *lateClaimOpener) ClaimOpener(id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+func (o *lateClaimOpener) ClaimOpener(ctx context.Context, id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	first := false
 	o.once.Do(func() { first = true })
 	if !first {
-		return o.SessionStore.ClaimOpener(id, now, staleAfter)
+		return o.SessionStore.ClaimOpener(ctx, id, now, staleAfter)
 	}
 	time.Sleep(2 * staleAfter)
-	result, err := o.SessionStore.ClaimOpener(id, now, staleAfter)
+	result, err := o.SessionStore.ClaimOpener(ctx, id, now, staleAfter)
 	close(o.claimed)
 	<-o.release
 	return result, err
@@ -1265,7 +1265,7 @@ func TestHandler_OpenSession_RecoversAnInterruptedNoteOnce(t *testing.T) {
 	shortOpenerTiming(t)
 	rec, h := newOpenHandler(welcomeProfile)
 	storeOpened(t, rec.store, openedSession, "u1")
-	if result, err := rec.store.ReserveNote(openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+	if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 		t.Fatalf("crashed attempt's reservation = %v, %v", result, err)
 	}
 	note := map[string]string{
@@ -1303,18 +1303,18 @@ type flakyOpener struct {
 	failAt int32
 }
 
-func (o *flakyOpener) ClaimOpener(id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+func (o *flakyOpener) ClaimOpener(ctx context.Context, id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	if o.calls.Add(1) == o.failAt {
 		return state.ClaimHeld, errors.New("database unavailable")
 	}
-	return o.SessionStore.ClaimOpener(id, now, staleAfter)
+	return o.SessionStore.ClaimOpener(ctx, id, now, staleAfter)
 }
 
-func (o *flakyOpener) ReserveNote(id, key string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+func (o *flakyOpener) ReserveNote(ctx context.Context, id, key string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	if o.calls.Add(1) == o.failAt {
 		return state.ClaimHeld, errors.New("database unavailable")
 	}
-	return o.SessionStore.ReserveNote(id, key, now, staleAfter)
+	return o.SessionStore.ReserveNote(ctx, id, key, now, staleAfter)
 }
 
 // TestHandler_OpenSession_FailedClaimIsRefusedThenRetried: an open whose
@@ -1349,6 +1349,84 @@ func TestHandler_OpenSession_FailedClaimIsRefusedThenRetried(t *testing.T) {
 	}
 }
 
+// stuckOpener's open (stuck "open") or first-turn claim (stuck "claim") waits
+// until its context ends, as an open waits for another transaction's insert of
+// its key and a claim for a session row another transaction holds, and
+// records whether that context carried a deadline.
+type stuckOpener struct {
+	*state.SessionStore
+	stuck    string
+	deadline atomic.Bool
+}
+
+func (o *stuckOpener) wait(ctx context.Context) error {
+	_, bounded := ctx.Deadline()
+	o.deadline.Store(bounded)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (o *stuckOpener) OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error) {
+	if o.stuck == "open" {
+		return nil, false, o.wait(ctx)
+	}
+	return o.SessionStore.OpenSession(ctx, p)
+}
+
+func (o *stuckOpener) ClaimOpener(ctx context.Context, id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	if o.stuck == "claim" {
+		return state.ClaimHeld, o.wait(ctx)
+	}
+	return o.SessionStore.ClaimOpener(ctx, id, now, staleAfter)
+}
+
+// TestHandler_OpenSession_StoreWaitIsBounded: an open or a claim that waits for
+// another transaction gives up once the turn timeout passed, or as soon as the
+// request's context ends; the attempt is refused with internal_error and
+// nothing is sent or run.
+func TestHandler_OpenSession_StoreWaitIsBounded(t *testing.T) {
+	shortOpenerTiming(t)
+	for _, tc := range []struct {
+		name, stuck string
+		cancel      bool
+	}{
+		{"open, turn timeout", "open", false},
+		{"open, request ends", "open", true},
+		{"claim, turn timeout", "claim", false},
+		{"claim, request ends", "claim", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			op := &stuckOpener{stuck: tc.stuck}
+			rec, h := newOpenHandler(welcomeProfile, func(cfg *HandlerConfig) {
+				op.SessionStore = cfg.Opener.(*state.SessionStore)
+				cfg.Opener = op
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancel {
+				time.AfterFunc(100*time.Millisecond, cancel)
+			}
+
+			start := time.Now()
+			out, _ := h(ctx, "websocket:c1", openRequest("c1", nil))
+			waited := time.Since(start)
+
+			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "internal_error" {
+				t.Errorf("answer = %+v, want open_rejected internal_error", out.Metadata)
+			}
+			if !op.deadline.Load() {
+				t.Errorf("the %s's context carries no deadline", tc.stuck)
+			}
+			if limit := openerTimeout + time.Second; tc.cancel && waited >= openerTimeout || waited > limit {
+				t.Errorf("the attempt returned after %v", waited)
+			}
+			if events, _, _ := rec.snapshot(); len(events) != 0 {
+				t.Errorf("events = %v, want nothing sent or run", events)
+			}
+		})
+	}
+}
+
 // TestHandler_OpenSession_RecoveryOutlivesAFailedClaim: a recovery whose claim
 // call fails looks again later instead of giving up, so a note acknowledged
 // while a dead attempt held its reservation still runs once.
@@ -1360,7 +1438,7 @@ func TestHandler_OpenSession_RecoveryOutlivesAFailedClaim(t *testing.T) {
 		cfg.Opener = op
 	})
 	storeOpened(t, rec.store, openedSession, "u1")
-	if result, err := rec.store.ReserveNote(openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+	if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 		t.Fatalf("crashed attempt's reservation = %v, %v", result, err)
 	}
 	note := map[string]string{
@@ -1386,9 +1464,9 @@ type countingOpener struct {
 	claims atomic.Int32
 }
 
-func (o *countingOpener) ClaimOpener(id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+func (o *countingOpener) ClaimOpener(ctx context.Context, id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	o.claims.Add(1)
-	return o.SessionStore.ClaimOpener(id, now, staleAfter)
+	return o.SessionStore.ClaimOpener(ctx, id, now, staleAfter)
 }
 
 // TestHandler_OpenSession_RecoveryOnlyForAHeldClaimAndOnce: duplicates of a
@@ -1415,7 +1493,7 @@ func TestHandler_OpenSession_RecoveryOnlyForAHeldClaimAndOnce(t *testing.T) {
 				callOpen(h, "c1", nil)
 			} else {
 				storeOpened(t, rec.store, openedSession, "u1")
-				if result, err := rec.store.ClaimOpener(openedSession, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				if result, err := rec.store.ClaimOpener(context.Background(), openedSession, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 					t.Fatalf("dead attempt's claim = %v, %v", result, err)
 				}
 			}
@@ -1505,7 +1583,7 @@ func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
 		{"u2:websocket:c1", "u2", "websocket"}, // another user's
 		{"u1:slack:c1", "u1", "slack"},         // u1's on another channel
 	} {
-		if _, created, err := rec.store.OpenSession(state.SessionParams{
+		if _, created, err := rec.store.OpenSession(context.Background(), state.SessionParams{
 			ID: s.id, EntityID: s.owner, OpenedBy: "welcome", OpenKey: s.id, ChannelID: s.channel,
 		}); err != nil || !created {
 			t.Fatalf("OpenSession(%s) = created %v, %v", s.id, created, err)
@@ -1531,7 +1609,7 @@ func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
 		if sess, _ := rec.store.Get(id); len(sess.Messages) != 0 {
 			t.Errorf("%s holds %+v, want nothing stored", id, sess.Messages)
 		}
-		if result, err := rec.store.ReserveNote(id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+		if result, err := rec.store.ReserveNote(context.Background(), id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 			t.Errorf("%s note reservation = %v, %v; want it still free", id, result, err)
 		}
 	}
@@ -1600,10 +1678,10 @@ func TestHandler_OpenSession_KeyPartsWithAColonAreRefused(t *testing.T) {
 				if sess, err := rec.store.Get(e.ID); err != nil || sess.OpenKey != "" || len(sess.Messages) != 0 {
 					t.Errorf("%s = %+v, %v; want it unopened and empty", e.ID, sess, err)
 				}
-				if result, err := rec.store.ClaimOpener(e.ID, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				if result, err := rec.store.ClaimOpener(context.Background(), e.ID, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 					t.Errorf("%s first-turn claim = %v, %v; want it still free", e.ID, result, err)
 				}
-				if result, err := rec.store.ReserveNote(e.ID, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				if result, err := rec.store.ReserveNote(context.Background(), e.ID, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 					t.Errorf("%s note reservation = %v, %v; want it still free", e.ID, result, err)
 				}
 			}
@@ -1649,10 +1727,10 @@ func TestHandler_OpenSession_KeyWithoutAnOwnerIsNeitherReachedNorTaken(t *testin
 			if sess, err := rec.store.Get(id); err != nil || sess.OpenKey != "" || sess.EntityID != tc.owner || len(sess.Messages) != 0 {
 				t.Errorf("%s = %+v, %v; want it as it was", id, sess, err)
 			}
-			if result, err := rec.store.ClaimOpener(id, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+			if result, err := rec.store.ClaimOpener(context.Background(), id, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 				t.Errorf("first-turn claim = %v, %v; want it still free", result, err)
 			}
-			if result, err := rec.store.ReserveNote(id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+			if result, err := rec.store.ReserveNote(context.Background(), id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 				t.Errorf("note reservation = %v, %v; want it still free", result, err)
 			}
 		})
@@ -1749,7 +1827,7 @@ func TestHandler_OpenSession_Rejections(t *testing.T) {
 			rec, h := newOpenHandler(tc.p, tc.override)
 			for id, p := range elsewhere {
 				p.ID, p.EntityID, p.OpenedBy = id, "u1", "welcome"
-				if _, _, err := rec.store.OpenSession(p); err != nil {
+				if _, _, err := rec.store.OpenSession(context.Background(), p); err != nil {
 					t.Fatalf("OpenSession(%s): %v", id, err)
 				}
 			}
@@ -1774,10 +1852,10 @@ func TestHandler_OpenSession_Rejections(t *testing.T) {
 				t.Errorf("events = %v, minted = %v, want nothing", events, rec.minted)
 			}
 			for id := range elsewhere {
-				if result, err := rec.store.ClaimOpener(id, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				if result, err := rec.store.ClaimOpener(context.Background(), id, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 					t.Errorf("%s first-turn claim = %v, %v; want it still free", id, result, err)
 				}
-				if result, err := rec.store.ReserveNote(id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				if result, err := rec.store.ReserveNote(context.Background(), id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 					t.Errorf("%s note reservation = %v, %v; want it still free", id, result, err)
 				}
 			}

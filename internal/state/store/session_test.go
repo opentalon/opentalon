@@ -367,7 +367,7 @@ func checkOpenSessionCreateOrFind(t *testing.T, db *DB) {
 	store := NewSessionStore(db, 0, 0)
 	first := state.SessionParams{ID: "open-1", EntityID: "user-1", GroupID: "group-1", ChannelID: "websocket", OpenedBy: "origin-a", OpenKey: "event-1"}
 
-	sess, created, err := store.OpenSession(first)
+	sess, created, err := store.OpenSession(context.Background(), first)
 	if err != nil || !created {
 		t.Fatalf("first OpenSession = (%v, created=%v, err=%v), want a created session", sess, created, err)
 	}
@@ -382,7 +382,7 @@ func checkOpenSessionCreateOrFind(t *testing.T, db *DB) {
 
 	again := first
 	again.ID, again.GroupID, again.ChannelID = "open-2", "group-2", "http"
-	found, created, err := store.OpenSession(again)
+	found, created, err := store.OpenSession(context.Background(), again)
 	if err != nil || created {
 		t.Fatalf("repeated OpenSession = (created=%v, err=%v), want found", created, err)
 	}
@@ -403,7 +403,7 @@ func checkOpenSessionCreateOrFind(t *testing.T, db *DB) {
 		{"another key", state.SessionParams{ID: "open-3", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-2"}},
 		{"another entity", state.SessionParams{ID: "open-4", EntityID: "user-2", OpenedBy: "origin-a", OpenKey: "event-1"}},
 	} {
-		sess, created, err := store.OpenSession(tc.p)
+		sess, created, err := store.OpenSession(context.Background(), tc.p)
 		if err != nil || !created || sess.ID != tc.p.ID {
 			t.Errorf("%s: OpenSession = (%v, created=%v, err=%v), want a new session %s", tc.name, sess, created, err, tc.p.ID)
 		}
@@ -427,7 +427,7 @@ func checkOpenSessionRefusals(t *testing.T, db *DB) {
 		{"no origin", state.SessionParams{ID: "x-2", EntityID: "user-1", OpenKey: "event-1"}, state.ErrOpenParams},
 		{"id of another session", state.SessionParams{ID: "taken", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-9"}, nil},
 	} {
-		sess, created, err := store.OpenSession(tc.p)
+		sess, created, err := store.OpenSession(context.Background(), tc.p)
 		if err == nil || sess != nil || created {
 			t.Errorf("%s: OpenSession = (%v, created=%v, err=%v), want an error and no session", tc.name, sess, created, err)
 		}
@@ -457,7 +457,7 @@ func checkOpenSessionConcurrent(t *testing.T, db *DB) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			sess, created, err := store.OpenSession(state.SessionParams{
+			sess, created, err := store.OpenSession(context.Background(), state.SessionParams{
 				ID: fmt.Sprintf("race-%d", i), EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-race",
 			})
 			results[i] = result{created: created, err: err}
@@ -495,9 +495,9 @@ func checkOpenSessionConcurrent(t *testing.T, db *DB) {
 // in-memory state.SessionStore both satisfy it, so one check pins both.
 type claimStore interface {
 	Get(id string) (*state.Session, error)
-	OpenSession(p state.SessionParams) (*state.Session, bool, error)
-	ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
-	ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
+	OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error)
+	ClaimOpener(ctx context.Context, sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
+	ReserveNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
 	AddMessage(id string, msg provider.Message) error
 	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
 	ClearMessages(id string) error
@@ -580,14 +580,14 @@ func storeStep(t *testing.T, step string, store claimStore, id string, msg provi
 // an unknown session is refused.
 func checkClaimOpener(t *testing.T, store claimStore) {
 	t.Helper()
-	sess, _, err := store.OpenSession(state.SessionParams{ID: "claim-1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-claim"})
+	sess, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "claim-1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-claim"})
 	if err != nil {
 		t.Fatalf("OpenSession: %v", err)
 	}
 	now := time.Now()
 	const stale = time.Minute
 	claimAt := func(id string, at time.Time) func() (state.ClaimResult, error) {
-		return func() (state.ClaimResult, error) { return store.ClaimOpener(id, at, stale) }
+		return func() (state.ClaimResult, error) { return store.ClaimOpener(context.Background(), id, at, stale) }
 	}
 
 	if winners := concurrentWinners(t, 8, claimAt(sess.ID, now)); winners != 1 {
@@ -626,14 +626,14 @@ func checkClaimOpener(t *testing.T, store claimStore) {
 func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	t.Helper()
 	for _, id := range []string{"note-s1", "note-s2"} {
-		if _, _, err := store.OpenSession(state.SessionParams{ID: id, EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-" + id}); err != nil {
+		if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: id, EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-" + id}); err != nil {
 			t.Fatalf("OpenSession %s: %v", id, err)
 		}
 	}
 	now := time.Now()
 	const stale = time.Minute
 	reserveAt := func(sid, key string, at time.Time) func() (state.ClaimResult, error) {
-		return func() (state.ClaimResult, error) { return store.ReserveNote(sid, key, at, stale) }
+		return func() (state.ClaimResult, error) { return store.ReserveNote(context.Background(), sid, key, at, stale) }
 	}
 
 	if winners := concurrentWinners(t, 8, reserveAt("note-s1", "chapter-1", now)); winners != 1 {
@@ -721,7 +721,7 @@ func checkNoteReservationsGoWithSession(t *testing.T, db *DB) {
 		}},
 	} {
 		store.Create(state.SessionParams{ID: tc.sid, EntityID: "user-1"})
-		if result, err := store.ReserveNote(tc.sid, "chapter-1", time.Now(), time.Minute); err != nil || result != state.ClaimWon {
+		if result, err := store.ReserveNote(context.Background(), tc.sid, "chapter-1", time.Now(), time.Minute); err != nil || result != state.ClaimWon {
 			t.Fatalf("%s: ReserveNote = (%v, %v), want reserved", tc.name, result, err)
 		}
 		if err := tc.remove(tc.sid); err != nil {
@@ -736,7 +736,7 @@ func checkNoteReservationsGoWithSession(t *testing.T, db *DB) {
 // ownerStore is what checkSessionOwner needs; both session stores satisfy it.
 type ownerStore interface {
 	Create(p state.SessionParams) *state.Session
-	OpenSession(p state.SessionParams) (*state.Session, bool, error)
+	OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error)
 	Get(id string) (*state.Session, error)
 }
 
@@ -749,7 +749,7 @@ func checkSessionOwner(t *testing.T, store ownerStore) {
 	store.Create(state.SessionParams{ID: "u1:other:websocket:c1", EntityID: "u1:other"})
 	opened := state.SessionParams{ID: "u1:ws:admin:c1", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-owner", ChannelID: "ws:admin"}
 	for range 2 {
-		if sess, _, err := store.OpenSession(opened); err != nil || sess.ChannelID != "ws:admin" {
+		if sess, _, err := store.OpenSession(context.Background(), opened); err != nil || sess.ChannelID != "ws:admin" {
 			t.Fatalf("OpenSession = %+v, %v; want channel ws:admin", sess, err)
 		}
 	}
@@ -808,13 +808,17 @@ func TestInMemorySessionStore_DeleteForgetsOpenedSession(t *testing.T) {
 	store := state.NewSessionStore("")
 	now := time.Now()
 	open := func(id, key string) (*state.Session, bool, error) {
-		return store.OpenSession(state.SessionParams{ID: id, EntityID: "user-1", OpenedBy: "origin-a", OpenKey: key})
+		return store.OpenSession(context.Background(), state.SessionParams{ID: id, EntityID: "user-1", OpenedBy: "origin-a", OpenKey: key})
 	}
 	if _, _, err := open("s", "key-a"); err != nil {
 		t.Fatalf("OpenSession key-a: %v", err)
 	}
-	claimStep(t, "first claim", state.ClaimWon, func() (state.ClaimResult, error) { return store.ClaimOpener("s", now, time.Minute) })
-	claimStep(t, "first reservation", state.ClaimWon, func() (state.ClaimResult, error) { return store.ReserveNote("s", "note-1", now, time.Minute) })
+	claimStep(t, "first claim", state.ClaimWon, func() (state.ClaimResult, error) {
+		return store.ClaimOpener(context.Background(), "s", now, time.Minute)
+	})
+	claimStep(t, "first reservation", state.ClaimWon, func() (state.ClaimResult, error) {
+		return store.ReserveNote(context.Background(), "s", "note-1", now, time.Minute)
+	})
 	if err := store.Delete("s"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
@@ -822,8 +826,12 @@ func TestInMemorySessionStore_DeleteForgetsOpenedSession(t *testing.T) {
 	if _, created, err := open("s", "key-b"); err != nil || !created {
 		t.Fatalf("OpenSession key-b under the old id = (created=%v, err=%v), want created", created, err)
 	}
-	claimStep(t, "claim after delete", state.ClaimWon, func() (state.ClaimResult, error) { return store.ClaimOpener("s", now, time.Minute) })
-	claimStep(t, "reservation after delete", state.ClaimWon, func() (state.ClaimResult, error) { return store.ReserveNote("s", "note-1", now, time.Minute) })
+	claimStep(t, "claim after delete", state.ClaimWon, func() (state.ClaimResult, error) {
+		return store.ClaimOpener(context.Background(), "s", now, time.Minute)
+	})
+	claimStep(t, "reservation after delete", state.ClaimWon, func() (state.ClaimResult, error) {
+		return store.ReserveNote(context.Background(), "s", "note-1", now, time.Minute)
+	})
 	if sess, created, err := open("t", "key-a"); err != nil || !created || sess.ID != "t" {
 		t.Errorf("OpenSession key-a after delete = (%v, created=%v, err=%v), want a new session t", sess, created, err)
 	}
@@ -840,14 +848,16 @@ func TestSessionStore_PersistenceFailureIsAnError(t *testing.T) {
 	store := NewSessionStore(db, 0, 0)
 	_ = db.Close()
 
-	sess, created, err := store.OpenSession(state.SessionParams{ID: "down-1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-1"})
+	sess, created, err := store.OpenSession(context.Background(), state.SessionParams{ID: "down-1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-1"})
 	if err == nil || sess != nil || created {
 		t.Errorf("OpenSession on a closed DB = (%v, created=%v, err=%v), want an error and no session", sess, created, err)
 	}
 	for name, call := range map[string]func() (state.ClaimResult, error){
-		"ClaimOpener": func() (state.ClaimResult, error) { return store.ClaimOpener("down-1", time.Now(), time.Minute) },
+		"ClaimOpener": func() (state.ClaimResult, error) {
+			return store.ClaimOpener(context.Background(), "down-1", time.Now(), time.Minute)
+		},
 		"ReserveNote": func() (state.ClaimResult, error) {
-			return store.ReserveNote("down-1", "chapter-1", time.Now(), time.Minute)
+			return store.ReserveNote(context.Background(), "down-1", "chapter-1", time.Now(), time.Minute)
 		},
 	} {
 		if result, err := call(); err == nil || result == state.ClaimWon {
@@ -865,7 +875,7 @@ func TestSessionStore_OpenSessionFoundAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if _, created, err := NewSessionStore(db, 0, 0).OpenSession(p); err != nil || !created {
+	if _, created, err := NewSessionStore(db, 0, 0).OpenSession(context.Background(), p); err != nil || !created {
 		t.Fatalf("OpenSession before restart: created=%v err=%v", created, err)
 	}
 	_ = db.Close()
@@ -876,7 +886,7 @@ func TestSessionStore_OpenSessionFoundAfterRestart(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	p.ID = "after-restart"
-	sess, created, err := NewSessionStore(db, 0, 0).OpenSession(p)
+	sess, created, err := NewSessionStore(db, 0, 0).OpenSession(context.Background(), p)
 	if err != nil || created || sess.ID != "before-restart" {
 		t.Errorf("OpenSession after restart = (%v, created=%v, err=%v), want found before-restart", sess, created, err)
 	}

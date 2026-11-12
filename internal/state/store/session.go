@@ -202,15 +202,16 @@ func (s *SessionStore) Create(p state.SessionParams) *state.Session {
 // The INSERT is ON CONFLICT DO NOTHING against migration 018's unique index,
 // so the uniqueness is decided by the database in one statement: Postgres
 // makes a concurrent duplicate wait for the first insert's commit, SQLite
-// serialises writers. The lookup after a conflict reads the committed row.
-func (s *SessionStore) OpenSession(p state.SessionParams) (*state.Session, bool, error) {
+// serialises writers; ctx ends the wait. The lookup after a conflict reads the
+// committed row.
+func (s *SessionStore) OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error) {
 	if p.OpenedBy == "" || p.OpenKey == "" {
 		return nil, false, state.ErrOpenParams
 	}
 	d := s.db.Dialect()
 	now := time.Now().UTC()
 	ts := now.Format(time.RFC3339)
-	res, err := s.db.SQLDB().Exec(
+	res, err := s.db.SQLDB().ExecContext(ctx,
 		d.Rebind(`INSERT INTO sessions (id, summary, active_model, metadata, entity_id, group_id, channel_id, interaction_kind, opened_by, open_key, created_at, updated_at)
 		VALUES (?, '', '', '{}', ?, ?, ?, 'chat', ?, ?, ?, ?) ON CONFLICT DO NOTHING`),
 		p.ID, p.EntityID, p.GroupID, p.ChannelID, p.OpenedBy, p.OpenKey, ts, ts)
@@ -236,7 +237,7 @@ func (s *SessionStore) OpenSession(p state.SessionParams) (*state.Session, bool,
 	}
 
 	var existingID string
-	err = s.db.SQLDB().QueryRow(
+	err = s.db.SQLDB().QueryRowContext(ctx,
 		d.Rebind(`SELECT id FROM sessions WHERE entity_id = ? AND opened_by = ? AND open_key = ?`),
 		p.EntityID, p.OpenedBy, p.OpenKey,
 	).Scan(&existingID)
@@ -272,9 +273,9 @@ func (s *SessionStore) OpenSession(p state.SessionParams) (*state.Session, bool,
 //
 // On Postgres a second UPDATE waits for the first one's row lock and then
 // re-checks the WHERE against the claimed row, so it matches nothing; SQLite
-// serialises writers.
-func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
-	res, err := s.db.SQLDB().Exec(
+// serialises writers. ctx ends the wait.
+func (s *SessionStore) ClaimOpener(ctx context.Context, sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	res, err := s.db.SQLDB().ExecContext(ctx,
 		s.db.Dialect().Rebind(`UPDATE sessions SET opener_claimed_at = ?
 		WHERE id = ? AND (opener_claimed_at IS NULL
 			OR (opener_claimed_at < ? AND opener_stored_at IS NULL))`),
@@ -289,7 +290,7 @@ func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter t
 	if claimed {
 		return state.ClaimWon, nil
 	}
-	result, err := s.claimNotWon(`SELECT COALESCE(opener_stored_at, '') FROM sessions WHERE id = ?`, sessionID)
+	result, err := s.claimNotWon(ctx, `SELECT COALESCE(opener_stored_at, '') FROM sessions WHERE id = ?`, sessionID)
 	if err != nil {
 		return result, fmt.Errorf("claim opener %q: %w", sessionID, err)
 	}
@@ -302,9 +303,9 @@ func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter t
 // another run holds. The read follows the write, so a claim that went stale or
 // was stored in between is reported as it is now, which a caller only uses to
 // decide whether to look again later.
-func (s *SessionStore) claimNotWon(query string, args ...any) (state.ClaimResult, error) {
+func (s *SessionStore) claimNotWon(ctx context.Context, query string, args ...any) (state.ClaimResult, error) {
 	var stored string
-	err := s.db.SQLDB().QueryRow(s.db.Dialect().Rebind(query), args...).Scan(&stored)
+	err := s.db.SQLDB().QueryRowContext(ctx, s.db.Dialect().Rebind(query), args...).Scan(&stored)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return state.ClaimSettled, nil
@@ -334,14 +335,14 @@ func (s *SessionStore) claimNotWon(query string, args ...any) (state.ClaimResult
 // session, and it waits for a prune or delete that holds the row, so no
 // reservation outlives its session. The re-claim is a compare-and-set UPDATE,
 // which on Postgres a concurrent caller re-checks against the row the winner
-// wrote.
-func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+// wrote. ctx ends a wait for the row.
+func (s *SessionStore) ReserveNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	d := s.db.Dialect()
 	at := now.UTC().Format(time.RFC3339)
 	fail := func(err error) (state.ClaimResult, error) {
 		return state.ClaimHeld, fmt.Errorf("reserve note %q in %q: %w", noteKey, sessionID, err)
 	}
-	res, err := s.db.SQLDB().Exec(
+	res, err := s.db.SQLDB().ExecContext(ctx,
 		d.Rebind(`INSERT INTO session_note_reservations (session_id, note_key, reserved_at)
 		SELECT id, ?, ? FROM sessions WHERE id = ?`+d.ForUpdate()+` ON CONFLICT DO NOTHING`),
 		noteKey, at, sessionID)
@@ -356,7 +357,7 @@ func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, sta
 		return state.ClaimWon, nil
 	}
 
-	res, err = s.db.SQLDB().Exec(
+	res, err = s.db.SQLDB().ExecContext(ctx,
 		d.Rebind(`UPDATE session_note_reservations SET reserved_at = ?
 		WHERE session_id = ? AND note_key = ? AND reserved_at < ? AND stored_at IS NULL`),
 		at, sessionID, noteKey, now.Add(-staleAfter).UTC().Format(time.RFC3339))
@@ -369,7 +370,7 @@ func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, sta
 	if reserved {
 		return state.ClaimWon, nil
 	}
-	result, err := s.claimNotWon(`SELECT COALESCE(stored_at, '') FROM session_note_reservations WHERE session_id = ? AND note_key = ?`, sessionID, noteKey)
+	result, err := s.claimNotWon(ctx, `SELECT COALESCE(stored_at, '') FROM session_note_reservations WHERE session_id = ? AND note_key = ?`, sessionID, noteKey)
 	if err != nil {
 		return fail(err)
 	}
