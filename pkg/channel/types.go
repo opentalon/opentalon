@@ -275,11 +275,11 @@ const ControlResumeHello = "resume_hello"
 // system invocation may send it. Keys of the request:
 //
 //   - OpenedByMetadataKey, OpenKeyMetadataKey: the origin label and the
-//     idempotency key; the same user, origin and key always answer the same
-//     session, and its first turn runs once.
+//     idempotency key; the same user, origin and key answer the same session
+//     while it exists, and its first turn is stored once.
 //   - OpenSessionIDMetadataKey and NoteKeyMetadataKey instead: continue that
-//     session of the user with the content as a hidden note, stored and
-//     answered once per note key.
+//     session of the user with the content as a hidden note, stored once per
+//     note key.
 //   - OpenRequestIDMetadataKey: the attempt's correlation id.
 //
 // The core answers every attempt with one frame carrying that correlation id,
