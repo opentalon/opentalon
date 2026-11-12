@@ -145,9 +145,10 @@ func withoutProtocol(s string) string {
 // plus an unclosed block's text, or the spoken version when both are empty.
 //
 // The parser also runs a response that is one {"tool": ...} object without any
-// tags (isBareToolCall). When the text from the first character outside the
-// spoken blocks to the end is such an object, rest and shown are that object as
-// the model wrote it: markers in its arguments are the arguments' own.
+// tags (bareToolCall). When the text from the first character outside the
+// spoken blocks opens with such an object and nothing but spoken blocks and
+// space follows it, rest and shown are that object as the model wrote it:
+// markers in its arguments are the arguments' own.
 func splitSpoken(response string) (spoken, rest, shown string) {
 	var kept strings.Builder
 	unclosed := ""
@@ -192,12 +193,16 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 			i = block.end
 		}
 	}
-	if outsideAt >= 0 && isBareToolCall(response[outsideAt:]) {
-		if spokenAt > outsideAt {
-			spoken = ""
+	if outsideAt >= 0 {
+		if n, ok := bareToolCall(response[outsideAt:]); ok {
+			if _, after, _ := splitSpoken(response[outsideAt+n:]); after == "" {
+				if spokenAt > outsideAt {
+					spoken = ""
+				}
+				rest = response[outsideAt : outsideAt+n]
+				return spoken, rest, rest
+			}
 		}
-		rest = strings.TrimSpace(response[outsideAt:])
-		return spoken, rest, rest
 	}
 	rest = strings.TrimSpace(kept.String())
 	if shown = strings.TrimSpace(kept.String() + unclosed); shown == "" {
@@ -262,11 +267,16 @@ func takeSpoken(ctx context.Context, response string) (spoken, rest, shown strin
 	return splitSpoken(response)
 }
 
-// isBareToolCall tells a response that is nothing but a {"tool": ..., "args": ...}
-// object, which the parser runs as a call without any tags.
-func isBareToolCall(response string) bool {
+// bareToolCall reports whether s opens with a {"tool": ..., "args": ...} object,
+// which the parser runs as a call without any tags when nothing else is left
+// around it, and the object's length. What follows the object is not read.
+func bareToolCall(s string) (n int, ok bool) {
+	dec := json.NewDecoder(strings.NewReader(s))
 	var block toolCallJSON
-	return json.Unmarshal([]byte(strings.TrimSpace(response)), &block) == nil && block.Tool != ""
+	if dec.Decode(&block) != nil || block.Tool == "" {
+		return 0, false
+	}
+	return int(dec.InputOffset()), true
 }
 
 // spokenMetadata is the metadata of a final reply in a spoken turn: its spoken

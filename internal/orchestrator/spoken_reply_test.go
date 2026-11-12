@@ -72,7 +72,12 @@ func TestSplitSpoken(t *testing.T) {
 		}
 	}
 	const bare = `{"tool":"p__a","args":{"text":"Vorher <spoken>bleibt</spoken> nachher <spoken>offen"}}`
-	for _, reply := range []string{" " + bare + " ", "<spoken>Ich speichere.</spoken>\n" + bare} {
+	for _, reply := range []string{
+		" " + bare + " ",
+		"<spoken>Ich speichere.</spoken>\n" + bare,
+		"<spoken>Ich speichere.</spoken>" + bare + "<spoken>Ich speichere.</spoken>",
+		bare + " <spoken>Ich speichere.</spoken>\n",
+	} {
 		if _, rest, shown := splitSpoken(reply); rest != bare || shown != bare {
 			t.Errorf("a bare JSON call in %q changed: %q, %q", reply, rest, shown)
 		}
@@ -525,15 +530,24 @@ func TestABareJSONCallKeepsItsArgumentsInASpokenTurn(t *testing.T) {
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
 	const call = `{"tool":"p__save","args":{"text":"Vorher <spoken>bleibt</spoken> nachher"}}`
-	llm := &fakeLLM{responses: []string{call, "Gespeichert.", "<spoken>Ich speichere.</spoken>" + call, "Gespeichert."}}
+	llm := &fakeLLM{responses: []string{
+		call, "Gespeichert.",
+		"<spoken>Ich speichere.</spoken>" + call, "Gespeichert.",
+		"<spoken>Ich speichere.</spoken>" + call + "<spoken>Ich speichere.</spoken>", "Gespeichert.",
+	}}
 	orch := NewWithRules(llm, DefaultParser, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{})
-	for range 2 {
+	for range 3 {
 		if _, err := orch.Run(actor.WithSpokenReply(context.Background()), "s1", "Speicher das"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if len(executor.args) != 2 || executor.args[0]["text"] != "Vorher <spoken>bleibt</spoken> nachher" || executor.args[1]["text"] != executor.args[0]["text"] {
-		t.Errorf("calls %v; want two, each with the text as the model wrote it", executor.args)
+	if len(executor.args) != 3 {
+		t.Fatalf("calls %v; want three", executor.args)
+	}
+	for i, args := range executor.args {
+		if args["text"] != "Vorher <spoken>bleibt</spoken> nachher" {
+			t.Errorf("call %d text = %q, want it as the model wrote it", i+1, args["text"])
+		}
 	}
 }
 
