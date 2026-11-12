@@ -61,17 +61,19 @@ type openSessions struct {
 // its notes.
 type recoveryKey struct{ sessionID, noteKey string }
 
-// openScope is what an open-session request may reach: the sessions of its
-// verified entity on the channel it arrived on (see handle).
+// openScope is what an open-session request may reach: the sessions the open
+// path opened for its verified entity on the channel it arrived on (see
+// handle).
 type openScope struct{ entityID, channel string }
 
-// reaches reports whether sess is in the scope: the store records it for the
-// scope's entity and channel. Its key proves neither, since an entity id and a
-// channel id may each hold a colon ("u1:ws:admin:c1" may be u1's on channel
-// ws:admin). Only a session the open path opened records a channel.
+// reaches reports whether sess is in the scope: the open path opened it (it
+// has an open key) and the store records it for the scope's entity and
+// channel. Its key proves neither, since an entity id and a channel id may
+// each hold a colon ("u1:ws:admin:c1" may be u1's on channel ws:admin), and an
+// ordinary session may record a channel too (the store backfilled it).
 func (s openScope) reaches(sess *state.Session) bool {
 	_, ok := s.conversation(sess.ID)
-	return ok && sess.EntityID == s.entityID && sess.ChannelID == s.channel
+	return ok && sess.OpenKey != "" && sess.EntityID == s.entityID && sess.ChannelID == s.channel
 }
 
 // conversation returns the conversation of sessionID, a session in the scope:
@@ -160,7 +162,8 @@ func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessa
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
 	}
 	if err != nil || !scope.reaches(sess) {
-		// Gone, or another user's or channel's: alike to the caller.
+		// Gone, not opened by the open path, or another user's or channel's:
+		// alike to the caller.
 		return openRejected(msg, unavailable, "not_found")
 	}
 	return o.claimAndRun(ctx, msg, scope, recoveryKey{sessionID: target, noteKey: noteKey})

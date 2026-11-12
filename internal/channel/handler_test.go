@@ -1496,13 +1496,14 @@ func TestHandler_OpenSession_ReplyReachesItsConversation(t *testing.T) {
 }
 
 // TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound: a note reaches
-// a session the store records for the user and the request's channel only. A
-// session that is gone, another user's, the user's on another channel, or one
-// with no recorded channel (an ordinary chat) is refused with not_found, so
-// the caller may open a new one, and nothing is stored, reserved, run or
-// sent. The key proves neither owner nor channel: an entity id and a channel
-// id may each hold a colon, so several targets below start with the prefix
-// "u1:websocket:" of the request's own sessions.
+// a session the open path opened and the store records for the user and the
+// request's channel only. A session that is gone, another user's, the user's
+// on another channel, or an ordinary chat, also one whose channel the store
+// backfilled, is refused with not_found, so the caller may open a new one, and
+// nothing is stored, reserved, run or sent. The key proves neither owner nor
+// channel: an entity id and a channel id may each hold a colon, so several
+// targets below start with the prefix "u1:websocket:" of the request's own
+// sessions.
 func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
 	rec, h := newOpenHandler(welcomeProfile)
 	var foreign []string
@@ -1522,7 +1523,9 @@ func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
 		foreign = append(foreign, s.id)
 	}
 	rec.store.Create(state.SessionParams{ID: "u1:websocket:c2", EntityID: "u1"}) // u1's chat, no recorded channel
-	foreign = append(foreign, "u1:websocket:c2")
+	backfilled := rec.store.Create(state.SessionParams{ID: "u1:websocket:c3", EntityID: "u1"})
+	backfilled.ChannelID = "websocket" // u1's chat on this channel, recorded by the store's backfill
+	foreign = append(foreign, "u1:websocket:c2", "u1:websocket:c3")
 
 	for _, target := range append([]string{"u1:websocket:gone"}, foreign...) {
 		out := callOpen(h, "c8", map[string]string{pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2"})
