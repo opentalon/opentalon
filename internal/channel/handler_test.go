@@ -1,9 +1,11 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -1197,12 +1199,44 @@ func (o *lateClaimOpener) ClaimOpener(ctx context.Context, id string, now time.T
 	return result, err
 }
 
+// syncBuffer collects log output written from the handler's goroutines and
+// timers.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLogs routes the default logger, Info and above, into a buffer for the
+// test.
+func captureLogs(t *testing.T) *syncBuffer {
+	t.Helper()
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return logs
+}
+
 // TestHandler_OpenSession_FirstTurnClaimTakenOverRunsOnce: a claim granted
 // after it went stale is taken over by the next request, which runs the first
 // turn; when the late claimant gets to its turn, the store refuses its claim,
-// so it stores nothing and answers nothing.
+// so it stores nothing and answers nothing, and the takeover is logged at
+// Info, not as a failed run.
 func TestHandler_OpenSession_FirstTurnClaimTakenOverRunsOnce(t *testing.T) {
 	shortOpenerTiming(t)
+	logs := captureLogs(t)
 	op := &lateClaimOpener{claimed: make(chan struct{}), release: make(chan struct{})}
 	rec, h := newOpenHandler(welcomeProfile, func(cfg *HandlerConfig) {
 		op.SessionStore = cfg.Opener.(*state.SessionStore)
@@ -1223,6 +1257,9 @@ func TestHandler_OpenSession_FirstTurnClaimTakenOverRunsOnce(t *testing.T) {
 	}
 	if n := rec.replies(); n != 1 {
 		t.Errorf("replies = %d, want 1", n)
+	}
+	if out := logs.String(); !strings.Contains(out, "turn taken over by another run") || strings.Contains(out, "level=ERROR") {
+		t.Errorf("log:\n%s\nwant the takeover at Info and no error", out)
 	}
 }
 
@@ -1580,9 +1617,16 @@ func TestHandler_OpenSession_ReplyReachesItsConversation(t *testing.T) {
 			if ack := frames[0]; ack.channel != tc.channel || ack.msg.ConversationID != tc.conv {
 				t.Errorf("answer to %s/%q, want the request's %s/%q", ack.channel, ack.msg.ConversationID, tc.channel, tc.conv)
 			}
-			if reply := frames[1]; reply.channel != tc.channel || reply.msg.ConversationID != tc.wantConv || reply.msg.ThreadID != "" {
+			reply := frames[1]
+			if reply.channel != tc.channel || reply.msg.ConversationID != tc.wantConv || reply.msg.ThreadID != "" {
 				t.Errorf("reply to %s/%q thread %q, want %s/%q", reply.channel, reply.msg.ConversationID,
 					reply.msg.ThreadID, tc.channel, tc.wantConv)
+			}
+			for _, key := range []string{pkg.OpenSessionMetadataKey, pkg.OpenedByMetadataKey, pkg.OpenKeyMetadataKey,
+				pkg.OpenSessionIDMetadataKey, pkg.NoteKeyMetadataKey} {
+				if v, ok := reply.msg.Metadata[key]; ok {
+					t.Errorf("reply carries the request's %s=%q", key, v)
+				}
 			}
 		})
 	}

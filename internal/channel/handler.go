@@ -290,7 +290,11 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 func runTurn(ctx context.Context, cfg HandlerConfig, sessionKey, content string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 	response, inputForDisplay, resultMeta, err := cfg.Runner.Run(ctx, sessionKey, content, msg.Files...)
 	if err != nil {
-		logger.FromContext(ctx).Error("handler run failed", "error", err)
+		// A run whose claim another run took over did not fail: its caller
+		// logs the takeover (see openSessions.run).
+		if !errors.Is(err, state.ErrClaimLost) {
+			logger.FromContext(ctx).Error("handler run failed", "error", err)
+		}
 		errText, errCode := friendlyError(err)
 		return errorFrame(msg, errText, errCode), err
 	}

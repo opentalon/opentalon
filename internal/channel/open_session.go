@@ -251,10 +251,14 @@ func (o *openSessions) deliver(ctx context.Context, scope openScope, frame pkg.O
 // delivers nothing: that run answers the turn.
 func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.InboundMessage, scope openScope, claim state.TurnClaim) {
 	// The turn's frames belong to the conversation, not to the request: its
-	// error frame is the channel's ordinary one (see errorFrame).
+	// error frame is the channel's ordinary one (see errorFrame), and none of
+	// its frames carries the request's keys.
 	turn := msg
 	turn.Metadata = maps.Clone(msg.Metadata)
-	delete(turn.Metadata, pkg.OpenSessionMetadataKey)
+	for _, key := range []string{pkg.OpenSessionMetadataKey, pkg.OpenedByMetadataKey, pkg.OpenKeyMetadataKey,
+		pkg.OpenSessionIDMetadataKey, pkg.NoteKeyMetadataKey} {
+		delete(turn.Metadata, key)
+	}
 	turn.ConversationID, _ = scope.conversation(sessionID)
 	ctx = actor.WithConversationID(ctx, turn.ConversationID)
 	runCtx, cancel := context.WithTimeout(orchestrator.WithTurnClaim(pkg.WithStreamWriter(ctx, nil), claim), o.timeout)
