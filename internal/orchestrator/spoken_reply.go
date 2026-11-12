@@ -2,8 +2,10 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/provider"
@@ -17,22 +19,23 @@ import (
 // of every response the moment it arrives (takeSpoken), so tool parsing, the
 // checks on the response, what is stored and what is shown never see the
 // markers. What a spoken block holds is speech only: never parsed for a call,
-// and shown only when a reply is nothing else (or the block was never closed).
-// The spoken version of the final
-// reply goes into the result's metadata and onto the stored reply
-// (spokenMetadata), and a final reply without one is stored with spoken_missing
-// and stays silent. The confirmation question is written by its own narrator,
-// which in a spoken turn writes the question as it is asked aloud the same way
+// and shown only when a reply is nothing else (or the block was never closed);
+// a protocol block and a bare {"tool": ...} call are the parser's and kept as
+// written (splitSpoken). The spoken version of the final reply goes into the
+// result's metadata and onto the stored reply (spokenMetadata), and a final
+// reply without one is stored with spoken_missing and stays silent. The
+// confirmation question is written by its own narrator, which in a spoken turn
+// writes the question as it is asked aloud the same way
 // (spokenConfirmationInstruction). Text no model wrote a spoken version for (a
-// confirmation the narrator wrote without one, a plan, a pipeline's summary, any
-// other way a turn ends) is its own spoken version when it is short enough
+// confirmation the narrator wrote without one, a plan, a pipeline's summary,
+// any other way a turn ends) is its own spoken version when it is short enough
 // (speakAsIs; Run applies it to every result that carries neither key, and a
 // reply it stores carries the same, storeReply). An error result is never read,
 // like an error frame. A protocol block (protocolTags) is never read, and a
-// spoken block inside one is not a spoken version; whatever is read goes through
-// speakable: what a screen shows and an ear cannot take (lists, field changes,
-// markdown) is never read. Spoken turns are not streamed: the spoken version
-// must be out before anything is shown.
+// spoken block inside one is not a spoken version; whatever is read goes
+// through speakable: what a screen shows and an ear cannot take (lists, field
+// changes, markdown) is never read. Spoken turns are not streamed: the spoken
+// version must be out before anything is shown.
 
 const (
 	// SpokenMetadataKey carries the spoken version on the result and the stored reply.
@@ -87,40 +90,68 @@ func withoutProtocol(s string) string {
 // block goes from rest with whatever it holds (a nested one, too, and one never
 // closed up to the end of the response): a call or a protocol block in one is
 // never run, and is not read either. A block never closed is no spoken version:
-// its text is shown instead. A protocol block outside them is kept as it is, a
-// spoken block in it too: the parser reads it, the shown text drops it, nothing
-// of it is read. An unpaired closing marker goes. shown is rest plus an
-// unclosed block's text, or the spoken version when both are empty.
+// its text is shown instead. A closed protocol block is kept as it is, a spoken
+// block in it too: the parser reads it, the shown text drops it, nothing of it
+// is read. After a protocol tag that is never closed (a self-closing <invoke/>
+// is one) spoken blocks still go from rest, but none is read: the shown text
+// drops what follows such a tag. An unpaired closing marker goes. shown is rest
+// plus an unclosed block's text, or the spoken version when both are empty.
+//
+// The parser also runs a response that is one {"tool": ...} object without any
+// tags (isBareToolCall). When the text from the first character outside the
+// spoken blocks to the end is such an object, rest and shown are that object as
+// the model wrote it: markers in its arguments are the arguments' own.
 func splitSpoken(response string) (spoken, rest, shown string) {
 	var kept strings.Builder
 	unclosed := ""
+	afterUnclosedProtocol := false
+	outsideAt, spokenAt := -1, -1
+	keep := func(from, to int) {
+		if outsideAt < 0 {
+			if k := strings.IndexFunc(response[from:to], func(r rune) bool { return !unicode.IsSpace(r) }); k >= 0 {
+				outsideAt = from + k
+			}
+		}
+		kept.WriteString(response[from:to])
+	}
 	for i := 0; i < len(response); {
 		at, open, closing := nextSpokenOrProtocolTag(response, i)
 		if at < 0 {
-			kept.WriteString(response[i:])
+			keep(i, len(response))
 			break
 		}
-		kept.WriteString(response[i:at])
+		keep(i, at)
 		switch open {
 		case spokenClose: // unpaired
 			i = at + len(spokenClose)
 		case spokenOpen:
 			body, end, closed := spokenBlock(response, at)
 			text := markers.Replace(withoutProtocol(body))
-			if !closed {
+			switch {
+			case !closed:
 				unclosed = text
-			} else if spoken == "" {
-				spoken = strings.TrimSpace(text)
+			case spoken == "" && !afterUnclosedProtocol:
+				spoken, spokenAt = strings.TrimSpace(text), at
 			}
 			i = end
 		default: // a protocol block, kept whole
-			end := len(response)
-			if j := strings.Index(response[at+len(open):], closing); j >= 0 {
-				end = at + len(open) + j + len(closing)
+			end := protocolBlockEnd(response, at, open, closing)
+			if end < 0 {
+				keep(at, at+len(open))
+				afterUnclosedProtocol = true
+				i = at + len(open)
+				continue
 			}
-			kept.WriteString(response[at:end])
+			keep(at, end)
 			i = end
 		}
+	}
+	if outsideAt >= 0 && isBareToolCall(response[outsideAt:]) {
+		if spokenAt > outsideAt {
+			spoken = ""
+		}
+		rest = strings.TrimSpace(response[outsideAt:])
+		return spoken, rest, rest
 	}
 	rest = strings.TrimSpace(kept.String())
 	if shown = strings.TrimSpace(kept.String() + unclosed); shown == "" {
@@ -129,26 +160,39 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 	return spoken, rest, shown
 }
 
+// protocolBlockEnd is where the protocol block that opens at at with open ends,
+// after its closing tag; -1 when it is never closed.
+func protocolBlockEnd(s string, at int, open, closing string) int {
+	j := strings.Index(s[at+len(open):], closing)
+	if j < 0 {
+		return -1
+	}
+	return at + len(open) + j + len(closing)
+}
+
 // spokenBlock returns the body of the spoken block that opens at at, where the
 // response goes on after it, and whether it is closed: a nested block is part of
-// it, and one never closed runs to the end of s.
+// it, a marker inside a closed protocol block in it does not count, and a block
+// never closed runs to the end of s.
 func spokenBlock(s string, at int) (body string, end int, closed bool) {
 	depth := 0
 	for i := at; ; {
-		o := strings.Index(s[i:], spokenOpen)
-		c := strings.Index(s[i:], spokenClose)
-		switch {
-		case c < 0:
+		next, open, closing := nextSpokenOrProtocolTag(s, i)
+		switch open {
+		case "":
 			return s[at+len(spokenOpen):], len(s), false
-		case o >= 0 && o < c:
+		case spokenOpen:
 			depth++
-			i += o + len(spokenOpen)
-		default:
-			depth--
-			if depth == 0 {
-				return s[at+len(spokenOpen) : i+c], i + c + len(spokenClose), true
+			i = next + len(spokenOpen)
+		case spokenClose:
+			if depth--; depth == 0 {
+				return s[at+len(spokenOpen) : next], next + len(spokenClose), true
 			}
-			i += c + len(spokenClose)
+			i = next + len(spokenClose)
+		default:
+			if i = protocolBlockEnd(s, next, open, closing); i < 0 {
+				i = next + len(open)
+			}
 		}
 	}
 }
@@ -181,6 +225,13 @@ func takeSpoken(ctx context.Context, response string) (spoken, rest, shown strin
 		return "", response, response
 	}
 	return splitSpoken(response)
+}
+
+// isBareToolCall tells a response that is nothing but a {"tool": ..., "args": ...}
+// object, which the parser runs as a call without any tags.
+func isBareToolCall(response string) bool {
+	var block toolCallJSON
+	return json.Unmarshal([]byte(strings.TrimSpace(response)), &block) == nil && block.Tool != ""
 }
 
 // spokenMetadata is the metadata of a final reply in a spoken turn: its spoken

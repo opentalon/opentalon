@@ -52,16 +52,31 @@ func TestSplitSpoken(t *testing.T) {
 		{"<spoken>A<spoken>B</spoken>C", "", "", "ABC"},
 		{"<spoken>Ich sehe nach. " + call + "</spoken>Antwort.", "Ich sehe nach.", "Antwort.", "Antwort."},
 		{"<spoken>A<spoken>B</spoken>" + call + "</spoken>Antwort.", "AB", "Antwort.", "Antwort."},
+		{"<spoken>A[tool_call]{\"t\":\"</spoken>\"}[/tool_call]" + call + "</spoken>Antwort.", "A", "Antwort.", "Antwort."},
 		{"<spoken>" + call, "", "", ""},
 		{"<spoken>Erledigt. <invoke name=\"p__a\"><parameter name=\"id\">7</parameter></invoke></spoken>", "Erledigt.", "", "Erledigt."},
 		{"[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt.", "",
 			"[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt.", "[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt."},
 		{argWithMarkers, "", argWithMarkers, argWithMarkers},
+		{"<invoke name=\"q__a\"/><spoken>A</spoken>B", "", "<invoke name=\"q__a\"/>B", "<invoke name=\"q__a\"/>B"},
+		{"Hallo. [plugin_output]x <spoken>geheim</spoken>Danke.", "", "Hallo. [plugin_output]x Danke.", "Hallo. [plugin_output]x Danke."},
 	}
 	for _, c := range cases {
 		if spoken, rest, shown := splitSpoken(c.reply); spoken != c.spoken || rest != c.rest || shown != c.shown {
 			t.Errorf("splitSpoken(%q) = %q, %q, %q; want %q, %q, %q", c.reply, spoken, rest, shown, c.spoken, c.rest, c.shown)
 		}
+	}
+	const bare = `{"tool":"p__a","args":{"text":"Vorher <spoken>bleibt</spoken> nachher <spoken>offen"}}`
+	for _, reply := range []string{" " + bare + " ", "<spoken>Ich speichere.</spoken>\n" + bare} {
+		if _, rest, shown := splitSpoken(reply); rest != bare || shown != bare {
+			t.Errorf("a bare JSON call in %q changed: %q, %q", reply, rest, shown)
+		}
+	}
+	if spoken, _, _ := splitSpoken(bare); spoken != "" {
+		t.Errorf("an argument of a bare JSON call is read: %q", spoken)
+	}
+	if spoken, _, _ := splitSpoken("<spoken>Ich speichere.</spoken>" + bare); spoken != "Ich speichere." {
+		t.Errorf("the spoken version before a bare JSON call is %q", spoken)
 	}
 }
 
@@ -344,6 +359,8 @@ func TestWhatASpokenBlockHoldsIsNeverRunAsACall(t *testing.T) {
 		{"bare invoke", []string{`<spoken>Fertig. <invoke name="p__lookup"><parameter name="id">geheim</parameter></invoke></spoken>`, "Fertig."}, "Fertig."},
 		{"bare JSON", []string{`<spoken>{"tool":"p__lookup","args":{}}</spoken>`, "Fertig."}, ""},
 		{"unclosed bare JSON", []string{`<spoken>{"tool":"p__lookup","args":{}}`, "Fertig."}, ""},
+		{"after a self-closing invoke", []string{`<invoke name="q__noop"/><spoken>` + call + "</spoken>", "Fertig."}, "Fertig."},
+		{"behind a marker in a call", []string{`<spoken>[tool_call]{"tool":"q__noop","args":{"t":"</spoken>"}}[/tool_call]` + call + "</spoken>Fertig.", "Fertig."}, "Fertig."},
 	} {
 		// A trailing answer lets a regression that runs the call end its turn.
 		executor := &countingExecutor{}
@@ -354,6 +371,53 @@ func TestWhatASpokenBlockHoldsIsNeverRunAsACall(t *testing.T) {
 		}
 		if executor.count != 0 || (c.shown != "" && result.Response != c.shown) || strings.Contains(result.Metadata[SpokenMetadataKey], "geheim") {
 			t.Errorf("%s: calls run %d, reply %q, metadata %v; want no call", c.name, executor.count, result.Response, result.Metadata)
+		}
+	}
+}
+
+// argsExecutor keeps the arguments of every call it runs.
+type argsExecutor struct{ args []map[string]string }
+
+func (e *argsExecutor) Execute(_ context.Context, call ToolCall) ToolResult {
+	e.args = append(e.args, call.Args)
+	return ToolResult{CallID: call.ID, Content: "ok"}
+}
+
+func TestABareJSONCallKeepsItsArgumentsInASpokenTurn(t *testing.T) {
+	registry := NewToolRegistry()
+	executor := &argsExecutor{}
+	if err := registry.Register(PluginCapability{Name: "p", Actions: []Action{{Name: "save", Parameters: []Parameter{{Name: "text"}}}}}, executor); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "s1"})
+	const call = `{"tool":"p__save","args":{"text":"Vorher <spoken>bleibt</spoken> nachher"}}`
+	llm := &fakeLLM{responses: []string{call, "Gespeichert.", "<spoken>Ich speichere.</spoken>" + call, "Gespeichert."}}
+	orch := NewWithRules(llm, DefaultParser, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{})
+	for range 2 {
+		if _, err := orch.Run(actor.WithSpokenReply(context.Background()), "s1", "Speicher das"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(executor.args) != 2 || executor.args[0]["text"] != "Vorher <spoken>bleibt</spoken> nachher" || executor.args[1]["text"] != executor.args[0]["text"] {
+		t.Errorf("calls %v; want two, each with the text as the model wrote it", executor.args)
+	}
+}
+
+func TestAnInventedResultInWhatIsShownOrReadIsRetried(t *testing.T) {
+	for _, first := range []string{
+		"<spoken>Es gibt {{result.items.count}} Objekte.</spoken>",
+		"<spoken>Es gibt {{result.items.count}} Objekte.",
+		"<spoken>{{result.items.count}} Treffer.</spoken>Hier die Treffer.",
+	} {
+		llm := &fakeLLM{responses: []string{first, "<spoken>Es gibt drei Objekte.</spoken>Drei Objekte."}}
+		orch, sessionID := setupOrchestrator(llm, DefaultParser)
+		result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Wie viele?")
+		if err != nil {
+			t.Fatalf("%q: %v", first, err)
+		}
+		if llm.callCount != 2 || result.Response != "Drei Objekte." || result.Metadata[SpokenMetadataKey] != "Es gibt drei Objekte." {
+			t.Errorf("%q: %d calls, reply %q, spoken %q; want the invented result retried", first, llm.callCount, result.Response, result.Metadata[SpokenMetadataKey])
 		}
 	}
 }

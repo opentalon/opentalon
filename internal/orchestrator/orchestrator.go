@@ -2568,10 +2568,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			o.emitParseFailedIfApplicable(ctx, resp.Content, calls)
 		}
 		if calls == nil {
+			// What a spoken block holds is shown, never parsed, and checked
+			// like the rest of the reply (spoken_reply.go).
+			resp.Content = turnShown
 			// Detect hallucinated results: the LLM fabricated a response with
 			// template variables (e.g. "{{plugin_output.pagination.total}}")
 			// as if it had called a tool, but it didn't. Retry with a nudge.
-			if hasHallucinatedResult(resp.Content) && stripRetries < 3 {
+			if (hasHallucinatedResult(resp.Content) || hasHallucinatedResult(turnSpoken)) && stripRetries < 3 {
 				stripRetries++
 				log.Warn("hallucinated result detected, retrying", "round", i+1)
 				emit.EmitRetry(ctx, o.eventSink, emit.RetryArgs{
@@ -2590,10 +2593,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 
 			stripped := StripInternalBlocks(resp.Content)
-			if turnShown != resp.Content {
-				// What a spoken block holds is shown, never parsed (spoken_reply.go).
-				resp.Content, stripped = turnShown, StripInternalBlocks(turnShown)
-			}
 			if stripped == "" {
 				// Empty response — either the LLM returned nothing, or its output
 				// was entirely unparseable tool call blocks that got stripped.
