@@ -140,6 +140,57 @@ func TestPostgres_PruneKeepsASessionWrittenMeanwhile(t *testing.T) {
 	}
 }
 
+// TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept: a note reserved
+// while the prune deletes its session (a recovery firing during another pod's
+// start) waits for the prune and answers settled; no reservation outlives the
+// session, where no later prune would find it.
+func TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 1)
+	store.Create(state.SessionParams{ID: "idle", EntityID: "u1"})
+
+	// The prune holds the idle session's row until it deleted the session
+	// with everything it owns.
+	ctx := context.Background()
+	prune, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin prune: %v", err)
+	}
+	defer func() { _ = prune.Rollback() }()
+	var one int
+	if err := prune.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = 'idle' FOR UPDATE`).Scan(&one); err != nil {
+		t.Fatalf("lock the session: %v", err)
+	}
+	type reserved struct {
+		result state.ClaimResult
+		err    error
+	}
+	done := make(chan reserved, 1)
+	go func() {
+		result, err := store.ReserveNote("idle", "chapter-1", time.Now(), time.Minute)
+		done <- reserved{result, err}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	for _, q := range []string{
+		`DELETE FROM session_note_reservations WHERE session_id = 'idle'`,
+		`DELETE FROM sessions WHERE id = 'idle'`,
+	} {
+		if _, err := prune.ExecContext(ctx, q); err != nil {
+			t.Fatalf("prune %q: %v", q, err)
+		}
+	}
+	if err := prune.Commit(); err != nil {
+		t.Fatalf("commit prune: %v", err)
+	}
+
+	if r := <-done; r.err != nil || r.result != state.ClaimSettled {
+		t.Errorf("ReserveNote = %v, %v; want settled for a pruned session", r.result, r.err)
+	}
+	if n := countNoteReservations(t, db, "idle"); n != 0 {
+		t.Errorf("reservations = %d, want none left behind the pruned session", n)
+	}
+}
+
 func TestPostgres_AddMessageConcurrent(t *testing.T) {
 	db := pgDB(t)
 	store := NewSessionStore(db, 0, 0)

@@ -642,6 +642,7 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	claimStep(t, "fresh reservation stands", state.ClaimHeld, reserveAt("note-s1", "chapter-1", now.Add(30*time.Second)))
 	claimStep(t, "another key", state.ClaimWon, reserveAt("note-s1", "chapter-2", now))
 	claimStep(t, "another session", state.ClaimWon, reserveAt("note-s2", "chapter-1", now))
+	claimStep(t, "no such session", state.ClaimSettled, reserveAt("note-gone", "chapter-1", now))
 
 	if err := store.AddMessage("note-s1", provider.Message{Role: provider.RoleUser, Content: "opener", Visibility: "hidden"}); err != nil {
 		t.Fatalf("AddMessage opener: %v", err)
@@ -669,6 +670,9 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 
 	if db == nil {
 		return
+	}
+	if n := countNoteReservations(t, db, "note-gone"); n != 0 {
+		t.Errorf("reservations of a missing session = %d, want none", n)
 	}
 	storeStep(t, "note-s2's note", store, "note-s2", note, state.TurnClaim{NoteKey: "chapter-1", At: now}.Metadata(), nil)
 	var key sql.NullString

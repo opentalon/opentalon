@@ -242,12 +242,15 @@ func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter t
 
 // ReserveNote mirrors the DB-backed reservation of a note key: the first call
 // for a session and key wins, a fresh reservation is held, and a stale one is
-// won again only while the note was not stored under it; a stored one is
-// settled.
+// won again only while the note was not stored under it; a stored one, and an
+// unknown session, is settled.
 func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (ClaimResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if _, ok := s.sessions[sessionID]; !ok {
+		return ClaimSettled, nil
+	}
 	return take(s.notes, noteIdentity{sessionID: sessionID, noteKey: noteKey}, now, staleAfter), nil
 }
 

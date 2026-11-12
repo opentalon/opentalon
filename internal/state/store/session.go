@@ -321,15 +321,18 @@ func (s *SessionStore) claimNotWon(query string, args ...any) (state.ClaimResult
 // reservation is fresh, state.ClaimSettled once the note was stored under it,
 // and state.ClaimWon once more when it is older than staleAfter and the note
 // was not stored under it — the reserving run died before the turn runner
-// stored the note. A database failure is an error, never a refusal. Same split as
-// ClaimOpener: the reservation is the compare-and-set, the turn runner stores
-// the note under the reservation's state.TurnClaim (AddMessageWithMetadata),
-// and that store marks the reservation's stored_at, which no transcript
-// rewrite erases.
+// stored the note. A session that does not exist is settled, never reserved. A
+// database failure is an error, never a refusal. Same split as ClaimOpener:
+// the reservation is the compare-and-set, the turn runner stores the note
+// under the reservation's state.TurnClaim (AddMessageWithMetadata), and that
+// store marks the reservation's stored_at, which no transcript rewrite erases.
 //
-// The insert is ON CONFLICT DO NOTHING against the reservation's primary key;
-// the re-claim is a compare-and-set UPDATE, which on Postgres a concurrent
-// caller re-checks against the row the winner wrote.
+// The insert is ON CONFLICT DO NOTHING against the reservation's primary key
+// and selects the session's row for update: it inserts nothing for a missing
+// session, and it waits for a prune or delete that holds the row, so no
+// reservation outlives its session. The re-claim is a compare-and-set UPDATE,
+// which on Postgres a concurrent caller re-checks against the row the winner
+// wrote.
 func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	d := s.db.Dialect()
 	at := now.UTC().Format(time.RFC3339)
@@ -337,8 +340,9 @@ func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, sta
 		return state.ClaimHeld, fmt.Errorf("reserve note %q in %q: %w", noteKey, sessionID, err)
 	}
 	res, err := s.db.SQLDB().Exec(
-		d.Rebind(`INSERT INTO session_note_reservations (session_id, note_key, reserved_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`),
-		sessionID, noteKey, at)
+		d.Rebind(`INSERT INTO session_note_reservations (session_id, note_key, reserved_at)
+		SELECT id, ?, ? FROM sessions WHERE id = ?`+d.ForUpdate()+` ON CONFLICT DO NOTHING`),
+		noteKey, at, sessionID)
 	if err != nil {
 		return fail(err)
 	}
