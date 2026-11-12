@@ -279,19 +279,20 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		if prep := pkg.GetContentPreparer(kindOf(msg)); prep != nil {
 			content = prep(ctx, content, cfg.RunAction, cfg.HasAction)
 		}
-		return runTurn(ctx, cfg, sessionKey, content, msg), nil
+		reply, _ := runTurn(ctx, cfg, sessionKey, content, msg)
+		return reply, nil
 	}
 }
 
 // runTurn runs content through the Runner as a turn of sessionKey and returns
-// the reply frame, or the error frame when the run failed, addressed to msg's
-// conversation and carrying msg's metadata.
-func runTurn(ctx context.Context, cfg HandlerConfig, sessionKey, content string, msg pkg.InboundMessage) pkg.OutboundMessage {
+// the reply frame, or the error frame and the run's error when the run failed,
+// addressed to msg's conversation and carrying msg's metadata.
+func runTurn(ctx context.Context, cfg HandlerConfig, sessionKey, content string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 	response, inputForDisplay, resultMeta, err := cfg.Runner.Run(ctx, sessionKey, content, msg.Files...)
 	if err != nil {
 		logger.FromContext(ctx).Error("handler run failed", "error", err)
 		errText, errCode := friendlyError(err)
-		return errorFrame(msg, errText, errCode)
+		return errorFrame(msg, errText, errCode), err
 	}
 	outContent := response
 	if outContent == "" {
@@ -312,7 +313,7 @@ func runTurn(ctx context.Context, cfg HandlerConfig, sessionKey, content string,
 		ThreadID:       msg.ThreadID,
 		Content:        outContent,
 		Metadata:       outMeta,
-	}
+	}, nil
 }
 
 // kindOf returns the channel TYPE for a message. Prefers msg.Kind (set by

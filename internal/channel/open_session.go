@@ -29,13 +29,14 @@ type SessionOpener interface {
 }
 
 // A server-opened turn is claimed before it runs (ClaimOpener, ReserveNote),
-// and the claim is marked stored when the runner stores the turn's message. A
-// claim older than openerStaleAfter without that mark counts as abandoned and
-// may be taken again. Between the claim and the store lie the run's queueing
-// and its planner call, so the turn runs under openerTimeout and
-// openerStaleAfter exceeds it: by the time a claim goes stale, its turn has
-// stored its message or given up. Variables so tests can shorten them;
-// NewMessageHandler reads them once.
+// and the claim is marked stored when the runner stores the turn's message
+// under it (state.TurnClaim). A claim older than openerStaleAfter without that
+// mark counts as abandoned and may be taken again; the store then refuses the
+// message of the run that lost the claim (state.ErrClaimLost), so of two runs
+// of one turn only one stores it and goes on. The turn runs under
+// openerTimeout and openerStaleAfter exceeds it, so a live claimant normally
+// stores its message or gives up before its claim goes stale. Variables so
+// tests can shorten them; NewMessageHandler reads them once.
 var (
 	openerTimeout    = 3 * time.Minute
 	openerStaleAfter = openerTimeout + time.Minute
@@ -95,12 +96,13 @@ func (o *openSessions) open(ctx context.Context, sessionKey string, msg pkg.Inbo
 	}
 	o.acknowledge(ctx, sessionKey, msg, sess.ID, created)
 
-	won, err := o.cfg.Opener.ClaimOpener(sess.ID, time.Now(), o.staleAfter)
+	now := time.Now()
+	won, err := o.cfg.Opener.ClaimOpener(sess.ID, now, o.staleAfter)
 	if err != nil {
 		logger.FromContext(ctx).Warn("opener claim failed", "session", sess.ID, "error", err)
 	}
 	if won {
-		o.run(ctx, sess.ID, msg, entityID)
+		o.run(ctx, sess.ID, msg, entityID, state.TurnClaim{At: now})
 		return pkg.OutboundMessage{}
 	}
 	// Another attempt holds the claim, or the first turn ran. A claimant that
@@ -131,14 +133,15 @@ func (o *openSessions) continueSession(ctx context.Context, sessionKey string, m
 	if err != nil || sess.EntityID != entityID {
 		return openRejected(msg, gone, "not_found")
 	}
-	reserved, err := o.cfg.Opener.ReserveNote(target, noteKey, time.Now(), o.staleAfter)
+	now := time.Now()
+	reserved, err := o.cfg.Opener.ReserveNote(target, noteKey, now, o.staleAfter)
 	if err != nil {
 		logger.FromContext(ctx).Error("note reservation failed", "session", target, "error", err)
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
 	}
 	o.acknowledge(ctx, sessionKey, msg, target, reserved)
 	if reserved {
-		o.run(orchestrator.WithNoteKey(ctx, noteKey), target, msg, entityID)
+		o.run(ctx, target, msg, entityID, state.TurnClaim{NoteKey: noteKey, At: now})
 	}
 	return pkg.OutboundMessage{}
 }
@@ -156,12 +159,14 @@ func (o *openSessions) acknowledge(ctx context.Context, sessionKey string, msg p
 	}
 }
 
-// run runs the content as a hidden turn of sessionID under the turn timeout
-// and delivers the reply, or its error frame, to that session's conversation.
-// The session need not be the inbound message's (a found or continued session,
-// a recovery), so the reply goes whole through SendToSession and the registry's
-// stream writer, bound to the inbound conversation, is dropped.
-func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.InboundMessage, entityID string) {
+// run runs the content as a hidden turn of sessionID under claim and the turn
+// timeout, and delivers the reply, or its error frame, to that session's
+// conversation. The session need not be the inbound message's (a found or
+// continued session, a recovery), so the reply goes whole through
+// SendToSession and the registry's stream writer, bound to the inbound
+// conversation, is dropped. A run whose claim another run took over delivers
+// nothing: that run answers the turn.
+func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.InboundMessage, entityID string, claim state.TurnClaim) {
 	// The turn's frames belong to the conversation, not to the request: its
 	// error frame is the channel's ordinary one (see errorFrame).
 	turn := msg
@@ -172,9 +177,13 @@ func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.Inboun
 		turn.ConversationID, turn.ThreadID = conv, thread
 		ctx = actor.WithConversationID(ctx, conv)
 	}
-	runCtx, cancel := context.WithTimeout(pkg.WithStreamWriter(ctx, nil), o.timeout)
-	reply := runTurn(runCtx, o.cfg, sessionID, msg.Content, turn)
+	runCtx, cancel := context.WithTimeout(orchestrator.WithTurnClaim(pkg.WithStreamWriter(ctx, nil), claim), o.timeout)
+	reply, err := runTurn(runCtx, o.cfg, sessionID, msg.Content, turn)
 	cancel()
+	if errors.Is(err, state.ErrClaimLost) {
+		logger.FromContext(ctx).Info("turn taken over by another run", "session", sessionID, "note_key", claim.NoteKey)
+		return
+	}
 	if err := o.cfg.SendToSession(ctx, sessionID, reply); err != nil {
 		logger.FromContext(ctx).Warn("open session reply not delivered", "session", sessionID, "error", err)
 	}
@@ -189,14 +198,15 @@ func (o *openSessions) scheduleRecovery(ctx context.Context, sessionID string, m
 		if ctx.Err() != nil {
 			return
 		}
-		won, err := o.cfg.Opener.ClaimOpener(sessionID, time.Now(), o.staleAfter)
+		now := time.Now()
+		won, err := o.cfg.Opener.ClaimOpener(sessionID, now, o.staleAfter)
 		if err != nil {
 			logger.FromContext(ctx).Warn("opener recovery claim failed", "session", sessionID, "error", err)
 			return
 		}
 		if won {
 			logger.FromContext(ctx).Info("recovering an interrupted first turn", "session", sessionID)
-			o.run(ctx, sessionID, msg, entityID)
+			o.run(ctx, sessionID, msg, entityID, state.TurnClaim{At: now})
 		}
 	})
 }

@@ -745,12 +745,16 @@ type sentFrame struct {
 }
 
 // openRecorder is the open-session test double. Its Run stores the turn's user
-// message as the orchestrator does (visibility from ctx, the note key as
-// metadata), so the store's claims see the turn as stored; it records, in
-// order, every turn, every frame sent to a session and every CreateSession.
+// message as the orchestrator does (visibility from ctx, under the turn's
+// claim), so the store's claims see the turn as stored; it records, in order,
+// every turn, every frame sent to a session and every CreateSession. With
+// holdAck set, the answer to that open_request_id waits for release before it
+// is sent, as a stalled channel would.
 type openRecorder struct {
-	store  *state.SessionStore
-	runErr error
+	store   *state.SessionStore
+	runErr  error
+	holdAck string
+	release chan struct{}
 
 	mu     sync.Mutex
 	events []string
@@ -761,8 +765,8 @@ type openRecorder struct {
 
 func (r *openRecorder) Run(ctx context.Context, sessionKey, content string, _ ...pkg.FileAttachment) (string, string, map[string]string, error) {
 	var meta map[string]string
-	if k := orchestrator.NoteKey(ctx); k != "" {
-		meta = map[string]string{"note_key": k}
+	if c, ok := orchestrator.TurnClaimFrom(ctx); ok {
+		meta = c.Metadata()
 	}
 	err := r.store.AddMessageWithMetadata(sessionKey, provider.Message{
 		Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx),
@@ -784,6 +788,9 @@ func (r *openRecorder) send(_ context.Context, sessionID string, msg pkg.Outboun
 	kind := msg.Metadata["type"]
 	if kind == "" {
 		kind = "reply"
+	}
+	if kind == pkg.FrameSessionOpened && r.holdAck != "" && msg.Metadata[pkg.OpenRequestIDMetadataKey] == r.holdAck {
+		<-r.release
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1111,13 +1118,125 @@ func TestHandler_OpenSession_NoteRunsOncePerKey(t *testing.T) {
 	if len(runs) != 1 {
 		t.Fatalf("note turns = %d, want 1", len(runs))
 	}
-	if r := runs[0]; r.sessionID != openedSession || orchestrator.NoteKey(r.ctx) != "chapter-2" ||
+	claim, _ := orchestrator.TurnClaimFrom(runs[0].ctx)
+	if r := runs[0]; r.sessionID != openedSession || claim.NoteKey != "chapter-2" ||
 		actor.Visibility(r.ctx) != provider.VisibilityHidden || actor.ConversationID(r.ctx) != "c1" {
 		t.Errorf("note ran on %q (key %q, visibility %q, conversation %q), want a hidden keyed turn of %s",
-			r.sessionID, orchestrator.NoteKey(r.ctx), actor.Visibility(r.ctx), actor.ConversationID(r.ctx), openedSession)
+			r.sessionID, claim.NoteKey, actor.Visibility(r.ctx), actor.ConversationID(r.ctx), openedSession)
 	}
 	if reply := frames[1]; reply.sessionID != openedSession || reply.msg.ConversationID != "c1" {
 		t.Errorf("note reply = %+v, want it in the session's conversation c1", reply)
+	}
+}
+
+// countStored is how many of session id's stored messages carry content.
+func countStored(t *testing.T, store *state.SessionStore, id, content string) int {
+	t.Helper()
+	sess, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	n := 0
+	for _, m := range sess.Messages {
+		if m.Content == content {
+			n++
+		}
+	}
+	return n
+}
+
+// replies counts the turn replies (frames without a type) sent so far.
+func (r *openRecorder) replies() int {
+	_, _, frames := r.snapshot()
+	n := 0
+	for _, f := range frames {
+		if f.msg.Metadata["type"] == "" {
+			n++
+		}
+	}
+	return n
+}
+
+// lateClaimOpener grants the first ClaimOpener call late: the call's now ages
+// while the write waits (a row lock, an exhausted connection pool), so the
+// claim it writes is stale at once; the call then returns only on release.
+type lateClaimOpener struct {
+	*state.SessionStore
+	once    sync.Once
+	claimed chan struct{}
+	release chan struct{}
+}
+
+func (o *lateClaimOpener) ClaimOpener(id string, now time.Time, staleAfter time.Duration) (bool, error) {
+	first := false
+	o.once.Do(func() { first = true })
+	if !first {
+		return o.SessionStore.ClaimOpener(id, now, staleAfter)
+	}
+	time.Sleep(2 * staleAfter)
+	won, err := o.SessionStore.ClaimOpener(id, now, staleAfter)
+	close(o.claimed)
+	<-o.release
+	return won, err
+}
+
+// TestHandler_OpenSession_FirstTurnClaimTakenOverRunsOnce: a claim granted
+// after it went stale is taken over by the next request, which runs the first
+// turn; when the late claimant gets to its turn, the store refuses its claim,
+// so it stores nothing and answers nothing.
+func TestHandler_OpenSession_FirstTurnClaimTakenOverRunsOnce(t *testing.T) {
+	shortOpenerTiming(t)
+	op := &lateClaimOpener{claimed: make(chan struct{}), release: make(chan struct{})}
+	rec, h := newOpenHandler(welcomeProfile, func(cfg *HandlerConfig) {
+		op.SessionStore = cfg.Opener.(*state.SessionStore)
+		cfg.Opener = op
+	})
+
+	late := make(chan struct{})
+	go func() { callOpen(h, "c1", nil); close(late) }()
+	<-op.claimed
+	callOpen(h, "c2", nil)
+	close(op.release)
+	<-late
+	time.Sleep(pastRecovery())
+
+	content := openRequest("c1", nil).Content
+	if n := countStored(t, rec.store, openedSession, content); n != 1 {
+		t.Errorf("first turn stored %d times, want once", n)
+	}
+	if n := rec.replies(); n != 1 {
+		t.Errorf("replies = %d, want 1", n)
+	}
+}
+
+// TestHandler_OpenSession_NoteReservationTakenOverRunsOnce: a note whose
+// answer stalls past its reservation's expiry is taken over by a retry, which
+// stores and answers the note; when the stalled request gets to its turn, the
+// store refuses its reservation, so the note is stored and answered once.
+func TestHandler_OpenSession_NoteReservationTakenOverRunsOnce(t *testing.T) {
+	shortOpenerTiming(t)
+	rec, h := newOpenHandler(welcomeProfile)
+	rec.holdAck, rec.release = "req-c8", make(chan struct{})
+	storeOpened(t, rec.store, openedSession, "u1")
+	note := map[string]string{
+		pkg.OpenSessionIDMetadataKey: openedSession, pkg.NoteKeyMetadataKey: "chapter-2",
+		pkg.OpenedByMetadataKey: "", pkg.OpenKeyMetadataKey: "",
+	}
+
+	stalled := make(chan struct{})
+	go func() { callOpen(h, "c8", note); close(stalled) }()
+	time.Sleep(2 * openerStaleAfter)
+	callOpen(h, "c9", note)
+	close(rec.release)
+	<-stalled
+	time.Sleep(pastRecovery())
+
+	content := openRequest("c8", note).Content
+	if n := countStored(t, rec.store, openedSession, content); n != 1 {
+		t.Errorf("note stored %d times, want once", n)
+	}
+	if n := rec.replies(); n != 1 {
+		t.Errorf("replies = %d, want 1", n)
 	}
 }
 

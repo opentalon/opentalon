@@ -44,7 +44,7 @@ type SessionStore struct {
 }
 
 // claim is an opener claim or a note reservation: when it was taken, and
-// whether the message it was taken for has been stored since. Like the
+// whether the turn's input has been stored under it since. Like the
 // DB-backed markers, stored survives ClearMessages and SetSummary.
 type claim struct {
 	at     time.Time
@@ -52,7 +52,7 @@ type claim struct {
 }
 
 // won reports whether a claim may be taken at now: there is none yet, or it
-// is older than staleAfter and its message was never stored.
+// is older than staleAfter and its turn's input was never stored.
 func (c *claim) won(now time.Time, staleAfter time.Duration) bool {
 	return c == nil || (!c.stored && c.at.Before(now.Add(-staleAfter)))
 }
@@ -100,6 +100,55 @@ type SessionParams struct {
 // ErrOpenParams is returned by OpenSession when the origin or the key is empty:
 // without both there is nothing to be idempotent on.
 var ErrOpenParams = errors.New("open session: origin and key are required")
+
+// TurnClaim names the claim a turn runs under: the first turn of an opened
+// session (ClaimOpener; NoteKey empty) or a keyed note (ReserveNote). At is
+// the now the claim was taken with; it tells this claim from a later one that
+// took the same turn over once the first went stale.
+type TurnClaim struct {
+	NoteKey string
+	At      time.Time
+}
+
+// The message metadata a claimed turn's input is stored with
+// (TurnClaim.Metadata); AddMessageWithMetadata reads the claim from it.
+const (
+	NoteKeyMetadataKey   = "note_key"
+	ClaimedAtMetadataKey = "claimed_at"
+)
+
+// ErrClaimLost is returned by AddMessageWithMetadata, which then stores
+// nothing, when the claim a turn's input names is no longer the claim held:
+// another run took the turn over after the claim went stale, or the input was
+// stored already. Exactly one run stores a claimed turn's input.
+var ErrClaimLost = errors.New("turn claim lost: another run took the turn over or stored its input")
+
+// Metadata is the message metadata that stores a turn's input under c.
+func (c TurnClaim) Metadata() map[string]string {
+	m := map[string]string{ClaimedAtMetadataKey: c.At.UTC().Format(time.RFC3339Nano)}
+	if c.NoteKey != "" {
+		m[NoteKeyMetadataKey] = c.NoteKey
+	}
+	return m
+}
+
+// TurnClaimOf reads the claim a message's metadata stores it under; claimed is
+// false for an ordinary message. A note key without a claim is an error: a note
+// is stored only under its reservation.
+func TurnClaimOf(metadata map[string]string) (c TurnClaim, claimed bool, err error) {
+	at, claimed := metadata[ClaimedAtMetadataKey]
+	if !claimed {
+		if key := metadata[NoteKeyMetadataKey]; key != "" {
+			return TurnClaim{}, false, fmt.Errorf("note %q without its reservation", key)
+		}
+		return TurnClaim{}, false, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, at)
+	if err != nil {
+		return TurnClaim{}, false, fmt.Errorf("claim time %q: %w", at, err)
+	}
+	return TurnClaim{NoteKey: metadata[NoteKeyMetadataKey], At: t}, true, nil
+}
 
 // Create returns the session for p.ID, minting a fresh empty record if absent.
 // Idempotent on existing ids so a "fresh-intent" call from a reconnecting
@@ -163,8 +212,8 @@ func (s *SessionStore) OpenSession(p SessionParams) (*Session, bool, error) {
 }
 
 // ClaimOpener mirrors the DB-backed compare-and-set: the claim is won when the
-// session has none, or when its claim is older than staleAfter and no message
-// was stored since it was taken. An unknown session is never won.
+// session has none, or when its claim is older than staleAfter and the first
+// turn's input was not stored under it. An unknown session is never won.
 func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -181,7 +230,7 @@ func (s *SessionStore) ClaimOpener(sessionID string, now time.Time, staleAfter t
 
 // ReserveNote mirrors the DB-backed reservation of a note key: the first call
 // for a session and key wins, a fresh reservation refuses, and a stale one is
-// won again only while no message with that note key was stored.
+// won again only while the note was not stored under it.
 func (s *SessionStore) ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -209,15 +258,19 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 	return s.AddMessageWithMetadata(id, msg, nil)
 }
 
-// AddMessageWithMetadata mirrors the persistent store's signature. Two
-// metadata keys are consumed, as in the DB-backed store: "prompt_type", which
-// the orchestrator's stripApprovedConfirmationExchanges uses to keep resolved
-// confirmation exchanges out of the LLM history, is mirrored onto the stored
-// message; "note_key" marks the session's reservation of that key as stored.
-// Any message marks a pending opener claim as stored. The rest of the map is
+// AddMessageWithMetadata mirrors the persistent store's signature and its
+// reading of the metadata: "prompt_type", which the orchestrator's
+// stripApprovedConfirmationExchanges uses to keep resolved confirmation
+// exchanges out of the LLM history, is mirrored onto the stored message; a
+// TurnClaim (TurnClaimOf) marks that claim stored, or fails with ErrClaimLost
+// and stores nothing when it is not the claim held. The rest of the map is
 // presentation state and is dropped.
 func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
 	msg.PromptType = metadata["prompt_type"]
+	tc, claimed, err := TurnClaimOf(metadata)
+	if err != nil {
+		return fmt.Errorf("add message: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -225,16 +278,18 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	if !ok {
 		return fmt.Errorf("session %q not found", id)
 	}
+	if claimed {
+		held := s.claims[id]
+		if tc.NoteKey != "" {
+			held = s.notes[noteIdentity{sessionID: id, noteKey: tc.NoteKey}]
+		}
+		if held == nil || held.stored || !held.at.Equal(tc.At) {
+			return ErrClaimLost
+		}
+		held.stored = true
+	}
 	sess.Messages = append(sess.Messages, msg)
 	sess.UpdatedAt = time.Now()
-	if c := s.claims[id]; c != nil {
-		c.stored = true
-	}
-	if k := metadata["note_key"]; k != "" {
-		if c := s.notes[noteIdentity{sessionID: id, noteKey: k}]; c != nil {
-			c.stored = true
-		}
-	}
 	return nil
 }
 

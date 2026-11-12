@@ -494,6 +494,7 @@ func checkOpenSessionConcurrent(t *testing.T, db *DB) {
 // claimStore is what the claim checks need. The DB-backed store and the
 // in-memory state.SessionStore both satisfy it, so one check pins both.
 type claimStore interface {
+	Get(id string) (*state.Session, error)
 	OpenSession(p state.SessionParams) (*state.Session, bool, error)
 	ClaimOpener(sessionID string, now time.Time, staleAfter time.Duration) (bool, error)
 	ReserveNote(sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error)
@@ -541,10 +542,42 @@ func claimStep(t *testing.T, step string, want bool, try func() (bool, error)) {
 	}
 }
 
+// countContent is how many of session id's messages carry content.
+func countContent(t *testing.T, store claimStore, id, content string) int {
+	t.Helper()
+	sess, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	n := 0
+	for _, m := range sess.Messages {
+		if m.Content == content {
+			n++
+		}
+	}
+	return n
+}
+
+// storeStep stores msg under metadata and fails the test unless the store
+// answers want (nil for success, or the error errors.Is must match).
+func storeStep(t *testing.T, step string, store claimStore, id string, msg provider.Message, metadata map[string]string, want error) {
+	t.Helper()
+	err := store.AddMessageWithMetadata(id, msg, metadata)
+	if want == nil && err != nil {
+		t.Fatalf("%s: %v", step, err)
+	}
+	if want != nil && !errors.Is(err, want) {
+		t.Errorf("%s: err = %v, want %v", step, err, want)
+	}
+}
+
 // checkClaimOpener: of concurrent claimers exactly one wins; a fresh claim
-// refuses; a stale claim is won again while no message was stored after it;
-// once the first turn's message is stored the claim is refused for good, also
-// after the transcript is cleared; an unknown session is refused.
+// refuses; a stale claim is won again while the first turn's input was not
+// stored under it, whatever else the session stored meanwhile (the user's own
+// turn); the input is stored only under the claim held, once, so a claimant
+// whose stale claim another run took over stores nothing; once the input is
+// stored the claim is refused for good, also after the transcript is cleared;
+// an unknown session is refused.
 func checkClaimOpener(t *testing.T, store claimStore) {
 	t.Helper()
 	sess, _, err := store.OpenSession(state.SessionParams{ID: "claim-1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-claim"})
@@ -561,9 +594,18 @@ func checkClaimOpener(t *testing.T, store claimStore) {
 		t.Fatalf("concurrent claim winners = %d, want exactly 1", winners)
 	}
 	claimStep(t, "fresh claim stands", false, claimAt(sess.ID, now.Add(30*time.Second)))
-	claimStep(t, "stale claim, no message", true, claimAt(sess.ID, now.Add(2*time.Minute)))
-	if err := store.AddMessage(sess.ID, provider.Message{Role: provider.RoleUser, Content: "context", Visibility: "hidden"}); err != nil {
+	if err := store.AddMessage(sess.ID, provider.Message{Role: provider.RoleUser, Content: "the user's own turn"}); err != nil {
 		t.Fatalf("AddMessage: %v", err)
+	}
+	retaken := now.Add(2 * time.Minute)
+	claimStep(t, "stale claim, only another message stored", true, claimAt(sess.ID, retaken))
+
+	input := provider.Message{Role: provider.RoleUser, Content: "context", Visibility: "hidden"}
+	storeStep(t, "input under the claim taken over", store, sess.ID, input, state.TurnClaim{At: now}.Metadata(), state.ErrClaimLost)
+	storeStep(t, "input under the claim held", store, sess.ID, input, state.TurnClaim{At: retaken}.Metadata(), nil)
+	storeStep(t, "input stored again under that claim", store, sess.ID, input, state.TurnClaim{At: retaken}.Metadata(), state.ErrClaimLost)
+	if n := countContent(t, store, sess.ID, "context"); n != 1 {
+		t.Errorf("first turn's input stored %d times, want once", n)
 	}
 	claimStep(t, "stale claim, first turn stored", false, claimAt(sess.ID, now.Add(10*time.Minute)))
 	if err := store.ClearMessages(sess.ID); err != nil {
@@ -575,10 +617,12 @@ func checkClaimOpener(t *testing.T, store claimStore) {
 
 // checkReserveNote: of concurrent reservations for one key exactly one wins; a
 // fresh reservation refuses; another key or another session reserves on its
-// own; a stale reservation is won again while no message with its key was
-// stored (other messages do not count); once the keyed note is stored it is
-// refused for good, also after the transcript is cleared. With a db, the note's
-// key is on its row and a second note with that key is refused by the index.
+// own; a stale reservation is won again while its note was not stored under
+// it (other messages, other keys' notes do not count); the note is stored only
+// under the reservation held, once; once it is stored the key is refused for
+// good, also after the transcript is cleared; a note key without its
+// reservation is no note. With a db, the note's key is on its row and a second
+// note with that key is refused.
 func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	t.Helper()
 	for _, id := range []string{"note-s1", "note-s2"} {
@@ -602,24 +646,31 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	if err := store.AddMessage("note-s1", provider.Message{Role: provider.RoleUser, Content: "opener", Visibility: "hidden"}); err != nil {
 		t.Fatalf("AddMessage opener: %v", err)
 	}
-	claimStep(t, "stale, only other messages", true, reserveAt("note-s1", "chapter-1", now.Add(2*time.Minute)))
+	other := provider.Message{Role: provider.RoleUser, Content: "chapter two", Visibility: "hidden"}
+	storeStep(t, "another key's note", store, "note-s1", other, state.TurnClaim{NoteKey: "chapter-2", At: now}.Metadata(), nil)
+	retaken := now.Add(2 * time.Minute)
+	claimStep(t, "stale, only other messages", true, reserveAt("note-s1", "chapter-1", retaken))
 
 	note := provider.Message{Role: provider.RoleUser, Content: "chapter note", Visibility: "hidden"}
-	if err := store.AddMessageWithMetadata("note-s1", note, map[string]string{"note_key": "chapter-1"}); err != nil {
-		t.Fatalf("AddMessageWithMetadata note: %v", err)
+	storeStep(t, "note under the reservation taken over", store, "note-s1", note, state.TurnClaim{NoteKey: "chapter-1", At: now}.Metadata(), state.ErrClaimLost)
+	storeStep(t, "note under the reservation held", store, "note-s1", note, state.TurnClaim{NoteKey: "chapter-1", At: retaken}.Metadata(), nil)
+	storeStep(t, "note stored again under that reservation", store, "note-s1", note, state.TurnClaim{NoteKey: "chapter-1", At: retaken}.Metadata(), state.ErrClaimLost)
+	if n := countContent(t, store, "note-s1", "chapter note"); n != 1 {
+		t.Errorf("note stored %d times, want once", n)
 	}
 	claimStep(t, "stale, note stored", false, reserveAt("note-s1", "chapter-1", now.Add(10*time.Minute)))
 	if err := store.ClearMessages("note-s1"); err != nil {
 		t.Fatalf("ClearMessages: %v", err)
 	}
 	claimStep(t, "stale, transcript cleared", false, reserveAt("note-s1", "chapter-1", now.Add(20*time.Minute)))
+	if err := store.AddMessageWithMetadata("note-s1", note, map[string]string{state.NoteKeyMetadataKey: "chapter-3"}); err == nil {
+		t.Error("a note key without its reservation was stored, want an error")
+	}
 
 	if db == nil {
 		return
 	}
-	if err := store.AddMessageWithMetadata("note-s2", note, map[string]string{"note_key": "chapter-1"}); err != nil {
-		t.Fatalf("AddMessageWithMetadata note-s2: %v", err)
-	}
+	storeStep(t, "note-s2's note", store, "note-s2", note, state.TurnClaim{NoteKey: "chapter-1", At: now}.Metadata(), nil)
 	var key sql.NullString
 	if err := db.SQLDB().QueryRow(
 		db.Dialect().Rebind(`SELECT note_key FROM messages WHERE session_id = ?`), "note-s2",
@@ -629,8 +680,8 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	if key.String != "chapter-1" {
 		t.Errorf("messages.note_key = %#v, want chapter-1", key)
 	}
-	if err := store.AddMessageWithMetadata("note-s2", note, map[string]string{"note_key": "chapter-1"}); err == nil {
-		t.Error("a second note with the same key was stored, want the unique index to refuse it")
+	if err := store.AddMessageWithMetadata("note-s2", note, state.TurnClaim{NoteKey: "chapter-1", At: now}.Metadata()); err == nil {
+		t.Error("a second note with the same key was stored, want it refused")
 	}
 }
 

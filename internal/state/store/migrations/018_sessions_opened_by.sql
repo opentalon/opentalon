@@ -17,8 +17,11 @@
 --                                The turn runner stores the hidden message, so
 --                                the claim is the only "first turn started"
 --                                mark before that message exists.
---   sessions.opener_stored_at  — when the first message after the claim was
---                                stored, written in the same transaction. A
+--   sessions.opener_stored_at  — when the first turn's hidden message was
+--                                stored under the claim, written in the same
+--                                transaction and only while opener_claimed_at
+--                                is still that claim's time (a claimant whose
+--                                claim was taken over stores nothing). A
 --                                stale claim without it may be claimed again
 --                                (the claimant died before its run); the
 --                                transcript is no proof, since clearing,
@@ -28,9 +31,10 @@
 --                                caller's key for that note). The same split as
 --                                the opener: the reservation is the
 --                                compare-and-set, the turn runner stores the
---                                note, and that store sets stored_at in the same
---                                transaction; a stale reservation without it may
---                                be claimed again.
+--                                note under it, and that store sets stored_at in
+--                                the same transaction while reserved_at is still
+--                                its time; a stale reservation without it may be
+--                                claimed again.
 --   messages.note_key          — the key on the stored note. Unique per session,
 --                                so one key stores one note.
 --

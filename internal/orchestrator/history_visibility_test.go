@@ -120,39 +120,88 @@ func TestMaybeGenerateTitle_IgnoresHiddenTurns(t *testing.T) {
 	}
 }
 
-// A keyed note's user message is stored with its key (WithNoteKey), which marks
-// the key's reservation stored: a stale reservation can then never be taken
-// again to run the note twice. An unkeyed turn leaves the reservation open.
-func TestRun_StoresTheNoteKeyWithTheUserMessage(t *testing.T) {
+// A claimed turn's user message is stored under its claim (WithTurnClaim),
+// which marks the claim stored: a stale claim can then never be taken again to
+// run the turn twice. That holds for the first turn of an opened session and
+// for a keyed note; an unclaimed turn of the same session marks neither.
+func TestRun_StoresAClaimedTurnUnderItsClaim(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		key         string
-		reclaimable bool
+		name    string
+		claim   *state.TurnClaim
+		settled string // the claim the run must settle: "opener", "note" or ""
 	}{
-		{"keyed note", "chapter-2", false},
-		{"unkeyed turn", "", true},
+		{"first turn", &state.TurnClaim{}, "opener"},
+		{"keyed note", &state.TurnClaim{NoteKey: "chapter-2"}, "note"},
+		{"unclaimed turn", nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sessions := state.NewSessionStore("")
-			sessions.Create(state.SessionParams{ID: "s1"})
+			if _, _, err := sessions.OpenSession(state.SessionParams{ID: "s1", EntityID: "u1", OpenedBy: "origin", OpenKey: "event-1"}); err != nil {
+				t.Fatalf("OpenSession: %v", err)
+			}
 			orch := NewWithRules(&fakeLLM{responses: []string{"Noted."}},
 				&fakeParser{parseFn: func(string) []ToolCall { return nil }},
 				NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
 			now := time.Now()
+			if ok, err := sessions.ClaimOpener("s1", now, time.Minute); err != nil || !ok {
+				t.Fatalf("ClaimOpener = %v, %v", ok, err)
+			}
 			if ok, err := sessions.ReserveNote("s1", "chapter-2", now, time.Minute); err != nil || !ok {
 				t.Fatalf("ReserveNote = %v, %v", ok, err)
 			}
 
-			ctx := WithNoteKey(actor.WithVisibility(context.Background(), provider.VisibilityHidden), tc.key)
+			ctx := actor.WithVisibility(context.Background(), provider.VisibilityHidden)
+			if tc.claim != nil {
+				c := *tc.claim
+				c.At = now
+				ctx = WithTurnClaim(ctx, c)
+			}
 			if _, err := orch.Run(ctx, "s1", "[context] chapter two was caught up"); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
 
-			again, err := sessions.ReserveNote("s1", "chapter-2", now.Add(time.Hour), time.Minute)
-			if err != nil || again != tc.reclaimable {
-				t.Errorf("stale reservation taken again = %v (%v), want %v", again, err, tc.reclaimable)
+			later := now.Add(time.Hour)
+			opener, err := sessions.ClaimOpener("s1", later, time.Minute)
+			if err != nil || opener != (tc.settled != "opener") {
+				t.Errorf("stale opener claim taken again = %v (%v), want %v", opener, err, tc.settled != "opener")
+			}
+			note, err := sessions.ReserveNote("s1", "chapter-2", later, time.Minute)
+			if err != nil || note != (tc.settled != "note") {
+				t.Errorf("stale note reservation taken again = %v (%v), want %v", note, err, tc.settled != "note")
 			}
 		})
+	}
+}
+
+// A claimed turn whose claim another run took over (it went stale, the other
+// run re-claimed it) stops at its store with state.ErrClaimLost: it stores
+// nothing and never reaches the model, so the turn runs once.
+func TestRun_ClaimTakenOverStopsTheTurn(t *testing.T) {
+	sessions := state.NewSessionStore("")
+	if _, _, err := sessions.OpenSession(state.SessionParams{ID: "s1", EntityID: "u1", OpenedBy: "origin", OpenKey: "event-1"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	llm := &promptRecordingLLM{fakeLLM: fakeLLM{responses: []string{"Hello."}}}
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }},
+		NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
+	lost := time.Now()
+	for _, at := range []time.Time{lost, lost.Add(2 * time.Minute)} {
+		if ok, err := sessions.ClaimOpener("s1", at, time.Minute); err != nil || !ok {
+			t.Fatalf("ClaimOpener(%v) = %v, %v", at, ok, err)
+		}
+	}
+
+	ctx := WithTurnClaim(actor.WithVisibility(context.Background(), provider.VisibilityHidden), state.TurnClaim{At: lost})
+	_, err := orch.Run(ctx, "s1", "[context] the setup created three samples")
+
+	if !errors.Is(err, state.ErrClaimLost) {
+		t.Errorf("Run = %v, want state.ErrClaimLost", err)
+	}
+	if sess, _ := sessions.Get("s1"); len(sess.Messages) != 0 {
+		t.Errorf("stored messages = %+v, want none", sess.Messages)
+	}
+	if len(llm.prompts) != 0 {
+		t.Errorf("model called with %q, want no call", llm.prompts)
 	}
 }
 
@@ -175,7 +224,7 @@ func TestRun_QueuedTurnPastItsDeadlineStoresNothing(t *testing.T) {
 
 	const note = "[context] chapter two was caught up"
 	ctx, cancel := context.WithTimeout(
-		WithNoteKey(actor.WithVisibility(context.Background(), provider.VisibilityHidden), "chapter-2"), 200*time.Millisecond)
+		WithTurnClaim(actor.WithVisibility(context.Background(), provider.VisibilityHidden), state.TurnClaim{NoteKey: "chapter-2", At: time.Now()}), 200*time.Millisecond)
 	defer cancel()
 	queued := make(chan error, 1)
 	go func() {

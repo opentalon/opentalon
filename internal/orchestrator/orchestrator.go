@@ -5961,30 +5961,28 @@ func isVisibleUserMessage(m provider.Message) bool {
 	return m.Role == provider.RoleUser && m.Visibility != provider.VisibilityHidden
 }
 
-type noteKeyCtxKey struct{}
+type turnClaimCtxKey struct{}
 
-// WithNoteKey marks the turn as the note posted under key into an existing
-// session: Run stores the turn's user message with metadata note_key=key, which
-// the session store keeps once per session and key and which marks that key's
-// reservation stored. An empty key leaves ctx unchanged.
-func WithNoteKey(ctx context.Context, key string) context.Context {
-	if key == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, noteKeyCtxKey{}, key)
+// WithTurnClaim marks the turn as the one claim c was taken for: the first
+// turn of a session a server opened, or a keyed note. Run stores the turn's
+// user message under c (state.TurnClaim.Metadata), which marks c stored, and
+// which the session store refuses with state.ErrClaimLost when another run
+// took the turn over meanwhile.
+func WithTurnClaim(ctx context.Context, c state.TurnClaim) context.Context {
+	return context.WithValue(ctx, turnClaimCtxKey{}, c)
 }
 
-// NoteKey returns the note key set by WithNoteKey, or "".
-func NoteKey(ctx context.Context) string {
-	k, _ := ctx.Value(noteKeyCtxKey{}).(string)
-	return k
+// TurnClaimFrom returns the claim set by WithTurnClaim.
+func TurnClaimFrom(ctx context.Context) (state.TurnClaim, bool) {
+	c, ok := ctx.Value(turnClaimCtxKey{}).(state.TurnClaim)
+	return c, ok
 }
 
-// addUserMessage stores the turn's own user message, with the note key when the
-// turn is a keyed note (WithNoteKey).
+// addUserMessage stores the turn's own user message, under the turn's claim
+// when it has one (WithTurnClaim).
 func addUserMessage(ctx context.Context, sessions SessionStoreInterface, sessionID string, msg provider.Message) error {
-	if key := NoteKey(ctx); key != "" {
-		return sessions.AddMessageWithMetadata(sessionID, msg, map[string]string{"note_key": key})
+	if c, ok := TurnClaimFrom(ctx); ok {
+		return sessions.AddMessageWithMetadata(sessionID, msg, c.Metadata())
 	}
 	return sessions.AddMessage(sessionID, msg)
 }
