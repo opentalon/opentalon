@@ -9,6 +9,7 @@ import (
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/logger"
+	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
@@ -49,16 +50,26 @@ type HandlerConfig struct {
 	// ok=false means nothing is pending. Read-only — it MUST NOT consume or
 	// mutate pending state. nil disables confirmation re-emit on resume.
 	PendingConfirmation func(sessionKey string) (content string, metadata map[string]string, ok bool)
+	// Opener is the store side of an open-session message
+	// (pkg.OpenSessionMetadataKey): create-or-find, first-turn claim and note
+	// reservation. Required.
+	Opener SessionOpener
+	// SendToConversation delivers a frame to a channel's conversation. The
+	// open-session path answers its caller and delivers its turn through it,
+	// because the session it opens or continues need not be the inbound
+	// message's conversation. Required.
+	SendToConversation orchestrator.ConversationSender
 }
 
 // NewMessageHandler returns a MessageHandler that: ensures session, verifies profile token (if
 // Verifier is non-nil), runs channel-specific content preparer (if registered), then runs the
 // message through the Runner and returns the response.
 //
-// Panics at construction if ResumeSession, CreateSession, or Runner is nil:
-// these are required for the strict-session contract and a missing one is a
-// boot-time misconfiguration that must surface immediately rather than as a
-// nil-deref under load. Verifier and LimitChecker remain optional.
+// Panics at construction if ResumeSession, CreateSession, Runner, Opener or
+// SendToConversation is nil: these are required for the strict-session
+// contract and a missing one is a boot-time misconfiguration that must
+// surface immediately rather than as a nil-deref under load. Verifier and
+// LimitChecker remain optional.
 func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	if cfg.ResumeSession == nil {
 		panic("channel.NewMessageHandler: ResumeSession is required")
@@ -69,6 +80,13 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	if cfg.Runner == nil {
 		panic("channel.NewMessageHandler: Runner is required")
 	}
+	if cfg.Opener == nil {
+		panic("channel.NewMessageHandler: Opener is required")
+	}
+	if cfg.SendToConversation == nil {
+		panic("channel.NewMessageHandler: SendToConversation is required")
+	}
+	opens := newOpenSessions(cfg)
 	return func(ctx context.Context, sessionKey string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		var entityID, groupID string
 
@@ -194,6 +212,12 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			ctx = actor.WithVisibility(ctx, provider.VisibilityHidden)
 		}
 
+		// A server's open-session request opens or continues a chat session in
+		// place of the create/resume below and answers with its own frames.
+		if msg.Metadata[pkg.OpenSessionMetadataKey] == "true" {
+			return opens.handle(ctx, sessionKey, msg, interactionKind, entityID, groupID), nil
+		}
+
 		// Route by resume intent: client-supplied conv-id → strict Resume
 		// (error frame if the session is gone); channel-minted conv-id →
 		// idempotent Create. This replaces the legacy EnsureSession
@@ -255,33 +279,45 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		if prep := pkg.GetContentPreparer(kindOf(msg)); prep != nil {
 			content = prep(ctx, content, cfg.RunAction, cfg.HasAction)
 		}
-		response, inputForDisplay, resultMeta, err := cfg.Runner.Run(ctx, sessionKey, content, msg.Files...)
-		if err != nil {
-			logger.FromContext(ctx).Error("handler run failed", "error", err)
-			errText, errCode := friendlyError(err)
-			return errorFrame(msg, errText, errCode), nil
-		}
-		outContent := response
-		if outContent == "" {
-			outContent = "(No response)"
-		}
-		if kindOf(msg) == "console" && inputForDisplay != "" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
-			outContent = "Input to LLM:\n" + inputForDisplay + "\n\n---\n\nResponse:\n" + response
-		}
-		outMeta := safeMetadata(msg.Metadata)
-		for k, v := range resultMeta {
-			if outMeta == nil {
-				outMeta = make(map[string]string)
-			}
-			outMeta[k] = v
-		}
-		return pkg.OutboundMessage{
-			ConversationID: msg.ConversationID,
-			ThreadID:       msg.ThreadID,
-			Content:        outContent,
-			Metadata:       outMeta,
-		}, nil
+		reply, _ := runTurn(ctx, cfg, sessionKey, content, msg)
+		return reply, nil
 	}
+}
+
+// runTurn runs content through the Runner as a turn of sessionKey and returns
+// the reply frame, or the error frame and the run's error when the run failed,
+// addressed to msg's conversation and carrying msg's metadata.
+func runTurn(ctx context.Context, cfg HandlerConfig, sessionKey, content string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
+	response, inputForDisplay, resultMeta, err := cfg.Runner.Run(ctx, sessionKey, content, msg.Files...)
+	if err != nil {
+		// A run whose claim another run took over did not fail: its caller
+		// logs the takeover (see openSessions.run).
+		if !errors.Is(err, state.ErrClaimLost) {
+			logger.FromContext(ctx).Error("handler run failed", "error", err)
+		}
+		errText, errCode := friendlyError(err)
+		return errorFrame(msg, errText, errCode), err
+	}
+	outContent := response
+	if outContent == "" {
+		outContent = "(No response)"
+	}
+	if kindOf(msg) == "console" && inputForDisplay != "" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		outContent = "Input to LLM:\n" + inputForDisplay + "\n\n---\n\nResponse:\n" + response
+	}
+	outMeta := safeMetadata(msg.Metadata)
+	for k, v := range resultMeta {
+		if outMeta == nil {
+			outMeta = make(map[string]string)
+		}
+		outMeta[k] = v
+	}
+	return pkg.OutboundMessage{
+		ConversationID: msg.ConversationID,
+		ThreadID:       msg.ThreadID,
+		Content:        outContent,
+		Metadata:       outMeta,
+	}, nil
 }
 
 // kindOf returns the channel TYPE for a message. Prefers msg.Kind (set by
@@ -304,6 +340,10 @@ func kindOf(msg pkg.InboundMessage) string {
 // by frontends for translated copy — adding one is an API change, not just
 // a log message tweak.
 func errorFrame(msg pkg.InboundMessage, text, errorCode string) pkg.OutboundMessage {
+	// Refusing an open-session request answers its waiting caller.
+	if msg.Metadata[pkg.OpenSessionMetadataKey] == "true" {
+		return openRejected(msg, text, errorCode)
+	}
 	return errorResponse(msg, text, map[string]string{
 		"type": "error", "error_code": errorCode,
 	})
@@ -345,6 +385,10 @@ func safeMetadata(m map[string]string) map[string]string {
 	// yaml_ws.go and the handler. Never echo them back to channel adapters.
 	delete(out, enrichmentFailedKey)
 	delete(out, enrichmentFailedStepKey)
+	// An open-session attempt's correlation id belongs on the one frame that
+	// answers the attempt (openFrame adds it there); a reply carrying it could
+	// be routed to the waiting caller instead of the conversation.
+	delete(out, pkg.OpenRequestIDMetadataKey)
 	return out
 }
 

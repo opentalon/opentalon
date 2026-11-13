@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"time"
 
@@ -98,11 +99,11 @@ func NewSessionStore(db *DB, maxMessages, maxIdleDays int) *SessionStore {
 // user their conversation expired" and "tell the user to retry".
 func (s *SessionStore) Get(id string) (*state.Session, error) {
 	d := s.db.Dialect()
-	var summary, title, activeModel, metadataJSON, createdAt, updatedAt string
+	var summary, title, activeModel, metadataJSON, createdAt, updatedAt, entityID, openedBy, openKey, channelID string
 	err := s.db.SQLDB().QueryRow(
-		d.Rebind(`SELECT COALESCE(summary,''), COALESCE(title,''), active_model, metadata, created_at, updated_at FROM sessions WHERE id = ?`),
+		d.Rebind(`SELECT COALESCE(summary,''), COALESCE(title,''), active_model, metadata, created_at, updated_at, COALESCE(entity_id,''), COALESCE(opened_by,''), COALESCE(open_key,''), COALESCE(channel_id,'') FROM sessions WHERE id = ?`),
 		id,
-	).Scan(&summary, &title, &activeModel, &metadataJSON, &createdAt, &updatedAt)
+	).Scan(&summary, &title, &activeModel, &metadataJSON, &createdAt, &updatedAt, &entityID, &openedBy, &openKey, &channelID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("session %q: %w", id, state.ErrSessionNotFound)
@@ -128,6 +129,10 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 		Title:       title,
 		ActiveModel: provider.ModelRef(activeModel),
 		Metadata:    metadata,
+		EntityID:    entityID,
+		OpenedBy:    openedBy,
+		OpenKey:     openKey,
+		ChannelID:   channelID,
 		CreatedAt:   ca,
 		UpdatedAt:   ua,
 	}, nil
@@ -176,9 +181,232 @@ func (s *SessionStore) Create(p state.SessionParams) *state.Session {
 		ID:        p.ID,
 		Messages:  []provider.Message{},
 		Metadata:  map[string]string{},
+		EntityID:  p.EntityID,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
+}
+
+// OpenSession opens a chat session for a user on a server's behalf, once per
+// entity, origin (p.OpenedBy) and idempotency key (p.OpenKey): the first call
+// inserts the row, stamped "chat" with no system_source, and answers
+// created=true; every later call, concurrent or after a restart, answers the
+// stored session with created=false — never the id it minted itself, and
+// never a changed row (the existing session's labels stay as they were). The
+// stored session is answered as Identity reads it: its id, owner, channel and
+// open key.
+//
+// Unlike Create, it tells created from found and has no transient fallback:
+// an insert that fails, or conflicts on anything but the key (the minted id
+// already belongs to another session), answers an error and no session, so
+// the caller may retry with the same key.
+//
+// The INSERT is ON CONFLICT DO NOTHING against migration 018's unique index,
+// so the uniqueness is decided by the database in one statement: Postgres
+// makes a concurrent duplicate wait for the first insert's commit, SQLite
+// serialises writers; ctx ends the wait. The lookup after a conflict reads the
+// committed row by its key, under ctx as well.
+func (s *SessionStore) OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error) {
+	if p.OpenedBy == "" || p.OpenKey == "" {
+		return nil, false, state.ErrOpenParams
+	}
+	d := s.db.Dialect()
+	now := time.Now().UTC()
+	ts := now.Format(time.RFC3339)
+	res, err := s.db.SQLDB().ExecContext(ctx,
+		d.Rebind(`INSERT INTO sessions (id, summary, active_model, metadata, entity_id, group_id, channel_id, interaction_kind, opened_by, open_key, created_at, updated_at)
+		VALUES (?, '', '', '{}', ?, ?, ?, 'chat', ?, ?, ?, ?) ON CONFLICT DO NOTHING`),
+		p.ID, p.EntityID, p.GroupID, p.ChannelID, p.OpenedBy, p.OpenKey, ts, ts)
+	if err != nil {
+		return nil, false, fmt.Errorf("open session %q insert: %w", p.ID, err)
+	}
+	inserted, err := affectedOne(res)
+	if err != nil {
+		return nil, false, fmt.Errorf("open session %q insert: %w", p.ID, err)
+	}
+	if inserted {
+		return &state.Session{
+			ID:        p.ID,
+			Messages:  []provider.Message{},
+			Metadata:  map[string]string{},
+			EntityID:  p.EntityID,
+			OpenedBy:  p.OpenedBy,
+			OpenKey:   p.OpenKey,
+			ChannelID: p.ChannelID,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}, true, nil
+	}
+
+	existing, err := s.identityWhere(ctx, `entity_id = ? AND opened_by = ? AND open_key = ?`, p.EntityID, p.OpenedBy, p.OpenKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, fmt.Errorf("open session %q: id already taken by another session", p.ID)
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("open session %q lookup: %w", p.ID, err)
+	}
+	return existing, false, nil
+}
+
+// Identity reads what authorises an open-session request for session id: its
+// id, owner, channel and open key, and nothing else. Unlike Get it does not
+// load the transcript, and ctx ends a wait for the database. A row that is
+// absent answers a wrapped state.ErrSessionNotFound.
+func (s *SessionStore) Identity(ctx context.Context, id string) (*state.Session, error) {
+	sess, err := s.identityWhere(ctx, `id = ?`, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("session %q: %w", id, state.ErrSessionNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("session %q load: %w", id, err)
+	}
+	return sess, nil
+}
+
+// identityWhere reads the identity (see Identity) of the session whose row
+// matches where, with args.
+func (s *SessionStore) identityWhere(ctx context.Context, where string, args ...any) (*state.Session, error) {
+	var sess state.Session
+	err := s.db.SQLDB().QueryRowContext(ctx,
+		s.db.Dialect().Rebind(`SELECT id, COALESCE(entity_id,''), COALESCE(opened_by,''), COALESCE(open_key,''), COALESCE(channel_id,'') FROM sessions WHERE `+where),
+		args...,
+	).Scan(&sess.ID, &sess.EntityID, &sess.OpenedBy, &sess.OpenKey, &sess.ChannelID)
+	if err != nil {
+		return nil, err
+	}
+	return &sess, nil
+}
+
+// ClaimOpener is the one atomic "this request runs the first turn" mark of an
+// opened session: a compare-and-set on opener_claimed_at that exactly one of
+// any number of concurrent callers wins. It is won when the session has no
+// claim yet, or when its claim is older than staleAfter and the first turn's
+// input was not stored under it (opener_stored_at, which
+// AddMessageWithMetadata sets for the input stored with that claim's
+// state.TurnClaim, and for nothing else) — the claimant died before its run
+// stored the hidden message, so the first turn never started and may be
+// claimed once more. Otherwise the claim is not won: a fresh one answers
+// state.ClaimHeld, a stored one and an unknown id state.ClaimSettled, which a
+// caller tells apart to recover only a turn that may still need its run. The
+// marker, not the transcript, is the proof:
+// clearing, summarising or trimming the messages must not make a first turn
+// that ran claimable again. The claim is separate from the message on
+// purpose: the turn runner stores that message, as for every turn, and a
+// claimant whose claim was taken over is refused when it stores.
+//
+// On Postgres a second UPDATE waits for the first one's row lock and then
+// re-checks the WHERE against the claimed row, so it matches nothing; SQLite
+// serialises writers. ctx ends the wait.
+func (s *SessionStore) ClaimOpener(ctx context.Context, sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	res, err := s.db.SQLDB().ExecContext(ctx,
+		s.db.Dialect().Rebind(`UPDATE sessions SET opener_claimed_at = ?
+		WHERE id = ? AND (opener_claimed_at IS NULL
+			OR (opener_claimed_at < ? AND opener_stored_at IS NULL))`),
+		now.UTC().Format(time.RFC3339), sessionID, now.Add(-staleAfter).UTC().Format(time.RFC3339))
+	if err != nil {
+		return state.ClaimHeld, fmt.Errorf("claim opener %q: %w", sessionID, err)
+	}
+	claimed, err := affectedOne(res)
+	if err != nil {
+		return state.ClaimHeld, fmt.Errorf("claim opener %q: %w", sessionID, err)
+	}
+	if claimed {
+		return state.ClaimWon, nil
+	}
+	result, err := s.claimNotWon(ctx, `SELECT COALESCE(opener_stored_at, '') FROM sessions WHERE id = ?`, sessionID)
+	if err != nil {
+		return result, fmt.Errorf("claim opener %q: %w", sessionID, err)
+	}
+	return result, nil
+}
+
+// claimNotWon tells why a claim's compare-and-set matched nothing; query reads
+// the claim's stored mark (empty while unset). A set mark is final, so a stored
+// claim, or a row that is gone, is settled; an unset mark means a fresh claim
+// another run holds. The read follows the write, so a claim that went stale or
+// was stored in between is reported as it is now, which a caller only uses to
+// decide whether to look again later.
+func (s *SessionStore) claimNotWon(ctx context.Context, query string, args ...any) (state.ClaimResult, error) {
+	var stored string
+	err := s.db.SQLDB().QueryRowContext(ctx, s.db.Dialect().Rebind(query), args...).Scan(&stored)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return state.ClaimSettled, nil
+	case err != nil:
+		return state.ClaimHeld, err
+	case stored != "":
+		return state.ClaimSettled, nil
+	default:
+		return state.ClaimHeld, nil
+	}
+}
+
+// ReserveNote is the once-per-key claim to post a note into an existing
+// session: the first call for a session and note key inserts the reservation
+// and answers state.ClaimWon; a later call answers state.ClaimHeld while that
+// reservation is fresh, state.ClaimSettled once the note was stored under it,
+// and state.ClaimWon once more when it is older than staleAfter and the note
+// was not stored under it — the reserving run died before the turn runner
+// stored the note. A session that does not exist is settled, never reserved. A
+// database failure is an error, never a refusal. Same split as ClaimOpener:
+// the reservation is the compare-and-set, the turn runner stores the note
+// under the reservation's state.TurnClaim (AddMessageWithMetadata), and that
+// store marks the reservation's stored_at, which no transcript rewrite erases.
+//
+// The insert is ON CONFLICT DO NOTHING against the reservation's primary key
+// and selects the session's row for update: it inserts nothing for a missing
+// session, and it waits for a prune or delete that holds the row, so no
+// reservation outlives its session. The re-claim is a compare-and-set UPDATE,
+// which on Postgres a concurrent caller re-checks against the row the winner
+// wrote. ctx ends a wait for the row.
+func (s *SessionStore) ReserveNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	d := s.db.Dialect()
+	at := now.UTC().Format(time.RFC3339)
+	fail := func(err error) (state.ClaimResult, error) {
+		return state.ClaimHeld, fmt.Errorf("reserve note %q in %q: %w", noteKey, sessionID, err)
+	}
+	res, err := s.db.SQLDB().ExecContext(ctx,
+		d.Rebind(`INSERT INTO session_note_reservations (session_id, note_key, reserved_at)
+		SELECT id, ?, ? FROM sessions WHERE id = ?`+d.ForUpdate()+` ON CONFLICT DO NOTHING`),
+		noteKey, at, sessionID)
+	if err != nil {
+		return fail(err)
+	}
+	reserved, err := affectedOne(res)
+	if err != nil {
+		return fail(err)
+	}
+	if reserved {
+		return state.ClaimWon, nil
+	}
+
+	res, err = s.db.SQLDB().ExecContext(ctx,
+		d.Rebind(`UPDATE session_note_reservations SET reserved_at = ?
+		WHERE session_id = ? AND note_key = ? AND reserved_at < ? AND stored_at IS NULL`),
+		at, sessionID, noteKey, now.Add(-staleAfter).UTC().Format(time.RFC3339))
+	if err != nil {
+		return fail(err)
+	}
+	if reserved, err = affectedOne(res); err != nil {
+		return fail(err)
+	}
+	if reserved {
+		return state.ClaimWon, nil
+	}
+	result, err := s.claimNotWon(ctx, `SELECT COALESCE(stored_at, '') FROM session_note_reservations WHERE session_id = ? AND note_key = ?`, sessionID, noteKey)
+	if err != nil {
+		return fail(err)
+	}
+	return result, nil
+}
+
+// affectedOne reports whether a single-row write took effect.
+func affectedOne(res sql.Result) (bool, error) {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 // sessionRowLocker is the slice of a transaction lockSessionRow needs; both
@@ -217,10 +445,29 @@ func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
 // confirmation exchanges out of the LLM history; everything else in the map
 // never reaches the model. A nil/empty map persists as SQL NULL, leaving
 // ordinary chat turns byte-identical to the pre-013 shape.
+//
+// A claimed turn's input (migration 018) carries its state.TurnClaim in the
+// metadata (state.TurnClaimOf): the first turn of an opened session
+// (ClaimOpener) or a note with its key (ReserveNote), which is written to
+// messages.note_key, unique per session. The store marks that claim stored in
+// this transaction, so the mark exists exactly when the message does, and only
+// while the claim is the one held and nothing was stored under it; otherwise
+// it answers state.ErrClaimLost and stores nothing, so a run whose stale claim
+// another run took over never stores the turn a second time. The claim time
+// itself is not persisted in messages.metadata.
 func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
 	ctx := context.Background()
 	d := s.db.Dialect()
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	tc, claimed, err := state.TurnClaimOf(metadata)
+	if err != nil {
+		return fmt.Errorf("add message: %w", err)
+	}
+	if claimed {
+		metadata = maps.Clone(metadata)
+		delete(metadata, state.ClaimedAtMetadataKey)
+	}
 
 	toolCallsJSON, err := toolCallsAsNullString(msg.ToolCalls)
 	if err != nil {
@@ -232,6 +479,7 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	}
 	toolCallID := sql.NullString{String: msg.ToolCallID, Valid: msg.ToolCallID != ""}
 	visibility := sql.NullString{String: msg.Visibility, Valid: msg.Visibility != ""}
+	noteKey := sql.NullString{String: tc.NoteKey, Valid: tc.NoteKey != ""}
 	metadataJSON, err := metadataAsNullString(metadata)
 	if err != nil {
 		return err
@@ -252,11 +500,16 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	if err := lockSessionRow(ctx, tx, d, id); err != nil {
 		return fmt.Errorf("add message lock: %w", err)
 	}
+	if claimed {
+		if err := markClaimStored(ctx, tx, d, id, tc, now); err != nil {
+			return err
+		}
+	}
 
 	if _, err := tx.ExecContext(ctx,
-		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, thinking, metadata, visibility, created_at)
-		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
-		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, thinkingJSON, metadataJSON, visibility, now, id); err != nil {
+		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, thinking, metadata, visibility, note_key, created_at)
+		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
+		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, thinkingJSON, metadataJSON, visibility, noteKey, now, id); err != nil {
 		return fmt.Errorf("add message insert: %w", err)
 	}
 
@@ -272,6 +525,41 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 		d.Rebind(`UPDATE sessions SET updated_at = ? WHERE id = ?`), now, id)
 
 	return tx.Commit()
+}
+
+// markClaimStored marks claim c of session id stored at now, inside the
+// transaction that stores the claimed turn's input. The UPDATE matches only
+// while c is the claim held (its time; claim times are kept at second
+// precision, and a claim is taken over only once it is minutes old) and
+// nothing was stored under it; no match is state.ErrClaimLost. On Postgres a
+// concurrent re-claim of the same row waits for this one and then re-checks
+// its own WHERE, so either the re-claim or this store takes effect, never both.
+func markClaimStored(ctx context.Context, tx ExclusiveTx, d Dialect, id string, c state.TurnClaim, now string) error {
+	at := c.At.UTC().Format(time.RFC3339)
+	var res sql.Result
+	var err error
+	if c.NoteKey != "" {
+		res, err = tx.ExecContext(ctx,
+			d.Rebind(`UPDATE session_note_reservations SET stored_at = ?
+			WHERE session_id = ? AND note_key = ? AND reserved_at = ? AND stored_at IS NULL`),
+			now, id, c.NoteKey, at)
+	} else {
+		res, err = tx.ExecContext(ctx,
+			d.Rebind(`UPDATE sessions SET opener_stored_at = ?
+			WHERE id = ? AND opener_claimed_at = ? AND opener_stored_at IS NULL`),
+			now, id, at)
+	}
+	if err != nil {
+		return fmt.Errorf("add message mark claim stored: %w", err)
+	}
+	stored, err := affectedOne(res)
+	if err != nil {
+		return fmt.Errorf("add message mark claim stored: %w", err)
+	}
+	if !stored {
+		return state.ErrClaimLost
+	}
+	return nil
 }
 
 // SetModel updates the active model and persists.
@@ -463,26 +751,70 @@ func (s *SessionStore) ClearMessages(id string) error {
 	return tx.Commit()
 }
 
-// Delete removes a session and its messages.
+// Delete removes a session with its messages and note reservations in one
+// transaction that holds the session's row first, like every transcript
+// writer (lockSessionRow): a message or reservation written meanwhile either
+// commits first and goes with the session, or waits and finds it gone.
 func (s *SessionStore) Delete(id string) error {
+	ctx := context.Background()
 	d := s.db.Dialect()
-	// Delete messages first (FK may not cascade in all configs).
-	_, _ = s.db.SQLDB().Exec(d.Rebind(`DELETE FROM messages WHERE session_id = ?`), id)
-	_, err := s.db.SQLDB().Exec(d.Rebind(`DELETE FROM sessions WHERE id = ?`), id)
-	return err
+	tx, cleanup, err := d.BeginExclusive(ctx, s.db.SQLDB())
+	if err != nil {
+		return fmt.Errorf("delete session begin: %w", err)
+	}
+	defer cleanup()
+	defer func() { _ = tx.Rollback() }()
+	if err := lockSessionRow(ctx, tx, d, id); err != nil {
+		return fmt.Errorf("delete session lock: %w", err)
+	}
+	// Messages and note reservations first (FK may not cascade in all configs).
+	for _, q := range []string{
+		`DELETE FROM messages WHERE session_id = ?`,
+		`DELETE FROM session_note_reservations WHERE session_id = ?`,
+		`DELETE FROM sessions WHERE id = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, d.Rebind(q), id); err != nil {
+			return fmt.Errorf("delete session: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
-// PruneIdleSessions deletes sessions not updated in the last maxIdleDays days.
+// PruneIdleSessions deletes sessions not updated in the last maxIdleDays days,
+// with their messages and note reservations, in one transaction. The idle
+// sessions' rows are locked first (on SQLite the transaction holds the write
+// lock), so a writer that touches one of them meanwhile either commits first,
+// and the session is no longer idle, or waits until it is gone: a session
+// never survives without its history and its settled note keys.
 func (s *SessionStore) PruneIdleSessions() error {
 	if s.maxIdleDays <= 0 {
 		return nil
 	}
+	ctx := context.Background()
 	d := s.db.Dialect()
 	cutoff := time.Now().AddDate(0, 0, -s.maxIdleDays).UTC().Format(time.RFC3339)
-	// Delete messages for pruned sessions.
-	_, _ = s.db.SQLDB().Exec(d.Rebind(`DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?)`), cutoff)
-	_, err := s.db.SQLDB().Exec(d.Rebind(`DELETE FROM sessions WHERE updated_at < ?`), cutoff)
-	return err
+	tx, cleanup, err := d.BeginExclusive(ctx, s.db.SQLDB())
+	if err != nil {
+		return fmt.Errorf("prune begin: %w", err)
+	}
+	defer cleanup()
+	defer func() { _ = tx.Rollback() }()
+	var idle int
+	if err := tx.QueryRowContext(ctx,
+		d.Rebind(`SELECT COUNT(*) FROM (SELECT id FROM sessions WHERE updated_at < ?`+d.ForUpdate()+`) idle`),
+		cutoff).Scan(&idle); err != nil {
+		return fmt.Errorf("prune lock: %w", err)
+	}
+	for _, q := range []string{
+		`DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?)`,
+		`DELETE FROM session_note_reservations WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?)`,
+		`DELETE FROM sessions WHERE updated_at < ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, d.Rebind(q), cutoff); err != nil {
+			return fmt.Errorf("prune: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // loadMessages reads all messages for a session from the messages table, ordered by seq.

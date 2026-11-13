@@ -269,6 +269,48 @@ const ControlMetadataKey = "control"
 // token so the handler can scope the session and validate it exists.
 const ControlResumeHello = "resume_hello"
 
+// OpenSessionMetadataKey="true" marks an inbound message as a server's
+// request to open a chat session for the verified user and run its first
+// turn, the message content, hidden from the transcript. Only a verified
+// system invocation may send it. Keys of the request:
+//
+//   - OpenedByMetadataKey, OpenKeyMetadataKey: the origin label and the
+//     idempotency key; the same user, origin and key answer the same session
+//     while it exists, and its first turn is stored once.
+//   - OpenSessionIDMetadataKey and NoteKeyMetadataKey instead: continue that
+//     session of the user with the content as a hidden note, stored once per
+//     note key.
+//   - OpenRequestIDMetadataKey: the attempt's correlation id.
+//
+// The core answers every attempt with one frame carrying that correlation id,
+// sent before any model run: FrameSessionOpened, with session_id (the session
+// key) and created ("true" exactly when this attempt took the turn's claim and
+// so runs the first turn or the note), or FrameOpenRejected, with error_code
+// forbidden, bad_request, not_found or internal_error, or the code any message
+// gets for the same refusal (token_required, auth_failed, ...). No other frame
+// carries the correlation id: the turn's reply and its error frame reach the
+// session's conversation as every reply does.
+//
+// A request reaches only the sessions opened this way that the store records
+// for the user and the channel it arrives on: any other note target, or the
+// user's session for the origin and key on another channel, answers not_found
+// like a missing one. A channel with threads, a request in a thread, one
+// whose channel id is not its channel's, one whose user, channel or
+// conversation id is empty or holds a colon, and a note whose target is not
+// "<entity>:<channel>:<conversation>" of such ids are refused with
+// bad_request.
+const (
+	OpenSessionMetadataKey   = "open_session"
+	OpenedByMetadataKey      = "opened_by"
+	OpenKeyMetadataKey       = "open_key"
+	OpenSessionIDMetadataKey = "session_id"
+	NoteKeyMetadataKey       = "note_key"
+	OpenRequestIDMetadataKey = "open_request_id"
+
+	FrameSessionOpened = "session_opened"
+	FrameOpenRejected  = "open_rejected"
+)
+
 // OwnerEntityMetadataKey carries the conversation-owning entity on outbound
 // metadata. This is the authoritative statement of the contract:
 //

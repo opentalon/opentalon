@@ -1120,9 +1120,9 @@ func (o *Orchestrator) runSTTPreparer(ctx context.Context, prep ContentPreparerE
 	return result.Content, nil
 }
 
-// preparerOutcome is the result of one preparer pass. Content / Blocked
-// drive what the orchestrator does next; Response holds the parsed plugin
-// JSON so callers can read the RFC #249 candidate fields and emit
+// preparerOutcome is the result of one preparer pass. Content / Blocked /
+// Invoke drive what the orchestrator does next; Response holds the parsed
+// plugin JSON so callers can read the RFC #249 candidate fields and emit
 // retrieval events without re-deserializing. For Lua preparers (no plugin
 // protocol) Response stays zero-valued — its KnowledgeCandidates /
 // GlossaryCandidates / ToolCandidates slices are nil and downstream emit
@@ -1130,6 +1130,7 @@ func (o *Orchestrator) runSTTPreparer(ctx context.Context, prep ContentPreparerE
 type preparerOutcome struct {
 	Content  string
 	Blocked  *RunResult
+	Invoke   []InvokeStep // the steps that answer the turn instead of the LLM; the caller runs them
 	Response preparerResponse
 }
 
@@ -1153,8 +1154,8 @@ func (o *Orchestrator) runSinglePreparerWithSearch(ctx context.Context, prep Con
 // runSinglePreparer executes one content preparer. Errors and "fail
 // open" preparer failures both return a non-blocked outcome with
 // Content == the input content; an explicit guard block returns
-// Blocked set; an `invoke` directive returns Content == "" and Blocked
-// holding the invoke result. The Response field carries the parsed
+// Blocked set; an `invoke` directive returns Content == "" and Invoke
+// holding its steps, run by the caller. The Response field carries the parsed
 // plugin JSON (RFC #249 candidate fields included) so callers can emit
 // retrieval events without re-parsing.
 func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPreparerEntry, content, callPrefix string, allowInvoke bool) (preparerOutcome, error) {
@@ -1174,8 +1175,7 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 				for i, s := range result.InvokeSteps {
 					steps[i] = InvokeStep{Plugin: s.Plugin, Action: s.Action, Args: s.Args}
 				}
-				invokeResult, err := o.runInvokeSteps(ctx, steps)
-				return preparerOutcome{Blocked: invokeResult}, err
+				return preparerOutcome{Invoke: steps}, nil
 			}
 			msg := result.Content
 			if msg == "" {
@@ -1223,8 +1223,7 @@ func (o *Orchestrator) runSinglePreparer(ctx context.Context, prep ContentPrepar
 				slog.Warn("insecure preparer cannot run invoke, ignoring", "plugin", prep.Plugin, "action", prep.Action)
 				return preparerOutcome{Content: content, Response: pr}, nil
 			}
-			invokeResult, err := o.runInvokeSteps(ctx, pr.Invoke)
-			return preparerOutcome{Blocked: invokeResult, Response: pr}, err
+			return preparerOutcome{Invoke: pr.Invoke, Response: pr}, nil
 		}
 		msg := pr.Message
 		if msg == "" {
@@ -1410,6 +1409,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		return nil, err
 	}
 	defer unlock()
+	// The in-pod session mutex waits regardless of ctx. A turn whose context
+	// ended while it queued behind another turn never starts: its caller's
+	// deadline bounds how late it may still store its message.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Request-scoped session cache: avoids redundant DB roundtrips for
 	// sessions.Get() on every agent loop iteration. The per-session lock
@@ -1820,6 +1825,26 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if outcome.Blocked != nil {
 				return outcome.Blocked, nil
 			}
+			if len(outcome.Invoke) > 0 {
+				// The steps answer the turn. A claimed turn stores its input
+				// first, as before the planner below: the store settles the
+				// claim, or refuses a run that lost it before any step acts.
+				if _, claimed := TurnClaimFrom(ctx); claimed {
+					if err := addUserMessage(ctx, sessions, sessionID, provider.Message{
+						Role:       provider.RoleUser,
+						Content:    stripKnowledgeContext(content),
+						Files:      files,
+						Visibility: actor.Visibility(ctx),
+					}); err != nil {
+						return nil, fmt.Errorf("adding user message: %w", err)
+					}
+				}
+				invokeResult, err := o.runInvokeSteps(ctx, outcome.Invoke)
+				if err != nil {
+					return nil, err
+				}
+				return invokeResult, nil
+			}
 			content = outcome.Content
 			// A preparer's relevant_tools no longer narrows the LLM's tools
 			// array — discovery is the registry-sourced catalog + load_tools.
@@ -1855,6 +1880,33 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				PreparerDecisionID: decisionID,
 			})
 		}
+	}
+
+	// A claimed turn (WithTurnClaim: the first turn of a session a server
+	// opened, or a keyed note) stores its input here, before the planner may
+	// run a tool or end the turn with a confirmation: that store is what marks
+	// the claim's turn as run, and the store refuses it when another run took
+	// the claim over, so a run that lost its claim stops before it acts. The
+	// later stores of the input below are skipped for it. Content the
+	// preparers left empty gets the agent loop's empty-content treatment here
+	// already, so the planner never acts on a claimed turn without its store.
+	inputStored := false
+	if _, claimed := TurnClaimFrom(ctx); claimed && !toolCallSeeded {
+		if content == "" && len(files) == 0 {
+			return emptyContentResult(), nil
+		}
+		if content == "" {
+			content = fileOnlyContent
+		}
+		if err := addUserMessage(ctx, sessions, sessionID, provider.Message{
+			Role:       provider.RoleUser,
+			Content:    content,
+			Files:      files,
+			Visibility: actor.Visibility(ctx),
+		}); err != nil {
+			return nil, fmt.Errorf("adding user message: %w", err)
+		}
+		inputStored = true
 	}
 
 	if timing != nil {
@@ -1939,13 +1991,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if !confResult.RequiresConfirmation {
 				// All read-only — execute pipeline directly.
 				log.Info("pipeline confirmation skipped by plugin", "steps", len(planResult.Steps))
-				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+				if !inputStored {
+					_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+				}
 				p := pipeline.NewPipeline(planResult.Steps, o.pipelineConfig)
 				return o.executePipeline(ctx, sessionID, p)
 			}
 			// Partial execution: run read prefix before the first write step,
 			// then pause for confirmation with real data.
-			_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+			if !inputStored {
+				_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+			}
 			if confResult.ConfirmBeforeStep > 0 {
 				// Execute read steps directly (not through executePipeline which
 				// enters the LLM agent loop). Collect their context so the write
@@ -2090,7 +2146,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				toolResult := o.executeCall(ctx, call)
 				if toolResult.Error == "" {
 					// Seed session: user message, assistant tool call, tool result.
-					_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+					if !inputStored {
+						_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
+					}
 					if o.supportsNativeTools() {
 						// Native format: assistant with tool_calls + tool result with tool_call_id.
 						_ = sessions.AddMessage(sessionID, provider.Message{
@@ -2146,25 +2204,21 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	if !singleStepSeeded {
 		if content == "" && len(files) == 0 {
 			log.Debug("empty content and no files, returning fallback")
-			return &RunResult{
-				Response: "I received your message but couldn't read its content. Could you try sending it as text?",
-				Metadata: map[string]string{
-					"type":       "error",
-					"error_code": "empty_content",
-				},
-			}, nil
+			return emptyContentResult(), nil
 		}
 		if content == "" && len(files) > 0 {
-			content = "[The user sent a file attachment.]"
+			content = fileOnlyContent
 		}
 
-		if err := sessions.AddMessage(sessionID, provider.Message{
-			Role:       provider.RoleUser,
-			Content:    content,
-			Files:      files,
-			Visibility: actor.Visibility(ctx),
-		}); err != nil {
-			return nil, fmt.Errorf("adding user message: %w", err)
+		if !inputStored {
+			if err := addUserMessage(ctx, sessions, sessionID, provider.Message{
+				Role:       provider.RoleUser,
+				Content:    content,
+				Files:      files,
+				Visibility: actor.Visibility(ctx),
+			}); err != nil {
+				return nil, fmt.Errorf("adding user message: %w", err)
+			}
 		}
 	}
 	// Run summarization asynchronously so it doesn't block the user's request.
@@ -5027,7 +5081,7 @@ func (o *Orchestrator) maybeGenerateTitle(ctx context.Context, sessionID string)
 	var firstUser string
 	hasAssistant := false
 	for _, m := range sess.Messages {
-		if firstUser == "" && m.Role == provider.RoleUser {
+		if firstUser == "" && isVisibleUserMessage(m) {
 			firstUser = m.Content
 		}
 		if m.Role == provider.RoleAssistant {
@@ -5953,6 +6007,47 @@ func deduplicateKnowledgeOutput(m provider.Message, seen map[uint64]bool) provid
 // includes hidden turns.
 func isVisibleUserMessage(m provider.Message) bool {
 	return m.Role == provider.RoleUser && m.Visibility != provider.VisibilityHidden
+}
+
+type turnClaimCtxKey struct{}
+
+// WithTurnClaim marks the turn as the one claim c was taken for: the first
+// turn of a session a server opened, or a keyed note. Run stores the turn's
+// user message under c (state.TurnClaim.Metadata), which marks c stored, and
+// which the session store refuses with state.ErrClaimLost when another run
+// took the turn over meanwhile.
+func WithTurnClaim(ctx context.Context, c state.TurnClaim) context.Context {
+	return context.WithValue(ctx, turnClaimCtxKey{}, c)
+}
+
+// TurnClaimFrom returns the claim set by WithTurnClaim.
+func TurnClaimFrom(ctx context.Context) (state.TurnClaim, bool) {
+	c, ok := ctx.Value(turnClaimCtxKey{}).(state.TurnClaim)
+	return c, ok
+}
+
+// fileOnlyContent stands in for the text of a message that brought only files.
+const fileOnlyContent = "[The user sent a file attachment.]"
+
+// emptyContentResult answers a turn left with neither text nor files: an empty
+// user message is never sent to the LLM.
+func emptyContentResult() *RunResult {
+	return &RunResult{
+		Response: "I received your message but couldn't read its content. Could you try sending it as text?",
+		Metadata: map[string]string{
+			"type":       "error",
+			"error_code": "empty_content",
+		},
+	}
+}
+
+// addUserMessage stores the turn's own user message, under the turn's claim
+// when it has one (WithTurnClaim).
+func addUserMessage(ctx context.Context, sessions SessionStoreInterface, sessionID string, msg provider.Message) error {
+	if c, ok := TurnClaimFrom(ctx); ok {
+		return sessions.AddMessageWithMetadata(sessionID, msg, c.Metadata())
+	}
+	return sessions.AddMessage(sessionID, msg)
 }
 
 // lastUserMessage returns the most recent VISIBLE user message from the session,

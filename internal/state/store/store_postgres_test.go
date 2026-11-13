@@ -6,10 +6,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/provider"
@@ -37,6 +39,7 @@ func pgDB(t *testing.T) *DB {
 		// this list in sync with internal/state/store/migrations/*.sql.
 		db.SQLDB().Exec(`DROP TABLE IF EXISTS
 			session_events,
+			session_note_reservations,
 			prompt_snapshots,
 			ai_debug_events,
 			messages,
@@ -57,8 +60,339 @@ func TestPostgres_OpenAndMigrations(t *testing.T) {
 	if err := db.SQLDB().QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 17 {
-		t.Errorf("schema_version = %d, want 17", v)
+	if v != 18 {
+		t.Errorf("schema_version = %d, want 18", v)
+	}
+}
+
+// The open-session contracts on Postgres; the checks are shared with the
+// SQLite tests in session_test.go.
+func TestPostgres_OpenSessionCreateOrFind(t *testing.T) { checkOpenSessionCreateOrFind(t, pgDB(t)) }
+func TestPostgres_OpenSessionRefusals(t *testing.T)     { checkOpenSessionRefusals(t, pgDB(t)) }
+func TestPostgres_OpenSessionConcurrent(t *testing.T)   { checkOpenSessionConcurrent(t, pgDB(t)) }
+func TestPostgres_ClaimOpener(t *testing.T) {
+	checkClaimOpener(t, NewSessionStore(pgDB(t), 0, 0))
+}
+func TestPostgres_ReserveNote(t *testing.T) {
+	db := pgDB(t)
+	checkReserveNote(t, NewSessionStore(db, 0, 0), db)
+}
+func TestPostgres_SessionOwner(t *testing.T) {
+	checkSessionOwner(t, NewSessionStore(pgDB(t), 0, 0))
+}
+func TestPostgres_NoteReservationsGoWithSession(t *testing.T) {
+	checkNoteReservationsGoWithSession(t, pgDB(t))
+}
+
+// TestPostgres_PruneKeepsASessionWrittenMeanwhile: an idle session that another
+// writer touches while the prune runs keeps its messages and note
+// reservations; it never survives without them, which would make a settled
+// note key claimable again.
+func TestPostgres_PruneKeepsASessionWrittenMeanwhile(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 1)
+	store.Create(state.SessionParams{ID: "idle", EntityID: "u1"})
+	if err := store.AddMessage("idle", provider.Message{Role: provider.RoleUser, Content: "earlier"}); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+	if result, err := store.ReserveNote(context.Background(), "idle", "chapter-1", time.Now(), time.Minute); err != nil || result != state.ClaimWon {
+		t.Fatalf("ReserveNote = %v, %v", result, err)
+	}
+	if _, err := db.SQLDB().Exec(`UPDATE sessions SET updated_at = $1 WHERE id = 'idle'`,
+		time.Now().AddDate(0, 0, -2).UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("age the session: %v", err)
+	}
+
+	// Another pod's writer holds the session's row, as AddMessage does, while
+	// the prune starts, then refreshes the session and commits.
+	ctx := context.Background()
+	writer, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin writer: %v", err)
+	}
+	defer func() { _ = writer.Rollback() }()
+	var one int
+	if err := writer.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = 'idle' FOR UPDATE`).Scan(&one); err != nil {
+		t.Fatalf("lock the session: %v", err)
+	}
+	pruned := make(chan error, 1)
+	go func() { pruned <- store.PruneIdleSessions() }()
+	time.Sleep(300 * time.Millisecond)
+	if _, err := writer.ExecContext(ctx, `UPDATE sessions SET updated_at = $1 WHERE id = 'idle'`,
+		time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("refresh the session: %v", err)
+	}
+	if err := writer.Commit(); err != nil {
+		t.Fatalf("commit writer: %v", err)
+	}
+	if err := <-pruned; err != nil {
+		t.Fatalf("PruneIdleSessions: %v", err)
+	}
+
+	sess, err := store.Get("idle")
+	if err != nil {
+		t.Fatalf("the refreshed session was pruned: %v", err)
+	}
+	if len(sess.Messages) != 1 {
+		t.Errorf("messages = %d, want 1: the session survived without its history", len(sess.Messages))
+	}
+	if n := countNoteReservations(t, db, "idle"); n != 1 {
+		t.Errorf("reservations = %d, want 1: the session survived without its note keys", n)
+	}
+}
+
+// TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept: a note reserved
+// while the prune deletes its session (a recovery firing during another pod's
+// start) waits for the prune and answers settled; no reservation outlives the
+// session, where no later prune would find it.
+func TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 1)
+	store.Create(state.SessionParams{ID: "idle", EntityID: "u1"})
+
+	// The prune holds the idle session's row until it deleted the session
+	// with everything it owns.
+	ctx := context.Background()
+	prune, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin prune: %v", err)
+	}
+	defer func() { _ = prune.Rollback() }()
+	var one int
+	if err := prune.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = 'idle' FOR UPDATE`).Scan(&one); err != nil {
+		t.Fatalf("lock the session: %v", err)
+	}
+	type reserved struct {
+		result state.ClaimResult
+		err    error
+	}
+	done := make(chan reserved, 1)
+	go func() {
+		result, err := store.ReserveNote(context.Background(), "idle", "chapter-1", time.Now(), time.Minute)
+		done <- reserved{result, err}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	for _, q := range []string{
+		`DELETE FROM session_note_reservations WHERE session_id = 'idle'`,
+		`DELETE FROM sessions WHERE id = 'idle'`,
+	} {
+		if _, err := prune.ExecContext(ctx, q); err != nil {
+			t.Fatalf("prune %q: %v", q, err)
+		}
+	}
+	if err := prune.Commit(); err != nil {
+		t.Fatalf("commit prune: %v", err)
+	}
+
+	if r := <-done; r.err != nil || r.result != state.ClaimSettled {
+		t.Errorf("ReserveNote = %v, %v; want settled for a pruned session", r.result, r.err)
+	}
+	if n := countNoteReservations(t, db, "idle"); n != 0 {
+		t.Errorf("reservations = %d, want none left behind the pruned session", n)
+	}
+}
+
+// TestPostgres_NoteReservedWhileItsSessionIsDeletedGoesWithIt: Delete waits
+// for a reservation that holds the session's row, as ReserveNote's insert
+// does, and removes it with the session; no reservation outlives the session,
+// where no prune would find it.
+func TestPostgres_NoteReservedWhileItsSessionIsDeletedGoesWithIt(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 1)
+	store.Create(state.SessionParams{ID: "idle", EntityID: "u1"})
+
+	ctx := context.Background()
+	reservation, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin reservation: %v", err)
+	}
+	defer func() { _ = reservation.Rollback() }()
+	var one int
+	if err := reservation.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = 'idle' FOR UPDATE`).Scan(&one); err != nil {
+		t.Fatalf("lock the session: %v", err)
+	}
+	deleted := make(chan error, 1)
+	go func() { deleted <- store.Delete("idle") }()
+	time.Sleep(300 * time.Millisecond)
+	if _, err := reservation.ExecContext(ctx,
+		`INSERT INTO session_note_reservations (session_id, note_key, reserved_at) VALUES ('idle', 'chapter-1', $1)`,
+		time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if err := reservation.Commit(); err != nil {
+		t.Fatalf("commit reservation: %v", err)
+	}
+	if err := <-deleted; err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if _, err := store.Get("idle"); !errors.Is(err, state.ErrSessionNotFound) {
+		t.Errorf("Get after Delete = %v, want not found", err)
+	}
+	if n := countNoteReservations(t, db, "idle"); n != 0 {
+		t.Errorf("reservations = %d, want none left behind the deleted session", n)
+	}
+}
+
+// TestPostgres_ClaimWaitEndsWithItsContext: a claim waits for its session's
+// row while another transaction holds it, and gives up when its context ends,
+// with an error and its database connection returned to the pool.
+func TestPostgres_ClaimWaitEndsWithItsContext(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 0)
+	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "held", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-1"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	ctx := context.Background()
+	holder, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	var one int
+	if err := holder.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = 'held' FOR UPDATE`).Scan(&one); err != nil {
+		t.Fatalf("lock the session: %v", err)
+	}
+	inUse := db.SQLDB().Stats().InUse
+
+	for _, tc := range []struct {
+		name  string
+		claim func(context.Context) (state.ClaimResult, error)
+	}{
+		{"first turn", func(ctx context.Context) (state.ClaimResult, error) {
+			return store.ClaimOpener(ctx, "held", time.Now(), time.Minute)
+		}},
+		{"note", func(ctx context.Context) (state.ClaimResult, error) {
+			return store.ReserveNote(ctx, "held", "chapter-1", time.Now(), time.Minute)
+		}},
+	} {
+		claimCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		start := time.Now()
+		result, err := tc.claim(claimCtx)
+		cancel()
+		if err == nil || result == state.ClaimWon {
+			t.Errorf("%s: claim = %v, %v; want an error once its context ended", tc.name, result, err)
+		}
+		if waited := time.Since(start); waited > 5*time.Second {
+			t.Errorf("%s: claim returned after %v, want soon after its context ended", tc.name, waited)
+		}
+		if n := db.SQLDB().Stats().InUse; n != inUse {
+			t.Errorf("%s: connections in use = %d, want %d", tc.name, n, inUse)
+		}
+	}
+}
+
+// TestPostgres_OpenWaitEndsWithItsContext: an open waits for another
+// transaction's uncommitted insert of the same key, and gives up when its
+// context ends, with an error and its database connection returned to the
+// pool.
+func TestPostgres_OpenWaitEndsWithItsContext(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 0)
+	ctx := context.Background()
+	holder, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.ExecContext(ctx, `INSERT INTO sessions (id, summary, active_model, metadata, entity_id, opened_by, open_key, created_at, updated_at)
+		VALUES ('first', '', '', '{}', 'u1', 'origin-a', 'event-1', $1, $1)`, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert the key's session: %v", err)
+	}
+	inUse := db.SQLDB().Stats().InUse
+
+	openCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	start := time.Now()
+	sess, _, err := store.OpenSession(openCtx, state.SessionParams{ID: "second", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-1"})
+	cancel()
+
+	if err == nil || sess != nil {
+		t.Errorf("OpenSession = %+v, %v; want an error once its context ended", sess, err)
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Errorf("OpenSession returned after %v, want soon after its context ended", waited)
+	}
+	if n := db.SQLDB().Stats().InUse; n != inUse {
+		t.Errorf("connections in use = %d, want %d", n, inUse)
+	}
+}
+
+// TestPostgres_FoundOpenReadsNoTranscript: an open of a key whose session
+// exists answers that session as Identity reads it, so a lock on the messages
+// table, which a transcript read would wait for, does not hold it.
+func TestPostgres_FoundOpenReadsNoTranscript(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 0)
+	first := state.SessionParams{ID: "first", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-1", ChannelID: "websocket"}
+	if _, _, err := store.OpenSession(context.Background(), first); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	if err := store.AddMessage("first", provider.Message{Role: provider.RoleUser, Content: "the first turn"}); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+	ctx := context.Background()
+	holder, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.ExecContext(ctx, `LOCK TABLE messages IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock the messages: %v", err)
+	}
+	inUse := db.SQLDB().Stats().InUse
+
+	again := first
+	again.ID = "second"
+	openCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	start := time.Now()
+	sess, created, err := store.OpenSession(openCtx, again)
+	cancel()
+
+	if err != nil || created || sess.ID != "first" || sess.EntityID != "u1" || sess.ChannelID != "websocket" || sess.OpenKey != "event-1" {
+		t.Errorf("OpenSession = %+v, created=%v, %v; want the found session first of u1 on websocket", sess, created, err)
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Errorf("OpenSession returned after %v", waited)
+	}
+	if n := db.SQLDB().Stats().InUse; n != inUse {
+		t.Errorf("connections in use = %d, want %d", n, inUse)
+	}
+}
+
+// TestPostgres_IdentityWaitEndsWithItsContext: a note's lookup of its session
+// waits for a lock on the sessions table, and gives up when its context ends,
+// with an error, not a missing session, and its database connection returned
+// to the pool.
+func TestPostgres_IdentityWaitEndsWithItsContext(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 0)
+	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "held", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-1"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	ctx := context.Background()
+	holder, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.ExecContext(ctx, `LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock the sessions: %v", err)
+	}
+	inUse := db.SQLDB().Stats().InUse
+
+	lookupCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	start := time.Now()
+	sess, err := store.Identity(lookupCtx, "held")
+	cancel()
+
+	if err == nil || sess != nil || errors.Is(err, state.ErrSessionNotFound) {
+		t.Errorf("Identity = %+v, %v; want an error once its context ended", sess, err)
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Errorf("Identity returned after %v, want soon after its context ended", waited)
+	}
+	if n := db.SQLDB().Stats().InUse; n != inUse {
+		t.Errorf("connections in use = %d, want %d", n, inUse)
 	}
 }
 
