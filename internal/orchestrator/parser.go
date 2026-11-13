@@ -503,14 +503,15 @@ var internalBlockTags = [][2]string{
 
 // StripInternalBlocks removes every protocol block from s (protocolTags: the
 // internalBlockTags and a bare <invoke>, which the parser also runs as a call),
-// cut where nextProtocolBlock cuts it; a block never closed takes the rest of s.
-// Used to clean up LLM responses so raw protocol content is never forwarded
-// to the channel (e.g. when the LLM echoes plugin output or uses an
-// unparseable tool name).
+// cut where nextProtocolBlock cuts it; a block never closed takes the rest of s,
+// except a bare <invoke>, which stays as written so prose that mentions the tag
+// keeps its text. Used to clean up LLM responses so raw protocol content is
+// never forwarded to the channel (e.g. when the LLM echoes plugin output or
+// uses an unparseable tool name).
 func StripInternalBlocks(s string) string {
 	// TrimSpace normalises the result: block removal can leave leading/trailing
 	// newlines, and LLM replies with surrounding whitespace carry no meaning.
-	return strings.TrimSpace(withoutProtocol(s))
+	return strings.TrimSpace(withoutProtocol(s, true))
 }
 
 // toolFQN composes a tool's fully-qualified name "<plugin><sep><action>" using

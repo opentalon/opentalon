@@ -501,7 +501,7 @@ func TestExtractionAndFilteringCutAtTheSameProtocolBlocks(t *testing.T) {
 				probed.WriteString(part)
 			}
 		}
-		if got := withoutProtocol(text.String()); got != outside.String() {
+		if got := withoutProtocol(text.String(), false); got != outside.String() {
 			t.Errorf("%s: filtering keeps %q, want %q", c.name, got, outside.String())
 		}
 		// Every text outside the blocks, put in a spoken block: extraction takes
@@ -573,7 +573,7 @@ func TestManyBlocksAreSplitInLinearTime(t *testing.T) {
 		response := "<spoken>Hallo.</spoken>" + strings.Repeat(unit, 30000)
 		start := time.Now()
 		splitSpoken(response)
-		withoutProtocol(response)
+		withoutProtocol(response, false)
 		if took := time.Since(start); took > 2*time.Second {
 			t.Errorf("%q 30000 times took %v", unit, took)
 		}

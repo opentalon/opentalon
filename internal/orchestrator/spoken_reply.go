@@ -82,10 +82,11 @@ const invokeClose = "</invoke>"
 
 // protocolBlock is where a protocol block lies in a text: it opens at at, what
 // follows its opening tag starts at body, and the text goes on at end. A block
-// never closed (closed false) runs to the end of the text.
+// never closed (closed false) runs to the end of the text. invoke marks a bare
+// <invoke>.
 type protocolBlock struct {
-	at, body, end int
-	closed        bool
+	at, body, end  int
+	closed, invoke bool
 }
 
 // textScan finds the markers and tags of one text. It keeps where it found each
@@ -132,7 +133,7 @@ func (x *textScan) nextProtocolBlock(from int) (b protocolBlock, ok bool) {
 	if b.at < 0 {
 		return b, false
 	}
-	if closing == invokeClose {
+	if b.invoke = closing == invokeClose; b.invoke {
 		if gt := x.index(">", b.at); gt > b.at && x.s[gt-1] == '/' {
 			b.end, b.closed = gt+1, true
 			return b, true
@@ -146,8 +147,11 @@ func (x *textScan) nextProtocolBlock(from int) (b protocolBlock, ok bool) {
 	return b, true
 }
 
-// withoutProtocol is s without its protocol blocks (nextProtocolBlock).
-func withoutProtocol(s string) string {
+// withoutProtocol is s without its protocol blocks (nextProtocolBlock). With
+// keepOpenInvoke, a bare <invoke> never closed stays as written, as the shown
+// text keeps it (StripInternalBlocks): prose that mentions the tag loses
+// nothing; what is read drops it.
+func withoutProtocol(s string, keepOpenInvoke bool) string {
 	x := newTextScan(s)
 	var out strings.Builder
 	for i := 0; ; {
@@ -155,6 +159,11 @@ func withoutProtocol(s string) string {
 		if !ok {
 			out.WriteString(s[i:])
 			return out.String()
+		}
+		if keepOpenInvoke && b.invoke && !b.closed {
+			out.WriteString(s[i:b.body])
+			i = b.body
+			continue
 		}
 		out.WriteString(s[i:b.at])
 		i = b.end
@@ -204,7 +213,7 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 			i = at + len(spokenClose)
 		case spokenOpen:
 			body, end, closed := x.spokenBlock(at)
-			text := markers.Replace(withoutProtocol(body))
+			text := markers.Replace(withoutProtocol(body, false))
 			switch {
 			case !closed:
 				unclosed = text
@@ -365,7 +374,7 @@ func speakAsIs(ctx context.Context, text string, meta map[string]string) map[str
 	for k, v := range meta {
 		out[k] = v
 	}
-	text = speakable(withoutProtocol(text))
+	text = speakable(withoutProtocol(text, false))
 	if text != "" && len([]rune(text)) <= spokenLimit {
 		out[SpokenMetadataKey] = text
 	} else {

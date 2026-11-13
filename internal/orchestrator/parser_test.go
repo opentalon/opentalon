@@ -391,9 +391,14 @@ func TestStripInternalBlocks(t *testing.T) {
 			want:  "Done.",
 		},
 		{
-			name:  "a bare invoke with no closing tag drops tail",
-			input: "Done.\n<invoke name=\"bogus\"><parameter name=\"x\">",
-			want:  "Done.",
+			name:  "keeps a bare invoke with no closing tag as written",
+			input: "Use `<invoke name=\"x\">` inside function_calls, then close it.",
+			want:  "Use `<invoke name=\"x\">` inside function_calls, then close it.",
+		},
+		{
+			name:  "strips a block after a bare invoke with no closing tag",
+			input: "Use `<invoke>` here. [plugin_output]raw[/plugin_output]Done.",
+			want:  "Use `<invoke>` here. Done.",
 		},
 		{
 			name:  "keeps a word that only starts like the tag",
