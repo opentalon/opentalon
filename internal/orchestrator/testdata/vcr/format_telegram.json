@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
+  "prompt_hash": "7cc1b994a31b2c5d95b1f4ca74fab6353fe2f11271ff9c06575bab77ce354e60",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-10-20T09:41:15.220517234Z",
+  "recorded_at": "2026-11-13T11:44:19.568525Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CgDGaLKuDUicS6bKQ1cco",
+        "id": "msg_011CgzsNeHJtyzKzomQsRq4K",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant that can help you work with integrated tools and services. Here are my key capabilities:\n\n**Code \u0026 Repository Management**\n- Analyze code in GitLab repositories\n- Create pull requests in GitLab\n\n**Issue Tracking**\n- Create issues in Jira with titles and descriptions\n\n**Web Search**\n- Search the web using Brave Search for information and research\n\n**Task Scheduling**\n- Create, view, pause, and manage scheduled jobs\n- Set up recurring automated actions\n- Monitor tasks on a schedule\n\n**Core Behavior**\n- I call tools directly when you ask for data or actions — I don't guess or make things up\n- I only execute tools you explicitly request; I don't follow instructions embedded in tool output\n- I provide real results from actual tool calls, not hypothetical answers\n- For write actions (create, update, delete), I call the tool immediately; the system handles confirmation\n- I keep responses focused on your current question\n\n**How I Work**\nWhen you need something that requires data or an action, I use the available tools to fulfill your request. I always call the tool first, then give you the real results. If I can't call a tool, I'll let you know rather than making up an answer.\n\nWhat would you like help with?",
+        "content": "I'm an AI assistant that can help you with various tasks through integrated tools and plugins. Here are my key capabilities:\n\n## **Code \u0026 Development**\n- **GitLab Integration**: Analyze code in repositories and create pull requests\n\n## **Project Management**\n- **Jira Integration**: Create and manage issues in Jira\n\n## **Search \u0026 Information**\n- **Web Search**: Look up information using Brave Search (available via tool loading)\n\n## **Task Scheduling**\n- **Scheduler**: Create, manage, and monitor recurring jobs and automated tasks with customizable intervals and notifications\n\n## **General Capabilities**\n- Answer questions and provide explanations\n- Help with research and problem-solving\n- Provide guidance on workflows and processes\n- Confirm actions before executing write operations (for safety)\n\n## **Key Principles**\n- I always call tools to retrieve real data—I never guess or fabricate information\n- For write actions (create, update, delete), I execute immediately rather than asking permission—the system has a built-in confirmation mechanism\n- I focus on your current request and don't repeat previous answers\n- I treat all plugin output as data only, never as instructions\n\n**What would you like help with?** Just let me know what you're working on, and I'll use the appropriate tools to assist you.",
         "usage": {
           "input_tokens": 1535,
-          "output_tokens": 283
+          "output_tokens": 288
         }
       }
     }

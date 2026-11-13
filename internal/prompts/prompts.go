@@ -92,6 +92,20 @@ var sessionTitleRaw string
 // user's language. Trailing newline trimmed so callers don't have to.
 var SessionTitle = strings.TrimRight(sessionTitleRaw, "\n")
 
+// OrchestratorSpokenReply is appended to the per-round system segment of a
+// turn the user spoke: it asks for a spoken version of the answer between the
+// <spoken> markers.
+//
+//go:embed orchestrator_spoken_reply.txt
+var OrchestratorSpokenReply string
+
+// ConfirmationSpokenQuestion is appended to the confirmation narrator's prompt
+// in a spoken turn: it asks for the question as it is asked aloud, between the
+// <spoken> markers.
+//
+//go:embed confirmation_spoken_question.txt
+var ConfirmationSpokenQuestion string
+
 //go:embed subprocess_preamble.txt
 var SubprocessPreamble string
 
@@ -176,6 +190,8 @@ var promptSetters = map[string]func(string){
 	"orchestrator_summarize":        func(s string) { SummarizeDefault = strings.TrimRight(s, "\n") },
 	"orchestrator_summarize_update": func(s string) { SummarizeUpdate = strings.TrimRight(s, "\n") },
 	"orchestrator_session_title":    func(s string) { SessionTitle = strings.TrimRight(s, "\n") },
+	"orchestrator_spoken_reply":     func(s string) { OrchestratorSpokenReply = s },
+	"confirmation_spoken_question":  func(s string) { ConfirmationSpokenQuestion = s },
 	"rules_default":                 func(s string) { DefaultRules = splitLines(s) },
 	"rules_scheduling":              func(s string) { SchedulingRules = splitLines(s) },
 	"format_slack":                  func(s string) { FormatSlack = strings.TrimRight(s, "\n") },

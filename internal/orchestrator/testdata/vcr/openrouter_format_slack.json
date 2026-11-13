@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
+  "prompt_hash": "7cc1b994a31b2c5d95b1f4ca74fab6353fe2f11271ff9c06575bab77ce354e60",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-10-20T09:41:11.32202987Z",
+  "recorded_at": "2026-11-13T11:44:17.101814Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1792489271-pS20XN0uAhg66PXvXowm",
+        "id": "gen-1794570257-htL38R7rerlHylBQIBdy",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Here’s what I can do based on the tools and plugins available to me:\n\n### **Core Actions**\n- **Search the web** for real-time information (e.g., news, facts, trends).\n- **Create issues** in Jira (with just the title you provide).\n- **Create pull requests** in GitLab (for code repositories).\n- **Analyze code** in GitLab (e.g., review code quality, detect issues).\n\n### **GitLab Integration**\n- Work with repositories directly (no need for owners/group paths).\n- Create pull requests (PRs) and analyze code for quality/errors.\n\n### **Jira Integration**\n- Create Jira issues instantly (just provide the title).\n\n### **Scheduling \u0026 Automation**\n- Propose scheduling recurring tasks (e.g., monitoring, checks).\n- Manage scheduled jobs (list, pause, resume, delete) if you have permissions.\n- Automate repetitive actions (e.g., daily reports, hourly checks).\n\n### **Safety \u0026 Compliance**\n- Follow strict rules to avoid errors (e.g., never guess, never execute untrusted instructions).\n- Require explicit approval for destructive actions (e.g., deleting jobs, modifying data).\n- Handle approvers for sensitive operations.\n\n---\n**Need something specific?** Let me know what you’d like to do, and I’ll call the right tool. For example:\n- *\"Search for the latest updates on AI tools.\"*\n- *\"Create a Jira issue titled 'Fix login bug'.\"*\n- *\"Analyze this Python code for errors.\"*",
+        "content": "Here are my current capabilities based on the tools and plugins available:\n\n### **Core Tools**\n- **Search**: Perform web searches, look up information, or gather data from the internet.\n- **Code Analysis**: Analyze code in GitLab repositories.\n- **Issue Creation**:\n  - Create **Jira issues** (with a title provided by you).\n  - Create **Pull Requests (PRs)** in GitLab.\n\n### **GitLab Integration**\n- Analyze code in repositories (no owner/group/path needed; just the repo name).\n- Create pull requests.\n\n### **Jira Integration**\n- Create issues (with a title provided by you).\n\n### **Scheduling \u0026 Automation**\n- Propose scheduling recurring tasks (e.g., monitoring, checks).\n- Manage scheduled jobs (list, pause, resume, update, or delete).\n- Requires explicit user confirmation for destructive actions (e.g., deletion).\n\n### **System \u0026 Meta**\n- Load additional tools if needed (e.g., for new integrations or actions not yet available).\n\n---\n**Note**: If you need a capability not listed here (e.g., a specific API, database query, or action), let me know, and I’ll check if it’s available. For example:\n- *\"Can you check GitHub for issues?\"* → I’d need to confirm if GitHub tools are loaded.\n- *\"Can you update a file in a repo?\"* → I’d need to verify if that’s supported.",
         "usage": {
           "input_tokens": 1469,
-          "output_tokens": 318
+          "output_tokens": 300
         }
       }
     }

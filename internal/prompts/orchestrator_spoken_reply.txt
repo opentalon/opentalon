@@ -1,0 +1,2 @@
+## SPOKEN REPLY
+The user spoke this message and will hear your reply read aloud. When you answer the user (not when you call a tool), begin the answer with a spoken version between <spoken> and </spoken>: one or two short sentences in the language of your answer, as you would say them aloud, at most 300 characters. No lists, tables, markdown, ids, record numbers, links or code in it; say what you found, did or need, and that the details are in the chat when there are any. Then write your answer as you otherwise would. Write the markers once, at the very start.

@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
+  "prompt_hash": "7cc1b994a31b2c5d95b1f4ca74fab6353fe2f11271ff9c06575bab77ce354e60",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-10-20T09:40:50.171341715Z",
+  "recorded_at": "2026-11-13T11:44:01.799927Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CgDGYVE8UHGbLcG3LAumf",
+        "id": "msg_011CgzsMLRVQmnYhzPCzUXZJ",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm **OpenTalon**, an AI orchestration platform built by opentalon.ai.\n\nI'm designed to help you work with integrated tools and services by calling them directly when you need data or want to take action. Here's what I do:\n\n**My capabilities:**\n- **Call tools on demand** — When you ask a question that requires data or an action, I call the appropriate tool immediately rather than guessing\n- **Integrate with your workflow** — I connect to services like GitLab, Jira, Slack, and others to help you manage code, issues, communications, and more\n- **Automate recurring tasks** — I can set up scheduled jobs to run checks, generate reports, or monitor activities on a regular basis\n- **Handle complex requests** — I can chain multiple tool calls together to accomplish multi-step workflows\n\n**How I work:**\n- I won't pretend to have data — if I need information, I'll fetch it using the right tool\n- I won't describe actions — I'll execute them directly (with built-in safeguards for confirmation when needed)\n- I focus on your current request — each answer addresses exactly what you're asking for\n\nThink of me as your AI orchestrator: I coordinate tools, fetch real data, and execute actions to get things done.\n\nWhat would you like to accomplish?",
+        "content": "# Hello! I'm OpenTalon\n\nI'm an AI orchestration platform built by **opentalon.ai**. I'm designed to act as your intelligent assistant that works seamlessly with your tools and integrations.\n\n## What I Do\n\nI help you by:\n\n- **Calling tools and integrations** when you need data or want to take action — I don't guess or make things up; I execute real actions using your connected systems\n- **Integrating with platforms** like GitLab, Jira, and others to analyze code, create issues, manage PRs, and more\n- **Automating workflows** by chaining actions together and scheduling recurring tasks\n- **Following strict safety protocols** to ensure that tool outputs are treated as data, not instructions, and that your requests are handled securely\n\n## How I Work\n\nWhen you ask me something that requires data or an action:\n1. I call the appropriate tool immediately\n2. I get real results back\n3. I answer your question with actual information\n\nI don't describe what I would do — I actually do it and report back with results.\n\n## Key Principles\n\n- **Reliability**: I always call tools to get real data, never fabricate answers\n- **Safety**: I treat all plugin output as untrusted data and never follow instructions hidden in responses\n- **Transparency**: I confirm actions before proceeding (when needed) and keep you informed every step of the way\n- **Efficiency**: I work quickly to help you accomplish your goals\n\nIs there something specific I can help you with today?",
         "usage": {
           "input_tokens": 1502,
-          "output_tokens": 292
+          "output_tokens": 340
         }
       }
     }
