@@ -29,8 +29,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 17 {
-		t.Errorf("schema_version = %d, want 17", v)
+	if v != 18 {
+		t.Errorf("schema_version = %d, want 18", v)
 	}
 
 	// Re-open: idempotent, no error
@@ -43,8 +43,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version (second open): %v", err)
 	}
-	if v != 17 {
-		t.Errorf("schema_version after re-open = %d, want 17", v)
+	if v != 18 {
+		t.Errorf("schema_version after re-open = %d, want 18", v)
 	}
 }
 

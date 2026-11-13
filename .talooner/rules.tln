@@ -1,0 +1,107 @@
+define "critical_path" {
+  attr "pr.changed_files" contains ".talooner/"
+    or attr "pr.changed_files" contains "internal/prompts/"
+    or attr "pr.changed_files" contains "internal/auth/"
+    or attr "pr.changed_files" contains "internal/provider/"
+    or attr "pr.changed_files" contains "internal/state/"
+    or attr "pr.changed_files" contains "proto/"
+    or attr "pr.changed_files" contains ".github/workflows/"
+}
+
+rule "Block PRs with no description" {
+  for records where type == "pr"
+    and attr "pr.draft" == false
+    and attr "pr.has_description" == false
+  block "merge"
+  do block "pr.merge"
+  do comment "pr" "No description. Say what changed and why before asking for review."
+  reason "no description"
+  priority HIGH
+}
+
+rule "Sensitive path needs review" {
+  for records where type == "pr" and is "critical_path"
+  requires "review.opentalon"
+  do block "pr.merge"
+  do assign "pr" attr "user.owner"
+  do comment "pr" "This changes a sensitive path (see .talooner/onboarding.md); the owner is assigned for review."
+  reason "sensitive path"
+  priority HIGH
+}
+
+enrich "cdm: how risky is this PR?" {
+  for records where type == "pr"
+  stale_after 1 hour
+  tool "cdm" "decide" {
+    state   concat(attr "pr.title", "\n\n", attr "pr.body", "\n\nChanged files:\n", join(attr "pr.changed_files", "\n"))
+    choices "low, medium, high"
+  }
+  update attr "pr.risk" from result.chosen
+  update attr "pr.risk_certainty" from result.certainty
+}
+
+rule "Confident high risk needs a review" {
+  for records where type == "pr"
+    and attr "pr.risk" == "high"
+    and attr "pr.risk_certainty" >= 0.85
+  requires "review.opentalon"
+  do block "pr.merge"
+  do assign "pr" attr "user.owner"
+  do comment "pr" "The decision model rates this change high risk."
+  reason "high risk"
+  priority HIGH
+}
+
+enrich "cdm: does the description say why?" {
+  for records where type == "pr"
+  stale_after 1 hour
+  tool "cdm" "decide" {
+    state   concat(attr "pr.title", "\n\n", attr "pr.body")
+    choices "explains why, says only what, vague"
+  }
+  update attr "pr.description_kind" from result.chosen
+  update attr "pr.description_certainty" from result.certainty
+}
+
+rule "Confident vague description gets a comment" {
+  for records where type == "pr"
+    and attr "pr.description_kind" == "vague"
+    and attr "pr.description_certainty" >= 0.85
+  do comment "pr" "The description says what changed but not why."
+  reason "vague description"
+  priority MEDIUM
+}
+
+rule "AI review inconclusive needs a human" {
+  for records where type == "code_unit" and attr "unit.llm_result" == "unclear"
+  requires "review.opentalon"
+  do block "pr.merge"
+  do assign "pr" attr "user.owner"
+  do comment "pr" "The AI review could not decide on a changed unit. A human read is required."
+  reason "ai review inconclusive"
+  priority MEDIUM
+}
+
+rule "AI review failed needs a human" {
+  for records where type == "code_unit" and attr "unit.llm_result" == "error"
+  requires "review.opentalon"
+  do block "pr.merge"
+  do assign "pr" attr "user.owner"
+  do comment "pr" "The AI review failed on a changed unit. A human read is required."
+  reason "ai review failed"
+  priority MEDIUM
+}
+
+rule "Auto-approve a small, tested PR" {
+  for records where type == "pr"
+    and attr "pr.draft" == false
+    and attr "pr.has_description" == true
+    and attr "pr.tests_passing" == true
+    and attr "pr.lint_passing" == true
+    and attr "pr.lines_changed" <= 200
+    and not is "critical_path"
+  allow "merge"
+  do approve "pr"
+  reason "small, tested, described, non-sensitive"
+  priority LOW
+}

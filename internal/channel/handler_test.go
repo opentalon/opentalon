@@ -1,14 +1,21 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
@@ -55,6 +62,10 @@ func baseHandlerConfig() HandlerConfig {
 			return "", errors.New("no actions")
 		},
 		HasAction: func(_, _ string) bool { return false },
+		Opener:    state.NewSessionStore(""),
+		SendToConversation: func(context.Context, string, string, pkg.OutboundMessage) error {
+			return nil
+		},
 	}
 }
 
@@ -712,5 +723,1243 @@ func TestFriendlyError(t *testing.T) {
 				t.Error("expected a user-facing message")
 			}
 		})
+	}
+}
+
+// shortOpenerTiming shortens the claim timing so a stale claim and its
+// scheduled recovery happen within a test. NewMessageHandler reads it, so call
+// it before building the handler.
+func shortOpenerTiming(t *testing.T) {
+	t.Helper()
+	timeout, stale, leeway := openerTimeout, openerStaleAfter, recoveryLeeway
+	openerTimeout, openerStaleAfter, recoveryLeeway = time.Second, 100*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() { openerTimeout, openerStaleAfter, recoveryLeeway = timeout, stale, leeway })
+}
+
+// pastRecovery outlasts any recovery the handler scheduled, several times over.
+func pastRecovery() time.Duration { return 5 * (openerStaleAfter + recoveryLeeway) }
+
+type sessionRun struct {
+	sessionID string
+	content   string
+	ctx       context.Context
+}
+
+type sentFrame struct {
+	channel string
+	msg     pkg.OutboundMessage
+}
+
+// openRecorder is the open-session test double. Its Run stores the turn's user
+// message as the orchestrator does (visibility from ctx, under the turn's
+// claim), so the store's claims see the turn as stored; it records, in order,
+// every turn, every frame sent to a session and every CreateSession. With
+// holdAck set, the answer to that open_request_id waits for release before it
+// is sent, as a stalled channel would.
+type openRecorder struct {
+	store   *state.SessionStore
+	runErr  error
+	holdAck string
+	release chan struct{}
+
+	mu     sync.Mutex
+	events []string
+	runs   []sessionRun
+	frames []sentFrame
+	minted []string
+}
+
+func (r *openRecorder) Run(ctx context.Context, sessionKey, content string, _ ...pkg.FileAttachment) (string, string, map[string]string, error) {
+	var meta map[string]string
+	if c, ok := orchestrator.TurnClaimFrom(ctx); ok {
+		meta = c.Metadata()
+	}
+	err := r.store.AddMessageWithMetadata(sessionKey, provider.Message{
+		Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx),
+	}, meta)
+	r.mu.Lock()
+	r.events = append(r.events, "run")
+	r.runs = append(r.runs, sessionRun{sessionID: sessionKey, content: content, ctx: ctx})
+	r.mu.Unlock()
+	if err != nil {
+		return "", "", nil, err
+	}
+	if r.runErr != nil {
+		return "", "", nil, r.runErr
+	}
+	return "reply: " + content, "", nil, nil
+}
+
+func (r *openRecorder) send(_ context.Context, channel, conversation string, msg pkg.OutboundMessage) error {
+	if conversation != msg.ConversationID {
+		return fmt.Errorf("sent to conversation %q a frame of %q", conversation, msg.ConversationID)
+	}
+	kind := msg.Metadata["type"]
+	if kind == "" {
+		kind = "reply"
+	}
+	if kind == pkg.FrameSessionOpened && r.holdAck != "" && msg.Metadata[pkg.OpenRequestIDMetadataKey] == r.holdAck {
+		<-r.release
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, "send "+kind)
+	r.frames = append(r.frames, sentFrame{channel: channel, msg: msg})
+	return nil
+}
+
+func (r *openRecorder) snapshot() (events []string, runs []sessionRun, frames []sentFrame) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.events), slices.Clone(r.runs), slices.Clone(r.frames)
+}
+
+// acks returns the session_opened frames sent so far, in order.
+func (r *openRecorder) acks() []pkg.OutboundMessage {
+	_, _, frames := r.snapshot()
+	var out []pkg.OutboundMessage
+	for _, f := range frames {
+		if f.msg.Metadata["type"] == pkg.FrameSessionOpened {
+			out = append(out, f.msg)
+		}
+	}
+	return out
+}
+
+func (r *openRecorder) waitForRuns(t *testing.T, n int) {
+	t.Helper()
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if _, runs, _ := r.snapshot(); len(runs) >= n {
+			return
+		}
+	}
+	t.Fatalf("waited for %d turns, the runner ran fewer", n)
+}
+
+// systemVerifier answers a fresh copy of p for every token, so concurrent calls
+// never share the profile the handler stamps.
+type systemVerifier struct{ p profile.Profile }
+
+func (v systemVerifier) Verify(context.Context, string, string, map[string]string) (*profile.Profile, error) {
+	p := v.p
+	return &p, nil
+}
+
+// failingOpener fails every store call, as a store whose database is gone.
+type failingOpener struct{}
+
+func (failingOpener) Identity(context.Context, string) (*state.Session, error) {
+	return nil, errors.New("database connection lost")
+}
+
+func (failingOpener) OpenSession(context.Context, state.SessionParams) (*state.Session, bool, error) {
+	return nil, false, errors.New("database connection lost")
+}
+
+func (failingOpener) ClaimOpener(context.Context, string, time.Time, time.Duration) (state.ClaimResult, error) {
+	return state.ClaimHeld, errors.New("database connection lost")
+}
+
+func (failingOpener) ReserveNote(context.Context, string, string, time.Time, time.Duration) (state.ClaimResult, error) {
+	return state.ClaimHeld, errors.New("database connection lost")
+}
+
+var welcomeProfile = profile.Profile{EntityID: "u1", Group: "g1", Kind: profile.KindSystem, SystemSource: "welcome_label"}
+
+const openedSession = "u1:websocket:c1"
+
+func newOpenHandler(p profile.Profile, override ...func(*HandlerConfig)) (*openRecorder, pkg.MessageHandler) {
+	rec := &openRecorder{store: state.NewSessionStore("")}
+	cfg := baseHandlerConfig()
+	cfg.Verifier = systemVerifier{p: p}
+	cfg.Runner = rec
+	cfg.Opener = rec.store
+	cfg.SendToConversation = rec.send
+	cfg.ResumeSession = func(key string) error {
+		_, err := rec.store.Get(key)
+		return err
+	}
+	cfg.CreateSession = func(p state.SessionParams) {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		rec.minted = append(rec.minted, p.ID)
+	}
+	for _, o := range override {
+		o(&cfg)
+	}
+	return rec, NewMessageHandler(cfg)
+}
+
+// openRequest is an open-session message on the minted conversation conv; set
+// overrides metadata keys, and an empty value removes one.
+func openRequest(conv string, set map[string]string) pkg.InboundMessage {
+	meta := map[string]string{
+		"profile_token":              "tok",
+		pkg.OpenSessionMetadataKey:   "true",
+		pkg.OpenedByMetadataKey:      "welcome",
+		pkg.OpenKeyMetadataKey:       "event-1",
+		pkg.OpenRequestIDMetadataKey: "req-" + conv,
+	}
+	for k, v := range set {
+		if v == "" {
+			delete(meta, k)
+		} else {
+			meta[k] = v
+		}
+	}
+	return pkg.InboundMessage{
+		ChannelID: "websocket", ConversationID: conv,
+		Content: "facts and the instruction for the first turn", Metadata: meta,
+	}
+}
+
+func callOpen(h pkg.MessageHandler, conv string, set map[string]string) pkg.OutboundMessage {
+	out, _ := h(context.Background(), "websocket:"+conv, openRequest(conv, set))
+	return out
+}
+
+// storeOpened opens session id of entity as the open path does, on the channel
+// the id names after the entity.
+func storeOpened(t *testing.T, store *state.SessionStore, id, entity string) {
+	t.Helper()
+	channel, _, _ := strings.Cut(strings.TrimPrefix(id, entity+":"), ":")
+	if _, created, err := store.OpenSession(context.Background(), state.SessionParams{
+		ID: id, EntityID: entity, OpenedBy: "welcome", OpenKey: "event-1", ChannelID: channel,
+	}); err != nil || !created {
+		t.Fatalf("OpenSession(%s) = created %v, %v", id, created, err)
+	}
+}
+
+// TestHandler_OpenSession_OpensAndRunsHiddenFirstTurn: a verified system
+// invocation opens the user's session through the store, never through Create
+// (which would stamp the token's system kind on it), answers the caller before
+// the model runs, and runs the content once as a hidden turn under the system
+// profile, whose kind and label the turn's usage row records. The reply reaches
+// the session's conversation without the attempt's correlation id.
+func TestHandler_OpenSession_OpensAndRunsHiddenFirstTurn(t *testing.T) {
+	rec, h := newOpenHandler(welcomeProfile)
+
+	if out := callOpen(h, "c1", nil); out.Content != "" || len(out.Metadata) != 0 {
+		t.Errorf("handler frame = %+v, want empty: the answer and the reply are sent to the session", out)
+	}
+
+	sess, err := rec.store.Get(openedSession)
+	if err != nil {
+		t.Fatalf("session not opened: %v", err)
+	}
+	if sess.OpenedBy != "welcome" || sess.OpenKey != "event-1" {
+		t.Errorf("session origin/key = %q/%q, want welcome/event-1", sess.OpenedBy, sess.OpenKey)
+	}
+	if len(rec.minted) != 0 {
+		t.Errorf("CreateSession called for %v; the open path must not mint a system-stamped session", rec.minted)
+	}
+	if len(sess.Messages) != 1 || sess.Messages[0].Visibility != provider.VisibilityHidden {
+		t.Fatalf("stored messages = %+v, want the one hidden first turn", sess.Messages)
+	}
+
+	events, runs, frames := rec.snapshot()
+	if want := []string{"send " + pkg.FrameSessionOpened, "run", "send reply"}; !slices.Equal(events, want) {
+		t.Fatalf("events = %v, want %v (the answer before the model runs)", events, want)
+	}
+	ack := frames[0]
+	if ack.channel != "websocket" || ack.msg.ConversationID != "c1" ||
+		ack.msg.Metadata[pkg.OpenSessionIDMetadataKey] != openedSession ||
+		ack.msg.Metadata["created"] != "true" || ack.msg.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c1" {
+		t.Errorf("answer = %+v, want session_opened for %s, created=true, open_request_id=req-c1", ack, openedSession)
+	}
+	run := runs[0]
+	if run.sessionID != openedSession || actor.Visibility(run.ctx) != provider.VisibilityHidden ||
+		actor.ConversationID(run.ctx) != "c1" {
+		t.Errorf("turn ran on %q (visibility %q, conversation %q), want a hidden turn of %s",
+			run.sessionID, actor.Visibility(run.ctx), actor.ConversationID(run.ctx), openedSession)
+	}
+	if p := profile.FromContext(run.ctx); p == nil || p.Kind != profile.KindSystem || p.SystemSource != "welcome_label" {
+		t.Errorf("turn profile = %+v, want kind system with its label", p)
+	}
+	reply := frames[1]
+	if reply.channel != "websocket" || reply.msg.ConversationID != "c1" || reply.msg.Content != "reply: "+run.content {
+		t.Errorf("reply = %+v, want the turn's reply to the session's conversation", reply)
+	}
+	if _, ok := reply.msg.Metadata[pkg.OpenRequestIDMetadataKey]; ok {
+		t.Error("the reply carries open_request_id; only the answer to the attempt may")
+	}
+	// Both frames name the verified owner, which the sender keeps.
+	for _, f := range frames {
+		if owner := f.msg.Metadata[pkg.OwnerEntityMetadataKey]; owner != "u1" {
+			t.Errorf("%s frame owner = %q, want u1", f.msg.Metadata["type"], owner)
+		}
+	}
+}
+
+// TestHandler_OpenSession_SameKeyAnswersFoundWithoutSecondTurn: a repeated
+// request (a retried job, a lost answer) gets the stored session with
+// created=false, and its first turn never runs again.
+func TestHandler_OpenSession_SameKeyAnswersFoundWithoutSecondTurn(t *testing.T) {
+	shortOpenerTiming(t)
+	rec, h := newOpenHandler(welcomeProfile)
+
+	callOpen(h, "c1", nil)
+	callOpen(h, "c2", nil)
+	time.Sleep(pastRecovery())
+
+	acks := rec.acks()
+	if len(acks) != 2 || acks[1].Metadata["created"] != "false" || acks[1].Metadata[pkg.OpenSessionIDMetadataKey] != openedSession {
+		t.Fatalf("answers = %+v, want the second one created=false for %s", acks, openedSession)
+	}
+	if _, runs, _ := rec.snapshot(); len(runs) != 1 {
+		t.Errorf("first turn ran %d times, want 1", len(runs))
+	}
+}
+
+// TestHandler_OpenSession_RecoversAnInterruptedFirstTurnOnce: an attempt that
+// claimed the first turn and died before it ran leaves a session without a
+// message. The next identical request recovers it exactly once, on the stored
+// session: after the claim's expiry when the claim is still fresh, answered
+// created=false, at once when it is already stale, answered created=true since
+// that request takes the claim and runs the turn.
+func TestHandler_OpenSession_RecoversAnInterruptedFirstTurnOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stale bool
+	}{
+		{"retry while the claim is fresh", false},
+		{"retry after the claim went stale", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortOpenerTiming(t)
+			rec, h := newOpenHandler(welcomeProfile)
+			storeOpened(t, rec.store, openedSession, "u1")
+			if result, err := rec.store.ClaimOpener(context.Background(), openedSession, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				t.Fatalf("crashed attempt's claim = %v, %v", result, err)
+			}
+			if tc.stale {
+				time.Sleep(2 * openerStaleAfter)
+			}
+
+			callOpen(h, "c2", nil)
+			if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != strconv.FormatBool(tc.stale) ||
+				acks[0].Metadata[pkg.OpenSessionIDMetadataKey] != openedSession {
+				t.Fatalf("answers = %+v, want created=%v for %s", acks, tc.stale, openedSession)
+			}
+			if _, runs, _ := rec.snapshot(); (len(runs) == 1) != tc.stale {
+				t.Fatalf("turns right after the retry = %d, want %d", len(runs), map[bool]int{true: 1}[tc.stale])
+			}
+			rec.waitForRuns(t, 1)
+			time.Sleep(pastRecovery())
+
+			_, runs, frames := rec.snapshot()
+			if len(runs) != 1 || runs[0].sessionID != openedSession {
+				t.Fatalf("turns = %+v, want exactly one on %s", runs, openedSession)
+			}
+			if last := frames[len(frames)-1]; last.channel != "websocket" || last.msg.ConversationID != "c1" {
+				t.Errorf("reply went to %q conversation %q, want the stored session's conversation c1",
+					last.channel, last.msg.ConversationID)
+			}
+		})
+	}
+}
+
+// TestHandler_OpenSession_ConcurrentDuplicatesRunOneFirstTurn: simultaneous
+// requests for one key get one created and the rest found, all for the same
+// session, and one first turn runs.
+func TestHandler_OpenSession_ConcurrentDuplicatesRunOneFirstTurn(t *testing.T) {
+	shortOpenerTiming(t)
+	rec, h := newOpenHandler(welcomeProfile)
+
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Go(func() { callOpen(h, fmt.Sprintf("c%d", i), nil) })
+	}
+	wg.Wait()
+	time.Sleep(pastRecovery())
+
+	acks := rec.acks()
+	created := 0
+	for _, a := range acks {
+		if a.Metadata["created"] == "true" {
+			created++
+		}
+		if a.Metadata[pkg.OpenSessionIDMetadataKey] != acks[0].Metadata[pkg.OpenSessionIDMetadataKey] {
+			t.Errorf("answers name different sessions: %+v", acks)
+		}
+	}
+	if len(acks) != 8 || created != 1 {
+		t.Errorf("answers = %d with %d created, want 8 with 1 created", len(acks), created)
+	}
+	if _, runs, _ := rec.snapshot(); len(runs) != 1 {
+		t.Errorf("first turn ran %d times, want 1", len(runs))
+	}
+}
+
+// TestHandler_OpenSession_ModelErrorReachesTheConversation: a first turn that
+// fails at the model answers the channel's error frame to the session's
+// conversation, without the correlation id the answer before it carried.
+func TestHandler_OpenSession_ModelErrorReachesTheConversation(t *testing.T) {
+	rec, h := newOpenHandler(welcomeProfile)
+	rec.runErr = errors.New("openai api error (status 429): rate_limit exceeded")
+
+	callOpen(h, "c1", nil)
+
+	events, _, frames := rec.snapshot()
+	if want := []string{"send " + pkg.FrameSessionOpened, "run", "send error"}; !slices.Equal(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+	errFrame := frames[1]
+	if errFrame.channel != "websocket" || errFrame.msg.ConversationID != "c1" ||
+		errFrame.msg.Metadata["error_code"] != "rate_limited" {
+		t.Errorf("error frame = %+v, want rate_limited to the session's conversation", errFrame)
+	}
+	if _, ok := errFrame.msg.Metadata[pkg.OpenRequestIDMetadataKey]; ok {
+		t.Error("the error frame carries open_request_id; only the answer to the attempt may")
+	}
+}
+
+// TestHandler_OpenSession_NoteRunsOncePerKey: the continuation form posts the
+// content as a hidden note into the user's session, keyed so the store keeps
+// one note per key; a repeated key answers created=false and runs nothing.
+func TestHandler_OpenSession_NoteRunsOncePerKey(t *testing.T) {
+	rec, h := newOpenHandler(welcomeProfile)
+	storeOpened(t, rec.store, openedSession, "u1")
+	note := map[string]string{
+		pkg.OpenSessionIDMetadataKey: openedSession, pkg.NoteKeyMetadataKey: "chapter-2",
+		pkg.OpenedByMetadataKey: "", pkg.OpenKeyMetadataKey: "",
+	}
+
+	callOpen(h, "c8", note)
+	callOpen(h, "c9", note)
+
+	acks := rec.acks()
+	if len(acks) != 2 || acks[0].Metadata["created"] != "true" || acks[1].Metadata["created"] != "false" ||
+		acks[1].Metadata[pkg.OpenSessionIDMetadataKey] != openedSession {
+		t.Fatalf("answers = %+v, want created=true then created=false for %s", acks, openedSession)
+	}
+	_, runs, frames := rec.snapshot()
+	if len(runs) != 1 {
+		t.Fatalf("note turns = %d, want 1", len(runs))
+	}
+	claim, _ := orchestrator.TurnClaimFrom(runs[0].ctx)
+	if r := runs[0]; r.sessionID != openedSession || claim.NoteKey != "chapter-2" ||
+		actor.Visibility(r.ctx) != provider.VisibilityHidden || actor.ConversationID(r.ctx) != "c1" {
+		t.Errorf("note ran on %q (key %q, visibility %q, conversation %q), want a hidden keyed turn of %s",
+			r.sessionID, claim.NoteKey, actor.Visibility(r.ctx), actor.ConversationID(r.ctx), openedSession)
+	}
+	if reply := frames[1]; reply.channel != "websocket" || reply.msg.ConversationID != "c1" {
+		t.Errorf("note reply = %+v, want it in the session's conversation c1", reply)
+	}
+}
+
+// countStored is how many of session id's stored messages carry content.
+func countStored(t *testing.T, store *state.SessionStore, id, content string) int {
+	t.Helper()
+	sess, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	n := 0
+	for _, m := range sess.Messages {
+		if m.Content == content {
+			n++
+		}
+	}
+	return n
+}
+
+// replies counts the turn replies (frames without a type) sent so far.
+func (r *openRecorder) replies() int {
+	_, _, frames := r.snapshot()
+	n := 0
+	for _, f := range frames {
+		if f.msg.Metadata["type"] == "" {
+			n++
+		}
+	}
+	return n
+}
+
+// lateClaimOpener grants the first ClaimOpener call late: the call's now ages
+// while the write waits (a row lock, an exhausted connection pool), so the
+// claim it writes is stale at once; the call then returns only on release.
+type lateClaimOpener struct {
+	*state.SessionStore
+	once    sync.Once
+	claimed chan struct{}
+	release chan struct{}
+}
+
+func (o *lateClaimOpener) ClaimOpener(ctx context.Context, id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	first := false
+	o.once.Do(func() { first = true })
+	if !first {
+		return o.SessionStore.ClaimOpener(ctx, id, now, staleAfter)
+	}
+	time.Sleep(2 * staleAfter)
+	result, err := o.SessionStore.ClaimOpener(ctx, id, now, staleAfter)
+	close(o.claimed)
+	<-o.release
+	return result, err
+}
+
+// syncBuffer collects log output written from the handler's goroutines and
+// timers.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLogs routes the default logger, Info and above, into a buffer for the
+// test.
+func captureLogs(t *testing.T) *syncBuffer {
+	t.Helper()
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return logs
+}
+
+// TestHandler_OpenSession_FirstTurnClaimTakenOverRunsOnce: a claim granted
+// after it went stale is taken over by the next request, which runs the first
+// turn; when the late claimant gets to its turn, the store refuses its claim,
+// so it stores nothing and answers nothing, and the takeover is logged at
+// Info, not as a failed run.
+func TestHandler_OpenSession_FirstTurnClaimTakenOverRunsOnce(t *testing.T) {
+	shortOpenerTiming(t)
+	logs := captureLogs(t)
+	op := &lateClaimOpener{claimed: make(chan struct{}), release: make(chan struct{})}
+	rec, h := newOpenHandler(welcomeProfile, func(cfg *HandlerConfig) {
+		op.SessionStore = cfg.Opener.(*state.SessionStore)
+		cfg.Opener = op
+	})
+
+	late := make(chan struct{})
+	go func() { callOpen(h, "c1", nil); close(late) }()
+	<-op.claimed
+	callOpen(h, "c2", nil)
+	close(op.release)
+	<-late
+	time.Sleep(pastRecovery())
+
+	content := openRequest("c1", nil).Content
+	if n := countStored(t, rec.store, openedSession, content); n != 1 {
+		t.Errorf("first turn stored %d times, want once", n)
+	}
+	if n := rec.replies(); n != 1 {
+		t.Errorf("replies = %d, want 1", n)
+	}
+	if out := logs.String(); !strings.Contains(out, "turn taken over by another run") || strings.Contains(out, "level=ERROR") {
+		t.Errorf("log:\n%s\nwant the takeover at Info and no error", out)
+	}
+}
+
+// TestHandler_OpenSession_NoteReservationTakenOverRunsOnce: a note whose
+// answer stalls past its reservation's expiry is taken over by a retry, which
+// stores and answers the note; when the stalled request gets to its turn, the
+// store refuses its reservation, so the note is stored and answered once.
+func TestHandler_OpenSession_NoteReservationTakenOverRunsOnce(t *testing.T) {
+	shortOpenerTiming(t)
+	rec, h := newOpenHandler(welcomeProfile)
+	rec.holdAck, rec.release = "req-c8", make(chan struct{})
+	storeOpened(t, rec.store, openedSession, "u1")
+	note := map[string]string{
+		pkg.OpenSessionIDMetadataKey: openedSession, pkg.NoteKeyMetadataKey: "chapter-2",
+		pkg.OpenedByMetadataKey: "", pkg.OpenKeyMetadataKey: "",
+	}
+
+	stalled := make(chan struct{})
+	go func() { callOpen(h, "c8", note); close(stalled) }()
+	time.Sleep(2 * openerStaleAfter)
+	callOpen(h, "c9", note)
+	close(rec.release)
+	<-stalled
+	time.Sleep(pastRecovery())
+
+	content := openRequest("c8", note).Content
+	if n := countStored(t, rec.store, openedSession, content); n != 1 {
+		t.Errorf("note stored %d times, want once", n)
+	}
+	if n := rec.replies(); n != 1 {
+		t.Errorf("replies = %d, want 1", n)
+	}
+}
+
+// TestHandler_OpenSession_RecoversAnInterruptedNoteOnce: an attempt that
+// reserved a note and died before it stored the note leaves the reservation
+// held. A retry while it is fresh is answered created=false and recovers the
+// note once the reservation is stale: the note is stored and answered once.
+func TestHandler_OpenSession_RecoversAnInterruptedNoteOnce(t *testing.T) {
+	shortOpenerTiming(t)
+	rec, h := newOpenHandler(welcomeProfile)
+	storeOpened(t, rec.store, openedSession, "u1")
+	if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+		t.Fatalf("crashed attempt's reservation = %v, %v", result, err)
+	}
+	note := map[string]string{
+		pkg.OpenSessionIDMetadataKey: openedSession, pkg.NoteKeyMetadataKey: "chapter-2",
+		pkg.OpenedByMetadataKey: "", pkg.OpenKeyMetadataKey: "",
+	}
+
+	callOpen(h, "c8", note)
+	if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "false" {
+		t.Fatalf("answers = %+v, want created=false", acks)
+	}
+	if _, runs, _ := rec.snapshot(); len(runs) != 0 {
+		t.Fatalf("the note ran while the reservation was fresh: %+v", runs)
+	}
+	rec.waitForRuns(t, 1)
+	time.Sleep(pastRecovery())
+
+	_, runs, _ := rec.snapshot()
+	if claim, _ := orchestrator.TurnClaimFrom(runs[0].ctx); len(runs) != 1 || runs[0].sessionID != openedSession || claim.NoteKey != "chapter-2" {
+		t.Fatalf("turns = %+v, want one recovered note chapter-2 on %s", runs, openedSession)
+	}
+	if n := countStored(t, rec.store, openedSession, openRequest("c8", note).Content); n != 1 {
+		t.Errorf("note stored %d times, want once", n)
+	}
+	if n := rec.replies(); n != 1 {
+		t.Errorf("replies = %d, want 1", n)
+	}
+}
+
+// flakyOpener fails claim call number failAt (ClaimOpener and ReserveNote
+// counted together), as a database that is briefly unavailable.
+type flakyOpener struct {
+	*state.SessionStore
+	calls  atomic.Int32
+	failAt int32
+}
+
+func (o *flakyOpener) ClaimOpener(ctx context.Context, id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	if o.calls.Add(1) == o.failAt {
+		return state.ClaimHeld, errors.New("database unavailable")
+	}
+	return o.SessionStore.ClaimOpener(ctx, id, now, staleAfter)
+}
+
+func (o *flakyOpener) ReserveNote(ctx context.Context, id, key string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	if o.calls.Add(1) == o.failAt {
+		return state.ClaimHeld, errors.New("database unavailable")
+	}
+	return o.SessionStore.ReserveNote(ctx, id, key, now, staleAfter)
+}
+
+// TestHandler_OpenSession_FailedClaimIsRefusedThenRetried: an open whose
+// first-turn claim the store cannot answer is refused with internal_error
+// before any answer or run; the session it opened stays, and a retry with the
+// same key takes the claim, is answered created=true and runs the turn once.
+func TestHandler_OpenSession_FailedClaimIsRefusedThenRetried(t *testing.T) {
+	shortOpenerTiming(t)
+	op := &flakyOpener{failAt: 1}
+	rec, h := newOpenHandler(welcomeProfile, func(cfg *HandlerConfig) {
+		op.SessionStore = cfg.Opener.(*state.SessionStore)
+		cfg.Opener = op
+	})
+
+	out := callOpen(h, "c1", nil)
+	if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "internal_error" ||
+		out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c1" {
+		t.Fatalf("answer = %+v, want open_rejected internal_error with req-c1", out.Metadata)
+	}
+	if events, _, _ := rec.snapshot(); len(events) != 0 {
+		t.Fatalf("events = %v, want nothing sent or run", events)
+	}
+
+	callOpen(h, "c2", nil)
+	time.Sleep(pastRecovery())
+	if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "true" ||
+		acks[0].Metadata[pkg.OpenSessionIDMetadataKey] != openedSession {
+		t.Errorf("answers = %+v, want the retry's created=true for %s", acks, openedSession)
+	}
+	if _, runs, _ := rec.snapshot(); len(runs) != 1 || runs[0].sessionID != openedSession {
+		t.Errorf("turns = %+v, want one on %s", runs, openedSession)
+	}
+}
+
+// stuckOpener's open (stuck "open"), a note's lookup (stuck "lookup") or the
+// first-turn claim (stuck "claim") waits until its context ends, as an open
+// waits for another transaction's insert of its key, a lookup for a table lock
+// or a free connection, and a claim for a session row another transaction
+// holds, and records whether that context carried a deadline.
+type stuckOpener struct {
+	*state.SessionStore
+	stuck    string
+	deadline atomic.Bool
+}
+
+func (o *stuckOpener) wait(ctx context.Context) error {
+	_, bounded := ctx.Deadline()
+	o.deadline.Store(bounded)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (o *stuckOpener) OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error) {
+	if o.stuck == "open" {
+		return nil, false, o.wait(ctx)
+	}
+	return o.SessionStore.OpenSession(ctx, p)
+}
+
+func (o *stuckOpener) Identity(ctx context.Context, id string) (*state.Session, error) {
+	if o.stuck == "lookup" {
+		return nil, o.wait(ctx)
+	}
+	return o.SessionStore.Identity(ctx, id)
+}
+
+func (o *stuckOpener) ClaimOpener(ctx context.Context, id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	if o.stuck == "claim" {
+		return state.ClaimHeld, o.wait(ctx)
+	}
+	return o.SessionStore.ClaimOpener(ctx, id, now, staleAfter)
+}
+
+// TestHandler_OpenSession_StoreWaitIsBounded: an open, a note's lookup or a
+// claim whose store call waits gives up once the turn timeout passed, or as
+// soon as the request's context ends; the attempt is refused with
+// internal_error and nothing is sent or run.
+func TestHandler_OpenSession_StoreWaitIsBounded(t *testing.T) {
+	shortOpenerTiming(t)
+	for _, tc := range []struct {
+		name, stuck string
+		cancel      bool
+	}{
+		{"open, turn timeout", "open", false},
+		{"open, request ends", "open", true},
+		{"note lookup, turn timeout", "lookup", false},
+		{"note lookup, request ends", "lookup", true},
+		{"claim, turn timeout", "claim", false},
+		{"claim, request ends", "claim", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			op := &stuckOpener{stuck: tc.stuck}
+			rec, h := newOpenHandler(welcomeProfile, func(cfg *HandlerConfig) {
+				op.SessionStore = cfg.Opener.(*state.SessionStore)
+				cfg.Opener = op
+			})
+			req := openRequest("c1", nil)
+			if tc.stuck == "lookup" {
+				storeOpened(t, rec.store, openedSession, "u1")
+				req = openRequest("c1", map[string]string{
+					pkg.OpenSessionIDMetadataKey: openedSession, pkg.NoteKeyMetadataKey: "chapter-2",
+					pkg.OpenedByMetadataKey: "", pkg.OpenKeyMetadataKey: "",
+				})
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancel {
+				time.AfterFunc(100*time.Millisecond, cancel)
+			}
+
+			start := time.Now()
+			out, _ := h(ctx, "websocket:c1", req)
+			waited := time.Since(start)
+
+			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "internal_error" {
+				t.Errorf("answer = %+v, want open_rejected internal_error", out.Metadata)
+			}
+			if !op.deadline.Load() {
+				t.Errorf("the %s's context carries no deadline", tc.stuck)
+			}
+			if limit := openerTimeout + time.Second; tc.cancel && waited >= openerTimeout || waited > limit {
+				t.Errorf("the attempt returned after %v", waited)
+			}
+			if events, _, _ := rec.snapshot(); len(events) != 0 {
+				t.Errorf("events = %v, want nothing sent or run", events)
+			}
+		})
+	}
+}
+
+// TestHandler_OpenSession_RecoveryOutlivesAFailedClaim: a recovery whose claim
+// call fails looks again later instead of giving up, so a note acknowledged
+// while a dead attempt held its reservation still runs once.
+func TestHandler_OpenSession_RecoveryOutlivesAFailedClaim(t *testing.T) {
+	shortOpenerTiming(t)
+	op := &flakyOpener{failAt: 2} // 1: the request's own reservation, 2: the first recovery
+	rec, h := newOpenHandler(welcomeProfile, func(cfg *HandlerConfig) {
+		op.SessionStore = cfg.Opener.(*state.SessionStore)
+		cfg.Opener = op
+	})
+	storeOpened(t, rec.store, openedSession, "u1")
+	if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+		t.Fatalf("crashed attempt's reservation = %v, %v", result, err)
+	}
+	note := map[string]string{
+		pkg.OpenSessionIDMetadataKey: openedSession, pkg.NoteKeyMetadataKey: "chapter-2",
+		pkg.OpenedByMetadataKey: "", pkg.OpenKeyMetadataKey: "",
+	}
+
+	callOpen(h, "c8", note)
+	rec.waitForRuns(t, 1)
+	time.Sleep(pastRecovery())
+
+	if _, runs, _ := rec.snapshot(); len(runs) != 1 {
+		t.Errorf("note ran %d times, want 1", len(runs))
+	}
+	if n := countStored(t, rec.store, openedSession, openRequest("c8", note).Content); n != 1 {
+		t.Errorf("note stored %d times, want once", n)
+	}
+}
+
+// countingOpener counts the first-turn claims that reach the store.
+type countingOpener struct {
+	*state.SessionStore
+	claims atomic.Int32
+}
+
+func (o *countingOpener) ClaimOpener(ctx context.Context, id string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	o.claims.Add(1)
+	return o.SessionStore.ClaimOpener(ctx, id, now, staleAfter)
+}
+
+// TestHandler_OpenSession_RecoveryOnlyForAHeldClaimAndOnce: duplicates of a
+// request whose first turn ran schedule no recovery; duplicates that find the
+// claim held by a dead attempt schedule one recovery between them, which runs
+// the first turn once.
+func TestHandler_OpenSession_RecoveryOnlyForAHeldClaimAndOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		ran        bool
+		recoveries int32
+	}{
+		{"first turn ran", true, 0},
+		{"claim held by a dead attempt", false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortOpenerTiming(t)
+			op := &countingOpener{}
+			rec, h := newOpenHandler(welcomeProfile, func(cfg *HandlerConfig) {
+				op.SessionStore = cfg.Opener.(*state.SessionStore)
+				cfg.Opener = op
+			})
+			if tc.ran {
+				callOpen(h, "c1", nil)
+			} else {
+				storeOpened(t, rec.store, openedSession, "u1")
+				if result, err := rec.store.ClaimOpener(context.Background(), openedSession, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+					t.Fatalf("dead attempt's claim = %v, %v", result, err)
+				}
+			}
+			before := op.claims.Load()
+
+			const duplicates = 6
+			var wg sync.WaitGroup
+			for i := range duplicates {
+				wg.Go(func() { callOpen(h, fmt.Sprintf("d%d", i), nil) })
+			}
+			wg.Wait()
+			time.Sleep(pastRecovery())
+
+			if got := op.claims.Load() - before - duplicates; got != tc.recoveries {
+				t.Errorf("recovery claims = %d, want %d", got, tc.recoveries)
+			}
+			if _, runs, _ := rec.snapshot(); len(runs) != 1 {
+				t.Errorf("first turn ran %d times, want 1", len(runs))
+			}
+		})
+	}
+}
+
+// TestHandler_OpenSession_ReplyReachesItsConversation: the answer goes to the
+// request's own conversation and the turn, run on the session's whole key, to
+// the session's conversation, the part after "<entity>:<channel>:", on the
+// request's channel. The turn runs with that channel and conversation, the
+// address work it defers (a reminder) is delivered to.
+func TestHandler_OpenSession_ReplyReachesItsConversation(t *testing.T) {
+	note := func(target string) map[string]string {
+		return map[string]string{
+			pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2",
+			pkg.OpenedByMetadataKey: "", pkg.OpenKeyMetadataKey: "",
+		}
+	}
+	for _, tc := range []struct {
+		name          string
+		channel, conv string
+		target        string // a session the note goes to; empty for a first turn
+		wantConv      string
+	}{
+		{name: "first turn", channel: "websocket", conv: "room-42", wantConv: "room-42"},
+		{name: "first turn on another channel", channel: "ws-a", conv: "room-42", wantConv: "room-42"},
+		{name: "note", channel: "websocket", conv: "c9", target: "u1:websocket:room-42", wantConv: "room-42"},
+		{name: "note on another channel", channel: "ws-a", conv: "c9", target: "u1:ws-a:room-42", wantConv: "room-42"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, h := newOpenHandler(welcomeProfile)
+			session, set := "u1:"+pkg.SessionKey(tc.channel, tc.conv, ""), map[string]string(nil)
+			if tc.target != "" {
+				storeOpened(t, rec.store, tc.target, "u1")
+				session, set = tc.target, note(tc.target)
+			}
+			msg := openRequest(tc.conv, set)
+			msg.ChannelID = tc.channel
+			_, _ = h(context.Background(), pkg.SessionKey(tc.channel, tc.conv, ""), msg)
+
+			_, runs, frames := rec.snapshot()
+			if len(runs) != 1 || runs[0].sessionID != session || actor.ConversationID(runs[0].ctx) != tc.wantConv ||
+				profile.FromContext(runs[0].ctx).ChannelID != tc.channel {
+				t.Fatalf("turns = %+v, want one on %s in %s/%q", runs, session, tc.channel, tc.wantConv)
+			}
+			if len(frames) != 2 {
+				t.Fatalf("frames = %+v, want the answer and the reply", frames)
+			}
+			if ack := frames[0]; ack.channel != tc.channel || ack.msg.ConversationID != tc.conv {
+				t.Errorf("answer to %s/%q, want the request's %s/%q", ack.channel, ack.msg.ConversationID, tc.channel, tc.conv)
+			}
+			reply := frames[1]
+			if reply.channel != tc.channel || reply.msg.ConversationID != tc.wantConv || reply.msg.ThreadID != "" {
+				t.Errorf("reply to %s/%q thread %q, want %s/%q", reply.channel, reply.msg.ConversationID,
+					reply.msg.ThreadID, tc.channel, tc.wantConv)
+			}
+			for _, key := range []string{pkg.OpenSessionMetadataKey, pkg.OpenedByMetadataKey, pkg.OpenKeyMetadataKey,
+				pkg.OpenSessionIDMetadataKey, pkg.NoteKeyMetadataKey} {
+				if v, ok := reply.msg.Metadata[key]; ok {
+					t.Errorf("reply carries the request's %s=%q", key, v)
+				}
+			}
+		})
+	}
+}
+
+// TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound: a note reaches
+// a session the open path opened and the store records for the user and the
+// request's channel only. A session that is gone, another user's, the user's
+// on another channel, or an ordinary chat, also one whose channel the store
+// backfilled, is refused with not_found, so the caller may open a new one, and
+// nothing is stored, reserved, run or sent.
+func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
+	rec, h := newOpenHandler(welcomeProfile)
+	var foreign []string
+	for _, s := range []struct{ id, owner, channel string }{
+		{"u2:websocket:c1", "u2", "websocket"}, // another user's
+		{"u1:slack:c1", "u1", "slack"},         // u1's on another channel
+	} {
+		if _, created, err := rec.store.OpenSession(context.Background(), state.SessionParams{
+			ID: s.id, EntityID: s.owner, OpenedBy: "welcome", OpenKey: s.id, ChannelID: s.channel,
+		}); err != nil || !created {
+			t.Fatalf("OpenSession(%s) = created %v, %v", s.id, created, err)
+		}
+		foreign = append(foreign, s.id)
+	}
+	rec.store.Create(state.SessionParams{ID: "u1:websocket:c2", EntityID: "u1"}) // u1's chat, no recorded channel
+	backfilled := rec.store.Create(state.SessionParams{ID: "u1:websocket:c3", EntityID: "u1"})
+	backfilled.ChannelID = "websocket" // u1's chat on this channel, recorded by the store's backfill
+	foreign = append(foreign, "u1:websocket:c2", "u1:websocket:c3")
+
+	for _, target := range append([]string{"u1:websocket:gone"}, foreign...) {
+		out := callOpen(h, "c8", map[string]string{pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2"})
+		if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" ||
+			out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c8" {
+			t.Errorf("note for %s answered %+v, want open_rejected not_found with req-c8", target, out.Metadata)
+		}
+	}
+	if events, _, _ := rec.snapshot(); len(events) != 0 {
+		t.Errorf("events = %v, want nothing sent or run", events)
+	}
+	for _, id := range foreign {
+		if sess, _ := rec.store.Get(id); len(sess.Messages) != 0 {
+			t.Errorf("%s holds %+v, want nothing stored", id, sess.Messages)
+		}
+		if result, err := rec.store.ReserveNote(context.Background(), id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+			t.Errorf("%s note reservation = %v, %v; want it still free", id, result, err)
+		}
+	}
+}
+
+// TestHandler_OpenSession_KeyPartsWithAColonAreRefused: a session key names its
+// user, channel and conversation only while none of them is empty or holds a
+// colon: "u1:websocket:websocket:c1" is u1's conversation "websocket:c1" and
+// u1:websocket's conversation "c1". An open-session request whose entity,
+// channel or conversation id is not such a part, and a note whose target is
+// not a key of three such parts, is refused with bad_request naming the field
+// before the store is asked: nothing is opened, stored, claimed, reserved, run
+// or sent, also in the sessions those keys name.
+func TestHandler_OpenSession_KeyPartsWithAColonAreRefused(t *testing.T) {
+	note := func(target string) map[string]string {
+		return map[string]string{pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2"}
+	}
+	for _, tc := range []struct {
+		name, entity, channel, conv string
+		set                         map[string]string
+		field                       string
+	}{
+		{"entity id with a colon", "u1:websocket", "websocket", "c1", nil, "entity id"},
+		{"empty entity id", "", "websocket", "c1", nil, "entity id"},
+		{"channel id with a colon", "u1", "websocket:admin", "c1", nil, "channel id"},
+		{"conversation id with a colon", "u1", "websocket", "websocket:c1", nil, "conversation id"},
+		{"note into a conversation id with a colon", "u1", "websocket", "c8", note("u1:websocket:websocket:c1"), "session id"},
+		{"note on a channel id with a colon", "u1", "websocket", "c8", note("u1:websocket:admin:c1"), "session id"},
+		{"note for a user id with a colon", "u1", "websocket", "c8", note("u1:other:websocket:c1"), "session id"},
+		{"note for a key of no conversation", "u1", "websocket", "c8", note("u1-job-7"), "session id"},
+		{"note for a key with an empty conversation", "u1", "websocket", "c8", note("u1:websocket:"), "session id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := welcomeProfile
+			p.EntityID = tc.entity
+			rec, h := newOpenHandler(p)
+			// The sessions those keys name: u1:websocket's chat "c1", which is
+			// also the key of u1's conversation "websocket:c1", u1's chat
+			// "admin:c1", u1:other's chat "c1" and u1's session of no
+			// conversation.
+			existing := []state.SessionParams{
+				{ID: "u1:websocket:websocket:c1", EntityID: "u1:websocket"},
+				{ID: "u1:websocket:admin:c1", EntityID: "u1"},
+				{ID: "u1:other:websocket:c1", EntityID: "u1:other"},
+				{ID: "u1-job-7", EntityID: "u1"},
+			}
+			for _, e := range existing {
+				rec.store.Create(e)
+			}
+			msg := openRequest(tc.conv, tc.set)
+			msg.ChannelID = tc.channel
+
+			out, _ := h(context.Background(), pkg.SessionKey(tc.channel, tc.conv, ""), msg)
+
+			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "bad_request" ||
+				out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-"+tc.conv || !strings.Contains(out.Content, tc.field) {
+				t.Errorf("answer = %q %+v, want open_rejected bad_request naming the %s", out.Content, out.Metadata, tc.field)
+			}
+			if events, _, _ := rec.snapshot(); len(events) != 0 || len(rec.minted) != 0 {
+				t.Errorf("events = %v, minted = %v, want nothing", events, rec.minted)
+			}
+			if n := len(rec.store.List()); n != len(existing) {
+				t.Errorf("store holds %d sessions, want the %d it had", n, len(existing))
+			}
+			for _, e := range existing {
+				if sess, err := rec.store.Get(e.ID); err != nil || sess.OpenKey != "" || len(sess.Messages) != 0 {
+					t.Errorf("%s = %+v, %v; want it unopened and empty", e.ID, sess, err)
+				}
+				if result, err := rec.store.ClaimOpener(context.Background(), e.ID, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+					t.Errorf("%s first-turn claim = %v, %v; want it still free", e.ID, result, err)
+				}
+				if result, err := rec.store.ReserveNote(context.Background(), e.ID, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+					t.Errorf("%s note reservation = %v, %v; want it still free", e.ID, result, err)
+				}
+			}
+		})
+	}
+}
+
+// TestHandler_OpenSession_KeyWithoutAnOwnerIsNeitherReachedNorTaken: the
+// handler keys a message without a verified profile "<channel>:<conversation>"
+// with any thread after it, and such a key may read like a user's:
+// "u1:websocket:c4" is thread c4 of conversation "websocket" on a channel u1.
+// That session has no open key, so a note for it is not_found, and an open
+// whose own key it is finds the id taken and answers internal_error; neither
+// stores, claims, runs or sends anything in it, also when the store backfilled
+// the key's first part as its owner and a channel for it.
+func TestHandler_OpenSession_KeyWithoutAnOwnerIsNeitherReachedNorTaken(t *testing.T) {
+	const id = "u1:websocket:c4"
+	for _, tc := range []struct{ name, owner, channel string }{
+		{"as keyed", "", ""},
+		{"owner and channel backfilled", "u1", "websocket"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, h := newOpenHandler(welcomeProfile)
+			unowned := rec.store.Create(state.SessionParams{ID: id, EntityID: tc.owner})
+			unowned.ChannelID = tc.channel
+
+			for _, attempt := range []struct {
+				conv string
+				set  map[string]string
+				code string
+			}{
+				{"c8", map[string]string{pkg.OpenSessionIDMetadataKey: id, pkg.NoteKeyMetadataKey: "chapter-2"}, "not_found"},
+				{"c4", nil, "internal_error"}, // the open's own key is u1:websocket:c4
+			} {
+				out := callOpen(h, attempt.conv, attempt.set)
+				if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != attempt.code {
+					t.Errorf("attempt on %s answered %+v, want open_rejected %s", attempt.conv, out.Metadata, attempt.code)
+				}
+			}
+			if events, _, _ := rec.snapshot(); len(events) != 0 || len(rec.minted) != 0 {
+				t.Errorf("events = %v, minted = %v, want nothing", events, rec.minted)
+			}
+			if sess, err := rec.store.Get(id); err != nil || sess.OpenKey != "" || sess.EntityID != tc.owner || len(sess.Messages) != 0 {
+				t.Errorf("%s = %+v, %v; want it as it was", id, sess, err)
+			}
+			if result, err := rec.store.ClaimOpener(context.Background(), id, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				t.Errorf("first-turn claim = %v, %v; want it still free", result, err)
+			}
+			if result, err := rec.store.ReserveNote(context.Background(), id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				t.Errorf("note reservation = %v, %v; want it still free", result, err)
+			}
+		})
+	}
+}
+
+// TestHandler_OrdinaryChatTakesAConversationIdWithAColon: the open path's
+// refusal leaves ordinary chats as they are: a chat's conversation id may hold
+// a colon, and its session, keyed with it, is created, resumed and answered
+// in that conversation.
+func TestHandler_OrdinaryChatTakesAConversationIdWithAColon(t *testing.T) {
+	chat := welcomeProfile
+	chat.Kind, chat.SystemSource = profile.KindChat, ""
+	var rec *openRecorder
+	var h pkg.MessageHandler
+	rec, h = newOpenHandler(chat, func(cfg *HandlerConfig) {
+		mint := cfg.CreateSession
+		cfg.CreateSession = func(p state.SessionParams) {
+			mint(p)
+			rec.store.Create(p)
+		}
+	})
+	const conv, session = "websocket:c1", "u1:websocket:websocket:c1"
+	for _, resume := range []bool{false, true} {
+		meta := map[string]string{"profile_token": "tok"}
+		if resume {
+			meta[pkg.ResumeIntentMetadataKey] = "true"
+		}
+		msg := pkg.InboundMessage{ChannelID: "websocket", ConversationID: conv, Content: "hello", Metadata: meta}
+
+		out, err := h(context.Background(), pkg.SessionKey("websocket", conv, ""), msg)
+
+		if err != nil || out.Content != "reply: hello" || out.ConversationID != conv {
+			t.Errorf("resume %v: answer = %q to %q, %v; want the reply in %q", resume, out.Content, out.ConversationID, err, conv)
+		}
+	}
+	_, runs, _ := rec.snapshot()
+	if len(runs) != 2 || runs[0].sessionID != session || runs[1].sessionID != session {
+		t.Errorf("turns = %+v, want two in %s", runs, session)
+	}
+	if len(rec.minted) != 1 || rec.minted[0] != session {
+		t.Errorf("minted = %v, want %s once", rec.minted, session)
+	}
+}
+
+// TestHandler_OpenSession_Rejections: an attempt that may not or cannot open a
+// session is answered with open_rejected and its correlation id, also when the
+// refusal comes before the open path (the token check), and opens, claims,
+// reserves, runs and sends nothing. A chat token is refused like any
+// privileged option. A request on a channel with threads, even for the user's
+// session there, in a thread, or with a channel id its key does not carry, is
+// refused before the store is asked; the user's session for the origin and
+// key on another channel is out of reach, also where that channel's id
+// extends this one's.
+func TestHandler_OpenSession_Rejections(t *testing.T) {
+	chat := welcomeProfile
+	chat.Kind, chat.SystemSource = profile.KindChat, ""
+	unverifiable := func(cfg *HandlerConfig) { cfg.Verifier = &stubVerifier{err: errors.New("bad token")} }
+	failingStore := func(cfg *HandlerConfig) { cfg.Opener = failingOpener{} }
+	keep := func(*HandlerConfig) {}
+	inThread := func(m *pkg.InboundMessage) { m.ThreadID = "t1" }
+	misnamed := func(m *pkg.InboundMessage) { m.ChannelID = "websocket-2" }
+	// The user's sessions for the origin and keys event-1 and event-2: on a
+	// channel with threads, and on a channel whose id extends "websocket".
+	elsewhere := map[string]state.SessionParams{
+		"u1:slack:c0":           {OpenKey: "event-1", ChannelID: "slack"},
+		"u1:websocket:admin:c0": {OpenKey: "event-2", ChannelID: "websocket:admin"},
+	}
+	note := map[string]string{pkg.OpenSessionIDMetadataKey: "u1:slack:c0", pkg.NoteKeyMetadataKey: "chapter-2"}
+	for _, tc := range []struct {
+		name            string
+		p               profile.Profile
+		channel         string
+		threads         bool
+		mutate          func(*pkg.InboundMessage)
+		set             map[string]string
+		override        func(*HandlerConfig)
+		code, requestID string
+	}{
+		{"unverifiable token", welcomeProfile, "websocket", false, nil, nil, unverifiable, "auth_failed", "req-c1"},
+		{"chat token", chat, "websocket", false, nil, nil, keep, "forbidden", "req-c1"},
+		{"missing key", welcomeProfile, "websocket", false, nil, map[string]string{pkg.OpenKeyMetadataKey: ""}, keep, "bad_request", "req-c1"},
+		{"missing request id", welcomeProfile, "websocket", false, nil, map[string]string{pkg.OpenRequestIDMetadataKey: ""}, keep, "bad_request", ""},
+		{"store failure", welcomeProfile, "websocket", false, nil, nil, failingStore, "internal_error", "req-c1"},
+		{"session on another channel", welcomeProfile, "websocket", false, nil, nil, keep, "not_found", "req-c1"},
+		{"session on a channel whose id extends this one's", welcomeProfile, "websocket", false, nil,
+			map[string]string{pkg.OpenKeyMetadataKey: "event-2"}, keep, "not_found", "req-c1"},
+		{"open on a channel with threads", welcomeProfile, "slack", true, nil, nil, keep, "bad_request", "req-c1"},
+		{"note on a channel with threads", welcomeProfile, "slack", true, nil, note, keep, "bad_request", "req-c1"},
+		{"open in a thread", welcomeProfile, "websocket", false, inThread, nil, keep, "bad_request", "req-c1"},
+		{"channel id unlike its key", welcomeProfile, "websocket", false, misnamed, nil, keep, "bad_request", "req-c1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, h := newOpenHandler(tc.p, tc.override)
+			for id, p := range elsewhere {
+				p.ID, p.EntityID, p.OpenedBy = id, "u1", "welcome"
+				if _, _, err := rec.store.OpenSession(context.Background(), p); err != nil {
+					t.Fatalf("OpenSession(%s): %v", id, err)
+				}
+			}
+			msg := openRequest("c1", tc.set)
+			msg.ChannelID = tc.channel
+			if tc.mutate != nil {
+				tc.mutate(&msg)
+			}
+			ctx := pkg.WithCapabilities(context.Background(), pkg.Capabilities{ID: tc.channel, Threads: tc.threads})
+			own := pkg.SessionKey(tc.channel, "c1", msg.ThreadID)
+
+			out, _ := h(ctx, own, msg)
+
+			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != tc.code ||
+				out.Metadata[pkg.OpenRequestIDMetadataKey] != tc.requestID {
+				t.Errorf("answer = %+v, want open_rejected %s with open_request_id %q", out.Metadata, tc.code, tc.requestID)
+			}
+			if _, err := rec.store.Get("u1:" + own); !errors.Is(err, state.ErrSessionNotFound) {
+				t.Errorf("a rejected attempt left a session (Get err = %v)", err)
+			}
+			if events, _, _ := rec.snapshot(); len(events) != 0 || len(rec.minted) != 0 {
+				t.Errorf("events = %v, minted = %v, want nothing", events, rec.minted)
+			}
+			for id := range elsewhere {
+				if result, err := rec.store.ClaimOpener(context.Background(), id, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+					t.Errorf("%s first-turn claim = %v, %v; want it still free", id, result, err)
+				}
+				if result, err := rec.store.ReserveNote(context.Background(), id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+					t.Errorf("%s note reservation = %v, %v; want it still free", id, result, err)
+				}
+			}
+		})
+	}
+}
+
+// duplicateDedup answers every message as a duplicate another pod already took.
+type duplicateDedup struct{}
+
+func (duplicateDedup) TryAcquire(context.Context, string, time.Duration) (bool, error) {
+	return false, nil
+}
+
+// TestRegistry_OpenSessionSkipsDedupAndDebounce: an open-session request is a
+// server's call waiting for its answer, so the registry dispatches it at once:
+// never dropped as a transport duplicate (the store keeps a repeat from running
+// its turn twice) and never held or merged by the debouncer.
+func TestRegistry_OpenSessionSkipsDedupAndDebounce(t *testing.T) {
+	handled := make(chan pkg.InboundMessage, 1)
+	reg := NewRegistry(func(_ context.Context, _ string, m pkg.InboundMessage) (pkg.OutboundMessage, error) {
+		handled <- m
+		return pkg.OutboundMessage{}, nil
+	})
+	reg.SetDebounceWindow(time.Hour)
+	reg.SetDeduplicator(duplicateDedup{}, time.Minute)
+	ch := newMockChannel("websocket")
+	if err := reg.Register(ch); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	defer reg.StopAll()
+
+	msg := openRequest("c1", nil)
+	msg.Timestamp = time.Now()
+	ch.pushMessage(msg)
+
+	select {
+	case m := <-handled:
+		if m.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c1" {
+			t.Errorf("handled %+v, want the open-session request", m.Metadata)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the open-session request was dropped as a duplicate or held by the debouncer")
 	}
 }

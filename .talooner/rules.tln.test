@@ -1,0 +1,318 @@
+test "A PR with no description is blocked" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.draft" false
+    attr 1 "pr.has_description" false
+
+    record 2 type "pr"
+    attr 2 "pr.draft" false
+    attr 2 "pr.has_description" true
+  }
+
+  when rule "Block PRs with no description"
+
+  expect {
+    flagged 1
+    not flagged 2
+    did 1 block "pr.merge"
+    did_not 2 block "pr.merge"
+  }
+}
+
+test "A draft with no description is left alone" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.draft" true
+    attr 1 "pr.has_description" false
+  }
+
+  when rule "Block PRs with no description"
+
+  expect {
+    not flagged 1
+  }
+}
+
+test "Every sensitive path needs its reviewer" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.changed_files" ["internal/prompts/planner_preamble.txt"]
+
+    record 2 type "pr"
+    attr 2 "pr.changed_files" ["internal/auth/rotator.go"]
+
+    record 3 type "pr"
+    attr 3 "pr.changed_files" ["internal/provider/anthropic.go"]
+
+    record 4 type "pr"
+    attr 4 "pr.changed_files" ["internal/state/store/migrations/018_new.sql"]
+
+    record 5 type "pr"
+    attr 5 "pr.changed_files" ["proto/plugin.proto"]
+
+    record 6 type "pr"
+    attr 6 "pr.changed_files" [".github/workflows/ci.yml"]
+
+    record 7 type "pr"
+    attr 7 "pr.changed_files" [".talooner/rules.tln"]
+  }
+
+  when rule "Sensitive path needs review"
+
+  expect {
+    flagged 1
+    flagged 2
+    flagged 3
+    flagged 4
+    flagged 5
+    flagged 6
+    flagged 7
+    did 1 assign "pr"
+    did 6 assign "pr"
+  }
+}
+
+test "Path lookalikes do not match a sensitive path" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.changed_files" ["README.md"]
+
+    record 2 type "pr"
+    attr 2 "pr.changed_files" ["internal/stateful/walk.go"]
+
+    record 3 type "pr"
+    attr 3 "pr.changed_files" ["internal/decideprovider/decide.go"]
+
+    record 4 type "pr"
+    attr 4 "pr.changed_files" ["internal/protocol/wire.go"]
+
+    record 5 type "pr"
+    attr 5 "pr.changed_files" [".github/workflows-bak/ci.yml"]
+
+    record 6 type "pr"
+    attr 6 "pr.changed_files" [".talooner-bak/rules.tln"]
+  }
+
+  when rule "Sensitive path needs review"
+
+  expect {
+    not flagged 1
+    not flagged 2
+    not flagged 3
+    not flagged 4
+    not flagged 5
+    not flagged 6
+    did_not 3 assign "pr"
+  }
+}
+
+test "An empty changed_files list matches no sensitive path" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.changed_files" []
+  }
+
+  when rule "Sensitive path needs review"
+
+  expect {
+    not flagged 1
+  }
+}
+
+test "The risk gate holds at 0.85" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.risk" "high"
+    attr 1 "pr.risk_certainty" 0.85
+
+    record 2 type "pr"
+    attr 2 "pr.risk" "high"
+    attr 2 "pr.risk_certainty" 0.84
+
+    record 3 type "pr"
+    attr 3 "pr.risk" "low"
+    attr 3 "pr.risk_certainty" 0.99
+
+    record 4 type "pr"
+    attr 4 "pr.risk" "error"
+    attr 4 "pr.risk_certainty" 0
+  }
+
+  when rule "Confident high risk needs a review"
+
+  expect {
+    flagged 1
+    not flagged 2
+    not flagged 3
+    not flagged 4
+    did 1 assign "pr"
+  }
+}
+
+test "The risk decision calls the configured model" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.title" "Rotate provider keys"
+    attr 1 "pr.body" "Adds a cooldown to the rotator"
+    attr 1 "pr.changed_files" ["internal/auth/rotator.go"]
+  }
+
+  mock tool "cdm" "decide" { returns { chosen "high" certainty 0.9 } }
+
+  when enrich "cdm: how risky is this PR?"
+
+  expect {
+    count == 1
+    tool_called "cdm" "decide"
+  }
+}
+
+test "The description gate holds at 0.85" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.description_kind" "vague"
+    attr 1 "pr.description_certainty" 0.85
+
+    record 2 type "pr"
+    attr 2 "pr.description_kind" "vague"
+    attr 2 "pr.description_certainty" 0.84
+
+    record 3 type "pr"
+    attr 3 "pr.description_kind" "explains why"
+    attr 3 "pr.description_certainty" 0.99
+  }
+
+  when rule "Confident vague description gets a comment"
+
+  expect {
+    flagged 1
+    not flagged 2
+    not flagged 3
+    did 1 comment "pr" contains "why"
+  }
+}
+
+test "The description decision calls the configured model" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.title" "Refactor"
+    attr 1 "pr.body" "Changes files"
+  }
+
+  mock tool "cdm" "decide" { returns { chosen "vague" certainty 0.9 } }
+
+  when enrich "cdm: does the description say why?"
+
+  expect {
+    count == 1
+    tool_called "cdm" "decide"
+  }
+}
+
+test "An inconclusive AI review needs a human" {
+  given {
+    record 1 type "code_unit"
+    attr 1 "unit.llm_result" "unclear"
+
+    record 2 type "code_unit"
+    attr 2 "unit.llm_result" "ok"
+  }
+
+  when rule "AI review inconclusive needs a human"
+
+  expect {
+    flagged 1
+    not flagged 2
+    did 1 block "pr.merge"
+    did_not 2 assign "pr"
+  }
+}
+
+test "A failed AI review needs a human" {
+  given {
+    record 1 type "code_unit"
+    attr 1 "unit.llm_result" "error"
+
+    record 2 type "code_unit"
+  }
+
+  when rule "AI review failed needs a human"
+
+  expect {
+    flagged 1
+    not flagged 2
+    did 1 assign "pr"
+  }
+}
+
+test "A small tested PR is approved" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.draft" false
+    attr 1 "pr.has_description" true
+    attr 1 "pr.tests_passing" true
+    attr 1 "pr.lint_passing" true
+    attr 1 "pr.lines_changed" 200
+    attr 1 "pr.changed_files" ["docs/readme.md"]
+
+    record 2 type "pr"
+    attr 2 "pr.draft" false
+    attr 2 "pr.has_description" true
+    attr 2 "pr.tests_passing" true
+    attr 2 "pr.lint_passing" true
+    attr 2 "pr.lines_changed" 201
+    attr 2 "pr.changed_files" ["docs/readme.md"]
+  }
+
+  when rule "Auto-approve a small, tested PR"
+
+  expect {
+    flagged 1
+    not flagged 2
+    did 1 approve "pr"
+    did_not 2 approve "pr"
+  }
+}
+
+test "Auto-approve never fires on a sensitive path" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.draft" false
+    attr 1 "pr.has_description" true
+    attr 1 "pr.tests_passing" true
+    attr 1 "pr.lint_passing" true
+    attr 1 "pr.lines_changed" 10
+    attr 1 "pr.changed_files" ["internal/prompts/planner_preamble.txt"]
+  }
+
+  when rule "Auto-approve a small, tested PR"
+
+  expect {
+    not flagged 1
+  }
+}
+
+test "Auto-approve never fires without confirmed checks" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.draft" false
+    attr 1 "pr.has_description" true
+    attr 1 "pr.lines_changed" 10
+    attr 1 "pr.changed_files" ["docs/readme.md"]
+
+    record 2 type "pr"
+    attr 2 "pr.draft" true
+    attr 2 "pr.has_description" true
+    attr 2 "pr.tests_passing" true
+    attr 2 "pr.lint_passing" true
+    attr 2 "pr.lines_changed" 10
+    attr 2 "pr.changed_files" ["docs/readme.md"]
+  }
+
+  when rule "Auto-approve a small, tested PR"
+
+  expect {
+    not flagged 1
+    not flagged 2
+  }
+}

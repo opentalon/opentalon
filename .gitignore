@@ -9,6 +9,8 @@
 
 # Test binary
 *.test
+# ...but keep Talooner rule tests, which share the .test suffix
+!.talooner/*.tln.test
 
 # Output of go coverage
 *.out
@@ -57,3 +59,6 @@ channels/*
 plugins/*
 !plugins/.gitkeep
 .cursor/
+
+# ...keep the Talooner config, which the credential pattern above also matches
+!.talooner/config.yaml
