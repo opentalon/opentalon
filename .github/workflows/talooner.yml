@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker run --rm -v "$PWD:/repo" -w /repo --entrypoint tln ghcr.io/talooner/talooner-runner:1.1.3 test .talooner/
+      - run: docker run --rm -v "$PWD:/repo" -w /repo --entrypoint tln ghcr.io/talooner/talooner-runner:1.2.2 test .talooner/
   review:
     needs: rules
     # Runs when rules passed or was skipped (review, comment events). Only
@@ -67,7 +67,7 @@ jobs:
         # -gh: root, because only root can append to the runner's $GITHUB_OUTPUT
         # (0644, owned by the runner's uid) for the resolve job below. The rules
         # step only reads and stays on the non-root image.
-        uses: docker://ghcr.io/talooner/talooner-runner:1.1.3-gh
+        uses: docker://ghcr.io/talooner/talooner-runner:1.2.2-gh
         env:
           TALOONER_PROVIDER: github
           TALOONER_LICENSE_KEY: ${{ secrets.TALOONER_LICENSE_KEY }}
