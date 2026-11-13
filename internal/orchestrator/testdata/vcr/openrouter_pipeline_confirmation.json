@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
+  "prompt_hash": "7cc1b994a31b2c5d95b1f4ca74fab6353fe2f11271ff9c06575bab77ce354e60",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-10-20T09:40:57.725841893Z",
+  "recorded_at": "2026-11-13T11:44:09.780936Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1792489257-A9XbF9QKKwWKiwShq1Fm",
+        "id": "gen-1794570249-OLHPJ33VqFB2WouatFla",
         "model": "mistralai/ministral-8b-2512",
-        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in myrepo\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue for code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"summary\": \"Code Analysis Findings for myrepo\",\n        \"description\": \"Automated findings from code analysis of {{step1.output.repo}}. Details: {{step1.output.analysis_details}}\",\n        \"project_key\": \"YOUR_PROJECT_KEY\",  // Replace with actual project key or reference dynamically if possible\n        \"issue_type\": \"Bug\"  // Adjust issue type as needed (e.g., \"Task\", \"Improvement\")\n      },\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
+        "content": "```json\n{\n  \"type\": \"pipeline\",\n  \"steps\": [\n    {\n      \"id\": \"step1\",\n      \"name\": \"Analyze code in repository\",\n      \"plugin\": \"gitlab\",\n      \"action\": \"analyze_code\",\n      \"args\": {\n        \"repo\": \"myrepo\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"step2\",\n      \"name\": \"Create Jira issue for code analysis findings\",\n      \"plugin\": \"jira\",\n      \"action\": \"create_issue\",\n      \"args\": {\n        \"summary\": \"Code Analysis Findings for {{step1.output.repo}}\",\n        \"description\": \"Automated findings from code analysis:\\n\\n{{step1.output.findings | tostring}}\",\n        \"project_key\": \"YOUR_PROJECT_KEY\"  // Replace with the actual Jira project key\n      },\n      \"depends_on\": [\"step1\"]\n    }\n  ]\n}\n```",
         "usage": {
           "input_tokens": 759,
-          "output_tokens": 240
+          "output_tokens": 210
         }
       }
     },
@@ -38,17 +38,17 @@
           },
           {
             "role": "user",
-            "content": "User's original request: analyze code in myrepo and then create a jira issue for the findings\n\nPlan steps:\n1. Analyze code in myrepo (gitlab.analyze_code)\n2. Create Jira issue for code analysis findings (jira.create_issue)\n"
+            "content": "User's original request: analyze code in myrepo and then create a jira issue for the findings\n\nPlan steps:\n1. Analyze code in repository (gitlab.analyze_code)\n2. Create Jira issue for code analysis findings (jira.create_issue)\n"
           }
         ]
       },
       "response": {
-        "id": "gen-1792489261-9oKIbzoMtNqx1XdbcxNl",
+        "id": "gen-1794570251-lP3GVYVLnqqwA2vZJiZY",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Hier ist dein Plan in einfachen Schritten:\n\nZuerst werde ich den Code in deinem Repository **durchgehen und auf mögliche Probleme oder Verbesserungen prüfen**. Anschließend erstelle ich daraus eine **Jira-Ticket**, damit das Team die Ergebnisse nachverfolgen und bearbeiten kann.\n\nMöchtest du mit diesem Plan fortfahren?",
+        "content": "Hier ist dein geplanter Ablauf in einfachen Schritten:\n\n1. **Code in deinem Repository analysieren**, um mögliche Probleme oder Verbesserungspotenziale zu finden.\n2. **Ein Jira-Ticket erstellen**, das die wichtigsten Ergebnisse der Analyse zusammenfasst und für die weitere Bearbeitung priorisiert.\n\nMöchtest du mit diesem Plan fortfahren?",
         "usage": {
-          "input_tokens": 141,
-          "output_tokens": 72
+          "input_tokens": 140,
+          "output_tokens": 75
         }
       }
     }

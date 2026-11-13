@@ -3518,7 +3518,7 @@ Shall I return it?`
 // English technical terms do not reach the field names, which the user checks
 // under the names they see (rule 5). Without a directive the prompt is unchanged
 // and rule 1 applies. In a spoken turn the
-// narrator also writes the question as it is asked aloud (spokenConfirmationInstruction).
+// narrator also writes the question as it is asked aloud (prompts.ConfirmationSpokenQuestion).
 func confirmationNarrateSystemPrompt(ctx context.Context, hint string) string {
 	base := confirmationNarratePrompt
 	if hint != "" {
@@ -3531,7 +3531,7 @@ func confirmationNarrateSystemPrompt(ctx context.Context, hint string) string {
 		}
 	}
 	if actor.SpokenReply(ctx) {
-		base += "\n\n" + spokenConfirmationInstruction
+		base += "\n\n" + prompts.ConfirmationSpokenQuestion
 	}
 	return base
 }
@@ -4337,7 +4337,7 @@ func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Sessi
 	// A spoken turn's instruction holds in every round, the first included
 	// (spoken_reply.go); the per-round segment sits after the cached prefix.
 	if actor.SpokenReply(ctx) {
-		system.Round += "\n\n" + spokenReplyInstruction
+		system.Round += "\n\n" + prompts.OrchestratorSpokenReply
 	}
 	messages := make([]provider.Message, 0, len(sess.Messages)+4)
 	messages = append(messages, provider.Message{Role: provider.RoleSystem, Content: system.Join()})

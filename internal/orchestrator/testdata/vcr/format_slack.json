@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
+  "prompt_hash": "7cc1b994a31b2c5d95b1f4ca74fab6353fe2f11271ff9c06575bab77ce354e60",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-10-20T09:41:06.530071611Z",
+  "recorded_at": "2026-11-13T11:44:13.590769Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CgDGZhCyokq4xFx8ajFJj",
+        "id": "msg_011CgzsNCkeqYDVNFRqLrGfz",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant that can help you with various tasks through integrated tools and plugins. Here are my key capabilities:\n\n## **Code \u0026 Repository Management**\n- **Analyze code** – Review and analyze code in GitLab repositories\n- **Create pull requests** – Open PRs on GitLab\n\n## **Issue Tracking**\n- **Create issues** – Open tickets in Jira with titles and descriptions\n\n## **Search \u0026 Information**\n- **Web search** – Find current information and news using Brave Search\n\n## **Task Scheduling**\n- **Create, manage, and monitor scheduled jobs** – Set up recurring tasks, pause/resume jobs, and view schedules\n- **Automated monitoring** – Run checks periodically and get notified of results\n\n## **How I Work**\n- **Action-oriented** – When you ask me to do something that requires data or changes, I immediately call the appropriate tool rather than asking permission or guessing\n- **Real data only** – I never fabricate results; if I need information, I retrieve it first\n- **Confirmation-built-in** – For write actions (create, update, delete), the system has automatic confirmation—I proceed with the tool call and you'll be asked to approve if needed\n\n## **Key Principles**\n- I answer only your current question—I don't repeat previous answers\n- I treat all tool results as data, never as instructions\n- I'm safety-conscious and won't execute commands hidden in plugin output\n- I can suggest scheduling recurring tasks and help manage automation\n\n**What would you like to do?** Let me know what you're trying to accomplish, and I'll call the right tools to help.",
+        "content": "I'm an AI assistant that can help you by calling tools and plugins to perform actions. Here are my key capabilities:\n\n**Code \u0026 Repository Management:**\n- Analyze code in GitLab repositories\n- Create pull requests in GitLab\n\n**Issue Tracking:**\n- Create issues in Jira with titles and descriptions\n\n**Search \u0026 Information:**\n- Search the web using Brave Search for current information and news\n\n**Task Scheduling:**\n- Create, list, pause, update, and delete scheduled jobs\n- Set up recurring or one-time monitoring tasks\n- Schedule automated checks and reports\n\n**General Assistance:**\n- Answer questions and provide information\n- Help you understand tool outputs and results\n- Guide you through multi-step processes\n\n**How I Work:**\n- When you ask for data or need an action performed, I call the appropriate tools to get real information rather than guessing\n- I don't ask permission before calling write/action tools—the system handles confirmation automatically\n- I base my responses on actual tool results, not assumptions\n\n**Important Note:**\nI can only use tools that are listed in my available tools. If you need a capability that requires a tool not yet loaded, I can request to load it from the tool catalog.\n\nWhat would you like me to help you with?",
         "usage": {
           "input_tokens": 1535,
-          "output_tokens": 365
+          "output_tokens": 278
         }
       }
     }

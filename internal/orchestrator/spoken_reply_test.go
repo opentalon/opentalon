@@ -8,9 +8,21 @@ import (
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/pipeline"
+	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
+
+func TestTheSpokenPromptsAskForTheMarkersTheSplitTakesOut(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"orchestrator_spoken_reply":    prompts.OrchestratorSpokenReply,
+		"confirmation_spoken_question": prompts.ConfirmationSpokenQuestion,
+	} {
+		if !strings.Contains(prompt, spokenOpen+" and "+spokenClose) {
+			t.Errorf("%s does not ask for %s and %s", name, spokenOpen, spokenClose)
+		}
+	}
+}
 
 // metadataRecorder keeps what the orchestrator stores with each message; the in-memory store drops it.
 type metadataRecorder struct {

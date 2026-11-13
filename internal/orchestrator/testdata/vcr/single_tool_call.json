@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
+  "prompt_hash": "7cc1b994a31b2c5d95b1f4ca74fab6353fe2f11271ff9c06575bab77ce354e60",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-10-20T09:40:39.607215771Z",
+  "recorded_at": "2026-11-13T11:43:52.180658Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CgDGXi2HiFxKQJouB99EH",
+        "id": "msg_011CgzsLdCGA9daLxYvDz8rS",
         "model": "claude-haiku-4-5-20251001",
-        "content": "\n[tool_call]\n{\"tool\": \"gitlab__analyze_code\", \"args\": {\"repo\": \"myrepo\"}}\n[/tool_call]\n\nI've started analyzing the code in myrepo. Let me get the results for you.",
+        "content": "\n[tool_call]\n{\"tool\": \"gitlab__analyze_code\", \"args\": {\"repo\": \"myrepo\"}}\n[/tool_call]\n\nI'll analyze the code in myrepo for you.",
         "usage": {
           "input_tokens": 1496,
-          "output_tokens": 59
+          "output_tokens": 52
         }
       }
     },
@@ -51,12 +51,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CgDGXmsUaJtZF2hjqH9Nx",
+        "id": "msg_011CgzsLgpok5CgawR1wgfbF",
         "model": "claude-haiku-4-5-20251001",
-        "content": "The code analysis for myrepo has been completed. The analysis ran successfully. If you'd like more specific details about what was found (such as issues, code quality metrics, or recommendations), please let me know what aspects you'd like me to focus on.",
+        "content": "The code analysis for myrepo has been completed. The analysis was executed successfully. \n\nIs there anything specific about the code you'd like me to help with, such as identifying issues, suggesting improvements, or examining particular files?",
         "usage": {
           "input_tokens": 1569,
-          "output_tokens": 56
+          "output_tokens": 50
         }
       }
     }

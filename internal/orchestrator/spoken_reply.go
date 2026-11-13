@@ -16,7 +16,7 @@ import (
 // A turn the person spoke (actor.SpokenReply, set from a channel's inbound
 // metadata["reply"] == "spoken") gets its answer read aloud. The model writes a
 // short spoken version at the start of its reply to the user, between markers
-// (spokenReplyInstruction, added to the per-round system segment in every round
+// (prompts.OrchestratorSpokenReply, added to the per-round system segment in every round
 // by appendConversation, so the cached prefix stays the same). Run takes it out
 // of every response the moment it arrives (takeSpoken), so tool parsing, the
 // checks on the response, what is stored and what is shown never see the
@@ -28,7 +28,7 @@ import (
 // reply without one is stored with spoken_missing and stays silent. The
 // confirmation question is written by its own narrator, which in a spoken turn
 // writes the question as it is asked aloud the same way
-// (spokenConfirmationInstruction). Text no model wrote a spoken version for (a
+// (prompts.ConfirmationSpokenQuestion). Text no model wrote a spoken version for (a
 // confirmation the narrator wrote without one, a plan, a pipeline's summary,
 // any other way a turn ends) is its own spoken version when it is short enough
 // (speakAsIs; Run applies it to every result that carries neither key, and a
@@ -56,22 +56,6 @@ const (
 	// spokenLimit caps what is read aloud, in characters.
 	spokenLimit = 400
 )
-
-const spokenReplyInstruction = "## SPOKEN REPLY\n" +
-	"The user spoke this message and will hear your reply read aloud. When you answer the user (not when you " +
-	"call a tool), begin the answer with a spoken version between " + spokenOpen + " and " + spokenClose + ": " +
-	"one or two short sentences in the language of your answer, as you would say them aloud, at most 300 " +
-	"characters. No lists, tables, markdown, ids, record numbers, links or code in it; say what you found, did or " +
-	"need, and that the details are in the chat when there are any. Then write your answer as you otherwise " +
-	"would. Write the markers once, at the very start.\n"
-
-const spokenConfirmationInstruction = "## SPOKEN QUESTION\n" +
-	"The user spoke their request and will hear this question read aloud. Begin your reply with the question as " +
-	"you would ask it aloud, between " + spokenOpen + " and " + spokenClose + ": one or two short sentences in " +
-	"the language of your reply, at most 300 characters, under the same rules as the question for the screen. " +
-	"Name what will be created, changed or deleted by its name and say a change in words, never as a field list " +
-	"or with arrows; no markdown, ids, links or code in it. Then write the question for the screen as the rules " +
-	"above say. Write the markers once, at the very start.\n"
 
 // protocolTags are the blocks a response carries for the orchestrator, not for
 // the person, which the shown text drops (StripInternalBlocks): the

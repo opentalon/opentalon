@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "2ff2484a8005de7a6ef0e6edf33da8e5ff3a9794cd4433b8d40dfedff6654956",
+  "prompt_hash": "7cc1b994a31b2c5d95b1f4ca74fab6353fe2f11271ff9c06575bab77ce354e60",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-10-20T09:40:47.117715724Z",
+  "recorded_at": "2026-11-13T11:43:58.997061Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,7 +19,7 @@
         ]
       },
       "response": {
-        "id": "gen-1792489247-F0ezZBQGhvLJFtoWF8Kl",
+        "id": "gen-1794570239-dZhcaSrknEWMrKHkf3SY",
         "model": "mistralai/ministral-8b-2512",
         "content": "[tool_call]\n{\"tool\": \"_meta__load_tools\", \"args\": {\"names\": \"gitlab__analyze_code,jira__create_issue\"}}\n[/tool_call]",
         "usage": {
@@ -51,7 +51,7 @@
         ]
       },
       "response": {
-        "id": "gen-1792489248-I7IxIOFWz7s3rk7kl5vT",
+        "id": "gen-1794570239-B56BwwjW1uQqVGEfQ4gQ",
         "model": "mistralai/ministral-8b-2512",
         "content": "[tool_call]\n{\"tool\": \"gitlab__analyze_code\", \"args\": {\"repo\": \"myrepo\"}}\n[/tool_call]",
         "usage": {
@@ -91,12 +91,12 @@
         ]
       },
       "response": {
-        "id": "gen-1792489248-5dBuDlkCeJxXZHarOQEe",
+        "id": "gen-1794570240-RcUQtrjWbP4qAgE1Mlk3",
         "model": "mistralai/ministral-8b-2512",
-        "content": "[tool_call]\n{\"tool\": \"jira__create_issue\", \"args\": {\"title\": \"Code review\"}}\n[/tool_call]",
+        "content": "[tool_call] jira__create_issue(title=\"Code review\")",
         "usage": {
           "input_tokens": 1695,
-          "output_tokens": 32
+          "output_tokens": 16
         }
       }
     },
@@ -139,7 +139,7 @@
         ]
       },
       "response": {
-        "id": "gen-1792489249-swAzVLgWJ6r8VqC5oovj",
+        "id": "gen-1794570240-FBSPj7OJ0WfMf8bmHGUb",
         "model": "mistralai/ministral-8b-2512",
         "content": "The code in `myrepo` has been analyzed, and a Jira issue titled **\"Code review\"** has been created.",
         "usage": {
