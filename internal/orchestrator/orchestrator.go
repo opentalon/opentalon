@@ -2492,7 +2492,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion: %w", err)
 		}
-		turnSpoken, rest, turnShown := takeSpoken(ctx, resp.Content)
+		written := resp.Content
+		turnSpoken, rest, turnShown := takeSpoken(ctx, written)
 		resp.Content = rest
 		// The provider's own count of what it just charged for. Free, exact,
 		// and the only ground truth the estimate ever gets.
@@ -2584,7 +2585,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				})
 				// Escape {{ to { { in the hallucinated content before sending it back —
 				// vLLM chat templates use Jinja2 which chokes on unescaped {{ in messages.
-				escaped := strings.ReplaceAll(resp.Content, "{{", "{ {")
+				// The response goes back as the model wrote it, its spoken version
+				// included, so the model sees the placeholder wherever it wrote it.
+				escaped := strings.ReplaceAll(written, "{{", "{ {")
 				transientMessages = []provider.Message{
 					{Role: provider.RoleAssistant, Content: escaped},
 					{Role: provider.RoleUser, Content: recoveryHint(nativeMode, nativeInventedResultHint, textInventedResultHint)},

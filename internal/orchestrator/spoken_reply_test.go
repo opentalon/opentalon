@@ -586,7 +586,7 @@ func TestAnInventedResultInWhatIsShownOrReadIsRetried(t *testing.T) {
 		"<spoken>Es gibt {{result.items.count}} Objekte.",
 		"<spoken>{{result.items.count}} Treffer.</spoken>Hier die Treffer.",
 	} {
-		llm := &fakeLLM{responses: []string{first, "<spoken>Es gibt drei Objekte.</spoken>Drei Objekte."}}
+		llm := &capturingLLM{responses: []string{first, "<spoken>Es gibt drei Objekte.</spoken>Drei Objekte."}}
 		orch, sessionID := setupOrchestrator(llm, DefaultParser)
 		result, err := orch.Run(actor.WithSpokenReply(context.Background()), sessionID, "Wie viele?")
 		if err != nil {
@@ -594,6 +594,13 @@ func TestAnInventedResultInWhatIsShownOrReadIsRetried(t *testing.T) {
 		}
 		if llm.callCount != 2 || result.Response != "Drei Objekte." || result.Metadata[SpokenMetadataKey] != "Es gibt drei Objekte." {
 			t.Errorf("%q: %d calls, reply %q, spoken %q; want the invented result retried", first, llm.callCount, result.Response, result.Metadata[SpokenMetadataKey])
+		}
+		shownBack := false
+		for _, m := range llm.requests[len(llm.requests)-1].Messages {
+			shownBack = shownBack || (m.Role == provider.RoleAssistant && strings.Contains(m.Content, "{ {result.items.count}}"))
+		}
+		if !shownBack {
+			t.Errorf("%q: the retry does not show the model the placeholder it wrote", first)
 		}
 	}
 }
