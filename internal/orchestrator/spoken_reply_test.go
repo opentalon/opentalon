@@ -610,6 +610,29 @@ func TestASpokenBlockInsideAProtocolBlockIsNotRead(t *testing.T) {
 	}
 }
 
+// A bare <invoke> the parser runs no call from (its tool name is not valid) is
+// shown as little as any other protocol block, in a typed turn and in a spoken
+// one, a spoken block in it included, and nothing of it is read.
+func TestABareInvokeThatRunsNoCallIsNeitherShownNorRead(t *testing.T) {
+	for name, ctx := range map[string]context.Context{
+		"typed":  context.Background(),
+		"spoken": actor.WithSpokenReply(context.Background()),
+	} {
+		llm := &fakeLLM{responses: []string{`<invoke name="bogus"><spoken>geheim</spoken></invoke>Erledigt.`}}
+		orch, sessionID := setupOrchestrator(llm, DefaultParser)
+		result, err := orch.Run(ctx, sessionID, "Leg an")
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if result.Response != "Erledigt." {
+			t.Errorf("%s: shown %q; want only the text outside the invoke", name, result.Response)
+		}
+		if strings.Contains(result.Metadata[SpokenMetadataKey], "geheim") {
+			t.Errorf("%s: spoken = %q; want nothing of the invoke read", name, result.Metadata[SpokenMetadataKey])
+		}
+	}
+}
+
 func TestTextWrittenWithoutMarkersIsItsOwnSpokenVersionWhenShort(t *testing.T) {
 	spoken := actor.WithSpokenReply(context.Background())
 	short := speakAsIs(spoken, "Soll ich den Akkuschrauber anlegen?", map[string]string{"prompt_type": "tool_confirmation"})

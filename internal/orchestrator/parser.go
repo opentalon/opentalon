@@ -501,40 +501,16 @@ var internalBlockTags = [][2]string{
 	{"<" + "antml:function_calls>", "<" + "/antml:function_calls>"},
 }
 
-// StripInternalBlocks removes any internal protocol blocks from s
-// ([tool_call]...[/tool_call] and [plugin_output]...[/plugin_output]).
+// StripInternalBlocks removes every protocol block from s (protocolTags: the
+// internalBlockTags and a bare <invoke>, which the parser also runs as a call),
+// cut where nextProtocolBlock cuts it; a block never closed takes the rest of s.
 // Used to clean up LLM responses so raw protocol content is never forwarded
 // to the channel (e.g. when the LLM echoes plugin output or uses an
 // unparseable tool name).
 func StripInternalBlocks(s string) string {
-	for _, tags := range internalBlockTags {
-		s = stripTaggedBlocks(s, tags[0], tags[1])
-	}
 	// TrimSpace normalises the result: block removal can leave leading/trailing
 	// newlines, and LLM replies with surrounding whitespace carry no meaning.
-	return strings.TrimSpace(s)
-}
-
-func stripTaggedBlocks(s, open, close string) string {
-	var sb strings.Builder
-	rest := s
-	for {
-		start := strings.Index(rest, open)
-		if start < 0 {
-			sb.WriteString(rest)
-			break
-		}
-		sb.WriteString(rest[:start])
-		rest = rest[start+len(open):]
-		end := strings.Index(rest, close)
-		if end >= 0 {
-			rest = rest[end+len(close):]
-		} else {
-			// No closing tag — drop everything after the opening tag.
-			break
-		}
-	}
-	return sb.String()
+	return strings.TrimSpace(withoutProtocol(s))
 }
 
 // toolFQN composes a tool's fully-qualified name "<plugin><sep><action>" using

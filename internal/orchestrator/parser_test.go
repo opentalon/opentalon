@@ -375,6 +375,31 @@ func TestStripInternalBlocks(t *testing.T) {
 			input: "You're absolutely right! Let me update.\n<function_calls>\n<invoke",
 			want:  "You're absolutely right! Let me update.",
 		},
+		{
+			name:  "strips a bare invoke",
+			input: "Checking.\n<invoke name=\"bogus\"><parameter name=\"x\">1</parameter></invoke>\nDone.",
+			want:  "Checking.\n\nDone.",
+		},
+		{
+			name:  "strips a bare invoke without attributes",
+			input: "<invoke><parameter name=\"x\">1</parameter></invoke>Done.",
+			want:  "Done.",
+		},
+		{
+			name:  "keeps the text after a self-closing bare invoke",
+			input: "<invoke name=\"bogus\"/>Done.",
+			want:  "Done.",
+		},
+		{
+			name:  "a bare invoke with no closing tag drops tail",
+			input: "Done.\n<invoke name=\"bogus\"><parameter name=\"x\">",
+			want:  "Done.",
+		},
+		{
+			name:  "keeps a word that only starts like the tag",
+			input: "The <invoker> field stays.",
+			want:  "The <invoker> field stays.",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -72,9 +72,11 @@ const spokenConfirmationInstruction = "## SPOKEN QUESTION\n" +
 	"above say. Write the markers once, at the very start.\n"
 
 // protocolTags are the blocks a response carries for the orchestrator, not for
-// the person: the ones the shown text drops (internalBlockTags) and a bare
-// <invoke>, which the parser runs as a call.
-var protocolTags = append(internalBlockTags[:len(internalBlockTags):len(internalBlockTags)], [2]string{"<invoke", invokeClose})
+// the person, which the shown text drops (StripInternalBlocks): the
+// internalBlockTags and a bare <invoke>, opened as the parser finds it
+// (findNextInvoke), which runs it as a call.
+var protocolTags = append(internalBlockTags[:len(internalBlockTags):len(internalBlockTags)],
+	[2]string{"<invoke ", invokeClose}, [2]string{"<invoke>", invokeClose})
 
 const invokeClose = "</invoke>"
 
