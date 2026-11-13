@@ -59,12 +59,17 @@ func TestSplitSpoken(t *testing.T) {
 		{"[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt.", "",
 			"[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt.", "[plugin_output]<spoken>geheim</spoken>[/plugin_output]Erledigt."},
 		{argWithMarkers, "", argWithMarkers, argWithMarkers},
-		{"<invoke name=\"q__a\"/><spoken>A</spoken>B", "A", "<invoke name=\"q__a\"/>B", "<invoke name=\"q__a\"/>B"},
+		{"<invoke name=\"q__a\"/><spoken>A</spoken>B", "A", "<invoke name=\"q__a\"/> B", "<invoke name=\"q__a\"/> B"},
 		{"<invoke name=\"q__a\"/><spoken>A</spoken><invoke name=\"q__b\"></invoke>B", "A",
-			"<invoke name=\"q__a\"/><invoke name=\"q__b\"></invoke>B", "<invoke name=\"q__a\"/><invoke name=\"q__b\"></invoke>B"},
+			"<invoke name=\"q__a\"/> <invoke name=\"q__b\"></invoke>B", "<invoke name=\"q__a\"/> <invoke name=\"q__b\"></invoke>B"},
 		{"Hallo. <invoke name=\"q__a\"><spoken>A</spoken>", "", "Hallo. <invoke name=\"q__a\">", "Hallo. <invoke name=\"q__a\">"},
 		{"<spoken>A <invoke name=\"q__a\"/>B</spoken>", "A B", "", "A B"},
 		{"Hallo. [plugin_output]x <spoken>geheim</spoken>Danke.", "", "Hallo. [plugin_output]x Danke.", "Hallo. [plugin_output]x Danke."},
+		{"Hallo. [plugin_output]x<spoken>geheim</spoken>Danke.", "", "Hallo. [plugin_output]xDanke.", "Hallo. [plugin_output]xDanke."},
+		{"Erledigt.<spoken>Gespeichert.</spoken>Die Liste.", "Gespeichert.", "Erledigt. Die Liste.", "Erledigt. Die Liste."},
+		{"Erledigt.</spoken>Die Liste.", "", "Erledigt. Die Liste.", "Erledigt. Die Liste."},
+		{"Erledigt.<spoken>Ich habe gespeichert", "", "Erledigt.", "Erledigt. Ich habe gespeichert"},
+		{"Größe<spoken>x</spoken>über", "x", "Größe über", "Größe über"},
 	}
 	for _, c := range cases {
 		if spoken, rest, shown := splitSpoken(c.reply); spoken != c.spoken || rest != c.rest || shown != c.shown {
@@ -497,6 +502,9 @@ func TestExtractionAndFilteringCutAtTheSameProtocolBlocks(t *testing.T) {
 				outside.WriteString(part)
 				probed.WriteString(spokenOpen + part + spokenClose)
 			} else {
+				if touching(blocks.String(), part) {
+					blocks.WriteByte(' ')
+				}
 				blocks.WriteString(part)
 				probed.WriteString(part)
 			}
@@ -505,7 +513,8 @@ func TestExtractionAndFilteringCutAtTheSameProtocolBlocks(t *testing.T) {
 			t.Errorf("%s: filtering keeps %q, want %q", c.name, got, outside.String())
 		}
 		// Every text outside the blocks, put in a spoken block: extraction takes
-		// each one out and keeps exactly the blocks for the parser.
+		// each one out and keeps exactly the blocks for the parser, two that would
+		// touch separated by a space.
 		spoken, rest, _ := splitSpoken(probed.String())
 		if want := strings.TrimSpace(blocks.String()); spoken != strings.TrimSpace(c.parts[0]) || rest != want {
 			t.Errorf("%s: extraction = %q, %q; want %q, %q", c.name, spoken, rest, strings.TrimSpace(c.parts[0]), want)

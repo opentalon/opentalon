@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/provider"
@@ -179,8 +180,11 @@ func withoutProtocol(s string, keepOpenInvoke bool) string {
 // as it is, a spoken block in it too: the parser reads it, the shown text drops
 // it, nothing of it is read. A protocol block never closed runs to the end of
 // the response: it stays in rest as written, but a spoken block in it still goes
-// from rest, and none is read. An unpaired closing marker goes. shown is rest
-// plus an unclosed block's text, or the spoken version when both are empty.
+// from rest, and none is read. An unpaired closing marker goes. Where a marker
+// or block that went leaves two words touching, a space separates them, except
+// after a protocol block never closed, whose text stays as written. shown
+// is rest plus an unclosed block's text, or the spoken version when both are
+// empty.
 //
 // The parser also runs a response that is one {"tool": ...} object without any
 // tags (bareToolCall). When the text from the first character outside the
@@ -191,13 +195,19 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 	x := newTextScan(response)
 	var kept strings.Builder
 	unclosed := ""
-	afterUnclosedProtocol := false
+	afterUnclosedProtocol, cut := false, false
 	outsideAt, spokenAt := -1, -1
 	keep := func(from, to int) {
 		if outsideAt < 0 {
 			if k := strings.IndexFunc(response[from:to], func(r rune) bool { return !unicode.IsSpace(r) }); k >= 0 {
 				outsideAt = from + k
 			}
+		}
+		if cut && from < to {
+			if touching(kept.String(), response[from:to]) {
+				kept.WriteByte(' ')
+			}
+			cut = false
 		}
 		kept.WriteString(response[from:to])
 	}
@@ -210,8 +220,9 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 		keep(i, at)
 		switch marker {
 		case spokenClose: // unpaired
-			i = at + len(spokenClose)
+			i, cut = at+len(spokenClose), !afterUnclosedProtocol
 		case spokenOpen:
+			cut = !afterUnclosedProtocol
 			body, end, closed := x.spokenBlock(at)
 			text := markers.Replace(withoutProtocol(body, false))
 			switch {
@@ -242,10 +253,21 @@ func splitSpoken(response string) (spoken, rest, shown string) {
 		}
 	}
 	rest = strings.TrimSpace(kept.String())
+	if cut && touching(kept.String(), unclosed) {
+		kept.WriteByte(' ')
+	}
 	if shown = strings.TrimSpace(kept.String() + unclosed); shown == "" {
 		shown = spoken
 	}
 	return spoken, rest, shown
+}
+
+// touching reports whether a ends and b starts with a character other than
+// space, so text cut from between them would join the two words.
+func touching(a, b string) bool {
+	last, _ := utf8.DecodeLastRuneInString(a)
+	first, _ := utf8.DecodeRuneInString(b)
+	return a != "" && b != "" && !unicode.IsSpace(last) && !unicode.IsSpace(first)
 }
 
 // onlySpeech reports whether the text from from on holds nothing but space,
