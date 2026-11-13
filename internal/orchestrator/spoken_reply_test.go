@@ -780,7 +780,9 @@ func TestAConfirmationComesBackAfterAReconnectAsSpokenAsItWasAsked(t *testing.T)
 		}
 		_, _, _, orch := raiseConfirmation(t, ctx, shownQuestion)
 		_, meta, ok := orch.PendingConfirmationFrame("s1")
-		if !ok || (meta[ReplyMetadataKey] == ReplySpoken) != spoken {
+		_, read := meta[SpokenMetadataKey]
+		_, missing := meta[SpokenMissingMetadataKey]
+		if !ok || (meta[ReplyMetadataKey] == ReplySpoken) != spoken || read || missing {
 			t.Errorf("asked in a spoken turn %v: re-emitted with %v", spoken, meta)
 		}
 	}
