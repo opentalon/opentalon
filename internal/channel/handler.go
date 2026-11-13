@@ -204,7 +204,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		// A turn the person spoke (a channel's voice input): its answer is read
 		// aloud, so the model writes a short spoken version too. Only this one
 		// value is honored.
-		if msg.Metadata["reply"] == "spoken" {
+		if msg.Metadata[orchestrator.ReplyMetadataKey] == orchestrator.ReplySpoken {
 			ctx = actor.WithSpokenReply(ctx)
 		}
 
@@ -398,8 +398,8 @@ func safeMetadata(m map[string]string) map[string]string {
 	delete(out, pkg.OpenRequestIDMetadataKey)
 	// What is read aloud comes from the orchestrator's result only, never from
 	// what a client sent in.
-	delete(out, "spoken")
-	delete(out, "spoken_missing")
+	delete(out, orchestrator.SpokenMetadataKey)
+	delete(out, orchestrator.SpokenMissingMetadataKey)
 	return out
 }
 

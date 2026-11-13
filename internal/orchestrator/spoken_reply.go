@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"regexp"
 	"strings"
 	"unicode"
@@ -393,9 +394,7 @@ func speakAsIs(ctx context.Context, text string, meta map[string]string) map[str
 		return meta
 	}
 	out := make(map[string]string, len(meta)+1)
-	for k, v := range meta {
-		out[k] = v
-	}
+	maps.Copy(out, meta)
 	text = speakable(withoutProtocol(text, false))
 	if text != "" && len([]rune(text)) <= spokenLimit {
 		out[SpokenMetadataKey] = text
@@ -506,9 +505,7 @@ func voiceInputMetadata(ctx context.Context, extra map[string]string) map[string
 		return extra
 	}
 	meta := map[string]string{InputMetadataKey: InputVoice}
-	for k, v := range extra {
-		meta[k] = v
-	}
+	maps.Copy(meta, extra)
 	return meta
 }
 
@@ -539,7 +536,5 @@ func mergeMetadata(result *RunResult, extra map[string]string) {
 	if result.Metadata == nil {
 		result.Metadata = make(map[string]string, len(extra))
 	}
-	for k, v := range extra {
-		result.Metadata[k] = v
-	}
+	maps.Copy(result.Metadata, extra)
 }
