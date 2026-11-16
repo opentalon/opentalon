@@ -351,7 +351,7 @@ func (s *SessionStore) ClaimOpener(ctx context.Context, sessionID string, now ti
 		s.db.Dialect().Rebind(`UPDATE sessions SET opener_claimed_at = ?
 		WHERE id = ? AND (opener_claimed_at IS NULL
 			OR (opener_claimed_at < ? AND opener_stored_at IS NULL))`),
-		now.UTC().Format(time.RFC3339), sessionID, now.Add(-staleAfter).UTC().Format(time.RFC3339))
+		claimTime(now), sessionID, claimTime(now.Add(-staleAfter)))
 	if err != nil {
 		return state.ClaimHeld, fmt.Errorf("claim opener %q: %w", sessionID, err)
 	}
@@ -415,7 +415,7 @@ func (s *SessionStore) claimNotWon(ctx context.Context, gone state.ClaimResult, 
 // was a moment before, and the caller looks again. ctx ends a wait for the row.
 func (s *SessionStore) ReserveNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	d := s.db.Dialect()
-	at := now.UTC().Format(time.RFC3339)
+	at := claimTime(now)
 	fail := func(err error) (state.ClaimResult, error) {
 		return state.ClaimHeld, fmt.Errorf("reserve note %q in %q: %w", noteKey, sessionID, err)
 	}
@@ -437,7 +437,7 @@ func (s *SessionStore) ReserveNote(ctx context.Context, sessionID, noteKey strin
 	res, err = s.db.SQLDB().ExecContext(ctx,
 		d.Rebind(`UPDATE session_note_reservations SET reserved_at = ?
 		WHERE session_id = ? AND note_key = ? AND reserved_at < ? AND stored_at IS NULL`),
-		at, sessionID, noteKey, now.Add(-staleAfter).UTC().Format(time.RFC3339))
+		at, sessionID, noteKey, claimTime(now.Add(-staleAfter)))
 	if err != nil {
 		return fail(err)
 	}
@@ -458,24 +458,40 @@ func (s *SessionStore) ReserveNote(ctx context.Context, sessionID, noteKey strin
 }
 
 // FreeNote removes the note reservation of sessionID and noteKey only while it
-// is the one taken at reservedAt (ReserveNote's now, kept at second precision
-// like every claim time) and no note was stored under it, so the same call
-// again wins the key at once. A stored reservation stays settled, one another
-// call re-claimed since stays that call's, and one that is not there, or a
-// session that does not exist, is left alone without an error: the claim time,
-// not the stored mark alone, says whose reservation it is. On Postgres a
-// concurrent store of the note (markClaimStored) and this DELETE wait for each
-// other's row lock and then re-check their WHERE, so either the note is stored
-// or its reservation freed, never both; SQLite serialises writers. ctx ends a
-// wait for the row.
+// is the one taken at reservedAt (ReserveNote's now, compared as claimTime)
+// and no note was stored under it, so the same call again wins the key at
+// once. A stored reservation stays settled, one another call re-claimed since
+// stays that call's, also when it was taken within the same second, and one
+// that is not there, or a session that does not exist, is left alone without
+// an error: the claim time, not the stored mark alone, says whose reservation
+// it is. On Postgres a concurrent store of the note (markClaimStored) and this
+// DELETE wait for each other's row lock and then re-check their WHERE, so
+// either the note is stored or its reservation freed, never both; SQLite
+// serialises writers. ctx ends a wait for the row.
 func (s *SessionStore) FreeNote(ctx context.Context, sessionID, noteKey string, reservedAt time.Time) error {
 	if _, err := s.db.SQLDB().ExecContext(ctx,
 		s.db.Dialect().Rebind(`DELETE FROM session_note_reservations
 		WHERE session_id = ? AND note_key = ? AND reserved_at = ? AND stored_at IS NULL`),
-		sessionID, noteKey, reservedAt.UTC().Format(time.RFC3339)); err != nil {
+		sessionID, noteKey, claimTime(reservedAt)); err != nil {
 		return fmt.Errorf("free note %q in %q: %w", noteKey, sessionID, err)
 	}
 	return nil
+}
+
+// claimTimeLayout is how a claim time is written and compared
+// (opener_claimed_at, reserved_at): in UTC, at the nanosecond precision of the
+// time the caller claims with, which state.TurnClaim carries unchanged to the
+// store of the turn's input. So one claim time names one claim, also when a
+// note reservation is freed and taken again within the same second. The width
+// is fixed, so the text sorts in time order, which the stale cutoff compares
+// as strings (claimed_at < cutoff). A claim time an older core wrote at second
+// precision ("…:05Z") sorts after every time within its second ("…:05.…Z"):
+// the cutoff takes it for fresh up to a second longer, never for stale early.
+const claimTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
+// claimTime is t as a claim time is stored (claimTimeLayout).
+func claimTime(t time.Time) string {
+	return t.UTC().Format(claimTimeLayout)
 }
 
 // affectedOne reports whether a single-row write took effect.
@@ -607,13 +623,12 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 
 // markClaimStored marks claim c of session id stored at now, inside the
 // transaction that stores the claimed turn's input. The UPDATE matches only
-// while c is the claim held (its time; claim times are kept at second
-// precision, and a claim is taken over only once it is minutes old) and
-// nothing was stored under it; no match is state.ErrClaimLost. On Postgres a
-// concurrent re-claim of the same row waits for this one and then re-checks
-// its own WHERE, so either the re-claim or this store takes effect, never both.
+// while c is the claim held (its time, compared as claimTime) and nothing was
+// stored under it; no match is state.ErrClaimLost. On Postgres a concurrent
+// re-claim of the same row waits for this one and then re-checks its own
+// WHERE, so either the re-claim or this store takes effect, never both.
 func markClaimStored(ctx context.Context, tx ExclusiveTx, d Dialect, id string, c state.TurnClaim, now string) error {
-	at := c.At.UTC().Format(time.RFC3339)
+	at := claimTime(c.At)
 	var res sql.Result
 	var err error
 	if c.NoteKey != "" {

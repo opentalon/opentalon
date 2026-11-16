@@ -753,13 +753,16 @@ func checkNoteReservationsGoWithSession(t *testing.T, db *DB) {
 // time, so the same call again wins the key at once and the freed claim stores
 // nothing; it leaves every other reservation as it was: another key's, one
 // another call re-claimed since (whose holder still stores its note), and a
-// stored one; freeing what is not there is no error.
+// stored one; freeing what is not there is no error. The key is reserved again
+// within the second of the freed claim, so the claim times differ below a
+// second: the freed claim neither frees nor stores under the new reservation.
 func checkFreeNote(t *testing.T, store claimStore) {
 	t.Helper()
 	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "free-s1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-free"}); err != nil {
 		t.Fatalf("OpenSession: %v", err)
 	}
-	now := time.Now()
+	now := time.Now().Truncate(time.Second).Add(100 * time.Millisecond)
+	again := now.Add(100 * time.Millisecond)
 	const stale = time.Minute
 	reserveAt := func(key string, at time.Time) func() (state.ClaimResult, error) {
 		return func() (state.ClaimResult, error) {
@@ -775,16 +778,25 @@ func checkFreeNote(t *testing.T, store claimStore) {
 	noteOf := func(key string) provider.Message {
 		return provider.Message{Role: provider.RoleUser, Content: "note " + key, Visibility: "hidden"}
 	}
-	for _, key := range []string{"freed", "other", "retaken", "stored"} {
+	for _, key := range []string{"freed", "freed-stored", "other", "retaken", "stored"} {
 		claimStep(t, "reserve "+key, state.ClaimWon, reserveAt(key, now))
 	}
 
 	free("own unstored reservation", "freed", now)
 	storeStep(t, "note under the freed reservation", store, "free-s1", noteOf("freed"), state.TurnClaim{NoteKey: "freed", At: now}.Metadata(), state.ErrClaimLost)
-	again := now.Add(time.Second)
 	claimStep(t, "same call again after the free", state.ClaimWon, reserveAt("freed", again))
+	free("the freed claim once more, after the key was reserved again", "freed", now)
+	claimStep(t, "new reservation after the freed claim's free", state.ClaimHeld, reserveAt("freed", again.Add(30*time.Second)))
 	storeStep(t, "note under the new reservation", store, "free-s1", noteOf("freed"), state.TurnClaim{NoteKey: "freed", At: again}.Metadata(), nil)
 	claimStep(t, "another key after the free", state.ClaimHeld, reserveAt("other", now.Add(30*time.Second)))
+
+	free("own unstored reservation", "freed-stored", now)
+	claimStep(t, "reserve again after the free", state.ClaimWon, reserveAt("freed-stored", again))
+	storeStep(t, "note under the freed claim, after the key was reserved again", store, "free-s1", noteOf("freed-stored"), state.TurnClaim{NoteKey: "freed-stored", At: now}.Metadata(), state.ErrClaimLost)
+	if n := countContent(t, store, "free-s1", "note freed-stored"); n != 0 {
+		t.Errorf("note under the freed claim stored %d times, want none", n)
+	}
+	storeStep(t, "note under the reservation taken after the free", store, "free-s1", noteOf("freed-stored"), state.TurnClaim{NoteKey: "freed-stored", At: again}.Metadata(), nil)
 
 	retaken := now.Add(2 * time.Minute)
 	claimStep(t, "stale reservation re-claimed", state.ClaimWon, reserveAt("retaken", retaken))
@@ -796,7 +808,7 @@ func checkFreeNote(t *testing.T, store claimStore) {
 	free("a stored reservation", "stored", now)
 	claimStep(t, "stored reservation after the free", state.ClaimSettled, reserveAt("stored", now.Add(10*time.Minute)))
 
-	for _, key := range []string{"freed", "retaken", "stored"} {
+	for _, key := range []string{"freed", "freed-stored", "retaken", "stored"} {
 		if n := countContent(t, store, "free-s1", "note "+key); n != 1 {
 			t.Errorf("note %s stored %d times, want once", key, n)
 		}
@@ -804,6 +816,46 @@ func checkFreeNote(t *testing.T, store claimStore) {
 	free("a key never reserved", "never", now)
 	if err := store.FreeNote(context.Background(), "no-such-session", "freed", now); err != nil {
 		t.Errorf("FreeNote in a missing session: %v, want no error", err)
+	}
+}
+
+// checkSecondPrecisionClaimTimes: an opener claim and a note reservation an
+// older core wrote at second precision are taken over only once they are
+// stale: never while the cutoff is in an earlier second, still not while it is
+// within the claim's own second, and once it is in a later second.
+func checkSecondPrecisionClaimTimes(t *testing.T, db *DB) {
+	t.Helper()
+	store := NewSessionStore(db, 0, 0)
+	const stale = time.Minute
+	claimed := time.Now().Add(-time.Hour).Truncate(time.Second)
+	at := claimed.UTC().Format(time.RFC3339)
+	store.Create(state.SessionParams{ID: "older-s1", EntityID: "user-1"})
+	for _, q := range []string{
+		`UPDATE sessions SET opener_claimed_at = ? WHERE id = 'older-s1'`,
+		`INSERT INTO session_note_reservations (session_id, note_key, reserved_at) VALUES ('older-s1', 'chapter-1', ?)`,
+	} {
+		if _, err := db.SQLDB().Exec(db.Dialect().Rebind(q), at); err != nil {
+			t.Fatalf("write a claim time at second precision: %v", err)
+		}
+	}
+	for _, claim := range []struct {
+		kind string
+		at   func(now time.Time) func() (state.ClaimResult, error)
+	}{
+		{"opener claim", func(now time.Time) func() (state.ClaimResult, error) {
+			return func() (state.ClaimResult, error) {
+				return store.ClaimOpener(context.Background(), "older-s1", now, stale)
+			}
+		}},
+		{"note reservation", func(now time.Time) func() (state.ClaimResult, error) {
+			return func() (state.ClaimResult, error) {
+				return store.ReserveNote(context.Background(), "older-s1", "chapter-1", now, stale)
+			}
+		}},
+	} {
+		claimStep(t, claim.kind+", cutoff in the second before", state.ClaimHeld, claim.at(claimed.Add(stale-500*time.Millisecond)))
+		claimStep(t, claim.kind+", cutoff within the claim's second", state.ClaimHeld, claim.at(claimed.Add(stale+500*time.Millisecond)))
+		claimStep(t, claim.kind+", cutoff in the second after", state.ClaimWon, claim.at(claimed.Add(stale+time.Second)))
 	}
 }
 
@@ -1069,6 +1121,36 @@ func TestSessionStore_FreeNote(t *testing.T) {
 
 func TestInMemorySessionStore_FreeNote(t *testing.T) {
 	checkFreeNote(t, state.NewSessionStore(""))
+}
+
+func TestSessionStore_SecondPrecisionClaimTimes(t *testing.T) {
+	checkSecondPrecisionClaimTimes(t, openTestDB(t))
+}
+
+// TestClaimTimeSortsInTimeOrder: stored claim times have one width and sort as
+// text in time order, whole seconds and fractions alike, in any zone the
+// caller's clock reads.
+func TestClaimTimeSortsInTimeOrder(t *testing.T) {
+	second := time.Date(2026, 11, 16, 12, 0, 5, 0, time.UTC)
+	times := []time.Time{
+		second.Add(-time.Nanosecond),
+		second,
+		second.Add(time.Nanosecond),
+		second.Add(100 * time.Millisecond),
+		second.Add(450 * time.Millisecond),
+		second.Add(500 * time.Millisecond).In(time.FixedZone("east", 2*60*60)),
+		second.Add(time.Second - time.Nanosecond),
+		second.Add(time.Second),
+	}
+	for i := 1; i < len(times); i++ {
+		before, after := claimTime(times[i-1]), claimTime(times[i])
+		if len(before) != len(after) {
+			t.Errorf("claim times %q and %q differ in width", before, after)
+		}
+		if before >= after {
+			t.Errorf("claim time %q sorts at or after %q, want before", before, after)
+		}
+	}
 }
 
 func TestSessionStore_VerifiedOwner(t *testing.T) {
