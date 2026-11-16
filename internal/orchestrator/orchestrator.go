@@ -285,19 +285,19 @@ type SessionStoreInterface interface {
 }
 
 // keyedMutex is a refcounted set of named mutexes: lock blocks until the
-// mutex for key is held; unlock releases it and reaps the map entry once no
-// goroutine holds or waits on it, so idle keys don't accumulate. The
-// orchestrator keeps two instances — sessionMuxes and titleMuxes — whose
-// lock DOMAINS are deliberately disjoint (see the titleMuxes field comment);
-// only the mechanics are shared.
+// mutex for key is held, lockContext until then or until its context ends;
+// unlock releases it and reaps the map entry once no goroutine holds or waits
+// on it, so idle keys don't accumulate. The orchestrator keeps two instances —
+// sessionMuxes and titleMuxes — whose lock DOMAINS are deliberately disjoint
+// (see the titleMuxes field comment); only the mechanics are shared.
 type keyedMutex struct {
 	mu      sync.Mutex // guards entries
 	entries map[string]*keyedMutexEntry
 }
 
 type keyedMutexEntry struct {
-	mu       sync.Mutex
-	refCount int // goroutines currently waiting or holding this entry
+	held     chan struct{} // holds one token while the mutex is locked: a wait for it can end with a context
+	refCount int           // goroutines currently waiting or holding this entry
 }
 
 func newKeyedMutex() *keyedMutex {
@@ -305,28 +305,30 @@ func newKeyedMutex() *keyedMutex {
 }
 
 func (k *keyedMutex) lock(key string) *keyedMutexEntry {
-	k.mu.Lock()
-	e, ok := k.entries[key]
-	if !ok {
-		e = &keyedMutexEntry{}
-		k.entries[key] = e
-	}
-	e.refCount++
-	k.mu.Unlock()
-
-	e.mu.Lock()
+	e := k.ref(key)
+	e.held <- struct{}{}
 	return e
 }
 
-func (k *keyedMutex) unlock(key string, e *keyedMutexEntry) {
-	k.mu.Lock()
-	e.refCount--
-	if e.refCount == 0 {
-		delete(k.entries, key)
+// lockContext is lock that gives up when ctx ends first: it returns ctx's
+// error and no longer counts for key, so the entry is still reaped once its
+// holder and the other waiters are done. A ctx that ends just as the mutex
+// comes free may still take it, so a caller that must not go on past its ctx
+// checks ctx once it holds the mutex.
+func (k *keyedMutex) lockContext(ctx context.Context, key string) (*keyedMutexEntry, error) {
+	e := k.ref(key)
+	select {
+	case e.held <- struct{}{}:
+		return e, nil
+	case <-ctx.Done():
+		k.unref(key, e)
+		return nil, ctx.Err()
 	}
-	k.mu.Unlock()
+}
 
-	e.mu.Unlock()
+func (k *keyedMutex) unlock(key string, e *keyedMutexEntry) {
+	k.unref(key, e)
+	<-e.held
 }
 
 // tryLock acquires key without blocking. It returns the entry and true when
@@ -335,28 +337,42 @@ func (k *keyedMutex) unlock(key string, e *keyedMutexEntry) {
 // guard: a second background turn for a session already running one is dropped
 // rather than queued, so a flapping trigger can't stack goroutines.
 func (k *keyedMutex) tryLock(key string) (*keyedMutexEntry, bool) {
-	k.mu.Lock()
-	e, ok := k.entries[key]
-	if !ok {
-		e = &keyedMutexEntry{}
-		k.entries[key] = e
-	}
-	e.refCount++
-	k.mu.Unlock()
-
-	if e.mu.TryLock() {
+	e := k.ref(key)
+	select {
+	case e.held <- struct{}{}:
 		return e, true
+	default:
 	}
 
 	// Contended: release the refcount reservation we just took so the entry
 	// is still reaped when the current holder unlocks.
+	k.unref(key, e)
+	return nil, false
+}
+
+// ref counts a goroutine that holds or waits for key's entry, creating the
+// entry when there is none.
+func (k *keyedMutex) ref(key string) *keyedMutexEntry {
 	k.mu.Lock()
+	defer k.mu.Unlock()
+	e, ok := k.entries[key]
+	if !ok {
+		e = &keyedMutexEntry{held: make(chan struct{}, 1)}
+		k.entries[key] = e
+	}
+	e.refCount++
+	return e
+}
+
+// unref stops counting a goroutine for key's entry and reaps the entry once
+// no goroutine holds or waits for it.
+func (k *keyedMutex) unref(key string, e *keyedMutexEntry) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	e.refCount--
 	if e.refCount == 0 {
 		delete(k.entries, key)
 	}
-	k.mu.Unlock()
-	return nil, false
 }
 
 type Orchestrator struct {
@@ -1351,11 +1367,17 @@ func (o *Orchestrator) formatResponse(ctx context.Context, result *RunResult) er
 // Never acquire an earlier lock while holding a later one; StoreNote, which
 // calls no model, takes no semaphore. The distributed lease is acquired while
 // HOLDING the in-pod mutex so at most one goroutine per pod polls the
-// distributed lock per session. When lease acquisition
-// fails (caller's ctx ended) the in-pod mutex is released before returning,
-// so an error never leaks a held lock.
+// distributed lock per session. Both waits end when the caller's ctx ends,
+// with its error: a note's deadline, a request that is gone or a shutdown
+// stops waiting for a turn that runs on. When lease acquisition fails the
+// in-pod mutex is released before returning, so an error never leaks a held
+// lock. A ctx that ends just as a lock comes free may still take it, so a
+// caller that must not go on past its ctx checks ctx once this returns.
 func (o *Orchestrator) lockSessionTurn(ctx context.Context, sessionID string) (unlock func(), err error) {
-	sm := o.sessionMuxes.lock(sessionID)
+	sm, err := o.sessionMuxes.lockContext(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
 	releaseTurnLease, err := o.sessionLocker.Lock(ctx, sessionID)
 	if err != nil {
 		o.sessionMuxes.unlock(sessionID, sm)
@@ -1412,9 +1434,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		return nil, err
 	}
 	defer unlock()
-	// The in-pod session mutex waits regardless of ctx. A turn whose context
-	// ended while it queued behind another turn never starts: its caller's
-	// deadline bounds how late it may still store its message.
+	// A turn whose context ended while it queued behind another turn never
+	// starts, also when its context ended just as the lock came free (see
+	// lockSessionTurn): its caller's deadline bounds how late it may still
+	// store its message.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

@@ -2299,6 +2299,37 @@ func TestHandler_OpenSession_NoteWithoutAReplyWaitsForTheSessionsTurn(t *testing
 	}
 }
 
+// TestHandler_OpenSession_NoteWithoutAReplyGivesUpWhileTheTurnRuns: a note
+// whose deadline passes while a turn holds the session returns at its
+// deadline, before the turn ends, without an answer and with its key free, so
+// the same call again could take it at once. Nothing is stored, also once the
+// turn ends.
+func TestHandler_OpenSession_NoteWithoutAReplyGivesUpWhileTheTurnRuns(t *testing.T) {
+	noteTiming(t, 300*time.Millisecond, 3*time.Second)
+	llm, storing := newGateLLM(), make(chan struct{})
+	rec, orch, h := newNoteHandler(llm, signalStoring(storing))
+	storeOpened(t, rec.store, openedSession, "u1")
+	release := sync.OnceFunc(holdTurn(t, orch, llm, openedSession))
+	t.Cleanup(release)
+
+	answered := make(chan pkg.OutboundMessage, 1)
+	go func() { answered <- callOpen(h, "c8", noteWithoutReply(openedSession)) }()
+	await(t, storing, "the note to reach StoreNote")
+	out := await(t, answered, "the note's call to return while the turn runs")
+
+	if len(out.Metadata) != 0 || len(rec.acks()) != 0 {
+		t.Errorf("handler frame = %+v, answers %+v; want none past the deadline", out.Metadata, rec.acks())
+	}
+	if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+		t.Errorf("the note's key while the turn runs = %v, %v; want it free", result, err)
+	}
+	release()
+	got, _, _ := rec.snapshot()
+	if n := countStored(t, rec.store, openedSession, noteContent); n != 0 || countEvents(got, "event "+events.TypeNoteStored) != 0 {
+		t.Errorf("note stored %d times, events %v; want nothing past the deadline", n, got)
+	}
+}
+
 // heldOpener closes held when a note reservation is first found held.
 type heldOpener struct {
 	*state.SessionStore
