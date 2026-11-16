@@ -869,6 +869,10 @@ func (failingOpener) ReserveNote(context.Context, string, string, time.Time, tim
 	return state.ClaimHeld, errors.New("database connection lost")
 }
 
+func (failingOpener) ReclaimNote(context.Context, string, string, time.Time, time.Duration) (state.ClaimResult, error) {
+	return state.ClaimHeld, errors.New("database connection lost")
+}
+
 func (failingOpener) FreeNote(context.Context, string, string, time.Time) error {
 	return errors.New("database connection lost")
 }
@@ -1342,8 +1346,8 @@ func TestHandler_OpenSession_RecoversAnInterruptedNoteOnce(t *testing.T) {
 	}
 }
 
-// flakyOpener fails claim call number failAt (ClaimOpener and ReserveNote
-// counted together), as a database that is briefly unavailable.
+// flakyOpener fails claim call number failAt (ClaimOpener, ReserveNote and
+// ReclaimNote counted together), as a database that is briefly unavailable.
 type flakyOpener struct {
 	*state.SessionStore
 	calls  atomic.Int32
@@ -1362,6 +1366,13 @@ func (o *flakyOpener) ReserveNote(ctx context.Context, id, key string, now time.
 		return state.ClaimHeld, errors.New("database unavailable")
 	}
 	return o.SessionStore.ReserveNote(ctx, id, key, now, staleAfter)
+}
+
+func (o *flakyOpener) ReclaimNote(ctx context.Context, id, key string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	if o.calls.Add(1) == o.failAt {
+		return state.ClaimHeld, errors.New("database unavailable")
+	}
+	return o.SessionStore.ReclaimNote(ctx, id, key, now, staleAfter)
 }
 
 // TestHandler_OpenSession_FailedClaimIsRefusedThenRetried: an open whose
@@ -2364,6 +2375,60 @@ func TestHandler_OpenSession_NoteWithoutAReplyWaitsForAHeldKey(t *testing.T) {
 			t.Errorf("events = %v, want nothing stored or sent", got)
 		}
 	})
+}
+
+// TestHandler_OpenSession_RecoveryLeavesAFreedNoteKeyFree: duplicates of a
+// note without a reply while a turn holds the session, the duplicate with a
+// reply or without one. The first call takes the key, the duplicate finds it
+// held and schedules the note's recovery. Both deadlines pass before the turn
+// ends, and the first call frees its key, which then belongs to the caller's
+// next attempt. The recovery finds no reservation to take over: nothing is
+// stored and no turn runs, and the same call again stores the note.
+func TestHandler_OpenSession_RecoveryLeavesAFreedNoteKeyFree(t *testing.T) {
+	const deadline = 200 * time.Millisecond
+	for _, reply := range []string{"true", "false"} {
+		t.Run("duplicate with reply "+reply, func(t *testing.T) {
+			noteTiming(t, deadline, 3*deadline)
+			llm, storing := newGateLLM(), make(chan struct{})
+			op := &heldOpener{held: make(chan struct{})}
+			rec, orch, h := newNoteHandler(llm, signalStoring(storing), func(cfg *HandlerConfig) {
+				op.SessionStore = cfg.Opener.(*state.SessionStore)
+				cfg.Opener = op
+			})
+			storeOpened(t, rec.store, openedSession, "u1")
+			release := holdTurn(t, orch, llm, openedSession)
+
+			first, second := make(chan pkg.OutboundMessage, 1), make(chan pkg.OutboundMessage, 1)
+			go func() { first <- callOpen(h, "c8", noteWithoutReply(openedSession)) }()
+			await(t, storing, "the first call to take the key")
+			duplicate := noteWithoutReply(openedSession)
+			duplicate[pkg.NoteReplyMetadataKey] = reply
+			go func() { second <- callOpen(h, "c9", duplicate) }()
+			await(t, op.held, "the duplicate to find the key held")
+			time.Sleep(deadline + deadline/2)
+			release()
+			await(t, first, "the first call to return")
+			await(t, second, "the duplicate to return")
+			time.Sleep(pastRecovery())
+
+			got, runs, _ := rec.snapshot()
+			if n := countStored(t, rec.store, openedSession, noteContent); n != 0 || countEvents(got, "event "+events.TypeNoteStored) != 0 {
+				t.Errorf("note stored %d times, events %v; want nothing stored past both deadlines", n, got)
+			}
+			if len(runs) != 0 || rec.replies() != 0 || llm.calls.Load() != 1 {
+				t.Errorf("turns %d, replies %d, model calls %d; want no turn beside the user's", len(runs), rec.replies(), llm.calls.Load())
+			}
+
+			before := len(rec.acks())
+			callOpen(h, "c10", noteWithoutReply(openedSession))
+			if acks := rec.acks(); len(acks) != before+1 || acks[before].Metadata["created"] != "true" {
+				t.Errorf("answers to the same call again = %+v, want created=true", acks[before:])
+			}
+			if n := countStored(t, rec.store, openedSession, noteContent); n != 1 {
+				t.Errorf("note stored %d times by the same call again, want once", n)
+			}
+		})
+	}
 }
 
 // TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenNotStored: a note

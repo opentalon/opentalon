@@ -86,6 +86,9 @@ func TestPostgres_NoteReservationsGoWithSession(t *testing.T) {
 func TestPostgres_FreeNote(t *testing.T) {
 	checkFreeNote(t, NewSessionStore(pgDB(t), 0, 0))
 }
+func TestPostgres_ReclaimNote(t *testing.T) {
+	checkReclaimNote(t, NewSessionStore(pgDB(t), 0, 0))
+}
 func TestPostgres_SecondPrecisionClaimTimes(t *testing.T) {
 	checkSecondPrecisionClaimTimes(t, pgDB(t))
 }

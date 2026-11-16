@@ -434,14 +434,7 @@ func (s *SessionStore) ReserveNote(ctx context.Context, sessionID, noteKey strin
 		return state.ClaimWon, nil
 	}
 
-	res, err = s.db.SQLDB().ExecContext(ctx,
-		d.Rebind(`UPDATE session_note_reservations SET reserved_at = ?
-		WHERE session_id = ? AND note_key = ? AND reserved_at < ? AND stored_at IS NULL`),
-		at, sessionID, noteKey, claimTime(now.Add(-staleAfter)))
-	if err != nil {
-		return fail(err)
-	}
-	if reserved, err = affectedOne(res); err != nil {
+	if reserved, err = s.takeStaleNote(ctx, sessionID, noteKey, now, staleAfter); err != nil {
 		return fail(err)
 	}
 	if reserved {
@@ -455,6 +448,62 @@ func (s *SessionStore) ReserveNote(ctx context.Context, sessionID, noteKey strin
 		return fail(err)
 	}
 	return result, nil
+}
+
+// ReclaimNote takes over the note reservation of sessionID and noteKey at now
+// only while there is one, older than staleAfter and without a stored note:
+// its holder vanished before it stored the note. Unlike ReserveNote it never
+// inserts a reservation, so one its holder freed (FreeNote) stays free for
+// that caller's next attempt. It answers state.ClaimWon for the take-over,
+// state.ClaimHeld for a fresh reservation, state.ClaimSettled for a stored
+// one, state.ClaimNotReserved when there is none and
+// state.ClaimSessionNotFound for a session that does not exist. The take-over
+// is ReserveNote's compare-and-set UPDATE: on Postgres it waits for a
+// concurrent FreeNote's or store's row lock and then re-checks its WHERE, so a
+// reservation freed or stored meanwhile is not taken. ctx ends a wait for the
+// row.
+func (s *SessionStore) ReclaimNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	fail := func(err error) (state.ClaimResult, error) {
+		return state.ClaimHeld, fmt.Errorf("reclaim note %q in %q: %w", noteKey, sessionID, err)
+	}
+	reclaimed, err := s.takeStaleNote(ctx, sessionID, noteKey, now, staleAfter)
+	if err != nil {
+		return fail(err)
+	}
+	if reclaimed {
+		return state.ClaimWon, nil
+	}
+	var reserved, stored string
+	err = s.db.SQLDB().QueryRowContext(ctx, s.db.Dialect().Rebind(
+		`SELECT COALESCE(r.reserved_at, ''), COALESCE(r.stored_at, '') FROM sessions s
+		LEFT JOIN session_note_reservations r ON r.session_id = s.id AND r.note_key = ?
+		WHERE s.id = ?`), noteKey, sessionID).Scan(&reserved, &stored)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return state.ClaimSessionNotFound, nil
+	case err != nil:
+		return fail(err)
+	case reserved == "":
+		return state.ClaimNotReserved, nil
+	case stored != "":
+		return state.ClaimSettled, nil
+	default:
+		return state.ClaimHeld, nil
+	}
+}
+
+// takeStaleNote is the compare-and-set that takes the note reservation of
+// sessionID and noteKey at now when it is older than staleAfter and no note
+// was stored under it (ReserveNote, ReclaimNote).
+func (s *SessionStore) takeStaleNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error) {
+	res, err := s.db.SQLDB().ExecContext(ctx,
+		s.db.Dialect().Rebind(`UPDATE session_note_reservations SET reserved_at = ?
+		WHERE session_id = ? AND note_key = ? AND reserved_at < ? AND stored_at IS NULL`),
+		claimTime(now), sessionID, noteKey, claimTime(now.Add(-staleAfter)))
+	if err != nil {
+		return false, err
+	}
+	return affectedOne(res)
 }
 
 // FreeNote removes the note reservation of sessionID and noteKey only while it

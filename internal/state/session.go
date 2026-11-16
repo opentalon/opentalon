@@ -127,7 +127,8 @@ type SessionParams struct {
 // without both there is nothing to be idempotent on.
 var ErrOpenParams = errors.New("open session: origin and key are required")
 
-// ClaimResult is what a claim call (ClaimOpener, ReserveNote) found.
+// ClaimResult is what a claim call (ClaimOpener, ReserveNote, ReclaimNote)
+// found.
 type ClaimResult int
 
 const (
@@ -144,6 +145,10 @@ const (
 	// nothing to reserve a note in. Unlike ClaimSettled it says nothing about
 	// the key.
 	ClaimSessionNotFound
+	// ClaimNotReserved: ReclaimNote found no reservation under the key: none
+	// was taken, or its attempt freed it (FreeNote) and the key is that
+	// caller's again. There is nothing to take over.
+	ClaimNotReserved
 )
 
 // TurnClaim names the claim a turn runs under: the first turn of an opened
@@ -285,6 +290,25 @@ func (s *SessionStore) ReserveNote(_ context.Context, sessionID, noteKey string,
 		return ClaimSessionNotFound, nil
 	}
 	return take(s.notes, noteIdentity{sessionID: sessionID, noteKey: noteKey}, now, staleAfter), nil
+}
+
+// ReclaimNote mirrors the DB-backed take-over of a note reservation: it takes
+// the reservation of sessionID and noteKey at now only while there is one, as
+// ReserveNote would take it, and never creates one. A reservation that is not
+// there answers ClaimNotReserved, and an unknown session
+// ClaimSessionNotFound.
+func (s *SessionStore) ReclaimNote(_ context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (ClaimResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.sessions[sessionID]; !ok {
+		return ClaimSessionNotFound, nil
+	}
+	key := noteIdentity{sessionID: sessionID, noteKey: noteKey}
+	if s.notes[key] == nil {
+		return ClaimNotReserved, nil
+	}
+	return take(s.notes, key, now, staleAfter), nil
 }
 
 // FreeNote mirrors the DB-backed release of a note reservation: it removes the

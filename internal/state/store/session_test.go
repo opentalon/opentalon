@@ -498,6 +498,7 @@ type claimStore interface {
 	OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error)
 	ClaimOpener(ctx context.Context, sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
 	ReserveNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
+	ReclaimNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
 	FreeNote(ctx context.Context, sessionID, noteKey string, reservedAt time.Time) error
 	AddMessage(id string, msg provider.Message) error
 	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
@@ -819,6 +820,64 @@ func checkFreeNote(t *testing.T, store claimStore) {
 	}
 }
 
+// checkReclaimNote: a take-over takes only a reservation that is there, stale
+// and without a stored note, exactly once among concurrent callers, and the
+// claim it replaced stores nothing. A fresh reservation is held and a stored
+// one settled. A key never reserved, and one whose holder freed its
+// reservation, answer not reserved and stay free: the next reservation wins
+// the key. A missing session answers not found.
+func checkReclaimNote(t *testing.T, store claimStore) {
+	t.Helper()
+	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "reclaim-s1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-reclaim"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	now := time.Now().Truncate(time.Second).Add(100 * time.Millisecond)
+	stale := now.Add(2 * time.Minute)
+	const staleAfter = time.Minute
+	reserveAt := func(key string, at time.Time) func() (state.ClaimResult, error) {
+		return func() (state.ClaimResult, error) {
+			return store.ReserveNote(context.Background(), "reclaim-s1", key, at, staleAfter)
+		}
+	}
+	reclaimAt := func(sid, key string, at time.Time) func() (state.ClaimResult, error) {
+		return func() (state.ClaimResult, error) {
+			return store.ReclaimNote(context.Background(), sid, key, at, staleAfter)
+		}
+	}
+	noteOf := func(key string) provider.Message {
+		return provider.Message{Role: provider.RoleUser, Content: "note " + key, Visibility: "hidden"}
+	}
+	for _, key := range []string{"fresh", "stale", "freed", "contended"} {
+		claimStep(t, "reserve "+key, state.ClaimWon, reserveAt(key, now))
+	}
+
+	claimStep(t, "a key never reserved", state.ClaimNotReserved, reclaimAt("reclaim-s1", "never", stale))
+	claimStep(t, "the key never reserved, reserved after the take-over", state.ClaimWon, reserveAt("never", stale))
+	claimStep(t, "fresh reservation", state.ClaimHeld, reclaimAt("reclaim-s1", "fresh", now.Add(30*time.Second)))
+
+	claimStep(t, "stale reservation", state.ClaimWon, reclaimAt("reclaim-s1", "stale", stale))
+	storeStep(t, "note under the claim taken over", store, "reclaim-s1", noteOf("stale"), state.TurnClaim{NoteKey: "stale", At: now}.Metadata(), state.ErrClaimLost)
+	storeStep(t, "note under the take-over", store, "reclaim-s1", noteOf("stale"), state.TurnClaim{NoteKey: "stale", At: stale}.Metadata(), nil)
+	claimStep(t, "stale, note stored", state.ClaimSettled, reclaimAt("reclaim-s1", "stale", now.Add(10*time.Minute)))
+
+	if err := store.FreeNote(context.Background(), "reclaim-s1", "freed", now); err != nil {
+		t.Fatalf("FreeNote: %v", err)
+	}
+	claimStep(t, "freed reservation", state.ClaimNotReserved, reclaimAt("reclaim-s1", "freed", stale))
+	claimStep(t, "the freed key, reserved by its caller's next attempt", state.ClaimWon, reserveAt("freed", stale))
+
+	if winners := concurrentWinners(t, 8, reclaimAt("reclaim-s1", "contended", stale)); winners != 1 {
+		t.Errorf("concurrent take-over winners = %d, want exactly 1", winners)
+	}
+	claimStep(t, "no such session", state.ClaimSessionNotFound, reclaimAt("reclaim-gone", "fresh", stale))
+
+	for key, want := range map[string]int{"stale": 1, "freed": 0, "never": 0} {
+		if n := countContent(t, store, "reclaim-s1", "note "+key); n != want {
+			t.Errorf("note %s stored %d times, want %d", key, n, want)
+		}
+	}
+}
+
 // checkSecondPrecisionClaimTimes: an opener claim and a note reservation an
 // older core wrote at second precision are taken over only once they are
 // stale: never while the cutoff is in an earlier second, still not while it is
@@ -1121,6 +1180,14 @@ func TestSessionStore_FreeNote(t *testing.T) {
 
 func TestInMemorySessionStore_FreeNote(t *testing.T) {
 	checkFreeNote(t, state.NewSessionStore(""))
+}
+
+func TestSessionStore_ReclaimNote(t *testing.T) {
+	checkReclaimNote(t, NewSessionStore(openTestDB(t), 0, 0))
+}
+
+func TestInMemorySessionStore_ReclaimNote(t *testing.T) {
+	checkReclaimNote(t, state.NewSessionStore(""))
 }
 
 func TestSessionStore_SecondPrecisionClaimTimes(t *testing.T) {

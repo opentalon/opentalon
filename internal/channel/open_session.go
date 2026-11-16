@@ -20,9 +20,9 @@ import (
 )
 
 // SessionOpener is the store side of a server-opened session: the
-// create-or-find, the first-turn claim, the note reservation and its release
-// (see state.SessionStore.OpenSession), and the read of what a note's target
-// is authorised by. These are the open path's store calls before its turn
+// create-or-find, the first-turn claim, the note reservation, its take-over by
+// a recovery and its release (see state.SessionStore.OpenSession), and the
+// read of what a note's target is authorised by. These are the open path's store calls before its turn
 // runs or its note is stored, and each takes the request's context (see
 // storeContext). Both session stores implement it.
 type SessionOpener interface {
@@ -30,6 +30,7 @@ type SessionOpener interface {
 	OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error)
 	ClaimOpener(ctx context.Context, sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
 	ReserveNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
+	ReclaimNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
 	FreeNote(ctx context.Context, sessionID, noteKey string, reservedAt time.Time) error
 }
 
@@ -444,8 +445,8 @@ func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.Inboun
 // account since. One recovery per claim is scheduled in this process, however
 // many requests find it held; it looks again while the claim is held by yet
 // another run or the store fails to answer, and ends when the claim is
-// settled, the note no longer reaches its session, or the process's context
-// ends.
+// settled, the note's reservation was freed (see reclaim), the note no longer
+// reaches its session, or the process's context ends.
 // The timer lives in this process; a restart before it fires leaves the
 // recovery to the next identical request.
 func (o *openSessions) scheduleRecovery(ctx context.Context, key recoveryKey, msg pkg.InboundMessage, scope openScope, groupID string) {
@@ -478,7 +479,7 @@ func (o *openSessions) recoverWhenStale(ctx context.Context, key recoveryKey, ms
 			}
 		}
 		now := time.Now()
-		result, err := o.claim(ctx, key, now)
+		result, err := o.reclaim(ctx, key, now)
 		switch {
 		case err != nil || result == state.ClaimHeld:
 			// The store could not say, or yet another run took the claim
@@ -518,6 +519,20 @@ func (o *openSessions) claim(ctx context.Context, key recoveryKey, now time.Time
 		return o.cfg.Opener.ClaimOpener(ctx, key.sessionID, now, o.staleAfter)
 	}
 	return o.cfg.Opener.ReserveNote(ctx, key.sessionID, key.noteKey, now, o.staleAfter)
+}
+
+// reclaim takes key's claim at now for its recovery: the first turn's as claim
+// does, and a note's only by taking over the reservation there is
+// (ReclaimNote). A note's attempt that ended frees its reservation, and the
+// key is then its caller's for the next attempt: a recovery that reserved it
+// anew would store a note nobody sent again.
+func (o *openSessions) reclaim(ctx context.Context, key recoveryKey, now time.Time) (state.ClaimResult, error) {
+	if key.noteKey == "" {
+		return o.claim(ctx, key, now)
+	}
+	ctx, cancel := o.storeContext(ctx)
+	defer cancel()
+	return o.cfg.Opener.ReclaimNote(ctx, key.sessionID, key.noteKey, now, o.staleAfter)
 }
 
 // storeContext bounds the open path's store calls outside its turn: the open,
