@@ -142,17 +142,15 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 	}, nil
 }
 
-// verifiedOwnerSelect reads a session's verified-owner mark (migration 019),
-// scanned in this order into verifiedOwnerColumns.
+// verifiedOwnerSelect is scanned in this order into verifiedOwnerColumns.
 const verifiedOwnerSelect = `verified_entity_id, COALESCE(verified_group_id,''), COALESCE(verified_channel_id,'')`
 
-// verifiedOwnerColumns holds the mark's columns as read; a NULL entity is no mark.
+// A NULL verified_entity_id is no mark.
 type verifiedOwnerColumns struct {
 	entityID           sql.NullString
 	groupID, channelID string
 }
 
-// owner is the mark read, or nil for a session without one.
 func (c *verifiedOwnerColumns) owner() *state.VerifiedOwner {
 	if !c.entityID.Valid {
 		return nil
@@ -271,9 +269,8 @@ func (s *SessionStore) OpenSession(ctx context.Context, p state.SessionParams) (
 	return existing, false, nil
 }
 
-// Identity reads what authorises an open-session request for session id: its
-// id, owner, the account it was created or opened for (group_id), channel,
-// open key and verified-owner mark, and nothing else. Unlike Get it does not
+// Identity reads what authorises an open-session request for session id,
+// and nothing else. Unlike Get it does not
 // load the transcript, and ctx ends a wait for the database. A row that is
 // absent answers a wrapped state.ErrSessionNotFound.
 func (s *SessionStore) Identity(ctx context.Context, id string) (*state.Session, error) {
@@ -304,11 +301,7 @@ func (s *SessionStore) identityWhere(ctx context.Context, where string, args ...
 	return &sess, nil
 }
 
-// SetVerifiedOwner records owner as session id's verified-owner mark (migration
-// 019), replacing an earlier mark. It writes the mark's columns and nothing
-// else, not updated_at, so setting the same owner again changes nothing. A
-// session that does not exist answers a wrapped state.ErrSessionNotFound. ctx
-// ends a wait for the database.
+// SetVerifiedOwner writes only the mark's columns, not updated_at, so setting the same owner again changes nothing.
 func (s *SessionStore) SetVerifiedOwner(ctx context.Context, id string, owner state.VerifiedOwner) error {
 	res, err := s.db.SQLDB().ExecContext(ctx,
 		s.db.Dialect().Rebind(`UPDATE sessions SET verified_entity_id = ?, verified_group_id = ?, verified_channel_id = ? WHERE id = ?`),
@@ -369,13 +362,7 @@ func (s *SessionStore) ClaimOpener(ctx context.Context, sessionID string, now ti
 	return result, nil
 }
 
-// claimNotWon tells why a claim's compare-and-set matched nothing; query reads
-// the claim's stored mark (empty while unset) from the session's row. A set
-// mark is final, so a stored claim is settled; an unset mark means a fresh
-// claim another run holds; no row, a session that is gone, answers gone. The
-// read follows the write, so a claim that went stale or was stored in between
-// is reported as it is now, which a caller only uses to decide whether to look
-// again later.
+// claimNotWon reads after the write, so a claim that went stale or was stored in between is reported as it is now.
 func (s *SessionStore) claimNotWon(ctx context.Context, gone state.ClaimResult, query string, args ...any) (state.ClaimResult, error) {
 	var stored string
 	err := s.db.SQLDB().QueryRowContext(ctx, s.db.Dialect().Rebind(query), args...).Scan(&stored)
@@ -391,28 +378,12 @@ func (s *SessionStore) claimNotWon(ctx context.Context, gone state.ClaimResult, 
 	}
 }
 
-// ReserveNote is the once-per-key claim to post a note into an existing
-// session: the first call for a session and note key inserts the reservation
-// and answers state.ClaimWon; a later call answers state.ClaimHeld while that
-// reservation is fresh, state.ClaimSettled once the note was stored under it,
-// and state.ClaimWon once more when it is older than staleAfter and the note
-// was not stored under it — the reserving run died before the turn runner
-// stored the note. A session that does not exist answers
-// state.ClaimSessionNotFound and is never reserved. A database failure is an
-// error, never a refusal. Same split as ClaimOpener: the reservation is the
-// compare-and-set, the turn runner stores the note under the reservation's
-// state.TurnClaim (AddMessageWithMetadata), and that store marks the
-// reservation's stored_at, which no transcript rewrite erases.
-//
 // The insert is ON CONFLICT DO NOTHING against the reservation's primary key
 // and selects the session's row for update: it inserts nothing for a missing
 // session, and it waits for a prune or delete that holds the row, so no
 // reservation outlives its session. The re-claim is a compare-and-set UPDATE,
 // which on Postgres a concurrent caller re-checks against the row the winner
-// wrote. When neither took effect, one read of the session's row joined to the
-// reservation tells a missing session from a held or a settled key; a
-// reservation its holder freed in between (FreeNote) is answered held, as it
-// was a moment before, and the caller looks again. ctx ends a wait for the row.
+// wrote. ctx ends a wait for the row.
 func (s *SessionStore) ReserveNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	d := s.db.Dialect()
 	at := claimTime(now)
@@ -450,18 +421,7 @@ func (s *SessionStore) ReserveNote(ctx context.Context, sessionID, noteKey strin
 	return result, nil
 }
 
-// ReclaimNote takes over the note reservation of sessionID and noteKey at now
-// only while there is one, older than staleAfter and without a stored note:
-// its holder vanished before it stored the note. Unlike ReserveNote it never
-// inserts a reservation, so one its holder freed (FreeNote) stays free for
-// that caller's next attempt. It answers state.ClaimWon for the take-over,
-// state.ClaimHeld for a fresh reservation, state.ClaimSettled for a stored
-// one, state.ClaimNotReserved when there is none and
-// state.ClaimSessionNotFound for a session that does not exist. The take-over
-// is ReserveNote's compare-and-set UPDATE: on Postgres it waits for a
-// concurrent FreeNote's or store's row lock and then re-checks its WHERE, so a
-// reservation freed or stored meanwhile is not taken. ctx ends a wait for the
-// row.
+// ReclaimNote never inserts a reservation, so one its holder freed stays free for that caller's next attempt.
 func (s *SessionStore) ReclaimNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	fail := func(err error) (state.ClaimResult, error) {
 		return state.ClaimHeld, fmt.Errorf("reclaim note %q in %q: %w", noteKey, sessionID, err)
@@ -492,9 +452,6 @@ func (s *SessionStore) ReclaimNote(ctx context.Context, sessionID, noteKey strin
 	}
 }
 
-// takeStaleNote is the compare-and-set that takes the note reservation of
-// sessionID and noteKey at now when it is older than staleAfter and no note
-// was stored under it (ReserveNote, ReclaimNote).
 func (s *SessionStore) takeStaleNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error) {
 	res, err := s.db.SQLDB().ExecContext(ctx,
 		s.db.Dialect().Rebind(`UPDATE session_note_reservations SET reserved_at = ?
@@ -506,17 +463,7 @@ func (s *SessionStore) takeStaleNote(ctx context.Context, sessionID, noteKey str
 	return affectedOne(res)
 }
 
-// FreeNote removes the note reservation of sessionID and noteKey only while it
-// is the one taken at reservedAt (ReserveNote's now, compared as claimTime)
-// and no note was stored under it, so the same call again wins the key at
-// once. A stored reservation stays settled, one another call re-claimed since
-// stays that call's, also when it was taken within the same second, and one
-// that is not there, or a session that does not exist, is left alone without
-// an error: the claim time, not the stored mark alone, says whose reservation
-// it is. On Postgres a concurrent store of the note (markClaimStored) and this
-// DELETE wait for each other's row lock and then re-check their WHERE, so
-// either the note is stored or its reservation freed, never both; SQLite
-// serialises writers. ctx ends a wait for the row.
+// On Postgres a concurrent store of the note (markClaimStored) and FreeNote's DELETE re-check their WHERE after each other's row lock: never both.
 func (s *SessionStore) FreeNote(ctx context.Context, sessionID, noteKey string, reservedAt time.Time) error {
 	if _, err := s.db.SQLDB().ExecContext(ctx,
 		s.db.Dialect().Rebind(`DELETE FROM session_note_reservations
@@ -527,18 +474,9 @@ func (s *SessionStore) FreeNote(ctx context.Context, sessionID, noteKey string, 
 	return nil
 }
 
-// claimTimeLayout is how a claim time is written and compared
-// (opener_claimed_at, reserved_at): in UTC, at the nanosecond precision of the
-// time the caller claims with, which state.TurnClaim carries unchanged to the
-// store of the turn's input. So one claim time names one claim, also when a
-// note reservation is freed and taken again within the same second. The width
-// is fixed, so the text sorts in time order, which the stale cutoff compares
-// as strings (claimed_at < cutoff). A claim time an older core wrote at second
-// precision ("…:05Z") sorts after every time within its second ("…:05.…Z"):
-// the cutoff takes it for fresh up to a second longer, never for stale early.
+// claimTimeLayout's fixed width lets the stale cutoff compare as strings; an older core's second-precision time sorts after its second, so it counts fresh up to a second longer.
 const claimTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 
-// claimTime is t as a claim time is stored (claimTimeLayout).
 func claimTime(t time.Time) string {
 	return t.UTC().Format(claimTimeLayout)
 }
@@ -676,7 +614,7 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	return tx.Commit()
 }
 
-// requireVerifiedOwner runs after lockSessionRow, whose row lock keeps SetVerifiedOwner from changing the mark until the write commits.
+// requireVerifiedOwner runs after lockSessionRow, whose row lock keeps SetVerifiedOwner from changing the mark before this write commits.
 func requireVerifiedOwner(ctx context.Context, tx sessionRowLocker, d Dialect, id string, owner state.VerifiedOwner) error {
 	var one int
 	err := tx.QueryRowContext(ctx, d.Rebind(`SELECT 1 FROM sessions
@@ -691,12 +629,7 @@ func requireVerifiedOwner(ctx context.Context, tx sessionRowLocker, d Dialect, i
 	return nil
 }
 
-// markClaimStored marks claim c of session id stored at now, inside the
-// transaction that stores the claimed turn's input. The UPDATE matches only
-// while c is the claim held (its time, compared as claimTime) and nothing was
-// stored under it; no match is state.ErrClaimLost. On Postgres a concurrent
-// re-claim of the same row waits for this one and then re-checks its own
-// WHERE, so either the re-claim or this store takes effect, never both.
+// On Postgres a concurrent re-claim of the row waits for markClaimStored's UPDATE and re-checks its WHERE, so only one of them takes effect.
 func markClaimStored(ctx context.Context, tx ExclusiveTx, d Dialect, id string, c state.TurnClaim, now string) error {
 	at := claimTime(c.At)
 	var res sql.Result

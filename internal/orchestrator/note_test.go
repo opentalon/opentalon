@@ -27,8 +27,6 @@ const (
 	testNote    = "[context] The walkthrough created the item Drill 7 with id 42."
 )
 
-// reserveNote takes the reservation of testNoteKey in sessionID at at, as the
-// open path does before it stores the note, and returns its claim.
 func reserveNote(t *testing.T, sessions noteSessions, sessionID string, at time.Time) state.TurnClaim {
 	t.Helper()
 	if result, err := sessions.ReserveNote(context.Background(), sessionID, testNoteKey, at, time.Minute); err != nil || result != state.ClaimWon {
@@ -37,10 +35,7 @@ func reserveNote(t *testing.T, sessions noteSessions, sessionID string, at time.
 	return state.TurnClaim{NoteKey: testNoteKey, At: at}
 }
 
-// noteSettled reports whether the reservation of testNoteKey was marked
-// stored: a stale reservation is then settled, one under which nothing was
-// stored is won again. It takes the reservation when it can, so a test calls it
-// last.
+// noteSettled takes the reservation when it can, so a test calls it last.
 func noteSettled(t *testing.T, sessions noteSessions, sessionID string) bool {
 	t.Helper()
 	result, err := sessions.ReserveNote(context.Background(), sessionID, testNoteKey, time.Now().Add(time.Hour), time.Minute)
@@ -64,11 +59,7 @@ func noToolCalls() *fakeParser {
 	return &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 }
 
-// A note is stored as a hidden user row under its reservation, which it marks
-// stored, and emits note_stored with its key, content and length. Nothing of a
-// turn happens: no other event, no model call, no usage, no summarisation and
-// no title although both are due, and the session's metadata (the pending
-// confirmation, the latest-user-message id) stays as it was.
+// A note runs no turn: no other event, model call, usage, summarisation or title, and the session's metadata stays.
 func TestStoreNote_StoresAHiddenRowWithoutATurn(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		sessions := kind.open(t)
@@ -124,7 +115,6 @@ func TestStoreNote_StoresAHiddenRowWithoutATurn(t *testing.T) {
 	})
 }
 
-// requestRecordingLLM is fakeLLM that keeps the messages of every request.
 type requestRecordingLLM struct {
 	fakeLLM
 	requests [][]provider.Message
@@ -135,10 +125,7 @@ func (l *requestRecordingLLM) Complete(ctx context.Context, req *provider.Comple
 	return l.fakeLLM.Complete(ctx, req)
 }
 
-// The next turn sends the note to the model before the user's new message,
-// while every derivation of what the user said skips it: the latest user
-// message, the planner's context and the reply language follow the user's
-// own German request, not the English note after it.
+// The next turn sends the note to the model, while the latest user message, the planner's context and the reply language skip it.
 func TestStoreNote_NextTurnReadsTheNote(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		const asked = "Bitte zeige mir, wie ich einen neuen Artikel im Lager anlege."
@@ -179,9 +166,7 @@ func TestStoreNote_NextTurnReadsTheNote(t *testing.T) {
 	})
 }
 
-// pausingStore holds the first assistant row a turn stores, with the turn's
-// session lock held, until resume is closed: in the turns below that row is a
-// tool call whose result comes in the next write.
+// pausingStore pauses with the turn's session lock held, after the tool call's row and before its result.
 type pausingStore struct {
 	noteSessions
 	once   sync.Once
@@ -200,9 +185,7 @@ func (s *pausingStore) AddMessage(id string, msg provider.Message) error {
 	return err
 }
 
-// A note that arrives while a turn sits between storing a tool call and its
-// result waits for the turn and is stored after all of the turn's rows, also
-// when the turn fails after the tool round.
+// A note never lands between a tool call and its result, also when the turn fails after the tool round.
 func TestStoreNote_WaitsForATurnInFlight(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		const toolResponse = "[tool] repo.analyze"
@@ -265,7 +248,7 @@ func TestStoreNote_WaitsForATurnInFlight(t *testing.T) {
 	})
 }
 
-// R5 across pods: each pod has its own in-pod mutex, so only the turn lease in Redis keeps the note out of the other pod's tool round.
+// Each pod has its own in-pod mutex, so only the turn lease in Redis keeps the note out of the other pod's tool round.
 func TestStoreNote_WaitsForATurnOnAnotherPod(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		const toolResponse = "[tool] repo.analyze"
@@ -325,8 +308,7 @@ func TestStoreNote_WaitsForATurnOnAnotherPod(t *testing.T) {
 	})
 }
 
-// A note that arrives while a summarisation rewrites the session's rows waits
-// for it and is stored after the rewrite, which would otherwise drop it.
+// A note is stored after a summarisation in flight, whose rewrite would otherwise drop it.
 func TestStoreNote_WaitsForASummarisationInFlight(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		inner := kind.open(t)
@@ -369,9 +351,7 @@ func TestStoreNote_WaitsForASummarisationInFlight(t *testing.T) {
 	})
 }
 
-// A note whose deadline passed while it waited for a long turn stores nothing
-// when the turn frees the session, emits nothing and leaves its reservation
-// unstored.
+// A note past its deadline stores nothing and leaves its reservation unstored.
 func TestStoreNote_PastItsDeadlineStoresNothing(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		llm := newBlockingLLM("done")
@@ -417,8 +397,6 @@ func TestStoreNote_PastItsDeadlineStoresNothing(t *testing.T) {
 	})
 }
 
-// A note whose reservation another call took over (it went stale and was
-// reserved again) stores nothing, emits nothing and answers the lost claim.
 func TestStoreNote_ReservationTakenOverStoresNothing(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		sessions := kind.open(t)
@@ -442,8 +420,6 @@ func TestStoreNote_ReservationTakenOverStoresNothing(t *testing.T) {
 	})
 }
 
-// agentRequestLog is lumLLM that keeps the messages of every agent-loop
-// request (those that carry the native tools array).
 type agentRequestLog struct {
 	*lumLLM
 	mu       sync.Mutex
@@ -459,10 +435,7 @@ func (l *agentRequestLog) Complete(ctx context.Context, req *provider.Completion
 	return l.lumLLM.Complete(ctx, req)
 }
 
-// A note stored while a tool call waits for the user's approval leaves the
-// confirmation pending; the user's answer then resolves it and runs the call,
-// and the model input that follows carries the note but not the resolved
-// prompt and its answer, which the note now stands between.
+// A note stored while a tool call waits for approval leaves the confirmation pending.
 func TestStoreNote_PendingConfirmationStaysPending(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		sessions := kind.open(t)

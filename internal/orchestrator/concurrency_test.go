@@ -382,8 +382,6 @@ func TestConcurrencySessionLockCleanup(t *testing.T) {
 	}
 }
 
-// sessionLockRefs is how many goroutines hold or wait for sessionID's in-pod
-// turn lock; 0 when its entry is reaped.
 func sessionLockRefs(orch *Orchestrator, sessionID string) int {
 	orch.sessionMuxes.mu.Lock()
 	defer orch.sessionMuxes.mu.Unlock()
@@ -393,8 +391,6 @@ func sessionLockRefs(orch *Orchestrator, sessionID string) int {
 	return 0
 }
 
-// waitForSessionLockRefs waits until n goroutines hold or wait for sessionID's
-// in-pod turn lock.
 func waitForSessionLockRefs(t *testing.T, orch *Orchestrator, sessionID string, n int) {
 	t.Helper()
 	for deadline := time.Now().Add(2 * time.Second); sessionLockRefs(orch, sessionID) != n; time.Sleep(time.Millisecond) {
@@ -404,11 +400,7 @@ func waitForSessionLockRefs(t *testing.T, orch *Orchestrator, sessionID string, 
 	}
 }
 
-// TestSessionTurnLockWaitEndsWithItsContext: of two goroutines waiting for the
-// session's turn lock while a third holds it, the one whose context ends gives
-// up at once with its context's error and stops counting; the other still
-// waits, takes the lock when the holder releases it, and once it releases the
-// lock too the session's entry is reaped.
+// A waiter whose context ends gives up and stops counting, so the session's entry is still reaped.
 func TestSessionTurnLockWaitEndsWithItsContext(t *testing.T) {
 	orch, s1, _ := newConcurrentOrch(t, 4, &immediateLLM{resp: "ok"})
 	unlockHolder, err := orch.lockSessionTurn(context.Background(), s1)

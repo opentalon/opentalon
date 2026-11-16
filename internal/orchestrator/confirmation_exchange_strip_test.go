@@ -109,10 +109,7 @@ func TestStrip_PlainConversationUntouched(t *testing.T) {
 	}
 }
 
-// TestStrip_HiddenNotesBetweenPromptAndReply: a hidden note stored while a
-// prompt waited for its answer stands between the prompt and the reply row. The
-// resolved exchange is still dropped and the note stays where it was; a prompt
-// whose next visible row is no reply stays, notes and all.
+// Hidden notes between a prompt and its reply stay where they are; the resolved exchange is still dropped.
 func TestStrip_HiddenNotesBetweenPromptAndReply(t *testing.T) {
 	request := provider.Message{Role: provider.RoleUser, Content: "Delete the old drill"}
 	prompt := provider.Message{Role: provider.RoleAssistant, Content: "This will delete 'Drill 5'. Proceed?", PromptType: provider.PromptTypeToolConfirmation}

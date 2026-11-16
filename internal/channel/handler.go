@@ -50,20 +50,13 @@ type HandlerConfig struct {
 	// ok=false means nothing is pending. Read-only — it MUST NOT consume or
 	// mutate pending state. nil disables confirmation re-emit on resume.
 	PendingConfirmation func(sessionKey string) (content string, metadata map[string]string, ok bool)
-	// SetVerifiedOwner records a session's verified-owner mark (see
-	// state.VerifiedOwner). The handler sets it before every turn a user runs
-	// under a verified profile of the chat kind, and the open path's note
-	// reaches an ordinary session by it (see openScope.takesNote). nil sets no
-	// mark, so no note reaches an ordinary session.
+	// SetVerifiedOwner nil sets no mark, so no note reaches an ordinary session.
 	SetVerifiedOwner func(ctx context.Context, sessionKey string, owner state.VerifiedOwner) error
 	// Opener is the store side of an open-session message
-	// (pkg.OpenSessionMetadataKey): create-or-find, first-turn claim, note
-	// reservation and its release. Required.
+	// (pkg.OpenSessionMetadataKey): create-or-find, first-turn claim and note
+	// reservation. Required.
 	Opener SessionOpener
-	// StoreNote stores a note without a reply (pkg.NoteReplyMetadataKey) as a
-	// hidden user message of the session under the note's reservation, in the
-	// order of the session's turns, and runs no turn; ctx bounds its wait for
-	// the session's turn (see orchestrator.Orchestrator.StoreNote). Required.
+	// StoreNote's ctx bounds its wait for the session's turn, not the write.
 	StoreNote func(ctx context.Context, sessionID, content string, claim state.TurnClaim) error
 	// SendToConversation delivers a frame to a channel's conversation. The
 	// open-session path answers its caller and delivers its turn through it,
@@ -76,11 +69,11 @@ type HandlerConfig struct {
 // Verifier is non-nil), runs channel-specific content preparer (if registered), then runs the
 // message through the Runner and returns the response.
 //
-// Panics at construction if ResumeSession, CreateSession, Runner, Opener,
-// StoreNote or SendToConversation is nil: these are required for the
-// strict-session contract and a missing one is a boot-time misconfiguration
-// that must surface immediately rather than as a nil-deref under load.
-// Verifier and LimitChecker remain optional.
+// Panics at construction if ResumeSession, CreateSession, Runner, Opener, StoreNote or
+// SendToConversation is nil: these are required for the strict-session
+// contract and a missing one is a boot-time misconfiguration that must
+// surface immediately rather than as a nil-deref under load. Verifier and
+// LimitChecker remain optional.
 func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	if cfg.ResumeSession == nil {
 		panic("channel.NewMessageHandler: ResumeSession is required")
@@ -103,8 +96,6 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	opens := newOpenSessions(cfg)
 	return func(ctx context.Context, sessionKey string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		var entityID, groupID string
-		// The verified-owner mark this message's turn sets: a verified chat
-		// profile's only.
 		var mark *state.VerifiedOwner
 
 		// Inbound enrichment is fail-closed: if the channel adapter
@@ -299,10 +290,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			return pkg.OutboundMessage{}, nil
 		}
 
-		// The user's own turn marks the session theirs before it runs, so a
-		// server's note for the conversation reaches it, also while this turn
-		// is still running. A mark that cannot be written does not stop the
-		// turn: the session keeps the mark it had until a later turn sets it.
+		// Marked before the turn runs, so a note reaches the session during it; a mark that fails does not stop the turn.
 		if mark != nil && cfg.SetVerifiedOwner != nil {
 			if err := cfg.SetVerifiedOwner(ctx, sessionKey, *mark); err != nil {
 				logger.FromContext(ctx).Warn("verified owner mark not set", "session", sessionKey,

@@ -285,18 +285,18 @@ type SessionStoreInterface interface {
 }
 
 // keyedMutex is a refcounted set of named mutexes: lock blocks until the
-// mutex for key is held, lockContext until then or until its context ends;
-// unlock releases it and reaps the map entry once no goroutine holds or waits
-// on it, so idle keys don't accumulate. The orchestrator keeps two instances —
-// sessionMuxes and titleMuxes — whose lock DOMAINS are deliberately disjoint
-// (see the titleMuxes field comment); only the mechanics are shared.
+// mutex for key is held; unlock releases it and reaps the map entry once no
+// goroutine holds or waits on it, so idle keys don't accumulate. The
+// orchestrator keeps two instances — sessionMuxes and titleMuxes — whose
+// lock DOMAINS are deliberately disjoint (see the titleMuxes field comment);
+// only the mechanics are shared.
 type keyedMutex struct {
 	mu      sync.Mutex // guards entries
 	entries map[string]*keyedMutexEntry
 }
 
 type keyedMutexEntry struct {
-	held     chan struct{} // holds one token while the mutex is locked: a wait for it can end with a context
+	held     chan struct{} // one token while locked; a channel, so a wait can end with a context
 	refCount int           // goroutines currently waiting or holding this entry
 }
 
@@ -310,11 +310,7 @@ func (k *keyedMutex) lock(key string) *keyedMutexEntry {
 	return e
 }
 
-// lockContext is lock that gives up when ctx ends first: it returns ctx's
-// error and no longer counts for key, so the entry is still reaped once its
-// holder and the other waiters are done. A ctx that ends just as the mutex
-// comes free may still take it, so a caller that must not go on past its ctx
-// checks ctx once it holds the mutex.
+// A ctx that ends just as the mutex comes free may still take it: a caller that must not go past its ctx checks it after the lock.
 func (k *keyedMutex) lockContext(ctx context.Context, key string) (*keyedMutexEntry, error) {
 	e := k.ref(key)
 	select {
@@ -344,14 +340,10 @@ func (k *keyedMutex) tryLock(key string) (*keyedMutexEntry, bool) {
 	default:
 	}
 
-	// Contended: release the refcount reservation we just took so the entry
-	// is still reaped when the current holder unlocks.
 	k.unref(key, e)
 	return nil, false
 }
 
-// ref counts a goroutine that holds or waits for key's entry, creating the
-// entry when there is none.
 func (k *keyedMutex) ref(key string) *keyedMutexEntry {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -364,8 +356,6 @@ func (k *keyedMutex) ref(key string) *keyedMutexEntry {
 	return e
 }
 
-// unref stops counting a goroutine for key's entry and reaps the entry once
-// no goroutine holds or waits for it.
 func (k *keyedMutex) unref(key string, e *keyedMutexEntry) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -1355,8 +1345,8 @@ func (o *Orchestrator) formatResponse(ctx context.Context, result *RunResult) er
 // The returned unlock releases both in reverse order and must be called
 // exactly once when the turn's critical section ends. It is the ONLY place
 // that encodes this ordering — every session-state-mutating path (Run, the
-// background summarizer, StoreNote) must go through it rather than taking the
-// locks individually.
+// background summarizer) must go through it rather than taking the locks
+// individually.
 //
 // Lock ordering (must always be acquired in this sequence to prevent deadlock):
 //  1. semaphore      – global concurrency cap (Run acquires it before calling this)
@@ -1364,15 +1354,12 @@ func (o *Orchestrator) formatResponse(ctx context.Context, result *RunResult) er
 //  3. sessionLocker  – per-session serialization across pods (distributed turn lease)
 //  4. pendingMu      – pending-pipeline map
 //
-// Never acquire an earlier lock while holding a later one; StoreNote, which
-// calls no model, takes no semaphore. The distributed lease is acquired while
-// HOLDING the in-pod mutex so at most one goroutine per pod polls the
-// distributed lock per session. Both waits end when the caller's ctx ends,
-// with its error: a note's deadline, a request that is gone or a shutdown
-// stops waiting for a turn that runs on. When lease acquisition fails the
-// in-pod mutex is released before returning, so an error never leaks a held
-// lock. A ctx that ends just as a lock comes free may still take it, so a
-// caller that must not go on past its ctx checks ctx once this returns.
+// Never acquire an earlier lock while holding a later one. The distributed
+// lease is acquired while HOLDING the in-pod mutex so at most one goroutine
+// per pod polls the distributed lock per session. When lease acquisition
+// fails (caller's ctx ended) the in-pod mutex is released before returning,
+// so an error never leaks a held lock.
+// A ctx that ends just as a lock comes free may still take it: a caller that must not go past its ctx checks it once this returns.
 func (o *Orchestrator) lockSessionTurn(ctx context.Context, sessionID string) (unlock func(), err error) {
 	sm, err := o.sessionMuxes.lockContext(ctx, sessionID)
 	if err != nil {
@@ -1434,10 +1421,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		return nil, err
 	}
 	defer unlock()
-	// A turn whose context ended while it queued behind another turn never
-	// starts, also when its context ended just as the lock came free (see
-	// lockSessionTurn): its caller's deadline bounds how late it may still
-	// store its message.
+	// The lock may come free just as ctx ends (see lockSessionTurn): a turn past its ctx never starts.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -4192,14 +4176,13 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 // after stripping is user request → tool call → tool result: exactly the
 // protocol the model must continue.
 //
-// Only APPROVED-and-executed exchanges are stripped — a prompt row followed by
-// its reply row, with nothing but hidden notes between them (notes stored
-// while the prompt waited for its answer; they stay). A prompt WITHOUT a reply row
-// stays: single-call rejects never persist a reply, an amend reply arrives as
-// a plain user message, and the re-planning paths need the proposed action for
-// context. Pipeline plan confirmations (prompt_type=confirmation) are
-// untouched. The user-facing transcript is untouched too — this filters only
-// what the LLM sees.
+// Only APPROVED-and-executed exchanges are stripped — a prompt row, with only hidden notes (they stay) before it is
+// followed by its reply row. A prompt WITHOUT a reply row stays: single-call
+// rejects never persist a reply, an amend reply arrives as a plain user
+// message, and the re-planning paths need the proposed action for context.
+// Pipeline plan confirmations (prompt_type=confirmation) are untouched. The
+// user-facing transcript is untouched too — this filters only what the LLM
+// sees.
 func stripApprovedConfirmationExchanges(msgs []provider.Message) []provider.Message {
 	out := make([]provider.Message, 0, len(msgs))
 	for i := 0; i < len(msgs); i++ {

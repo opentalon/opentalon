@@ -618,16 +618,7 @@ func checkClaimOpener(t *testing.T, store claimStore) {
 	claimStep(t, "unknown session", state.ClaimSettled, claimAt("no-such-session", now))
 }
 
-// checkReserveNote: of concurrent reservations for one key exactly one wins; a
-// fresh reservation refuses; another key or another session reserves on its
-// own; a session that does not exist answers not found, not settled; a stale
-// reservation is won again while its note was not stored under it (other
-// messages, other keys' notes do not count); the note is stored only under the
-// reservation held, once; once it is stored the key is refused for good, also
-// after the transcript is summarised or cleared; a note key without its
-// reservation is no note. With a db, the note's key is on its row, a second
-// note with that key is refused, and the key stays settled after the trim
-// drops the note's row.
+// checkReserveNote: once a note is stored its key is refused for good, also after the transcript is summarised, cleared or trimmed.
 func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	t.Helper()
 	for _, id := range []string{"note-s1", "note-s2"} {
@@ -750,13 +741,7 @@ func checkNoteReservationsGoWithSession(t *testing.T, db *DB) {
 	}
 }
 
-// checkFreeNote: freeing removes the unstored reservation taken at the given
-// time, so the same call again wins the key at once and the freed claim stores
-// nothing; it leaves every other reservation as it was: another key's, one
-// another call re-claimed since (whose holder still stores its note), and a
-// stored one; freeing what is not there is no error. The key is reserved again
-// within the second of the freed claim, so the claim times differ below a
-// second: the freed claim neither frees nor stores under the new reservation.
+// checkFreeNote reserves the key again within the freed claim's second, so the claim times differ below a second.
 func checkFreeNote(t *testing.T, store claimStore) {
 	t.Helper()
 	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "free-s1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-free"}); err != nil {
@@ -820,12 +805,7 @@ func checkFreeNote(t *testing.T, store claimStore) {
 	}
 }
 
-// checkReclaimNote: a take-over takes only a reservation that is there, stale
-// and without a stored note, exactly once among concurrent callers, and the
-// claim it replaced stores nothing. A fresh reservation is held and a stored
-// one settled. A key never reserved, and one whose holder freed its
-// reservation, answer not reserved and stay free: the next reservation wins
-// the key. A missing session answers not found.
+// checkReclaimNote: a take-over never reserves a key anew, so a key its holder freed stays free.
 func checkReclaimNote(t *testing.T, store claimStore) {
 	t.Helper()
 	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "reclaim-s1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-reclaim"}); err != nil {
@@ -878,10 +858,7 @@ func checkReclaimNote(t *testing.T, store claimStore) {
 	}
 }
 
-// checkSecondPrecisionClaimTimes: an opener claim and a note reservation an
-// older core wrote at second precision are taken over only once they are
-// stale: never while the cutoff is in an earlier second, still not while it is
-// within the claim's own second, and once it is in a later second.
+// checkSecondPrecisionClaimTimes: a claim an older core wrote at second precision goes stale only once the cutoff is in a later second.
 func checkSecondPrecisionClaimTimes(t *testing.T, db *DB) {
 	t.Helper()
 	store := NewSessionStore(db, 0, 0)
@@ -918,7 +895,6 @@ func checkSecondPrecisionClaimTimes(t *testing.T, db *DB) {
 	}
 }
 
-// identityStore is what the identity checks need; both session stores satisfy it.
 type identityStore interface {
 	Create(p state.SessionParams) *state.Session
 	OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error)
@@ -927,7 +903,6 @@ type identityStore interface {
 	SetVerifiedOwner(ctx context.Context, id string, owner state.VerifiedOwner) error
 }
 
-// identityOf is Identity of id, failing the test on an error.
 func identityOf(t *testing.T, store identityStore, id string) *state.Session {
 	t.Helper()
 	sess, err := store.Identity(context.Background(), id)
@@ -937,12 +912,7 @@ func identityOf(t *testing.T, store identityStore, id string) *state.Session {
 	return sess
 }
 
-// checkVerifiedOwner: a session Create made or OpenSession opened has no
-// verified-owner mark until SetVerifiedOwner sets it; Identity and Get then
-// report it; setting the same owner again changes nothing, not even the time
-// of last change; a later owner replaces it; a session that does not exist
-// answers not found. With a db, the session's time of last change is moved a
-// day back first, since the store keeps it at second precision.
+// checkVerifiedOwner: with a db, updated_at is moved a day back first, as the store keeps it at second precision.
 func checkVerifiedOwner(t *testing.T, store identityStore, db *DB) {
 	t.Helper()
 	ctx := context.Background()
@@ -1011,9 +981,7 @@ type ownerClaimStore interface {
 	SetVerifiedOwner(ctx context.Context, id string, owner state.VerifiedOwner) error
 }
 
-// checkClaimOwner: a claim with an Owner is stored only while the session's
-// mark is that owner; otherwise ErrOwnerChanged, nothing stored, and the
-// reservation left unstored.
+// checkClaimOwner: a claim with an Owner is stored only while the session's mark is that owner.
 func checkClaimOwner(t *testing.T, store ownerClaimStore) {
 	t.Helper()
 	ctx := context.Background()
@@ -1061,8 +1029,6 @@ func checkClaimOwner(t *testing.T, store ownerClaimStore) {
 	}
 }
 
-// checkSessionAccount: Identity reports the account a session was created or
-// opened for, and none where none was recorded.
 func checkSessionAccount(t *testing.T, store identityStore) {
 	t.Helper()
 	store.Create(state.SessionParams{ID: "acct-created", EntityID: "u1", GroupID: "g1"})
@@ -1077,11 +1043,7 @@ func checkSessionAccount(t *testing.T, store identityStore) {
 	}
 }
 
-// checkMigrationMarksNoSession: migration 019 applied to a database that holds
-// sessions (an ordinary one, an opened one, and one keyed without a profile
-// whose owner a backfill would derive from its key) gives none of them the
-// mark. The columns are dropped and the schema set back to 18, so the runner
-// applies 019 to rows that existed before it.
+// checkMigrationMarksNoSession: migration 019 marks no existing session, also none whose owner a backfill derived from its key.
 func checkMigrationMarksNoSession(t *testing.T, db *DB) {
 	t.Helper()
 	store := NewSessionStore(db, 0, 0)
@@ -1250,9 +1212,7 @@ func TestSessionStore_SecondPrecisionClaimTimes(t *testing.T) {
 	checkSecondPrecisionClaimTimes(t, openTestDB(t))
 }
 
-// TestClaimTimeSortsInTimeOrder: stored claim times have one width and sort as
-// text in time order, whole seconds and fractions alike, in any zone the
-// caller's clock reads.
+// Claim times sort as text in time order, whole seconds and fractions alike, in any zone the caller's clock reads.
 func TestClaimTimeSortsInTimeOrder(t *testing.T) {
 	second := time.Date(2026, 11, 16, 12, 0, 5, 0, time.UTC)
 	times := []time.Time{

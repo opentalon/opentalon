@@ -19,12 +19,7 @@ import (
 	pkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
-// SessionOpener is the store side of a server-opened session: the
-// create-or-find, the first-turn claim, the note reservation, its take-over by
-// a recovery and its release (see state.SessionStore.OpenSession), and the
-// read of what a note's target is authorised by. These are the open path's store calls before its turn
-// runs or its note is stored, and each takes the request's context (see
-// storeContext). Both session stores implement it.
+// SessionOpener is the open path's side of a session store; both session stores implement it.
 type SessionOpener interface {
 	Identity(ctx context.Context, id string) (*state.Session, error)
 	OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error)
@@ -41,25 +36,17 @@ type SessionOpener interface {
 // message of the run that lost the claim (state.ErrClaimLost), so of two runs
 // of one turn only one stores it and goes on. The turn runs under
 // openerTimeout and openerStaleAfter exceeds it, so a live claimant normally
-// stores its message or gives up before its claim goes stale. A note without
-// a reply waits for its place among the session's turns until openerTimeout
-// after its claim, its deadline, for the same reason. Variables so tests can
-// shorten them; NewMessageHandler reads them once.
+// stores its message or gives up before its claim goes stale. Variables so
+// tests can shorten them; NewMessageHandler reads them once.
 var (
 	openerTimeout    = 3 * time.Minute
 	openerStaleAfter = openerTimeout + time.Minute
-	// recoveryLeeway delays a scheduled recovery past the claim's expiry: the
-	// DB-backed store keeps claim times at second precision.
+	// recoveryLeeway: a claim time an older core wrote at second precision counts fresh up to a second past its expiry.
 	recoveryLeeway = time.Second
-	// notePoll is how often a note without a reply whose key another attempt
-	// holds looks again whether that attempt stored it (see claimAndStore).
-	notePoll = 250 * time.Millisecond
+	notePoll       = 250 * time.Millisecond
 )
 
-// noteFreeTimeout bounds the release of a note's reservation (see freeNote),
-// which runs also after the request ended. It is short: a channel that shuts
-// down waits for its requests, and a release that does not finish leaves the
-// reservation to go stale.
+// noteFreeTimeout is short, as a channel's shutdown waits for its requests; a release that does not finish leaves the reservation to go stale.
 const noteFreeTimeout = 2 * time.Second
 
 // openSessions serves the handler's open-session path.
@@ -78,9 +65,6 @@ type openSessions struct {
 // its notes.
 type recoveryKey struct{ sessionID, noteKey string }
 
-// openScope is what an open-session request may reach: the sessions of its
-// verified entity on the channel it arrived on (see handle, reaches and
-// takesNote).
 type openScope struct{ entityID, channel string }
 
 // reaches reports whether sess is in the scope: the open path opened it (it
@@ -94,14 +78,7 @@ func (s openScope) reaches(sess *state.Session) bool {
 	return ok && sess.OpenKey != "" && sess.EntityID == s.entityID && sess.ChannelID == s.channel
 }
 
-// takesNote reports whether sess takes a note of the scope under groupID, the
-// account of the request's verified profile: its key names a conversation of
-// the scope, and it is the user's under that account on the scope's channel. A
-// session the open path opened is that by what the open path recorded when it
-// opened it (reaches, and the account it was opened for); an ordinary session
-// by its verified-owner mark, which only the user's own chat turns set (see
-// NewMessageHandler), as neither its key nor its recorded owner proves it.
-// owner is the mark the note's write must find again (state.TurnClaim.Owner), nil for a session the open path opened.
+// An ordinary session is the user's only by its mark, which only the user's own chat turns set: neither its key nor its recorded owner proves it.
 func (s openScope) takesNote(sess *state.Session, groupID string) (owner *state.VerifiedOwner, ok bool) {
 	if sess.OpenKey != "" {
 		return nil, s.reaches(sess) && sess.GroupID == groupID
@@ -212,9 +189,7 @@ func (o *openSessions) open(ctx context.Context, sessionKey string, msg pkg.Inbo
 }
 
 // continueSession posts the content as a hidden note into target, a session of
-// the user under groupID, the verified profile's account, on the request's
-// channel (see takesNote), once per note key: as a hidden turn (see
-// claimAndRun), or without a reply (see claimAndStore).
+// the user on the request's channel, once per note key (see claimAndRun).
 func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessage, target string, scope openScope, groupID string) pkg.OutboundMessage {
 	noteKey := msg.Metadata[pkg.NoteKeyMetadataKey]
 	if noteKey == "" {
@@ -230,8 +205,7 @@ func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessa
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
 	}
 	if !reached {
-		// Gone, not proven the user's, or another user's, account's or
-		// channel's: alike to the caller.
+		// Gone, unproven and another user's answer alike, so the answer discloses nothing.
 		return openRejected(msg, unavailable, "not_found")
 	}
 	key := recoveryKey{sessionID: target, noteKey: noteKey}
@@ -241,8 +215,6 @@ func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessa
 	return o.claimAndRun(ctx, msg, scope, groupID, key)
 }
 
-// noteReply reads a note's reply switch (pkg.NoteReplyMetadataKey): true
-// without the key; ok is false for a value other than "true" and "false".
 func noteReply(msg pkg.InboundMessage) (reply, ok bool) {
 	switch value, set := msg.Metadata[pkg.NoteReplyMetadataKey]; {
 	case !set, value == "true":
@@ -254,8 +226,6 @@ func noteReply(msg pkg.InboundMessage) (reply, ok bool) {
 	}
 }
 
-// noteReaches reads target and reports whether a note of scope under groupID
-// reaches it (see openScope.takesNote); a session that is gone is out of reach.
 func (o *openSessions) noteReaches(ctx context.Context, target string, scope openScope, groupID string) (owner *state.VerifiedOwner, reached bool, err error) {
 	lookupCtx, cancel := o.storeContext(ctx)
 	sess, err := o.cfg.Opener.Identity(lookupCtx, target)
@@ -276,8 +246,7 @@ func (o *openSessions) noteReaches(ctx context.Context, target string, scope ope
 // the turn is recovered once that claim is stale, should its claimant have
 // died before it stored the turn's input; a settled turn needs nothing. A
 // claim the store cannot answer refuses the attempt, which the caller may
-// retry with the same key, and a note's session that is gone meanwhile
-// answers not_found.
+// retry with the same key.
 func (o *openSessions) claimAndRun(ctx context.Context, msg pkg.InboundMessage, scope openScope, groupID string, key recoveryKey) pkg.OutboundMessage {
 	now := time.Now()
 	result, err := o.claim(ctx, key, now)
@@ -298,18 +267,7 @@ func (o *openSessions) claimAndRun(ctx context.Context, msg pkg.InboundMessage, 
 	return pkg.OutboundMessage{}
 }
 
-// claimAndStore takes key's note reservation for msg, a note without a reply,
-// and answers the attempt only once the note is stored: created=true when this
-// attempt stored it (see storeNote), created=false when another had. While
-// another attempt holds the key, this one looks again every poll and takes the
-// key should that attempt give it up or its reservation go stale; the note's
-// recovery is scheduled as for a held note with a reply. The note is stored
-// only while its session still carries owner (state.TurnClaim.Owner). Waiting for the key and for the note's place
-// among the session's turns ends at the note's deadline, the timeout after the
-// first claim: an attempt whose note is not stored by then gets no answer, so
-// the caller's wait for one ends as for any unanswered attempt, and a key it
-// took is freed (see storeNote). A claim the store cannot answer refuses the
-// attempt, and a session that is gone meanwhile answers not_found.
+// The attempt is answered only once its note is stored, created=false when another attempt stored it; past its deadline it gets no answer.
 func (o *openSessions) claimAndStore(ctx context.Context, msg pkg.InboundMessage, scope openScope, groupID string, key recoveryKey,
 	owner *state.VerifiedOwner) pkg.OutboundMessage {
 	start := time.Now()
@@ -349,10 +307,6 @@ func (o *openSessions) claimAndStore(ctx context.Context, msg pkg.InboundMessage
 	}
 }
 
-// storeNote stores content as a note without a reply in key's session under
-// claim, waiting for its place among the session's turns until deadline (see
-// HandlerConfig.StoreNote). A note it did not store frees the claim's
-// reservation (see freeNote), so the same attempt again takes the key at once.
 func (o *openSessions) storeNote(ctx context.Context, key recoveryKey, content string, claim state.TurnClaim, deadline time.Time) error {
 	noteCtx, cancel := context.WithDeadline(ctx, deadline)
 	err := o.cfg.StoreNote(noteCtx, key.sessionID, content, claim)
@@ -363,14 +317,7 @@ func (o *openSessions) storeNote(ctx context.Context, key recoveryKey, content s
 	return err
 }
 
-// freeNote frees key's reservation taken at reservedAt, whose note this
-// attempt did not store. The release runs under a context of its own, bounded
-// by noteFreeTimeout, as ctx may have ended, which is one reason a note is not
-// stored: the caller is gone or the channel shuts down, and a release under
-// that context would fail at once. The store frees nothing once a note is
-// stored under the reservation, also when the error came after the write
-// committed, nor a reservation another attempt took over; a release the store
-// cannot make leaves the reservation to go stale.
+// Not under ctx: a note often goes unstored because ctx ended, and a release under it would fail at once.
 func (o *openSessions) freeNote(ctx context.Context, key recoveryKey, reservedAt time.Time) {
 	freeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), noteFreeTimeout)
 	defer cancel()
@@ -379,11 +326,6 @@ func (o *openSessions) freeNote(ctx context.Context, key recoveryKey, reservedAt
 	}
 }
 
-// answerStored answers the attempt that took key's reservation by err, what
-// storeNote returned: created=true once the note is stored. A note past its
-// deadline, and one whose reservation another attempt took over, which then
-// stores it, get no answer; a session that is gone or out of reach answers
-// not_found, any other failure internal_error.
 func (o *openSessions) answerStored(ctx context.Context, msg pkg.InboundMessage, scope openScope, groupID string, key recoveryKey, err error) pkg.OutboundMessage {
 	log := logger.FromContext(ctx)
 	if err == nil {
@@ -409,8 +351,7 @@ func (o *openSessions) answerStored(ctx context.Context, msg pkg.InboundMessage,
 }
 
 // acknowledge answers the attempt with its session, through the inbound
-// message's own conversation: before any turn runs, and for a note without a
-// reply once it is stored.
+// message's own conversation, before any turn runs.
 func (o *openSessions) acknowledge(ctx context.Context, msg pkg.InboundMessage, scope openScope, sessionID string, created bool) {
 	ack := openFrame(msg, "", map[string]string{
 		"type":                       pkg.FrameSessionOpened,
@@ -457,16 +398,7 @@ func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.Inboun
 	o.deliver(ctx, scope, reply, "open session reply not delivered")
 }
 
-// scheduleRecovery takes the claim key again once the claim another run holds
-// is stale, and runs the turn with msg when that claim is won, or stores it
-// when it is a note without a reply: its claimant died before the turn stored
-// its input. A note is recovered only while it still reaches its session
-// under groupID: the user's chat turns may have marked the session for another
-// account since. One recovery per claim is scheduled in this process, however
-// many requests find it held; it looks again while the claim is held by yet
-// another run or the store fails to answer, and ends when the claim is
-// settled, the note's reservation was freed (see reclaim), the note no longer
-// reaches its session, or the process's context ends.
+// A note is recovered only while it still reaches its session: the user's chat turns may have marked it for another account since.
 // The timer lives in this process; a restart before it fires leaves the
 // recovery to the next identical request.
 func (o *openSessions) scheduleRecovery(ctx context.Context, key recoveryKey, msg pkg.InboundMessage, scope openScope, groupID string) {
@@ -548,11 +480,7 @@ func (o *openSessions) claim(ctx context.Context, key recoveryKey, now time.Time
 	return o.cfg.Opener.ReserveNote(ctx, key.sessionID, key.noteKey, now, o.staleAfter)
 }
 
-// reclaim takes key's claim at now for its recovery: the first turn's as claim
-// does, and a note's only by taking over the reservation there is
-// (ReclaimNote). A note's attempt that ended frees its reservation, and the
-// key is then its caller's for the next attempt: a recovery that reserved it
-// anew would store a note nobody sent again.
+// A note's reservation is only taken over, never made anew: a freed key belongs to its caller's next attempt.
 func (o *openSessions) reclaim(ctx context.Context, key recoveryKey, now time.Time) (state.ClaimResult, error) {
 	if key.noteKey == "" {
 		return o.claim(ctx, key, now)
@@ -562,14 +490,7 @@ func (o *openSessions) reclaim(ctx context.Context, key recoveryKey, now time.Ti
 	return o.cfg.Opener.ReclaimNote(ctx, key.sessionID, key.noteKey, now, o.staleAfter)
 }
 
-// storeContext bounds the open path's store calls outside its turn: the open,
-// a note's lookup and the claims, which may wait for another transaction, a
-// table lock or a free connection. Each waits no longer than the turn it is
-// for may run, and not past ctx, so neither another transaction nor a
-// shutdown keeps it and its database connection. A note's release has a
-// bound of its own (see freeNote). The turn's own store calls (Runner.Run)
-// take no context, as every turn's, nor does the write of a note without a
-// reply (HandlerConfig.StoreNote).
+// A store call here may wait for another transaction, a table lock or a free connection.
 func (o *openSessions) storeContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, o.timeout)
 }

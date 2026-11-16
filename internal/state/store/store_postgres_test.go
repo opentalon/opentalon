@@ -106,8 +106,7 @@ func TestPostgres_ClaimOwner(t *testing.T) {
 	checkClaimOwner(t, NewSessionStore(pgDB(t), 0, 0))
 }
 
-// TestPostgres_ClaimOwnerSeesAMarkWrittenMeanwhile: a note whose write waits
-// for the row lock of a mark in flight is checked against that mark.
+// A note's write that waits for the row lock of a mark in flight is checked against that mark.
 func TestPostgres_ClaimOwnerSeesAMarkWrittenMeanwhile(t *testing.T) {
 	db := pgDB(t)
 	store := NewSessionStore(db, 0, 0)
@@ -216,10 +215,7 @@ func TestPostgres_PruneKeepsASessionWrittenMeanwhile(t *testing.T) {
 	}
 }
 
-// TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept: a note reserved
-// while the prune deletes its session (a recovery firing during another pod's
-// start) waits for the prune and answers not found; no reservation outlives
-// the session, where no later prune would find it.
+// A note reserved while the prune deletes its session waits for the prune and answers not found: no reservation outlives its session.
 func TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept(t *testing.T) {
 	db := pgDB(t)
 	store := NewSessionStore(db, 0, 1)

@@ -936,8 +936,6 @@ func callOpen(h pkg.MessageHandler, conv string, set map[string]string) pkg.Outb
 	return out
 }
 
-// storeOpened opens session id of entity as the open path does for
-// welcomeProfile's account, on the channel the id names after the entity.
 func storeOpened(t *testing.T, store sessionStore, id, entity string) {
 	t.Helper()
 	channel, _, _ := strings.Cut(strings.TrimPrefix(id, entity+":"), ":")
@@ -1350,8 +1348,6 @@ func TestHandler_OpenSession_RecoversAnInterruptedNoteOnce(t *testing.T) {
 	}
 }
 
-// flakyOpener fails claim call number failAt (ClaimOpener, ReserveNote and
-// ReclaimNote counted together), as a database that is briefly unavailable.
 type flakyOpener struct {
 	*state.SessionStore
 	calls  atomic.Int32
@@ -1657,20 +1653,14 @@ func TestHandler_OpenSession_ReplyReachesItsConversation(t *testing.T) {
 	}
 }
 
-// TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound: a note reaches
-// a session the open path opened and the store records for the user and the
-// request's channel, or an ordinary chat by its verified-owner mark. A session
-// that is gone, another user's, the user's on another channel, or an ordinary
-// chat without the mark, also one whose channel the store backfilled, is
-// refused with not_found, so the caller may open a new one, and nothing is
-// stored, reserved, run or sent.
+// A note reaches only a session opened for the user on the request's channel, or an ordinary chat by its mark: anything else is not_found.
 func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		rec, h := newOpenHandlerOn(kind.open(t), welcomeProfile)
 		var foreign []string
 		for _, s := range []struct{ id, owner, channel string }{
-			{"u2:websocket:c1", "u2", "websocket"}, // another user's
-			{"u1:slack:c1", "u1", "slack"},         // u1's on another channel
+			{"u2:websocket:c1", "u2", "websocket"},
+			{"u1:slack:c1", "u1", "slack"},
 		} {
 			if _, created, err := rec.store.OpenSession(context.Background(), state.SessionParams{
 				ID: s.id, EntityID: s.owner, OpenedBy: "welcome", OpenKey: s.id, ChannelID: s.channel,
@@ -1679,9 +1669,9 @@ func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
 			}
 			foreign = append(foreign, s.id)
 		}
-		rec.store.Create(state.SessionParams{ID: "u1:websocket:c2", EntityID: "u1"}) // u1's chat, no recorded channel
+		rec.store.Create(state.SessionParams{ID: "u1:websocket:c2", EntityID: "u1"})
 		rec.store.Create(state.SessionParams{ID: "u1:websocket:c3", EntityID: "u1"})
-		rec.store.backfill(t, "u1:websocket:c3", "u1", "", "websocket") // u1's chat on this channel, recorded by the store's backfill
+		rec.store.backfill(t, "u1:websocket:c3", "u1", "", "websocket")
 		foreign = append(foreign, "u1:websocket:c2", "u1:websocket:c3")
 
 		for _, target := range append([]string{"u1:websocket:gone"}, foreign...) {
@@ -1705,9 +1695,7 @@ func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
 	})
 }
 
-// tokenVerifier answers a fresh copy of the profile its token names, as WhoAmI
-// does, so one handler serves a user's chat tokens and the server's system
-// tokens for that user.
+// tokenVerifier answers a fresh copy of the profile, as WhoAmI does.
 type tokenVerifier map[string]profile.Profile
 
 func (v tokenVerifier) Verify(_ context.Context, token, _ string, _ map[string]string) (*profile.Profile, error) {
@@ -1718,10 +1706,6 @@ func (v tokenVerifier) Verify(_ context.Context, token, _ string, _ map[string]s
 	return &p, nil
 }
 
-// markingTokens are the tokens newMarkingHandler serves: "tok", openRequest's,
-// is u1's system token under account g1 (welcomeProfile) and "tok-g2" u1's
-// under account g2; "chat", "chat-g2" and "chat-u2" are the chat tokens of u1
-// under g1, of u1 under g2 and of u2 under g1.
 var markingTokens = func() tokenVerifier {
 	chat := func(entity, group string) profile.Profile {
 		return profile.Profile{EntityID: entity, Group: group, Kind: profile.KindChat}
@@ -1734,9 +1718,7 @@ var markingTokens = func() tokenVerifier {
 	}
 }()
 
-// newMarkingHandler is newOpenHandler serving markingTokens, whose
-// CreateSession also creates the session in the store, as main's does: a
-// user's chat turn creates its session and marks it before it runs.
+// newMarkingHandler's CreateSession creates the session in the store, as main's does.
 func newMarkingHandler(store testStore, override ...func(*HandlerConfig)) (*openRecorder, pkg.MessageHandler) {
 	var rec *openRecorder
 	var h pkg.MessageHandler
@@ -1751,30 +1733,21 @@ func newMarkingHandler(store testStore, override ...func(*HandlerConfig)) (*open
 	return rec, h
 }
 
-// chatMessage is a user's own message "hello" under token in conversation conv
-// on channel.
 func chatMessage(token, channel, conv string) pkg.InboundMessage {
 	return pkg.InboundMessage{ChannelID: channel, ConversationID: conv, Content: "hello",
 		Metadata: map[string]string{"profile_token": token}}
 }
 
-// chatTurn hands msg to h under the key the registry gives it and returns the
-// answer.
 func chatTurn(h pkg.MessageHandler, msg pkg.InboundMessage) pkg.OutboundMessage {
 	out, _ := h(context.Background(), pkg.SessionKey(msg.ChannelID, msg.ConversationID, msg.ThreadID), msg)
 	return out
 }
 
-// noteTo is the metadata of a note for target under token (see openRequest).
 func noteTo(target, token string) map[string]string {
 	return map[string]string{"profile_token": token, pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2"}
 }
 
-// TestHandler_OpenSession_NoteReachesAChatAfterTheUsersTurn: the user's
-// ordinary conversation, here one from before the verified-owner mark, takes
-// no note until the user's own chat turn ran in it. After it a note is taken,
-// stored hidden and run, and its reply reaches the conversation stamped with
-// the user as its owner, which the channel gates delivery on.
+// A conversation from before the mark takes no note until the user's own chat turn ran in it.
 func TestHandler_OpenSession_NoteReachesAChatAfterTheUsersTurn(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		const chat = "u1:websocket:c1"
@@ -1809,16 +1782,7 @@ func TestHandler_OpenSession_NoteReachesAChatAfterTheUsersTurn(t *testing.T) {
 	})
 }
 
-// TestHandler_OpenSession_NoteNeedsTheMarkOfTheUsersAccountAndChannel: a note
-// reaches an ordinary session only by a verified-owner mark naming the token's
-// user and account and the request's channel, and only the user's own chat
-// turn under a verified profile sets one. Another user's chat, the user's under
-// another account or on another channel, an anonymous session whose key reads
-// like the user's conversation and whose owner, account and channel the store
-// backfilled, and a session only a system token's turn or a resume handshake
-// touched answer not_found; a thread of the user's conversation is no note
-// target and answers bad_request. None of them stores, reserves or runs the
-// note.
+// Only the user's own chat turn under a verified profile marks a session; a note needs the mark of its user, account and channel.
 func TestHandler_OpenSession_NoteNeedsTheMarkOfTheUsersAccountAndChannel(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		type handlers struct{ verified, anonymous pkg.MessageHandler }
@@ -1838,7 +1802,7 @@ func TestHandler_OpenSession_NoteNeedsTheMarkOfTheUsersAccountAndChannel(t *test
 			{"the user's chat under another account", "u1:websocket:c1", chat("chat-g2", "websocket"), true, "not_found"},
 			{"the user's chat on another channel", "u1:slack:c1", chat("chat", "slack"), true, "not_found"},
 			{"an anonymous session with a backfilled owner", "u1:websocket:c4", func(t *testing.T, rec *openRecorder, h handlers) {
-				// "<channel>:<conversation>:<thread>" of channel u1, conversation websocket.
+				// keyed "u1:websocket:c4", like a conversation of u1
 				chatTurn(h.anonymous, pkg.InboundMessage{ChannelID: "u1", ConversationID: "websocket", ThreadID: "c4", Content: "hello"})
 				rec.store.backfill(t, "u1:websocket:c4", "u1", "g1", "websocket")
 			}, false, "not_found"},
@@ -1898,15 +1862,11 @@ func TestHandler_OpenSession_NoteNeedsTheMarkOfTheUsersAccountAndChannel(t *test
 	})
 }
 
-// TestHandler_OpenSession_NoteTakesAnOpenedSessionUnderItsAccountOnly: a
-// session the open path opened takes a note by what that path recorded when it
-// opened it, the account among it. The same user's system token under another
-// account answers not_found and stores, reserves and runs nothing, also after
-// the user's own chat turn under that account marked the session.
+// An opened session takes a note only under the account it was opened for, whatever account its mark names.
 func TestHandler_OpenSession_NoteTakesAnOpenedSessionUnderItsAccountOnly(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		rec, h := newMarkingHandler(kind.open(t))
-		callOpen(h, "c1", nil) // opens openedSession under g1 and runs its first turn
+		callOpen(h, "c1", nil)
 		if out := chatTurn(h, chatMessage("chat-g2", "websocket", "c1")); out.Content != "reply: hello" {
 			t.Fatalf("the user's turn under g2 answered %q, want its reply", out.Content)
 		}
@@ -1942,8 +1902,6 @@ func TestHandler_OpenSession_NoteTakesAnOpenedSessionUnderItsAccountOnly(t *test
 	})
 }
 
-// firstRunHook calls before once, when the first turn reaches the runner and
-// before that turn runs.
 type firstRunHook struct {
 	pkg.Runner
 	before func()
@@ -1957,9 +1915,7 @@ func (r *firstRunHook) Run(ctx context.Context, sessionKey, content string, file
 	return r.Runner.Run(ctx, sessionKey, content, files...)
 }
 
-// TestHandler_OpenSession_NoteReachesAChatWhileItsFirstTurnRuns: the user's
-// turn marks its session before it runs, so a note arriving while the first
-// turn of a new conversation is still running is taken.
+// The user's turn marks its session before it runs, so a note is taken while the first turn still runs.
 func TestHandler_OpenSession_NoteReachesAChatWhileItsFirstTurnRuns(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		const chat = "u1:websocket:c1"
@@ -1984,9 +1940,7 @@ func TestHandler_OpenSession_NoteReachesAChatWhileItsFirstTurnRuns(t *testing.T)
 	})
 }
 
-// TestHandler_ChatTurnRunsWhenItsMarkIsNotWritten: a mark the store fails to
-// write is logged and does not stop the user's turn; the conversation stays
-// out of a note's reach until a later turn marks it.
+// A mark the store fails to write does not stop the user's turn.
 func TestHandler_ChatTurnRunsWhenItsMarkIsNotWritten(t *testing.T) {
 	logs := captureLogs(t)
 	_, h := newMarkingHandler(memoryStore(), func(cfg *HandlerConfig) {
@@ -2006,11 +1960,7 @@ func TestHandler_ChatTurnRunsWhenItsMarkIsNotWritten(t *testing.T) {
 	}
 }
 
-// TestHandler_OpenSession_RecoveryOfANoteRechecksItsReach: a note whose key a
-// dead attempt holds is recovered once the reservation is stale, and only into
-// a session the note still reaches. The user's chat turn under another account
-// marks the session for that account meanwhile, so the recovery runs and
-// stores nothing.
+// A recovered note is stored only into a session it still reaches.
 func TestHandler_OpenSession_RecoveryOfANoteRechecksItsReach(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		shortOpenerTiming(t)
@@ -2037,9 +1987,7 @@ func TestHandler_OpenSession_RecoveryOfANoteRechecksItsReach(t *testing.T) {
 	})
 }
 
-// noteTiming sets the deadline of a note without a reply (the turn timeout),
-// the reservation's expiry, a short recovery leeway and a short poll for a
-// test. NewMessageHandler reads them, so call it before building the handler.
+// noteTiming must run before the handler is built: NewMessageHandler reads the timings once.
 func noteTiming(t *testing.T, deadline, staleAfter time.Duration) {
 	t.Helper()
 	timeout, stale, leeway, poll := openerTimeout, openerStaleAfter, recoveryLeeway, notePoll
@@ -2047,17 +1995,12 @@ func noteTiming(t *testing.T, deadline, staleAfter time.Duration) {
 	t.Cleanup(func() { openerTimeout, openerStaleAfter, recoveryLeeway, notePoll = timeout, stale, leeway, poll })
 }
 
-// Emit records a session event among the recorder's events, in order with the
-// turns and frames.
 func (r *openRecorder) Emit(_ context.Context, evt emit.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events = append(r.events, "event "+evt.EventType)
 }
 
-// gateLLM is the model of newNoteHandler's orchestrator. Its first call
-// closes entered, while the turn holds its session; every call answers "done"
-// once release is closed.
 type gateLLM struct {
 	calls   atomic.Int32
 	once    sync.Once
@@ -2080,9 +2023,6 @@ func (l *gateLLM) Complete(ctx context.Context, _ *provider.CompletionRequest) (
 	}
 }
 
-// newNoteHandler is newOpenHandler whose StoreNote is the orchestrator's,
-// over the recorder's store, with llm as its model and the recorder as its
-// event sink.
 func newNoteHandler(store testStore, llm *gateLLM, override ...func(*HandlerConfig)) (*openRecorder, *orchestrator.Orchestrator, pkg.MessageHandler) {
 	var orch *orchestrator.Orchestrator
 	rec, h := newOpenHandlerOn(store, welcomeProfile, append([]func(*HandlerConfig){func(cfg *HandlerConfig) {
@@ -2095,8 +2035,7 @@ func newNoteHandler(store testStore, llm *gateLLM, override ...func(*HandlerConf
 	return rec, orch, h
 }
 
-// signalStoring closes storing when the first note reaches StoreNote, before
-// it waits for its place among the session's turns.
+// signalStoring fires before the note waits for the session's turn.
 func signalStoring(storing chan struct{}) func(*HandlerConfig) {
 	return func(cfg *HandlerConfig) {
 		next := cfg.StoreNote
@@ -2108,8 +2047,6 @@ func signalStoring(storing chan struct{}) func(*HandlerConfig) {
 	}
 }
 
-// holdTurn runs the user's turn "hello" in sessionID until the returned
-// release, which waits for the turn to end.
 func holdTurn(t *testing.T, orch *orchestrator.Orchestrator, llm *gateLLM, sessionID string) (release func()) {
 	t.Helper()
 	ended := make(chan struct{})
@@ -2125,8 +2062,6 @@ func holdTurn(t *testing.T, orch *orchestrator.Orchestrator, llm *gateLLM, sessi
 	return func() { close(llm.release); <-ended }
 }
 
-// noteWithoutReply is the metadata of a note without a reply for target (see
-// openRequest).
 func noteWithoutReply(target string) map[string]string {
 	return map[string]string{
 		pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2", pkg.NoteReplyMetadataKey: "false",
@@ -2134,8 +2069,6 @@ func noteWithoutReply(target string) map[string]string {
 	}
 }
 
-// await returns what ch delivers, failing the test when nothing comes within
-// a few seconds.
 func await[T any](t *testing.T, ch <-chan T, what string) T {
 	t.Helper()
 	select {
@@ -2148,7 +2081,6 @@ func await[T any](t *testing.T, ch <-chan T, what string) T {
 	}
 }
 
-// noteContent is the content every test note carries.
 var noteContent = openRequest("c8", nil).Content
 
 func countEvents(got []string, event string) int {
@@ -2161,12 +2093,7 @@ func countEvents(got []string, event string) int {
 	return n
 }
 
-// TestHandler_OpenSession_NoteWithoutAReplyIsStoredWithoutATurn: a note
-// without a reply is stored as a hidden user message, one note_stored event
-// is emitted, and only then is the attempt answered created=true. Nothing of
-// a turn follows: no model call, no run and no frame to the session's
-// conversation. The same call again answers created=false, stores nothing and
-// emits nothing.
+// A note without a reply is stored and note_stored emitted before the answer, and no turn follows.
 func TestHandler_OpenSession_NoteWithoutAReplyIsStoredWithoutATurn(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		llm := newGateLLM()
@@ -2201,7 +2128,7 @@ func TestHandler_OpenSession_NoteWithoutAReplyIsStoredWithoutATurn(t *testing.T)
 	})
 }
 
-// R2: the key stays taken when summarisation or trimming drops the note's row.
+// The key stays taken after summarisation or trimming drops the note's row.
 func TestHandler_OpenSession_NoteKeyOutlivesItsRow(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		for _, reply := range []string{"true", "false"} {
@@ -2247,11 +2174,7 @@ func TestHandler_OpenSession_NoteKeyOutlivesItsRow(t *testing.T) {
 	})
 }
 
-// TestHandler_OpenSession_NoteWithoutAReplyIsStoredOnceForConcurrentCalls: of
-// concurrent calls with one key while a turn holds the session, one takes the
-// key and stores the note when the turn ends; the others find the key held and
-// answer created=false once it is stored. Every answer follows the stored
-// note, and no call runs a turn.
+// Of concurrent calls with one key, one stores the note once the turn ends; every answer follows the stored note.
 func TestHandler_OpenSession_NoteWithoutAReplyIsStoredOnceForConcurrentCalls(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		noteTiming(t, 2*time.Second, 4*time.Second)
@@ -2296,13 +2219,7 @@ func TestHandler_OpenSession_NoteWithoutAReplyIsStoredOnceForConcurrentCalls(t *
 	})
 }
 
-// TestHandler_OpenSession_NoteWithoutAReplyWaitsForTheSessionsTurn: a note
-// whose key this call took waits for a turn in flight. When the turn ends
-// before the note's deadline, the note is stored after the turn's rows and
-// then answered created=true. When the turn outlasts the deadline, nothing is
-// stored, nothing is emitted, the call gets no answer and its key is free: the
-// same call again stores the note. A session deleted while the note waits
-// answers not_found.
+// A note is stored after the turn in flight; past its deadline it stores nothing, gets no answer and frees its key.
 func TestHandler_OpenSession_NoteWithoutAReplyWaitsForTheSessionsTurn(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		const deadline = 300 * time.Millisecond
@@ -2366,11 +2283,7 @@ func TestHandler_OpenSession_NoteWithoutAReplyWaitsForTheSessionsTurn(t *testing
 	})
 }
 
-// TestHandler_OpenSession_NoteWithoutAReplyGivesUpWhileTheTurnRuns: a note
-// whose deadline passes while a turn holds the session returns at its
-// deadline, before the turn ends, without an answer and with its key free, so
-// the same call again could take it at once. Nothing is stored, also once the
-// turn ends.
+// A note returns at its deadline, before the turn ends, with its key free.
 func TestHandler_OpenSession_NoteWithoutAReplyGivesUpWhileTheTurnRuns(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		noteTiming(t, 300*time.Millisecond, 3*time.Second)
@@ -2399,9 +2312,7 @@ func TestHandler_OpenSession_NoteWithoutAReplyGivesUpWhileTheTurnRuns(t *testing
 	})
 }
 
-// liveFreeOpener frees a note reservation only under a context that has not
-// ended, as the DB-backed store, whose statement fails at once under an ended
-// one.
+// liveFreeOpener fails under an ended context, as the DB-backed store's statement does.
 type liveFreeOpener struct{ SessionOpener }
 
 func (o liveFreeOpener) FreeNote(ctx context.Context, id, key string, reservedAt time.Time) error {
@@ -2411,10 +2322,7 @@ func (o liveFreeOpener) FreeNote(ctx context.Context, id, key string, reservedAt
 	return o.SessionOpener.FreeNote(ctx, id, key, reservedAt)
 }
 
-// TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenItsRequestEnds: a
-// note waiting for a turn in flight whose request ends (the caller is gone,
-// the channel shuts down) returns, stores nothing and frees its key, so the
-// same call again can take it while the turn still runs.
+// A note whose request ends while it waits frees its key, so the same call can take it while the turn still runs.
 func TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenItsRequestEnds(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		noteTiming(t, 2*time.Second, 4*time.Second)
@@ -2448,7 +2356,6 @@ func TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenItsRequestEnds(t *t
 	})
 }
 
-// heldOpener closes held when a note reservation is first found held.
 type heldOpener struct {
 	SessionOpener
 	once sync.Once
@@ -2463,11 +2370,7 @@ func (o *heldOpener) ReserveNote(ctx context.Context, id, key string, now time.T
 	return result, err
 }
 
-// TestHandler_OpenSession_NoteWithoutAReplyWaitsForAHeldKey: a note whose key
-// a dead attempt holds waits for it until the note's deadline and then gets
-// no answer; nothing is stored or sent. Once the reservation is stale, the
-// recovery stores the note once, runs no turn and sends nothing. A session
-// deleted while the call waits answers not_found.
+// A note whose key a dead attempt holds gets no answer at its deadline; its recovery stores it, without a turn, once the key is stale.
 func TestHandler_OpenSession_NoteWithoutAReplyWaitsForAHeldKey(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		t.Run("the wait runs out, the recovery stores the note", func(t *testing.T) {
@@ -2528,13 +2431,7 @@ func TestHandler_OpenSession_NoteWithoutAReplyWaitsForAHeldKey(t *testing.T) {
 	})
 }
 
-// TestHandler_OpenSession_RecoveryLeavesAFreedNoteKeyFree: duplicates of a
-// note without a reply while a turn holds the session, the duplicate with a
-// reply or without one. The first call takes the key, the duplicate finds it
-// held and schedules the note's recovery. Both deadlines pass before the turn
-// ends, and the first call frees its key, which then belongs to the caller's
-// next attempt. The recovery finds no reservation to take over: nothing is
-// stored and no turn runs, and the same call again stores the note.
+// A recovery never takes a key its first attempt freed: the key belongs to the caller's next attempt.
 func TestHandler_OpenSession_RecoveryLeavesAFreedNoteKeyFree(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		const deadline = 200 * time.Millisecond
@@ -2584,11 +2481,7 @@ func TestHandler_OpenSession_RecoveryLeavesAFreedNoteKeyFree(t *testing.T) {
 	})
 }
 
-// TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenNotStored: a note
-// whose write fails is refused with internal_error and frees its key, so the
-// same call again stores it and answers created=true. An error returned after
-// the write committed frees nothing: the same call again answers
-// created=false and stores nothing.
+// A failed write frees the note's key; an error after the write committed does not.
 func TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenNotStored(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		for _, tc := range []struct {
@@ -2644,12 +2537,7 @@ func TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenNotStored(t *testin
 	})
 }
 
-// TestHandler_OpenSession_WaitingNoteRechecksItsReach: a note without a reply
-// reaches the user's chat under account g1 and finds its key held by another
-// attempt. While it waits, the user's chat turn under account g2 marks the
-// session for g2, and the holder frees its reservation. The waiting call takes
-// the key, no longer reaches the session, frees the key again and answers
-// not_found: nothing is stored or answered.
+// A note that waited for a held key is refused when the user's turn under another account marked the session meanwhile.
 func TestHandler_OpenSession_WaitingNoteRechecksItsReach(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		noteTiming(t, 2*time.Second, 4*time.Second)
@@ -2693,7 +2581,7 @@ func TestHandler_OpenSession_WaitingNoteRechecksItsReach(t *testing.T) {
 	})
 }
 
-// R1: the mark is written outside the turn lock, so a note that took its key at once and waits for a turn is refused when the user's turn under another account marks the session meanwhile.
+// The mark is written outside the turn lock: a note waiting for a turn is refused when the user's turn under another account marks the session.
 func TestHandler_OpenSession_NoteWaitingForATurnIsRefusedUnderANewAccount(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		noteTiming(t, 2*time.Second, 4*time.Second)
@@ -2731,8 +2619,6 @@ func TestHandler_OpenSession_NoteWaitingForATurnIsRefusedUnderANewAccount(t *tes
 	})
 }
 
-// vanishingOpener deletes a note's session right before its reservation, as
-// a session deleted between the note's lookup and its claim.
 type vanishingOpener struct{ sessionStore }
 
 func (o vanishingOpener) ReserveNote(ctx context.Context, id, key string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
@@ -2740,9 +2626,7 @@ func (o vanishingOpener) ReserveNote(ctx context.Context, id, key string, now ti
 	return o.sessionStore.ReserveNote(ctx, id, key, now, staleAfter)
 }
 
-// TestHandler_OpenSession_NoteForASessionGoneAtItsClaimIsNotFound: a note
-// whose session is deleted between its lookup and its claim answers not_found,
-// with a reply and without one, and nothing is run, stored or sent.
+// A session deleted between a note's lookup and its claim answers not_found.
 func TestHandler_OpenSession_NoteForASessionGoneAtItsClaimIsNotFound(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		for _, reply := range []string{"true", "false"} {
@@ -2767,11 +2651,7 @@ func TestHandler_OpenSession_NoteForASessionGoneAtItsClaimIsNotFound(t *testing.
 	})
 }
 
-// TestHandler_OpenSession_ReplySwitchIsANotesTrueOrFalse: the reply switch
-// belongs to a note and reads "true" or "false". On an open, and with any
-// other value, the attempt is refused with bad_request before the store is
-// asked: nothing is opened, stored, reserved, run or sent. "true" runs the
-// note as a hidden turn as without the switch, and its reply does not carry it.
+// The reply switch belongs to a note and reads "true" or "false"; anything else is refused before the store is asked.
 func TestHandler_OpenSession_ReplySwitchIsANotesTrueOrFalse(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

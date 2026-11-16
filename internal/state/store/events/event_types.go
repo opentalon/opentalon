@@ -34,10 +34,7 @@ const (
 	TypeUserMessage = "user_message"
 	TypeLLMRequest  = "llm_request"
 	TypeLLMResponse = "llm_response"
-	// note_stored records a hidden note stored in the session without a turn
-	// (Orchestrator.StoreNote): no user_message, turn_start or turn_finished
-	// comes with it, so a consumer that reads user_message as the start of a
-	// turn never sees one for the note.
+	// note_stored: a hidden note stored without a turn; no user_message, turn_start or turn_finished comes with it.
 	TypeNoteStored = "note_stored"
 
 	// Planner / orchestrator internals (debug-view or fold-default in UI).
@@ -356,8 +353,6 @@ type UserMessagePayload struct {
 
 const UserMessageVersion = 1
 
-// NoteStoredPayload — a hidden note stored without a turn: the key it was
-// reserved under and its content, as UserMessagePayload carries a user's.
 type NoteStoredPayload struct {
 	Header
 	NoteKey       string `json:"note_key"`

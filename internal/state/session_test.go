@@ -249,11 +249,7 @@ func TestSessionMetadata(t *testing.T) {
 	}
 }
 
-// TestSessionMarkSetWhileTheSessionIsRead: SetVerifiedOwner runs outside the
-// turn lock, so it may run while a turn copies the whole session Get answered
-// (the orchestrator's request cache does), while the session is saved, listed
-// or opened again. Under -race a reader fails here while it reads the live
-// session outside the store's lock.
+// SetVerifiedOwner runs outside the turn lock: under -race a reader of the live session outside the store's lock fails here.
 func TestSessionMarkSetWhileTheSessionIsRead(t *testing.T) {
 	opened := SessionParams{ID: "u1:websocket:o1", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-1"}
 	for _, tc := range []struct {
@@ -325,8 +321,6 @@ func TestSessionMarkSetWhileTheSessionIsRead(t *testing.T) {
 	}
 }
 
-// TestSessionGetAnswersACopy: changing what Get, OpenSession or List answered
-// changes nothing in the store; the store's own writes do.
 func TestSessionGetAnswersACopy(t *testing.T) {
 	store := NewSessionStore("")
 	opened := SessionParams{ID: "u1:websocket:o1", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-1"}
