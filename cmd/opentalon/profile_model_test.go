@@ -62,8 +62,9 @@ func (u *usageSpy) RecordUsage(_ context.Context, _, _, _, _, modelID, _, _ stri
 
 // TestProfileModelServedAtItsProvider drives a chat turn whose whoami profile
 // names a model through the provider buildProvider builds and orch.Run, in the
-// setup with fallbacks and in the setup with one default provider. The
-// Anthropic provider is outside routing and its key is unset.
+// setup with fallbacks and in the setup with one default provider and no
+// fallbacks, where no health gate stands behind it. The Anthropic provider is
+// outside routing and its key is unset.
 func TestProfileModelServedAtItsProvider(t *testing.T) {
 	const (
 		defaultAnswer = `{"id":"c1","model":"default-model","choices":[{"message":{"role":"assistant","content":"From the default."},` +
@@ -80,6 +81,7 @@ func TestProfileModelServedAtItsProvider(t *testing.T) {
 		stream       bool   // the round would stream
 		claude       bool   // Claude answers; otherwise the default model does
 		wantThinking string // the Anthropic request's thinking and output_config; empty = neither
+		wantModel    string // the model the default chain is sent; empty = default-model
 		wantWarn     string
 	}{
 		{name: "selected model", model: "anthropic/claude-x", claude: true, wantThinking: adaptive + ` {"effort":"medium"}`},
@@ -88,12 +90,19 @@ func TestProfileModelServedAtItsProvider(t *testing.T) {
 		{name: "a streaming round", model: "anthropic/claude-x", stream: true, claude: true, wantThinking: adaptive + ` {"effort":"medium"}`},
 		{name: "unknown provider", model: "nope/claude-x", wantWarn: "nope/claude-x"},
 		{name: "unknown model", model: "anthropic/claude-nope", wantWarn: "anthropic/claude-nope"},
+		{name: "unknown bare id", model: "unknown-model", wantWarn: "unknown-model"},
+		{name: "no provider part", model: "/missing", wantWarn: "/missing"},
+		{name: "no model part", model: "anthropic/", wantWarn: "anthropic/"},
+		{name: "known bare id", model: "other-model", wantModel: "other-model"},
 		{name: "no profile model", model: ""},
 		{name: "selected provider refuses", model: "anthropic/claude-x", anthStatus: http.StatusUnauthorized, wantWarn: "claude-x"},
 	}
-	for _, fallbacks := range []string{"[backup/backup-model]", "[]"} {
+	for _, setup := range []struct{ name, fallbacks string }{
+		{"with fallbacks", "[backup/backup-model]"},
+		{"single provider without fallbacks", "[]"},
+	} {
 		for _, tc := range cases {
-			t.Run(fallbacks+"/"+tc.name, func(t *testing.T) {
+			t.Run(setup.name+"/"+tc.name, func(t *testing.T) {
 				var logs bytes.Buffer
 				prev := slog.Default()
 				slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
@@ -115,6 +124,7 @@ models:
       models:
         - id: default-model
           features: [reasoning]
+        - id: other-model
     backup:
       api: openai-completions
       base_url: ` + backup.URL + `
@@ -133,7 +143,7 @@ models:
         - id: claude-plain
 routing:
   primary: primary/default-model
-  fallbacks: ` + fallbacks + `
+  fallbacks: ` + setup.fallbacks + `
 `))
 				if err != nil {
 					t.Fatal(err)
@@ -208,8 +218,12 @@ routing:
 					if err := json.Unmarshal([]byte(got[0]), &sent); err != nil {
 						t.Fatal(err)
 					}
-					if sent.Model != "default-model" || res.Response != "From the default." {
-						t.Errorf("default model was sent %q and answered %q, want default-model and its answer", sent.Model, res.Response)
+					want := tc.wantModel
+					if want == "" {
+						want = "default-model"
+					}
+					if sent.Model != want || res.Response != "From the default." {
+						t.Errorf("default chain was sent %q and answered %q, want %s and its answer", sent.Model, res.Response, want)
 					}
 				}
 				if tc.wantWarn != "" && !warnedAbout(logs.String(), tc.wantWarn) {
