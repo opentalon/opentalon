@@ -35,6 +35,7 @@ const (
 		`"usage":{"input_tokens":10,"output_tokens":2}}`
 	anthAuthError      = `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`
 	anthSpendLimit     = `{"type":"error","error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits. You will regain access on 2026-12-01 at 00:00 UTC."}}`
+	anthCreditTooLow   = `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`
 	anthOverloaded     = `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`
 	anthInvalidRequest = `{"type":"error","error":{"type":"invalid_request_error","message":"messages.3.content.0: unexpected tool_use_id found in tool_result blocks"}}`
 )
@@ -249,6 +250,8 @@ func TestSelectedProviderFailure(t *testing.T) {
 		{name: "the key is refused", answer: fakeAnswer{401, anthAuthError}, failure: "authentication_error", marks: true},
 		{name: "the spend limit is reached", answer: fakeAnswer{400, anthSpendLimit},
 			failure: "You have reached your specified API usage limits", marks: true},
+		{name: "the credit balance is too low", answer: fakeAnswer{400, anthCreditTooLow},
+			failure: "Your credit balance is too low", marks: true},
 		{name: "overloaded", answer: fakeAnswer{529, anthOverloaded}, failure: "overloaded_error", marks: true},
 		{name: "cannot be reached", unreachable: true, failure: "connection refused", marks: true},
 		{name: "reaches its time limit", answer: fakeAnswer{200, claudeTextBody}, hold: true,

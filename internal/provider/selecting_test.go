@@ -59,18 +59,39 @@ func selectedRequestOf() *CompletionRequest {
 	return &CompletionRequest{Model: "m2", ModelRef: "sel/m2"}
 }
 
-// TestSelectedContextOverflowIsReturned: a prompt longer than the selected
-// model's window is the caller's to handle, as before; the default model is
-// not asked and the provider stays healthy.
-func TestSelectedContextOverflowIsReturned(t *testing.T) {
+// TestSelectedContextOverflow: a prompt longer than the selected model's
+// window is the caller's to handle, as before, when the default model's
+// window is no larger: the chat loop trims to that window and sends again.
+// When the default model's window is larger, the default model answers. The
+// provider stays healthy either way.
+func TestSelectedContextOverflow(t *testing.T) {
 	tooLong := &StatusError{api: "anthropic", StatusCode: 400,
 		Body: `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`}
-	s, def, _ := newSelectedFixture(t, tooLong, func(context.Context) error { return nil })
-	if _, err := s.Complete(context.Background(), selectedRequestOf()); !errors.Is(err, tooLong) {
-		t.Fatalf("error = %v, want the overflow", err)
+	cases := []struct {
+		name          string
+		defaultWindow int
+		defaultUsed   bool
+	}{
+		{"the default window is the same", 200_000, false},
+		{"the default window is smaller", 128_000, false},
+		{"the default window is larger", 400_000, true},
 	}
-	if def.calls != 0 || !s.providers["sel"].health.isHealthy() {
-		t.Errorf("default got %d calls, selected healthy %v; want none and healthy", def.calls, s.providers["sel"].health.isHealthy())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, def, sel := newSelectedFixture(t, tooLong, func(context.Context) error { return nil })
+			def.window, sel.window = tc.defaultWindow, 200_000
+			resp, err := s.Complete(context.Background(), selectedRequestOf())
+			if tc.defaultUsed {
+				if err != nil || resp.ID != "primary" || !resp.Fallback {
+					t.Fatalf("got %+v, %v; want the default's answer, marked as a fallback", resp, err)
+				}
+			} else if !errors.Is(err, tooLong) || def.calls != 0 {
+				t.Fatalf("error = %v, default calls %d; want the overflow and none", err, def.calls)
+			}
+			if !s.providers["sel"].health.isHealthy() {
+				t.Error("a prompt too long for the selected model marked its provider unhealthy")
+			}
+		})
 	}
 }
 

@@ -20,12 +20,13 @@ type fakeProvider struct {
 	calls     int
 	extra     []string       // further model ids it serves besides model
 	stream    ResponseStream // what Stream returns when it does not fail; nil = an error
+	window    int            // context window of model; 0 = not set
 }
 
 func (f *fakeProvider) ID() string                   { return f.id }
 func (f *fakeProvider) SupportsFeature(Feature) bool { return true }
 func (f *fakeProvider) Models() []ModelInfo {
-	out := []ModelInfo{{ID: f.model, ProviderID: f.id}}
+	out := []ModelInfo{{ID: f.model, ProviderID: f.id, ContextWindow: f.window}}
 	for _, m := range f.extra {
 		out = append(out, ModelInfo{ID: m, ProviderID: f.id})
 	}
