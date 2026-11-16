@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 )
 
 // selectingProvider serves a request whose ModelRef names a provider and a
@@ -33,30 +34,44 @@ func (s *selectingProvider) Models() []ModelInfo { return s.def.Models() }
 func (s *selectingProvider) SupportsFeature(f Feature) bool { return s.def.SupportsFeature(f) }
 
 // route resolves req.ModelRef. A reference to a model of a defined provider
-// returns that provider and model; one that names no defined provider or
-// model returns none and logs a warning. The request for the default
-// provider carries the default model whenever the reference has a provider
-// part, and is req itself otherwise.
+// returns that provider and model. Every other request goes to the default
+// provider: unchanged without a reference or with a bare id of a model the
+// default provider lists, with the default model for a reference to that
+// model, and with the default model and a warning for anything else.
 func (s *selectingProvider) route(req *CompletionRequest) (Provider, ModelInfo, *CompletionRequest) {
-	providerID, modelID := req.ModelRef.Provider(), req.ModelRef.Model()
-	if providerID == "" {
+	ref := string(req.ModelRef)
+	if ref == "" {
 		return nil, ModelInfo{}, req
 	}
 	def := *req
 	def.Model = s.model
+	providerID, modelID, qualified := strings.Cut(ref, "/")
+	if !qualified {
+		if findModel(s.def.Models(), ref).ID != "" {
+			return nil, ModelInfo{}, req
+		}
+		s.log.Warn("requested model is not a model of the default provider; using the default model",
+			"requested", ref, "model", s.model)
+		return nil, ModelInfo{}, &def
+	}
+	if providerID == "" || modelID == "" {
+		s.log.Warn("requested model is not a <provider>/<model> reference; using the default model",
+			"requested", ref, "model", s.model)
+		return nil, ModelInfo{}, &def
+	}
 	if providerID == s.def.ID() && modelID == s.model {
 		return nil, ModelInfo{}, &def
 	}
 	p, ok := s.providers[providerID]
 	if !ok {
 		s.log.Warn("requested model names a provider the config does not define; using the default model",
-			"requested", string(req.ModelRef), "model", s.model)
+			"requested", ref, "model", s.model)
 		return nil, ModelInfo{}, &def
 	}
 	m := findModel(p.Models(), modelID)
 	if m.ID == "" {
 		s.log.Warn("requested model is not a model of its provider; using the default model",
-			"requested", string(req.ModelRef), "model", s.model)
+			"requested", ref, "model", s.model)
 		return nil, ModelInfo{}, &def
 	}
 	return p, m, &def

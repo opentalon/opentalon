@@ -397,7 +397,8 @@ provider does not have to be part of `routing`:
 | empty, or not a string | the default chain, with a warning |
 | `<provider>/<model>`, both defined | that model at that provider; when the call fails, the default chain, with a warning |
 | `<provider>/<model>`, provider or model not defined | the default model, with a warning |
-| `<model>` without a provider | the default chain, sent that id as before; with fallbacks, an endpoint that does not serve it gets its own model, with a warning |
+| `<model>` without a provider, listed by a model of the default chain | the default chain, sent that id as before |
+| `<model>` without a provider that no model of the default chain lists, or a reference with an empty provider or model part (`/model`, `provider/`) | the default model, with a warning |
 
 - Only the chat loop follows the profile, for `chat` and `system` runs alike.
   Session titles, summaries, the planner, the confirmation classifier, the
