@@ -64,9 +64,9 @@ type openSessions struct {
 // its notes.
 type recoveryKey struct{ sessionID, noteKey string }
 
-// openScope is what an open-session request may reach: the sessions the open
-// path opened for its verified entity on the channel it arrived on (see
-// handle).
+// openScope is what an open-session request may reach: the sessions of its
+// verified entity on the channel it arrived on (see handle, reaches and
+// takesNote).
 type openScope struct{ entityID, channel string }
 
 // reaches reports whether sess is in the scope: the open path opened it (it
@@ -78,6 +78,22 @@ type openScope struct{ entityID, channel string }
 func (s openScope) reaches(sess *state.Session) bool {
 	_, ok := s.conversation(sess.ID)
 	return ok && sess.OpenKey != "" && sess.EntityID == s.entityID && sess.ChannelID == s.channel
+}
+
+// takesNote reports whether sess takes a note of the scope under groupID, the
+// account of the request's verified profile: its key names a conversation of
+// the scope, and it is the user's under that account on the scope's channel. A
+// session the open path opened is that by what the open path recorded when it
+// opened it (reaches, and the account it was opened for); an ordinary session
+// by its verified-owner mark, which only the user's own chat turns set (see
+// NewMessageHandler), as neither its key nor its recorded owner proves it.
+func (s openScope) takesNote(sess *state.Session, groupID string) bool {
+	if sess.OpenKey != "" {
+		return s.reaches(sess) && sess.GroupID == groupID
+	}
+	_, ok := s.conversation(sess.ID)
+	return ok && sess.VerifiedOwner != nil &&
+		*sess.VerifiedOwner == state.VerifiedOwner{EntityID: s.entityID, GroupID: groupID, ChannelID: s.channel}
 }
 
 // conversation returns the conversation of sessionID, a session in the scope:
@@ -144,7 +160,7 @@ func (o *openSessions) handle(ctx context.Context, sessionKey string, msg pkg.In
 	scope := openScope{entityID: entityID, channel: channel}
 	ctx = actor.WithVisibility(ctx, provider.VisibilityHidden)
 	if target != "" {
-		return o.continueSession(ctx, msg, target, scope)
+		return o.continueSession(ctx, msg, target, scope, groupID)
 	}
 	return o.open(ctx, sessionKey, msg, scope, groupID)
 }
@@ -178,8 +194,9 @@ func (o *openSessions) open(ctx context.Context, sessionKey string, msg pkg.Inbo
 }
 
 // continueSession posts the content as a hidden note into target, a session of
-// the user on the request's channel, once per note key (see claimAndRun).
-func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessage, target string, scope openScope) pkg.OutboundMessage {
+// the user under groupID, the verified profile's account, on the request's
+// channel (see takesNote), once per note key (see claimAndRun).
+func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessage, target string, scope openScope, groupID string) pkg.OutboundMessage {
 	noteKey := msg.Metadata[pkg.NoteKeyMetadataKey]
 	if noteKey == "" {
 		return openRejected(msg, "A note needs a note key.", "bad_request")
@@ -191,9 +208,9 @@ func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessa
 		logger.FromContext(ctx).Error("note session lookup failed", "session", target, "error", err)
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
 	}
-	if err != nil || !scope.reaches(sess) {
-		// Gone, not opened by the open path, or another user's or channel's:
-		// alike to the caller.
+	if err != nil || !scope.takesNote(sess, groupID) {
+		// Gone, not proven the user's, or another user's, account's or
+		// channel's: alike to the caller.
 		return openRejected(msg, unavailable, "not_found")
 	}
 	return o.claimAndRun(ctx, msg, scope, recoveryKey{sessionID: target, noteKey: noteKey})

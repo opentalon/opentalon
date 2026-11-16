@@ -50,6 +50,12 @@ type HandlerConfig struct {
 	// ok=false means nothing is pending. Read-only — it MUST NOT consume or
 	// mutate pending state. nil disables confirmation re-emit on resume.
 	PendingConfirmation func(sessionKey string) (content string, metadata map[string]string, ok bool)
+	// SetVerifiedOwner records a session's verified-owner mark (see
+	// state.VerifiedOwner). The handler sets it before every turn a user runs
+	// under a verified profile of the chat kind, and the open path's note
+	// reaches an ordinary session by it (see openScope.takesNote). nil sets no
+	// mark, so no note reaches an ordinary session.
+	SetVerifiedOwner func(ctx context.Context, sessionKey string, owner state.VerifiedOwner) error
 	// Opener is the store side of an open-session message
 	// (pkg.OpenSessionMetadataKey): create-or-find, first-turn claim and note
 	// reservation. Required.
@@ -89,6 +95,9 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	opens := newOpenSessions(cfg)
 	return func(ctx context.Context, sessionKey string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		var entityID, groupID string
+		// The verified-owner mark this message's turn sets: a verified chat
+		// profile's only.
+		var mark *state.VerifiedOwner
 
 		// Inbound enrichment is fail-closed: if the channel adapter
 		// couldn't fetch the data the WhoAmI server (or LLM) is going
@@ -163,6 +172,9 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			groupID = p.Group
 			interactionKind = p.Kind
 			systemSource = p.SystemSource
+			if p.Kind == profile.KindChat {
+				mark = &state.VerifiedOwner{EntityID: p.EntityID, GroupID: p.Group, ChannelID: msg.ChannelID}
+			}
 			sessionKey = p.EntityID + ":" + sessionKey
 			// Use entity ID as actor for memory scoping and permission checks.
 			ctx = actor.WithActor(ctx, p.EntityID)
@@ -277,6 +289,17 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 				}
 			}
 			return pkg.OutboundMessage{}, nil
+		}
+
+		// The user's own turn marks the session theirs before it runs, so a
+		// server's note for the conversation reaches it, also while this turn
+		// is still running. A mark that cannot be written does not stop the
+		// turn: the session keeps the mark it had until a later turn sets it.
+		if mark != nil && cfg.SetVerifiedOwner != nil {
+			if err := cfg.SetVerifiedOwner(ctx, sessionKey, *mark); err != nil {
+				logger.FromContext(ctx).Warn("verified owner mark not set", "session", sessionKey,
+					"channel", msg.ChannelID, "entity_id", entityID, "group_id", groupID, "error", err)
+			}
 		}
 
 		content := msg.Content

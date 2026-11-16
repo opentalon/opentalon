@@ -874,6 +874,7 @@ func newOpenHandler(p profile.Profile, override ...func(*HandlerConfig)) (*openR
 	cfg.Verifier = systemVerifier{p: p}
 	cfg.Runner = rec
 	cfg.Opener = rec.store
+	cfg.SetVerifiedOwner = rec.store.SetVerifiedOwner
 	cfg.SendToConversation = rec.send
 	cfg.ResumeSession = func(key string) error {
 		_, err := rec.store.Get(key)
@@ -918,13 +919,13 @@ func callOpen(h pkg.MessageHandler, conv string, set map[string]string) pkg.Outb
 	return out
 }
 
-// storeOpened opens session id of entity as the open path does, on the channel
-// the id names after the entity.
+// storeOpened opens session id of entity as the open path does for
+// welcomeProfile's account, on the channel the id names after the entity.
 func storeOpened(t *testing.T, store *state.SessionStore, id, entity string) {
 	t.Helper()
 	channel, _, _ := strings.Cut(strings.TrimPrefix(id, entity+":"), ":")
 	if _, created, err := store.OpenSession(context.Background(), state.SessionParams{
-		ID: id, EntityID: entity, OpenedBy: "welcome", OpenKey: "event-1", ChannelID: channel,
+		ID: id, EntityID: entity, GroupID: welcomeProfile.Group, OpenedBy: "welcome", OpenKey: "event-1", ChannelID: channel,
 	}); err != nil || !created {
 		t.Fatalf("OpenSession(%s) = created %v, %v", id, created, err)
 	}
@@ -1634,10 +1635,11 @@ func TestHandler_OpenSession_ReplyReachesItsConversation(t *testing.T) {
 
 // TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound: a note reaches
 // a session the open path opened and the store records for the user and the
-// request's channel only. A session that is gone, another user's, the user's
-// on another channel, or an ordinary chat, also one whose channel the store
-// backfilled, is refused with not_found, so the caller may open a new one, and
-// nothing is stored, reserved, run or sent.
+// request's channel, or an ordinary chat by its verified-owner mark. A session
+// that is gone, another user's, the user's on another channel, or an ordinary
+// chat without the mark, also one whose channel the store backfilled, is
+// refused with not_found, so the caller may open a new one, and nothing is
+// stored, reserved, run or sent.
 func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
 	rec, h := newOpenHandler(welcomeProfile)
 	var foreign []string
@@ -1674,6 +1676,300 @@ func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
 		if result, err := rec.store.ReserveNote(context.Background(), id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
 			t.Errorf("%s note reservation = %v, %v; want it still free", id, result, err)
 		}
+	}
+}
+
+// tokenVerifier answers a fresh copy of the profile its token names, as WhoAmI
+// does, so one handler serves a user's chat tokens and the server's system
+// tokens for that user.
+type tokenVerifier map[string]profile.Profile
+
+func (v tokenVerifier) Verify(_ context.Context, token, _ string, _ map[string]string) (*profile.Profile, error) {
+	p, ok := v[token]
+	if !ok {
+		return nil, errors.New("unknown token")
+	}
+	return &p, nil
+}
+
+// markingTokens are the tokens newMarkingHandler serves: "tok", openRequest's,
+// is u1's system token under account g1 (welcomeProfile) and "tok-g2" u1's
+// under account g2; "chat", "chat-g2" and "chat-u2" are the chat tokens of u1
+// under g1, of u1 under g2 and of u2 under g1.
+var markingTokens = func() tokenVerifier {
+	chat := func(entity, group string) profile.Profile {
+		return profile.Profile{EntityID: entity, Group: group, Kind: profile.KindChat}
+	}
+	underG2 := welcomeProfile
+	underG2.Group = "g2"
+	return tokenVerifier{
+		"tok": welcomeProfile, "tok-g2": underG2,
+		"chat": chat("u1", "g1"), "chat-g2": chat("u1", "g2"), "chat-u2": chat("u2", "g1"),
+	}
+}()
+
+// newMarkingHandler is newOpenHandler serving markingTokens, whose
+// CreateSession also creates the session in the store, as main's does: a
+// user's chat turn creates its session and marks it before it runs.
+func newMarkingHandler(override ...func(*HandlerConfig)) (*openRecorder, pkg.MessageHandler) {
+	var rec *openRecorder
+	var h pkg.MessageHandler
+	rec, h = newOpenHandler(welcomeProfile, append([]func(*HandlerConfig){func(cfg *HandlerConfig) {
+		cfg.Verifier = markingTokens
+		mint := cfg.CreateSession
+		cfg.CreateSession = func(p state.SessionParams) {
+			mint(p)
+			rec.store.Create(p)
+		}
+	}}, override...)...)
+	return rec, h
+}
+
+// chatMessage is a user's own message "hello" under token in conversation conv
+// on channel.
+func chatMessage(token, channel, conv string) pkg.InboundMessage {
+	return pkg.InboundMessage{ChannelID: channel, ConversationID: conv, Content: "hello",
+		Metadata: map[string]string{"profile_token": token}}
+}
+
+// chatTurn hands msg to h under the key the registry gives it and returns the
+// answer.
+func chatTurn(h pkg.MessageHandler, msg pkg.InboundMessage) pkg.OutboundMessage {
+	out, _ := h(context.Background(), pkg.SessionKey(msg.ChannelID, msg.ConversationID, msg.ThreadID), msg)
+	return out
+}
+
+// noteTo is the metadata of a note for target under token (see openRequest).
+func noteTo(target, token string) map[string]string {
+	return map[string]string{"profile_token": token, pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2"}
+}
+
+// TestHandler_OpenSession_NoteReachesAChatAfterTheUsersTurn: the user's
+// ordinary conversation, here one from before the verified-owner mark, takes
+// no note until the user's own chat turn ran in it. After it a note is taken,
+// stored hidden and run, and its reply reaches the conversation stamped with
+// the user as its owner, which the channel gates delivery on.
+func TestHandler_OpenSession_NoteReachesAChatAfterTheUsersTurn(t *testing.T) {
+	const chat = "u1:websocket:c1"
+	rec, h := newMarkingHandler()
+	rec.store.Create(state.SessionParams{ID: chat, EntityID: "u1", GroupID: "g1"})
+	note := noteTo(chat, "tok")
+
+	if out := callOpen(h, "c8", note); out.Metadata["error_code"] != "not_found" {
+		t.Fatalf("note before the user's turn answered %+v, want not_found", out.Metadata)
+	}
+	if out := chatTurn(h, chatMessage("chat", "websocket", "c1")); out.Content != "reply: hello" {
+		t.Fatalf("chat turn answered %q, want its reply", out.Content)
+	}
+	if out := callOpen(h, "c8", note); out.Content != "" || len(out.Metadata) != 0 {
+		t.Fatalf("note after the user's turn answered %+v, want the empty frame: its answer goes to the caller's conversation", out)
+	}
+
+	_, runs, frames := rec.snapshot()
+	if len(runs) != 2 || runs[1].sessionID != chat || runs[1].content != openRequest("c8", nil).Content {
+		t.Fatalf("turns = %+v, want the chat turn and then the note's in %s", runs, chat)
+	}
+	if len(frames) != 2 || frames[0].msg.Metadata["created"] != "true" || frames[0].msg.Metadata[pkg.OpenSessionIDMetadataKey] != chat {
+		t.Fatalf("frames = %+v, want the answer created for %s and the note's reply", frames, chat)
+	}
+	if reply := frames[1]; reply.channel != "websocket" || reply.msg.ConversationID != "c1" ||
+		reply.msg.Metadata["type"] != "" || reply.msg.Metadata[pkg.OwnerEntityMetadataKey] != "u1" {
+		t.Errorf("note reply = %+v on %s, want a reply to websocket/c1 stamped with owner u1", reply.msg, reply.channel)
+	}
+	if sess, _ := rec.store.Get(chat); len(sess.Messages) != 2 || sess.Messages[1].Visibility != provider.VisibilityHidden {
+		t.Errorf("stored messages = %+v, want the chat turn's and the hidden note", sess.Messages)
+	}
+}
+
+// TestHandler_OpenSession_NoteNeedsTheMarkOfTheUsersAccountAndChannel: a note
+// reaches an ordinary session only by a verified-owner mark naming the token's
+// user and account and the request's channel, and only the user's own chat
+// turn under a verified profile sets one. Another user's chat, the user's under
+// another account or on another channel, an anonymous session whose key reads
+// like the user's conversation and whose owner, account and channel the store
+// backfilled, and a session only a system token's turn or a resume handshake
+// touched answer not_found; a thread of the user's conversation is no note
+// target and answers bad_request. None of them stores, reserves or runs the
+// note.
+func TestHandler_OpenSession_NoteNeedsTheMarkOfTheUsersAccountAndChannel(t *testing.T) {
+	type handlers struct{ verified, anonymous pkg.MessageHandler }
+	chat := func(token, channel string) func(*testing.T, *openRecorder, handlers) {
+		return func(_ *testing.T, _ *openRecorder, h handlers) {
+			chatTurn(h.verified, chatMessage(token, channel, "c1"))
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		target string
+		touch  func(*testing.T, *openRecorder, handlers)
+		marked bool
+		code   string
+	}{
+		{"another user's chat", "u2:websocket:c1", chat("chat-u2", "websocket"), true, "not_found"},
+		{"the user's chat under another account", "u1:websocket:c1", chat("chat-g2", "websocket"), true, "not_found"},
+		{"the user's chat on another channel", "u1:slack:c1", chat("chat", "slack"), true, "not_found"},
+		{"an anonymous session with a backfilled owner", "u1:websocket:c4", func(_ *testing.T, rec *openRecorder, h handlers) {
+			// "<channel>:<conversation>:<thread>" of channel u1, conversation websocket.
+			chatTurn(h.anonymous, pkg.InboundMessage{ChannelID: "u1", ConversationID: "websocket", ThreadID: "c4", Content: "hello"})
+			backfilled := rec.store.Create(state.SessionParams{ID: "u1:websocket:c4"})
+			backfilled.EntityID, backfilled.GroupID, backfilled.ChannelID = "u1", "g1", "websocket"
+		}, false, "not_found"},
+		{"a session only a system token's turn touched", "u1:websocket:c1", func(_ *testing.T, _ *openRecorder, h handlers) {
+			msg := chatMessage("tok", "websocket", "c1")
+			msg.Metadata["visibility"] = provider.VisibilityHidden
+			chatTurn(h.verified, msg)
+		}, false, "not_found"},
+		{"a session only a resume handshake touched", "u1:websocket:c1", func(t *testing.T, rec *openRecorder, h handlers) {
+			rec.store.Create(state.SessionParams{ID: "u1:websocket:c1", EntityID: "u1", GroupID: "g1"})
+			msg := chatMessage("chat", "websocket", "c1")
+			msg.Content = ""
+			msg.Metadata[pkg.ResumeIntentMetadataKey] = "true"
+			msg.Metadata[pkg.ControlMetadataKey] = pkg.ControlResumeHello
+			if out := chatTurn(h.verified, msg); out.Content != "" || out.Metadata["type"] == "error" {
+				t.Fatalf("resume handshake answered %+v, want the empty frame", out)
+			}
+		}, false, "not_found"},
+		{"a thread of the user's chat", "u1:websocket:c1:t1", func(_ *testing.T, _ *openRecorder, h handlers) {
+			msg := chatMessage("chat", "websocket", "c1")
+			msg.ThreadID = "t1"
+			chatTurn(h.verified, msg)
+		}, true, "bad_request"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var anonymous pkg.MessageHandler
+			rec, verified := newMarkingHandler(func(cfg *HandlerConfig) {
+				anon := *cfg
+				anon.Verifier = nil
+				anonymous = NewMessageHandler(anon)
+			})
+			tc.touch(t, rec, handlers{verified: verified, anonymous: anonymous})
+			identity, err := rec.store.Identity(context.Background(), tc.target)
+			if err != nil || (identity.VerifiedOwner != nil) != tc.marked {
+				t.Fatalf("%s after its turn = %+v, %v; want it marked %v", tc.target, identity, err, tc.marked)
+			}
+			before, _, _ := rec.snapshot()
+			stored := countStored(t, rec.store, tc.target, openRequest("c8", nil).Content)
+
+			out := callOpen(verified, "c8", noteTo(tc.target, "tok"))
+
+			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != tc.code ||
+				out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c8" {
+				t.Errorf("note answered %+v, want open_rejected %s with req-c8", out.Metadata, tc.code)
+			}
+			if events, _, _ := rec.snapshot(); len(events) != len(before) {
+				t.Errorf("events = %v, want the note to send or run nothing after %v", events, before)
+			}
+			if n := countStored(t, rec.store, tc.target, openRequest("c8", nil).Content); n != stored {
+				t.Errorf("%s holds the note %d times, want %d", tc.target, n, stored)
+			}
+			if result, err := rec.store.ReserveNote(context.Background(), tc.target, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				t.Errorf("note reservation = %v, %v; want it still free", result, err)
+			}
+		})
+	}
+}
+
+// TestHandler_OpenSession_NoteTakesAnOpenedSessionUnderItsAccountOnly: a
+// session the open path opened takes a note by what that path recorded when it
+// opened it, the account among it. The same user's system token under another
+// account answers not_found and stores, reserves and runs nothing, also after
+// the user's own chat turn under that account marked the session.
+func TestHandler_OpenSession_NoteTakesAnOpenedSessionUnderItsAccountOnly(t *testing.T) {
+	rec, h := newMarkingHandler()
+	callOpen(h, "c1", nil) // opens openedSession under g1 and runs its first turn
+	if out := chatTurn(h, chatMessage("chat-g2", "websocket", "c1")); out.Content != "reply: hello" {
+		t.Fatalf("the user's turn under g2 answered %q, want its reply", out.Content)
+	}
+	if identity, err := rec.store.Identity(context.Background(), openedSession); err != nil || identity.GroupID != "g1" ||
+		identity.VerifiedOwner == nil || identity.VerifiedOwner.GroupID != "g2" {
+		t.Fatalf("%s = %+v, %v; want it opened under g1 and marked under g2", openedSession, identity, err)
+	}
+	before, _, _ := rec.snapshot()
+	content := openRequest("c8", nil).Content // the first turn's as well
+	stored := countStored(t, rec.store, openedSession, content)
+
+	out := callOpen(h, "c8", noteTo(openedSession, "tok-g2"))
+
+	if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" {
+		t.Errorf("note under g2 answered %+v, want open_rejected not_found", out.Metadata)
+	}
+	if events, _, _ := rec.snapshot(); len(events) != len(before) {
+		t.Errorf("events = %v, want the note under g2 to send or run nothing after %v", events, before)
+	}
+	if n := countStored(t, rec.store, openedSession, content); n != stored {
+		t.Errorf("after the note under g2 the content is stored %d times, want %d", n, stored)
+	}
+
+	callOpen(h, "c8", noteTo(openedSession, "tok"))
+
+	acks := rec.acks()
+	if last := acks[len(acks)-1]; last.Metadata["created"] != "true" || last.Metadata[pkg.OpenSessionIDMetadataKey] != openedSession {
+		t.Errorf("note under g1 answered %+v, want created for %s: the one under g2 reserved nothing", last.Metadata, openedSession)
+	}
+	if n := countStored(t, rec.store, openedSession, content); n != stored+1 {
+		t.Errorf("after the note under g1 the content is stored %d times, want %d", n, stored+1)
+	}
+}
+
+// firstRunHook calls before once, when the first turn reaches the runner and
+// before that turn runs.
+type firstRunHook struct {
+	pkg.Runner
+	before func()
+}
+
+func (r *firstRunHook) Run(ctx context.Context, sessionKey, content string, files ...pkg.FileAttachment) (string, string, map[string]string, error) {
+	if before := r.before; before != nil {
+		r.before = nil
+		before()
+	}
+	return r.Runner.Run(ctx, sessionKey, content, files...)
+}
+
+// TestHandler_OpenSession_NoteReachesAChatWhileItsFirstTurnRuns: the user's
+// turn marks its session before it runs, so a note arriving while the first
+// turn of a new conversation is still running is taken.
+func TestHandler_OpenSession_NoteReachesAChatWhileItsFirstTurnRuns(t *testing.T) {
+	const chat = "u1:websocket:c1"
+	hook := &firstRunHook{}
+	rec, h := newMarkingHandler(func(cfg *HandlerConfig) { hook.Runner, cfg.Runner = cfg.Runner, hook })
+	var during pkg.OutboundMessage
+	hook.before = func() { during = callOpen(h, "c8", noteTo(chat, "tok")) }
+
+	if out := chatTurn(h, chatMessage("chat", "websocket", "c1")); out.Content != "reply: hello" {
+		t.Fatalf("chat turn answered %q, want its reply", out.Content)
+	}
+
+	if len(during.Metadata) != 0 {
+		t.Errorf("note during the first turn answered %+v, want the empty frame", during.Metadata)
+	}
+	if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "true" || acks[0].Metadata[pkg.OpenSessionIDMetadataKey] != chat {
+		t.Errorf("answers = %+v, want one created for %s", acks, chat)
+	}
+	if _, runs, _ := rec.snapshot(); len(runs) != 2 || runs[0].sessionID != chat || runs[1].content != "hello" {
+		t.Errorf("turns = %+v, want the note's in %s inside the running first turn", runs, chat)
+	}
+}
+
+// TestHandler_ChatTurnRunsWhenItsMarkIsNotWritten: a mark the store fails to
+// write is logged and does not stop the user's turn; the conversation stays
+// out of a note's reach until a later turn marks it.
+func TestHandler_ChatTurnRunsWhenItsMarkIsNotWritten(t *testing.T) {
+	logs := captureLogs(t)
+	_, h := newMarkingHandler(func(cfg *HandlerConfig) {
+		cfg.SetVerifiedOwner = func(context.Context, string, state.VerifiedOwner) error {
+			return errors.New("database connection lost")
+		}
+	})
+
+	if out := chatTurn(h, chatMessage("chat", "websocket", "c1")); out.Content != "reply: hello" {
+		t.Errorf("chat turn answered %q, want its reply", out.Content)
+	}
+	if !strings.Contains(logs.String(), "verified owner mark not set") {
+		t.Errorf("logs = %q, want the failed mark logged", logs.String())
+	}
+	if out := callOpen(h, "c8", noteTo("u1:websocket:c1", "tok")); out.Metadata["error_code"] != "not_found" {
+		t.Errorf("note answered %+v, want not_found", out.Metadata)
 	}
 }
 
