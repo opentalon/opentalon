@@ -602,9 +602,9 @@ type ProviderConfig struct {
 	// differs from the session's previous one. Needs PromptCache; see
 	// validatePromptCache.
 	CacheDiagnostics StrictBool `yaml:"cache_diagnostics"`
-	// Timeout is the longest one call to this provider may take, its retries
-	// included, as a Go duration; empty keeps 120 seconds. See
-	// validateTimeouts.
+	// Timeout is the longest one call to this provider that does not stream
+	// may take, its retries included, as a Go duration; empty keeps 120
+	// seconds. See validateTimeouts.
 	Timeout     string `yaml:"timeout,omitempty"`
 	timeoutLine int    // line of a timeout without a value; 0 if none
 }
@@ -815,15 +815,20 @@ type RoutingConfig struct {
 }
 
 // HealthCheckConfig tunes the health-gated fallback that prefers routing.primary
-// while its endpoint is reachable and switches to routing.fallbacks otherwise.
-// It is only used when routing.fallbacks is non-empty. All fields are optional;
-// zero/empty values use the defaults: probe base_url+"/models" every 10s with a
-// 3s timeout, and switch back to the primary after 3 consecutive healthy probes.
-// The primary trips to the fallbacks immediately on a failed probe or a live
-// request error, but only recovers after RecoverAfter consecutive healthy probes
-// (hysteresis, to avoid flapping when the primary is intermittently available).
+// while its endpoint is reachable and switches to routing.fallbacks otherwise,
+// and the probes of a provider a profile model selected.
+// Path tunes the primary's probe, used when routing.fallbacks is non-empty.
+// Interval, Timeout and RecoverAfter tune that probe and also the probe of a
+// provider a profile model selected, which starts after a failure marks that
+// provider unhealthy. All fields are optional; zero/empty values use the
+// defaults: probe the provider's model list (base_url+"/v1/models" for
+// anthropic-messages, base_url+"/models" otherwise) every 10s with a 3s
+// timeout, and use the provider again after 3 consecutive healthy probes.
+// A provider trips immediately on a failed probe or a live request error, but
+// only recovers after RecoverAfter consecutive healthy probes (hysteresis, to
+// avoid flapping when it is intermittently available).
 type HealthCheckConfig struct {
-	Path         string `yaml:"path"`          // probe path relative to base_url; default "/models"
+	Path         string `yaml:"path"`          // primary's probe path relative to base_url; default its model list path
 	Interval     string `yaml:"interval"`      // probe interval (Go duration); default "10s"
 	Timeout      string `yaml:"timeout"`       // per-probe timeout (Go duration); default "3s"
 	RecoverAfter int    `yaml:"recover_after"` // consecutive healthy probes before switching back; default 3

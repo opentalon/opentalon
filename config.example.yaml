@@ -104,8 +104,11 @@ routing:
   # probes (hysteresis — avoids flapping when the primary is intermittently up).
   fallbacks:
     - deepseek/deepseek-reasoner
-  # health:                    # optional; tunes the health-gated fallback above
-  #   path: "/models"          # probe path relative to the primary's base_url (default "/models")
+  # health:                    # optional; tunes the health-gated fallback above, and
+  #                            # interval/timeout/recover_after also the probes of a
+  #                            # provider a profile model selected, after it failed
+  #   path: "/models"          # primary's probe path relative to its base_url (default its
+  #                            # model list: "/v1/models" for anthropic-messages, else "/models")
   #   interval: "10s"          # how often to probe the primary (default "10s")
   #   timeout: "3s"            # per-probe timeout (default "3s")
   #   recover_after: 3         # consecutive healthy probes before switching back (default 3)

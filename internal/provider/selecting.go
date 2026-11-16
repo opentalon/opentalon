@@ -182,14 +182,19 @@ func (f fallbackStream) EventID() string {
 
 // failed handles err of the selected provider for model m. It returns err
 // when the default model cannot do better: the turn was cancelled, or the
-// prompt is longer than the window. Otherwise it marks the provider unhealthy
-// when err is about the provider rather than this request, warns once and
-// returns nil for the default model to answer.
+// prompt is longer than m's window and the default model's window is no
+// larger, so the caller trims and sends again. Otherwise it marks the provider
+// unhealthy when err is about the provider rather than this request, warns
+// once and returns nil for the default model to answer.
 func (s *selectingProvider) failed(ctx context.Context, sel *selected, m ModelInfo, err error) error {
-	if ctx.Err() != nil || IsContextOverflow(err) {
+	if ctx.Err() != nil {
 		return err
 	}
-	unhealthy := sel.health != nil && providerFailure(err)
+	overflow := IsContextOverflow(err)
+	if overflow && findModel(s.def.Models(), s.model).ContextWindow <= m.ContextWindow {
+		return err
+	}
+	unhealthy := sel.health != nil && !overflow && providerFailure(err)
 	if unhealthy {
 		sel.health.trip()
 		sel.probing.Do(func() { go sel.health.run(s.ctx) })
@@ -200,17 +205,21 @@ func (s *selectingProvider) failed(ctx context.Context, sel *selected, m ModelIn
 }
 
 // providerFailure reports whether err says the provider serves no request
-// right now: it refuses the key, the account, the spent usage limit or the
-// load, cannot be reached, or took longer than its time limit. A 400, 413 or
-// 422 without a usage limit refuses this request only.
+// right now: it refuses the key, the account, the spent usage limit or credit
+// or the load, cannot be reached, or took longer than its time limit. A 400,
+// 413 or 422 without a usage limit or credit message refuses this request
+// only.
 func providerFailure(err error) bool {
 	var se *StatusError
 	if errors.As(err, &se) {
 		switch se.StatusCode {
 		case http.StatusBadRequest:
-			// Anthropic answers a reached spend limit with 400; the message
-			// is the documented way to tell it from an invalid request.
-			return strings.Contains(strings.ToLower(se.Body), "you have reached your specified")
+			// Anthropic answers a reached spend limit and an empty credit
+			// balance with 400; the message is the way to tell them from an
+			// invalid request.
+			body := strings.ToLower(se.Body)
+			return strings.Contains(body, "you have reached your specified") ||
+				strings.Contains(body, "credit balance is too low")
 		case http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
 			return false
 		}

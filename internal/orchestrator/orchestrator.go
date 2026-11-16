@@ -2497,12 +2497,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// The provider's own count of what it just charged for. Free, exact,
 		// and the only ground truth the estimate ever gets. It corrects the
 		// model that answered: the default's ("") when the default model
-		// answered a request for another model.
-		answered := req.Model
+		// answered a request for another model, against the estimate under
+		// the default's correction rather than the requested model's.
+		answered, estimated := req.Model, estimatedTokens
 		if resp.Fallback {
 			answered = ""
+			estimated = int(float64(estimatedTokens) * o.calibrators.factor("") / o.calibrators.factor(req.Model))
 		}
-		o.calibrators.observe(answered, estimatedTokens, resp.Usage.InputTokens)
+		o.calibrators.observe(answered, estimated, resp.Usage.InputTokens)
 		// Stamp the just-emitted llm_response as parent for the rest of
 		// this iteration: tool_call_extracted / tool_call_result / retry
 		// / confirmation events all form a tight subtree under the LLM

@@ -168,14 +168,16 @@ models:
       timeout: 45s
 ```
 
-- `timeout` is the longest one call to the provider may take, its retries
-  and their waits included. Without it a call has 120 seconds.
+- `timeout` is the longest one call to the provider that does not stream
+  may take, its retries and their waits included. Without it such a call
+  has 120 seconds. A streamed call (`openai-completions` only) is not bounded
+  by it.
 - It takes a Go duration above 0, such as `45s` or `1m30s`. A `timeout`
   without a value, `null`, `~`, `""`, `0`, a negative duration or a number
   without a unit stops the start with an error naming the key.
-- A call that reaches it fails like a provider that cannot be reached: the
-  primary of a failover chain hands the request to its fallbacks, a model
-  from the profile to the default chain.
+- A call that does not stream and reaches it fails like a provider that
+  cannot be reached: the primary of a failover chain hands the request to
+  its fallbacks, a model from the profile to the default chain.
 - Retries count against it. By default a call answered 429, 500, 502, 503
   or 504, or failing on the way, is tried up to 4 times with at most 30
   seconds of waiting; `retry: {max_attempts: 1}` makes one attempt.
@@ -449,9 +451,11 @@ provider does not have to be part of `routing`:
 
 | The selected provider | Then |
 |---|---|
-| answers with a status other than 400, 413 and 422 (a refused key or account, a rate or spend limit, an unknown model, an overload or server error), answers 400 with Anthropic's spend limit message ("You have reached your specified … API usage limits"), cannot be reached, or reaches its `timeout` | the default chain answers with the default model, and one warning names the provider, the model and the error, with `unhealthy=true`: the provider is marked unhealthy |
+| answers with a status other than 400, 413 and 422 (a refused key or account, a rate or spend limit, an unknown model, an overload or server error), cannot be reached, or reaches its `timeout` | the default chain answers with the default model, and one warning names the provider, the model and the error, with `unhealthy=true`: the provider is marked unhealthy |
+| answers 400 with Anthropic's spend limit message ("You have reached your specified … API usage limits") or its empty credit message ("Your credit balance is too low to access the Anthropic API") | as above: the default chain answers and the provider is marked unhealthy |
 | answers 400, 413 or 422 otherwise (it refuses this request), or with a reply that cannot be read | the default chain answers, with the warning and `unhealthy=false`; the provider stays in use |
-| refuses the prompt as longer than the model's window | the chat loop gets the refusal, as before, and trims and sends again |
+| refuses the prompt as longer than the model's window, and the default model's `context_window` is larger | the default chain answers, with the warning and `unhealthy=false`; the provider stays in use |
+| refuses the prompt as longer than the model's window, and the default model's `context_window` is not larger | the chat loop gets the refusal, as before, and trims and sends again |
 | does not answer before the turn is cancelled | the turn ends; the default chain is not called and nothing is marked |
 
 While a provider is marked unhealthy:
