@@ -4169,7 +4169,7 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 // exchanges from the history fed to the model: the narrated "Shall I
 // proceed?" assistant row (metadata prompt_type=tool_confirmation) together
 // with the button reply row (prompt_type=confirmation_response) that
-// immediately follows it. Both rows are platform artifacts — the prompt was
+// follows it, hidden note rows possibly between. Both rows are platform artifacts — the prompt was
 // written by narrateConfirmation during the gate pause, not by the model, and
 // the reply is a pressed button, not something the user typed. Replayed
 // verbatim they teach the model a false protocol: after two approved creates
