@@ -1973,6 +1973,35 @@ func TestHandler_ChatTurnRunsWhenItsMarkIsNotWritten(t *testing.T) {
 	}
 }
 
+// TestHandler_OpenSession_RecoveryOfANoteRechecksItsReach: a note whose key a
+// dead attempt holds is recovered once the reservation is stale, and only into
+// a session the note still reaches. The user's chat turn under another account
+// marks the session for that account meanwhile, so the recovery runs and
+// stores nothing.
+func TestHandler_OpenSession_RecoveryOfANoteRechecksItsReach(t *testing.T) {
+	shortOpenerTiming(t)
+	const chat = "u1:websocket:c1"
+	rec, h := newMarkingHandler()
+	chatTurn(h, chatMessage("chat", "websocket", "c1"))
+	if result, err := rec.store.ReserveNote(context.Background(), chat, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+		t.Fatalf("dead attempt's reservation = %v, %v", result, err)
+	}
+
+	callOpen(h, "c8", noteTo(chat, "tok"))
+	if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "false" {
+		t.Fatalf("answers = %+v, want created=false", acks)
+	}
+	chatTurn(h, chatMessage("chat-g2", "websocket", "c1"))
+	time.Sleep(pastRecovery())
+
+	if _, runs, _ := rec.snapshot(); len(runs) != 2 {
+		t.Errorf("turns = %+v, want the two chat turns and no note", runs)
+	}
+	if n := countStored(t, rec.store, chat, openRequest("c8", nil).Content); n != 0 {
+		t.Errorf("note stored %d times in a session marked for another account, want 0", n)
+	}
+}
+
 // TestHandler_OpenSession_KeyPartsWithAColonAreRefused: a session key names its
 // user, channel and conversation only while none of them is empty or holds a
 // colon: "u1:websocket:websocket:c1" is u1's conversation "websocket:c1" and
