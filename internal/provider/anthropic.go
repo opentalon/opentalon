@@ -526,7 +526,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 	return resp, nil
 }
 
-// Stream is not yet implemented; returns ErrStreamingNotImplemented.
+// Stream is not yet implemented; returns an error.
 func (p *AnthropicProvider) Stream(_ context.Context, _ *CompletionRequest) (ResponseStream, error) {
 	return nil, fmt.Errorf("%w for provider %s", ErrStreamingNotImplemented, p.id)
 }

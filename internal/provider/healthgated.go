@@ -110,8 +110,7 @@ func (h *healthGatedProvider) modelFor(e ProviderEntry, requested string) string
 
 // PrimaryModels returns the models of the provider requests go to first: the
 // preferred endpoint of a health-gated provider (Models there is the union of
-// every endpoint, fallbacks included), otherwise p's own models. A selecting
-// provider answers for its default provider.
+// every endpoint, fallbacks included), otherwise p's own models.
 func PrimaryModels(p Provider) []ModelInfo {
 	if sp, ok := p.(*selectingProvider); ok {
 		p = sp.def
@@ -223,9 +222,6 @@ type endpointHealth struct {
 	log *slog.Logger
 }
 
-// newEndpointHealth returns the health of an endpoint probed by probe, with
-// cfg's zero values at their defaults. It starts healthy: the endpoint gets
-// the first request, and a failed probe or live error trips it.
 func newEndpointHealth(name string, probe HealthProbe, cfg HealthGateConfig, log *slog.Logger) *endpointHealth {
 	interval := cfg.Interval
 	if interval <= 0 {
@@ -247,6 +243,9 @@ func newEndpointHealth(name string, probe HealthProbe, cfg HealthGateConfig, log
 		recoverAfter: recoverAfter,
 		log:          log,
 	}
+	// Optimistic start: prefer the preferred endpoint from the first request.
+	// A failed probe or live error trips it; recovery then needs RecoverAfter
+	// consecutive healthy probes.
 	h.healthy.Store(true)
 	h.consecutiveOK = recoverAfter
 	return h
@@ -317,10 +316,6 @@ const (
 	ProbeAuthAnthropicNative
 )
 
-// NewProviderProbe returns a probe of the model list of the provider cfg
-// describes, with that provider's auth and headers, and the URL it gets: the
-// base URL (the provider's default when empty) joined with path, or with the
-// model list path of the provider's API when path is empty.
 func NewProviderProbe(cfg ProviderConfig, path string) (HealthProbe, string) {
 	base, modelsPath, auth := cfg.BaseURL, "/models", ProbeAuthBearer
 	if cfg.API == APIAnthropic {

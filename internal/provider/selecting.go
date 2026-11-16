@@ -10,23 +10,14 @@ import (
 	"sync"
 )
 
-// selectingProvider serves a request whose ModelRef names a provider and a
-// model the config defines at that provider, with the default provider (the
-// health gate, or the single routing provider) behind it. Every other
-// request goes to the default provider, and so does a request the selected
-// provider fails or would get while it is unhealthy.
 type selectingProvider struct {
 	def       Provider
-	model     string               // the default model id
-	providers map[string]*selected // every provider the config defines, by id
-	ctx       context.Context      // ends the probes
+	model     string
+	providers map[string]*selected
+	ctx       context.Context
 	log       *slog.Logger
 }
 
-// SelectableProvider is a provider the config defines, and the probe that
-// tells when it serves again after a failure that marked it unhealthy. A
-// provider without a probe is never marked: each failed request falls back
-// on its own.
 type SelectableProvider struct {
 	Prov  Provider
 	Probe HealthProbe
@@ -34,14 +25,10 @@ type SelectableProvider struct {
 
 type selected struct {
 	prov    Provider
-	health  *endpointHealth // nil without a probe
+	health  *endpointHealth
 	probing sync.Once
 }
 
-// NewSelectingProvider puts the providers in front of def, whose model is
-// defaultModel. ID, Models and SupportsFeature are def's. A provider's probes
-// start when a failure first marks it unhealthy, run as health sets them and
-// stop when ctx is done.
 func NewSelectingProvider(ctx context.Context, def Provider, defaultModel string, providers map[string]SelectableProvider, health HealthGateConfig, log *slog.Logger) Provider {
 	if log == nil {
 		log = slog.Default()
@@ -63,11 +50,6 @@ func (s *selectingProvider) Models() []ModelInfo { return s.def.Models() }
 
 func (s *selectingProvider) SupportsFeature(f Feature) bool { return s.def.SupportsFeature(f) }
 
-// route resolves req.ModelRef. A reference to a model of a defined provider
-// returns that provider and model. Every other request goes to the default
-// provider: unchanged without a reference or with a bare id of a model the
-// default provider lists, with the default model for a reference to that
-// model, and with the default model and a warning for anything else.
 func (s *selectingProvider) route(req *CompletionRequest) (*selected, ModelInfo, *CompletionRequest) {
 	ref := string(req.ModelRef)
 	if ref == "" {
@@ -112,8 +94,6 @@ func (s *selectingProvider) route(req *CompletionRequest) (*selected, ModelInfo,
 	return p, m, &def
 }
 
-// selectedRequest is req for model m: its id, and reasoning as m has it
-// rather than as the default model's flag set it.
 func selectedRequest(req *CompletionRequest, m ModelInfo) *CompletionRequest {
 	cp := *req
 	cp.Model = m.ID
@@ -161,8 +141,6 @@ func (s *selectingProvider) Stream(ctx context.Context, req *CompletionRequest) 
 	return stream, err
 }
 
-// fallbackStream marks every chunk of the default model's stream for a
-// request for another model.
 type fallbackStream struct{ ResponseStream }
 
 func (f fallbackStream) Recv() (StreamChunk, error) {
@@ -180,12 +158,6 @@ func (f fallbackStream) EventID() string {
 	return ""
 }
 
-// failed handles err of the selected provider for model m. It returns err
-// when the default model cannot do better: the turn was cancelled, or the
-// prompt is longer than m's window and the default model's window is no
-// larger, so the caller trims and sends again. Otherwise it marks the provider
-// unhealthy when err is about the provider rather than this request, warns
-// once and returns nil for the default model to answer.
 func (s *selectingProvider) failed(ctx context.Context, sel *selected, m ModelInfo, err error) error {
 	if ctx.Err() != nil {
 		return err
@@ -204,11 +176,6 @@ func (s *selectingProvider) failed(ctx context.Context, sel *selected, m ModelIn
 	return nil
 }
 
-// providerFailure reports whether err says the provider serves no request
-// right now: it refuses the key, the account, the spent usage limit or credit
-// or the load, cannot be reached, or took longer than its time limit. A 400,
-// 413 or 422 without a usage limit or credit message refuses this request
-// only.
 func providerFailure(err error) bool {
 	var se *StatusError
 	if errors.As(err, &se) {

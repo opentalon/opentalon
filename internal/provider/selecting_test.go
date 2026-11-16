@@ -7,11 +7,6 @@ import (
 	"time"
 )
 
-// TestSelectingProviderLeavesTheDefaultChainAlone checks the requests the
-// selecting provider hands to its default provider untouched: one without a
-// reference, as a sub-agent or repair call sends its own model, and one whose
-// reference names the default model at the default provider, which another
-// instance of that provider must not answer outside the default chain.
 func TestSelectingProviderLeavesTheDefaultChainAlone(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -44,9 +39,6 @@ func TestSelectingProviderLeavesTheDefaultChainAlone(t *testing.T) {
 	}
 }
 
-// newSelectedFixture is a selecting provider in front of def (model m1) with
-// one provider, sel, serving m2 and failing with failWith. Its probes never
-// tick by themselves; a test runs them with probeOnce.
 func newSelectedFixture(t *testing.T, failWith error, probe HealthProbe) (*selectingProvider, *fakeProvider, *fakeProvider) {
 	def := &fakeProvider{id: "primary", model: "m1"}
 	sel := &fakeProvider{id: "sel", model: "m2", failNext: failWith != nil, failWith: failWith}
@@ -59,11 +51,6 @@ func selectedRequestOf() *CompletionRequest {
 	return &CompletionRequest{Model: "m2", ModelRef: "sel/m2"}
 }
 
-// TestSelectedContextOverflow: a prompt longer than the selected model's
-// window is the caller's to handle, as before, when the default model's
-// window is no larger: the chat loop trims to that window and sends again.
-// When the default model's window is larger, the default model answers. The
-// provider stays healthy either way.
 func TestSelectedContextOverflow(t *testing.T) {
 	tooLong := &StatusError{api: "anthropic", StatusCode: 400,
 		Body: `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}`}
@@ -95,16 +82,11 @@ func TestSelectedContextOverflow(t *testing.T) {
 	}
 }
 
-// oneChunk is a stream of one final chunk.
 type oneChunk struct{}
 
 func (oneChunk) Recv() (StreamChunk, error) { return StreamChunk{Content: "ok", Done: true}, nil }
 func (oneChunk) Close() error               { return nil }
 
-// TestSelectedStreamFailure: a selected provider that cannot stream hands
-// the request back to the caller's Complete without a mark; one that is
-// unavailable is marked and the default model streams instead, its chunks
-// marked as a fallback.
 func TestSelectedStreamFailure(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -138,9 +120,6 @@ func TestSelectedStreamFailure(t *testing.T) {
 	}
 }
 
-// TestSelectedRefusedWhileProbesAnswer: when the probe answers but every call
-// is refused, each recovery costs the provider one call and the default model
-// answers every request.
 func TestSelectedRefusedWhileProbesAnswer(t *testing.T) {
 	refused := &StatusError{api: "anthropic", StatusCode: 401, Body: "invalid x-api-key"}
 	s, def, sel := newSelectedFixture(t, refused, func(context.Context) error { return nil })

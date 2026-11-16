@@ -10,10 +10,6 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
-// answeringLLM answers every request as model, charging far more input
-// tokens than any estimate, or ratio times the uncorrected estimate when
-// ratio is set; fallback marks the answer as the default model's for a
-// request for another model.
 type answeringLLM struct {
 	model    string
 	fallback bool
@@ -29,18 +25,13 @@ func (a answeringLLM) Complete(ctx context.Context, req *provider.CompletionRequ
 		Usage: provider.Usage{InputTokens: input, OutputTokens: 1}}, nil
 }
 
-// TestCalibrationObservesTheAnsweringModel: the token count of an answer
-// corrects the estimate of the model that answered, under the key its
-// requests look it up by: the requested model's, also when its API reports a
-// longer id, and the default's ("") when the default chain answers a request
-// that named another model, whose correction stays as it was.
 func TestCalibrationObservesTheAnsweringModel(t *testing.T) {
 	cases := []struct {
 		name         string
 		profileModel string
 		answeredBy   string
 		fallback     bool
-		learned      string // the calibration key the answer corrects
+		learned      string
 		untouched    string
 	}{
 		{"the selected model answers", "anthropic/claude-x", "claude-x-20261001", false, "claude-x", ""},
@@ -66,16 +57,12 @@ func TestCalibrationObservesTheAnsweringModel(t *testing.T) {
 	}
 }
 
-// TestCalibrationAfterAFallback: when the default model answers for a model
-// whose correction differs from the default's, the answer corrects the
-// default's estimate by the default's own ratio, not by one skewed by the
-// requested model's correction.
 func TestCalibrationAfterAFallback(t *testing.T) {
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
 	o := NewWithRules(answeringLLM{model: "default-model", fallback: true, ratio: 1.6}, DefaultParser, NewToolRegistry(),
 		state.NewMemoryStore(""), sessions, OrchestratorOpts{})
-	o.calibrators.observe("claude-x", 100, 200) // the requested model's correction: 2.0
+	o.calibrators.observe("claude-x", 100, 200)
 	ctx := profile.WithProfile(context.Background(), &profile.Profile{EntityID: "e1", Model: "anthropic/claude-x"})
 	if _, err := o.Run(ctx, "s1", "Hi"); err != nil {
 		t.Fatal(err)

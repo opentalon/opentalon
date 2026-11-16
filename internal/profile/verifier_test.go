@@ -734,12 +734,10 @@ func TestVerifier_SourceOnNonSystemRunIsDropped(t *testing.T) {
 	}
 }
 
-// TestVerifier_ModelField checks that a model the whoami answer gives as
-// anything but a non-empty string counts as absent, with a warning.
 func TestVerifier_ModelField(t *testing.T) {
 	cases := []struct {
 		name     string
-		model    string // the raw JSON value
+		model    string
 		want     string
 		wantWarn bool
 	}{

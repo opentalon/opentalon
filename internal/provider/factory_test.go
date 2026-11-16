@@ -83,8 +83,6 @@ func TestFromConfigWithModels(t *testing.T) {
 	}
 }
 
-// TestFromConfigTimeout: a provider's time limit bounds its HTTP client, and
-// without one the client keeps 120 seconds.
 func TestFromConfigTimeout(t *testing.T) {
 	cases := []struct {
 		api     string

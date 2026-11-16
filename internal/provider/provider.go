@@ -106,11 +106,7 @@ type CompletionRequest struct {
 	// Segments describes Messages[0], whose content is Segments.Join(). Only
 	// the chat loop sets it; nil on every other call.
 	Segments *SystemSegments `json:"-"`
-	// ModelRef is the profile's model as the chat loop received it. A
-	// selecting provider serves a "<provider>/<model>" reference at that
-	// provider; Model holds the model part, for a provider that serves the
-	// request itself. Empty on every other call.
-	ModelRef ModelRef `json:"-"`
+	ModelRef ModelRef        `json:"-"`
 }
 
 // Usage is a call's tokens and cost. InputTokens counts every input token,
@@ -148,19 +144,15 @@ type CompletionResponse struct {
 	// dispatch back to the LLM round that produced it.
 	EventID string `json:"-"`
 
-	// Fallback is true when the default model answered a request for
-	// another model (see selectingProvider): the usage is the default
-	// model's, not the requested one's.
 	Fallback bool `json:"-"`
 }
 
 type StreamChunk struct {
-	Content string `json:"content"`
-	Done    bool   `json:"done"`
-	Model   string `json:"model,omitempty"`
-	Usage   Usage  `json:"usage,omitempty"`
-	// Fallback is CompletionResponse.Fallback for a stream.
-	Fallback bool `json:"-"`
+	Content  string `json:"content"`
+	Done     bool   `json:"done"`
+	Model    string `json:"model,omitempty"`
+	Usage    Usage  `json:"usage,omitempty"`
+	Fallback bool   `json:"-"`
 }
 
 type ResponseStream interface {
@@ -168,13 +160,10 @@ type ResponseStream interface {
 	Close() error
 }
 
-// ErrStreamingNotImplemented is returned by the Stream of a provider that
-// cannot stream; its Complete serves the request instead.
 var ErrStreamingNotImplemented = errors.New("streaming not yet implemented")
 
-// StatusError is a provider's answer with an HTTP status other than 200.
 type StatusError struct {
-	api        string // "anthropic" or "openai", the start of the error text
+	api        string
 	StatusCode int
 	Body       string
 }

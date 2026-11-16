@@ -440,7 +440,9 @@ provider does not have to be part of `routing`:
   cache prices included.
 - Every provider in `models.providers` is started. One whose `api_key`
   references an unset variable still starts; its calls fail and the default
-  chain answers.
+  chain answers. One that cannot be built is left out with a warning
+  instead of stopping the start; a profile model naming it gets the default
+  model.
 - The token count of an answer corrects the size estimate of the model that
   answered: the default model's when the default chain answered in place of
   the selected one.

@@ -38,11 +38,7 @@ type ProviderConfig struct {
 	PromptCache  bool        // Anthropic only: cache markers on chat-loop requests
 	// CacheDiagnostics is Anthropic only: cache diagnostics on chat-loop requests.
 	CacheDiagnostics bool
-	// Timeout is the longest one call that does not stream may take, its
-	// retries included (they run inside the client). Zero keeps the client's
-	// 120 seconds. A stream of the OpenAI-compatible provider has a client of
-	// its own without a time limit.
-	Timeout time.Duration
+	Timeout          time.Duration
 }
 
 // FromConfig creates a Provider from a config entry. The api field

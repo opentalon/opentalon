@@ -20,8 +20,6 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
-// recordingServer is an LLM endpoint that answers every request with status
-// and body, and keeps the request bodies it received.
 type recordingServer struct {
 	*httptest.Server
 	mu     sync.Mutex
@@ -60,11 +58,6 @@ func (u *usageSpy) RecordUsage(_ context.Context, _, _, _, _, modelID, _, _ stri
 	u.rows = append(u.rows, usageRow{modelID, inCost, outCost})
 }
 
-// TestProfileModelServedAtItsProvider drives a chat turn whose whoami profile
-// names a model through the provider buildProvider builds and orch.Run, in the
-// setup with fallbacks and in the setup with one default provider and no
-// fallbacks, where no health gate stands behind it. The Anthropic provider is
-// outside routing and its key is unset.
 func TestProfileModelServedAtItsProvider(t *testing.T) {
 	const (
 		defaultAnswer = `{"id":"c1","model":"default-model","choices":[{"message":{"role":"assistant","content":"From the default."},` +
@@ -76,12 +69,12 @@ func TestProfileModelServedAtItsProvider(t *testing.T) {
 	cases := []struct {
 		name         string
 		model        string
-		effort       string // the turn's reasoning effort
+		effort       string
 		anthStatus   int
-		stream       bool   // the round would stream
-		claude       bool   // Claude answers; otherwise the default model does
-		wantThinking string // the Anthropic request's thinking and output_config; empty = neither
-		wantModel    string // the model the default chain is sent; empty = default-model
+		stream       bool
+		claude       bool
+		wantThinking string
+		wantModel    string
 		wantWarn     string
 	}{
 		{name: "selected model", model: "anthropic/claude-x", claude: true, wantThinking: adaptive + ` {"effort":"medium"}`},
@@ -234,7 +227,6 @@ routing:
 	}
 }
 
-// warnedAbout reports whether a warning line of logs contains s.
 func warnedAbout(logs, s string) bool {
 	for _, line := range strings.Split(logs, "\n") {
 		if strings.Contains(line, "level=WARN") && strings.Contains(line, s) {

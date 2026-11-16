@@ -18,9 +18,9 @@ type fakeProvider struct {
 	failWith  error  // the error to return when failing; nil means a generic one
 	lastModel string // model id it was last called with
 	calls     int
-	extra     []string       // further model ids it serves besides model
-	stream    ResponseStream // what Stream returns when it does not fail; nil = an error
-	window    int            // context window of model; 0 = not set
+	extra     []string // further model ids it serves besides model
+	stream    ResponseStream
+	window    int
 }
 
 func (f *fakeProvider) ID() string                   { return f.id }
@@ -319,8 +319,6 @@ func TestPrimaryModels(t *testing.T) {
 	}
 }
 
-// TestNewProviderProbe: a provider's probe gets its model list with the auth
-// of its API, and a set path replaces the model list path.
 func TestNewProviderProbe(t *testing.T) {
 	type seen struct{ path, apiKey, bearer string }
 	var got seen
@@ -334,7 +332,7 @@ func TestNewProviderProbe(t *testing.T) {
 		base    string
 		path    string
 		wantURL string
-		want    seen // the request the server sees; zero = not sent
+		want    seen
 	}{
 		{"anthropic-messages", APIAnthropic, srv.URL, "", srv.URL + "/v1/models", seen{"/v1/models", "sk", ""}},
 		{"openai-completions", APIOpenAI, srv.URL + "/v1", "", srv.URL + "/v1/models", seen{"/v1/models", "", "Bearer sk"}},

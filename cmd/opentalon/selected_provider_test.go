@@ -45,18 +45,14 @@ type fakeAnswer struct {
 	body   string
 }
 
-// fakeLLMServer is an LLM endpoint. A POST is a completion call: it gets the
-// next of answers, the last one again once the others are used, or, with
-// hold, waits until the client gives up. A GET is a health probe and gets
-// probeStatus.
 type fakeLLMServer struct {
 	*httptest.Server
 	mu          sync.Mutex
 	answers     []fakeAnswer
 	hold        bool
-	held        chan struct{} // one value per held call, when it arrives
+	held        chan struct{}
 	probeStatus int
-	calls       []string // the completion calls' bodies
+	calls       []string
 	probes      []probeSeen
 }
 
@@ -127,9 +123,6 @@ var routingSetups = []struct{ name, fallbacks string }{
 	{"single provider without fallbacks", "[]"},
 }
 
-// selectedProviderConfig is a config whose default chain is primary (and
-// backup with fallbacks) and whose Anthropic provider, outside routing, runs
-// without retries and with a time limit of 500ms, as production's does.
 func selectedProviderConfig(t *testing.T, defURL, backupURL, anthURL, fallbacks, health string) *config.Config {
 	t.Helper()
 	cfg, err := config.Parse([]byte(`
@@ -170,8 +163,6 @@ routing:
 	return cfg
 }
 
-// newSelectedProviderOrch builds the provider buildProvider builds for cfg and
-// an orchestrator over it, with session s1.
 func newSelectedProviderOrch(t *testing.T, cfg *config.Config, registry *orchestrator.ToolRegistry) (*orchestrator.Orchestrator, *state.SessionStore) {
 	t.Helper()
 	prov, defaultModel, err := buildProvider(cfg, nil, nil, nil)
@@ -216,7 +207,6 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// warnings returns the warning lines of logs that contain s.
 func warnings(logs, s string) []string {
 	var out []string
 	for _, line := range strings.Split(logs, "\n") {
@@ -231,20 +221,13 @@ func selectedProfile(ctx context.Context, model string) context.Context {
 	return profile.WithProfile(ctx, &profile.Profile{EntityID: "e1", Model: model})
 }
 
-// TestSelectedProviderFailure drives two chat turns through buildProvider and
-// orch.Run while the selected provider fails, in the setup with fallbacks and
-// in the one without. The default chain answers each failed request, sent its
-// own model id, with one warning naming provider, model and failure. A
-// failure that says something about the provider takes it out of rotation, so
-// the second turn goes straight to the default chain; a refusal of the
-// request itself leaves it in rotation.
 func TestSelectedProviderFailure(t *testing.T) {
 	cases := []struct {
 		name        string
 		answer      fakeAnswer
 		unreachable bool
 		hold        bool
-		failure     string // text of the failure the warning names
+		failure     string
 		marks       bool
 	}{
 		{name: "the key is refused", answer: fakeAnswer{401, anthAuthError}, failure: "authentication_error", marks: true},
@@ -316,9 +299,6 @@ func TestSelectedProviderFailure(t *testing.T) {
 	}
 }
 
-// TestSelectedProviderReturnsAfterHealthyProbes: a selected provider out of
-// rotation is probed on its own models path with its own key, and requests
-// return to it after recover_after healthy probes.
 func TestSelectedProviderReturnsAfterHealthyProbes(t *testing.T) {
 	for _, setup := range routingSetups {
 		t.Run(setup.name, func(t *testing.T) {
@@ -379,10 +359,6 @@ func healthyProbes(probes []probeSeen) int {
 	return n
 }
 
-// TestCancelledTurnMarksNothing: a turn cancelled while the selected provider
-// answers ends there. It logs no failure of the provider, the default chain
-// is not asked, the next turn goes to the selected provider again, and the
-// default chain's primary stays in rotation.
 func TestCancelledTurnMarksNothing(t *testing.T) {
 	for _, setup := range routingSetups {
 		t.Run(setup.name, func(t *testing.T) {
@@ -423,21 +399,12 @@ func TestCancelledTurnMarksNothing(t *testing.T) {
 	}
 }
 
-// listExecutor answers every inv.list call.
 type listExecutor struct{}
 
 func (listExecutor) Execute(_ context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
 	return orchestrator.ToolResult{CallID: call.ID, Content: "3 items"}
 }
 
-// TestConversationChangesModels drives one conversation with tool calls,
-// thinking blocks and two user rows in a row through model changes in both
-// directions, in both routing setups. Inside the first turn, Claude calls a
-// tool, then rejects the next request, which the default chain answers with a
-// tool call of its own, and answers the round after that. The second turn
-// runs without a profile model, as after the account left the statuses that
-// get one. A note posted without a reply then puts two user rows in a row
-// before the third turn, which names the model again. No turn fails.
 func TestConversationChangesModels(t *testing.T) {
 	for _, setup := range routingSetups {
 		t.Run(setup.name, func(t *testing.T) {
@@ -481,15 +448,11 @@ func TestConversationChangesModels(t *testing.T) {
 			if len(anthCalls) != 4 || len(defCalls) != 2 {
 				t.Fatalf("Anthropic received %d calls and the default model %d, want 4 and 2", len(anthCalls), len(defCalls))
 			}
-			// The default chain answered Claude's round with Claude's tool call
-			// and its result in the history.
 			for _, want := range []string{`"id":"toolu_1"`, `"tool_call_id":"toolu_1"`} {
 				if !strings.Contains(defCalls[0], want) {
 					t.Errorf("the default model's round lacks %s:\n%s", want, defCalls[0])
 				}
 			}
-			// Claude's next round and the third turn carry the default model's
-			// tool call and its result.
 			for _, call := range anthCalls[2:] {
 				for _, want := range []string{`"id":"toolu_1"`, `"id":"call_2"`, `"tool_use_id":"toolu_1"`, `"tool_use_id":"call_2"`} {
 					if !strings.Contains(call, want) {
@@ -504,8 +467,6 @@ func TestConversationChangesModels(t *testing.T) {
 	}
 }
 
-// userRowsInARow reports whether the Anthropic request body has a user
-// message with text first directly followed by one with text second.
 func userRowsInARow(t *testing.T, body, first, second string) bool {
 	t.Helper()
 	var req struct {

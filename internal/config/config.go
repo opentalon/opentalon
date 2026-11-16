@@ -602,11 +602,8 @@ type ProviderConfig struct {
 	// differs from the session's previous one. Needs PromptCache; see
 	// validatePromptCache.
 	CacheDiagnostics StrictBool `yaml:"cache_diagnostics"`
-	// Timeout is the longest one call to this provider that does not stream
-	// may take, its retries included, as a Go duration; empty keeps 120
-	// seconds. See validateTimeouts.
-	Timeout     string `yaml:"timeout,omitempty"`
-	timeoutLine int    // line of a timeout without a value; 0 if none
+	Timeout          string     `yaml:"timeout,omitempty"`
+	timeoutLine      int
 }
 
 // UnmarshalYAML decodes a provider. yaml.v3 never hands a null value to
@@ -1077,8 +1074,6 @@ func validateThinking(cfg *Config) error {
 	return nil
 }
 
-// validateTimeouts checks models.providers.<id>.timeout: absent, or a Go
-// duration above 0.
 func validateTimeouts(cfg *Config) error {
 	ids := make([]string, 0, len(cfg.Models.Providers))
 	for id := range cfg.Models.Providers {

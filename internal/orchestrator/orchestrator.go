@@ -2242,9 +2242,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 	result := &RunResult{}
 
-	// The profile's model: the LLM client serves a "<provider>/<model>"
-	// reference at that provider; a provider that serves the request itself
-	// gets the model part (e.g. "anthropic/claude-3-5" -> "claude-3-5").
+	// Resolve profile model override: strip the provider prefix if present (e.g. "anthropic/claude-3-5" -> "claude-3-5").
 	var profileRef provider.ModelRef
 	if p := profile.FromContext(ctx); p != nil {
 		profileRef = provider.ModelRef(p.Model)
@@ -2495,10 +2493,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		turnSpoken, rest, turnShown := takeSpoken(ctx, written)
 		resp.Content = rest
 		// The provider's own count of what it just charged for. Free, exact,
-		// and the only ground truth the estimate ever gets. It corrects the
-		// model that answered: the default's ("") when the default model
-		// answered a request for another model, against the estimate under
-		// the default's correction rather than the requested model's.
+		// and the only ground truth the estimate ever gets.
 		answered, estimated := req.Model, estimatedTokens
 		if resp.Fallback {
 			answered = ""

@@ -1726,10 +1726,6 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 	return provider.NewSelectingProvider(context.Background(), gated, modelID, selectable, health, slog.Default()), modelID, nil
 }
 
-// definedProviders builds every provider in models.providers, by id, each
-// with a probe of its own model list. One that cannot be built is left out
-// with a warning instead of stopping the start: nothing routes to it, and a
-// profile model naming it gets the default model.
 func definedProviders(cfg *config.Config, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver, eventSink emit.Sink) map[string]provider.SelectableProvider {
 	out := make(map[string]provider.SelectableProvider, len(cfg.Models.Providers))
 	for id := range cfg.Models.Providers {
@@ -1746,9 +1742,8 @@ func definedProviders(cfg *config.Config, debugSink provider.DebugEventSink, deb
 
 // buildProviderRef builds a single provider from a "providerID" or
 // "providerID/modelID" routing ref. An empty ref selects the first configured
-// provider. It returns the provider, the resolved model id, and the config the
-// provider was built from (used by the caller to wire the health probe against
-// its endpoint).
+// provider. It returns the provider, the resolved model id, and the provider's
+// config entry (used by the caller to wire the health probe against its endpoint).
 func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver, eventSink emit.Sink) (provider.Provider, string, provider.ProviderConfig, error) {
 	providerID := ""
 	modelID := ""

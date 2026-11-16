@@ -1523,8 +1523,8 @@ func TestPromptCacheMarshalsAsBoolean(t *testing.T) {
 func TestParseProviderTimeout(t *testing.T) {
 	cases := []struct {
 		name    string
-		field   string // the line under the provider; "" = none
-		wantErr string // "" = must parse
+		field   string
+		wantErr string
 	}{
 		{"absent", "", ""},
 		{"a duration", "timeout: 45s", ""},
@@ -1554,7 +1554,6 @@ func TestParseProviderTimeout(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			// A marshal round trip keeps the value and leaves an absent key out.
 			out, err := yaml.Marshal(cfg.Models.Providers["p"])
 			if err != nil {
 				t.Fatal(err)
@@ -1581,7 +1580,6 @@ func TestParseProviderTimeout(t *testing.T) {
 	}
 }
 
-// indentLines puts prefix before every line of s.
 func indentLines(s, prefix string) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	for i, l := range lines {
