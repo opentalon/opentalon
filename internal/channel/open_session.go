@@ -295,13 +295,15 @@ func (o *openSessions) claimAndRun(ctx context.Context, msg pkg.InboundMessage, 
 // attempt stored it (see storeNote), created=false when another had. While
 // another attempt holds the key, this one looks again every poll and takes the
 // key should that attempt give it up or its reservation go stale; the note's
-// recovery is scheduled as for a held note with a reply. Waiting for the key
-// and for the note's place among the session's turns ends at the note's
-// deadline, the timeout after the first claim: an attempt whose note is not
-// stored by then gets no answer, so the caller's wait for one ends as for any
-// unanswered attempt, and a key it took is freed (see storeNote). A claim the
-// store cannot answer refuses the attempt, and a session that is gone
-// meanwhile answers not_found.
+// recovery is scheduled as for a held note with a reply. A key taken after
+// such a wait is stored under only while the note still reaches its session
+// (see stillReaches): the user's chat turns may have marked the session for
+// another account meanwhile. Waiting for the key and for the note's place
+// among the session's turns ends at the note's deadline, the timeout after the
+// first claim: an attempt whose note is not stored by then gets no answer, so
+// the caller's wait for one ends as for any unanswered attempt, and a key it
+// took is freed (see storeNote). A claim the store cannot answer refuses the
+// attempt, and a session that is gone meanwhile answers not_found.
 func (o *openSessions) claimAndStore(ctx context.Context, msg pkg.InboundMessage, scope openScope, groupID string, key recoveryKey) pkg.OutboundMessage {
 	start := time.Now()
 	deadline := start.Add(o.timeout)
@@ -318,7 +320,13 @@ func (o *openSessions) claimAndStore(ctx context.Context, msg pkg.InboundMessage
 		}
 		switch result {
 		case state.ClaimWon:
-			err := o.storeNote(ctx, key, msg.Content, state.TurnClaim{NoteKey: key.noteKey, At: now}, deadline)
+			claim := state.TurnClaim{NoteKey: key.noteKey, At: now}
+			if held {
+				if refused, ok := o.stillReaches(ctx, msg, scope, groupID, key, claim); !ok {
+					return refused
+				}
+			}
+			err := o.storeNote(ctx, key, msg.Content, claim, deadline)
 			return o.answerStored(ctx, msg, scope, groupID, key, err)
 		case state.ClaimSettled:
 			o.acknowledge(ctx, msg, scope, key.sessionID, false)
@@ -340,26 +348,48 @@ func (o *openSessions) claimAndStore(ctx context.Context, msg pkg.InboundMessage
 	}
 }
 
+// stillReaches reports whether the note msg, whose attempt took key's
+// reservation under claim after waiting for it, still reaches its session
+// (see noteReaches). When it does not, or the lookup fails, it frees the
+// reservation and returns the refusal to answer: not_found, or internal_error.
+func (o *openSessions) stillReaches(ctx context.Context, msg pkg.InboundMessage, scope openScope, groupID string, key recoveryKey, claim state.TurnClaim) (pkg.OutboundMessage, bool) {
+	reached, err := o.noteReaches(ctx, key.sessionID, scope, groupID)
+	if err == nil && reached {
+		return pkg.OutboundMessage{}, true
+	}
+	o.freeNote(ctx, key, claim.At)
+	if err != nil {
+		logger.FromContext(ctx).Error("note session lookup failed", "session", key.sessionID, "error", err)
+		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error"), false
+	}
+	return openRejected(msg, unavailable, "not_found"), false
+}
+
 // storeNote stores content as a note without a reply in key's session under
 // claim, waiting for its place among the session's turns until deadline (see
 // HandlerConfig.StoreNote). A note it did not store frees the claim's
-// reservation, so the same attempt again takes the key at once. The store
-// frees nothing once a note is stored under the reservation, also when the
-// error came after the write committed, nor a reservation another attempt took
-// over; a release the store cannot make leaves the reservation to go stale.
+// reservation (see freeNote), so the same attempt again takes the key at once.
 func (o *openSessions) storeNote(ctx context.Context, key recoveryKey, content string, claim state.TurnClaim, deadline time.Time) error {
 	noteCtx, cancel := context.WithDeadline(ctx, deadline)
 	err := o.cfg.StoreNote(noteCtx, key.sessionID, content, claim)
 	cancel()
-	if err == nil {
-		return nil
-	}
-	freeCtx, cancel := o.storeContext(ctx)
-	defer cancel()
-	if ferr := o.cfg.Opener.FreeNote(freeCtx, key.sessionID, key.noteKey, claim.At); ferr != nil {
-		logger.FromContext(ctx).Warn("note reservation not freed", "session", key.sessionID, "note_key", key.noteKey, "error", ferr)
+	if err != nil {
+		o.freeNote(ctx, key, claim.At)
 	}
 	return err
+}
+
+// freeNote frees key's reservation taken at reservedAt, whose note this
+// attempt did not store. The store frees nothing once a note is stored under
+// the reservation, also when the error came after the write committed, nor a
+// reservation another attempt took over; a release the store cannot make
+// leaves the reservation to go stale.
+func (o *openSessions) freeNote(ctx context.Context, key recoveryKey, reservedAt time.Time) {
+	freeCtx, cancel := o.storeContext(ctx)
+	defer cancel()
+	if err := o.cfg.Opener.FreeNote(freeCtx, key.sessionID, key.noteKey, reservedAt); err != nil {
+		logger.FromContext(ctx).Warn("note reservation not freed", "session", key.sessionID, "note_key", key.noteKey, "error", err)
+	}
 }
 
 // answerStored answers the attempt that took key's reservation by err, what

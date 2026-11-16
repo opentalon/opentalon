@@ -2489,6 +2489,53 @@ func TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenNotStored(t *testin
 	}
 }
 
+// TestHandler_OpenSession_WaitingNoteRechecksItsReach: a note without a reply
+// reaches the user's chat under account g1 and finds its key held by another
+// attempt. While it waits, the user's chat turn under account g2 marks the
+// session for g2, and the holder frees its reservation. The waiting call takes
+// the key, no longer reaches the session, frees the key again and answers
+// not_found: nothing is stored or answered.
+func TestHandler_OpenSession_WaitingNoteRechecksItsReach(t *testing.T) {
+	noteTiming(t, 2*time.Second, 4*time.Second)
+	const chat = "u1:websocket:c1"
+	op := &heldOpener{held: make(chan struct{})}
+	var orch *orchestrator.Orchestrator
+	rec, h := newMarkingHandler(func(cfg *HandlerConfig) {
+		op.SessionStore = cfg.Opener.(*state.SessionStore)
+		cfg.Opener = op
+		cfg.StoreNote = func(ctx context.Context, id, content string, claim state.TurnClaim) error {
+			return orch.StoreNote(ctx, id, content, claim)
+		}
+	})
+	orch = orchestrator.NewWithRules(newGateLLM(), orchestrator.DefaultParser, orchestrator.NewToolRegistry(),
+		state.NewMemoryStore(""), rec.store, orchestrator.OrchestratorOpts{EventSink: rec})
+	chatTurn(h, chatMessage("chat", "websocket", "c1"))
+	held := time.Now()
+	if result, err := rec.store.ReserveNote(context.Background(), chat, "chapter-2", held, openerStaleAfter); err != nil || result != state.ClaimWon {
+		t.Fatalf("other attempt's reservation = %v, %v", result, err)
+	}
+
+	answered := make(chan pkg.OutboundMessage, 1)
+	go func() { answered <- callOpen(h, "c8", noteWithoutReply(chat)) }()
+	await(t, op.held, "the note to find its key held")
+	chatTurn(h, chatMessage("chat-g2", "websocket", "c1"))
+	if err := rec.store.FreeNote(context.Background(), chat, "chapter-2", held); err != nil {
+		t.Fatalf("other attempt's release: %v", err)
+	}
+	out := await(t, answered, "the note's call to return")
+
+	if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" {
+		t.Errorf("handler frame = %+v, want open_rejected not_found", out.Metadata)
+	}
+	got, _, _ := rec.snapshot()
+	if n := countStored(t, rec.store, chat, noteContent); n != 0 || countEvents(got, "event "+events.TypeNoteStored) != 0 || len(rec.acks()) != 0 {
+		t.Errorf("note stored %d times, events %v, answers %+v; want nothing in a session marked for another account", n, got, rec.acks())
+	}
+	if result, err := rec.store.ReserveNote(context.Background(), chat, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+		t.Errorf("the note's key after its call = %v, %v; want it free", result, err)
+	}
+}
+
 // vanishingOpener deletes a note's session right before its reservation, as
 // a session deleted between the note's lookup and its claim.
 type vanishingOpener struct{ *state.SessionStore }
