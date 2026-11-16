@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,30 +64,7 @@ func NewHealthGatedProvider(ctx context.Context, entries []ProviderEntry, probe 
 	if log == nil {
 		log = slog.Default()
 	}
-	interval := cfg.Interval
-	if interval <= 0 {
-		interval = defaultHealthInterval
-	}
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = defaultHealthTimeout
-	}
-	recoverAfter := cfg.RecoverAfter
-	if recoverAfter <= 0 {
-		recoverAfter = defaultHealthRecoverAfter
-	}
-	h := &endpointHealth{
-		probe:        probe,
-		interval:     interval,
-		timeout:      timeout,
-		recoverAfter: recoverAfter,
-		log:          log,
-	}
-	// Optimistic start: prefer the preferred endpoint from the first request.
-	// A failed probe or live error trips it; recovery then needs RecoverAfter
-	// consecutive healthy probes.
-	h.healthy.Store(true)
-	h.consecutiveOK = recoverAfter
+	h := newEndpointHealth("preferred llm endpoint", probe, cfg, log)
 	hg := &healthGatedProvider{entries: entries, health: h, log: log}
 	if probe != nil {
 		go h.run(ctx)
@@ -182,7 +161,7 @@ func (h *healthGatedProvider) Complete(ctx context.Context, req *CompletionReque
 		}
 		lastErr = err
 		if idx == 0 {
-			h.health.trip()
+			h.tripPreferred()
 		}
 		if len(h.entries) > 1 {
 			h.log.Warn("llm provider failed; trying next endpoint",
@@ -212,7 +191,7 @@ func (h *healthGatedProvider) Stream(ctx context.Context, req *CompletionRequest
 		}
 		lastErr = err
 		if idx == 0 {
-			h.health.trip()
+			h.tripPreferred()
 		}
 		if len(h.entries) > 1 {
 			h.log.Warn("llm provider stream failed; trying next endpoint",
@@ -222,9 +201,16 @@ func (h *healthGatedProvider) Stream(ctx context.Context, req *CompletionRequest
 	return nil, lastErr
 }
 
-// endpointHealth tracks the reachability of the preferred endpoint with
-// hysteresis on recovery.
+func (h *healthGatedProvider) tripPreferred() {
+	if h.health.trip() {
+		h.log.Warn("preferred llm endpoint tripped to unhealthy after a live failure")
+	}
+}
+
+// endpointHealth tracks the reachability of one endpoint with hysteresis on
+// recovery. name starts its log messages.
 type endpointHealth struct {
+	name         string
 	healthy      atomic.Bool
 	probe        HealthProbe
 	interval     time.Duration
@@ -237,18 +223,45 @@ type endpointHealth struct {
 	log *slog.Logger
 }
 
+// newEndpointHealth returns the health of an endpoint probed by probe, with
+// cfg's zero values at their defaults. It starts healthy: the endpoint gets
+// the first request, and a failed probe or live error trips it.
+func newEndpointHealth(name string, probe HealthProbe, cfg HealthGateConfig, log *slog.Logger) *endpointHealth {
+	interval := cfg.Interval
+	if interval <= 0 {
+		interval = defaultHealthInterval
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = defaultHealthTimeout
+	}
+	recoverAfter := cfg.RecoverAfter
+	if recoverAfter <= 0 {
+		recoverAfter = defaultHealthRecoverAfter
+	}
+	h := &endpointHealth{
+		name:         name,
+		probe:        probe,
+		interval:     interval,
+		timeout:      timeout,
+		recoverAfter: recoverAfter,
+		log:          log,
+	}
+	h.healthy.Store(true)
+	h.consecutiveOK = recoverAfter
+	return h
+}
+
 func (h *endpointHealth) isHealthy() bool { return h.healthy.Load() }
 
 // trip marks the endpoint unhealthy immediately, called on a live request
-// failure against the preferred endpoint. Recovery then requires recoverAfter
-// consecutive healthy probes.
-func (h *endpointHealth) trip() {
+// failure against it, and reports whether it was healthy until then.
+// Recovery then requires recoverAfter consecutive healthy probes.
+func (h *endpointHealth) trip() bool {
 	h.mu.Lock()
 	h.consecutiveOK = 0
 	h.mu.Unlock()
-	if h.healthy.Swap(false) {
-		h.log.Warn("preferred llm endpoint tripped to unhealthy after a live failure")
-	}
+	return h.healthy.Swap(false)
 }
 
 func (h *endpointHealth) run(ctx context.Context) {
@@ -277,14 +290,14 @@ func (h *endpointHealth) probeOnce(ctx context.Context) {
 	if err != nil {
 		h.consecutiveOK = 0
 		if h.healthy.Swap(false) {
-			h.log.Warn("preferred llm endpoint probe failed; falling back", "error", err)
+			h.log.Warn(h.name+" probe failed; falling back", "error", err)
 		}
 		return
 	}
 	h.consecutiveOK++
 	if !h.healthy.Load() && h.consecutiveOK >= h.recoverAfter {
 		h.healthy.Store(true)
-		h.log.Info("preferred llm endpoint healthy again; switching back", "consecutive_ok", h.consecutiveOK)
+		h.log.Info(h.name+" healthy again; switching back", "consecutive_ok", h.consecutiveOK)
 	}
 }
 
@@ -303,6 +316,43 @@ const (
 	// format the provider is configured to use for completions.
 	ProbeAuthAnthropicNative
 )
+
+// NewProviderProbe returns a probe of the model list of the provider cfg
+// describes, with that provider's auth and headers, and the URL it gets: the
+// base URL (the provider's default when empty) joined with path, or with the
+// model list path of the provider's API when path is empty.
+func NewProviderProbe(cfg ProviderConfig, path string) (HealthProbe, string) {
+	base, modelsPath, auth := cfg.BaseURL, "/models", ProbeAuthBearer
+	if cfg.API == APIAnthropic {
+		if base == "" {
+			base = anthropicDefaultBaseURL
+		}
+		modelsPath, auth = "/v1/models", ProbeAuthAnthropicNative
+	} else if base == "" {
+		base = openAIDefaultBaseURL
+	}
+	if isAnthropicNativeHost(base) {
+		// api.anthropic.com's OpenAI-compat layer accepts Bearer on
+		// /chat/completions but not on /models. See issue #324.
+		auth = ProbeAuthAnthropicNative
+	}
+	if path == "" {
+		path = modelsPath
+	}
+	probeURL := strings.TrimRight(base, "/") + path
+	return NewHTTPHealthProbeWithHeaders(probeURL, cfg.APIKey, auth, cfg.Headers, nil), probeURL
+}
+
+// isAnthropicNativeHost reports whether baseURL points at Anthropic's API
+// (native or OpenAI-compat surface), where /v1/models only accepts
+// x-api-key, never Bearer.
+func isAnthropicNativeHost(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	return u.Hostname() == "api.anthropic.com"
+}
 
 // NewHTTPHealthProbe returns a HealthProbe that GETs probeURL with apiKey sent
 // per auth, and treats any 2xx response as healthy. probeURL is typically the

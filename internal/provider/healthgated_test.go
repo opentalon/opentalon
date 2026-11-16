@@ -18,7 +18,8 @@ type fakeProvider struct {
 	failWith  error  // the error to return when failing; nil means a generic one
 	lastModel string // model id it was last called with
 	calls     int
-	extra     []string // further model ids it serves besides model
+	extra     []string       // further model ids it serves besides model
+	stream    ResponseStream // what Stream returns when it does not fail; nil = an error
 }
 
 func (f *fakeProvider) ID() string                   { return f.id }
@@ -53,6 +54,9 @@ func (f *fakeProvider) Stream(_ context.Context, req *CompletionRequest) (Respon
 	if f.failNext {
 		return nil, f.failure()
 	}
+	if f.stream != nil {
+		return f.stream, nil
+	}
 	return nil, errors.New("stream not exercised in these tests")
 }
 
@@ -86,15 +90,8 @@ func TestHealthGatedContextOverflowStopsAtFirstEndpoint(t *testing.T) {
 // newTestHG builds a health-gated provider directly (no background goroutine)
 // so the health state can be driven deterministically via probeOnce/trip.
 func newTestHG(preferred, fallback *fakeProvider, recoverAfter int, probe HealthProbe) *healthGatedProvider {
-	h := &endpointHealth{
-		probe:        probe,
-		recoverAfter: recoverAfter,
-		interval:     time.Hour,
-		timeout:      time.Second,
-		log:          slog.Default(),
-	}
-	h.healthy.Store(true)
-	h.consecutiveOK = recoverAfter
+	h := newEndpointHealth("preferred llm endpoint", probe,
+		HealthGateConfig{Interval: time.Hour, Timeout: time.Second, RecoverAfter: recoverAfter}, slog.Default())
 	return &healthGatedProvider{
 		entries: []ProviderEntry{
 			{Prov: preferred, Model: preferred.model},
@@ -310,7 +307,7 @@ func TestPrimaryModels(t *testing.T) {
 	preferred := &fakeProvider{id: "anthropic", model: "opus", extra: []string{"haiku"}}
 	fallback := &fakeProvider{id: "backup", model: "fallback-only"}
 	gate := newTestHG(preferred, fallback, 1, nil)
-	for _, p := range []Provider{gate, NewSelectingProvider(gate, "opus", nil, nil)} {
+	for _, p := range []Provider{gate, NewSelectingProvider(context.Background(), gate, "opus", nil, HealthGateConfig{}, nil)} {
 		got := PrimaryModels(p)
 		if len(got) != 2 || got[0].ID != "opus" || got[1].ID != "haiku" {
 			t.Errorf("PrimaryModels = %+v, want the preferred endpoint's opus, haiku", got)
@@ -318,5 +315,48 @@ func TestPrimaryModels(t *testing.T) {
 	}
 	if got := PrimaryModels(preferred); len(got) != 2 {
 		t.Errorf("PrimaryModels on a bare provider = %+v, want its own models", got)
+	}
+}
+
+// TestNewProviderProbe: a provider's probe gets its model list with the auth
+// of its API, and a set path replaces the model list path.
+func TestNewProviderProbe(t *testing.T) {
+	type seen struct{ path, apiKey, bearer string }
+	var got seen
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = seen{r.URL.Path, r.Header.Get("x-api-key"), r.Header.Get("Authorization")}
+	}))
+	defer srv.Close()
+	cases := []struct {
+		name    string
+		api     string
+		base    string
+		path    string
+		wantURL string
+		want    seen // the request the server sees; zero = not sent
+	}{
+		{"anthropic-messages", APIAnthropic, srv.URL, "", srv.URL + "/v1/models", seen{"/v1/models", "sk", ""}},
+		{"openai-completions", APIOpenAI, srv.URL + "/v1", "", srv.URL + "/v1/models", seen{"/v1/models", "", "Bearer sk"}},
+		{"a set path", APIOpenAI, srv.URL, "/health", srv.URL + "/health", seen{"/health", "", "Bearer sk"}},
+		{"anthropic-messages without base_url", APIAnthropic, "", "", "https://api.anthropic.com/v1/models", seen{}},
+		{"openai-completions without base_url", "", "", "", "https://api.openai.com/v1/models", seen{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			probe, url := NewProviderProbe(ProviderConfig{API: tc.api, BaseURL: tc.base, APIKey: "sk"}, tc.path)
+			if url != tc.wantURL {
+				t.Errorf("probe URL = %q, want %q", url, tc.wantURL)
+			}
+			if tc.want == (seen{}) {
+				return
+			}
+			got = seen{}
+			if err := probe(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("server saw %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }

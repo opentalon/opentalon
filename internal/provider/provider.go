@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 type Role string
@@ -146,6 +147,11 @@ type CompletionResponse struct {
 	// tool_call_extracted events so the analytics graph links each tool
 	// dispatch back to the LLM round that produced it.
 	EventID string `json:"-"`
+
+	// Fallback is true when the default model answered a request for
+	// another model (see selectingProvider): the usage is the default
+	// model's, not the requested one's.
+	Fallback bool `json:"-"`
 }
 
 type StreamChunk struct {
@@ -153,6 +159,8 @@ type StreamChunk struct {
 	Done    bool   `json:"done"`
 	Model   string `json:"model,omitempty"`
 	Usage   Usage  `json:"usage,omitempty"`
+	// Fallback is CompletionResponse.Fallback for a stream.
+	Fallback bool `json:"-"`
 }
 
 type ResponseStream interface {
@@ -163,6 +171,17 @@ type ResponseStream interface {
 // ErrStreamingNotImplemented is returned by the Stream of a provider that
 // cannot stream; its Complete serves the request instead.
 var ErrStreamingNotImplemented = errors.New("streaming not yet implemented")
+
+// StatusError is a provider's answer with an HTTP status other than 200.
+type StatusError struct {
+	api        string // "anthropic" or "openai", the start of the error text
+	StatusCode int
+	Body       string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s api error (status %d): %s", e.api, e.StatusCode, e.Body)
+}
 
 type Provider interface {
 	ID() string

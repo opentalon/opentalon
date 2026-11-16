@@ -436,7 +436,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 			StatusCode:       httpResp.StatusCode,
 			ResponseBodyText: string(respBody),
 		})
-		return nil, fmt.Errorf("anthropic api error (status %d): %s", httpResp.StatusCode, string(respBody))
+		return nil, &StatusError{api: "anthropic", StatusCode: httpResp.StatusCode, Body: string(respBody)}
 	}
 
 	var anthResp anthResponse

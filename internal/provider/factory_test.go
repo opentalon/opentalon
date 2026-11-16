@@ -1,7 +1,9 @@
 package provider
 
 import (
+	"net/http"
 	"testing"
+	"time"
 )
 
 func TestFromConfigOpenAI(t *testing.T) {
@@ -78,5 +80,36 @@ func TestFromConfigWithModels(t *testing.T) {
 	}
 	if len(p.Models()) != 2 {
 		t.Errorf("models = %d, want 2", len(p.Models()))
+	}
+}
+
+// TestFromConfigTimeout: a provider's time limit bounds its HTTP client, and
+// without one the client keeps 120 seconds.
+func TestFromConfigTimeout(t *testing.T) {
+	cases := []struct {
+		api     string
+		timeout time.Duration
+		want    time.Duration
+	}{
+		{APIOpenAI, 0, 120 * time.Second},
+		{APIOpenAI, 45 * time.Second, 45 * time.Second},
+		{APIAnthropic, 0, 120 * time.Second},
+		{APIAnthropic, 45 * time.Second, 45 * time.Second},
+	}
+	for _, tc := range cases {
+		p, err := FromConfig(ProviderConfig{ID: "p", API: tc.api, Timeout: tc.timeout})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var client *http.Client
+		switch pp := p.(type) {
+		case *OpenAIProvider:
+			client = pp.client
+		case *AnthropicProvider:
+			client = pp.client
+		}
+		if client == nil || client.Timeout != tc.want {
+			t.Errorf("%s with timeout %v: client %+v, want Timeout %v", tc.api, tc.timeout, client, tc.want)
+		}
 	}
 }

@@ -2495,8 +2495,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		turnSpoken, rest, turnShown := takeSpoken(ctx, written)
 		resp.Content = rest
 		// The provider's own count of what it just charged for. Free, exact,
-		// and the only ground truth the estimate ever gets.
-		o.calibrators.observe(req.Model, estimatedTokens, resp.Usage.InputTokens)
+		// and the only ground truth the estimate ever gets. It corrects the
+		// model that answered: the default's ("") when the default model
+		// answered a request for another model.
+		answered := req.Model
+		if resp.Fallback {
+			answered = ""
+		}
+		o.calibrators.observe(answered, estimatedTokens, resp.Usage.InputTokens)
 		// Stamp the just-emitted llm_response as parent for the rest of
 		// this iteration: tool_call_extracted / tool_call_result / retry
 		// / confirmation events all form a tight subtree under the LLM
@@ -3671,6 +3677,7 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 	var buf strings.Builder
 	var usage provider.Usage
 	var model string
+	var fallback bool
 	showLabels := o.showToolCalls == "friendly" || o.showToolCalls == "raw" || o.showToolCalls == "true"
 	filter := newStreamTagFilter(showLabels)
 	for {
@@ -3691,6 +3698,7 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 		if chunk.Model != "" {
 			model = chunk.Model
 		}
+		fallback = fallback || chunk.Fallback
 		if chunk.Usage.InputTokens > 0 || chunk.Usage.OutputTokens > 0 {
 			usage = chunk.Usage
 		}
@@ -3716,10 +3724,11 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 	}
 
 	return &provider.CompletionResponse{
-		Content: buf.String(),
-		Model:   model,
-		Usage:   usage,
-		EventID: eventID,
+		Content:  buf.String(),
+		Model:    model,
+		Usage:    usage,
+		EventID:  eventID,
+		Fallback: fallback,
 	}, nil
 }
 

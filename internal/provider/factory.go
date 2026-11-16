@@ -2,6 +2,8 @@ package provider
 
 import (
 	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 )
@@ -36,6 +38,9 @@ type ProviderConfig struct {
 	PromptCache  bool        // Anthropic only: cache markers on chat-loop requests
 	// CacheDiagnostics is Anthropic only: cache diagnostics on chat-loop requests.
 	CacheDiagnostics bool
+	// Timeout is the longest one call may take, its retries included (they
+	// run inside the client). Zero keeps the client's 120 seconds.
+	Timeout time.Duration
 }
 
 // FromConfig creates a Provider from a config entry. The api field
@@ -58,6 +63,9 @@ func FromConfig(cfg ProviderConfig) (Provider, error) {
 		if len(cfg.Headers) > 0 {
 			opts = append(opts, WithOpenAIHeaders(cfg.Headers))
 		}
+		if cfg.Timeout > 0 {
+			opts = append(opts, WithOpenAIHTTPClient(&http.Client{Timeout: cfg.Timeout}))
+		}
 		opts = append(opts, WithOpenAIRetryPolicy(cfg.Retry))
 		return NewOpenAIProvider(cfg.ID, cfg.BaseURL, cfg.APIKey, cfg.Models, opts...), nil
 	case APIAnthropic:
@@ -67,6 +75,9 @@ func FromConfig(cfg ProviderConfig) (Provider, error) {
 		}
 		if len(cfg.Headers) > 0 {
 			opts = append(opts, WithAnthropicHeaders(cfg.Headers))
+		}
+		if cfg.Timeout > 0 {
+			opts = append(opts, WithAnthropicHTTPClient(&http.Client{Timeout: cfg.Timeout}))
 		}
 		opts = append(opts, WithAnthropicRetryPolicy(cfg.Retry), WithAnthropicPromptCache(cfg.PromptCache),
 			WithAnthropicCacheDiagnostics(cfg.CacheDiagnostics))

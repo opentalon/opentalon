@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1698,8 +1697,14 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 	if err != nil {
 		return nil, "", err
 	}
+	health := provider.HealthGateConfig{
+		Interval:     parseDurationOrZero(cfg.Routing.Health.Interval),
+		Timeout:      parseDurationOrZero(cfg.Routing.Health.Timeout),
+		RecoverAfter: cfg.Routing.Health.RecoverAfter,
+	}
+	selectable := definedProviders(cfg, debugSink, debugResolve, eventSink)
 	if len(cfg.Routing.Fallbacks) == 0 {
-		return provider.NewSelectingProvider(prov, modelID, definedProviders(cfg, debugSink, debugResolve, eventSink), slog.Default()), modelID, nil
+		return provider.NewSelectingProvider(context.Background(), prov, modelID, selectable, health, slog.Default()), modelID, nil
 	}
 
 	entries := make([]provider.ProviderEntry, 0, 1+len(cfg.Routing.Fallbacks))
@@ -1712,65 +1717,39 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 		entries = append(entries, provider.ProviderEntry{Prov: fp, Model: fModel})
 	}
 
-	probePath := cfg.Routing.Health.Path
-	if probePath == "" {
-		probePath = "/models"
-	}
-	probeURL := strings.TrimRight(primaryPC.BaseURL, "/") + probePath
-	probeAuth := provider.ProbeAuthBearer
-	if isAnthropicNativeHost(primaryPC.BaseURL) {
-		// api.anthropic.com's OpenAI-compat layer accepts Bearer on
-		// /chat/completions but not on /models — the probe must use
-		// Anthropic's native auth regardless of the provider's configured
-		// `api:` kind. See issue #324.
-		probeAuth = provider.ProbeAuthAnthropicNative
-	}
-	probe := provider.NewHTTPHealthProbeWithHeaders(probeURL, primaryPC.APIKey, probeAuth, primaryPC.Headers, nil)
-	gate := provider.HealthGateConfig{
-		Interval:     parseDurationOrZero(cfg.Routing.Health.Interval),
-		Timeout:      parseDurationOrZero(cfg.Routing.Health.Timeout),
-		RecoverAfter: cfg.Routing.Health.RecoverAfter,
-	}
+	probe, probeURL := provider.NewProviderProbe(primaryPC, cfg.Routing.Health.Path)
 	slog.Info("llm routing: health-gated fallback enabled",
 		"primary", cfg.Routing.Primary,
 		"fallbacks", cfg.Routing.Fallbacks,
 		"health_probe", probeURL)
-	gated := provider.NewHealthGatedProvider(context.Background(), entries, probe, gate, slog.Default())
-	return provider.NewSelectingProvider(gated, modelID, definedProviders(cfg, debugSink, debugResolve, eventSink), slog.Default()), modelID, nil
+	gated := provider.NewHealthGatedProvider(context.Background(), entries, probe, health, slog.Default())
+	return provider.NewSelectingProvider(context.Background(), gated, modelID, selectable, health, slog.Default()), modelID, nil
 }
 
-// definedProviders builds every provider in models.providers, by id. One that
-// cannot be built is left out with a warning instead of stopping the start:
-// nothing routes to it, and a profile model naming it gets the default model.
-func definedProviders(cfg *config.Config, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver, eventSink emit.Sink) map[string]provider.Provider {
-	out := make(map[string]provider.Provider, len(cfg.Models.Providers))
+// definedProviders builds every provider in models.providers, by id, each
+// with a probe of its own model list. One that cannot be built is left out
+// with a warning instead of stopping the start: nothing routes to it, and a
+// profile model naming it gets the default model.
+func definedProviders(cfg *config.Config, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver, eventSink emit.Sink) map[string]provider.SelectableProvider {
+	out := make(map[string]provider.SelectableProvider, len(cfg.Models.Providers))
 	for id := range cfg.Models.Providers {
-		p, _, _, err := buildProviderRef(cfg, id, debugSink, debugResolve, eventSink)
+		p, _, pc, err := buildProviderRef(cfg, id, debugSink, debugResolve, eventSink)
 		if err != nil {
 			slog.Warn("provider not built; a profile model naming it gets the default model", "provider", id, "error", err)
 			continue
 		}
-		out[id] = p
+		probe, _ := provider.NewProviderProbe(pc, "")
+		out[id] = provider.SelectableProvider{Prov: p, Probe: probe}
 	}
 	return out
 }
 
-// isAnthropicNativeHost reports whether baseURL points at Anthropic's API
-// (native or OpenAI-compat surface), where /v1/models only accepts
-// x-api-key, never Bearer.
-func isAnthropicNativeHost(baseURL string) bool {
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return false
-	}
-	return u.Hostname() == "api.anthropic.com"
-}
-
 // buildProviderRef builds a single provider from a "providerID" or
 // "providerID/modelID" routing ref. An empty ref selects the first configured
-// provider. It returns the provider, the resolved model id, and the provider's
-// config entry (used by the caller to wire the health probe against its endpoint).
-func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver, eventSink emit.Sink) (provider.Provider, string, config.ProviderConfig, error) {
+// provider. It returns the provider, the resolved model id, and the config the
+// provider was built from (used by the caller to wire the health probe against
+// its endpoint).
+func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver, eventSink emit.Sink) (provider.Provider, string, provider.ProviderConfig, error) {
 	providerID := ""
 	modelID := ""
 
@@ -1788,12 +1767,12 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 		}
 	}
 	if providerID == "" {
-		return nil, "", config.ProviderConfig{}, fmt.Errorf("no provider configured in models.providers")
+		return nil, "", provider.ProviderConfig{}, fmt.Errorf("no provider configured in models.providers")
 	}
 
 	pc, ok := cfg.Models.Providers[providerID]
 	if !ok {
-		return nil, "", config.ProviderConfig{}, fmt.Errorf("provider %q not found", providerID)
+		return nil, "", provider.ProviderConfig{}, fmt.Errorf("provider %q not found", providerID)
 	}
 
 	if modelID == "" {
@@ -1856,12 +1835,13 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 			MaxTotalWait: parseDurationOrZero(pc.Retry.MaxTotalWait),
 		},
 		CacheDiagnostics: pc.CacheDiagnostics.Value,
+		Timeout:          parseDurationOrZero(pc.Timeout),
 	}
 	prov, err := provider.FromConfig(provCfg)
 	if err != nil {
-		return nil, "", config.ProviderConfig{}, err
+		return nil, "", provider.ProviderConfig{}, err
 	}
-	return prov, modelID, pc, nil
+	return prov, modelID, provCfg, nil
 }
 
 // parseDurationOrZero parses a Go duration string, returning 0 (which the
