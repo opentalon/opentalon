@@ -762,7 +762,7 @@ type sentFrame struct {
 // holdAck set, the answer to that open_request_id waits for release before it
 // is sent, as a stalled channel would.
 type openRecorder struct {
-	store   *state.SessionStore
+	store   testStore
 	runErr  error
 	holdAck string
 	release chan struct{}
@@ -882,11 +882,15 @@ var welcomeProfile = profile.Profile{EntityID: "u1", Group: "g1", Kind: profile.
 const openedSession = "u1:websocket:c1"
 
 func newOpenHandler(p profile.Profile, override ...func(*HandlerConfig)) (*openRecorder, pkg.MessageHandler) {
-	rec := &openRecorder{store: state.NewSessionStore("")}
+	return newOpenHandlerOn(memoryStore(), p, override...)
+}
+
+func newOpenHandlerOn(store testStore, p profile.Profile, override ...func(*HandlerConfig)) (*openRecorder, pkg.MessageHandler) {
+	rec := &openRecorder{store: store}
 	cfg := baseHandlerConfig()
 	cfg.Verifier = systemVerifier{p: p}
 	cfg.Runner = rec
-	cfg.Opener = rec.store
+	cfg.Opener = rec.store.sessionStore
 	cfg.SetVerifiedOwner = rec.store.SetVerifiedOwner
 	cfg.SendToConversation = rec.send
 	cfg.ResumeSession = func(key string) error {
@@ -934,7 +938,7 @@ func callOpen(h pkg.MessageHandler, conv string, set map[string]string) pkg.Outb
 
 // storeOpened opens session id of entity as the open path does for
 // welcomeProfile's account, on the channel the id names after the entity.
-func storeOpened(t *testing.T, store *state.SessionStore, id, entity string) {
+func storeOpened(t *testing.T, store sessionStore, id, entity string) {
 	t.Helper()
 	channel, _, _ := strings.Cut(strings.TrimPrefix(id, entity+":"), ":")
 	if _, created, err := store.OpenSession(context.Background(), state.SessionParams{
@@ -1163,7 +1167,7 @@ func TestHandler_OpenSession_NoteRunsOncePerKey(t *testing.T) {
 }
 
 // countStored is how many of session id's stored messages carry content.
-func countStored(t *testing.T, store *state.SessionStore, id, content string) int {
+func countStored(t *testing.T, store sessionStore, id, content string) int {
 	t.Helper()
 	sess, err := store.Get(id)
 	if err != nil {
@@ -1661,42 +1665,44 @@ func TestHandler_OpenSession_ReplyReachesItsConversation(t *testing.T) {
 // refused with not_found, so the caller may open a new one, and nothing is
 // stored, reserved, run or sent.
 func TestHandler_OpenSession_NoteForASessionOutOfReachIsNotFound(t *testing.T) {
-	rec, h := newOpenHandler(welcomeProfile)
-	var foreign []string
-	for _, s := range []struct{ id, owner, channel string }{
-		{"u2:websocket:c1", "u2", "websocket"}, // another user's
-		{"u1:slack:c1", "u1", "slack"},         // u1's on another channel
-	} {
-		if _, created, err := rec.store.OpenSession(context.Background(), state.SessionParams{
-			ID: s.id, EntityID: s.owner, OpenedBy: "welcome", OpenKey: s.id, ChannelID: s.channel,
-		}); err != nil || !created {
-			t.Fatalf("OpenSession(%s) = created %v, %v", s.id, created, err)
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		rec, h := newOpenHandlerOn(kind.open(t), welcomeProfile)
+		var foreign []string
+		for _, s := range []struct{ id, owner, channel string }{
+			{"u2:websocket:c1", "u2", "websocket"}, // another user's
+			{"u1:slack:c1", "u1", "slack"},         // u1's on another channel
+		} {
+			if _, created, err := rec.store.OpenSession(context.Background(), state.SessionParams{
+				ID: s.id, EntityID: s.owner, OpenedBy: "welcome", OpenKey: s.id, ChannelID: s.channel,
+			}); err != nil || !created {
+				t.Fatalf("OpenSession(%s) = created %v, %v", s.id, created, err)
+			}
+			foreign = append(foreign, s.id)
 		}
-		foreign = append(foreign, s.id)
-	}
-	rec.store.Create(state.SessionParams{ID: "u1:websocket:c2", EntityID: "u1"}) // u1's chat, no recorded channel
-	backfilled := rec.store.Create(state.SessionParams{ID: "u1:websocket:c3", EntityID: "u1"})
-	backfilled.ChannelID = "websocket" // u1's chat on this channel, recorded by the store's backfill
-	foreign = append(foreign, "u1:websocket:c2", "u1:websocket:c3")
+		rec.store.Create(state.SessionParams{ID: "u1:websocket:c2", EntityID: "u1"}) // u1's chat, no recorded channel
+		rec.store.Create(state.SessionParams{ID: "u1:websocket:c3", EntityID: "u1"})
+		rec.store.backfill(t, "u1:websocket:c3", "u1", "", "websocket") // u1's chat on this channel, recorded by the store's backfill
+		foreign = append(foreign, "u1:websocket:c2", "u1:websocket:c3")
 
-	for _, target := range append([]string{"u1:websocket:gone"}, foreign...) {
-		out := callOpen(h, "c8", map[string]string{pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2"})
-		if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" ||
-			out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c8" {
-			t.Errorf("note for %s answered %+v, want open_rejected not_found with req-c8", target, out.Metadata)
+		for _, target := range append([]string{"u1:websocket:gone"}, foreign...) {
+			out := callOpen(h, "c8", map[string]string{pkg.OpenSessionIDMetadataKey: target, pkg.NoteKeyMetadataKey: "chapter-2"})
+			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" ||
+				out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c8" {
+				t.Errorf("note for %s answered %+v, want open_rejected not_found with req-c8", target, out.Metadata)
+			}
 		}
-	}
-	if events, _, _ := rec.snapshot(); len(events) != 0 {
-		t.Errorf("events = %v, want nothing sent or run", events)
-	}
-	for _, id := range foreign {
-		if sess, _ := rec.store.Get(id); len(sess.Messages) != 0 {
-			t.Errorf("%s holds %+v, want nothing stored", id, sess.Messages)
+		if events, _, _ := rec.snapshot(); len(events) != 0 {
+			t.Errorf("events = %v, want nothing sent or run", events)
 		}
-		if result, err := rec.store.ReserveNote(context.Background(), id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
-			t.Errorf("%s note reservation = %v, %v; want it still free", id, result, err)
+		for _, id := range foreign {
+			if sess, _ := rec.store.Get(id); len(sess.Messages) != 0 {
+				t.Errorf("%s holds %+v, want nothing stored", id, sess.Messages)
+			}
+			if result, err := rec.store.ReserveNote(context.Background(), id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				t.Errorf("%s note reservation = %v, %v; want it still free", id, result, err)
+			}
 		}
-	}
+	})
 }
 
 // tokenVerifier answers a fresh copy of the profile its token names, as WhoAmI
@@ -1731,10 +1737,10 @@ var markingTokens = func() tokenVerifier {
 // newMarkingHandler is newOpenHandler serving markingTokens, whose
 // CreateSession also creates the session in the store, as main's does: a
 // user's chat turn creates its session and marks it before it runs.
-func newMarkingHandler(override ...func(*HandlerConfig)) (*openRecorder, pkg.MessageHandler) {
+func newMarkingHandler(store testStore, override ...func(*HandlerConfig)) (*openRecorder, pkg.MessageHandler) {
 	var rec *openRecorder
 	var h pkg.MessageHandler
-	rec, h = newOpenHandler(welcomeProfile, append([]func(*HandlerConfig){func(cfg *HandlerConfig) {
+	rec, h = newOpenHandlerOn(store, welcomeProfile, append([]func(*HandlerConfig){func(cfg *HandlerConfig) {
 		cfg.Verifier = markingTokens
 		mint := cfg.CreateSession
 		cfg.CreateSession = func(p state.SessionParams) {
@@ -1770,35 +1776,37 @@ func noteTo(target, token string) map[string]string {
 // stored hidden and run, and its reply reaches the conversation stamped with
 // the user as its owner, which the channel gates delivery on.
 func TestHandler_OpenSession_NoteReachesAChatAfterTheUsersTurn(t *testing.T) {
-	const chat = "u1:websocket:c1"
-	rec, h := newMarkingHandler()
-	rec.store.Create(state.SessionParams{ID: chat, EntityID: "u1", GroupID: "g1"})
-	note := noteTo(chat, "tok")
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		const chat = "u1:websocket:c1"
+		rec, h := newMarkingHandler(kind.open(t))
+		rec.store.Create(state.SessionParams{ID: chat, EntityID: "u1", GroupID: "g1"})
+		note := noteTo(chat, "tok")
 
-	if out := callOpen(h, "c8", note); out.Metadata["error_code"] != "not_found" {
-		t.Fatalf("note before the user's turn answered %+v, want not_found", out.Metadata)
-	}
-	if out := chatTurn(h, chatMessage("chat", "websocket", "c1")); out.Content != "reply: hello" {
-		t.Fatalf("chat turn answered %q, want its reply", out.Content)
-	}
-	if out := callOpen(h, "c8", note); out.Content != "" || len(out.Metadata) != 0 {
-		t.Fatalf("note after the user's turn answered %+v, want the empty frame: its answer goes to the caller's conversation", out)
-	}
+		if out := callOpen(h, "c8", note); out.Metadata["error_code"] != "not_found" {
+			t.Fatalf("note before the user's turn answered %+v, want not_found", out.Metadata)
+		}
+		if out := chatTurn(h, chatMessage("chat", "websocket", "c1")); out.Content != "reply: hello" {
+			t.Fatalf("chat turn answered %q, want its reply", out.Content)
+		}
+		if out := callOpen(h, "c8", note); out.Content != "" || len(out.Metadata) != 0 {
+			t.Fatalf("note after the user's turn answered %+v, want the empty frame: its answer goes to the caller's conversation", out)
+		}
 
-	_, runs, frames := rec.snapshot()
-	if len(runs) != 2 || runs[1].sessionID != chat || runs[1].content != openRequest("c8", nil).Content {
-		t.Fatalf("turns = %+v, want the chat turn and then the note's in %s", runs, chat)
-	}
-	if len(frames) != 2 || frames[0].msg.Metadata["created"] != "true" || frames[0].msg.Metadata[pkg.OpenSessionIDMetadataKey] != chat {
-		t.Fatalf("frames = %+v, want the answer created for %s and the note's reply", frames, chat)
-	}
-	if reply := frames[1]; reply.channel != "websocket" || reply.msg.ConversationID != "c1" ||
-		reply.msg.Metadata["type"] != "" || reply.msg.Metadata[pkg.OwnerEntityMetadataKey] != "u1" {
-		t.Errorf("note reply = %+v on %s, want a reply to websocket/c1 stamped with owner u1", reply.msg, reply.channel)
-	}
-	if sess, _ := rec.store.Get(chat); len(sess.Messages) != 2 || sess.Messages[1].Visibility != provider.VisibilityHidden {
-		t.Errorf("stored messages = %+v, want the chat turn's and the hidden note", sess.Messages)
-	}
+		_, runs, frames := rec.snapshot()
+		if len(runs) != 2 || runs[1].sessionID != chat || runs[1].content != openRequest("c8", nil).Content {
+			t.Fatalf("turns = %+v, want the chat turn and then the note's in %s", runs, chat)
+		}
+		if len(frames) != 2 || frames[0].msg.Metadata["created"] != "true" || frames[0].msg.Metadata[pkg.OpenSessionIDMetadataKey] != chat {
+			t.Fatalf("frames = %+v, want the answer created for %s and the note's reply", frames, chat)
+		}
+		if reply := frames[1]; reply.channel != "websocket" || reply.msg.ConversationID != "c1" ||
+			reply.msg.Metadata["type"] != "" || reply.msg.Metadata[pkg.OwnerEntityMetadataKey] != "u1" {
+			t.Errorf("note reply = %+v on %s, want a reply to websocket/c1 stamped with owner u1", reply.msg, reply.channel)
+		}
+		if sess, _ := rec.store.Get(chat); len(sess.Messages) != 2 || sess.Messages[1].Visibility != provider.VisibilityHidden {
+			t.Errorf("stored messages = %+v, want the chat turn's and the hidden note", sess.Messages)
+		}
+	})
 }
 
 // TestHandler_OpenSession_NoteNeedsTheMarkOfTheUsersAccountAndChannel: a note
@@ -1812,81 +1820,82 @@ func TestHandler_OpenSession_NoteReachesAChatAfterTheUsersTurn(t *testing.T) {
 // target and answers bad_request. None of them stores, reserves or runs the
 // note.
 func TestHandler_OpenSession_NoteNeedsTheMarkOfTheUsersAccountAndChannel(t *testing.T) {
-	type handlers struct{ verified, anonymous pkg.MessageHandler }
-	chat := func(token, channel string) func(*testing.T, *openRecorder, handlers) {
-		return func(_ *testing.T, _ *openRecorder, h handlers) {
-			chatTurn(h.verified, chatMessage(token, channel, "c1"))
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		type handlers struct{ verified, anonymous pkg.MessageHandler }
+		chat := func(token, channel string) func(*testing.T, *openRecorder, handlers) {
+			return func(_ *testing.T, _ *openRecorder, h handlers) {
+				chatTurn(h.verified, chatMessage(token, channel, "c1"))
+			}
 		}
-	}
-	for _, tc := range []struct {
-		name   string
-		target string
-		touch  func(*testing.T, *openRecorder, handlers)
-		marked bool
-		code   string
-	}{
-		{"another user's chat", "u2:websocket:c1", chat("chat-u2", "websocket"), true, "not_found"},
-		{"the user's chat under another account", "u1:websocket:c1", chat("chat-g2", "websocket"), true, "not_found"},
-		{"the user's chat on another channel", "u1:slack:c1", chat("chat", "slack"), true, "not_found"},
-		{"an anonymous session with a backfilled owner", "u1:websocket:c4", func(_ *testing.T, rec *openRecorder, h handlers) {
-			// "<channel>:<conversation>:<thread>" of channel u1, conversation websocket.
-			chatTurn(h.anonymous, pkg.InboundMessage{ChannelID: "u1", ConversationID: "websocket", ThreadID: "c4", Content: "hello"})
-			backfilled := rec.store.Create(state.SessionParams{ID: "u1:websocket:c4"})
-			backfilled.EntityID, backfilled.GroupID, backfilled.ChannelID = "u1", "g1", "websocket"
-		}, false, "not_found"},
-		{"a session only a system token's turn touched", "u1:websocket:c1", func(_ *testing.T, _ *openRecorder, h handlers) {
-			msg := chatMessage("tok", "websocket", "c1")
-			msg.Metadata["visibility"] = provider.VisibilityHidden
-			chatTurn(h.verified, msg)
-		}, false, "not_found"},
-		{"a session only a resume handshake touched", "u1:websocket:c1", func(t *testing.T, rec *openRecorder, h handlers) {
-			rec.store.Create(state.SessionParams{ID: "u1:websocket:c1", EntityID: "u1", GroupID: "g1"})
-			msg := chatMessage("chat", "websocket", "c1")
-			msg.Content = ""
-			msg.Metadata[pkg.ResumeIntentMetadataKey] = "true"
-			msg.Metadata[pkg.ControlMetadataKey] = pkg.ControlResumeHello
-			if out := chatTurn(h.verified, msg); out.Content != "" || out.Metadata["type"] == "error" {
-				t.Fatalf("resume handshake answered %+v, want the empty frame", out)
-			}
-		}, false, "not_found"},
-		{"a thread of the user's chat", "u1:websocket:c1:t1", func(_ *testing.T, _ *openRecorder, h handlers) {
-			msg := chatMessage("chat", "websocket", "c1")
-			msg.ThreadID = "t1"
-			chatTurn(h.verified, msg)
-		}, true, "bad_request"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var anonymous pkg.MessageHandler
-			rec, verified := newMarkingHandler(func(cfg *HandlerConfig) {
-				anon := *cfg
-				anon.Verifier = nil
-				anonymous = NewMessageHandler(anon)
+		for _, tc := range []struct {
+			name   string
+			target string
+			touch  func(*testing.T, *openRecorder, handlers)
+			marked bool
+			code   string
+		}{
+			{"another user's chat", "u2:websocket:c1", chat("chat-u2", "websocket"), true, "not_found"},
+			{"the user's chat under another account", "u1:websocket:c1", chat("chat-g2", "websocket"), true, "not_found"},
+			{"the user's chat on another channel", "u1:slack:c1", chat("chat", "slack"), true, "not_found"},
+			{"an anonymous session with a backfilled owner", "u1:websocket:c4", func(t *testing.T, rec *openRecorder, h handlers) {
+				// "<channel>:<conversation>:<thread>" of channel u1, conversation websocket.
+				chatTurn(h.anonymous, pkg.InboundMessage{ChannelID: "u1", ConversationID: "websocket", ThreadID: "c4", Content: "hello"})
+				rec.store.backfill(t, "u1:websocket:c4", "u1", "g1", "websocket")
+			}, false, "not_found"},
+			{"a session only a system token's turn touched", "u1:websocket:c1", func(_ *testing.T, _ *openRecorder, h handlers) {
+				msg := chatMessage("tok", "websocket", "c1")
+				msg.Metadata["visibility"] = provider.VisibilityHidden
+				chatTurn(h.verified, msg)
+			}, false, "not_found"},
+			{"a session only a resume handshake touched", "u1:websocket:c1", func(t *testing.T, rec *openRecorder, h handlers) {
+				rec.store.Create(state.SessionParams{ID: "u1:websocket:c1", EntityID: "u1", GroupID: "g1"})
+				msg := chatMessage("chat", "websocket", "c1")
+				msg.Content = ""
+				msg.Metadata[pkg.ResumeIntentMetadataKey] = "true"
+				msg.Metadata[pkg.ControlMetadataKey] = pkg.ControlResumeHello
+				if out := chatTurn(h.verified, msg); out.Content != "" || out.Metadata["type"] == "error" {
+					t.Fatalf("resume handshake answered %+v, want the empty frame", out)
+				}
+			}, false, "not_found"},
+			{"a thread of the user's chat", "u1:websocket:c1:t1", func(_ *testing.T, _ *openRecorder, h handlers) {
+				msg := chatMessage("chat", "websocket", "c1")
+				msg.ThreadID = "t1"
+				chatTurn(h.verified, msg)
+			}, true, "bad_request"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var anonymous pkg.MessageHandler
+				rec, verified := newMarkingHandler(kind.open(t), func(cfg *HandlerConfig) {
+					anon := *cfg
+					anon.Verifier = nil
+					anonymous = NewMessageHandler(anon)
+				})
+				tc.touch(t, rec, handlers{verified: verified, anonymous: anonymous})
+				identity, err := rec.store.Identity(context.Background(), tc.target)
+				if err != nil || (identity.VerifiedOwner != nil) != tc.marked {
+					t.Fatalf("%s after its turn = %+v, %v; want it marked %v", tc.target, identity, err, tc.marked)
+				}
+				before, _, _ := rec.snapshot()
+				stored := countStored(t, rec.store, tc.target, openRequest("c8", nil).Content)
+
+				out := callOpen(verified, "c8", noteTo(tc.target, "tok"))
+
+				if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != tc.code ||
+					out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c8" {
+					t.Errorf("note answered %+v, want open_rejected %s with req-c8", out.Metadata, tc.code)
+				}
+				if events, _, _ := rec.snapshot(); len(events) != len(before) {
+					t.Errorf("events = %v, want the note to send or run nothing after %v", events, before)
+				}
+				if n := countStored(t, rec.store, tc.target, openRequest("c8", nil).Content); n != stored {
+					t.Errorf("%s holds the note %d times, want %d", tc.target, n, stored)
+				}
+				if result, err := rec.store.ReserveNote(context.Background(), tc.target, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+					t.Errorf("note reservation = %v, %v; want it still free", result, err)
+				}
 			})
-			tc.touch(t, rec, handlers{verified: verified, anonymous: anonymous})
-			identity, err := rec.store.Identity(context.Background(), tc.target)
-			if err != nil || (identity.VerifiedOwner != nil) != tc.marked {
-				t.Fatalf("%s after its turn = %+v, %v; want it marked %v", tc.target, identity, err, tc.marked)
-			}
-			before, _, _ := rec.snapshot()
-			stored := countStored(t, rec.store, tc.target, openRequest("c8", nil).Content)
-
-			out := callOpen(verified, "c8", noteTo(tc.target, "tok"))
-
-			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != tc.code ||
-				out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c8" {
-				t.Errorf("note answered %+v, want open_rejected %s with req-c8", out.Metadata, tc.code)
-			}
-			if events, _, _ := rec.snapshot(); len(events) != len(before) {
-				t.Errorf("events = %v, want the note to send or run nothing after %v", events, before)
-			}
-			if n := countStored(t, rec.store, tc.target, openRequest("c8", nil).Content); n != stored {
-				t.Errorf("%s holds the note %d times, want %d", tc.target, n, stored)
-			}
-			if result, err := rec.store.ReserveNote(context.Background(), tc.target, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
-				t.Errorf("note reservation = %v, %v; want it still free", result, err)
-			}
-		})
-	}
+		}
+	})
 }
 
 // TestHandler_OpenSession_NoteTakesAnOpenedSessionUnderItsAccountOnly: a
@@ -1895,40 +1904,42 @@ func TestHandler_OpenSession_NoteNeedsTheMarkOfTheUsersAccountAndChannel(t *test
 // account answers not_found and stores, reserves and runs nothing, also after
 // the user's own chat turn under that account marked the session.
 func TestHandler_OpenSession_NoteTakesAnOpenedSessionUnderItsAccountOnly(t *testing.T) {
-	rec, h := newMarkingHandler()
-	callOpen(h, "c1", nil) // opens openedSession under g1 and runs its first turn
-	if out := chatTurn(h, chatMessage("chat-g2", "websocket", "c1")); out.Content != "reply: hello" {
-		t.Fatalf("the user's turn under g2 answered %q, want its reply", out.Content)
-	}
-	if identity, err := rec.store.Identity(context.Background(), openedSession); err != nil || identity.GroupID != "g1" ||
-		identity.VerifiedOwner == nil || identity.VerifiedOwner.GroupID != "g2" {
-		t.Fatalf("%s = %+v, %v; want it opened under g1 and marked under g2", openedSession, identity, err)
-	}
-	before, _, _ := rec.snapshot()
-	content := openRequest("c8", nil).Content // the first turn's as well
-	stored := countStored(t, rec.store, openedSession, content)
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		rec, h := newMarkingHandler(kind.open(t))
+		callOpen(h, "c1", nil) // opens openedSession under g1 and runs its first turn
+		if out := chatTurn(h, chatMessage("chat-g2", "websocket", "c1")); out.Content != "reply: hello" {
+			t.Fatalf("the user's turn under g2 answered %q, want its reply", out.Content)
+		}
+		if identity, err := rec.store.Identity(context.Background(), openedSession); err != nil || identity.GroupID != "g1" ||
+			identity.VerifiedOwner == nil || identity.VerifiedOwner.GroupID != "g2" {
+			t.Fatalf("%s = %+v, %v; want it opened under g1 and marked under g2", openedSession, identity, err)
+		}
+		before, _, _ := rec.snapshot()
+		content := openRequest("c8", nil).Content // the first turn's as well
+		stored := countStored(t, rec.store, openedSession, content)
 
-	out := callOpen(h, "c8", noteTo(openedSession, "tok-g2"))
+		out := callOpen(h, "c8", noteTo(openedSession, "tok-g2"))
 
-	if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" {
-		t.Errorf("note under g2 answered %+v, want open_rejected not_found", out.Metadata)
-	}
-	if events, _, _ := rec.snapshot(); len(events) != len(before) {
-		t.Errorf("events = %v, want the note under g2 to send or run nothing after %v", events, before)
-	}
-	if n := countStored(t, rec.store, openedSession, content); n != stored {
-		t.Errorf("after the note under g2 the content is stored %d times, want %d", n, stored)
-	}
+		if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" {
+			t.Errorf("note under g2 answered %+v, want open_rejected not_found", out.Metadata)
+		}
+		if events, _, _ := rec.snapshot(); len(events) != len(before) {
+			t.Errorf("events = %v, want the note under g2 to send or run nothing after %v", events, before)
+		}
+		if n := countStored(t, rec.store, openedSession, content); n != stored {
+			t.Errorf("after the note under g2 the content is stored %d times, want %d", n, stored)
+		}
 
-	callOpen(h, "c8", noteTo(openedSession, "tok"))
+		callOpen(h, "c8", noteTo(openedSession, "tok"))
 
-	acks := rec.acks()
-	if last := acks[len(acks)-1]; last.Metadata["created"] != "true" || last.Metadata[pkg.OpenSessionIDMetadataKey] != openedSession {
-		t.Errorf("note under g1 answered %+v, want created for %s: the one under g2 reserved nothing", last.Metadata, openedSession)
-	}
-	if n := countStored(t, rec.store, openedSession, content); n != stored+1 {
-		t.Errorf("after the note under g1 the content is stored %d times, want %d", n, stored+1)
-	}
+		acks := rec.acks()
+		if last := acks[len(acks)-1]; last.Metadata["created"] != "true" || last.Metadata[pkg.OpenSessionIDMetadataKey] != openedSession {
+			t.Errorf("note under g1 answered %+v, want created for %s: the one under g2 reserved nothing", last.Metadata, openedSession)
+		}
+		if n := countStored(t, rec.store, openedSession, content); n != stored+1 {
+			t.Errorf("after the note under g1 the content is stored %d times, want %d", n, stored+1)
+		}
+	})
 }
 
 // firstRunHook calls before once, when the first turn reaches the runner and
@@ -1950,25 +1961,27 @@ func (r *firstRunHook) Run(ctx context.Context, sessionKey, content string, file
 // turn marks its session before it runs, so a note arriving while the first
 // turn of a new conversation is still running is taken.
 func TestHandler_OpenSession_NoteReachesAChatWhileItsFirstTurnRuns(t *testing.T) {
-	const chat = "u1:websocket:c1"
-	hook := &firstRunHook{}
-	rec, h := newMarkingHandler(func(cfg *HandlerConfig) { hook.Runner, cfg.Runner = cfg.Runner, hook })
-	var during pkg.OutboundMessage
-	hook.before = func() { during = callOpen(h, "c8", noteTo(chat, "tok")) }
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		const chat = "u1:websocket:c1"
+		hook := &firstRunHook{}
+		rec, h := newMarkingHandler(kind.open(t), func(cfg *HandlerConfig) { hook.Runner, cfg.Runner = cfg.Runner, hook })
+		var during pkg.OutboundMessage
+		hook.before = func() { during = callOpen(h, "c8", noteTo(chat, "tok")) }
 
-	if out := chatTurn(h, chatMessage("chat", "websocket", "c1")); out.Content != "reply: hello" {
-		t.Fatalf("chat turn answered %q, want its reply", out.Content)
-	}
+		if out := chatTurn(h, chatMessage("chat", "websocket", "c1")); out.Content != "reply: hello" {
+			t.Fatalf("chat turn answered %q, want its reply", out.Content)
+		}
 
-	if len(during.Metadata) != 0 {
-		t.Errorf("note during the first turn answered %+v, want the empty frame", during.Metadata)
-	}
-	if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "true" || acks[0].Metadata[pkg.OpenSessionIDMetadataKey] != chat {
-		t.Errorf("answers = %+v, want one created for %s", acks, chat)
-	}
-	if _, runs, _ := rec.snapshot(); len(runs) != 2 || runs[0].sessionID != chat || runs[1].content != "hello" {
-		t.Errorf("turns = %+v, want the note's in %s inside the running first turn", runs, chat)
-	}
+		if len(during.Metadata) != 0 {
+			t.Errorf("note during the first turn answered %+v, want the empty frame", during.Metadata)
+		}
+		if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "true" || acks[0].Metadata[pkg.OpenSessionIDMetadataKey] != chat {
+			t.Errorf("answers = %+v, want one created for %s", acks, chat)
+		}
+		if _, runs, _ := rec.snapshot(); len(runs) != 2 || runs[0].sessionID != chat || runs[1].content != "hello" {
+			t.Errorf("turns = %+v, want the note's in %s inside the running first turn", runs, chat)
+		}
+	})
 }
 
 // TestHandler_ChatTurnRunsWhenItsMarkIsNotWritten: a mark the store fails to
@@ -1976,7 +1989,7 @@ func TestHandler_OpenSession_NoteReachesAChatWhileItsFirstTurnRuns(t *testing.T)
 // out of a note's reach until a later turn marks it.
 func TestHandler_ChatTurnRunsWhenItsMarkIsNotWritten(t *testing.T) {
 	logs := captureLogs(t)
-	_, h := newMarkingHandler(func(cfg *HandlerConfig) {
+	_, h := newMarkingHandler(memoryStore(), func(cfg *HandlerConfig) {
 		cfg.SetVerifiedOwner = func(context.Context, string, state.VerifiedOwner) error {
 			return errors.New("database connection lost")
 		}
@@ -1999,27 +2012,29 @@ func TestHandler_ChatTurnRunsWhenItsMarkIsNotWritten(t *testing.T) {
 // marks the session for that account meanwhile, so the recovery runs and
 // stores nothing.
 func TestHandler_OpenSession_RecoveryOfANoteRechecksItsReach(t *testing.T) {
-	shortOpenerTiming(t)
-	const chat = "u1:websocket:c1"
-	rec, h := newMarkingHandler()
-	chatTurn(h, chatMessage("chat", "websocket", "c1"))
-	if result, err := rec.store.ReserveNote(context.Background(), chat, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
-		t.Fatalf("dead attempt's reservation = %v, %v", result, err)
-	}
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		shortOpenerTiming(t)
+		const chat = "u1:websocket:c1"
+		rec, h := newMarkingHandler(kind.open(t))
+		chatTurn(h, chatMessage("chat", "websocket", "c1"))
+		if result, err := rec.store.ReserveNote(context.Background(), chat, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+			t.Fatalf("dead attempt's reservation = %v, %v", result, err)
+		}
 
-	callOpen(h, "c8", noteTo(chat, "tok"))
-	if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "false" {
-		t.Fatalf("answers = %+v, want created=false", acks)
-	}
-	chatTurn(h, chatMessage("chat-g2", "websocket", "c1"))
-	time.Sleep(pastRecovery())
+		callOpen(h, "c8", noteTo(chat, "tok"))
+		if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "false" {
+			t.Fatalf("answers = %+v, want created=false", acks)
+		}
+		chatTurn(h, chatMessage("chat-g2", "websocket", "c1"))
+		time.Sleep(pastRecovery())
 
-	if _, runs, _ := rec.snapshot(); len(runs) != 2 {
-		t.Errorf("turns = %+v, want the two chat turns and no note", runs)
-	}
-	if n := countStored(t, rec.store, chat, openRequest("c8", nil).Content); n != 0 {
-		t.Errorf("note stored %d times in a session marked for another account, want 0", n)
-	}
+		if _, runs, _ := rec.snapshot(); len(runs) != 2 {
+			t.Errorf("turns = %+v, want the two chat turns and no note", runs)
+		}
+		if n := countStored(t, rec.store, chat, openRequest("c8", nil).Content); n != 0 {
+			t.Errorf("note stored %d times in a session marked for another account, want 0", n)
+		}
+	})
 }
 
 // noteTiming sets the deadline of a note without a reply (the turn timeout),
@@ -2068,9 +2083,9 @@ func (l *gateLLM) Complete(ctx context.Context, _ *provider.CompletionRequest) (
 // newNoteHandler is newOpenHandler whose StoreNote is the orchestrator's,
 // over the recorder's store, with llm as its model and the recorder as its
 // event sink.
-func newNoteHandler(llm *gateLLM, override ...func(*HandlerConfig)) (*openRecorder, *orchestrator.Orchestrator, pkg.MessageHandler) {
+func newNoteHandler(store testStore, llm *gateLLM, override ...func(*HandlerConfig)) (*openRecorder, *orchestrator.Orchestrator, pkg.MessageHandler) {
 	var orch *orchestrator.Orchestrator
-	rec, h := newOpenHandler(welcomeProfile, append([]func(*HandlerConfig){func(cfg *HandlerConfig) {
+	rec, h := newOpenHandlerOn(store, welcomeProfile, append([]func(*HandlerConfig){func(cfg *HandlerConfig) {
 		cfg.StoreNote = func(ctx context.Context, id, content string, claim state.TurnClaim) error {
 			return orch.StoreNote(ctx, id, content, claim)
 		}
@@ -2153,35 +2168,83 @@ func countEvents(got []string, event string) int {
 // conversation. The same call again answers created=false, stores nothing and
 // emits nothing.
 func TestHandler_OpenSession_NoteWithoutAReplyIsStoredWithoutATurn(t *testing.T) {
-	llm := newGateLLM()
-	rec, _, h := newNoteHandler(llm)
-	storeOpened(t, rec.store, openedSession, "u1")
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		llm := newGateLLM()
+		rec, _, h := newNoteHandler(kind.open(t), llm)
+		storeOpened(t, rec.store, openedSession, "u1")
 
-	first := callOpen(h, "c8", noteWithoutReply(openedSession))
-	again := callOpen(h, "c9", noteWithoutReply(openedSession))
+		first := callOpen(h, "c8", noteWithoutReply(openedSession))
+		again := callOpen(h, "c9", noteWithoutReply(openedSession))
 
-	if len(first.Metadata) != 0 || len(again.Metadata) != 0 {
-		t.Fatalf("handler frames = %+v, %+v; want empty: the answers go to the callers' conversations", first, again)
-	}
-	got, runs, frames := rec.snapshot()
-	want := []string{"event " + events.TypeNoteStored, "send " + pkg.FrameSessionOpened, "send " + pkg.FrameSessionOpened}
-	if !slices.Equal(got, want) {
-		t.Fatalf("events = %v, want %v: the note stored, then its answer, then the repeat's answer alone", got, want)
-	}
-	for i, wantCreated := range []string{"true", "false"} {
-		if ack := frames[i].msg; ack.ConversationID != []string{"c8", "c9"}[i] || ack.Metadata["created"] != wantCreated ||
-			ack.Metadata[pkg.OpenSessionIDMetadataKey] != openedSession {
-			t.Errorf("answer %d = %+v, want created=%s for %s to its caller", i, ack, wantCreated, openedSession)
+		if len(first.Metadata) != 0 || len(again.Metadata) != 0 {
+			t.Fatalf("handler frames = %+v, %+v; want empty: the answers go to the callers' conversations", first, again)
 		}
-	}
-	if len(runs) != 0 || llm.calls.Load() != 0 {
-		t.Errorf("turns %d, model calls %d; want neither", len(runs), llm.calls.Load())
-	}
-	sess, _ := rec.store.Get(openedSession)
-	if len(sess.Messages) != 1 || sess.Messages[0].Role != provider.RoleUser ||
-		sess.Messages[0].Visibility != provider.VisibilityHidden || sess.Messages[0].Content != noteContent {
-		t.Errorf("stored messages = %+v, want the note once as a hidden user message", sess.Messages)
-	}
+		got, runs, frames := rec.snapshot()
+		want := []string{"event " + events.TypeNoteStored, "send " + pkg.FrameSessionOpened, "send " + pkg.FrameSessionOpened}
+		if !slices.Equal(got, want) {
+			t.Fatalf("events = %v, want %v: the note stored, then its answer, then the repeat's answer alone", got, want)
+		}
+		for i, wantCreated := range []string{"true", "false"} {
+			if ack := frames[i].msg; ack.ConversationID != []string{"c8", "c9"}[i] || ack.Metadata["created"] != wantCreated ||
+				ack.Metadata[pkg.OpenSessionIDMetadataKey] != openedSession {
+				t.Errorf("answer %d = %+v, want created=%s for %s to its caller", i, ack, wantCreated, openedSession)
+			}
+		}
+		if len(runs) != 0 || llm.calls.Load() != 0 {
+			t.Errorf("turns %d, model calls %d; want neither", len(runs), llm.calls.Load())
+		}
+		sess, _ := rec.store.Get(openedSession)
+		if len(sess.Messages) != 1 || sess.Messages[0].Role != provider.RoleUser ||
+			sess.Messages[0].Visibility != provider.VisibilityHidden || sess.Messages[0].Content != noteContent {
+			t.Errorf("stored messages = %+v, want the note once as a hidden user message", sess.Messages)
+		}
+	})
+}
+
+// R2: the key stays taken when summarisation or trimming drops the note's row.
+func TestHandler_OpenSession_NoteKeyOutlivesItsRow(t *testing.T) {
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		for _, reply := range []string{"true", "false"} {
+			for _, drop := range []string{"summarised", "trimmed"} {
+				t.Run("reply "+reply+", "+drop, func(t *testing.T) {
+					store := kind.open(t)
+					dropRow := map[string]func(){
+						"summarised": func() { _ = store.SetSummary(openedSession, "summary", nil) },
+						"trimmed":    func() { store.trim(t, openedSession) },
+					}[drop]
+					if drop == "trimmed" && store.trim == nil {
+						t.Skip("this store keeps every row")
+					}
+					llm := newGateLLM()
+					rec, _, h := newNoteHandler(store, llm)
+					storeOpened(t, rec.store, openedSession, "u1")
+					note := noteWithoutReply(openedSession)
+					note[pkg.NoteReplyMetadataKey] = reply
+
+					callOpen(h, "c8", note)
+					dropRow()
+					if n := countStored(t, rec.store, openedSession, noteContent); n != 0 {
+						t.Fatalf("note rows after the session was %s = %d, want 0", drop, n)
+					}
+					callOpen(h, "c9", note)
+
+					acks := rec.acks()
+					if len(acks) != 2 || acks[0].Metadata["created"] != "true" || acks[1].Metadata["created"] != "false" {
+						t.Fatalf("answers = %+v, want created=true and then created=false", acks)
+					}
+					got, runs, _ := rec.snapshot()
+					wantRuns, wantStored := map[string]int{"true": 1}[reply], map[string]int{"false": 1}[reply]
+					if len(runs) != wantRuns || countEvents(got, "event "+events.TypeNoteStored) != wantStored || llm.calls.Load() != 0 {
+						t.Errorf("turns %d, events %v, model calls %d; want %d turns, %d note_stored and no model call",
+							len(runs), got, llm.calls.Load(), wantRuns, wantStored)
+					}
+					if n := countStored(t, rec.store, openedSession, noteContent); n != 0 {
+						t.Errorf("the repeat stored the note %d times, want 0", n)
+					}
+				})
+			}
+		}
+	})
 }
 
 // TestHandler_OpenSession_NoteWithoutAReplyIsStoredOnceForConcurrentCalls: of
@@ -2190,45 +2253,47 @@ func TestHandler_OpenSession_NoteWithoutAReplyIsStoredWithoutATurn(t *testing.T)
 // answer created=false once it is stored. Every answer follows the stored
 // note, and no call runs a turn.
 func TestHandler_OpenSession_NoteWithoutAReplyIsStoredOnceForConcurrentCalls(t *testing.T) {
-	noteTiming(t, 2*time.Second, 4*time.Second)
-	llm, storing := newGateLLM(), make(chan struct{})
-	rec, orch, h := newNoteHandler(llm, signalStoring(storing))
-	storeOpened(t, rec.store, openedSession, "u1")
-	release := holdTurn(t, orch, llm, openedSession)
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		noteTiming(t, 2*time.Second, 4*time.Second)
+		llm, storing := newGateLLM(), make(chan struct{})
+		rec, orch, h := newNoteHandler(kind.open(t), llm, signalStoring(storing))
+		storeOpened(t, rec.store, openedSession, "u1")
+		release := holdTurn(t, orch, llm, openedSession)
 
-	const calls = 8
-	var wg sync.WaitGroup
-	for i := range calls {
-		wg.Go(func() { callOpen(h, fmt.Sprintf("c%d", 10+i), noteWithoutReply(openedSession)) })
-	}
-	await(t, storing, "a note to reach StoreNote")
-	time.Sleep(100 * time.Millisecond) // the others find the key held
-	release()
-	wg.Wait()
-
-	got, runs, _ := rec.snapshot()
-	stored := slices.Index(got, "event "+events.TypeNoteStored)
-	if stored < 0 || countEvents(got, "event "+events.TypeNoteStored) != 1 {
-		t.Fatalf("events = %v, want one note_stored", got)
-	}
-	if first := slices.Index(got, "send "+pkg.FrameSessionOpened); first < stored {
-		t.Errorf("events = %v, want every answer after the note was stored", got)
-	}
-	created := 0
-	for _, a := range rec.acks() {
-		if a.Metadata["created"] == "true" {
-			created++
+		const calls = 8
+		var wg sync.WaitGroup
+		for i := range calls {
+			wg.Go(func() { callOpen(h, fmt.Sprintf("c%d", 10+i), noteWithoutReply(openedSession)) })
 		}
-	}
-	if acks := rec.acks(); len(acks) != calls || created != 1 {
-		t.Errorf("answers = %d with %d created, want %d with 1 created", len(acks), created, calls)
-	}
-	if n := countStored(t, rec.store, openedSession, noteContent); n != 1 {
-		t.Errorf("note stored %d times, want once", n)
-	}
-	if len(runs) != 0 || llm.calls.Load() != 1 {
-		t.Errorf("runs %d, model calls %d; want none and the user's turn's one", len(runs), llm.calls.Load())
-	}
+		await(t, storing, "a note to reach StoreNote")
+		time.Sleep(100 * time.Millisecond) // the others find the key held
+		release()
+		wg.Wait()
+
+		got, runs, _ := rec.snapshot()
+		stored := slices.Index(got, "event "+events.TypeNoteStored)
+		if stored < 0 || countEvents(got, "event "+events.TypeNoteStored) != 1 {
+			t.Fatalf("events = %v, want one note_stored", got)
+		}
+		if first := slices.Index(got, "send "+pkg.FrameSessionOpened); first < stored {
+			t.Errorf("events = %v, want every answer after the note was stored", got)
+		}
+		created := 0
+		for _, a := range rec.acks() {
+			if a.Metadata["created"] == "true" {
+				created++
+			}
+		}
+		if acks := rec.acks(); len(acks) != calls || created != 1 {
+			t.Errorf("answers = %d with %d created, want %d with 1 created", len(acks), created, calls)
+		}
+		if n := countStored(t, rec.store, openedSession, noteContent); n != 1 {
+			t.Errorf("note stored %d times, want once", n)
+		}
+		if len(runs) != 0 || llm.calls.Load() != 1 {
+			t.Errorf("runs %d, model calls %d; want none and the user's turn's one", len(runs), llm.calls.Load())
+		}
+	})
 }
 
 // TestHandler_OpenSession_NoteWithoutAReplyWaitsForTheSessionsTurn: a note
@@ -2239,64 +2304,66 @@ func TestHandler_OpenSession_NoteWithoutAReplyIsStoredOnceForConcurrentCalls(t *
 // same call again stores the note. A session deleted while the note waits
 // answers not_found.
 func TestHandler_OpenSession_NoteWithoutAReplyWaitsForTheSessionsTurn(t *testing.T) {
-	const deadline = 300 * time.Millisecond
-	for _, tc := range []struct {
-		name      string
-		meanwhile func(*openRecorder)
-		stored    bool
-		code      string
-	}{
-		{"the turn ends within the deadline", func(*openRecorder) {}, true, ""},
-		{"the turn outlasts the deadline", func(*openRecorder) { time.Sleep(2 * deadline) }, false, ""},
-		{"the session is deleted meanwhile", func(rec *openRecorder) { _ = rec.store.Delete(openedSession) }, false, "not_found"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			noteTiming(t, deadline, 10*deadline)
-			llm, storing := newGateLLM(), make(chan struct{})
-			rec, orch, h := newNoteHandler(llm, signalStoring(storing))
-			storeOpened(t, rec.store, openedSession, "u1")
-			release := holdTurn(t, orch, llm, openedSession)
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		const deadline = 300 * time.Millisecond
+		for _, tc := range []struct {
+			name      string
+			meanwhile func(*openRecorder)
+			stored    bool
+			code      string
+		}{
+			{"the turn ends within the deadline", func(*openRecorder) {}, true, ""},
+			{"the turn outlasts the deadline", func(*openRecorder) { time.Sleep(2 * deadline) }, false, ""},
+			{"the session is deleted meanwhile", func(rec *openRecorder) { _ = rec.store.Delete(openedSession) }, false, "not_found"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				noteTiming(t, deadline, 10*deadline)
+				llm, storing := newGateLLM(), make(chan struct{})
+				rec, orch, h := newNoteHandler(kind.open(t), llm, signalStoring(storing))
+				storeOpened(t, rec.store, openedSession, "u1")
+				release := holdTurn(t, orch, llm, openedSession)
 
-			answered := make(chan pkg.OutboundMessage, 1)
-			go func() { answered <- callOpen(h, "c8", noteWithoutReply(openedSession)) }()
-			await(t, storing, "the note to reach StoreNote")
-			tc.meanwhile(rec)
-			release()
-			out := await(t, answered, "the note's call to return")
+				answered := make(chan pkg.OutboundMessage, 1)
+				go func() { answered <- callOpen(h, "c8", noteWithoutReply(openedSession)) }()
+				await(t, storing, "the note to reach StoreNote")
+				tc.meanwhile(rec)
+				release()
+				out := await(t, answered, "the note's call to return")
 
-			if out.Metadata["error_code"] != tc.code {
-				t.Errorf("handler frame = %+v, want error_code %q", out.Metadata, tc.code)
-			}
-			got, _, _ := rec.snapshot()
-			if n := countEvents(got, "event "+events.TypeNoteStored); n != map[bool]int{true: 1}[tc.stored] {
-				t.Errorf("note_stored events = %d in %v, want %d", n, got, map[bool]int{true: 1}[tc.stored])
-			}
-			acks := rec.acks()
-			if tc.stored != (len(acks) == 1) || tc.stored && acks[0].Metadata["created"] != "true" {
-				t.Fatalf("answers = %+v, want created=true exactly when stored", acks)
-			}
-			if tc.code != "" {
-				return
-			}
-			sess, _ := rec.store.Get(openedSession)
-			if tc.stored {
-				if last := sess.Messages[len(sess.Messages)-1]; len(sess.Messages) != 3 || last.Content != noteContent {
-					t.Errorf("stored messages = %+v, want the turn's two rows and then the note", sess.Messages)
+				if out.Metadata["error_code"] != tc.code {
+					t.Errorf("handler frame = %+v, want error_code %q", out.Metadata, tc.code)
 				}
-				return
-			}
-			if n := countStored(t, rec.store, openedSession, noteContent); n != 0 {
-				t.Fatalf("note stored %d times past its deadline, want 0", n)
-			}
-			callOpen(h, "c9", noteWithoutReply(openedSession))
-			if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "true" {
-				t.Errorf("answers to the same call again = %+v, want created=true", acks)
-			}
-			if n := countStored(t, rec.store, openedSession, noteContent); n != 1 {
-				t.Errorf("note stored %d times by the same call again, want once", n)
-			}
-		})
-	}
+				got, _, _ := rec.snapshot()
+				if n := countEvents(got, "event "+events.TypeNoteStored); n != map[bool]int{true: 1}[tc.stored] {
+					t.Errorf("note_stored events = %d in %v, want %d", n, got, map[bool]int{true: 1}[tc.stored])
+				}
+				acks := rec.acks()
+				if tc.stored != (len(acks) == 1) || tc.stored && acks[0].Metadata["created"] != "true" {
+					t.Fatalf("answers = %+v, want created=true exactly when stored", acks)
+				}
+				if tc.code != "" {
+					return
+				}
+				sess, _ := rec.store.Get(openedSession)
+				if tc.stored {
+					if last := sess.Messages[len(sess.Messages)-1]; len(sess.Messages) != 3 || last.Content != noteContent {
+						t.Errorf("stored messages = %+v, want the turn's two rows and then the note", sess.Messages)
+					}
+					return
+				}
+				if n := countStored(t, rec.store, openedSession, noteContent); n != 0 {
+					t.Fatalf("note stored %d times past its deadline, want 0", n)
+				}
+				callOpen(h, "c9", noteWithoutReply(openedSession))
+				if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "true" {
+					t.Errorf("answers to the same call again = %+v, want created=true", acks)
+				}
+				if n := countStored(t, rec.store, openedSession, noteContent); n != 1 {
+					t.Errorf("note stored %d times by the same call again, want once", n)
+				}
+			})
+		}
+	})
 }
 
 // TestHandler_OpenSession_NoteWithoutAReplyGivesUpWhileTheTurnRuns: a note
@@ -2305,41 +2372,43 @@ func TestHandler_OpenSession_NoteWithoutAReplyWaitsForTheSessionsTurn(t *testing
 // the same call again could take it at once. Nothing is stored, also once the
 // turn ends.
 func TestHandler_OpenSession_NoteWithoutAReplyGivesUpWhileTheTurnRuns(t *testing.T) {
-	noteTiming(t, 300*time.Millisecond, 3*time.Second)
-	llm, storing := newGateLLM(), make(chan struct{})
-	rec, orch, h := newNoteHandler(llm, signalStoring(storing))
-	storeOpened(t, rec.store, openedSession, "u1")
-	release := sync.OnceFunc(holdTurn(t, orch, llm, openedSession))
-	t.Cleanup(release)
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		noteTiming(t, 300*time.Millisecond, 3*time.Second)
+		llm, storing := newGateLLM(), make(chan struct{})
+		rec, orch, h := newNoteHandler(kind.open(t), llm, signalStoring(storing))
+		storeOpened(t, rec.store, openedSession, "u1")
+		release := sync.OnceFunc(holdTurn(t, orch, llm, openedSession))
+		t.Cleanup(release)
 
-	answered := make(chan pkg.OutboundMessage, 1)
-	go func() { answered <- callOpen(h, "c8", noteWithoutReply(openedSession)) }()
-	await(t, storing, "the note to reach StoreNote")
-	out := await(t, answered, "the note's call to return while the turn runs")
+		answered := make(chan pkg.OutboundMessage, 1)
+		go func() { answered <- callOpen(h, "c8", noteWithoutReply(openedSession)) }()
+		await(t, storing, "the note to reach StoreNote")
+		out := await(t, answered, "the note's call to return while the turn runs")
 
-	if len(out.Metadata) != 0 || len(rec.acks()) != 0 {
-		t.Errorf("handler frame = %+v, answers %+v; want none past the deadline", out.Metadata, rec.acks())
-	}
-	if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
-		t.Errorf("the note's key while the turn runs = %v, %v; want it free", result, err)
-	}
-	release()
-	got, _, _ := rec.snapshot()
-	if n := countStored(t, rec.store, openedSession, noteContent); n != 0 || countEvents(got, "event "+events.TypeNoteStored) != 0 {
-		t.Errorf("note stored %d times, events %v; want nothing past the deadline", n, got)
-	}
+		if len(out.Metadata) != 0 || len(rec.acks()) != 0 {
+			t.Errorf("handler frame = %+v, answers %+v; want none past the deadline", out.Metadata, rec.acks())
+		}
+		if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+			t.Errorf("the note's key while the turn runs = %v, %v; want it free", result, err)
+		}
+		release()
+		got, _, _ := rec.snapshot()
+		if n := countStored(t, rec.store, openedSession, noteContent); n != 0 || countEvents(got, "event "+events.TypeNoteStored) != 0 {
+			t.Errorf("note stored %d times, events %v; want nothing past the deadline", n, got)
+		}
+	})
 }
 
 // liveFreeOpener frees a note reservation only under a context that has not
 // ended, as the DB-backed store, whose statement fails at once under an ended
 // one.
-type liveFreeOpener struct{ *state.SessionStore }
+type liveFreeOpener struct{ SessionOpener }
 
 func (o liveFreeOpener) FreeNote(ctx context.Context, id, key string, reservedAt time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return o.SessionStore.FreeNote(ctx, id, key, reservedAt)
+	return o.SessionOpener.FreeNote(ctx, id, key, reservedAt)
 }
 
 // TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenItsRequestEnds: a
@@ -2347,45 +2416,47 @@ func (o liveFreeOpener) FreeNote(ctx context.Context, id, key string, reservedAt
 // the channel shuts down) returns, stores nothing and frees its key, so the
 // same call again can take it while the turn still runs.
 func TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenItsRequestEnds(t *testing.T) {
-	noteTiming(t, 2*time.Second, 4*time.Second)
-	llm, storing := newGateLLM(), make(chan struct{})
-	rec, orch, h := newNoteHandler(llm, signalStoring(storing), func(cfg *HandlerConfig) {
-		cfg.Opener = liveFreeOpener{cfg.Opener.(*state.SessionStore)}
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		noteTiming(t, 2*time.Second, 4*time.Second)
+		llm, storing := newGateLLM(), make(chan struct{})
+		rec, orch, h := newNoteHandler(kind.open(t), llm, signalStoring(storing), func(cfg *HandlerConfig) {
+			cfg.Opener = liveFreeOpener{cfg.Opener}
+		})
+		storeOpened(t, rec.store, openedSession, "u1")
+		release := sync.OnceFunc(holdTurn(t, orch, llm, openedSession))
+		t.Cleanup(release)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		answered := make(chan pkg.OutboundMessage, 1)
+		go func() {
+			out, _ := h(ctx, "websocket:c8", openRequest("c8", noteWithoutReply(openedSession)))
+			answered <- out
+		}()
+		await(t, storing, "the note to reach StoreNote")
+		cancel()
+		await(t, answered, "the note's call to return once its request ended")
+
+		if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+			t.Errorf("the note's key once its request ended = %v, %v; want it free", result, err)
+		}
+		release()
+		got, _, _ := rec.snapshot()
+		if n := countStored(t, rec.store, openedSession, noteContent); n != 0 || countEvents(got, "event "+events.TypeNoteStored) != 0 || len(rec.acks()) != 0 {
+			t.Errorf("note stored %d times, events %v, answers %+v; want nothing for an ended request", n, got, rec.acks())
+		}
 	})
-	storeOpened(t, rec.store, openedSession, "u1")
-	release := sync.OnceFunc(holdTurn(t, orch, llm, openedSession))
-	t.Cleanup(release)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	answered := make(chan pkg.OutboundMessage, 1)
-	go func() {
-		out, _ := h(ctx, "websocket:c8", openRequest("c8", noteWithoutReply(openedSession)))
-		answered <- out
-	}()
-	await(t, storing, "the note to reach StoreNote")
-	cancel()
-	await(t, answered, "the note's call to return once its request ended")
-
-	if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
-		t.Errorf("the note's key once its request ended = %v, %v; want it free", result, err)
-	}
-	release()
-	got, _, _ := rec.snapshot()
-	if n := countStored(t, rec.store, openedSession, noteContent); n != 0 || countEvents(got, "event "+events.TypeNoteStored) != 0 || len(rec.acks()) != 0 {
-		t.Errorf("note stored %d times, events %v, answers %+v; want nothing for an ended request", n, got, rec.acks())
-	}
 }
 
 // heldOpener closes held when a note reservation is first found held.
 type heldOpener struct {
-	*state.SessionStore
+	SessionOpener
 	once sync.Once
 	held chan struct{}
 }
 
 func (o *heldOpener) ReserveNote(ctx context.Context, id, key string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
-	result, err := o.SessionStore.ReserveNote(ctx, id, key, now, staleAfter)
+	result, err := o.SessionOpener.ReserveNote(ctx, id, key, now, staleAfter)
 	if result == state.ClaimHeld {
 		o.once.Do(func() { close(o.held) })
 	}
@@ -2398,60 +2469,62 @@ func (o *heldOpener) ReserveNote(ctx context.Context, id, key string, now time.T
 // recovery stores the note once, runs no turn and sends nothing. A session
 // deleted while the call waits answers not_found.
 func TestHandler_OpenSession_NoteWithoutAReplyWaitsForAHeldKey(t *testing.T) {
-	t.Run("the wait runs out, the recovery stores the note", func(t *testing.T) {
-		noteTiming(t, 150*time.Millisecond, 400*time.Millisecond)
-		llm := newGateLLM()
-		rec, _, h := newNoteHandler(llm)
-		storeOpened(t, rec.store, openedSession, "u1")
-		if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
-			t.Fatalf("dead attempt's reservation = %v, %v", result, err)
-		}
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		t.Run("the wait runs out, the recovery stores the note", func(t *testing.T) {
+			noteTiming(t, 150*time.Millisecond, 400*time.Millisecond)
+			llm := newGateLLM()
+			rec, _, h := newNoteHandler(kind.open(t), llm)
+			storeOpened(t, rec.store, openedSession, "u1")
+			if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				t.Fatalf("dead attempt's reservation = %v, %v", result, err)
+			}
 
-		start := time.Now()
-		out := callOpen(h, "c8", noteWithoutReply(openedSession))
+			start := time.Now()
+			out := callOpen(h, "c8", noteWithoutReply(openedSession))
 
-		if waited := time.Since(start); len(out.Metadata) != 0 || waited < openerTimeout || waited >= openerStaleAfter {
-			t.Fatalf("handler frame = %+v after %v, want none once the deadline of %v passed", out.Metadata, waited, openerTimeout)
-		}
-		if got, _, _ := rec.snapshot(); len(got) != 0 {
-			t.Fatalf("events = %v, want nothing stored or sent", got)
-		}
-		for wait := time.Now().Add(pastRecovery()); countStored(t, rec.store, openedSession, noteContent) == 0 && time.Now().Before(wait); {
-			time.Sleep(10 * time.Millisecond)
-		}
-		time.Sleep(pastRecovery())
-		got, runs, _ := rec.snapshot()
-		if !slices.Equal(got, []string{"event " + events.TypeNoteStored}) {
-			t.Errorf("events = %v, want the recovered note stored and nothing sent", got)
-		}
-		if n := countStored(t, rec.store, openedSession, noteContent); n != 1 || len(runs) != 0 || llm.calls.Load() != 0 {
-			t.Errorf("note stored %d times, %d turns, %d model calls; want it once and no turn", n, len(runs), llm.calls.Load())
-		}
-	})
-	t.Run("the session is deleted meanwhile", func(t *testing.T) {
-		noteTiming(t, 2*time.Second, 4*time.Second)
-		op := &heldOpener{held: make(chan struct{})}
-		rec, _, h := newNoteHandler(newGateLLM(), func(cfg *HandlerConfig) {
-			op.SessionStore = cfg.Opener.(*state.SessionStore)
-			cfg.Opener = op
+			if waited := time.Since(start); len(out.Metadata) != 0 || waited < openerTimeout || waited >= openerStaleAfter {
+				t.Fatalf("handler frame = %+v after %v, want none once the deadline of %v passed", out.Metadata, waited, openerTimeout)
+			}
+			if got, _, _ := rec.snapshot(); len(got) != 0 {
+				t.Fatalf("events = %v, want nothing stored or sent", got)
+			}
+			for wait := time.Now().Add(pastRecovery()); countStored(t, rec.store, openedSession, noteContent) == 0 && time.Now().Before(wait); {
+				time.Sleep(10 * time.Millisecond)
+			}
+			time.Sleep(pastRecovery())
+			got, runs, _ := rec.snapshot()
+			if !slices.Equal(got, []string{"event " + events.TypeNoteStored}) {
+				t.Errorf("events = %v, want the recovered note stored and nothing sent", got)
+			}
+			if n := countStored(t, rec.store, openedSession, noteContent); n != 1 || len(runs) != 0 || llm.calls.Load() != 0 {
+				t.Errorf("note stored %d times, %d turns, %d model calls; want it once and no turn", n, len(runs), llm.calls.Load())
+			}
 		})
-		storeOpened(t, rec.store, openedSession, "u1")
-		if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
-			t.Fatalf("dead attempt's reservation = %v, %v", result, err)
-		}
+		t.Run("the session is deleted meanwhile", func(t *testing.T) {
+			noteTiming(t, 2*time.Second, 4*time.Second)
+			op := &heldOpener{held: make(chan struct{})}
+			rec, _, h := newNoteHandler(kind.open(t), newGateLLM(), func(cfg *HandlerConfig) {
+				op.SessionOpener = cfg.Opener
+				cfg.Opener = op
+			})
+			storeOpened(t, rec.store, openedSession, "u1")
+			if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+				t.Fatalf("dead attempt's reservation = %v, %v", result, err)
+			}
 
-		answered := make(chan pkg.OutboundMessage, 1)
-		go func() { answered <- callOpen(h, "c8", noteWithoutReply(openedSession)) }()
-		await(t, op.held, "the note to find its key held")
-		_ = rec.store.Delete(openedSession)
-		out := await(t, answered, "the note's call to return")
+			answered := make(chan pkg.OutboundMessage, 1)
+			go func() { answered <- callOpen(h, "c8", noteWithoutReply(openedSession)) }()
+			await(t, op.held, "the note to find its key held")
+			_ = rec.store.Delete(openedSession)
+			out := await(t, answered, "the note's call to return")
 
-		if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" {
-			t.Errorf("handler frame = %+v, want open_rejected not_found", out.Metadata)
-		}
-		if got, _, _ := rec.snapshot(); len(got) != 0 {
-			t.Errorf("events = %v, want nothing stored or sent", got)
-		}
+			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" {
+				t.Errorf("handler frame = %+v, want open_rejected not_found", out.Metadata)
+			}
+			if got, _, _ := rec.snapshot(); len(got) != 0 {
+				t.Errorf("events = %v, want nothing stored or sent", got)
+			}
+		})
 	})
 }
 
@@ -2463,50 +2536,52 @@ func TestHandler_OpenSession_NoteWithoutAReplyWaitsForAHeldKey(t *testing.T) {
 // next attempt. The recovery finds no reservation to take over: nothing is
 // stored and no turn runs, and the same call again stores the note.
 func TestHandler_OpenSession_RecoveryLeavesAFreedNoteKeyFree(t *testing.T) {
-	const deadline = 200 * time.Millisecond
-	for _, reply := range []string{"true", "false"} {
-		t.Run("duplicate with reply "+reply, func(t *testing.T) {
-			noteTiming(t, deadline, 3*deadline)
-			llm, storing := newGateLLM(), make(chan struct{})
-			op := &heldOpener{held: make(chan struct{})}
-			rec, orch, h := newNoteHandler(llm, signalStoring(storing), func(cfg *HandlerConfig) {
-				op.SessionStore = cfg.Opener.(*state.SessionStore)
-				cfg.Opener = op
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		const deadline = 200 * time.Millisecond
+		for _, reply := range []string{"true", "false"} {
+			t.Run("duplicate with reply "+reply, func(t *testing.T) {
+				noteTiming(t, deadline, 3*deadline)
+				llm, storing := newGateLLM(), make(chan struct{})
+				op := &heldOpener{held: make(chan struct{})}
+				rec, orch, h := newNoteHandler(kind.open(t), llm, signalStoring(storing), func(cfg *HandlerConfig) {
+					op.SessionOpener = cfg.Opener
+					cfg.Opener = op
+				})
+				storeOpened(t, rec.store, openedSession, "u1")
+				release := holdTurn(t, orch, llm, openedSession)
+
+				first, second := make(chan pkg.OutboundMessage, 1), make(chan pkg.OutboundMessage, 1)
+				go func() { first <- callOpen(h, "c8", noteWithoutReply(openedSession)) }()
+				await(t, storing, "the first call to take the key")
+				duplicate := noteWithoutReply(openedSession)
+				duplicate[pkg.NoteReplyMetadataKey] = reply
+				go func() { second <- callOpen(h, "c9", duplicate) }()
+				await(t, op.held, "the duplicate to find the key held")
+				time.Sleep(deadline + deadline/2)
+				release()
+				await(t, first, "the first call to return")
+				await(t, second, "the duplicate to return")
+				time.Sleep(pastRecovery())
+
+				got, runs, _ := rec.snapshot()
+				if n := countStored(t, rec.store, openedSession, noteContent); n != 0 || countEvents(got, "event "+events.TypeNoteStored) != 0 {
+					t.Errorf("note stored %d times, events %v; want nothing stored past both deadlines", n, got)
+				}
+				if len(runs) != 0 || rec.replies() != 0 || llm.calls.Load() != 1 {
+					t.Errorf("turns %d, replies %d, model calls %d; want no turn beside the user's", len(runs), rec.replies(), llm.calls.Load())
+				}
+
+				before := len(rec.acks())
+				callOpen(h, "c10", noteWithoutReply(openedSession))
+				if acks := rec.acks(); len(acks) != before+1 || acks[before].Metadata["created"] != "true" {
+					t.Errorf("answers to the same call again = %+v, want created=true", acks[before:])
+				}
+				if n := countStored(t, rec.store, openedSession, noteContent); n != 1 {
+					t.Errorf("note stored %d times by the same call again, want once", n)
+				}
 			})
-			storeOpened(t, rec.store, openedSession, "u1")
-			release := holdTurn(t, orch, llm, openedSession)
-
-			first, second := make(chan pkg.OutboundMessage, 1), make(chan pkg.OutboundMessage, 1)
-			go func() { first <- callOpen(h, "c8", noteWithoutReply(openedSession)) }()
-			await(t, storing, "the first call to take the key")
-			duplicate := noteWithoutReply(openedSession)
-			duplicate[pkg.NoteReplyMetadataKey] = reply
-			go func() { second <- callOpen(h, "c9", duplicate) }()
-			await(t, op.held, "the duplicate to find the key held")
-			time.Sleep(deadline + deadline/2)
-			release()
-			await(t, first, "the first call to return")
-			await(t, second, "the duplicate to return")
-			time.Sleep(pastRecovery())
-
-			got, runs, _ := rec.snapshot()
-			if n := countStored(t, rec.store, openedSession, noteContent); n != 0 || countEvents(got, "event "+events.TypeNoteStored) != 0 {
-				t.Errorf("note stored %d times, events %v; want nothing stored past both deadlines", n, got)
-			}
-			if len(runs) != 0 || rec.replies() != 0 || llm.calls.Load() != 1 {
-				t.Errorf("turns %d, replies %d, model calls %d; want no turn beside the user's", len(runs), rec.replies(), llm.calls.Load())
-			}
-
-			before := len(rec.acks())
-			callOpen(h, "c10", noteWithoutReply(openedSession))
-			if acks := rec.acks(); len(acks) != before+1 || acks[before].Metadata["created"] != "true" {
-				t.Errorf("answers to the same call again = %+v, want created=true", acks[before:])
-			}
-			if n := countStored(t, rec.store, openedSession, noteContent); n != 1 {
-				t.Errorf("note stored %d times by the same call again, want once", n)
-			}
-		})
-	}
+		}
+	})
 }
 
 // TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenNotStored: a note
@@ -2515,56 +2590,58 @@ func TestHandler_OpenSession_RecoveryLeavesAFreedNoteKeyFree(t *testing.T) {
 // the write committed frees nothing: the same call again answers
 // created=false and stores nothing.
 func TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenNotStored(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		committed bool
-		again     string
-	}{
-		{"the write fails", false, "true"},
-		{"an error after the write committed", true, "false"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			noteTiming(t, 300*time.Millisecond, 3*time.Second)
-			rec, _, h := newNoteHandler(newGateLLM(), func(cfg *HandlerConfig) {
-				next := cfg.StoreNote
-				var calls atomic.Int32
-				cfg.StoreNote = func(ctx context.Context, id, content string, claim state.TurnClaim) error {
-					if calls.Add(1) > 1 {
-						return next(ctx, id, content, claim)
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		for _, tc := range []struct {
+			name      string
+			committed bool
+			again     string
+		}{
+			{"the write fails", false, "true"},
+			{"an error after the write committed", true, "false"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				noteTiming(t, 300*time.Millisecond, 3*time.Second)
+				rec, _, h := newNoteHandler(kind.open(t), newGateLLM(), func(cfg *HandlerConfig) {
+					next := cfg.StoreNote
+					var calls atomic.Int32
+					cfg.StoreNote = func(ctx context.Context, id, content string, claim state.TurnClaim) error {
+						if calls.Add(1) > 1 {
+							return next(ctx, id, content, claim)
+						}
+						if !tc.committed {
+							return errors.New("database connection lost")
+						}
+						if err := next(ctx, id, content, claim); err != nil {
+							return err
+						}
+						return errors.New("connection reset after the commit")
 					}
-					if !tc.committed {
-						return errors.New("database connection lost")
-					}
-					if err := next(ctx, id, content, claim); err != nil {
-						return err
-					}
-					return errors.New("connection reset after the commit")
+				})
+				storeOpened(t, rec.store, openedSession, "u1")
+
+				out := callOpen(h, "c8", noteWithoutReply(openedSession))
+				if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "internal_error" ||
+					out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c8" {
+					t.Fatalf("handler frame = %+v, want open_rejected internal_error with req-c8", out.Metadata)
+				}
+				if acks := rec.acks(); len(acks) != 0 {
+					t.Fatalf("answers = %+v, want none for a refused note", acks)
+				}
+
+				callOpen(h, "c9", noteWithoutReply(openedSession))
+
+				if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != tc.again {
+					t.Errorf("answers to the same call again = %+v, want created=%s", acks, tc.again)
+				}
+				if n := countStored(t, rec.store, openedSession, noteContent); n != 1 {
+					t.Errorf("note stored %d times, want once", n)
+				}
+				if got, runs, _ := rec.snapshot(); countEvents(got, "event "+events.TypeNoteStored) != 1 || len(runs) != 0 {
+					t.Errorf("events = %v, turns = %d; want one note_stored and no turn", got, len(runs))
 				}
 			})
-			storeOpened(t, rec.store, openedSession, "u1")
-
-			out := callOpen(h, "c8", noteWithoutReply(openedSession))
-			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "internal_error" ||
-				out.Metadata[pkg.OpenRequestIDMetadataKey] != "req-c8" {
-				t.Fatalf("handler frame = %+v, want open_rejected internal_error with req-c8", out.Metadata)
-			}
-			if acks := rec.acks(); len(acks) != 0 {
-				t.Fatalf("answers = %+v, want none for a refused note", acks)
-			}
-
-			callOpen(h, "c9", noteWithoutReply(openedSession))
-
-			if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != tc.again {
-				t.Errorf("answers to the same call again = %+v, want created=%s", acks, tc.again)
-			}
-			if n := countStored(t, rec.store, openedSession, noteContent); n != 1 {
-				t.Errorf("note stored %d times, want once", n)
-			}
-			if got, runs, _ := rec.snapshot(); countEvents(got, "event "+events.TypeNoteStored) != 1 || len(runs) != 0 {
-				t.Errorf("events = %v, turns = %d; want one note_stored and no turn", got, len(runs))
-			}
-		})
-	}
+		}
+	})
 }
 
 // TestHandler_OpenSession_WaitingNoteRechecksItsReach: a note without a reply
@@ -2574,78 +2651,82 @@ func TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenNotStored(t *testin
 // the key, no longer reaches the session, frees the key again and answers
 // not_found: nothing is stored or answered.
 func TestHandler_OpenSession_WaitingNoteRechecksItsReach(t *testing.T) {
-	noteTiming(t, 2*time.Second, 4*time.Second)
-	const chat = "u1:websocket:c1"
-	op := &heldOpener{held: make(chan struct{})}
-	var orch *orchestrator.Orchestrator
-	rec, h := newMarkingHandler(func(cfg *HandlerConfig) {
-		op.SessionStore = cfg.Opener.(*state.SessionStore)
-		cfg.Opener = op
-		cfg.StoreNote = func(ctx context.Context, id, content string, claim state.TurnClaim) error {
-			return orch.StoreNote(ctx, id, content, claim)
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		noteTiming(t, 2*time.Second, 4*time.Second)
+		const chat = "u1:websocket:c1"
+		op := &heldOpener{held: make(chan struct{})}
+		var orch *orchestrator.Orchestrator
+		rec, h := newMarkingHandler(kind.open(t), func(cfg *HandlerConfig) {
+			op.SessionOpener = cfg.Opener
+			cfg.Opener = op
+			cfg.StoreNote = func(ctx context.Context, id, content string, claim state.TurnClaim) error {
+				return orch.StoreNote(ctx, id, content, claim)
+			}
+		})
+		orch = orchestrator.NewWithRules(newGateLLM(), orchestrator.DefaultParser, orchestrator.NewToolRegistry(),
+			state.NewMemoryStore(""), rec.store, orchestrator.OrchestratorOpts{EventSink: rec})
+		chatTurn(h, chatMessage("chat", "websocket", "c1"))
+		held := time.Now()
+		if result, err := rec.store.ReserveNote(context.Background(), chat, "chapter-2", held, openerStaleAfter); err != nil || result != state.ClaimWon {
+			t.Fatalf("other attempt's reservation = %v, %v", result, err)
+		}
+
+		answered := make(chan pkg.OutboundMessage, 1)
+		go func() { answered <- callOpen(h, "c8", noteWithoutReply(chat)) }()
+		await(t, op.held, "the note to find its key held")
+		chatTurn(h, chatMessage("chat-g2", "websocket", "c1"))
+		if err := rec.store.FreeNote(context.Background(), chat, "chapter-2", held); err != nil {
+			t.Fatalf("other attempt's release: %v", err)
+		}
+		out := await(t, answered, "the note's call to return")
+
+		if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" {
+			t.Errorf("handler frame = %+v, want open_rejected not_found", out.Metadata)
+		}
+		got, _, _ := rec.snapshot()
+		if n := countStored(t, rec.store, chat, noteContent); n != 0 || countEvents(got, "event "+events.TypeNoteStored) != 0 || len(rec.acks()) != 0 {
+			t.Errorf("note stored %d times, events %v, answers %+v; want nothing in a session marked for another account", n, got, rec.acks())
+		}
+		if result, err := rec.store.ReserveNote(context.Background(), chat, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+			t.Errorf("the note's key after its call = %v, %v; want it free", result, err)
 		}
 	})
-	orch = orchestrator.NewWithRules(newGateLLM(), orchestrator.DefaultParser, orchestrator.NewToolRegistry(),
-		state.NewMemoryStore(""), rec.store, orchestrator.OrchestratorOpts{EventSink: rec})
-	chatTurn(h, chatMessage("chat", "websocket", "c1"))
-	held := time.Now()
-	if result, err := rec.store.ReserveNote(context.Background(), chat, "chapter-2", held, openerStaleAfter); err != nil || result != state.ClaimWon {
-		t.Fatalf("other attempt's reservation = %v, %v", result, err)
-	}
-
-	answered := make(chan pkg.OutboundMessage, 1)
-	go func() { answered <- callOpen(h, "c8", noteWithoutReply(chat)) }()
-	await(t, op.held, "the note to find its key held")
-	chatTurn(h, chatMessage("chat-g2", "websocket", "c1"))
-	if err := rec.store.FreeNote(context.Background(), chat, "chapter-2", held); err != nil {
-		t.Fatalf("other attempt's release: %v", err)
-	}
-	out := await(t, answered, "the note's call to return")
-
-	if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" {
-		t.Errorf("handler frame = %+v, want open_rejected not_found", out.Metadata)
-	}
-	got, _, _ := rec.snapshot()
-	if n := countStored(t, rec.store, chat, noteContent); n != 0 || countEvents(got, "event "+events.TypeNoteStored) != 0 || len(rec.acks()) != 0 {
-		t.Errorf("note stored %d times, events %v, answers %+v; want nothing in a session marked for another account", n, got, rec.acks())
-	}
-	if result, err := rec.store.ReserveNote(context.Background(), chat, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
-		t.Errorf("the note's key after its call = %v, %v; want it free", result, err)
-	}
 }
 
 // vanishingOpener deletes a note's session right before its reservation, as
 // a session deleted between the note's lookup and its claim.
-type vanishingOpener struct{ *state.SessionStore }
+type vanishingOpener struct{ sessionStore }
 
 func (o vanishingOpener) ReserveNote(ctx context.Context, id, key string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	_ = o.Delete(id)
-	return o.SessionStore.ReserveNote(ctx, id, key, now, staleAfter)
+	return o.sessionStore.ReserveNote(ctx, id, key, now, staleAfter)
 }
 
 // TestHandler_OpenSession_NoteForASessionGoneAtItsClaimIsNotFound: a note
 // whose session is deleted between its lookup and its claim answers not_found,
 // with a reply and without one, and nothing is run, stored or sent.
 func TestHandler_OpenSession_NoteForASessionGoneAtItsClaimIsNotFound(t *testing.T) {
-	for _, reply := range []string{"true", "false"} {
-		t.Run("reply "+reply, func(t *testing.T) {
-			rec, _, h := newNoteHandler(newGateLLM(), func(cfg *HandlerConfig) {
-				cfg.Opener = vanishingOpener{cfg.Opener.(*state.SessionStore)}
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		for _, reply := range []string{"true", "false"} {
+			t.Run("reply "+reply, func(t *testing.T) {
+				rec, _, h := newNoteHandler(kind.open(t), newGateLLM(), func(cfg *HandlerConfig) {
+					cfg.Opener = vanishingOpener{cfg.Opener.(sessionStore)}
+				})
+				storeOpened(t, rec.store, openedSession, "u1")
+				note := noteWithoutReply(openedSession)
+				note[pkg.NoteReplyMetadataKey] = reply
+
+				out := callOpen(h, "c8", note)
+
+				if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" {
+					t.Errorf("handler frame = %+v, want open_rejected not_found", out.Metadata)
+				}
+				if got, _, _ := rec.snapshot(); len(got) != 0 {
+					t.Errorf("events = %v, want nothing run, stored or sent", got)
+				}
 			})
-			storeOpened(t, rec.store, openedSession, "u1")
-			note := noteWithoutReply(openedSession)
-			note[pkg.NoteReplyMetadataKey] = reply
-
-			out := callOpen(h, "c8", note)
-
-			if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" {
-				t.Errorf("handler frame = %+v, want open_rejected not_found", out.Metadata)
-			}
-			if got, _, _ := rec.snapshot(); len(got) != 0 {
-				t.Errorf("events = %v, want nothing run, stored or sent", got)
-			}
-		})
-	}
+		}
+	})
 }
 
 // TestHandler_OpenSession_ReplySwitchIsANotesTrueOrFalse: the reply switch
@@ -2766,7 +2847,7 @@ func TestHandler_OpenSession_KeyPartsWithAColonAreRefused(t *testing.T) {
 			if events, _, _ := rec.snapshot(); len(events) != 0 || len(rec.minted) != 0 {
 				t.Errorf("events = %v, minted = %v, want nothing", events, rec.minted)
 			}
-			if n := len(rec.store.List()); n != len(existing) {
+			if n := len(rec.store.sessionStore.(*state.SessionStore).List()); n != len(existing) {
 				t.Errorf("store holds %d sessions, want the %d it had", n, len(existing))
 			}
 			for _, e := range existing {
@@ -2793,43 +2874,47 @@ func TestHandler_OpenSession_KeyPartsWithAColonAreRefused(t *testing.T) {
 // stores, claims, runs or sends anything in it, also when the store backfilled
 // the key's first part as its owner and a channel for it.
 func TestHandler_OpenSession_KeyWithoutAnOwnerIsNeitherReachedNorTaken(t *testing.T) {
-	const id = "u1:websocket:c4"
-	for _, tc := range []struct{ name, owner, channel string }{
-		{"as keyed", "", ""},
-		{"owner and channel backfilled", "u1", "websocket"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rec, h := newOpenHandler(welcomeProfile)
-			unowned := rec.store.Create(state.SessionParams{ID: id, EntityID: tc.owner})
-			unowned.ChannelID = tc.channel
-
-			for _, attempt := range []struct {
-				conv string
-				set  map[string]string
-				code string
-			}{
-				{"c8", map[string]string{pkg.OpenSessionIDMetadataKey: id, pkg.NoteKeyMetadataKey: "chapter-2"}, "not_found"},
-				{"c4", nil, "internal_error"}, // the open's own key is u1:websocket:c4
-			} {
-				out := callOpen(h, attempt.conv, attempt.set)
-				if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != attempt.code {
-					t.Errorf("attempt on %s answered %+v, want open_rejected %s", attempt.conv, out.Metadata, attempt.code)
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		const id = "u1:websocket:c4"
+		for _, tc := range []struct{ name, owner, channel string }{
+			{"as keyed", "", ""},
+			{"owner and channel backfilled", "u1", "websocket"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				rec, h := newOpenHandlerOn(kind.open(t), welcomeProfile)
+				rec.store.Create(state.SessionParams{ID: id, EntityID: tc.owner})
+				if tc.channel != "" {
+					rec.store.backfill(t, id, tc.owner, "", tc.channel)
 				}
-			}
-			if events, _, _ := rec.snapshot(); len(events) != 0 || len(rec.minted) != 0 {
-				t.Errorf("events = %v, minted = %v, want nothing", events, rec.minted)
-			}
-			if sess, err := rec.store.Get(id); err != nil || sess.OpenKey != "" || sess.EntityID != tc.owner || len(sess.Messages) != 0 {
-				t.Errorf("%s = %+v, %v; want it as it was", id, sess, err)
-			}
-			if result, err := rec.store.ClaimOpener(context.Background(), id, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
-				t.Errorf("first-turn claim = %v, %v; want it still free", result, err)
-			}
-			if result, err := rec.store.ReserveNote(context.Background(), id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
-				t.Errorf("note reservation = %v, %v; want it still free", result, err)
-			}
-		})
-	}
+
+				for _, attempt := range []struct {
+					conv string
+					set  map[string]string
+					code string
+				}{
+					{"c8", map[string]string{pkg.OpenSessionIDMetadataKey: id, pkg.NoteKeyMetadataKey: "chapter-2"}, "not_found"},
+					{"c4", nil, "internal_error"}, // the open's own key is u1:websocket:c4
+				} {
+					out := callOpen(h, attempt.conv, attempt.set)
+					if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != attempt.code {
+						t.Errorf("attempt on %s answered %+v, want open_rejected %s", attempt.conv, out.Metadata, attempt.code)
+					}
+				}
+				if events, _, _ := rec.snapshot(); len(events) != 0 || len(rec.minted) != 0 {
+					t.Errorf("events = %v, minted = %v, want nothing", events, rec.minted)
+				}
+				if sess, err := rec.store.Get(id); err != nil || sess.OpenKey != "" || sess.EntityID != tc.owner || len(sess.Messages) != 0 {
+					t.Errorf("%s = %+v, %v; want it as it was", id, sess, err)
+				}
+				if result, err := rec.store.ClaimOpener(context.Background(), id, time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+					t.Errorf("first-turn claim = %v, %v; want it still free", result, err)
+				}
+				if result, err := rec.store.ReserveNote(context.Background(), id, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+					t.Errorf("note reservation = %v, %v; want it still free", result, err)
+				}
+			})
+		}
+	})
 }
 
 // TestHandler_OrdinaryChatTakesAConversationIdWithAColon: the open path's
