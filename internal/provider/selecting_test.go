@@ -57,22 +57,16 @@ func TestSelectedContextOverflow(t *testing.T) {
 	cases := []struct {
 		name          string
 		defaultWindow int
-		defaultUsed   bool
 	}{
-		{"the default window is the same", 200_000, false},
-		{"the default window is smaller", 128_000, false},
-		{"the default window is larger", 400_000, true},
+		{"the default window is the same", 200_000},
+		{"the default window is smaller", 128_000},
+		{"the default window is larger", 400_000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s, def, sel := newSelectedFixture(t, tooLong, func(context.Context) error { return nil })
 			def.window, sel.window = tc.defaultWindow, 200_000
-			resp, err := s.Complete(context.Background(), selectedRequestOf())
-			if tc.defaultUsed {
-				if err != nil || resp.ID != "primary" || !resp.Fallback {
-					t.Fatalf("got %+v, %v; want the default's answer, marked as a fallback", resp, err)
-				}
-			} else if !errors.Is(err, tooLong) || def.calls != 0 {
+			if _, err := s.Complete(context.Background(), selectedRequestOf()); !errors.Is(err, tooLong) || def.calls != 0 {
 				t.Fatalf("error = %v, default calls %d; want the overflow and none", err, def.calls)
 			}
 			if !s.providers["sel"].health.isHealthy() {

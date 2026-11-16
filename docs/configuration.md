@@ -448,6 +448,9 @@ provider does not have to be part of `routing`:
   the selected one.
 - Conversations are trimmed to the default model's `context_window` and
   `max_tokens`, whichever model answers.
+- A selected model whose `context_window` is smaller than the default
+  model's can refuse long conversations: give it at least the default
+  model's `context_window` and `max_tokens`.
 
 #### When the selected provider fails
 
@@ -456,8 +459,7 @@ provider does not have to be part of `routing`:
 | answers with a status other than 400, 413 and 422 (a refused key or account, a rate or spend limit, an unknown model, an overload or server error), cannot be reached, or reaches its `timeout` | the default chain answers with the default model, and one warning names the provider, the model and the error, with `unhealthy=true`: the provider is marked unhealthy |
 | answers 400 with Anthropic's spend limit message ("You have reached your specified … API usage limits") or its empty credit message ("Your credit balance is too low to access the Anthropic API") | as above: the default chain answers and the provider is marked unhealthy |
 | answers 400, 413 or 422 otherwise (it refuses this request), or with a reply that cannot be read | the default chain answers, with the warning and `unhealthy=false`; the provider stays in use |
-| refuses the prompt as longer than the model's window, and the default model's `context_window` is larger | the default chain answers, with the warning and `unhealthy=false`; the provider stays in use |
-| refuses the prompt as longer than the model's window, and the default model's `context_window` is not larger | the chat loop gets the refusal, as before, and trims and sends again |
+| refuses the prompt as longer than the model's window | the chat loop gets the refusal, as before, and trims and sends again |
 | does not answer before the turn is cancelled | the turn ends; the default chain is not called and nothing is marked |
 
 While a provider is marked unhealthy:

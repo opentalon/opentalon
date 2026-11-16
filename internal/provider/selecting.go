@@ -159,14 +159,10 @@ func (f fallbackStream) EventID() string {
 }
 
 func (s *selectingProvider) failed(ctx context.Context, sel *selected, m ModelInfo, err error) error {
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || IsContextOverflow(err) {
 		return err
 	}
-	overflow := IsContextOverflow(err)
-	if overflow && findModel(s.def.Models(), s.model).ContextWindow <= m.ContextWindow {
-		return err
-	}
-	unhealthy := sel.health != nil && !overflow && providerFailure(err)
+	unhealthy := sel.health != nil && providerFailure(err)
 	if unhealthy {
 		sel.health.trip()
 		sel.probing.Do(func() { go sel.health.run(s.ctx) })
