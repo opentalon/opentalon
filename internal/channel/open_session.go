@@ -56,6 +56,12 @@ var (
 	notePoll = 250 * time.Millisecond
 )
 
+// noteFreeTimeout bounds the release of a note's reservation (see freeNote),
+// which runs also after the request ended. It is short: a channel that shuts
+// down waits for its requests, and a release that does not finish leaves the
+// reservation to go stale.
+const noteFreeTimeout = 2 * time.Second
+
 // openSessions serves the handler's open-session path.
 type openSessions struct {
 	cfg        HandlerConfig
@@ -380,12 +386,15 @@ func (o *openSessions) storeNote(ctx context.Context, key recoveryKey, content s
 }
 
 // freeNote frees key's reservation taken at reservedAt, whose note this
-// attempt did not store. The store frees nothing once a note is stored under
-// the reservation, also when the error came after the write committed, nor a
-// reservation another attempt took over; a release the store cannot make
-// leaves the reservation to go stale.
+// attempt did not store. The release runs under a context of its own, bounded
+// by noteFreeTimeout, as ctx may have ended, which is one reason a note is not
+// stored: the caller is gone or the channel shuts down, and a release under
+// that context would fail at once. The store frees nothing once a note is
+// stored under the reservation, also when the error came after the write
+// committed, nor a reservation another attempt took over; a release the store
+// cannot make leaves the reservation to go stale.
 func (o *openSessions) freeNote(ctx context.Context, key recoveryKey, reservedAt time.Time) {
-	freeCtx, cancel := o.storeContext(ctx)
+	freeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), noteFreeTimeout)
 	defer cancel()
 	if err := o.cfg.Opener.FreeNote(freeCtx, key.sessionID, key.noteKey, reservedAt); err != nil {
 		logger.FromContext(ctx).Warn("note reservation not freed", "session", key.sessionID, "note_key", key.noteKey, "error", err)
@@ -566,12 +575,13 @@ func (o *openSessions) reclaim(ctx context.Context, key recoveryKey, now time.Ti
 }
 
 // storeContext bounds the open path's store calls outside its turn: the open,
-// a note's lookup, the claims and a note's release, which may wait for another
-// transaction, a table lock or a free connection. Each waits no longer than
-// the turn it is for may run, and not past ctx, so neither another
-// transaction nor a shutdown keeps it and its database connection. The turn's
-// own store calls (Runner.Run) take no context, as every turn's, nor does the
-// write of a note without a reply (HandlerConfig.StoreNote).
+// a note's lookup and the claims, which may wait for another transaction, a
+// table lock or a free connection. Each waits no longer than the turn it is
+// for may run, and not past ctx, so neither another transaction nor a
+// shutdown keeps it and its database connection. A note's release has a
+// bound of its own (see freeNote). The turn's own store calls (Runner.Run)
+// take no context, as every turn's, nor does the write of a note without a
+// reply (HandlerConfig.StoreNote).
 func (o *openSessions) storeContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, o.timeout)
 }

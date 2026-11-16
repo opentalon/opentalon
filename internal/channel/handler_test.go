@@ -2330,6 +2330,53 @@ func TestHandler_OpenSession_NoteWithoutAReplyGivesUpWhileTheTurnRuns(t *testing
 	}
 }
 
+// liveFreeOpener frees a note reservation only under a context that has not
+// ended, as the DB-backed store, whose statement fails at once under an ended
+// one.
+type liveFreeOpener struct{ *state.SessionStore }
+
+func (o liveFreeOpener) FreeNote(ctx context.Context, id, key string, reservedAt time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return o.SessionStore.FreeNote(ctx, id, key, reservedAt)
+}
+
+// TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenItsRequestEnds: a
+// note waiting for a turn in flight whose request ends (the caller is gone,
+// the channel shuts down) returns, stores nothing and frees its key, so the
+// same call again can take it while the turn still runs.
+func TestHandler_OpenSession_NoteWithoutAReplyFreesItsKeyWhenItsRequestEnds(t *testing.T) {
+	noteTiming(t, 2*time.Second, 4*time.Second)
+	llm, storing := newGateLLM(), make(chan struct{})
+	rec, orch, h := newNoteHandler(llm, signalStoring(storing), func(cfg *HandlerConfig) {
+		cfg.Opener = liveFreeOpener{cfg.Opener.(*state.SessionStore)}
+	})
+	storeOpened(t, rec.store, openedSession, "u1")
+	release := sync.OnceFunc(holdTurn(t, orch, llm, openedSession))
+	t.Cleanup(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	answered := make(chan pkg.OutboundMessage, 1)
+	go func() {
+		out, _ := h(ctx, "websocket:c8", openRequest("c8", noteWithoutReply(openedSession)))
+		answered <- out
+	}()
+	await(t, storing, "the note to reach StoreNote")
+	cancel()
+	await(t, answered, "the note's call to return once its request ended")
+
+	if result, err := rec.store.ReserveNote(context.Background(), openedSession, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+		t.Errorf("the note's key once its request ended = %v, %v; want it free", result, err)
+	}
+	release()
+	got, _, _ := rec.snapshot()
+	if n := countStored(t, rec.store, openedSession, noteContent); n != 0 || countEvents(got, "event "+events.TypeNoteStored) != 0 || len(rec.acks()) != 0 {
+		t.Errorf("note stored %d times, events %v, answers %+v; want nothing for an ended request", n, got, rec.acks())
+	}
+}
+
 // heldOpener closes held when a note reservation is first found held.
 type heldOpener struct {
 	*state.SessionStore
