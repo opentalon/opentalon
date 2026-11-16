@@ -4168,22 +4168,28 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 // after stripping is user request → tool call → tool result: exactly the
 // protocol the model must continue.
 //
-// Only APPROVED-and-executed exchanges are stripped — a prompt row directly
-// followed by its reply row. A prompt WITHOUT a reply row stays: single-call
-// rejects never persist a reply, an amend reply arrives as a plain user
-// message, and the re-planning paths need the proposed action for context.
-// Pipeline plan confirmations (prompt_type=confirmation) are untouched. The
-// user-facing transcript is untouched too — this filters only what the LLM
-// sees.
+// Only APPROVED-and-executed exchanges are stripped — a prompt row followed by
+// its reply row, with nothing but hidden notes between them (notes stored
+// while the prompt waited for its answer; they stay). A prompt WITHOUT a reply row
+// stays: single-call rejects never persist a reply, an amend reply arrives as
+// a plain user message, and the re-planning paths need the proposed action for
+// context. Pipeline plan confirmations (prompt_type=confirmation) are
+// untouched. The user-facing transcript is untouched too — this filters only
+// what the LLM sees.
 func stripApprovedConfirmationExchanges(msgs []provider.Message) []provider.Message {
 	out := make([]provider.Message, 0, len(msgs))
 	for i := 0; i < len(msgs); i++ {
 		m := msgs[i]
-		if m.Role == provider.RoleAssistant && m.PromptType == provider.PromptTypeToolConfirmation &&
-			i+1 < len(msgs) && msgs[i+1].Role == provider.RoleUser &&
-			msgs[i+1].PromptType == provider.PromptTypeConfirmationResponse {
-			i++ // resolved exchange: skip the prompt AND its reply row
-			continue
+		if m.Role == provider.RoleAssistant && m.PromptType == provider.PromptTypeToolConfirmation {
+			j := i + 1
+			for j < len(msgs) && msgs[j].Role == provider.RoleUser && msgs[j].Visibility == provider.VisibilityHidden {
+				j++
+			}
+			if j < len(msgs) && msgs[j].Role == provider.RoleUser && msgs[j].PromptType == provider.PromptTypeConfirmationResponse {
+				out = append(out, msgs[i+1:j]...)
+				i = j // resolved exchange: skip the prompt AND its reply row
+				continue
+			}
 		}
 		out = append(out, m)
 	}
