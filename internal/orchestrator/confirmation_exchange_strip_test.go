@@ -108,3 +108,39 @@ func TestStrip_PlainConversationUntouched(t *testing.T) {
 		}
 	}
 }
+
+// TestStrip_HiddenNotesBetweenPromptAndReply: a hidden note stored while a
+// prompt waited for its answer stands between the prompt and the reply row. The
+// resolved exchange is still dropped and the note stays where it was; a prompt
+// whose next visible row is no reply stays, notes and all.
+func TestStrip_HiddenNotesBetweenPromptAndReply(t *testing.T) {
+	request := provider.Message{Role: provider.RoleUser, Content: "Delete the old drill"}
+	prompt := provider.Message{Role: provider.RoleAssistant, Content: "This will delete 'Drill 5'. Proceed?", PromptType: provider.PromptTypeToolConfirmation}
+	note := provider.Message{Role: provider.RoleUser, Visibility: provider.VisibilityHidden, Content: "[context] the walkthrough created Drill 7"}
+	later := provider.Message{Role: provider.RoleUser, Visibility: provider.VisibilityHidden, Content: "[context] the job finished"}
+	reply := provider.Message{Role: provider.RoleUser, Content: "approve", PromptType: provider.PromptTypeConfirmationResponse}
+	amend := provider.Message{Role: provider.RoleUser, Content: "no — I meant Drill 7"}
+	call := provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "c1", Name: "items__delete"}}}
+	result := provider.Message{Role: provider.RoleTool, Content: "Deleted Drill 5", ToolCallID: "c1"}
+
+	for _, tc := range []struct {
+		name string
+		msgs []provider.Message
+		want []provider.Message
+	}{
+		{"answered", []provider.Message{request, prompt, note, later, reply, call, result}, []provider.Message{request, note, later, call, result}},
+		{"amended", []provider.Message{request, prompt, note, amend}, []provider.Message{request, prompt, note, amend}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripApprovedConfirmationExchanges(tc.msgs)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d messages, want %d: %+v", len(got), len(tc.want), got)
+			}
+			for i := range tc.want {
+				if got[i].Content != tc.want[i].Content || got[i].Role != tc.want[i].Role {
+					t.Errorf("message %d = %+v, want %+v", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
