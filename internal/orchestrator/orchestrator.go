@@ -2242,15 +2242,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 	result := &RunResult{}
 
-	// Resolve profile model override: strip the provider prefix if present (e.g. "anthropic/claude-3-5" -> "claude-3-5").
-	profileModel := ""
-	if p := profile.FromContext(ctx); p != nil && p.Model != "" {
-		if idx := strings.Index(p.Model, "/"); idx >= 0 {
-			profileModel = p.Model[idx+1:]
-		} else {
-			profileModel = p.Model
-		}
+	// The profile's model: the LLM client serves a "<provider>/<model>"
+	// reference at that provider; a provider that serves the request itself
+	// gets the model part (e.g. "anthropic/claude-3-5" -> "claude-3-5").
+	var profileRef provider.ModelRef
+	if p := profile.FromContext(ctx); p != nil {
+		profileRef = provider.ModelRef(p.Model)
 	}
+	profileModel := profileRef.Model()
 
 	var totalInputTokens, totalOutputTokens, totalToolCalls int
 	var totalInputCost, totalOutputCost float64
@@ -2354,7 +2353,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("LLM request message", "index", j+1, "role", m.Role, "content", m.Content)
 		}
 
-		req := &provider.CompletionRequest{Messages: guardedMessages, Segments: &system}
+		req := &provider.CompletionRequest{Messages: guardedMessages, Segments: &system, ModelRef: profileRef}
 		if profileModel != "" {
 			req.Model = profileModel
 		}

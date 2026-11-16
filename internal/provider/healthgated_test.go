@@ -309,9 +309,12 @@ func TestHealthGatedKeepsRequestedModel(t *testing.T) {
 func TestPrimaryModels(t *testing.T) {
 	preferred := &fakeProvider{id: "anthropic", model: "opus", extra: []string{"haiku"}}
 	fallback := &fakeProvider{id: "backup", model: "fallback-only"}
-	got := PrimaryModels(newTestHG(preferred, fallback, 1, nil))
-	if len(got) != 2 || got[0].ID != "opus" || got[1].ID != "haiku" {
-		t.Errorf("PrimaryModels = %+v, want the preferred endpoint's opus, haiku", got)
+	gate := newTestHG(preferred, fallback, 1, nil)
+	for _, p := range []Provider{gate, NewSelectingProvider(gate, "opus", nil, nil)} {
+		got := PrimaryModels(p)
+		if len(got) != 2 || got[0].ID != "opus" || got[1].ID != "haiku" {
+			t.Errorf("PrimaryModels = %+v, want the preferred endpoint's opus, haiku", got)
+		}
 	}
 	if got := PrimaryModels(preferred); len(got) != 2 {
 		t.Errorf("PrimaryModels on a bare provider = %+v, want its own models", got)

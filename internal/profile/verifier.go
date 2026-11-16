@@ -435,6 +435,9 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 	}
 
 	model := jsonString(raw[v.cfg.ModelField])
+	if _, ok := raw[v.cfg.ModelField]; ok && model == "" {
+		slog.WarnContext(ctx, "whoami: model field is not a non-empty string, ignoring", "field", v.cfg.ModelField)
+	}
 	channelTypeResp := jsonString(raw[v.cfg.ChannelTypeField])
 	name := jsonString(raw[v.cfg.NameField])
 	kind := jsonString(raw[v.cfg.KindField])

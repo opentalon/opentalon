@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 )
 
 type Role string
@@ -104,6 +105,11 @@ type CompletionRequest struct {
 	// Segments describes Messages[0], whose content is Segments.Join(). Only
 	// the chat loop sets it; nil on every other call.
 	Segments *SystemSegments `json:"-"`
+	// ModelRef is the profile's model as the chat loop received it. A
+	// selecting provider serves a "<provider>/<model>" reference at that
+	// provider; Model holds the model part, for a provider that serves the
+	// request itself. Empty on every other call.
+	ModelRef ModelRef `json:"-"`
 }
 
 // Usage is a call's tokens and cost. InputTokens counts every input token,
@@ -153,6 +159,10 @@ type ResponseStream interface {
 	Recv() (StreamChunk, error)
 	Close() error
 }
+
+// ErrStreamingNotImplemented is returned by the Stream of a provider that
+// cannot stream; its Complete serves the request instead.
+var ErrStreamingNotImplemented = errors.New("streaming not yet implemented")
 
 type Provider interface {
 	ID() string

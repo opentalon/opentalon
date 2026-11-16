@@ -1687,17 +1687,19 @@ func runClean(configPath, category string) {
 
 // buildProvider returns a provider and the default model ID from config.
 // buildProvider builds the LLM provider from config. When routing.fallbacks is
-// empty it returns the single primary provider (unchanged behavior). Otherwise
-// it builds the primary plus each fallback and wraps them in a health-gated
-// provider that prefers the primary while its endpoint is reachable and falls
-// back — with recovery hysteresis — to the fallbacks otherwise.
+// empty its default is the single primary provider (unchanged behavior).
+// Otherwise it builds the primary plus each fallback and wraps them in a
+// health-gated provider that prefers the primary while its endpoint is
+// reachable and falls back — with recovery hysteresis — to the fallbacks
+// otherwise. Every provider the config defines stands in front of that
+// default, for the profile models the chat loop names.
 func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver, eventSink emit.Sink) (provider.Provider, string, error) {
 	prov, modelID, primaryPC, err := buildProviderRef(cfg, cfg.Routing.Primary, debugSink, debugResolve, eventSink)
 	if err != nil {
 		return nil, "", err
 	}
 	if len(cfg.Routing.Fallbacks) == 0 {
-		return prov, modelID, nil
+		return provider.NewSelectingProvider(prov, modelID, definedProviders(cfg, debugSink, debugResolve, eventSink), slog.Default()), modelID, nil
 	}
 
 	entries := make([]provider.ProviderEntry, 0, 1+len(cfg.Routing.Fallbacks))
@@ -1733,7 +1735,24 @@ func buildProvider(cfg *config.Config, debugSink provider.DebugEventSink, debugR
 		"primary", cfg.Routing.Primary,
 		"fallbacks", cfg.Routing.Fallbacks,
 		"health_probe", probeURL)
-	return provider.NewHealthGatedProvider(context.Background(), entries, probe, gate, slog.Default()), modelID, nil
+	gated := provider.NewHealthGatedProvider(context.Background(), entries, probe, gate, slog.Default())
+	return provider.NewSelectingProvider(gated, modelID, definedProviders(cfg, debugSink, debugResolve, eventSink), slog.Default()), modelID, nil
+}
+
+// definedProviders builds every provider in models.providers, by id. One that
+// cannot be built is left out with a warning instead of stopping the start:
+// nothing routes to it, and a profile model naming it gets the default model.
+func definedProviders(cfg *config.Config, debugSink provider.DebugEventSink, debugResolve provider.DebugContextResolver, eventSink emit.Sink) map[string]provider.Provider {
+	out := make(map[string]provider.Provider, len(cfg.Models.Providers))
+	for id := range cfg.Models.Providers {
+		p, _, _, err := buildProviderRef(cfg, id, debugSink, debugResolve, eventSink)
+		if err != nil {
+			slog.Warn("provider not built; a profile model naming it gets the default model", "provider", id, "error", err)
+			continue
+		}
+		out[id] = p
+	}
+	return out
 }
 
 // isAnthropicNativeHost reports whether baseURL points at Anthropic's API

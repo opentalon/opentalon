@@ -131,8 +131,12 @@ func (h *healthGatedProvider) modelFor(e ProviderEntry, requested string) string
 
 // PrimaryModels returns the models of the provider requests go to first: the
 // preferred endpoint of a health-gated provider (Models there is the union of
-// every endpoint, fallbacks included), otherwise p's own models.
+// every endpoint, fallbacks included), otherwise p's own models. A selecting
+// provider answers for its default provider.
 func PrimaryModels(p Provider) []ModelInfo {
+	if sp, ok := p.(*selectingProvider); ok {
+		p = sp.def
+	}
 	if hg, ok := p.(*healthGatedProvider); ok {
 		return hg.entries[0].Prov.Models()
 	}

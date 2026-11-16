@@ -384,6 +384,39 @@ routing:
     - anthropic/claude-opus-4-6
 ```
 
+### Model from the profile
+
+A whoami profile can name the model for its chat (`model` in the whoami
+answer, see [Profiles](profiles.md)) as `<provider>/<model>`, both as
+`models.providers` names them, for example `anthropic/claude-sonnet-5-5`. The
+provider does not have to be part of `routing`:
+
+| Profile `model` | Answered by |
+|---|---|
+| absent | the default chain (`routing.primary` and its fallbacks) |
+| empty, or not a string | the default chain, with a warning |
+| `<provider>/<model>`, both defined | that model at that provider; when the call fails, the default chain, with a warning |
+| `<provider>/<model>`, provider or model not defined | the default model, with a warning |
+| `<model>` without a provider | the default chain, sent that id as before; with fallbacks, an endpoint that does not serve it gets its own model, with a warning |
+
+- Only the chat loop follows the profile, for `chat` and `system` runs alike.
+  Session titles, summaries, the planner, the confirmation classifier, the
+  repair call and sub-agents stay on the default chain.
+- The call uses the selected model's own entry: its `thinking` and
+  `reasoning_effort`, and reasoning only when it has `features: [reasoning]`,
+  whatever the default model has. A turn's `reasoning_effort` still replaces
+  the model's effort.
+- A provider that cannot stream (`anthropic-messages`) answers a round that
+  would stream with its non-streaming call.
+- The usage row names the model that answered the run's first round, and each
+  round's cost comes from the price list of the provider that served it,
+  cache prices included.
+- Every provider in `models.providers` is started. One whose `api_key`
+  references an unset variable still starts; its calls fail and the default
+  chain answers.
+- Conversations are trimmed to the default model's `context_window` and
+  `max_tokens`, whichever model answers.
+
 ### Affinity learning
 
 Enable this to let the router learn from user feedback:
