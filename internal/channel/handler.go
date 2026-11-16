@@ -57,9 +57,14 @@ type HandlerConfig struct {
 	// mark, so no note reaches an ordinary session.
 	SetVerifiedOwner func(ctx context.Context, sessionKey string, owner state.VerifiedOwner) error
 	// Opener is the store side of an open-session message
-	// (pkg.OpenSessionMetadataKey): create-or-find, first-turn claim and note
-	// reservation. Required.
+	// (pkg.OpenSessionMetadataKey): create-or-find, first-turn claim, note
+	// reservation and its release. Required.
 	Opener SessionOpener
+	// StoreNote stores a note without a reply (pkg.NoteReplyMetadataKey) as a
+	// hidden user message of the session under the note's reservation, in the
+	// order of the session's turns, and runs no turn; ctx bounds its wait for
+	// the session's turn (see orchestrator.Orchestrator.StoreNote). Required.
+	StoreNote func(ctx context.Context, sessionID, content string, claim state.TurnClaim) error
 	// SendToConversation delivers a frame to a channel's conversation. The
 	// open-session path answers its caller and delivers its turn through it,
 	// because the session it opens or continues need not be the inbound
@@ -71,11 +76,11 @@ type HandlerConfig struct {
 // Verifier is non-nil), runs channel-specific content preparer (if registered), then runs the
 // message through the Runner and returns the response.
 //
-// Panics at construction if ResumeSession, CreateSession, Runner, Opener or
-// SendToConversation is nil: these are required for the strict-session
-// contract and a missing one is a boot-time misconfiguration that must
-// surface immediately rather than as a nil-deref under load. Verifier and
-// LimitChecker remain optional.
+// Panics at construction if ResumeSession, CreateSession, Runner, Opener,
+// StoreNote or SendToConversation is nil: these are required for the
+// strict-session contract and a missing one is a boot-time misconfiguration
+// that must surface immediately rather than as a nil-deref under load.
+// Verifier and LimitChecker remain optional.
 func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	if cfg.ResumeSession == nil {
 		panic("channel.NewMessageHandler: ResumeSession is required")
@@ -88,6 +93,9 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	}
 	if cfg.Opener == nil {
 		panic("channel.NewMessageHandler: Opener is required")
+	}
+	if cfg.StoreNote == nil {
+		panic("channel.NewMessageHandler: StoreNote is required")
 	}
 	if cfg.SendToConversation == nil {
 		panic("channel.NewMessageHandler: SendToConversation is required")

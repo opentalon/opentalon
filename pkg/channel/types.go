@@ -280,31 +280,54 @@ const ControlResumeHello = "resume_hello"
 //   - OpenSessionIDMetadataKey and NoteKeyMetadataKey instead: continue that
 //     session of the user with the content as a hidden note, stored once per
 //     note key.
+//   - NoteReplyMetadataKey, on a note only: "false" stores the note without a
+//     reply, as a hidden user message in the order of the session's turns,
+//     with no model run and no frame to the session's conversation; "true",
+//     like no key, runs the note as a hidden turn whose reply reaches the
+//     conversation. Any other value, and the key on an open, are refused with
+//     bad_request. A repeat under a note key is the same note, whatever its
+//     content or switch: what the first attempt stored or ran stands.
 //   - OpenRequestIDMetadataKey: the attempt's correlation id.
 //
-// The core answers every attempt with one frame carrying that correlation id,
-// sent before any model run: FrameSessionOpened, with session_id (the session
-// key) and created ("true" exactly when this attempt took the turn's claim and
-// so runs the first turn or the note), or FrameOpenRejected, with error_code
-// forbidden, bad_request, not_found or internal_error, or the code any message
-// gets for the same refusal (token_required, auth_failed, ...). No other frame
-// carries the correlation id: the turn's reply and its error frame reach the
-// session's conversation as every reply does.
+// The core answers an attempt with at most one frame carrying that
+// correlation id: FrameSessionOpened, with session_id (the session key) and
+// created ("true" exactly when this attempt took the turn's claim), or
+// FrameOpenRejected, with error_code forbidden, bad_request, not_found or
+// internal_error, or the code any message gets for the same refusal
+// (token_required, auth_failed, ...). An open and a note with a reply are
+// answered before any model run, and the attempt that took the claim then runs
+// the first turn or the note. A note without a reply is answered
+// FrameSessionOpened only once it is stored, by this attempt (created true) or
+// by an earlier one (created false); an attempt that finds the key held by
+// another waits for that one to store the note. One whose note is not stored
+// within three minutes, because a turn holds the session or another attempt
+// the key, gets no answer, and its key is freed: the same request again
+// stores the note or answers that it is stored. A channel answers its caller
+// as for any attempt: the websocket channel with 200 and the answer frame, or
+// with 504 when its own wait ends first. A note that cannot be stored for
+// another reason frees its key and is refused with internal_error, or
+// not_found when its session is gone. No other frame carries the correlation
+// id: the turn's reply and its error frame reach the session's conversation as
+// every reply does.
 //
-// A request reaches only the sessions opened this way that the store records
-// for the user and the channel it arrives on: any other note target, or the
-// user's session for the origin and key on another channel, answers not_found
-// like a missing one. A channel with threads, a request in a thread, one
-// whose channel id is not its channel's, one whose user, channel or
-// conversation id is empty or holds a colon, and a note whose target is not
-// "<entity>:<channel>:<conversation>" of such ids are refused with
-// bad_request.
+// A request reaches only sessions of the user on the channel it arrives on. A
+// note reaches a session opened this way only under the account it was opened
+// for, and an ordinary session only by its verified-owner mark, which names
+// the user, the account and the channel and which the user's own chat turns
+// alone set: a conversation from before the mark is reached after its next
+// such turn. Any other note target, or the user's session for the origin and
+// key on another channel, answers not_found like a missing one. A channel with
+// threads, a request in a thread, one whose channel id is not its channel's,
+// one whose user, channel or conversation id is empty or holds a colon, and a
+// note whose target is not "<entity>:<channel>:<conversation>" of such ids
+// are refused with bad_request.
 const (
 	OpenSessionMetadataKey   = "open_session"
 	OpenedByMetadataKey      = "opened_by"
 	OpenKeyMetadataKey       = "open_key"
 	OpenSessionIDMetadataKey = "session_id"
 	NoteKeyMetadataKey       = "note_key"
+	NoteReplyMetadataKey     = "note_reply"
 	OpenRequestIDMetadataKey = "open_request_id"
 
 	FrameSessionOpened = "session_opened"

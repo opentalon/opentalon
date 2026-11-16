@@ -1102,9 +1102,11 @@ func main() {
 		// (asserted next to newInMemoryState).
 		SetVerifiedOwner: sessions.(verifiedOwnerStore).SetVerifiedOwner,
 		// Server-opened sessions: both session stores implement the opener
-		// (asserted next to newInMemoryState); frames reach the request's
-		// channel through the late-bound registry.
+		// (asserted next to newInMemoryState); a note without a reply is stored
+		// in the session's turn order by the orchestrator; frames reach the
+		// request's channel through the late-bound registry.
 		Opener:             sessions.(channel.SessionOpener),
+		StoreNote:          orch.StoreNote,
 		SendToConversation: notifier.SendToConversation,
 	})
 
