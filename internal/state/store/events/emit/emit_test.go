@@ -543,6 +543,7 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 	}{
 		{"TurnStart", func(c context.Context, s Sink) { EmitTurnStart(c, s, TurnStartArgs{ModelID: "m", Temperature: &temp}) }, events.TypeTurnStart, events.TurnStartVersion},
 		{"UserMessage", func(c context.Context, s Sink) { EmitUserMessage(c, s, "u") }, events.TypeUserMessage, events.UserMessageVersion},
+		{"NoteStored", func(c context.Context, s Sink) { EmitNoteStored(c, s, "k", "n") }, events.TypeNoteStored, events.NoteStoredVersion},
 		{"LLMRequest", func(c context.Context, s Sink) { EmitLLMRequest(c, s, LLMRequestArgs{ModelID: "m"}) }, events.TypeLLMRequest, events.LLMRequestVersion},
 		{"LLMResponse", func(c context.Context, s Sink) { EmitLLMResponse(c, s, LLMResponseArgs{RawContent: "r"}) }, events.TypeLLMResponse, events.LLMResponseVersion},
 		{"LLMError", func(c context.Context, s Sink) { EmitLLMError(c, s, LLMErrorArgs{Phase: "p"}) }, events.TypeLLMError, events.LLMErrorVersion},
@@ -586,7 +587,7 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 	// All event types must be exercised — keep this in lockstep with
 	// the constants in event_types.go. If you add a new event type and
 	// this count drops below it, add a row above.
-	const wantCases = 32
+	const wantCases = 33
 	if len(cases) != wantCases {
 		t.Fatalf("len(cases) = %d, want %d — keep TestAllEmitHelpers in sync with event_types.go", len(cases), wantCases)
 	}
@@ -700,6 +701,17 @@ func TestEmit_SanitizesAllFreeTextFields(t *testing.T) {
 			func(c context.Context, s Sink) { EmitUserMessage(c, s, invalidUTF8Raw) },
 			func(t *testing.T, p []byte) string {
 				var v events.UserMessagePayload
+				if err := json.Unmarshal(p, &v); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				return v.Content
+			},
+		},
+		{
+			"NoteStored.Content",
+			func(c context.Context, s Sink) { EmitNoteStored(c, s, "chapter-2", invalidUTF8Raw) },
+			func(t *testing.T, p []byte) string {
+				var v events.NoteStoredPayload
 				if err := json.Unmarshal(p, &v); err != nil {
 					t.Fatalf("unmarshal: %v", err)
 				}

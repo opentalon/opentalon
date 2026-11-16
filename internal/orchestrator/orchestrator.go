@@ -1339,8 +1339,8 @@ func (o *Orchestrator) formatResponse(ctx context.Context, result *RunResult) er
 // The returned unlock releases both in reverse order and must be called
 // exactly once when the turn's critical section ends. It is the ONLY place
 // that encodes this ordering — every session-state-mutating path (Run, the
-// background summarizer) must go through it rather than taking the locks
-// individually.
+// background summarizer, StoreNote) must go through it rather than taking the
+// locks individually.
 //
 // Lock ordering (must always be acquired in this sequence to prevent deadlock):
 //  1. semaphore      – global concurrency cap (Run acquires it before calling this)
@@ -1348,9 +1348,10 @@ func (o *Orchestrator) formatResponse(ctx context.Context, result *RunResult) er
 //  3. sessionLocker  – per-session serialization across pods (distributed turn lease)
 //  4. pendingMu      – pending-pipeline map
 //
-// Never acquire an earlier lock while holding a later one. The distributed
-// lease is acquired while HOLDING the in-pod mutex so at most one goroutine
-// per pod polls the distributed lock per session. When lease acquisition
+// Never acquire an earlier lock while holding a later one; StoreNote, which
+// calls no model, takes no semaphore. The distributed lease is acquired while
+// HOLDING the in-pod mutex so at most one goroutine per pod polls the
+// distributed lock per session. When lease acquisition
 // fails (caller's ctx ended) the in-pod mutex is released before returning,
 // so an error never leaks a held lock.
 func (o *Orchestrator) lockSessionTurn(ctx context.Context, sessionID string) (unlock func(), err error) {
