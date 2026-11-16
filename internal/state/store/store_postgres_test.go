@@ -60,8 +60,8 @@ func TestPostgres_OpenAndMigrations(t *testing.T) {
 	if err := db.SQLDB().QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 18 {
-		t.Errorf("schema_version = %d, want 18", v)
+	if v != 19 {
+		t.Errorf("schema_version = %d, want 19", v)
 	}
 }
 
@@ -82,6 +82,19 @@ func TestPostgres_SessionOwner(t *testing.T) {
 }
 func TestPostgres_NoteReservationsGoWithSession(t *testing.T) {
 	checkNoteReservationsGoWithSession(t, pgDB(t))
+}
+func TestPostgres_FreeNote(t *testing.T) {
+	checkFreeNote(t, NewSessionStore(pgDB(t), 0, 0))
+}
+func TestPostgres_VerifiedOwner(t *testing.T) {
+	db := pgDB(t)
+	checkVerifiedOwner(t, NewSessionStore(db, 0, 0), db)
+}
+func TestPostgres_SessionAccount(t *testing.T) {
+	checkSessionAccount(t, NewSessionStore(pgDB(t), 0, 0))
+}
+func TestPostgres_MigrationMarksNoSession(t *testing.T) {
+	checkMigrationMarksNoSession(t, pgDB(t))
 }
 
 // TestPostgres_PruneKeepsASessionWrittenMeanwhile: an idle session that another
@@ -143,8 +156,8 @@ func TestPostgres_PruneKeepsASessionWrittenMeanwhile(t *testing.T) {
 
 // TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept: a note reserved
 // while the prune deletes its session (a recovery firing during another pod's
-// start) waits for the prune and answers settled; no reservation outlives the
-// session, where no later prune would find it.
+// start) waits for the prune and answers not found; no reservation outlives
+// the session, where no later prune would find it.
 func TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept(t *testing.T) {
 	db := pgDB(t)
 	store := NewSessionStore(db, 0, 1)
@@ -184,8 +197,8 @@ func TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept(t *testing.T) {
 		t.Fatalf("commit prune: %v", err)
 	}
 
-	if r := <-done; r.err != nil || r.result != state.ClaimSettled {
-		t.Errorf("ReserveNote = %v, %v; want settled for a pruned session", r.result, r.err)
+	if r := <-done; r.err != nil || r.result != state.ClaimSessionNotFound {
+		t.Errorf("ReserveNote = %v, %v; want not found for a pruned session", r.result, r.err)
 	}
 	if n := countNoteReservations(t, db, "idle"); n != 0 {
 		t.Errorf("reservations = %d, want none left behind the pruned session", n)

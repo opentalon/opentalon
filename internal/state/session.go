@@ -29,11 +29,26 @@ type Session struct {
 	ActiveModel provider.ModelRef  `yaml:"active_model,omitempty"`
 	Metadata    map[string]string  `yaml:"metadata,omitempty"`
 	EntityID    string             `yaml:"entity_id,omitempty"`  // the owner the session was created for (SessionParams.EntityID); empty without a profile
+	GroupID     string             `yaml:"group_id,omitempty"`   // the account the session was created or opened for (SessionParams.GroupID); empty when none was recorded
 	OpenedBy    string             `yaml:"opened_by,omitempty"`  // origin of a session a server opened (OpenSession); empty otherwise
 	OpenKey     string             `yaml:"open_key,omitempty"`   // the opener's idempotency key; empty otherwise
 	ChannelID   string             `yaml:"channel_id,omitempty"` // the channel recorded for the session (SessionParams.ChannelID, read by OpenSession); empty when none is
-	CreatedAt   time.Time          `yaml:"created_at"`
-	UpdatedAt   time.Time          `yaml:"updated_at"`
+	// VerifiedOwner is the session's verified-owner mark (SetVerifiedOwner); nil until it is set.
+	VerifiedOwner *VerifiedOwner `yaml:"verified_owner,omitempty"`
+	CreatedAt     time.Time      `yaml:"created_at"`
+	UpdatedAt     time.Time      `yaml:"updated_at"`
+}
+
+// VerifiedOwner is the mark that a user holds a session: the entity, the
+// account (group) and the channel of the whoami-verified profile of the latest
+// chat turn the user ran in it themselves. The core sets it before such a turn
+// runs, and nothing else does. Neither the session's key nor its EntityID
+// proves the owner: a migration derived EntityID from the key's first segment,
+// and a session keyed without a profile has the form of a user's conversation.
+type VerifiedOwner struct {
+	EntityID  string `yaml:"entity_id"`
+	GroupID   string `yaml:"group_id"`
+	ChannelID string `yaml:"channel_id"`
 }
 
 type SessionStore struct {
@@ -113,9 +128,13 @@ const (
 	ClaimHeld ClaimResult = iota
 	// ClaimWon: the call took the claim; its turn may run.
 	ClaimWon
-	// ClaimSettled: the turn's input was stored under a claim, or there is no
-	// such session: nothing is left to run.
+	// ClaimSettled: the turn's input was stored under a claim, or, for
+	// ClaimOpener, there is no such session: nothing is left to run.
 	ClaimSettled
+	// ClaimSessionNotFound: ReserveNote found no such session, so there is
+	// nothing to reserve a note in. Unlike ClaimSettled it says nothing about
+	// the key.
+	ClaimSessionNotFound
 )
 
 // TurnClaim names the claim a turn runs under: the first turn of an opened
@@ -187,6 +206,7 @@ func (s *SessionStore) Create(p SessionParams) *Session {
 		Messages:  make([]provider.Message, 0),
 		Metadata:  make(map[string]string),
 		EntityID:  p.EntityID,
+		GroupID:   p.GroupID,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -218,6 +238,7 @@ func (s *SessionStore) OpenSession(_ context.Context, p SessionParams) (*Session
 		Messages:  make([]provider.Message, 0),
 		Metadata:  make(map[string]string),
 		EntityID:  p.EntityID,
+		GroupID:   p.GroupID,
 		OpenedBy:  p.OpenedBy,
 		OpenKey:   p.OpenKey,
 		ChannelID: p.ChannelID,
@@ -245,16 +266,48 @@ func (s *SessionStore) ClaimOpener(_ context.Context, sessionID string, now time
 
 // ReserveNote mirrors the DB-backed reservation of a note key: the first call
 // for a session and key wins, a fresh reservation is held, and a stale one is
-// won again only while the note was not stored under it; a stored one, and an
-// unknown session, is settled.
+// won again only while the note was not stored under it; a stored one is
+// settled, and an unknown session is ClaimSessionNotFound.
 func (s *SessionStore) ReserveNote(_ context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (ClaimResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if _, ok := s.sessions[sessionID]; !ok {
-		return ClaimSettled, nil
+		return ClaimSessionNotFound, nil
 	}
 	return take(s.notes, noteIdentity{sessionID: sessionID, noteKey: noteKey}, now, staleAfter), nil
+}
+
+// FreeNote mirrors the DB-backed release of a note reservation: it removes the
+// reservation of sessionID and noteKey only while it is the one taken at
+// reservedAt and no note was stored under it, so a later ReserveNote wins the
+// key at once. A stored reservation, one another call took over since, and
+// one that is not there are left alone, without an error.
+func (s *SessionStore) FreeNote(_ context.Context, sessionID, noteKey string, reservedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := noteIdentity{sessionID: sessionID, noteKey: noteKey}
+	if c := s.notes[key]; c != nil && !c.stored && c.at.Equal(reservedAt) {
+		delete(s.notes, key)
+	}
+	return nil
+}
+
+// SetVerifiedOwner mirrors the DB-backed write of the session's verified-owner
+// mark: it records owner, replacing an earlier mark, and changes nothing else
+// (not UpdatedAt), so setting the same owner again changes nothing. An unknown
+// session answers a wrapped ErrSessionNotFound.
+func (s *SessionStore) SetVerifiedOwner(_ context.Context, id string, owner VerifiedOwner) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[id]
+	if !ok {
+		return fmt.Errorf("session %q: %w", id, ErrSessionNotFound)
+	}
+	sess.VerifiedOwner = &owner
+	return nil
 }
 
 // take takes claims[key] at now when it may be taken (claim.won) and reports
@@ -272,10 +325,32 @@ func take[K comparable](claims map[K]*claim, key K, now time.Time, staleAfter ti
 	}
 }
 
-// Identity is Get for the open path (see store/session.go Identity), whose
-// wait ctx would end; the in-memory store does not wait.
+// Identity mirrors the DB-backed read of what authorises an open-session
+// request (see store/session.go Identity): a copy of the session's id, owner,
+// account, channel, open key and verified-owner mark, taken under the store's
+// lock, so a mark set meanwhile never changes what the caller reads. The
+// in-memory store does not wait, so ctx is unused.
 func (s *SessionStore) Identity(_ context.Context, id string) (*Session, error) {
-	return s.Get(id)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sess, ok := s.sessions[id]
+	if !ok {
+		return nil, fmt.Errorf("session %q: %w", id, ErrSessionNotFound)
+	}
+	identity := &Session{
+		ID:        sess.ID,
+		EntityID:  sess.EntityID,
+		GroupID:   sess.GroupID,
+		OpenedBy:  sess.OpenedBy,
+		OpenKey:   sess.OpenKey,
+		ChannelID: sess.ChannelID,
+	}
+	if sess.VerifiedOwner != nil {
+		owner := *sess.VerifiedOwner
+		identity.VerifiedOwner = &owner
+	}
+	return identity, nil
 }
 
 func (s *SessionStore) Get(id string) (*Session, error) {

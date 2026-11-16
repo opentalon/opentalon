@@ -498,8 +498,10 @@ type claimStore interface {
 	OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error)
 	ClaimOpener(ctx context.Context, sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
 	ReserveNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
+	FreeNote(ctx context.Context, sessionID, noteKey string, reservedAt time.Time) error
 	AddMessage(id string, msg provider.Message) error
 	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
+	SetSummary(id string, summary string, messages []provider.Message) error
 	ClearMessages(id string) error
 }
 
@@ -617,12 +619,14 @@ func checkClaimOpener(t *testing.T, store claimStore) {
 
 // checkReserveNote: of concurrent reservations for one key exactly one wins; a
 // fresh reservation refuses; another key or another session reserves on its
-// own; a stale reservation is won again while its note was not stored under
-// it (other messages, other keys' notes do not count); the note is stored only
-// under the reservation held, once; once it is stored the key is refused for
-// good, also after the transcript is cleared; a note key without its
-// reservation is no note. With a db, the note's key is on its row and a second
-// note with that key is refused.
+// own; a session that does not exist answers not found, not settled; a stale
+// reservation is won again while its note was not stored under it (other
+// messages, other keys' notes do not count); the note is stored only under the
+// reservation held, once; once it is stored the key is refused for good, also
+// after the transcript is summarised or cleared; a note key without its
+// reservation is no note. With a db, the note's key is on its row, a second
+// note with that key is refused, and the key stays settled after the trim
+// drops the note's row.
 func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	t.Helper()
 	for _, id := range []string{"note-s1", "note-s2"} {
@@ -642,7 +646,7 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	claimStep(t, "fresh reservation stands", state.ClaimHeld, reserveAt("note-s1", "chapter-1", now.Add(30*time.Second)))
 	claimStep(t, "another key", state.ClaimWon, reserveAt("note-s1", "chapter-2", now))
 	claimStep(t, "another session", state.ClaimWon, reserveAt("note-s2", "chapter-1", now))
-	claimStep(t, "no such session", state.ClaimSettled, reserveAt("note-gone", "chapter-1", now))
+	claimStep(t, "no such session", state.ClaimSessionNotFound, reserveAt("note-gone", "chapter-1", now))
 
 	if err := store.AddMessage("note-s1", provider.Message{Role: provider.RoleUser, Content: "opener", Visibility: "hidden"}); err != nil {
 		t.Fatalf("AddMessage opener: %v", err)
@@ -660,6 +664,10 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 		t.Errorf("note stored %d times, want once", n)
 	}
 	claimStep(t, "stale, note stored", state.ClaimSettled, reserveAt("note-s1", "chapter-1", now.Add(10*time.Minute)))
+	if err := store.SetSummary("note-s1", "summary", []provider.Message{note}); err != nil {
+		t.Fatalf("SetSummary: %v", err)
+	}
+	claimStep(t, "stale, transcript summarised", state.ClaimSettled, reserveAt("note-s1", "chapter-1", now.Add(15*time.Minute)))
 	if err := store.ClearMessages("note-s1"); err != nil {
 		t.Fatalf("ClearMessages: %v", err)
 	}
@@ -687,6 +695,14 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	if err := store.AddMessageWithMetadata("note-s2", note, state.TurnClaim{NoteKey: "chapter-1", At: now}.Metadata()); err == nil {
 		t.Error("a second note with the same key was stored, want it refused")
 	}
+	trimmed := NewSessionStore(db, 1, 0)
+	if err := trimmed.AddMessage("note-s2", provider.Message{Role: provider.RoleUser, Content: "a later turn"}); err != nil {
+		t.Fatalf("AddMessage with the trim: %v", err)
+	}
+	if n := countContent(t, store, "note-s2", "chapter note"); n != 0 {
+		t.Fatalf("note rows after the trim = %d, want 0", n)
+	}
+	claimStep(t, "stale, note's row trimmed", state.ClaimSettled, reserveAt("note-s2", "chapter-1", now.Add(10*time.Minute)))
 }
 
 func countNoteReservations(t *testing.T, db *DB, sid string) int {
@@ -729,6 +745,212 @@ func checkNoteReservationsGoWithSession(t *testing.T, db *DB) {
 		}
 		if got := countNoteReservations(t, db, tc.sid); got != 0 {
 			t.Errorf("%s: reservations left = %d, want 0", tc.name, got)
+		}
+	}
+}
+
+// checkFreeNote: freeing removes the unstored reservation taken at the given
+// time, so the same call again wins the key at once and the freed claim stores
+// nothing; it leaves every other reservation as it was: another key's, one
+// another call re-claimed since (whose holder still stores its note), and a
+// stored one; freeing what is not there is no error.
+func checkFreeNote(t *testing.T, store claimStore) {
+	t.Helper()
+	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "free-s1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-free"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	now := time.Now()
+	const stale = time.Minute
+	reserveAt := func(key string, at time.Time) func() (state.ClaimResult, error) {
+		return func() (state.ClaimResult, error) {
+			return store.ReserveNote(context.Background(), "free-s1", key, at, stale)
+		}
+	}
+	free := func(step, key string, at time.Time) {
+		t.Helper()
+		if err := store.FreeNote(context.Background(), "free-s1", key, at); err != nil {
+			t.Fatalf("%s: FreeNote: %v", step, err)
+		}
+	}
+	noteOf := func(key string) provider.Message {
+		return provider.Message{Role: provider.RoleUser, Content: "note " + key, Visibility: "hidden"}
+	}
+	for _, key := range []string{"freed", "other", "retaken", "stored"} {
+		claimStep(t, "reserve "+key, state.ClaimWon, reserveAt(key, now))
+	}
+
+	free("own unstored reservation", "freed", now)
+	storeStep(t, "note under the freed reservation", store, "free-s1", noteOf("freed"), state.TurnClaim{NoteKey: "freed", At: now}.Metadata(), state.ErrClaimLost)
+	again := now.Add(time.Second)
+	claimStep(t, "same call again after the free", state.ClaimWon, reserveAt("freed", again))
+	storeStep(t, "note under the new reservation", store, "free-s1", noteOf("freed"), state.TurnClaim{NoteKey: "freed", At: again}.Metadata(), nil)
+	claimStep(t, "another key after the free", state.ClaimHeld, reserveAt("other", now.Add(30*time.Second)))
+
+	retaken := now.Add(2 * time.Minute)
+	claimStep(t, "stale reservation re-claimed", state.ClaimWon, reserveAt("retaken", retaken))
+	free("the re-claimed reservation, by its earlier claim time", "retaken", now)
+	claimStep(t, "re-claimed reservation after the stale free", state.ClaimHeld, reserveAt("retaken", retaken.Add(30*time.Second)))
+	storeStep(t, "note under the re-claimed reservation", store, "free-s1", noteOf("retaken"), state.TurnClaim{NoteKey: "retaken", At: retaken}.Metadata(), nil)
+
+	storeStep(t, "note under its reservation", store, "free-s1", noteOf("stored"), state.TurnClaim{NoteKey: "stored", At: now}.Metadata(), nil)
+	free("a stored reservation", "stored", now)
+	claimStep(t, "stored reservation after the free", state.ClaimSettled, reserveAt("stored", now.Add(10*time.Minute)))
+
+	for _, key := range []string{"freed", "retaken", "stored"} {
+		if n := countContent(t, store, "free-s1", "note "+key); n != 1 {
+			t.Errorf("note %s stored %d times, want once", key, n)
+		}
+	}
+	free("a key never reserved", "never", now)
+	if err := store.FreeNote(context.Background(), "no-such-session", "freed", now); err != nil {
+		t.Errorf("FreeNote in a missing session: %v, want no error", err)
+	}
+}
+
+// identityStore is what the identity checks need; both session stores satisfy it.
+type identityStore interface {
+	Create(p state.SessionParams) *state.Session
+	OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error)
+	Get(id string) (*state.Session, error)
+	Identity(ctx context.Context, id string) (*state.Session, error)
+	SetVerifiedOwner(ctx context.Context, id string, owner state.VerifiedOwner) error
+}
+
+// identityOf is Identity of id, failing the test on an error.
+func identityOf(t *testing.T, store identityStore, id string) *state.Session {
+	t.Helper()
+	sess, err := store.Identity(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Identity(%s): %v", id, err)
+	}
+	return sess
+}
+
+// checkVerifiedOwner: a session Create made or OpenSession opened has no
+// verified-owner mark until SetVerifiedOwner sets it; Identity and Get then
+// report it; setting the same owner again changes nothing, not even the time
+// of last change; a later owner replaces it; a session that does not exist
+// answers not found. With a db, the session's time of last change is moved a
+// day back first, since the store keeps it at second precision.
+func checkVerifiedOwner(t *testing.T, store identityStore, db *DB) {
+	t.Helper()
+	ctx := context.Background()
+	created := store.Create(state.SessionParams{ID: "u1:websocket:c1", EntityID: "u1", GroupID: "g1"})
+	if created.VerifiedOwner != nil {
+		t.Errorf("Create answered mark %+v, want none", created.VerifiedOwner)
+	}
+	if db != nil {
+		if _, err := db.SQLDB().Exec(db.Dialect().Rebind(`UPDATE sessions SET updated_at = ? WHERE id = ?`),
+			time.Now().AddDate(0, 0, -1).UTC().Format(time.RFC3339), "u1:websocket:c1"); err != nil {
+			t.Fatalf("move updated_at back: %v", err)
+		}
+	}
+	if _, _, err := store.OpenSession(ctx, state.SessionParams{ID: "u1:websocket:o1", EntityID: "u1", GroupID: "g1", ChannelID: "websocket", OpenedBy: "origin-a", OpenKey: "event-mark"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	for _, id := range []string{"u1:websocket:c1", "u1:websocket:o1"} {
+		if mark := identityOf(t, store, id).VerifiedOwner; mark != nil {
+			t.Errorf("Identity(%s) mark = %+v before it is set, want none", id, mark)
+		}
+	}
+
+	before, err := store.Get("u1:websocket:c1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	updatedAt := before.UpdatedAt // a value: the in-memory store answers its live session
+	owner := state.VerifiedOwner{EntityID: "u1", GroupID: "g1", ChannelID: "websocket"}
+	for i := range 2 {
+		if err := store.SetVerifiedOwner(ctx, "u1:websocket:c1", owner); err != nil {
+			t.Fatalf("SetVerifiedOwner #%d: %v", i+1, err)
+		}
+		if mark := identityOf(t, store, "u1:websocket:c1").VerifiedOwner; mark == nil || *mark != owner {
+			t.Errorf("Identity mark after set #%d = %+v, want %+v", i+1, mark, owner)
+		}
+	}
+	after, err := store.Get("u1:websocket:c1")
+	if err != nil {
+		t.Fatalf("Get after the mark: %v", err)
+	}
+	if after.VerifiedOwner == nil || *after.VerifiedOwner != owner {
+		t.Errorf("Get mark = %+v, want %+v", after.VerifiedOwner, owner)
+	}
+	if !after.UpdatedAt.Equal(updatedAt) {
+		t.Errorf("UpdatedAt moved from %v to %v, want the mark to change nothing else", updatedAt, after.UpdatedAt)
+	}
+	if mark := identityOf(t, store, "u1:websocket:o1").VerifiedOwner; mark != nil {
+		t.Errorf("Identity of the other session = %+v, want no mark", mark)
+	}
+
+	later := state.VerifiedOwner{EntityID: "u1", GroupID: "g2", ChannelID: "websocket"}
+	if err := store.SetVerifiedOwner(ctx, "u1:websocket:c1", later); err != nil {
+		t.Fatalf("SetVerifiedOwner later: %v", err)
+	}
+	if mark := identityOf(t, store, "u1:websocket:c1").VerifiedOwner; mark == nil || *mark != later {
+		t.Errorf("Identity mark after a later owner = %+v, want %+v", mark, later)
+	}
+	if err := store.SetVerifiedOwner(ctx, "no-such-session", owner); !errors.Is(err, state.ErrSessionNotFound) {
+		t.Errorf("SetVerifiedOwner on a missing session: err = %v, want ErrSessionNotFound", err)
+	}
+}
+
+// checkSessionAccount: Identity reports the account a session was created or
+// opened for, and none where none was recorded.
+func checkSessionAccount(t *testing.T, store identityStore) {
+	t.Helper()
+	store.Create(state.SessionParams{ID: "acct-created", EntityID: "u1", GroupID: "g1"})
+	store.Create(state.SessionParams{ID: "acct-none", EntityID: "u1"})
+	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "acct-opened", EntityID: "u1", GroupID: "g2", ChannelID: "websocket", OpenedBy: "origin-a", OpenKey: "event-acct"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	for id, want := range map[string]string{"acct-created": "g1", "acct-none": "", "acct-opened": "g2"} {
+		if got := identityOf(t, store, id).GroupID; got != want {
+			t.Errorf("Identity(%s) account = %q, want %q", id, got, want)
+		}
+	}
+}
+
+// checkMigrationMarksNoSession: migration 019 applied to a database that holds
+// sessions (an ordinary one, an opened one, and one keyed without a profile
+// whose owner a backfill would derive from its key) gives none of them the
+// mark. The columns are dropped and the schema set back to 18, so the runner
+// applies 019 to rows that existed before it.
+func checkMigrationMarksNoSession(t *testing.T, db *DB) {
+	t.Helper()
+	store := NewSessionStore(db, 0, 0)
+	store.Create(state.SessionParams{ID: "u1:websocket:c1", EntityID: "u1", GroupID: "g1"})
+	store.Create(state.SessionParams{ID: "websocket:c1:t1", EntityID: "websocket"})
+	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "u1:websocket:o1", EntityID: "u1", GroupID: "g1", ChannelID: "websocket", OpenedBy: "origin-a", OpenKey: "event-019"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	for _, q := range []string{
+		`ALTER TABLE sessions DROP COLUMN verified_entity_id`,
+		`ALTER TABLE sessions DROP COLUMN verified_group_id`,
+		`ALTER TABLE sessions DROP COLUMN verified_channel_id`,
+		`DELETE FROM schema_version`,
+		`INSERT INTO schema_version (version) VALUES (18)`,
+	} {
+		if _, err := db.SQLDB().Exec(q); err != nil {
+			t.Fatalf("set the schema back to 18: %s: %v", q, err)
+		}
+	}
+	if err := db.runMigrations(); err != nil {
+		t.Fatalf("apply 019: %v", err)
+	}
+	if v, err := db.currentVersion(); err != nil || v != 19 {
+		t.Fatalf("schema_version = %d (%v), want 19", v, err)
+	}
+	var marked int
+	if err := db.SQLDB().QueryRow(`SELECT COUNT(*) FROM sessions
+		WHERE verified_entity_id IS NOT NULL OR verified_group_id IS NOT NULL OR verified_channel_id IS NOT NULL`).Scan(&marked); err != nil {
+		t.Fatalf("count marked sessions: %v", err)
+	}
+	if marked != 0 {
+		t.Errorf("sessions with a mark after 019 = %d, want 0", marked)
+	}
+	for _, id := range []string{"u1:websocket:c1", "websocket:c1:t1", "u1:websocket:o1"} {
+		if mark := identityOf(t, store, id).VerifiedOwner; mark != nil {
+			t.Errorf("Identity(%s) mark = %+v after 019, want none", id, mark)
 		}
 	}
 }
@@ -839,6 +1061,35 @@ func TestInMemorySessionStore_DeleteForgetsOpenedSession(t *testing.T) {
 
 func TestSessionStore_NoteReservationsGoWithSession(t *testing.T) {
 	checkNoteReservationsGoWithSession(t, openTestDB(t))
+}
+
+func TestSessionStore_FreeNote(t *testing.T) {
+	checkFreeNote(t, NewSessionStore(openTestDB(t), 0, 0))
+}
+
+func TestInMemorySessionStore_FreeNote(t *testing.T) {
+	checkFreeNote(t, state.NewSessionStore(""))
+}
+
+func TestSessionStore_VerifiedOwner(t *testing.T) {
+	db := openTestDB(t)
+	checkVerifiedOwner(t, NewSessionStore(db, 0, 0), db)
+}
+
+func TestInMemorySessionStore_VerifiedOwner(t *testing.T) {
+	checkVerifiedOwner(t, state.NewSessionStore(""), nil)
+}
+
+func TestSessionStore_SessionAccount(t *testing.T) {
+	checkSessionAccount(t, NewSessionStore(openTestDB(t), 0, 0))
+}
+
+func TestInMemorySessionStore_SessionAccount(t *testing.T) {
+	checkSessionAccount(t, state.NewSessionStore(""))
+}
+
+func TestSessionStore_MigrationMarksNoSession(t *testing.T) {
+	checkMigrationMarksNoSession(t, openTestDB(t))
 }
 
 // A persistence failure answers an error: no session (never a transient one),
