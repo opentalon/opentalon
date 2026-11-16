@@ -70,9 +70,9 @@ or the single routing provider). `ID`, `Models`, `SupportsFeature` and
   ends. `endpointHealth` is the gate's; its name starts its log messages.
 - `NewProviderProbe(cfg, path)` gets the model list of the provider's API
   (`/v1/models` with `x-api-key` for `anthropic-messages`, `/models` with
-  `Bearer` otherwise) at its base URL or the API's default, with the provider's
-  headers. A set `path` replaces the model list path (`routing.health.path`, the
-  primary only).
+  `Bearer` otherwise, `x-api-key` at `api.anthropic.com`) at its base URL or
+  the API's default, with the provider's headers. A set `path` replaces the
+  model list path (`routing.health.path`, the primary only).
 - A provider that cannot stream returns `ErrStreamingNotImplemented` (wrapped).
   The selecting provider passes it through unmarked, so the caller's `Complete`
   serves the selected model.
