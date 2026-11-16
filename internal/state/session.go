@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -51,6 +53,13 @@ type VerifiedOwner struct {
 	ChannelID string `yaml:"channel_id"`
 }
 
+// SessionStore is the in-memory session store. The sessions OpenSession, Get,
+// List and Identity answer are copies taken under its lock, as the DB-backed
+// store answers a session read from its row, and Save marshals under the lock:
+// a write that runs outside a session's turn lock (SetVerifiedOwner) never
+// meets a read of the live session, and changing an answer changes nothing in
+// the store. Create alone answers the live session, as it always has: outside
+// tests its answer is not read.
 type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -227,7 +236,7 @@ func (s *SessionStore) OpenSession(_ context.Context, p SessionParams) (*Session
 
 	key := openIdentity{entityID: p.EntityID, openedBy: p.OpenedBy, openKey: p.OpenKey}
 	if id, ok := s.opened[key]; ok {
-		return s.sessions[id], false, nil
+		return s.sessions[id].clone(), false, nil
 	}
 	if _, taken := s.sessions[p.ID]; taken {
 		return nil, false, fmt.Errorf("open session %q: id already taken by another session", p.ID)
@@ -247,7 +256,7 @@ func (s *SessionStore) OpenSession(_ context.Context, p SessionParams) (*Session
 	}
 	s.sessions[p.ID] = sess
 	s.opened[key] = p.ID
-	return sess, true, nil
+	return sess.clone(), true, nil
 }
 
 // ClaimOpener mirrors the DB-backed compare-and-set: the claim is won when the
@@ -346,13 +355,12 @@ func (s *SessionStore) Identity(_ context.Context, id string) (*Session, error) 
 		OpenKey:   sess.OpenKey,
 		ChannelID: sess.ChannelID,
 	}
-	if sess.VerifiedOwner != nil {
-		owner := *sess.VerifiedOwner
-		identity.VerifiedOwner = &owner
-	}
+	identity.VerifiedOwner = sess.VerifiedOwner.clone()
 	return identity, nil
 }
 
+// Get answers a copy of session id taken under the store's lock (see
+// SessionStore).
 func (s *SessionStore) Get(id string) (*Session, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -361,7 +369,26 @@ func (s *SessionStore) Get(id string) (*Session, error) {
 	if !ok {
 		return nil, fmt.Errorf("session %q: %w", id, ErrSessionNotFound)
 	}
-	return sess, nil
+	return sess.clone(), nil
+}
+
+// clone is a copy of sess that shares no slice, map or mark with it. The
+// messages are copied as values; nothing changes a stored message in place.
+func (sess *Session) clone() *Session {
+	cp := *sess
+	cp.Messages = slices.Clone(sess.Messages)
+	cp.Metadata = maps.Clone(sess.Metadata)
+	cp.VerifiedOwner = sess.VerifiedOwner.clone()
+	return &cp
+}
+
+// clone is a copy of the mark, nil for none.
+func (o *VerifiedOwner) clone() *VerifiedOwner {
+	if o == nil {
+		return nil
+	}
+	cp := *o
+	return &cp
 }
 
 func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
@@ -520,31 +547,39 @@ func (s *SessionStore) List() []*Session {
 
 	result := make([]*Session, 0, len(s.sessions))
 	for _, sess := range s.sessions {
-		result = append(result, sess)
+		result = append(result, sess.clone())
 	}
 	return result
 }
 
+// Save writes session id to its file in the store's directory. The session is
+// marshaled under the store's lock.
 func (s *SessionStore) Save(id string) error {
-	s.mu.RLock()
-	sess, ok := s.sessions[id]
-	s.mu.RUnlock()
-
-	if !ok {
-		return fmt.Errorf("session %q not found", id)
+	data, err := s.marshal(id)
+	if err != nil {
+		return err
 	}
-
 	if err := os.MkdirAll(s.dir, 0700); err != nil {
 		return fmt.Errorf("creating sessions dir: %w", err)
 	}
-
-	data, err := yaml.Marshal(sess)
-	if err != nil {
-		return fmt.Errorf("marshaling session: %w", err)
-	}
-
 	path := filepath.Join(s.dir, id+".yaml")
 	return os.WriteFile(path, data, 0600)
+}
+
+// marshal is session id as Save writes it, read under the store's lock.
+func (s *SessionStore) marshal(id string) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sess, ok := s.sessions[id]
+	if !ok {
+		return nil, fmt.Errorf("session %q not found", id)
+	}
+	data, err := yaml.Marshal(sess)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling session: %w", err)
+	}
+	return data, nil
 }
 
 func (s *SessionStore) Load(id string) error {

@@ -910,7 +910,7 @@ func checkVerifiedOwner(t *testing.T, store identityStore, db *DB) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	updatedAt := before.UpdatedAt // a value: the in-memory store answers its live session
+	updatedAt := before.UpdatedAt
 	owner := state.VerifiedOwner{EntityID: "u1", GroupID: "g1", ChannelID: "websocket"}
 	for i := range 2 {
 		if err := store.SetVerifiedOwner(ctx, "u1:websocket:c1", owner); err != nil {

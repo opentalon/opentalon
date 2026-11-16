@@ -1,7 +1,10 @@
 package state
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/provider"
@@ -243,6 +246,121 @@ func TestSessionMetadata(t *testing.T) {
 	got, _ := store.Get("sess1")
 	if got.Metadata["user_id"] != "u123" {
 		t.Errorf("metadata user_id = %q", got.Metadata["user_id"])
+	}
+}
+
+// TestSessionMarkSetWhileTheSessionIsRead: SetVerifiedOwner runs outside the
+// turn lock, so it may run while a turn copies the whole session Get answered
+// (the orchestrator's request cache does), while the session is saved, listed
+// or opened again. Under -race a reader fails here while it reads the live
+// session outside the store's lock.
+func TestSessionMarkSetWhileTheSessionIsRead(t *testing.T) {
+	opened := SessionParams{ID: "u1:websocket:o1", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-1"}
+	for _, tc := range []struct {
+		name string
+		read func(t *testing.T, store *SessionStore) []Session
+	}{
+		{"Get", func(t *testing.T, store *SessionStore) []Session {
+			sess, err := store.Get(opened.ID)
+			if err != nil {
+				t.Errorf("Get: %v", err)
+				return nil
+			}
+			return []Session{*sess}
+		}},
+		{"Save", func(t *testing.T, store *SessionStore) []Session {
+			if err := store.Save(opened.ID); err != nil {
+				t.Errorf("Save: %v", err)
+			}
+			return nil
+		}},
+		{"List", func(t *testing.T, store *SessionStore) []Session {
+			var copies []Session
+			for _, sess := range store.List() {
+				copies = append(copies, *sess)
+			}
+			return copies
+		}},
+		{"OpenSession", func(t *testing.T, store *SessionStore) []Session {
+			sess, _, err := store.OpenSession(context.Background(), opened)
+			if err != nil {
+				t.Errorf("OpenSession: %v", err)
+				return nil
+			}
+			return []Session{*sess}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewSessionStore(t.TempDir())
+			if _, _, err := store.OpenSession(context.Background(), opened); err != nil {
+				t.Fatalf("OpenSession: %v", err)
+			}
+			const rounds = 200
+			var copies []Session
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				for i := range rounds {
+					owner := VerifiedOwner{EntityID: "u1", GroupID: fmt.Sprintf("g%d", i), ChannelID: "websocket"}
+					if err := store.SetVerifiedOwner(context.Background(), opened.ID, owner); err != nil {
+						t.Errorf("SetVerifiedOwner: %v", err)
+						return
+					}
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				for range rounds {
+					copies = append(copies, tc.read(t, store)...)
+				}
+			}()
+			wg.Wait()
+			for _, sess := range copies {
+				if sess.ID != opened.ID {
+					t.Fatalf("read session %q, want %q", sess.ID, opened.ID)
+				}
+			}
+		})
+	}
+}
+
+// TestSessionGetAnswersACopy: changing what Get, OpenSession or List answered
+// changes nothing in the store; the store's own writes do.
+func TestSessionGetAnswersACopy(t *testing.T) {
+	store := NewSessionStore("")
+	opened := SessionParams{ID: "u1:websocket:o1", EntityID: "u1", OpenedBy: "origin-a", OpenKey: "event-1"}
+	if _, _, err := store.OpenSession(context.Background(), opened); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	_ = store.AddMessage(opened.ID, provider.Message{Role: provider.RoleUser, Content: "kept"})
+	_ = store.SetMetadata(opened.ID, "debug", "true")
+	owner := VerifiedOwner{EntityID: "u1", GroupID: "g1", ChannelID: "websocket"}
+	_ = store.SetVerifiedOwner(context.Background(), opened.ID, owner)
+
+	got, _ := store.Get(opened.ID)
+	again, _, _ := store.OpenSession(context.Background(), opened)
+	answered := append([]*Session{got, again}, store.List()...)
+	for _, sess := range answered {
+		sess.Messages[0].Content = "changed"
+		sess.Messages = append(sess.Messages, provider.Message{Content: "appended"})
+		sess.Metadata["debug"] = "false"
+		sess.VerifiedOwner.GroupID = "g2"
+		sess.Title = "changed"
+	}
+
+	after, _ := store.Get(opened.ID)
+	if len(after.Messages) != 1 || after.Messages[0].Content != "kept" {
+		t.Errorf("Messages = %+v, want only the stored one", after.Messages)
+	}
+	if after.Metadata["debug"] != "true" {
+		t.Errorf("Metadata[debug] = %q, want true", after.Metadata["debug"])
+	}
+	if after.VerifiedOwner == nil || *after.VerifiedOwner != owner {
+		t.Errorf("mark = %+v, want %+v", after.VerifiedOwner, owner)
+	}
+	if after.Title != "" {
+		t.Errorf("Title = %q, want none", after.Title)
 	}
 }
 
