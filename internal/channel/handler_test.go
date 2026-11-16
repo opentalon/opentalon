@@ -2108,6 +2108,20 @@ func noteWithoutReply(target string) map[string]string {
 	}
 }
 
+// await returns what ch delivers, failing the test when nothing comes within
+// a few seconds.
+func await[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(3 * time.Second):
+		t.Fatalf("waited in vain for %s", what)
+		var none T
+		return none
+	}
+}
+
 // noteContent is the content every test note carries.
 var noteContent = openRequest("c8", nil).Content
 
@@ -2176,7 +2190,7 @@ func TestHandler_OpenSession_NoteWithoutAReplyIsStoredOnceForConcurrentCalls(t *
 	for i := range calls {
 		wg.Go(func() { callOpen(h, fmt.Sprintf("c%d", 10+i), noteWithoutReply(openedSession)) })
 	}
-	<-storing
+	await(t, storing, "a note to reach StoreNote")
 	time.Sleep(100 * time.Millisecond) // the others find the key held
 	release()
 	wg.Wait()
@@ -2234,10 +2248,10 @@ func TestHandler_OpenSession_NoteWithoutAReplyWaitsForTheSessionsTurn(t *testing
 
 			answered := make(chan pkg.OutboundMessage, 1)
 			go func() { answered <- callOpen(h, "c8", noteWithoutReply(openedSession)) }()
-			<-storing
+			await(t, storing, "the note to reach StoreNote")
 			tc.meanwhile(rec)
 			release()
-			out := <-answered
+			out := await(t, answered, "the note's call to return")
 
 			if out.Metadata["error_code"] != tc.code {
 				t.Errorf("handler frame = %+v, want error_code %q", out.Metadata, tc.code)
@@ -2339,9 +2353,9 @@ func TestHandler_OpenSession_NoteWithoutAReplyWaitsForAHeldKey(t *testing.T) {
 
 		answered := make(chan pkg.OutboundMessage, 1)
 		go func() { answered <- callOpen(h, "c8", noteWithoutReply(openedSession)) }()
-		<-op.held
+		await(t, op.held, "the note to find its key held")
 		_ = rec.store.Delete(openedSession)
-		out := <-answered
+		out := await(t, answered, "the note's call to return")
 
 		if out.Metadata["type"] != pkg.FrameOpenRejected || out.Metadata["error_code"] != "not_found" {
 			t.Errorf("handler frame = %+v, want open_rejected not_found", out.Metadata)
