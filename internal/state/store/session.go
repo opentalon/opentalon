@@ -610,6 +610,7 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	if claimed {
 		metadata = maps.Clone(metadata)
 		delete(metadata, state.ClaimedAtMetadataKey)
+		delete(metadata, state.ClaimOwnerMetadataKey)
 	}
 
 	toolCallsJSON, err := toolCallsAsNullString(msg.ToolCalls)
@@ -643,6 +644,11 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	if err := lockSessionRow(ctx, tx, d, id); err != nil {
 		return fmt.Errorf("add message lock: %w", err)
 	}
+	if claimed && tc.Owner != nil {
+		if err := requireVerifiedOwner(ctx, tx, d, id, *tc.Owner); err != nil {
+			return err
+		}
+	}
 	if claimed {
 		if err := markClaimStored(ctx, tx, d, id, tc, now); err != nil {
 			return err
@@ -668,6 +674,21 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 		d.Rebind(`UPDATE sessions SET updated_at = ? WHERE id = ?`), now, id)
 
 	return tx.Commit()
+}
+
+// requireVerifiedOwner runs after lockSessionRow, whose row lock keeps SetVerifiedOwner from changing the mark until the write commits.
+func requireVerifiedOwner(ctx context.Context, tx sessionRowLocker, d Dialect, id string, owner state.VerifiedOwner) error {
+	var one int
+	err := tx.QueryRowContext(ctx, d.Rebind(`SELECT 1 FROM sessions
+		WHERE id = ? AND verified_entity_id = ? AND verified_group_id = ? AND verified_channel_id = ?`),
+		id, owner.EntityID, owner.GroupID, owner.ChannelID).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return state.ErrOwnerChanged
+	case err != nil:
+		return fmt.Errorf("add message check owner: %w", err)
+	}
+	return nil
 }
 
 // markClaimStored marks claim c of session id stored at now, inside the

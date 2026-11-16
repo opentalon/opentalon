@@ -1005,6 +1005,62 @@ func checkVerifiedOwner(t *testing.T, store identityStore, db *DB) {
 	}
 }
 
+type ownerClaimStore interface {
+	claimStore
+	Create(p state.SessionParams) *state.Session
+	SetVerifiedOwner(ctx context.Context, id string, owner state.VerifiedOwner) error
+}
+
+// checkClaimOwner: a claim with an Owner is stored only while the session's
+// mark is that owner; otherwise ErrOwnerChanged, nothing stored, and the
+// reservation left unstored.
+func checkClaimOwner(t *testing.T, store ownerClaimStore) {
+	t.Helper()
+	ctx := context.Background()
+	const id = "owner-s1"
+	store.Create(state.SessionParams{ID: id, EntityID: "u1", GroupID: "g1", ChannelID: "websocket"})
+	owner := state.VerifiedOwner{EntityID: "u1", GroupID: "g1", ChannelID: "websocket"}
+	now := time.Now()
+	reserveAt := func(key string, at time.Time) func() (state.ClaimResult, error) {
+		return func() (state.ClaimResult, error) { return store.ReserveNote(ctx, id, key, at, time.Minute) }
+	}
+	noteOf := func(key string) provider.Message {
+		return provider.Message{Role: provider.RoleUser, Content: "note " + key, Visibility: "hidden"}
+	}
+	claimOf := func(key string, owner *state.VerifiedOwner) map[string]string {
+		return state.TurnClaim{NoteKey: key, At: now, Owner: owner}.Metadata()
+	}
+	for _, key := range []string{"unmarked", "marked", "remarked"} {
+		claimStep(t, "reserve "+key, state.ClaimWon, reserveAt(key, now))
+	}
+
+	storeStep(t, "note while the session carries no mark", store, id, noteOf("unmarked"), claimOf("unmarked", &owner), state.ErrOwnerChanged)
+	if err := store.FreeNote(ctx, id, "unmarked", now); err != nil {
+		t.Fatalf("FreeNote: %v", err)
+	}
+	claimStep(t, "the refused note's key after its free", state.ClaimWon, reserveAt("unmarked", now.Add(time.Second)))
+
+	if err := store.SetVerifiedOwner(ctx, id, owner); err != nil {
+		t.Fatalf("SetVerifiedOwner: %v", err)
+	}
+	storeStep(t, "note while the session carries its owner", store, id, noteOf("marked"), claimOf("marked", &owner), nil)
+
+	if err := store.SetVerifiedOwner(ctx, id, state.VerifiedOwner{EntityID: "u1", GroupID: "g2", ChannelID: "websocket"}); err != nil {
+		t.Fatalf("SetVerifiedOwner later: %v", err)
+	}
+	storeStep(t, "note after another owner's mark", store, id, noteOf("remarked"), claimOf("remarked", &owner), state.ErrOwnerChanged)
+	storeStep(t, "note without an owner under the refused note's reservation", store, id, noteOf("remarked"), claimOf("remarked", nil), nil)
+
+	for key, want := range map[string]int{"unmarked": 0, "marked": 1, "remarked": 1} {
+		if n := countContent(t, store, id, "note "+key); n != want {
+			t.Errorf("note %s stored %d times, want %d", key, n, want)
+		}
+	}
+	if err := store.AddMessageWithMetadata(id, noteOf("bare"), map[string]string{state.ClaimOwnerMetadataKey: `{}`}); err == nil {
+		t.Error("an owner condition without a claim was stored, want an error")
+	}
+}
+
 // checkSessionAccount: Identity reports the account a session was created or
 // opened for, and none where none was recorded.
 func checkSessionAccount(t *testing.T, store identityStore) {
@@ -1227,6 +1283,14 @@ func TestSessionStore_VerifiedOwner(t *testing.T) {
 
 func TestInMemorySessionStore_VerifiedOwner(t *testing.T) {
 	checkVerifiedOwner(t, state.NewSessionStore(""), nil)
+}
+
+func TestSessionStore_ClaimOwner(t *testing.T) {
+	checkClaimOwner(t, NewSessionStore(openTestDB(t), 0, 0))
+}
+
+func TestInMemorySessionStore_ClaimOwner(t *testing.T) {
+	checkClaimOwner(t, state.NewSessionStore(""))
 }
 
 func TestSessionStore_SessionAccount(t *testing.T) {

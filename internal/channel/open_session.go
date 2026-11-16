@@ -101,13 +101,14 @@ func (s openScope) reaches(sess *state.Session) bool {
 // opened it (reaches, and the account it was opened for); an ordinary session
 // by its verified-owner mark, which only the user's own chat turns set (see
 // NewMessageHandler), as neither its key nor its recorded owner proves it.
-func (s openScope) takesNote(sess *state.Session, groupID string) bool {
+// owner is the mark the note's write must find again (state.TurnClaim.Owner), nil for a session the open path opened.
+func (s openScope) takesNote(sess *state.Session, groupID string) (owner *state.VerifiedOwner, ok bool) {
 	if sess.OpenKey != "" {
-		return s.reaches(sess) && sess.GroupID == groupID
+		return nil, s.reaches(sess) && sess.GroupID == groupID
 	}
-	_, ok := s.conversation(sess.ID)
-	return ok && sess.VerifiedOwner != nil &&
-		*sess.VerifiedOwner == state.VerifiedOwner{EntityID: s.entityID, GroupID: groupID, ChannelID: s.channel}
+	_, ok = s.conversation(sess.ID)
+	mark := state.VerifiedOwner{EntityID: s.entityID, GroupID: groupID, ChannelID: s.channel}
+	return &mark, ok && sess.VerifiedOwner != nil && *sess.VerifiedOwner == mark
 }
 
 // conversation returns the conversation of sessionID, a session in the scope:
@@ -223,7 +224,7 @@ func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessa
 	if !ok {
 		return openRejected(msg, "A note's reply switch must be true or false.", "bad_request")
 	}
-	reached, err := o.noteReaches(ctx, target, scope, groupID)
+	owner, reached, err := o.noteReaches(ctx, target, scope, groupID)
 	if err != nil {
 		logger.FromContext(ctx).Error("note session lookup failed", "session", target, "error", err)
 		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error")
@@ -235,7 +236,7 @@ func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessa
 	}
 	key := recoveryKey{sessionID: target, noteKey: noteKey}
 	if !reply {
-		return o.claimAndStore(ctx, msg, scope, groupID, key)
+		return o.claimAndStore(ctx, msg, scope, groupID, key, owner)
 	}
 	return o.claimAndRun(ctx, msg, scope, groupID, key)
 }
@@ -255,17 +256,18 @@ func noteReply(msg pkg.InboundMessage) (reply, ok bool) {
 
 // noteReaches reads target and reports whether a note of scope under groupID
 // reaches it (see openScope.takesNote); a session that is gone is out of reach.
-func (o *openSessions) noteReaches(ctx context.Context, target string, scope openScope, groupID string) (bool, error) {
+func (o *openSessions) noteReaches(ctx context.Context, target string, scope openScope, groupID string) (owner *state.VerifiedOwner, reached bool, err error) {
 	lookupCtx, cancel := o.storeContext(ctx)
 	sess, err := o.cfg.Opener.Identity(lookupCtx, target)
 	cancel()
 	if errors.Is(err, state.ErrSessionNotFound) {
-		return false, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
-	return scope.takesNote(sess, groupID), nil
+	owner, reached = scope.takesNote(sess, groupID)
+	return owner, reached, nil
 }
 
 // claimAndRun takes key's claim, the first turn's or the note's, and answers
@@ -301,16 +303,15 @@ func (o *openSessions) claimAndRun(ctx context.Context, msg pkg.InboundMessage, 
 // attempt stored it (see storeNote), created=false when another had. While
 // another attempt holds the key, this one looks again every poll and takes the
 // key should that attempt give it up or its reservation go stale; the note's
-// recovery is scheduled as for a held note with a reply. A key taken after
-// such a wait is stored under only while the note still reaches its session
-// (see stillReaches): the user's chat turns may have marked the session for
-// another account meanwhile. Waiting for the key and for the note's place
+// recovery is scheduled as for a held note with a reply. The note is stored
+// only while its session still carries owner (state.TurnClaim.Owner). Waiting for the key and for the note's place
 // among the session's turns ends at the note's deadline, the timeout after the
 // first claim: an attempt whose note is not stored by then gets no answer, so
 // the caller's wait for one ends as for any unanswered attempt, and a key it
 // took is freed (see storeNote). A claim the store cannot answer refuses the
 // attempt, and a session that is gone meanwhile answers not_found.
-func (o *openSessions) claimAndStore(ctx context.Context, msg pkg.InboundMessage, scope openScope, groupID string, key recoveryKey) pkg.OutboundMessage {
+func (o *openSessions) claimAndStore(ctx context.Context, msg pkg.InboundMessage, scope openScope, groupID string, key recoveryKey,
+	owner *state.VerifiedOwner) pkg.OutboundMessage {
 	start := time.Now()
 	deadline := start.Add(o.timeout)
 	waitCtx, cancel := context.WithDeadline(ctx, deadline)
@@ -326,13 +327,7 @@ func (o *openSessions) claimAndStore(ctx context.Context, msg pkg.InboundMessage
 		}
 		switch result {
 		case state.ClaimWon:
-			claim := state.TurnClaim{NoteKey: key.noteKey, At: now}
-			if held {
-				if refused, ok := o.stillReaches(ctx, msg, scope, groupID, key, claim); !ok {
-					return refused
-				}
-			}
-			err := o.storeNote(ctx, key, msg.Content, claim, deadline)
+			err := o.storeNote(ctx, key, msg.Content, state.TurnClaim{NoteKey: key.noteKey, At: now, Owner: owner}, deadline)
 			return o.answerStored(ctx, msg, scope, groupID, key, err)
 		case state.ClaimSettled:
 			o.acknowledge(ctx, msg, scope, key.sessionID, false)
@@ -352,23 +347,6 @@ func (o *openSessions) claimAndStore(ctx context.Context, msg pkg.InboundMessage
 		case <-time.After(o.poll):
 		}
 	}
-}
-
-// stillReaches reports whether the note msg, whose attempt took key's
-// reservation under claim after waiting for it, still reaches its session
-// (see noteReaches). When it does not, or the lookup fails, it frees the
-// reservation and returns the refusal to answer: not_found, or internal_error.
-func (o *openSessions) stillReaches(ctx context.Context, msg pkg.InboundMessage, scope openScope, groupID string, key recoveryKey, claim state.TurnClaim) (pkg.OutboundMessage, bool) {
-	reached, err := o.noteReaches(ctx, key.sessionID, scope, groupID)
-	if err == nil && reached {
-		return pkg.OutboundMessage{}, true
-	}
-	o.freeNote(ctx, key, claim.At)
-	if err != nil {
-		logger.FromContext(ctx).Error("note session lookup failed", "session", key.sessionID, "error", err)
-		return openRejected(msg, "Something went wrong loading the conversation. Please try again.", "internal_error"), false
-	}
-	return openRejected(msg, unavailable, "not_found"), false
 }
 
 // storeNote stores content as a note without a reply in key's session under
@@ -416,7 +394,10 @@ func (o *openSessions) answerStored(ctx context.Context, msg pkg.InboundMessage,
 		log.Info("note not stored: its wait for the session's turn ended", "session", key.sessionID, "note_key", key.noteKey)
 		return pkg.OutboundMessage{}
 	}
-	if reached, lerr := o.noteReaches(ctx, key.sessionID, scope, groupID); lerr == nil && !reached {
+	if errors.Is(err, state.ErrOwnerChanged) {
+		return openRejected(msg, unavailable, "not_found")
+	}
+	if _, reached, lerr := o.noteReaches(ctx, key.sessionID, scope, groupID); lerr == nil && !reached {
 		return openRejected(msg, unavailable, "not_found")
 	}
 	if errors.Is(err, state.ErrClaimLost) {
@@ -505,8 +486,12 @@ func (o *openSessions) recoverWhenStale(ctx context.Context, key recoveryKey, ms
 			return
 		}
 		log := logger.FromContext(ctx)
+		var owner *state.VerifiedOwner
 		if key.noteKey != "" {
-			switch reached, err := o.noteReaches(ctx, key.sessionID, scope, groupID); {
+			var reached bool
+			var err error
+			owner, reached, err = o.noteReaches(ctx, key.sessionID, scope, groupID)
+			switch {
 			case err != nil:
 				log.Warn("recovery lookup failed", "session", key.sessionID, "note_key", key.noteKey, "error", err)
 				o.recoverWhenStale(ctx, key, msg, scope, groupID)
@@ -534,7 +519,10 @@ func (o *openSessions) recoverWhenStale(ctx context.Context, key recoveryKey, ms
 			claim := state.TurnClaim{NoteKey: key.noteKey, At: now}
 			if reply, _ := noteReply(msg); reply {
 				o.run(ctx, key.sessionID, msg, scope, claim)
-			} else if err := o.storeNote(ctx, key, msg.Content, claim, now.Add(o.timeout)); err != nil {
+				return
+			}
+			claim.Owner = owner
+			if err := o.storeNote(ctx, key, msg.Content, claim, now.Add(o.timeout)); err != nil {
 				log.Warn("recovered note not stored", "session", key.sessionID, "note_key", key.noteKey, "error", err)
 			}
 		default:

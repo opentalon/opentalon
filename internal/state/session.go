@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -158,13 +159,15 @@ const (
 type TurnClaim struct {
 	NoteKey string
 	At      time.Time
+	Owner   *VerifiedOwner // stored only while the session carries this mark, checked in the same write; nil requires none
 }
 
 // The message metadata a claimed turn's input is stored with
 // (TurnClaim.Metadata); AddMessageWithMetadata reads the claim from it.
 const (
-	NoteKeyMetadataKey   = "note_key"
-	ClaimedAtMetadataKey = "claimed_at"
+	NoteKeyMetadataKey    = "note_key"
+	ClaimedAtMetadataKey  = "claimed_at"
+	ClaimOwnerMetadataKey = "claim_owner"
 )
 
 // ErrClaimLost is returned by AddMessageWithMetadata, which then stores
@@ -173,11 +176,18 @@ const (
 // stored already. Exactly one run stores a claimed turn's input.
 var ErrClaimLost = errors.New("turn claim lost: another run took the turn over or stored its input")
 
+// ErrOwnerChanged is returned by AddMessageWithMetadata, which then stores nothing, for a claim whose Owner the session's mark no longer is.
+var ErrOwnerChanged = errors.New("turn claim refused: the session's verified owner is not the claim's")
+
 // Metadata is the message metadata that stores a turn's input under c.
 func (c TurnClaim) Metadata() map[string]string {
 	m := map[string]string{ClaimedAtMetadataKey: c.At.UTC().Format(time.RFC3339Nano)}
 	if c.NoteKey != "" {
 		m[NoteKeyMetadataKey] = c.NoteKey
+	}
+	if c.Owner != nil {
+		owner, _ := json.Marshal(c.Owner)
+		m[ClaimOwnerMetadataKey] = string(owner)
 	}
 	return m
 }
@@ -187,9 +197,13 @@ func (c TurnClaim) Metadata() map[string]string {
 // is stored only under its reservation.
 func TurnClaimOf(metadata map[string]string) (c TurnClaim, claimed bool, err error) {
 	at, claimed := metadata[ClaimedAtMetadataKey]
+	owner, conditioned := metadata[ClaimOwnerMetadataKey]
 	if !claimed {
 		if key := metadata[NoteKeyMetadataKey]; key != "" {
 			return TurnClaim{}, false, fmt.Errorf("note %q without its reservation", key)
+		}
+		if conditioned {
+			return TurnClaim{}, false, errors.New("an owner condition without a claim")
 		}
 		return TurnClaim{}, false, nil
 	}
@@ -197,7 +211,14 @@ func TurnClaimOf(metadata map[string]string) (c TurnClaim, claimed bool, err err
 	if err != nil {
 		return TurnClaim{}, false, fmt.Errorf("claim time %q: %w", at, err)
 	}
-	return TurnClaim{NoteKey: metadata[NoteKeyMetadataKey], At: t}, true, nil
+	c = TurnClaim{NoteKey: metadata[NoteKeyMetadataKey], At: t}
+	if conditioned {
+		c.Owner = &VerifiedOwner{}
+		if err := json.Unmarshal([]byte(owner), c.Owner); err != nil {
+			return TurnClaim{}, false, fmt.Errorf("claim owner %q: %w", owner, err)
+		}
+	}
+	return c, true, nil
 }
 
 // Create returns the session for p.ID, minting a fresh empty record if absent.
@@ -440,6 +461,9 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 		return fmt.Errorf("session %q not found", id)
 	}
 	if claimed {
+		if tc.Owner != nil && (sess.VerifiedOwner == nil || *sess.VerifiedOwner != *tc.Owner) {
+			return ErrOwnerChanged
+		}
 		held := s.claims[id]
 		if tc.NoteKey != "" {
 			held = s.notes[noteIdentity{sessionID: id, noteKey: tc.NoteKey}]
