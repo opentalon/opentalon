@@ -2619,6 +2619,70 @@ func TestHandler_OpenSession_NoteWaitingForATurnIsRefusedUnderANewAccount(t *tes
 	})
 }
 
+// noteRunner runs a note's turn on the orchestrator, every other turn on the recorder.
+type noteRunner struct {
+	rec     *openRecorder
+	orch    **orchestrator.Orchestrator
+	once    sync.Once
+	running chan struct{}
+}
+
+func (r *noteRunner) Run(ctx context.Context, sessionKey, content string, files ...pkg.FileAttachment) (string, string, map[string]string, error) {
+	if _, ok := orchestrator.TurnClaimFrom(ctx); !ok {
+		return r.rec.Run(ctx, sessionKey, content, files...)
+	}
+	r.once.Do(func() { close(r.running) })
+	result, err := (*r.orch).Run(ctx, sessionKey, content)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return result.Response, "", result.Metadata, nil
+}
+
+// The answer of a note with a reply precedes its wait for the turn, so a note refused under a new account ends silently: no row, turn or reply.
+func TestHandler_OpenSession_NoteWithAReplyWaitingForATurnIsRefusedUnderANewAccount(t *testing.T) {
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		noteTiming(t, 2*time.Second, 4*time.Second)
+		const chat = "u1:websocket:c1"
+		llm := newGateLLM()
+		var orch *orchestrator.Orchestrator
+		runner := &noteRunner{orch: &orch, running: make(chan struct{})}
+		rec, h := newMarkingHandler(kind.open(t), func(cfg *HandlerConfig) { cfg.Runner = runner })
+		runner.rec = rec
+		orch = orchestrator.NewWithRules(llm, orchestrator.DefaultParser, orchestrator.NewToolRegistry(),
+			state.NewMemoryStore(""), rec.store, orchestrator.OrchestratorOpts{EventSink: rec})
+		chatTurn(h, chatMessage("chat", "websocket", "c1"))
+		release := sync.OnceFunc(holdTurn(t, orch, llm, chat))
+		t.Cleanup(release)
+
+		returned := make(chan pkg.OutboundMessage, 1)
+		go func() { returned <- callOpen(h, "c8", noteTo(chat, "tok")) }()
+		await(t, runner.running, "the note's turn to wait for the session")
+		chatTurn(h, chatMessage("chat-g2", "websocket", "c1"))
+		release()
+		await(t, returned, "the note's call to return")
+
+		if acks := rec.acks(); len(acks) != 1 || acks[0].Metadata["created"] != "true" {
+			t.Errorf("answers = %+v, want one created=true, sent before the note's turn", acks)
+		}
+		got, _, _ := rec.snapshot()
+		sent := 0
+		for _, e := range got {
+			if strings.HasPrefix(e, "send ") && e != "send "+pkg.FrameSessionOpened {
+				sent++
+			}
+		}
+		if n := countStored(t, rec.store, chat, noteContent); n != 0 || llm.calls.Load() != 1 || sent != 0 ||
+			countEvents(got, "event "+events.TypeUserMessage) != 1 || countEvents(got, "event "+events.TypeTurnStart) != 1 {
+			t.Errorf("note stored %d times, model calls %d, frames sent %d, events %v; want no row, turn or reply for the note",
+				n, llm.calls.Load(), sent, got)
+		}
+		if result, err := rec.store.ReserveNote(context.Background(), chat, "chapter-2", time.Now(), openerStaleAfter); err != nil || result != state.ClaimWon {
+			t.Errorf("the note's key after its call = %v, %v; want it free", result, err)
+		}
+	})
+}
+
 type vanishingOpener struct{ sessionStore }
 
 func (o vanishingOpener) ReserveNote(ctx context.Context, id, key string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {

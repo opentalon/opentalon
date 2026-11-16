@@ -1435,6 +1435,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	if err != nil {
 		return nil, fmt.Errorf("session lookup: %w", err)
 	}
+	// Refused before any event; the input's write checks again, as the mark is written outside the turn lock.
+	if c, ok := TurnClaimFrom(ctx); ok && !c.Admits(sess.VerifiedOwner) {
+		return nil, state.ErrOwnerChanged
+	}
 	ctx = actor.WithSessionID(ctx, sessionID)
 
 	// Set up trace_id for this session so all logs are correlated.

@@ -318,7 +318,7 @@ func runTurn(ctx context.Context, cfg HandlerConfig, sessionKey, content string,
 	if err != nil {
 		// A run whose claim another run took over did not fail: its caller
 		// logs the takeover (see openSessions.run).
-		if !errors.Is(err, state.ErrClaimLost) {
+		if !errors.Is(err, state.ErrClaimLost) && !errors.Is(err, state.ErrOwnerChanged) {
 			logger.FromContext(ctx).Error("handler run failed", "error", err)
 		}
 		errText, errCode := friendlyError(err)

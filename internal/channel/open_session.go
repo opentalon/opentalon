@@ -185,7 +185,7 @@ func (o *openSessions) open(ctx context.Context, sessionKey string, msg pkg.Inbo
 		// The user's session for this origin and key is on another channel.
 		return openRejected(msg, unavailable, "not_found")
 	}
-	return o.claimAndRun(ctx, msg, scope, groupID, recoveryKey{sessionID: sess.ID})
+	return o.claimAndRun(ctx, msg, scope, groupID, recoveryKey{sessionID: sess.ID}, nil)
 }
 
 // continueSession posts the content as a hidden note into target, a session of
@@ -212,7 +212,7 @@ func (o *openSessions) continueSession(ctx context.Context, msg pkg.InboundMessa
 	if !reply {
 		return o.claimAndStore(ctx, msg, scope, groupID, key, owner)
 	}
-	return o.claimAndRun(ctx, msg, scope, groupID, key)
+	return o.claimAndRun(ctx, msg, scope, groupID, key, owner)
 }
 
 func noteReply(msg pkg.InboundMessage) (reply, ok bool) {
@@ -247,7 +247,8 @@ func (o *openSessions) noteReaches(ctx context.Context, target string, scope ope
 // died before it stored the turn's input; a settled turn needs nothing. A
 // claim the store cannot answer refuses the attempt, which the caller may
 // retry with the same key.
-func (o *openSessions) claimAndRun(ctx context.Context, msg pkg.InboundMessage, scope openScope, groupID string, key recoveryKey) pkg.OutboundMessage {
+func (o *openSessions) claimAndRun(ctx context.Context, msg pkg.InboundMessage, scope openScope, groupID string, key recoveryKey,
+	owner *state.VerifiedOwner) pkg.OutboundMessage {
 	now := time.Now()
 	result, err := o.claim(ctx, key, now)
 	if err != nil {
@@ -260,7 +261,7 @@ func (o *openSessions) claimAndRun(ctx context.Context, msg pkg.InboundMessage, 
 	o.acknowledge(ctx, msg, scope, key.sessionID, result == state.ClaimWon)
 	switch result {
 	case state.ClaimWon:
-		o.run(ctx, key.sessionID, msg, scope, state.TurnClaim{NoteKey: key.noteKey, At: now})
+		o.run(ctx, key.sessionID, msg, scope, state.TurnClaim{NoteKey: key.noteKey, At: now, Owner: owner})
 	case state.ClaimHeld:
 		o.scheduleRecovery(ctx, key, msg, scope, groupID)
 	}
@@ -395,6 +396,11 @@ func (o *openSessions) run(ctx context.Context, sessionID string, msg pkg.Inboun
 		logger.FromContext(ctx).Info("turn taken over by another run", "session", sessionID, "note_key", claim.NoteKey)
 		return
 	}
+	if errors.Is(err, state.ErrOwnerChanged) {
+		logger.FromContext(ctx).Info("note not run: its session is marked for another account", "session", sessionID, "note_key", claim.NoteKey)
+		o.freeNote(ctx, recoveryKey{sessionID: sessionID, noteKey: claim.NoteKey}, claim.At)
+		return
+	}
 	o.deliver(ctx, scope, reply, "open session reply not delivered")
 }
 
@@ -448,12 +454,11 @@ func (o *openSessions) recoverWhenStale(ctx context.Context, key recoveryKey, ms
 		case result == state.ClaimWon:
 			o.forget(key)
 			log.Info("recovering an interrupted turn", "session", key.sessionID, "note_key", key.noteKey)
-			claim := state.TurnClaim{NoteKey: key.noteKey, At: now}
+			claim := state.TurnClaim{NoteKey: key.noteKey, At: now, Owner: owner}
 			if reply, _ := noteReply(msg); reply {
 				o.run(ctx, key.sessionID, msg, scope, claim)
 				return
 			}
-			claim.Owner = owner
 			if err := o.storeNote(ctx, key, msg.Content, claim, now.Add(o.timeout)); err != nil {
 				log.Warn("recovered note not stored", "session", key.sessionID, "note_key", key.noteKey, "error", err)
 			}

@@ -161,6 +161,10 @@ var ErrClaimLost = errors.New("turn claim lost: another run took the turn over o
 // ErrOwnerChanged: the session's mark is no longer the claim's Owner; nothing was stored.
 var ErrOwnerChanged = errors.New("turn claim refused: the session's verified owner is not the claim's")
 
+func (c TurnClaim) Admits(mark *VerifiedOwner) bool {
+	return c.Owner == nil || (mark != nil && *mark == *c.Owner)
+}
+
 // Metadata is the message metadata that stores a turn's input under c.
 func (c TurnClaim) Metadata() map[string]string {
 	m := map[string]string{ClaimedAtMetadataKey: c.At.UTC().Format(time.RFC3339Nano)}
@@ -417,7 +421,7 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 		return fmt.Errorf("session %q not found", id)
 	}
 	if claimed {
-		if tc.Owner != nil && (sess.VerifiedOwner == nil || *sess.VerifiedOwner != *tc.Owner) {
+		if !tc.Admits(sess.VerifiedOwner) {
 			return ErrOwnerChanged
 		}
 		held := s.claims[id]
