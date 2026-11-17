@@ -2818,12 +2818,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		perCallInput := resp.Usage.InputTokens / max(len(calls), 1)
 		perCallOutput := resp.Usage.OutputTokens / max(len(calls), 1)
 
-		// The response's thinking blocks, until the first native tool-call
-		// message stored for the response takes them (takeThinking).
+		// The response's thinking blocks and text, until the first native
+		// tool-call message stored for the response takes them: a replay and
+		// the transcript carry each once, not once per call.
 		var thinking responseThinking
 		if nativeToolCalls {
 			thinking = responseThinking{Blocks: resp.Thinking, Fingerprint: resp.ThinkingFingerprint}
 		}
+		replyText := resp.Content
 
 		unrun := make(map[string]bool)
 		for i := range calls {
@@ -2953,13 +2955,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				// and tool result as role=tool with tool_call_id.
 				_ = sessions.AddMessage(sessionID, takeThinking(&thinking).attach(provider.Message{
 					Role:    provider.RoleAssistant,
-					Content: resp.Content,
+					Content: replyText,
 					ToolCalls: []provider.ToolCall{{
 						ID:        call.ID,
 						Name:      toolFQN(call.Plugin, call.Action),
 						Arguments: call.Args,
 					}},
 				}))
+				replyText = ""
 				_ = sessions.AddMessage(sessionID, provider.Message{
 					Role:       provider.RoleTool,
 					Content:    nativeToolContent(toolResult),
