@@ -2243,14 +2243,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	result := &RunResult{}
 
 	// Resolve profile model override: strip the provider prefix if present (e.g. "anthropic/claude-3-5" -> "claude-3-5").
-	profileModel := ""
-	if p := profile.FromContext(ctx); p != nil && p.Model != "" {
-		if idx := strings.Index(p.Model, "/"); idx >= 0 {
-			profileModel = p.Model[idx+1:]
-		} else {
-			profileModel = p.Model
-		}
+	var profileRef provider.ModelRef
+	if p := profile.FromContext(ctx); p != nil {
+		profileRef = provider.ModelRef(p.Model)
 	}
+	profileModel := profileRef.Model()
 
 	var totalInputTokens, totalOutputTokens, totalToolCalls int
 	var totalInputCost, totalOutputCost float64
@@ -2354,7 +2351,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("LLM request message", "index", j+1, "role", m.Role, "content", m.Content)
 		}
 
-		req := &provider.CompletionRequest{Messages: guardedMessages, Segments: &system}
+		req := &provider.CompletionRequest{Messages: guardedMessages, Segments: &system, ModelRef: profileRef}
 		if profileModel != "" {
 			req.Model = profileModel
 		}
@@ -2497,7 +2494,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		resp.Content = rest
 		// The provider's own count of what it just charged for. Free, exact,
 		// and the only ground truth the estimate ever gets.
-		o.calibrators.observe(req.Model, estimatedTokens, resp.Usage.InputTokens)
+		answered, estimated := req.Model, estimatedTokens
+		if resp.Fallback {
+			answered = ""
+			estimated = int(float64(estimatedTokens) * o.calibrators.factor("") / o.calibrators.factor(req.Model))
+		}
+		o.calibrators.observe(answered, estimated, resp.Usage.InputTokens)
 		// Stamp the just-emitted llm_response as parent for the rest of
 		// this iteration: tool_call_extracted / tool_call_result / retry
 		// / confirmation events all form a tight subtree under the LLM
@@ -3672,6 +3674,7 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 	var buf strings.Builder
 	var usage provider.Usage
 	var model string
+	var fallback bool
 	showLabels := o.showToolCalls == "friendly" || o.showToolCalls == "raw" || o.showToolCalls == "true"
 	filter := newStreamTagFilter(showLabels)
 	for {
@@ -3692,6 +3695,7 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 		if chunk.Model != "" {
 			model = chunk.Model
 		}
+		fallback = fallback || chunk.Fallback
 		if chunk.Usage.InputTokens > 0 || chunk.Usage.OutputTokens > 0 {
 			usage = chunk.Usage
 		}
@@ -3717,10 +3721,11 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 	}
 
 	return &provider.CompletionResponse{
-		Content: buf.String(),
-		Model:   model,
-		Usage:   usage,
-		EventID: eventID,
+		Content:  buf.String(),
+		Model:    model,
+		Usage:    usage,
+		EventID:  eventID,
+		Fallback: fallback,
 	}, nil
 }
 

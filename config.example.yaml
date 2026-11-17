@@ -41,6 +41,10 @@ models:
     # tools and conversation are read from Anthropic's cache at the cache
     # price. Every model with a cost then needs cache_write and cache_read
     # (per 1M tokens). See docs/configuration.md, "Prompt caching (Anthropic)".
+    # Outside routing, a whoami profile reaches this provider by naming a model
+    # as "anthropic/claude-sonnet-5-5"; a failed call, or a provider or model
+    # not defined here, is answered by the default chain. See
+    # docs/configuration.md, "Model from the profile".
     # anthropic:
     #   api_key: "${ANTHROPIC_API_KEY}"
     #   api: anthropic-messages
@@ -100,8 +104,11 @@ routing:
   # probes (hysteresis — avoids flapping when the primary is intermittently up).
   fallbacks:
     - deepseek/deepseek-reasoner
-  # health:                    # optional; tunes the health-gated fallback above
-  #   path: "/models"          # probe path relative to the primary's base_url (default "/models")
+  # health:                    # optional; tunes the health-gated fallback above, and
+  #                            # interval/timeout/recover_after also the probes of a
+  #                            # provider a profile model selected, after it failed
+  #   path: "/models"          # primary's probe path relative to its base_url (default its
+  #                            # model list: "/v1/models" for anthropic-messages, else "/models")
   #   interval: "10s"          # how often to probe the primary (default "10s")
   #   timeout: "3s"            # per-probe timeout (default "3s")
   #   recover_after: 3         # consecutive healthy probes before switching back (default 3)

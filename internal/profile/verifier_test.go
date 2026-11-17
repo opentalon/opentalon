@@ -1,11 +1,14 @@
 package profile
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -726,6 +729,43 @@ func TestVerifier_SourceOnNonSystemRunIsDropped(t *testing.T) {
 			}
 			if p.SystemSource != "" {
 				t.Errorf("SystemSource = %q, want it dropped on a non-system run", p.SystemSource)
+			}
+		})
+	}
+}
+
+func TestVerifier_ModelField(t *testing.T) {
+	cases := []struct {
+		name     string
+		model    string
+		want     string
+		wantWarn bool
+	}{
+		{"reference", `"anthropic/claude-x"`, "anthropic/claude-x", false},
+		{"empty string", `""`, "", true},
+		{"number", `42`, "", true},
+		{"null", `null`, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"entity_id":"u1","model":` + tc.model + `}`))
+			}))
+			defer srv.Close()
+			var logs bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			defer slog.SetDefault(prev)
+
+			v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
+			defer v.Close()
+			p, err := v.Verify(context.Background(), "tok", "", nil)
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			warned := strings.Contains(logs.String(), "level=WARN") && strings.Contains(logs.String(), "model field")
+			if p.Model != tc.want || warned != tc.wantWarn {
+				t.Errorf("Model = %q, warned = %t; want %q, %t\n%s", p.Model, warned, tc.want, tc.wantWarn, logs.String())
 			}
 		})
 	}

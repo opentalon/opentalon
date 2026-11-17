@@ -1519,3 +1519,71 @@ func TestPromptCacheMarshalsAsBoolean(t *testing.T) {
 		}
 	}
 }
+
+func TestParseProviderTimeout(t *testing.T) {
+	cases := []struct {
+		name    string
+		field   string
+		wantErr string
+	}{
+		{"absent", "", ""},
+		{"a duration", "timeout: 45s", ""},
+		{"a quoted duration", `timeout: "1m30s"`, ""},
+		{"null", "timeout: null", "models.providers.p.timeout: line 4: must be a duration above 0, such as 45s"},
+		{"~", "timeout: ~", "models.providers.p.timeout: line 4: must be a duration above 0, such as 45s"},
+		{"an empty value", "timeout:", "models.providers.p.timeout: line 4: must be a duration above 0, such as 45s"},
+		{"an empty string", `timeout: ""`, "models.providers.p.timeout: line 4: must be a duration above 0, such as 45s"},
+		{"0", "timeout: 0", `models.providers.p.timeout: must be a duration above 0, such as 45s, got "0"`},
+		{"0s", "timeout: 0s", `models.providers.p.timeout: must be a duration above 0, such as 45s, got "0s"`},
+		{"negative", "timeout: -5s", `models.providers.p.timeout: must be a duration above 0, such as 45s, got "-5s"`},
+		{"a number without unit", "timeout: 45", `models.providers.p.timeout: must be a duration above 0, such as 45s, got "45"`},
+		{"no duration", "timeout: soon", `models.providers.p.timeout: must be a duration above 0, such as 45s, got "soon"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]byte("models:\n  providers:\n    p:\n      " + tc.field + "\n      api: anthropic-messages\n"))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+				}
+				if cfg != nil {
+					t.Error("a failed parse returned a config")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			out, err := yaml.Marshal(cfg.Models.Providers["p"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := strings.ReplaceAll(tc.field, `"`, ""); tc.field == "" {
+				if strings.Contains(string(out), "timeout") {
+					t.Errorf("an absent timeout marshals as\n%s", out)
+				}
+			} else if !strings.Contains(string(out), want+"\n") {
+				t.Errorf("provider marshals as\n%s\nwant a line %q", out, want)
+			}
+			again, err := Parse([]byte("models:\n  providers:\n    p:\n" + indentLines(string(out), "      ")))
+			if err != nil {
+				t.Fatalf("the marshalled provider does not parse again: %v\n%s", err, out)
+			}
+			out2, err := yaml.Marshal(again.Models.Providers["p"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(out2) != string(out) {
+				t.Errorf("the round trip changed the provider from\n%s\nto\n%s", out, out2)
+			}
+		})
+	}
+}
+
+func indentLines(s, prefix string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
+	return strings.Join(lines, "\n") + "\n"
+}

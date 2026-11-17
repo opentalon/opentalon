@@ -436,7 +436,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 			StatusCode:       httpResp.StatusCode,
 			ResponseBodyText: string(respBody),
 		})
-		return nil, fmt.Errorf("anthropic api error (status %d): %s", httpResp.StatusCode, string(respBody))
+		return nil, &StatusError{api: "anthropic", StatusCode: httpResp.StatusCode, Body: string(respBody)}
 	}
 
 	var anthResp anthResponse
@@ -528,7 +528,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 
 // Stream is not yet implemented; returns an error.
 func (p *AnthropicProvider) Stream(_ context.Context, _ *CompletionRequest) (ResponseStream, error) {
-	return nil, fmt.Errorf("streaming not yet implemented for provider %s", p.id)
+	return nil, fmt.Errorf("%w for provider %s", ErrStreamingNotImplemented, p.id)
 }
 
 func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, error) {

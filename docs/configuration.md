@@ -87,8 +87,9 @@ models:
 How they behave:
 
 - They are sent with every request to that provider, streaming or not, and
-  with the routing health check (`routing.health`) when the provider is the
-  primary.
+  with its health check: the routing health check (`routing.health`) when
+  the provider is the primary, the probe after a failure when a profile
+  selected it (see [Model from the profile](#model-from-the-profile)).
 - Values support `${ENV_VAR}` like the rest of the config. As everywhere
   else, an unset variable keeps the literal `${ENV_VAR}` text and OpenTalon
   warns about it at start-up. A variable that is set to an empty string
@@ -155,6 +156,31 @@ Known limits:
   example an unquoted value that starts with `*`) can quote the text in the
   error, just as for `api_key`. Put values in quotes, as in the example
   above.
+
+### Time limit
+
+```yaml
+models:
+  providers:
+    anthropic:
+      api_key: "${ANTHROPIC_API_KEY}"
+      api: anthropic-messages
+      timeout: 45s
+```
+
+- `timeout` is the longest one call to the provider that does not stream
+  may take, its retries and their waits included. Without it such a call
+  has 120 seconds. A streamed call (`openai-completions` only) is not bounded
+  by it.
+- It takes a Go duration above 0, such as `45s` or `1m30s`. A `timeout`
+  without a value, `null`, `~`, `""`, `0`, a negative duration or a number
+  without a unit stops the start with an error naming the key.
+- A call that does not stream and reaches it fails like a provider that
+  cannot be reached: the primary of a failover chain hands the request to
+  its fallbacks, a model from the profile to the default chain.
+- Retries count against it. By default a call answered 429, 500, 502, 503
+  or 504, or failing on the way, is tried up to 4 times with at most 30
+  seconds of waiting; `retry: {max_attempts: 1}` makes one attempt.
 
 ### Prompt caching (Anthropic)
 
@@ -383,6 +409,76 @@ routing:
     - openai/gpt-5.2
     - anthropic/claude-opus-4-6
 ```
+
+### Model from the profile
+
+A whoami profile can name the model for its chat (`model` in the whoami
+answer, see [Profiles](profiles.md)) as `<provider>/<model>`, both as
+`models.providers` names them, for example `anthropic/claude-sonnet-5-5`. The
+provider does not have to be part of `routing`:
+
+| Profile `model` | Answered by |
+|---|---|
+| absent | the default chain (`routing.primary` and its fallbacks) |
+| empty, or not a string | the default chain, with a warning |
+| `<provider>/<model>`, both defined | that model at that provider; when the call fails or the provider is unhealthy, the default chain (see [When the selected provider fails](#when-the-selected-provider-fails)) |
+| `<provider>/<model>`, provider or model not defined | the default model, with a warning |
+| `<model>` without a provider, listed by a model of the default chain | the default chain, sent that id as before |
+| `<model>` without a provider that no model of the default chain lists, or a reference with an empty provider or model part (`/model`, `provider/`) | the default model, with a warning |
+
+- Only the chat loop follows the profile, for `chat` and `system` runs alike.
+  Session titles, summaries, the planner, the confirmation classifier, the
+  repair call and sub-agents stay on the default chain.
+- The call uses the selected model's own entry: its `thinking` and
+  `reasoning_effort`, and reasoning only when it has `features: [reasoning]`,
+  whatever the default model has. A turn's `reasoning_effort` still replaces
+  the model's effort.
+- A provider that cannot stream (`anthropic-messages`) answers a round that
+  would stream with its non-streaming call.
+- The usage row names the model that answered the run's first round, and each
+  round's cost comes from the price list of the provider that served it,
+  cache prices included.
+- Every provider in `models.providers` is started. One whose `api_key`
+  references an unset variable still starts; its calls fail and the default
+  chain answers. One that cannot be built is left out with a warning
+  instead of stopping the start; a profile model naming it gets the default
+  model.
+- The token count of an answer corrects the size estimate of the model that
+  answered: the default model's when the default chain answered in place of
+  the selected one.
+- Conversations are trimmed to the default model's `context_window` and
+  `max_tokens`, whichever model answers.
+- A selected model whose `context_window` is smaller than the default
+  model's can refuse long conversations: give it at least the default
+  model's `context_window` and `max_tokens`.
+
+#### When the selected provider fails
+
+| The selected provider | Then |
+|---|---|
+| answers with a status other than 400, 413 and 422 (a refused key or account, a rate or spend limit, an unknown model, an overload or server error), cannot be reached, or reaches its `timeout` | the default chain answers with the default model, and one warning names the provider, the model and the error, with `unhealthy=true`: the provider is marked unhealthy |
+| answers 400 with Anthropic's spend limit message ("You have reached your specified … API usage limits") or its empty credit message ("Your credit balance is too low to access the Anthropic API") | as above: the default chain answers and the provider is marked unhealthy |
+| answers 400, 413 or 422 otherwise (it refuses this request), or with a reply that cannot be read | the default chain answers, with the warning and `unhealthy=false`; the provider stays in use |
+| refuses the prompt as longer than the model's window | the chat loop gets the refusal, as before, and trims and sends again |
+| does not answer before the turn is cancelled | the turn ends; the default chain is not called and nothing is marked |
+
+While a provider is marked unhealthy:
+
+- Requests for its models go straight to the default chain with the default
+  model, warned about only at debug level.
+- OpenTalon probes it, from its first mark on: `GET <base_url>/v1/models`
+  with `x-api-key` for `anthropic-messages`, `GET <base_url>/models` with
+  `Bearer` for `openai-completions` (`x-api-key` at `api.anthropic.com`),
+  each with the provider's `headers`. `routing.health` sets `interval`
+  (10s), `timeout` (3s) and `recover_after` (3): after `recover_after`
+  healthy probes in a row the provider gets requests again.
+  `routing.health.path` applies to the primary only.
+- A probe checks that the endpoint answers and takes the key, not that the
+  account may spend. When the probes answer but every call is refused, each
+  return costs one refused call, and the default chain answers every
+  request.
+- A provider that cannot stream (`anthropic-messages`) is not marked for it;
+  its non-streaming call serves the round.
 
 ### Affinity learning
 

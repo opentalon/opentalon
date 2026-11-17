@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 )
 
 type Role string
@@ -104,6 +106,7 @@ type CompletionRequest struct {
 	// Segments describes Messages[0], whose content is Segments.Join(). Only
 	// the chat loop sets it; nil on every other call.
 	Segments *SystemSegments `json:"-"`
+	ModelRef ModelRef        `json:"-"`
 }
 
 // Usage is a call's tokens and cost. InputTokens counts every input token,
@@ -140,18 +143,33 @@ type CompletionResponse struct {
 	// tool_call_extracted events so the analytics graph links each tool
 	// dispatch back to the LLM round that produced it.
 	EventID string `json:"-"`
+
+	Fallback bool `json:"-"`
 }
 
 type StreamChunk struct {
-	Content string `json:"content"`
-	Done    bool   `json:"done"`
-	Model   string `json:"model,omitempty"`
-	Usage   Usage  `json:"usage,omitempty"`
+	Content  string `json:"content"`
+	Done     bool   `json:"done"`
+	Model    string `json:"model,omitempty"`
+	Usage    Usage  `json:"usage,omitempty"`
+	Fallback bool   `json:"-"`
 }
 
 type ResponseStream interface {
 	Recv() (StreamChunk, error)
 	Close() error
+}
+
+var ErrStreamingNotImplemented = errors.New("streaming not yet implemented")
+
+type StatusError struct {
+	api        string
+	StatusCode int
+	Body       string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s api error (status %d): %s", e.api, e.StatusCode, e.Body)
 }
 
 type Provider interface {

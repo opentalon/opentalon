@@ -483,7 +483,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 			StatusCode:       httpResp.StatusCode,
 			ResponseBodyText: string(respBody),
 		})
-		return nil, fmt.Errorf("openai api error (status %d): %s", httpResp.StatusCode, string(respBody))
+		return nil, &StatusError{api: "openai", StatusCode: httpResp.StatusCode, Body: string(respBody)}
 	}
 
 	var oaiResp oaiResponse
@@ -709,7 +709,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 			StatusCode:       httpResp.StatusCode,
 			ResponseBodyText: string(respBody),
 		})
-		return nil, fmt.Errorf("openai api error (status %d): %s", httpResp.StatusCode, string(respBody))
+		return nil, &StatusError{api: "openai", StatusCode: httpResp.StatusCode, Body: string(respBody)}
 	}
 
 	stream := &oaiResponseStream{

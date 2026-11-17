@@ -48,6 +48,42 @@ endpoint health gate on it either — the endpoint is fine.
 Keep the phrase list narrow. A false positive turns a real endpoint failure into
 "oversized prompt" and hides an outage.
 
+## A profile model goes through the selecting provider
+
+`NewSelectingProvider` stands in front of the default provider (the health gate,
+or the single routing provider). `ID`, `Models`, `SupportsFeature` and
+`PrimaryModels` are the default provider's. User-facing behaviour:
+[Model from the profile](../configuration.md#model-from-the-profile).
+
+- `CompletionRequest.ModelRef` is the profile's model as the chat loop received
+  it; `Model` holds its model part, for a provider that serves the request
+  itself. Only the chat loop sets `ModelRef`.
+- A request for a selected model carries that model's id and its own reasoning
+  flag (`features: [reasoning]`), not the default model's.
+- A non-200 answer is a `StatusError` (status and body; its text is
+  `<api> api error (status N): <body>`). `providerFailure` decides from it, or
+  from a `net.Error`, whether the provider is marked unhealthy; the classes are
+  the table in [When the selected provider fails](../configuration.md#when-the-selected-provider-fails).
+- A `SelectableProvider` without a `Probe` is never marked. With one, the probes
+  start at its first mark, run with `routing.health` interval, timeout and
+  `recover_after`, and stop when the context passed to `NewSelectingProvider`
+  ends. `endpointHealth` is the gate's; its name starts its log messages.
+- `NewProviderProbe(cfg, path)` gets the model list of the provider's API
+  (`/v1/models` with `x-api-key` for `anthropic-messages`, `/models` with
+  `Bearer` otherwise, `x-api-key` at `api.anthropic.com`) at its base URL or
+  the API's default, with the provider's headers. A set `path` replaces the
+  model list path (`routing.health.path`, the primary only).
+- A provider that cannot stream returns `ErrStreamingNotImplemented` (wrapped).
+  The selecting provider passes it through unmarked, so the caller's `Complete`
+  serves the selected model.
+- `CompletionResponse.Fallback` and `StreamChunk.Fallback` say the default model
+  answered a request for another model. The orchestrator then corrects the
+  default's calibration (key `""`), with the estimate rescaled from the requested
+  model's correction to the default's, and leaves the requested model's alone.
+- `ProviderConfig.Timeout` is the HTTP client's `Timeout` for calls that do not
+  stream, retries included; 0 keeps 120 s. The OpenAI-compatible stream uses a
+  client of its own without it.
+
 ## Retry policy: zero fields fall back to defaults
 
 `RetryPolicy.withDefaults()` fills every empty field from `DefaultRetryPolicy()`

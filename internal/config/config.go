@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -601,11 +602,14 @@ type ProviderConfig struct {
 	// differs from the session's previous one. Needs PromptCache; see
 	// validatePromptCache.
 	CacheDiagnostics StrictBool `yaml:"cache_diagnostics"`
+	Timeout          string     `yaml:"timeout,omitempty"`
+	timeoutLine      int
 }
 
 // UnmarshalYAML decodes a provider. yaml.v3 never hands a null value to
 // StrictBool.UnmarshalYAML, so a null prompt_cache or cache_diagnostics is
-// recorded here.
+// recorded here, as is a timeout without a value, which would otherwise read
+// as an absent one.
 func (p *ProviderConfig) UnmarshalYAML(n *yaml.Node) error {
 	type plain ProviderConfig
 	if err := n.Decode((*plain)(p)); err != nil {
@@ -615,6 +619,9 @@ func (p *ProviderConfig) UnmarshalYAML(n *yaml.Node) error {
 		if v := mappingValue(n, key); v != nil && v.ShortTag() == "!!null" {
 			*b = StrictBool{invalidLine: v.Line}
 		}
+	}
+	if v := mappingValue(n, "timeout"); v != nil && (v.ShortTag() == "!!null" || v.Value == "") {
+		p.timeoutLine = v.Line
 	}
 	return nil
 }
@@ -805,15 +812,20 @@ type RoutingConfig struct {
 }
 
 // HealthCheckConfig tunes the health-gated fallback that prefers routing.primary
-// while its endpoint is reachable and switches to routing.fallbacks otherwise.
-// It is only used when routing.fallbacks is non-empty. All fields are optional;
-// zero/empty values use the defaults: probe base_url+"/models" every 10s with a
-// 3s timeout, and switch back to the primary after 3 consecutive healthy probes.
-// The primary trips to the fallbacks immediately on a failed probe or a live
-// request error, but only recovers after RecoverAfter consecutive healthy probes
-// (hysteresis, to avoid flapping when the primary is intermittently available).
+// while its endpoint is reachable and switches to routing.fallbacks otherwise,
+// and the probes of a provider a profile model selected.
+// Path tunes the primary's probe, used when routing.fallbacks is non-empty.
+// Interval, Timeout and RecoverAfter tune that probe and also the probe of a
+// provider a profile model selected, which starts after a failure marks that
+// provider unhealthy. All fields are optional; zero/empty values use the
+// defaults: probe the provider's model list (base_url+"/v1/models" for
+// anthropic-messages, base_url+"/models" otherwise) every 10s with a 3s
+// timeout, and use the provider again after 3 consecutive healthy probes.
+// A provider trips immediately on a failed probe or a live request error, but
+// only recovers after RecoverAfter consecutive healthy probes (hysteresis, to
+// avoid flapping when it is intermittently available).
 type HealthCheckConfig struct {
-	Path         string `yaml:"path"`          // probe path relative to base_url; default "/models"
+	Path         string `yaml:"path"`          // primary's probe path relative to base_url; default its model list path
 	Interval     string `yaml:"interval"`      // probe interval (Go duration); default "10s"
 	Timeout      string `yaml:"timeout"`       // per-probe timeout (Go duration); default "3s"
 	RecoverAfter int    `yaml:"recover_after"` // consecutive healthy probes before switching back; default 3
@@ -1062,6 +1074,27 @@ func validateThinking(cfg *Config) error {
 	return nil
 }
 
+func validateTimeouts(cfg *Config) error {
+	ids := make([]string, 0, len(cfg.Models.Providers))
+	for id := range cfg.Models.Providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		p := cfg.Models.Providers[id]
+		if p.timeoutLine != 0 {
+			return fmt.Errorf("models.providers.%s.timeout: line %d: must be a duration above 0, such as 45s", id, p.timeoutLine)
+		}
+		if p.Timeout == "" {
+			continue
+		}
+		if d, err := time.ParseDuration(p.Timeout); err != nil || d <= 0 {
+			return fmt.Errorf("models.providers.%s.timeout: must be a duration above 0, such as 45s, got %q", id, p.Timeout)
+		}
+	}
+	return nil
+}
+
 // validHeaderName reports whether name is an HTTP field name (an RFC 9110
 // token).
 func validHeaderName(name string) bool {
@@ -1179,6 +1212,9 @@ func Parse(data []byte) (*Config, error) {
 		return nil, err
 	}
 	if err := validateThinking(&cfg); err != nil {
+		return nil, err
+	}
+	if err := validateTimeouts(&cfg); err != nil {
 		return nil, err
 	}
 
