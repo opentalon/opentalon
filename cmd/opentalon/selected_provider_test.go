@@ -228,6 +228,7 @@ func TestSelectedProviderFailure(t *testing.T) {
 		unreachable bool
 		hold        bool
 		failure     string
+		orFailure   string // a second wording the warning may carry instead
 		marks       bool
 	}{
 		{name: "the key is refused", answer: fakeAnswer{401, anthAuthError}, failure: "authentication_error", marks: true},
@@ -237,8 +238,10 @@ func TestSelectedProviderFailure(t *testing.T) {
 			failure: "Your credit balance is too low", marks: true},
 		{name: "overloaded", answer: fakeAnswer{529, anthOverloaded}, failure: "overloaded_error", marks: true},
 		{name: "cannot be reached", unreachable: true, failure: "connection refused", marks: true},
+		// net/http does not always add its "(Client.Timeout exceeded ...)"
+		// suffix to a client timeout; without it the context error is left.
 		{name: "reaches its time limit", answer: fakeAnswer{200, claudeTextBody}, hold: true,
-			failure: "Client.Timeout exceeded", marks: true},
+			failure: "Client.Timeout exceeded", orFailure: "context deadline exceeded", marks: true},
 		{name: "rejects the request as invalid", answer: fakeAnswer{400, anthInvalidRequest},
 			failure: "unexpected tool_use_id", marks: false},
 	}
@@ -279,7 +282,8 @@ func TestSelectedProviderFailure(t *testing.T) {
 					t.Errorf("%d warnings name claude-x, want one per failed call (%d):\n%s", len(warned), wantCalls, logs.String())
 				}
 				for _, w := range warned {
-					if !strings.Contains(w, "provider=anthropic") || !strings.Contains(w, tc.failure) {
+					named := strings.Contains(w, tc.failure) || (tc.orFailure != "" && strings.Contains(w, tc.orFailure))
+					if !strings.Contains(w, "provider=anthropic") || !named {
 						t.Errorf("warning does not name provider anthropic and %q:\n%s", tc.failure, w)
 					}
 				}
