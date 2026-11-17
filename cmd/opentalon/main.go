@@ -1096,10 +1096,13 @@ func main() {
 		// Read-only re-emit of a still-pending tool confirmation on a resume
 		// handshake, so a reconnected client redraws its Approve/Reject buttons.
 		PendingConfirmation: orch.PendingConfirmationFrame,
+		// The mark by which a note reaches an ordinary session; both session stores write it.
+		SetVerifiedOwner: sessions.(verifiedOwnerStore).SetVerifiedOwner,
 		// Server-opened sessions: both session stores implement the opener
 		// (asserted next to newInMemoryState); frames reach the request's
 		// channel through the late-bound registry.
 		Opener:             sessions.(channel.SessionOpener),
+		StoreNote:          orch.StoreNote,
 		SendToConversation: notifier.SendToConversation,
 	})
 
@@ -1406,11 +1409,16 @@ func enablePluginCostMetrics(plugins map[string]config.PluginConfig, collector *
 	return n, nil
 }
 
-// Both session stores main may pick serve as the handler's
-// channel.SessionOpener, so its type assertion on sessions cannot fail.
+type verifiedOwnerStore interface {
+	SetVerifiedOwner(ctx context.Context, id string, owner state.VerifiedOwner) error
+}
+
+// Both session stores main may pick serve as both interfaces, so its type assertions on sessions cannot fail.
 var (
 	_ channel.SessionOpener = (*store.SessionStore)(nil)
 	_ channel.SessionOpener = (*state.SessionStore)(nil)
+	_ verifiedOwnerStore    = (*store.SessionStore)(nil)
+	_ verifiedOwnerStore    = (*state.SessionStore)(nil)
 )
 
 // newInMemoryState returns in-memory memory and session stores (used when data_dir is unset or DB open fails).

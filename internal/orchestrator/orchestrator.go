@@ -296,8 +296,8 @@ type keyedMutex struct {
 }
 
 type keyedMutexEntry struct {
-	mu       sync.Mutex
-	refCount int // goroutines currently waiting or holding this entry
+	held     chan struct{} // one token while locked; a channel, so a wait can end with a context
+	refCount int           // goroutines currently waiting or holding this entry
 }
 
 func newKeyedMutex() *keyedMutex {
@@ -305,28 +305,26 @@ func newKeyedMutex() *keyedMutex {
 }
 
 func (k *keyedMutex) lock(key string) *keyedMutexEntry {
-	k.mu.Lock()
-	e, ok := k.entries[key]
-	if !ok {
-		e = &keyedMutexEntry{}
-		k.entries[key] = e
-	}
-	e.refCount++
-	k.mu.Unlock()
-
-	e.mu.Lock()
+	e := k.ref(key)
+	e.held <- struct{}{}
 	return e
 }
 
-func (k *keyedMutex) unlock(key string, e *keyedMutexEntry) {
-	k.mu.Lock()
-	e.refCount--
-	if e.refCount == 0 {
-		delete(k.entries, key)
+// A ctx that ends just as the mutex comes free may still take it: a caller that must not go past its ctx checks it after the lock.
+func (k *keyedMutex) lockContext(ctx context.Context, key string) (*keyedMutexEntry, error) {
+	e := k.ref(key)
+	select {
+	case e.held <- struct{}{}:
+		return e, nil
+	case <-ctx.Done():
+		k.unref(key, e)
+		return nil, ctx.Err()
 	}
-	k.mu.Unlock()
+}
 
-	e.mu.Unlock()
+func (k *keyedMutex) unlock(key string, e *keyedMutexEntry) {
+	k.unref(key, e)
+	<-e.held
 }
 
 // tryLock acquires key without blocking. It returns the entry and true when
@@ -335,28 +333,36 @@ func (k *keyedMutex) unlock(key string, e *keyedMutexEntry) {
 // guard: a second background turn for a session already running one is dropped
 // rather than queued, so a flapping trigger can't stack goroutines.
 func (k *keyedMutex) tryLock(key string) (*keyedMutexEntry, bool) {
+	e := k.ref(key)
+	select {
+	case e.held <- struct{}{}:
+		return e, true
+	default:
+	}
+
+	k.unref(key, e)
+	return nil, false
+}
+
+func (k *keyedMutex) ref(key string) *keyedMutexEntry {
 	k.mu.Lock()
+	defer k.mu.Unlock()
 	e, ok := k.entries[key]
 	if !ok {
-		e = &keyedMutexEntry{}
+		e = &keyedMutexEntry{held: make(chan struct{}, 1)}
 		k.entries[key] = e
 	}
 	e.refCount++
-	k.mu.Unlock()
+	return e
+}
 
-	if e.mu.TryLock() {
-		return e, true
-	}
-
-	// Contended: release the refcount reservation we just took so the entry
-	// is still reaped when the current holder unlocks.
+func (k *keyedMutex) unref(key string, e *keyedMutexEntry) {
 	k.mu.Lock()
+	defer k.mu.Unlock()
 	e.refCount--
 	if e.refCount == 0 {
 		delete(k.entries, key)
 	}
-	k.mu.Unlock()
-	return nil, false
 }
 
 type Orchestrator struct {
@@ -1353,8 +1359,12 @@ func (o *Orchestrator) formatResponse(ctx context.Context, result *RunResult) er
 // per pod polls the distributed lock per session. When lease acquisition
 // fails (caller's ctx ended) the in-pod mutex is released before returning,
 // so an error never leaks a held lock.
+// A ctx that ends just as a lock comes free may still take it: a caller that must not go past its ctx checks it once this returns.
 func (o *Orchestrator) lockSessionTurn(ctx context.Context, sessionID string) (unlock func(), err error) {
-	sm := o.sessionMuxes.lock(sessionID)
+	sm, err := o.sessionMuxes.lockContext(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
 	releaseTurnLease, err := o.sessionLocker.Lock(ctx, sessionID)
 	if err != nil {
 		o.sessionMuxes.unlock(sessionID, sm)
@@ -1411,9 +1421,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		return nil, err
 	}
 	defer unlock()
-	// The in-pod session mutex waits regardless of ctx. A turn whose context
-	// ended while it queued behind another turn never starts: its caller's
-	// deadline bounds how late it may still store its message.
+	// The lock may come free just as ctx ends (see lockSessionTurn): a turn past its ctx never starts.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1426,6 +1434,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	sess, err := sessions.Get(sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session lookup: %w", err)
+	}
+	// Refused before any event; the input's write checks again, as the mark is written outside the turn lock.
+	if c, ok := TurnClaimFrom(ctx); ok && !c.Admits(sess.VerifiedOwner) {
+		return nil, state.ErrOwnerChanged
 	}
 	ctx = actor.WithSessionID(ctx, sessionID)
 
@@ -4162,7 +4174,7 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 // exchanges from the history fed to the model: the narrated "Shall I
 // proceed?" assistant row (metadata prompt_type=tool_confirmation) together
 // with the button reply row (prompt_type=confirmation_response) that
-// immediately follows it. Both rows are platform artifacts — the prompt was
+// follows it, hidden note rows possibly between. Both rows are platform artifacts — the prompt was
 // written by narrateConfirmation during the gate pause, not by the model, and
 // the reply is a pressed button, not something the user typed. Replayed
 // verbatim they teach the model a false protocol: after two approved creates
@@ -4173,7 +4185,7 @@ func sanitizeHistory(msgs []provider.Message) []provider.Message {
 // after stripping is user request → tool call → tool result: exactly the
 // protocol the model must continue.
 //
-// Only APPROVED-and-executed exchanges are stripped — a prompt row directly
+// Only APPROVED-and-executed exchanges are stripped — a prompt row, with only hidden notes (they stay) before it is
 // followed by its reply row. A prompt WITHOUT a reply row stays: single-call
 // rejects never persist a reply, an amend reply arrives as a plain user
 // message, and the re-planning paths need the proposed action for context.
@@ -4184,11 +4196,16 @@ func stripApprovedConfirmationExchanges(msgs []provider.Message) []provider.Mess
 	out := make([]provider.Message, 0, len(msgs))
 	for i := 0; i < len(msgs); i++ {
 		m := msgs[i]
-		if m.Role == provider.RoleAssistant && m.PromptType == provider.PromptTypeToolConfirmation &&
-			i+1 < len(msgs) && msgs[i+1].Role == provider.RoleUser &&
-			msgs[i+1].PromptType == provider.PromptTypeConfirmationResponse {
-			i++ // resolved exchange: skip the prompt AND its reply row
-			continue
+		if m.Role == provider.RoleAssistant && m.PromptType == provider.PromptTypeToolConfirmation {
+			j := i + 1
+			for j < len(msgs) && msgs[j].Role == provider.RoleUser && msgs[j].Visibility == provider.VisibilityHidden {
+				j++
+			}
+			if j < len(msgs) && msgs[j].Role == provider.RoleUser && msgs[j].PromptType == provider.PromptTypeConfirmationResponse {
+				out = append(out, msgs[i+1:j]...)
+				i = j // resolved exchange: skip the prompt AND its reply row
+				continue
+			}
 		}
 		out = append(out, m)
 	}

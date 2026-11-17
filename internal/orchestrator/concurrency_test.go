@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -378,5 +379,81 @@ func TestConcurrencySessionLockCleanup(t *testing.T) {
 
 	if remaining != 0 {
 		t.Errorf("session mutex map has %d entries after all runs completed, want 0", remaining)
+	}
+}
+
+func sessionLockRefs(orch *Orchestrator, sessionID string) int {
+	orch.sessionMuxes.mu.Lock()
+	defer orch.sessionMuxes.mu.Unlock()
+	if e := orch.sessionMuxes.entries[sessionID]; e != nil {
+		return e.refCount
+	}
+	return 0
+}
+
+func waitForSessionLockRefs(t *testing.T, orch *Orchestrator, sessionID string, n int) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); sessionLockRefs(orch, sessionID) != n; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutines at the session lock = %d, want %d", sessionLockRefs(orch, sessionID), n)
+		}
+	}
+}
+
+// A waiter whose context ends gives up and stops counting, so the session's entry is still reaped.
+func TestSessionTurnLockWaitEndsWithItsContext(t *testing.T) {
+	orch, s1, _ := newConcurrentOrch(t, 4, &immediateLLM{resp: "ok"})
+	unlockHolder, err := orch.lockSessionTurn(context.Background(), s1)
+	if err != nil {
+		t.Fatalf("holder: %v", err)
+	}
+	next := make(chan func(), 1)
+	go func() {
+		unlock, err := orch.lockSessionTurn(context.Background(), s1)
+		if err != nil {
+			t.Errorf("waiter that keeps waiting: %v", err)
+			return
+		}
+		next <- unlock
+	}()
+	waitForSessionLockRefs(t, orch, s1, 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	gaveUp := make(chan error, 1)
+	go func() {
+		unlock, err := orch.lockSessionTurn(ctx, s1)
+		if err == nil {
+			unlock()
+		}
+		gaveUp <- err
+	}()
+	waitForSessionLockRefs(t, orch, s1, 3)
+	cancel()
+	select {
+	case err := <-gaveUp:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("waiter whose context ended: err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the waiter whose context ended still waits while the holder holds the lock")
+	}
+	if n := sessionLockRefs(orch, s1); n != 2 {
+		t.Errorf("goroutines at the session lock after the give-up = %d, want the holder and the other waiter", n)
+	}
+	select {
+	case <-next:
+		t.Fatal("the other waiter took the lock while the holder holds it")
+	default:
+	}
+
+	unlockHolder()
+	select {
+	case unlock := <-next:
+		unlock()
+	case <-time.After(2 * time.Second):
+		t.Fatal("the other waiter never took the lock the holder released")
+	}
+	if n := sessionLockRefs(orch, s1); n != 0 {
+		t.Errorf("session lock entry still counts %d goroutines, want it reaped", n)
 	}
 }

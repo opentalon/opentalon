@@ -2,10 +2,13 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -29,13 +32,24 @@ type Session struct {
 	ActiveModel provider.ModelRef  `yaml:"active_model,omitempty"`
 	Metadata    map[string]string  `yaml:"metadata,omitempty"`
 	EntityID    string             `yaml:"entity_id,omitempty"`  // the owner the session was created for (SessionParams.EntityID); empty without a profile
+	GroupID     string             `yaml:"group_id,omitempty"`   // the account the session was created or opened for; empty when none was recorded
 	OpenedBy    string             `yaml:"opened_by,omitempty"`  // origin of a session a server opened (OpenSession); empty otherwise
 	OpenKey     string             `yaml:"open_key,omitempty"`   // the opener's idempotency key; empty otherwise
 	ChannelID   string             `yaml:"channel_id,omitempty"` // the channel recorded for the session (SessionParams.ChannelID, read by OpenSession); empty when none is
-	CreatedAt   time.Time          `yaml:"created_at"`
-	UpdatedAt   time.Time          `yaml:"updated_at"`
+
+	VerifiedOwner *VerifiedOwner `yaml:"verified_owner,omitempty"`
+	CreatedAt     time.Time      `yaml:"created_at"`
+	UpdatedAt     time.Time      `yaml:"updated_at"`
 }
 
+// VerifiedOwner marks a session as the user's: only the user's own chat turn sets it, as neither the key nor EntityID proves the owner.
+type VerifiedOwner struct {
+	EntityID  string `yaml:"entity_id"`
+	GroupID   string `yaml:"group_id"`
+	ChannelID string `yaml:"channel_id"`
+}
+
+// SessionStore's reads answer copies taken under its lock, as SetVerifiedOwner runs outside the turn lock; Create alone answers the live session.
 type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -113,9 +127,11 @@ const (
 	ClaimHeld ClaimResult = iota
 	// ClaimWon: the call took the claim; its turn may run.
 	ClaimWon
-	// ClaimSettled: the turn's input was stored under a claim, or there is no
-	// such session: nothing is left to run.
+	// ClaimSettled: the input was stored under the claim; ClaimOpener answers it also for a session that does not exist.
 	ClaimSettled
+	ClaimSessionNotFound
+	// ClaimNotReserved: ReclaimNote found no reservation; a freed key is its caller's again.
+	ClaimNotReserved
 )
 
 // TurnClaim names the claim a turn runs under: the first turn of an opened
@@ -125,13 +141,15 @@ const (
 type TurnClaim struct {
 	NoteKey string
 	At      time.Time
+	Owner   *VerifiedOwner // stored only while the session's mark is this owner, checked in the same write
 }
 
 // The message metadata a claimed turn's input is stored with
 // (TurnClaim.Metadata); AddMessageWithMetadata reads the claim from it.
 const (
-	NoteKeyMetadataKey   = "note_key"
-	ClaimedAtMetadataKey = "claimed_at"
+	NoteKeyMetadataKey    = "note_key"
+	ClaimedAtMetadataKey  = "claimed_at"
+	ClaimOwnerMetadataKey = "claim_owner"
 )
 
 // ErrClaimLost is returned by AddMessageWithMetadata, which then stores
@@ -140,11 +158,22 @@ const (
 // stored already. Exactly one run stores a claimed turn's input.
 var ErrClaimLost = errors.New("turn claim lost: another run took the turn over or stored its input")
 
+// ErrOwnerChanged: the session's mark is no longer the claim's Owner; nothing was stored.
+var ErrOwnerChanged = errors.New("turn claim refused: the session's verified owner is not the claim's")
+
+func (c TurnClaim) Admits(mark *VerifiedOwner) bool {
+	return c.Owner == nil || (mark != nil && *mark == *c.Owner)
+}
+
 // Metadata is the message metadata that stores a turn's input under c.
 func (c TurnClaim) Metadata() map[string]string {
 	m := map[string]string{ClaimedAtMetadataKey: c.At.UTC().Format(time.RFC3339Nano)}
 	if c.NoteKey != "" {
 		m[NoteKeyMetadataKey] = c.NoteKey
+	}
+	if c.Owner != nil {
+		owner, _ := json.Marshal(c.Owner)
+		m[ClaimOwnerMetadataKey] = string(owner)
 	}
 	return m
 }
@@ -154,9 +183,13 @@ func (c TurnClaim) Metadata() map[string]string {
 // is stored only under its reservation.
 func TurnClaimOf(metadata map[string]string) (c TurnClaim, claimed bool, err error) {
 	at, claimed := metadata[ClaimedAtMetadataKey]
+	owner, conditioned := metadata[ClaimOwnerMetadataKey]
 	if !claimed {
 		if key := metadata[NoteKeyMetadataKey]; key != "" {
 			return TurnClaim{}, false, fmt.Errorf("note %q without its reservation", key)
+		}
+		if conditioned {
+			return TurnClaim{}, false, errors.New("an owner condition without a claim")
 		}
 		return TurnClaim{}, false, nil
 	}
@@ -164,7 +197,14 @@ func TurnClaimOf(metadata map[string]string) (c TurnClaim, claimed bool, err err
 	if err != nil {
 		return TurnClaim{}, false, fmt.Errorf("claim time %q: %w", at, err)
 	}
-	return TurnClaim{NoteKey: metadata[NoteKeyMetadataKey], At: t}, true, nil
+	c = TurnClaim{NoteKey: metadata[NoteKeyMetadataKey], At: t}
+	if conditioned {
+		c.Owner = &VerifiedOwner{}
+		if err := json.Unmarshal([]byte(owner), c.Owner); err != nil {
+			return TurnClaim{}, false, fmt.Errorf("claim owner %q: %w", owner, err)
+		}
+	}
+	return c, true, nil
 }
 
 // Create returns the session for p.ID, minting a fresh empty record if absent.
@@ -187,6 +227,7 @@ func (s *SessionStore) Create(p SessionParams) *Session {
 		Messages:  make([]provider.Message, 0),
 		Metadata:  make(map[string]string),
 		EntityID:  p.EntityID,
+		GroupID:   p.GroupID,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -207,7 +248,7 @@ func (s *SessionStore) OpenSession(_ context.Context, p SessionParams) (*Session
 
 	key := openIdentity{entityID: p.EntityID, openedBy: p.OpenedBy, openKey: p.OpenKey}
 	if id, ok := s.opened[key]; ok {
-		return s.sessions[id], false, nil
+		return s.sessions[id].clone(), false, nil
 	}
 	if _, taken := s.sessions[p.ID]; taken {
 		return nil, false, fmt.Errorf("open session %q: id already taken by another session", p.ID)
@@ -218,6 +259,7 @@ func (s *SessionStore) OpenSession(_ context.Context, p SessionParams) (*Session
 		Messages:  make([]provider.Message, 0),
 		Metadata:  make(map[string]string),
 		EntityID:  p.EntityID,
+		GroupID:   p.GroupID,
 		OpenedBy:  p.OpenedBy,
 		OpenKey:   p.OpenKey,
 		ChannelID: p.ChannelID,
@@ -226,7 +268,7 @@ func (s *SessionStore) OpenSession(_ context.Context, p SessionParams) (*Session
 	}
 	s.sessions[p.ID] = sess
 	s.opened[key] = p.ID
-	return sess, true, nil
+	return sess.clone(), true, nil
 }
 
 // ClaimOpener mirrors the DB-backed compare-and-set: the claim is won when the
@@ -243,18 +285,52 @@ func (s *SessionStore) ClaimOpener(_ context.Context, sessionID string, now time
 	return take(s.claims, sessionID, now, staleAfter), nil
 }
 
-// ReserveNote mirrors the DB-backed reservation of a note key: the first call
-// for a session and key wins, a fresh reservation is held, and a stale one is
-// won again only while the note was not stored under it; a stored one, and an
-// unknown session, is settled.
+// ReserveNote mirrors the DB-backed ReserveNote.
 func (s *SessionStore) ReserveNote(_ context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (ClaimResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if _, ok := s.sessions[sessionID]; !ok {
-		return ClaimSettled, nil
+		return ClaimSessionNotFound, nil
 	}
 	return take(s.notes, noteIdentity{sessionID: sessionID, noteKey: noteKey}, now, staleAfter), nil
+}
+
+func (s *SessionStore) ReclaimNote(_ context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (ClaimResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.sessions[sessionID]; !ok {
+		return ClaimSessionNotFound, nil
+	}
+	key := noteIdentity{sessionID: sessionID, noteKey: noteKey}
+	if s.notes[key] == nil {
+		return ClaimNotReserved, nil
+	}
+	return take(s.notes, key, now, staleAfter), nil
+}
+
+func (s *SessionStore) FreeNote(_ context.Context, sessionID, noteKey string, reservedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := noteIdentity{sessionID: sessionID, noteKey: noteKey}
+	if c := s.notes[key]; c != nil && !c.stored && c.at.Equal(reservedAt) {
+		delete(s.notes, key)
+	}
+	return nil
+}
+
+func (s *SessionStore) SetVerifiedOwner(_ context.Context, id string, owner VerifiedOwner) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[id]
+	if !ok {
+		return fmt.Errorf("session %q: %w", id, ErrSessionNotFound)
+	}
+	sess.VerifiedOwner = &owner
+	return nil
 }
 
 // take takes claims[key] at now when it may be taken (claim.won) and reports
@@ -272,10 +348,24 @@ func take[K comparable](claims map[K]*claim, key K, now time.Time, staleAfter ti
 	}
 }
 
-// Identity is Get for the open path (see store/session.go Identity), whose
-// wait ctx would end; the in-memory store does not wait.
 func (s *SessionStore) Identity(_ context.Context, id string) (*Session, error) {
-	return s.Get(id)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sess, ok := s.sessions[id]
+	if !ok {
+		return nil, fmt.Errorf("session %q: %w", id, ErrSessionNotFound)
+	}
+	identity := &Session{
+		ID:        sess.ID,
+		EntityID:  sess.EntityID,
+		GroupID:   sess.GroupID,
+		OpenedBy:  sess.OpenedBy,
+		OpenKey:   sess.OpenKey,
+		ChannelID: sess.ChannelID,
+	}
+	identity.VerifiedOwner = sess.VerifiedOwner.clone()
+	return identity, nil
 }
 
 func (s *SessionStore) Get(id string) (*Session, error) {
@@ -286,7 +376,24 @@ func (s *SessionStore) Get(id string) (*Session, error) {
 	if !ok {
 		return nil, fmt.Errorf("session %q: %w", id, ErrSessionNotFound)
 	}
-	return sess, nil
+	return sess.clone(), nil
+}
+
+// Messages are copied as values: nothing changes a stored message in place.
+func (sess *Session) clone() *Session {
+	cp := *sess
+	cp.Messages = slices.Clone(sess.Messages)
+	cp.Metadata = maps.Clone(sess.Metadata)
+	cp.VerifiedOwner = sess.VerifiedOwner.clone()
+	return &cp
+}
+
+func (o *VerifiedOwner) clone() *VerifiedOwner {
+	if o == nil {
+		return nil
+	}
+	cp := *o
+	return &cp
 }
 
 func (s *SessionStore) AddMessage(id string, msg provider.Message) error {
@@ -314,6 +421,9 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 		return fmt.Errorf("session %q not found", id)
 	}
 	if claimed {
+		if !tc.Admits(sess.VerifiedOwner) {
+			return ErrOwnerChanged
+		}
 		held := s.claims[id]
 		if tc.NoteKey != "" {
 			held = s.notes[noteIdentity{sessionID: id, noteKey: tc.NoteKey}]
@@ -445,31 +555,36 @@ func (s *SessionStore) List() []*Session {
 
 	result := make([]*Session, 0, len(s.sessions))
 	for _, sess := range s.sessions {
-		result = append(result, sess)
+		result = append(result, sess.clone())
 	}
 	return result
 }
 
 func (s *SessionStore) Save(id string) error {
-	s.mu.RLock()
-	sess, ok := s.sessions[id]
-	s.mu.RUnlock()
-
-	if !ok {
-		return fmt.Errorf("session %q not found", id)
+	data, err := s.marshal(id)
+	if err != nil {
+		return err
 	}
-
 	if err := os.MkdirAll(s.dir, 0700); err != nil {
 		return fmt.Errorf("creating sessions dir: %w", err)
 	}
-
-	data, err := yaml.Marshal(sess)
-	if err != nil {
-		return fmt.Errorf("marshaling session: %w", err)
-	}
-
 	path := filepath.Join(s.dir, id+".yaml")
 	return os.WriteFile(path, data, 0600)
+}
+
+func (s *SessionStore) marshal(id string) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sess, ok := s.sessions[id]
+	if !ok {
+		return nil, fmt.Errorf("session %q not found", id)
+	}
+	data, err := yaml.Marshal(sess)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling session: %w", err)
+	}
+	return data, nil
 }
 
 func (s *SessionStore) Load(id string) error {

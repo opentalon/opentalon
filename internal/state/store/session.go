@@ -99,11 +99,13 @@ func NewSessionStore(db *DB, maxMessages, maxIdleDays int) *SessionStore {
 // user their conversation expired" and "tell the user to retry".
 func (s *SessionStore) Get(id string) (*state.Session, error) {
 	d := s.db.Dialect()
-	var summary, title, activeModel, metadataJSON, createdAt, updatedAt, entityID, openedBy, openKey, channelID string
+	var summary, title, activeModel, metadataJSON, createdAt, updatedAt, entityID, groupID, openedBy, openKey, channelID string
+	var mark verifiedOwnerColumns
 	err := s.db.SQLDB().QueryRow(
-		d.Rebind(`SELECT COALESCE(summary,''), COALESCE(title,''), active_model, metadata, created_at, updated_at, COALESCE(entity_id,''), COALESCE(opened_by,''), COALESCE(open_key,''), COALESCE(channel_id,'') FROM sessions WHERE id = ?`),
+		d.Rebind(`SELECT COALESCE(summary,''), COALESCE(title,''), active_model, metadata, created_at, updated_at, COALESCE(entity_id,''), COALESCE(group_id,''), COALESCE(opened_by,''), COALESCE(open_key,''), COALESCE(channel_id,''), `+verifiedOwnerSelect+` FROM sessions WHERE id = ?`),
 		id,
-	).Scan(&summary, &title, &activeModel, &metadataJSON, &createdAt, &updatedAt, &entityID, &openedBy, &openKey, &channelID)
+	).Scan(&summary, &title, &activeModel, &metadataJSON, &createdAt, &updatedAt, &entityID, &groupID, &openedBy, &openKey, &channelID,
+		&mark.entityID, &mark.groupID, &mark.channelID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("session %q: %w", id, state.ErrSessionNotFound)
@@ -123,19 +125,37 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 	ca, _ := time.Parse(time.RFC3339, createdAt)
 	ua, _ := time.Parse(time.RFC3339, updatedAt)
 	return &state.Session{
-		ID:          id,
-		Messages:    messages,
-		Summary:     summary,
-		Title:       title,
-		ActiveModel: provider.ModelRef(activeModel),
-		Metadata:    metadata,
-		EntityID:    entityID,
-		OpenedBy:    openedBy,
-		OpenKey:     openKey,
-		ChannelID:   channelID,
-		CreatedAt:   ca,
-		UpdatedAt:   ua,
+		ID:            id,
+		Messages:      messages,
+		Summary:       summary,
+		Title:         title,
+		ActiveModel:   provider.ModelRef(activeModel),
+		Metadata:      metadata,
+		EntityID:      entityID,
+		GroupID:       groupID,
+		OpenedBy:      openedBy,
+		OpenKey:       openKey,
+		ChannelID:     channelID,
+		VerifiedOwner: mark.owner(),
+		CreatedAt:     ca,
+		UpdatedAt:     ua,
 	}, nil
+}
+
+// verifiedOwnerSelect is scanned in this order into verifiedOwnerColumns.
+const verifiedOwnerSelect = `verified_entity_id, COALESCE(verified_group_id,''), COALESCE(verified_channel_id,'')`
+
+// A NULL verified_entity_id is no mark.
+type verifiedOwnerColumns struct {
+	entityID           sql.NullString
+	groupID, channelID string
+}
+
+func (c *verifiedOwnerColumns) owner() *state.VerifiedOwner {
+	if !c.entityID.Valid {
+		return nil
+	}
+	return &state.VerifiedOwner{EntityID: c.entityID.String, GroupID: c.groupID, ChannelID: c.channelID}
 }
 
 // Create inserts a new session. If id already exists (e.g. race), returns existing session from DB.
@@ -182,6 +202,7 @@ func (s *SessionStore) Create(p state.SessionParams) *state.Session {
 		Messages:  []provider.Message{},
 		Metadata:  map[string]string{},
 		EntityID:  p.EntityID,
+		GroupID:   p.GroupID,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -193,8 +214,7 @@ func (s *SessionStore) Create(p state.SessionParams) *state.Session {
 // created=true; every later call, concurrent or after a restart, answers the
 // stored session with created=false — never the id it minted itself, and
 // never a changed row (the existing session's labels stay as they were). The
-// stored session is answered as Identity reads it: its id, owner, channel and
-// open key.
+// stored session is answered as Identity reads it.
 //
 // Unlike Create, it tells created from found and has no transient fallback:
 // an insert that fails, or conflicts on anything but the key (the minted id
@@ -230,6 +250,7 @@ func (s *SessionStore) OpenSession(ctx context.Context, p state.SessionParams) (
 			Messages:  []provider.Message{},
 			Metadata:  map[string]string{},
 			EntityID:  p.EntityID,
+			GroupID:   p.GroupID,
 			OpenedBy:  p.OpenedBy,
 			OpenKey:   p.OpenKey,
 			ChannelID: p.ChannelID,
@@ -248,8 +269,8 @@ func (s *SessionStore) OpenSession(ctx context.Context, p state.SessionParams) (
 	return existing, false, nil
 }
 
-// Identity reads what authorises an open-session request for session id: its
-// id, owner, channel and open key, and nothing else. Unlike Get it does not
+// Identity reads what authorises an open-session request for session id,
+// and nothing else. Unlike Get it does not
 // load the transcript, and ctx ends a wait for the database. A row that is
 // absent answers a wrapped state.ErrSessionNotFound.
 func (s *SessionStore) Identity(ctx context.Context, id string) (*state.Session, error) {
@@ -267,14 +288,35 @@ func (s *SessionStore) Identity(ctx context.Context, id string) (*state.Session,
 // matches where, with args.
 func (s *SessionStore) identityWhere(ctx context.Context, where string, args ...any) (*state.Session, error) {
 	var sess state.Session
+	var mark verifiedOwnerColumns
 	err := s.db.SQLDB().QueryRowContext(ctx,
-		s.db.Dialect().Rebind(`SELECT id, COALESCE(entity_id,''), COALESCE(opened_by,''), COALESCE(open_key,''), COALESCE(channel_id,'') FROM sessions WHERE `+where),
+		s.db.Dialect().Rebind(`SELECT id, COALESCE(entity_id,''), COALESCE(group_id,''), COALESCE(opened_by,''), COALESCE(open_key,''), COALESCE(channel_id,''), `+verifiedOwnerSelect+` FROM sessions WHERE `+where),
 		args...,
-	).Scan(&sess.ID, &sess.EntityID, &sess.OpenedBy, &sess.OpenKey, &sess.ChannelID)
+	).Scan(&sess.ID, &sess.EntityID, &sess.GroupID, &sess.OpenedBy, &sess.OpenKey, &sess.ChannelID,
+		&mark.entityID, &mark.groupID, &mark.channelID)
 	if err != nil {
 		return nil, err
 	}
+	sess.VerifiedOwner = mark.owner()
 	return &sess, nil
+}
+
+// SetVerifiedOwner writes only the mark's columns, not updated_at, so setting the same owner again changes nothing.
+func (s *SessionStore) SetVerifiedOwner(ctx context.Context, id string, owner state.VerifiedOwner) error {
+	res, err := s.db.SQLDB().ExecContext(ctx,
+		s.db.Dialect().Rebind(`UPDATE sessions SET verified_entity_id = ?, verified_group_id = ?, verified_channel_id = ? WHERE id = ?`),
+		owner.EntityID, owner.GroupID, owner.ChannelID, id)
+	if err != nil {
+		return fmt.Errorf("set verified owner of %q: %w", id, err)
+	}
+	set, err := affectedOne(res)
+	if err != nil {
+		return fmt.Errorf("set verified owner of %q: %w", id, err)
+	}
+	if !set {
+		return fmt.Errorf("session %q: %w", id, state.ErrSessionNotFound)
+	}
+	return nil
 }
 
 // ClaimOpener is the one atomic "this request runs the first turn" mark of an
@@ -302,7 +344,7 @@ func (s *SessionStore) ClaimOpener(ctx context.Context, sessionID string, now ti
 		s.db.Dialect().Rebind(`UPDATE sessions SET opener_claimed_at = ?
 		WHERE id = ? AND (opener_claimed_at IS NULL
 			OR (opener_claimed_at < ? AND opener_stored_at IS NULL))`),
-		now.UTC().Format(time.RFC3339), sessionID, now.Add(-staleAfter).UTC().Format(time.RFC3339))
+		claimTime(now), sessionID, claimTime(now.Add(-staleAfter)))
 	if err != nil {
 		return state.ClaimHeld, fmt.Errorf("claim opener %q: %w", sessionID, err)
 	}
@@ -313,25 +355,20 @@ func (s *SessionStore) ClaimOpener(ctx context.Context, sessionID string, now ti
 	if claimed {
 		return state.ClaimWon, nil
 	}
-	result, err := s.claimNotWon(ctx, `SELECT COALESCE(opener_stored_at, '') FROM sessions WHERE id = ?`, sessionID)
+	result, err := s.claimNotWon(ctx, state.ClaimSettled, `SELECT COALESCE(opener_stored_at, '') FROM sessions WHERE id = ?`, sessionID)
 	if err != nil {
 		return result, fmt.Errorf("claim opener %q: %w", sessionID, err)
 	}
 	return result, nil
 }
 
-// claimNotWon tells why a claim's compare-and-set matched nothing; query reads
-// the claim's stored mark (empty while unset). A set mark is final, so a stored
-// claim, or a row that is gone, is settled; an unset mark means a fresh claim
-// another run holds. The read follows the write, so a claim that went stale or
-// was stored in between is reported as it is now, which a caller only uses to
-// decide whether to look again later.
-func (s *SessionStore) claimNotWon(ctx context.Context, query string, args ...any) (state.ClaimResult, error) {
+// claimNotWon reads after the write, so a claim that went stale or was stored in between is reported as it is now.
+func (s *SessionStore) claimNotWon(ctx context.Context, gone state.ClaimResult, query string, args ...any) (state.ClaimResult, error) {
 	var stored string
 	err := s.db.SQLDB().QueryRowContext(ctx, s.db.Dialect().Rebind(query), args...).Scan(&stored)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return state.ClaimSettled, nil
+		return gone, nil
 	case err != nil:
 		return state.ClaimHeld, err
 	case stored != "":
@@ -341,18 +378,6 @@ func (s *SessionStore) claimNotWon(ctx context.Context, query string, args ...an
 	}
 }
 
-// ReserveNote is the once-per-key claim to post a note into an existing
-// session: the first call for a session and note key inserts the reservation
-// and answers state.ClaimWon; a later call answers state.ClaimHeld while that
-// reservation is fresh, state.ClaimSettled once the note was stored under it,
-// and state.ClaimWon once more when it is older than staleAfter and the note
-// was not stored under it — the reserving run died before the turn runner
-// stored the note. A session that does not exist is settled, never reserved. A
-// database failure is an error, never a refusal. Same split as ClaimOpener:
-// the reservation is the compare-and-set, the turn runner stores the note
-// under the reservation's state.TurnClaim (AddMessageWithMetadata), and that
-// store marks the reservation's stored_at, which no transcript rewrite erases.
-//
 // The insert is ON CONFLICT DO NOTHING against the reservation's primary key
 // and selects the session's row for update: it inserts nothing for a missing
 // session, and it waits for a prune or delete that holds the row, so no
@@ -361,7 +386,7 @@ func (s *SessionStore) claimNotWon(ctx context.Context, query string, args ...an
 // wrote. ctx ends a wait for the row.
 func (s *SessionStore) ReserveNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
 	d := s.db.Dialect()
-	at := now.UTC().Format(time.RFC3339)
+	at := claimTime(now)
 	fail := func(err error) (state.ClaimResult, error) {
 		return state.ClaimHeld, fmt.Errorf("reserve note %q in %q: %w", noteKey, sessionID, err)
 	}
@@ -380,24 +405,80 @@ func (s *SessionStore) ReserveNote(ctx context.Context, sessionID, noteKey strin
 		return state.ClaimWon, nil
 	}
 
-	res, err = s.db.SQLDB().ExecContext(ctx,
-		d.Rebind(`UPDATE session_note_reservations SET reserved_at = ?
-		WHERE session_id = ? AND note_key = ? AND reserved_at < ? AND stored_at IS NULL`),
-		at, sessionID, noteKey, now.Add(-staleAfter).UTC().Format(time.RFC3339))
-	if err != nil {
-		return fail(err)
-	}
-	if reserved, err = affectedOne(res); err != nil {
+	if reserved, err = s.takeStaleNote(ctx, sessionID, noteKey, now, staleAfter); err != nil {
 		return fail(err)
 	}
 	if reserved {
 		return state.ClaimWon, nil
 	}
-	result, err := s.claimNotWon(ctx, `SELECT COALESCE(stored_at, '') FROM session_note_reservations WHERE session_id = ? AND note_key = ?`, sessionID, noteKey)
+	result, err := s.claimNotWon(ctx, state.ClaimSessionNotFound,
+		`SELECT COALESCE(r.stored_at, '') FROM sessions s
+		LEFT JOIN session_note_reservations r ON r.session_id = s.id AND r.note_key = ?
+		WHERE s.id = ?`, noteKey, sessionID)
 	if err != nil {
 		return fail(err)
 	}
 	return result, nil
+}
+
+// ReclaimNote never inserts a reservation, so one its holder freed stays free for that caller's next attempt.
+func (s *SessionStore) ReclaimNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error) {
+	fail := func(err error) (state.ClaimResult, error) {
+		return state.ClaimHeld, fmt.Errorf("reclaim note %q in %q: %w", noteKey, sessionID, err)
+	}
+	reclaimed, err := s.takeStaleNote(ctx, sessionID, noteKey, now, staleAfter)
+	if err != nil {
+		return fail(err)
+	}
+	if reclaimed {
+		return state.ClaimWon, nil
+	}
+	var reserved, stored string
+	err = s.db.SQLDB().QueryRowContext(ctx, s.db.Dialect().Rebind(
+		`SELECT COALESCE(r.reserved_at, ''), COALESCE(r.stored_at, '') FROM sessions s
+		LEFT JOIN session_note_reservations r ON r.session_id = s.id AND r.note_key = ?
+		WHERE s.id = ?`), noteKey, sessionID).Scan(&reserved, &stored)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return state.ClaimSessionNotFound, nil
+	case err != nil:
+		return fail(err)
+	case reserved == "":
+		return state.ClaimNotReserved, nil
+	case stored != "":
+		return state.ClaimSettled, nil
+	default:
+		return state.ClaimHeld, nil
+	}
+}
+
+func (s *SessionStore) takeStaleNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (bool, error) {
+	res, err := s.db.SQLDB().ExecContext(ctx,
+		s.db.Dialect().Rebind(`UPDATE session_note_reservations SET reserved_at = ?
+		WHERE session_id = ? AND note_key = ? AND reserved_at < ? AND stored_at IS NULL`),
+		claimTime(now), sessionID, noteKey, claimTime(now.Add(-staleAfter)))
+	if err != nil {
+		return false, err
+	}
+	return affectedOne(res)
+}
+
+// On Postgres a concurrent store of the note (markClaimStored) and FreeNote's DELETE re-check their WHERE after each other's row lock: never both.
+func (s *SessionStore) FreeNote(ctx context.Context, sessionID, noteKey string, reservedAt time.Time) error {
+	if _, err := s.db.SQLDB().ExecContext(ctx,
+		s.db.Dialect().Rebind(`DELETE FROM session_note_reservations
+		WHERE session_id = ? AND note_key = ? AND reserved_at = ? AND stored_at IS NULL`),
+		sessionID, noteKey, claimTime(reservedAt)); err != nil {
+		return fmt.Errorf("free note %q in %q: %w", noteKey, sessionID, err)
+	}
+	return nil
+}
+
+// claimTimeLayout's fixed width lets the stale cutoff compare as strings; an older core's second-precision time sorts after its second, so it counts fresh up to a second longer.
+const claimTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
+func claimTime(t time.Time) string {
+	return t.UTC().Format(claimTimeLayout)
 }
 
 // affectedOne reports whether a single-row write took effect.
@@ -467,6 +548,7 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	if claimed {
 		metadata = maps.Clone(metadata)
 		delete(metadata, state.ClaimedAtMetadataKey)
+		delete(metadata, state.ClaimOwnerMetadataKey)
 	}
 
 	toolCallsJSON, err := toolCallsAsNullString(msg.ToolCalls)
@@ -500,6 +582,11 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	if err := lockSessionRow(ctx, tx, d, id); err != nil {
 		return fmt.Errorf("add message lock: %w", err)
 	}
+	if claimed && tc.Owner != nil {
+		if err := requireVerifiedOwner(ctx, tx, d, id, *tc.Owner); err != nil {
+			return err
+		}
+	}
 	if claimed {
 		if err := markClaimStored(ctx, tx, d, id, tc, now); err != nil {
 			return err
@@ -527,15 +614,24 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	return tx.Commit()
 }
 
-// markClaimStored marks claim c of session id stored at now, inside the
-// transaction that stores the claimed turn's input. The UPDATE matches only
-// while c is the claim held (its time; claim times are kept at second
-// precision, and a claim is taken over only once it is minutes old) and
-// nothing was stored under it; no match is state.ErrClaimLost. On Postgres a
-// concurrent re-claim of the same row waits for this one and then re-checks
-// its own WHERE, so either the re-claim or this store takes effect, never both.
+// requireVerifiedOwner runs after lockSessionRow, whose row lock keeps SetVerifiedOwner from changing the mark before this write commits.
+func requireVerifiedOwner(ctx context.Context, tx sessionRowLocker, d Dialect, id string, owner state.VerifiedOwner) error {
+	var one int
+	err := tx.QueryRowContext(ctx, d.Rebind(`SELECT 1 FROM sessions
+		WHERE id = ? AND verified_entity_id = ? AND verified_group_id = ? AND verified_channel_id = ?`),
+		id, owner.EntityID, owner.GroupID, owner.ChannelID).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return state.ErrOwnerChanged
+	case err != nil:
+		return fmt.Errorf("add message check owner: %w", err)
+	}
+	return nil
+}
+
+// On Postgres a concurrent re-claim of the row waits for markClaimStored's UPDATE and re-checks its WHERE, so only one of them takes effect.
 func markClaimStored(ctx context.Context, tx ExclusiveTx, d Dialect, id string, c state.TurnClaim, now string) error {
-	at := c.At.UTC().Format(time.RFC3339)
+	at := claimTime(c.At)
 	var res sql.Result
 	var err error
 	if c.NoteKey != "" {

@@ -34,6 +34,8 @@ const (
 	TypeUserMessage = "user_message"
 	TypeLLMRequest  = "llm_request"
 	TypeLLMResponse = "llm_response"
+	// note_stored: a hidden note stored without a turn; no user_message, turn_start or turn_finished comes with it.
+	TypeNoteStored = "note_stored"
 
 	// Planner / orchestrator internals (debug-view or fold-default in UI).
 	TypePlannerInvoked  = "planner_invoked"
@@ -124,6 +126,7 @@ var AllEventTypes = []string{
 	TypeUserMessage,
 	TypeLLMRequest,
 	TypeLLMResponse,
+	TypeNoteStored,
 	TypePlannerInvoked,
 	TypePlannerRequest,
 	TypePlannerResponse,
@@ -349,6 +352,15 @@ type UserMessagePayload struct {
 }
 
 const UserMessageVersion = 1
+
+type NoteStoredPayload struct {
+	Header
+	NoteKey       string `json:"note_key"`
+	Content       string `json:"content"`
+	ContentLength int    `json:"content_length"`
+}
+
+const NoteStoredVersion = 1
 
 // TurnFinishedPayload — emitted once per orchestrator turn, closing the
 // bracket opened by user_message. The orchestrator registers it as a

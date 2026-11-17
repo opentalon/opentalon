@@ -60,8 +60,8 @@ func TestPostgres_OpenAndMigrations(t *testing.T) {
 	if err := db.SQLDB().QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 18 {
-		t.Errorf("schema_version = %d, want 18", v)
+	if v != 19 {
+		t.Errorf("schema_version = %d, want 19", v)
 	}
 }
 
@@ -82,6 +82,80 @@ func TestPostgres_SessionOwner(t *testing.T) {
 }
 func TestPostgres_NoteReservationsGoWithSession(t *testing.T) {
 	checkNoteReservationsGoWithSession(t, pgDB(t))
+}
+func TestPostgres_FreeNote(t *testing.T) {
+	checkFreeNote(t, NewSessionStore(pgDB(t), 0, 0))
+}
+func TestPostgres_ReclaimNote(t *testing.T) {
+	checkReclaimNote(t, NewSessionStore(pgDB(t), 0, 0))
+}
+func TestPostgres_SecondPrecisionClaimTimes(t *testing.T) {
+	checkSecondPrecisionClaimTimes(t, pgDB(t))
+}
+func TestPostgres_VerifiedOwner(t *testing.T) {
+	db := pgDB(t)
+	checkVerifiedOwner(t, NewSessionStore(db, 0, 0), db)
+}
+func TestPostgres_SessionAccount(t *testing.T) {
+	checkSessionAccount(t, NewSessionStore(pgDB(t), 0, 0))
+}
+func TestPostgres_MigrationMarksNoSession(t *testing.T) {
+	checkMigrationMarksNoSession(t, pgDB(t))
+}
+func TestPostgres_ClaimOwner(t *testing.T) {
+	checkClaimOwner(t, NewSessionStore(pgDB(t), 0, 0))
+}
+
+// A note's write that waits for the row lock of a mark in flight is checked against that mark.
+func TestPostgres_ClaimOwnerSeesAMarkWrittenMeanwhile(t *testing.T) {
+	db := pgDB(t)
+	store := NewSessionStore(db, 0, 0)
+	ctx := context.Background()
+	const id = "owner-race"
+	store.Create(state.SessionParams{ID: id, EntityID: "u1", GroupID: "g1", ChannelID: "websocket"})
+	owner := state.VerifiedOwner{EntityID: "u1", GroupID: "g1", ChannelID: "websocket"}
+	if err := store.SetVerifiedOwner(ctx, id, owner); err != nil {
+		t.Fatalf("SetVerifiedOwner: %v", err)
+	}
+	now := time.Now()
+	claimStep(t, "reserve", state.ClaimWon, func() (state.ClaimResult, error) {
+		return store.ReserveNote(ctx, id, "chapter-1", now, time.Minute)
+	})
+
+	mark, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin mark: %v", err)
+	}
+	defer func() { _ = mark.Rollback() }()
+	if _, err := mark.ExecContext(ctx, `UPDATE sessions SET verified_group_id = 'g2' WHERE id = $1`, id); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	note := provider.Message{Role: provider.RoleUser, Content: "chapter note", Visibility: "hidden"}
+	stored := make(chan error, 1)
+	go func() {
+		stored <- store.AddMessageWithMetadata(id, note, state.TurnClaim{NoteKey: "chapter-1", At: now, Owner: &owner}.Metadata())
+	}()
+	select {
+	case err := <-stored:
+		t.Fatalf("the note's write returned (%v) while the mark held the session's row", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := mark.Commit(); err != nil {
+		t.Fatalf("commit mark: %v", err)
+	}
+
+	if err := <-stored; !errors.Is(err, state.ErrOwnerChanged) {
+		t.Errorf("note's write = %v, want ErrOwnerChanged", err)
+	}
+	if n := countContent(t, store, id, "chapter note"); n != 0 {
+		t.Errorf("note stored %d times, want none", n)
+	}
+	if err := store.FreeNote(ctx, id, "chapter-1", now); err != nil {
+		t.Fatalf("FreeNote: %v", err)
+	}
+	claimStep(t, "the refused note's key after its free", state.ClaimWon, func() (state.ClaimResult, error) {
+		return store.ReserveNote(ctx, id, "chapter-1", now.Add(time.Second), time.Minute)
+	})
 }
 
 // TestPostgres_PruneKeepsASessionWrittenMeanwhile: an idle session that another
@@ -141,10 +215,7 @@ func TestPostgres_PruneKeepsASessionWrittenMeanwhile(t *testing.T) {
 	}
 }
 
-// TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept: a note reserved
-// while the prune deletes its session (a recovery firing during another pod's
-// start) waits for the prune and answers settled; no reservation outlives the
-// session, where no later prune would find it.
+// A note reserved while the prune deletes its session waits for the prune and answers not found: no reservation outlives its session.
 func TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept(t *testing.T) {
 	db := pgDB(t)
 	store := NewSessionStore(db, 0, 1)
@@ -184,8 +255,8 @@ func TestPostgres_NoteReservedWhileItsSessionIsPrunedIsNotKept(t *testing.T) {
 		t.Fatalf("commit prune: %v", err)
 	}
 
-	if r := <-done; r.err != nil || r.result != state.ClaimSettled {
-		t.Errorf("ReserveNote = %v, %v; want settled for a pruned session", r.result, r.err)
+	if r := <-done; r.err != nil || r.result != state.ClaimSessionNotFound {
+		t.Errorf("ReserveNote = %v, %v; want not found for a pruned session", r.result, r.err)
 	}
 	if n := countNoteReservations(t, db, "idle"); n != 0 {
 		t.Errorf("reservations = %d, want none left behind the pruned session", n)

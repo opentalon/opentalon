@@ -50,10 +50,14 @@ type HandlerConfig struct {
 	// ok=false means nothing is pending. Read-only — it MUST NOT consume or
 	// mutate pending state. nil disables confirmation re-emit on resume.
 	PendingConfirmation func(sessionKey string) (content string, metadata map[string]string, ok bool)
+	// SetVerifiedOwner nil sets no mark, so no note reaches an ordinary session.
+	SetVerifiedOwner func(ctx context.Context, sessionKey string, owner state.VerifiedOwner) error
 	// Opener is the store side of an open-session message
 	// (pkg.OpenSessionMetadataKey): create-or-find, first-turn claim and note
 	// reservation. Required.
 	Opener SessionOpener
+	// StoreNote's ctx bounds its wait for the session's turn, not the write.
+	StoreNote func(ctx context.Context, sessionID, content string, claim state.TurnClaim) error
 	// SendToConversation delivers a frame to a channel's conversation. The
 	// open-session path answers its caller and delivers its turn through it,
 	// because the session it opens or continues need not be the inbound
@@ -65,7 +69,7 @@ type HandlerConfig struct {
 // Verifier is non-nil), runs channel-specific content preparer (if registered), then runs the
 // message through the Runner and returns the response.
 //
-// Panics at construction if ResumeSession, CreateSession, Runner, Opener or
+// Panics at construction if ResumeSession, CreateSession, Runner, Opener, StoreNote or
 // SendToConversation is nil: these are required for the strict-session
 // contract and a missing one is a boot-time misconfiguration that must
 // surface immediately rather than as a nil-deref under load. Verifier and
@@ -83,12 +87,16 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 	if cfg.Opener == nil {
 		panic("channel.NewMessageHandler: Opener is required")
 	}
+	if cfg.StoreNote == nil {
+		panic("channel.NewMessageHandler: StoreNote is required")
+	}
 	if cfg.SendToConversation == nil {
 		panic("channel.NewMessageHandler: SendToConversation is required")
 	}
 	opens := newOpenSessions(cfg)
 	return func(ctx context.Context, sessionKey string, msg pkg.InboundMessage) (pkg.OutboundMessage, error) {
 		var entityID, groupID string
+		var mark *state.VerifiedOwner
 
 		// Inbound enrichment is fail-closed: if the channel adapter
 		// couldn't fetch the data the WhoAmI server (or LLM) is going
@@ -163,6 +171,9 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			groupID = p.Group
 			interactionKind = p.Kind
 			systemSource = p.SystemSource
+			if p.Kind == profile.KindChat {
+				mark = &state.VerifiedOwner{EntityID: p.EntityID, GroupID: p.Group, ChannelID: msg.ChannelID}
+			}
 			sessionKey = p.EntityID + ":" + sessionKey
 			// Use entity ID as actor for memory scoping and permission checks.
 			ctx = actor.WithActor(ctx, p.EntityID)
@@ -279,6 +290,14 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 			return pkg.OutboundMessage{}, nil
 		}
 
+		// Marked before the turn runs, so a note reaches the session during it; a mark that fails does not stop the turn.
+		if mark != nil && cfg.SetVerifiedOwner != nil {
+			if err := cfg.SetVerifiedOwner(ctx, sessionKey, *mark); err != nil {
+				logger.FromContext(ctx).Warn("verified owner mark not set", "session", sessionKey,
+					"channel", msg.ChannelID, "entity_id", entityID, "group_id", groupID, "error", err)
+			}
+		}
+
 		content := msg.Content
 		// Content preparers register by channel KIND ("slack", "console")
 		// not by instance. Two Slack bots in one process share the same
@@ -299,7 +318,7 @@ func runTurn(ctx context.Context, cfg HandlerConfig, sessionKey, content string,
 	if err != nil {
 		// A run whose claim another run took over did not fail: its caller
 		// logs the takeover (see openSessions.run).
-		if !errors.Is(err, state.ErrClaimLost) {
+		if !errors.Is(err, state.ErrClaimLost) && !errors.Is(err, state.ErrOwnerChanged) {
 			logger.FromContext(ctx).Error("handler run failed", "error", err)
 		}
 		errText, errCode := friendlyError(err)

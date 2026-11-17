@@ -108,3 +108,36 @@ func TestStrip_PlainConversationUntouched(t *testing.T) {
 		}
 	}
 }
+
+// Hidden notes between a prompt and its reply stay where they are; the resolved exchange is still dropped.
+func TestStrip_HiddenNotesBetweenPromptAndReply(t *testing.T) {
+	request := provider.Message{Role: provider.RoleUser, Content: "Delete the old drill"}
+	prompt := provider.Message{Role: provider.RoleAssistant, Content: "This will delete 'Drill 5'. Proceed?", PromptType: provider.PromptTypeToolConfirmation}
+	note := provider.Message{Role: provider.RoleUser, Visibility: provider.VisibilityHidden, Content: "[context] the walkthrough created Drill 7"}
+	later := provider.Message{Role: provider.RoleUser, Visibility: provider.VisibilityHidden, Content: "[context] the job finished"}
+	reply := provider.Message{Role: provider.RoleUser, Content: "approve", PromptType: provider.PromptTypeConfirmationResponse}
+	amend := provider.Message{Role: provider.RoleUser, Content: "no — I meant Drill 7"}
+	call := provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "c1", Name: "items__delete"}}}
+	result := provider.Message{Role: provider.RoleTool, Content: "Deleted Drill 5", ToolCallID: "c1"}
+
+	for _, tc := range []struct {
+		name string
+		msgs []provider.Message
+		want []provider.Message
+	}{
+		{"answered", []provider.Message{request, prompt, note, later, reply, call, result}, []provider.Message{request, note, later, call, result}},
+		{"amended", []provider.Message{request, prompt, note, amend}, []provider.Message{request, prompt, note, amend}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripApprovedConfirmationExchanges(tc.msgs)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d messages, want %d: %+v", len(got), len(tc.want), got)
+			}
+			for i := range tc.want {
+				if got[i].Content != tc.want[i].Content || got[i].Role != tc.want[i].Role {
+					t.Errorf("message %d = %+v, want %+v", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}

@@ -498,8 +498,11 @@ type claimStore interface {
 	OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error)
 	ClaimOpener(ctx context.Context, sessionID string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
 	ReserveNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
+	ReclaimNote(ctx context.Context, sessionID, noteKey string, now time.Time, staleAfter time.Duration) (state.ClaimResult, error)
+	FreeNote(ctx context.Context, sessionID, noteKey string, reservedAt time.Time) error
 	AddMessage(id string, msg provider.Message) error
 	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
+	SetSummary(id string, summary string, messages []provider.Message) error
 	ClearMessages(id string) error
 }
 
@@ -615,14 +618,7 @@ func checkClaimOpener(t *testing.T, store claimStore) {
 	claimStep(t, "unknown session", state.ClaimSettled, claimAt("no-such-session", now))
 }
 
-// checkReserveNote: of concurrent reservations for one key exactly one wins; a
-// fresh reservation refuses; another key or another session reserves on its
-// own; a stale reservation is won again while its note was not stored under
-// it (other messages, other keys' notes do not count); the note is stored only
-// under the reservation held, once; once it is stored the key is refused for
-// good, also after the transcript is cleared; a note key without its
-// reservation is no note. With a db, the note's key is on its row and a second
-// note with that key is refused.
+// checkReserveNote: once a note is stored its key is refused for good, also after the transcript is summarised, cleared or trimmed.
 func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	t.Helper()
 	for _, id := range []string{"note-s1", "note-s2"} {
@@ -642,7 +638,7 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	claimStep(t, "fresh reservation stands", state.ClaimHeld, reserveAt("note-s1", "chapter-1", now.Add(30*time.Second)))
 	claimStep(t, "another key", state.ClaimWon, reserveAt("note-s1", "chapter-2", now))
 	claimStep(t, "another session", state.ClaimWon, reserveAt("note-s2", "chapter-1", now))
-	claimStep(t, "no such session", state.ClaimSettled, reserveAt("note-gone", "chapter-1", now))
+	claimStep(t, "no such session", state.ClaimSessionNotFound, reserveAt("note-gone", "chapter-1", now))
 
 	if err := store.AddMessage("note-s1", provider.Message{Role: provider.RoleUser, Content: "opener", Visibility: "hidden"}); err != nil {
 		t.Fatalf("AddMessage opener: %v", err)
@@ -660,6 +656,10 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 		t.Errorf("note stored %d times, want once", n)
 	}
 	claimStep(t, "stale, note stored", state.ClaimSettled, reserveAt("note-s1", "chapter-1", now.Add(10*time.Minute)))
+	if err := store.SetSummary("note-s1", "summary", []provider.Message{note}); err != nil {
+		t.Fatalf("SetSummary: %v", err)
+	}
+	claimStep(t, "stale, transcript summarised", state.ClaimSettled, reserveAt("note-s1", "chapter-1", now.Add(15*time.Minute)))
 	if err := store.ClearMessages("note-s1"); err != nil {
 		t.Fatalf("ClearMessages: %v", err)
 	}
@@ -687,6 +687,14 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 	if err := store.AddMessageWithMetadata("note-s2", note, state.TurnClaim{NoteKey: "chapter-1", At: now}.Metadata()); err == nil {
 		t.Error("a second note with the same key was stored, want it refused")
 	}
+	trimmed := NewSessionStore(db, 1, 0)
+	if err := trimmed.AddMessage("note-s2", provider.Message{Role: provider.RoleUser, Content: "a later turn"}); err != nil {
+		t.Fatalf("AddMessage with the trim: %v", err)
+	}
+	if n := countContent(t, store, "note-s2", "chapter note"); n != 0 {
+		t.Fatalf("note rows after the trim = %d, want 0", n)
+	}
+	claimStep(t, "stale, note's row trimmed", state.ClaimSettled, reserveAt("note-s2", "chapter-1", now.Add(10*time.Minute)))
 }
 
 func countNoteReservations(t *testing.T, db *DB, sid string) int {
@@ -729,6 +737,349 @@ func checkNoteReservationsGoWithSession(t *testing.T, db *DB) {
 		}
 		if got := countNoteReservations(t, db, tc.sid); got != 0 {
 			t.Errorf("%s: reservations left = %d, want 0", tc.name, got)
+		}
+	}
+}
+
+// checkFreeNote reserves the key again within the freed claim's second, so the claim times differ below a second.
+func checkFreeNote(t *testing.T, store claimStore) {
+	t.Helper()
+	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "free-s1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-free"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	now := time.Now().Truncate(time.Second).Add(100 * time.Millisecond)
+	again := now.Add(100 * time.Millisecond)
+	const stale = time.Minute
+	reserveAt := func(key string, at time.Time) func() (state.ClaimResult, error) {
+		return func() (state.ClaimResult, error) {
+			return store.ReserveNote(context.Background(), "free-s1", key, at, stale)
+		}
+	}
+	free := func(step, key string, at time.Time) {
+		t.Helper()
+		if err := store.FreeNote(context.Background(), "free-s1", key, at); err != nil {
+			t.Fatalf("%s: FreeNote: %v", step, err)
+		}
+	}
+	noteOf := func(key string) provider.Message {
+		return provider.Message{Role: provider.RoleUser, Content: "note " + key, Visibility: "hidden"}
+	}
+	for _, key := range []string{"freed", "freed-stored", "other", "retaken", "stored"} {
+		claimStep(t, "reserve "+key, state.ClaimWon, reserveAt(key, now))
+	}
+
+	free("own unstored reservation", "freed", now)
+	storeStep(t, "note under the freed reservation", store, "free-s1", noteOf("freed"), state.TurnClaim{NoteKey: "freed", At: now}.Metadata(), state.ErrClaimLost)
+	claimStep(t, "same call again after the free", state.ClaimWon, reserveAt("freed", again))
+	free("the freed claim once more, after the key was reserved again", "freed", now)
+	claimStep(t, "new reservation after the freed claim's free", state.ClaimHeld, reserveAt("freed", again.Add(30*time.Second)))
+	storeStep(t, "note under the new reservation", store, "free-s1", noteOf("freed"), state.TurnClaim{NoteKey: "freed", At: again}.Metadata(), nil)
+	claimStep(t, "another key after the free", state.ClaimHeld, reserveAt("other", now.Add(30*time.Second)))
+
+	free("own unstored reservation", "freed-stored", now)
+	claimStep(t, "reserve again after the free", state.ClaimWon, reserveAt("freed-stored", again))
+	storeStep(t, "note under the freed claim, after the key was reserved again", store, "free-s1", noteOf("freed-stored"), state.TurnClaim{NoteKey: "freed-stored", At: now}.Metadata(), state.ErrClaimLost)
+	if n := countContent(t, store, "free-s1", "note freed-stored"); n != 0 {
+		t.Errorf("note under the freed claim stored %d times, want none", n)
+	}
+	storeStep(t, "note under the reservation taken after the free", store, "free-s1", noteOf("freed-stored"), state.TurnClaim{NoteKey: "freed-stored", At: again}.Metadata(), nil)
+
+	retaken := now.Add(2 * time.Minute)
+	claimStep(t, "stale reservation re-claimed", state.ClaimWon, reserveAt("retaken", retaken))
+	free("the re-claimed reservation, by its earlier claim time", "retaken", now)
+	claimStep(t, "re-claimed reservation after the stale free", state.ClaimHeld, reserveAt("retaken", retaken.Add(30*time.Second)))
+	storeStep(t, "note under the re-claimed reservation", store, "free-s1", noteOf("retaken"), state.TurnClaim{NoteKey: "retaken", At: retaken}.Metadata(), nil)
+
+	storeStep(t, "note under its reservation", store, "free-s1", noteOf("stored"), state.TurnClaim{NoteKey: "stored", At: now}.Metadata(), nil)
+	free("a stored reservation", "stored", now)
+	claimStep(t, "stored reservation after the free", state.ClaimSettled, reserveAt("stored", now.Add(10*time.Minute)))
+
+	for _, key := range []string{"freed", "freed-stored", "retaken", "stored"} {
+		if n := countContent(t, store, "free-s1", "note "+key); n != 1 {
+			t.Errorf("note %s stored %d times, want once", key, n)
+		}
+	}
+	free("a key never reserved", "never", now)
+	if err := store.FreeNote(context.Background(), "no-such-session", "freed", now); err != nil {
+		t.Errorf("FreeNote in a missing session: %v, want no error", err)
+	}
+}
+
+// checkReclaimNote: a take-over never reserves a key anew, so a key its holder freed stays free.
+func checkReclaimNote(t *testing.T, store claimStore) {
+	t.Helper()
+	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "reclaim-s1", EntityID: "user-1", OpenedBy: "origin-a", OpenKey: "event-reclaim"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	now := time.Now().Truncate(time.Second).Add(100 * time.Millisecond)
+	stale := now.Add(2 * time.Minute)
+	const staleAfter = time.Minute
+	reserveAt := func(key string, at time.Time) func() (state.ClaimResult, error) {
+		return func() (state.ClaimResult, error) {
+			return store.ReserveNote(context.Background(), "reclaim-s1", key, at, staleAfter)
+		}
+	}
+	reclaimAt := func(sid, key string, at time.Time) func() (state.ClaimResult, error) {
+		return func() (state.ClaimResult, error) {
+			return store.ReclaimNote(context.Background(), sid, key, at, staleAfter)
+		}
+	}
+	noteOf := func(key string) provider.Message {
+		return provider.Message{Role: provider.RoleUser, Content: "note " + key, Visibility: "hidden"}
+	}
+	for _, key := range []string{"fresh", "stale", "freed", "contended"} {
+		claimStep(t, "reserve "+key, state.ClaimWon, reserveAt(key, now))
+	}
+
+	claimStep(t, "a key never reserved", state.ClaimNotReserved, reclaimAt("reclaim-s1", "never", stale))
+	claimStep(t, "the key never reserved, reserved after the take-over", state.ClaimWon, reserveAt("never", stale))
+	claimStep(t, "fresh reservation", state.ClaimHeld, reclaimAt("reclaim-s1", "fresh", now.Add(30*time.Second)))
+
+	claimStep(t, "stale reservation", state.ClaimWon, reclaimAt("reclaim-s1", "stale", stale))
+	storeStep(t, "note under the claim taken over", store, "reclaim-s1", noteOf("stale"), state.TurnClaim{NoteKey: "stale", At: now}.Metadata(), state.ErrClaimLost)
+	storeStep(t, "note under the take-over", store, "reclaim-s1", noteOf("stale"), state.TurnClaim{NoteKey: "stale", At: stale}.Metadata(), nil)
+	claimStep(t, "stale, note stored", state.ClaimSettled, reclaimAt("reclaim-s1", "stale", now.Add(10*time.Minute)))
+
+	if err := store.FreeNote(context.Background(), "reclaim-s1", "freed", now); err != nil {
+		t.Fatalf("FreeNote: %v", err)
+	}
+	claimStep(t, "freed reservation", state.ClaimNotReserved, reclaimAt("reclaim-s1", "freed", stale))
+	claimStep(t, "the freed key, reserved by its caller's next attempt", state.ClaimWon, reserveAt("freed", stale))
+
+	if winners := concurrentWinners(t, 8, reclaimAt("reclaim-s1", "contended", stale)); winners != 1 {
+		t.Errorf("concurrent take-over winners = %d, want exactly 1", winners)
+	}
+	claimStep(t, "no such session", state.ClaimSessionNotFound, reclaimAt("reclaim-gone", "fresh", stale))
+
+	for key, want := range map[string]int{"stale": 1, "freed": 0, "never": 0} {
+		if n := countContent(t, store, "reclaim-s1", "note "+key); n != want {
+			t.Errorf("note %s stored %d times, want %d", key, n, want)
+		}
+	}
+}
+
+// checkSecondPrecisionClaimTimes: a claim an older core wrote at second precision goes stale only once the cutoff is in a later second.
+func checkSecondPrecisionClaimTimes(t *testing.T, db *DB) {
+	t.Helper()
+	store := NewSessionStore(db, 0, 0)
+	const stale = time.Minute
+	claimed := time.Now().Add(-time.Hour).Truncate(time.Second)
+	at := claimed.UTC().Format(time.RFC3339)
+	store.Create(state.SessionParams{ID: "older-s1", EntityID: "user-1"})
+	for _, q := range []string{
+		`UPDATE sessions SET opener_claimed_at = ? WHERE id = 'older-s1'`,
+		`INSERT INTO session_note_reservations (session_id, note_key, reserved_at) VALUES ('older-s1', 'chapter-1', ?)`,
+	} {
+		if _, err := db.SQLDB().Exec(db.Dialect().Rebind(q), at); err != nil {
+			t.Fatalf("write a claim time at second precision: %v", err)
+		}
+	}
+	for _, claim := range []struct {
+		kind string
+		at   func(now time.Time) func() (state.ClaimResult, error)
+	}{
+		{"opener claim", func(now time.Time) func() (state.ClaimResult, error) {
+			return func() (state.ClaimResult, error) {
+				return store.ClaimOpener(context.Background(), "older-s1", now, stale)
+			}
+		}},
+		{"note reservation", func(now time.Time) func() (state.ClaimResult, error) {
+			return func() (state.ClaimResult, error) {
+				return store.ReserveNote(context.Background(), "older-s1", "chapter-1", now, stale)
+			}
+		}},
+	} {
+		claimStep(t, claim.kind+", cutoff in the second before", state.ClaimHeld, claim.at(claimed.Add(stale-500*time.Millisecond)))
+		claimStep(t, claim.kind+", cutoff within the claim's second", state.ClaimHeld, claim.at(claimed.Add(stale+500*time.Millisecond)))
+		claimStep(t, claim.kind+", cutoff in the second after", state.ClaimWon, claim.at(claimed.Add(stale+time.Second)))
+	}
+}
+
+type identityStore interface {
+	Create(p state.SessionParams) *state.Session
+	OpenSession(ctx context.Context, p state.SessionParams) (*state.Session, bool, error)
+	Get(id string) (*state.Session, error)
+	Identity(ctx context.Context, id string) (*state.Session, error)
+	SetVerifiedOwner(ctx context.Context, id string, owner state.VerifiedOwner) error
+}
+
+func identityOf(t *testing.T, store identityStore, id string) *state.Session {
+	t.Helper()
+	sess, err := store.Identity(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Identity(%s): %v", id, err)
+	}
+	return sess
+}
+
+// checkVerifiedOwner: with a db, updated_at is moved a day back first, as the store keeps it at second precision.
+func checkVerifiedOwner(t *testing.T, store identityStore, db *DB) {
+	t.Helper()
+	ctx := context.Background()
+	created := store.Create(state.SessionParams{ID: "u1:websocket:c1", EntityID: "u1", GroupID: "g1"})
+	if created.VerifiedOwner != nil {
+		t.Errorf("Create answered mark %+v, want none", created.VerifiedOwner)
+	}
+	if db != nil {
+		if _, err := db.SQLDB().Exec(db.Dialect().Rebind(`UPDATE sessions SET updated_at = ? WHERE id = ?`),
+			time.Now().AddDate(0, 0, -1).UTC().Format(time.RFC3339), "u1:websocket:c1"); err != nil {
+			t.Fatalf("move updated_at back: %v", err)
+		}
+	}
+	if _, _, err := store.OpenSession(ctx, state.SessionParams{ID: "u1:websocket:o1", EntityID: "u1", GroupID: "g1", ChannelID: "websocket", OpenedBy: "origin-a", OpenKey: "event-mark"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	for _, id := range []string{"u1:websocket:c1", "u1:websocket:o1"} {
+		if mark := identityOf(t, store, id).VerifiedOwner; mark != nil {
+			t.Errorf("Identity(%s) mark = %+v before it is set, want none", id, mark)
+		}
+	}
+
+	before, err := store.Get("u1:websocket:c1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	updatedAt := before.UpdatedAt
+	owner := state.VerifiedOwner{EntityID: "u1", GroupID: "g1", ChannelID: "websocket"}
+	for i := range 2 {
+		if err := store.SetVerifiedOwner(ctx, "u1:websocket:c1", owner); err != nil {
+			t.Fatalf("SetVerifiedOwner #%d: %v", i+1, err)
+		}
+		if mark := identityOf(t, store, "u1:websocket:c1").VerifiedOwner; mark == nil || *mark != owner {
+			t.Errorf("Identity mark after set #%d = %+v, want %+v", i+1, mark, owner)
+		}
+	}
+	after, err := store.Get("u1:websocket:c1")
+	if err != nil {
+		t.Fatalf("Get after the mark: %v", err)
+	}
+	if after.VerifiedOwner == nil || *after.VerifiedOwner != owner {
+		t.Errorf("Get mark = %+v, want %+v", after.VerifiedOwner, owner)
+	}
+	if !after.UpdatedAt.Equal(updatedAt) {
+		t.Errorf("UpdatedAt moved from %v to %v, want the mark to change nothing else", updatedAt, after.UpdatedAt)
+	}
+	if mark := identityOf(t, store, "u1:websocket:o1").VerifiedOwner; mark != nil {
+		t.Errorf("Identity of the other session = %+v, want no mark", mark)
+	}
+
+	later := state.VerifiedOwner{EntityID: "u1", GroupID: "g2", ChannelID: "websocket"}
+	if err := store.SetVerifiedOwner(ctx, "u1:websocket:c1", later); err != nil {
+		t.Fatalf("SetVerifiedOwner later: %v", err)
+	}
+	if mark := identityOf(t, store, "u1:websocket:c1").VerifiedOwner; mark == nil || *mark != later {
+		t.Errorf("Identity mark after a later owner = %+v, want %+v", mark, later)
+	}
+	if err := store.SetVerifiedOwner(ctx, "no-such-session", owner); !errors.Is(err, state.ErrSessionNotFound) {
+		t.Errorf("SetVerifiedOwner on a missing session: err = %v, want ErrSessionNotFound", err)
+	}
+}
+
+type ownerClaimStore interface {
+	claimStore
+	Create(p state.SessionParams) *state.Session
+	SetVerifiedOwner(ctx context.Context, id string, owner state.VerifiedOwner) error
+}
+
+// checkClaimOwner: a claim with an Owner is stored only while the session's mark is that owner.
+func checkClaimOwner(t *testing.T, store ownerClaimStore) {
+	t.Helper()
+	ctx := context.Background()
+	const id = "owner-s1"
+	store.Create(state.SessionParams{ID: id, EntityID: "u1", GroupID: "g1", ChannelID: "websocket"})
+	owner := state.VerifiedOwner{EntityID: "u1", GroupID: "g1", ChannelID: "websocket"}
+	now := time.Now()
+	reserveAt := func(key string, at time.Time) func() (state.ClaimResult, error) {
+		return func() (state.ClaimResult, error) { return store.ReserveNote(ctx, id, key, at, time.Minute) }
+	}
+	noteOf := func(key string) provider.Message {
+		return provider.Message{Role: provider.RoleUser, Content: "note " + key, Visibility: "hidden"}
+	}
+	claimOf := func(key string, owner *state.VerifiedOwner) map[string]string {
+		return state.TurnClaim{NoteKey: key, At: now, Owner: owner}.Metadata()
+	}
+	for _, key := range []string{"unmarked", "marked", "remarked"} {
+		claimStep(t, "reserve "+key, state.ClaimWon, reserveAt(key, now))
+	}
+
+	storeStep(t, "note while the session carries no mark", store, id, noteOf("unmarked"), claimOf("unmarked", &owner), state.ErrOwnerChanged)
+	if err := store.FreeNote(ctx, id, "unmarked", now); err != nil {
+		t.Fatalf("FreeNote: %v", err)
+	}
+	claimStep(t, "the refused note's key after its free", state.ClaimWon, reserveAt("unmarked", now.Add(time.Second)))
+
+	if err := store.SetVerifiedOwner(ctx, id, owner); err != nil {
+		t.Fatalf("SetVerifiedOwner: %v", err)
+	}
+	storeStep(t, "note while the session carries its owner", store, id, noteOf("marked"), claimOf("marked", &owner), nil)
+
+	if err := store.SetVerifiedOwner(ctx, id, state.VerifiedOwner{EntityID: "u1", GroupID: "g2", ChannelID: "websocket"}); err != nil {
+		t.Fatalf("SetVerifiedOwner later: %v", err)
+	}
+	storeStep(t, "note after another owner's mark", store, id, noteOf("remarked"), claimOf("remarked", &owner), state.ErrOwnerChanged)
+	storeStep(t, "note without an owner under the refused note's reservation", store, id, noteOf("remarked"), claimOf("remarked", nil), nil)
+
+	for key, want := range map[string]int{"unmarked": 0, "marked": 1, "remarked": 1} {
+		if n := countContent(t, store, id, "note "+key); n != want {
+			t.Errorf("note %s stored %d times, want %d", key, n, want)
+		}
+	}
+	if err := store.AddMessageWithMetadata(id, noteOf("bare"), map[string]string{state.ClaimOwnerMetadataKey: `{}`}); err == nil {
+		t.Error("an owner condition without a claim was stored, want an error")
+	}
+}
+
+func checkSessionAccount(t *testing.T, store identityStore) {
+	t.Helper()
+	store.Create(state.SessionParams{ID: "acct-created", EntityID: "u1", GroupID: "g1"})
+	store.Create(state.SessionParams{ID: "acct-none", EntityID: "u1"})
+	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "acct-opened", EntityID: "u1", GroupID: "g2", ChannelID: "websocket", OpenedBy: "origin-a", OpenKey: "event-acct"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	for id, want := range map[string]string{"acct-created": "g1", "acct-none": "", "acct-opened": "g2"} {
+		if got := identityOf(t, store, id).GroupID; got != want {
+			t.Errorf("Identity(%s) account = %q, want %q", id, got, want)
+		}
+	}
+}
+
+// checkMigrationMarksNoSession: migration 019 marks no existing session, also none whose owner a backfill derived from its key.
+func checkMigrationMarksNoSession(t *testing.T, db *DB) {
+	t.Helper()
+	store := NewSessionStore(db, 0, 0)
+	store.Create(state.SessionParams{ID: "u1:websocket:c1", EntityID: "u1", GroupID: "g1"})
+	store.Create(state.SessionParams{ID: "websocket:c1:t1", EntityID: "websocket"})
+	if _, _, err := store.OpenSession(context.Background(), state.SessionParams{ID: "u1:websocket:o1", EntityID: "u1", GroupID: "g1", ChannelID: "websocket", OpenedBy: "origin-a", OpenKey: "event-019"}); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	for _, q := range []string{
+		`ALTER TABLE sessions DROP COLUMN verified_entity_id`,
+		`ALTER TABLE sessions DROP COLUMN verified_group_id`,
+		`ALTER TABLE sessions DROP COLUMN verified_channel_id`,
+		`DELETE FROM schema_version`,
+		`INSERT INTO schema_version (version) VALUES (18)`,
+	} {
+		if _, err := db.SQLDB().Exec(q); err != nil {
+			t.Fatalf("set the schema back to 18: %s: %v", q, err)
+		}
+	}
+	if err := db.runMigrations(); err != nil {
+		t.Fatalf("apply 019: %v", err)
+	}
+	if v, err := db.currentVersion(); err != nil || v != 19 {
+		t.Fatalf("schema_version = %d (%v), want 19", v, err)
+	}
+	var marked int
+	if err := db.SQLDB().QueryRow(`SELECT COUNT(*) FROM sessions
+		WHERE verified_entity_id IS NOT NULL OR verified_group_id IS NOT NULL OR verified_channel_id IS NOT NULL`).Scan(&marked); err != nil {
+		t.Fatalf("count marked sessions: %v", err)
+	}
+	if marked != 0 {
+		t.Errorf("sessions with a mark after 019 = %d, want 0", marked)
+	}
+	for _, id := range []string{"u1:websocket:c1", "websocket:c1:t1", "u1:websocket:o1"} {
+		if mark := identityOf(t, store, id).VerifiedOwner; mark != nil {
+			t.Errorf("Identity(%s) mark = %+v after 019, want none", id, mark)
 		}
 	}
 }
@@ -839,6 +1190,79 @@ func TestInMemorySessionStore_DeleteForgetsOpenedSession(t *testing.T) {
 
 func TestSessionStore_NoteReservationsGoWithSession(t *testing.T) {
 	checkNoteReservationsGoWithSession(t, openTestDB(t))
+}
+
+func TestSessionStore_FreeNote(t *testing.T) {
+	checkFreeNote(t, NewSessionStore(openTestDB(t), 0, 0))
+}
+
+func TestInMemorySessionStore_FreeNote(t *testing.T) {
+	checkFreeNote(t, state.NewSessionStore(""))
+}
+
+func TestSessionStore_ReclaimNote(t *testing.T) {
+	checkReclaimNote(t, NewSessionStore(openTestDB(t), 0, 0))
+}
+
+func TestInMemorySessionStore_ReclaimNote(t *testing.T) {
+	checkReclaimNote(t, state.NewSessionStore(""))
+}
+
+func TestSessionStore_SecondPrecisionClaimTimes(t *testing.T) {
+	checkSecondPrecisionClaimTimes(t, openTestDB(t))
+}
+
+// Claim times sort as text in time order, whole seconds and fractions alike, in any zone the caller's clock reads.
+func TestClaimTimeSortsInTimeOrder(t *testing.T) {
+	second := time.Date(2026, 11, 16, 12, 0, 5, 0, time.UTC)
+	times := []time.Time{
+		second.Add(-time.Nanosecond),
+		second,
+		second.Add(time.Nanosecond),
+		second.Add(100 * time.Millisecond),
+		second.Add(450 * time.Millisecond),
+		second.Add(500 * time.Millisecond).In(time.FixedZone("east", 2*60*60)),
+		second.Add(time.Second - time.Nanosecond),
+		second.Add(time.Second),
+	}
+	for i := 1; i < len(times); i++ {
+		before, after := claimTime(times[i-1]), claimTime(times[i])
+		if len(before) != len(after) {
+			t.Errorf("claim times %q and %q differ in width", before, after)
+		}
+		if before >= after {
+			t.Errorf("claim time %q sorts at or after %q, want before", before, after)
+		}
+	}
+}
+
+func TestSessionStore_VerifiedOwner(t *testing.T) {
+	db := openTestDB(t)
+	checkVerifiedOwner(t, NewSessionStore(db, 0, 0), db)
+}
+
+func TestInMemorySessionStore_VerifiedOwner(t *testing.T) {
+	checkVerifiedOwner(t, state.NewSessionStore(""), nil)
+}
+
+func TestSessionStore_ClaimOwner(t *testing.T) {
+	checkClaimOwner(t, NewSessionStore(openTestDB(t), 0, 0))
+}
+
+func TestInMemorySessionStore_ClaimOwner(t *testing.T) {
+	checkClaimOwner(t, state.NewSessionStore(""))
+}
+
+func TestSessionStore_SessionAccount(t *testing.T) {
+	checkSessionAccount(t, NewSessionStore(openTestDB(t), 0, 0))
+}
+
+func TestInMemorySessionStore_SessionAccount(t *testing.T) {
+	checkSessionAccount(t, state.NewSessionStore(""))
+}
+
+func TestSessionStore_MigrationMarksNoSession(t *testing.T) {
+	checkMigrationMarksNoSession(t, openTestDB(t))
 }
 
 // A persistence failure answers an error: no session (never a transient one),

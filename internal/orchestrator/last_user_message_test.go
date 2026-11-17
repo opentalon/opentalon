@@ -100,7 +100,7 @@ type lumHarness struct {
 	llm      *lumLLM
 	exec     *recordingExecutor
 	sink     *recordingEventSink
-	sessions *state.SessionStore
+	sessions SessionStoreInterface
 	orch     *Orchestrator
 }
 

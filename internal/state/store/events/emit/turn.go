@@ -64,6 +64,16 @@ func EmitUserMessage(ctx context.Context, sink Sink, content string) string {
 	}, 0)
 }
 
+func EmitNoteStored(ctx context.Context, sink Sink, noteKey, content string) string {
+	sanitized := events.SanitizeUTF8(content)
+	return send(ctx, sink, events.TypeNoteStored, events.NoteStoredPayload{
+		Header:        events.Header{V: events.NoteStoredVersion},
+		NoteKey:       noteKey,
+		Content:       sanitized,
+		ContentLength: len(sanitized),
+	}, 0)
+}
+
 // TurnFinishedArgs is the terminal snapshot of one orchestrator turn. See
 // events.TurnFinishedPayload for the field semantics; the orchestrator
 // derives these from the RunResult on every Run return path.
