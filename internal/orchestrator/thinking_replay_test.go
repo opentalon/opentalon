@@ -77,6 +77,57 @@ func TestRun_ThinkingRidesOnFirstToolCallMessage(t *testing.T) {
 	}
 }
 
+// One response with text and two tool calls is stored as one assistant
+// message per call, and only the first carries the text: the transcript and
+// the next request hold it once, not once per call.
+func TestRun_ResponseTextRidesOnFirstToolCallMessage(t *testing.T) {
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "p", Description: "text fixtures",
+		Actions: []Action{
+			{Name: "read_a", Description: "First read.", ReadOnly: true, AlwaysInclude: true},
+			{Name: "read_b", Description: "Second read.", ReadOnly: true, AlwaysInclude: true},
+		},
+	}, &countingExecutor{}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "s1"})
+	llm := &scriptedNativeLLM{rounds: []provider.CompletionResponse{
+		{Content: "Checking both.", ToolCalls: []provider.ToolCall{
+			{ID: "c-a", Name: "p__read_a", Arguments: map[string]string{}},
+			{ID: "c-b", Name: "p__read_b", Arguments: map[string]string{}},
+		}},
+		{Content: "Done."},
+	}}
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
+		state.NewMemoryStore(""), sessions, OrchestratorOpts{InjectionStateStore: &fakeInjectionStateStore{}})
+
+	if _, err := orch.Run(actor.WithSessionID(context.Background(), "s1"), "s1", "read both"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	s, err := sessions.Get("s1")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	var got []string
+	for _, m := range s.Messages {
+		if m.Role != provider.RoleAssistant {
+			continue
+		}
+		key := "answer"
+		if len(m.ToolCalls) > 0 {
+			key = m.ToolCalls[0].ID
+		}
+		got = append(got, key+"="+m.Content)
+	}
+	want := []string{"c-a=Checking both.", "c-b=", "answer=Done."}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("text per assistant message:\n got %q\nwant %q", got, want)
+	}
+}
+
 // A tool call that needs approval leaves the agent loop before its message is
 // stored. The pending call keeps the response's thinking blocks and their
 // fingerprint, so an approval handled by a fresh orchestrator (a restart) on
