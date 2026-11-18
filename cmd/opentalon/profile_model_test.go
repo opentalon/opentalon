@@ -50,12 +50,13 @@ func (s *recordingServer) received() []string {
 type usageRow struct {
 	model                 string
 	inputCost, outputCost float64
+	price                 *float64
 }
 
 type usageSpy struct{ rows []usageRow }
 
-func (u *usageSpy) RecordUsage(_ context.Context, _, _, _, _, modelID, _, _ string, _, _, _ int, inCost, outCost float64) {
-	u.rows = append(u.rows, usageRow{modelID, inCost, outCost})
+func (u *usageSpy) RecordUsage(_ context.Context, _, _, _, _, modelID, _, _ string, _, _, _ int, inCost, outCost float64, price *float64) {
+	u.rows = append(u.rows, usageRow{modelID, inCost, outCost, price})
 }
 
 func TestProfileModelServedAtItsProvider(t *testing.T) {
@@ -193,7 +194,7 @@ routing:
 						t.Errorf("response = %q, want Claude's answer", res.Response)
 					}
 					if tc.model == "anthropic/claude-x" {
-						want := usageRow{"claude-x", (100*2.00 + 1000*0.20) / 1e6, 10 * 10.00 / 1e6}
+						want := usageRow{"claude-x", (100*2.00 + 1000*0.20) / 1e6, 10 * 10.00 / 1e6, nil}
 						if len(usage.rows) != 1 || usage.rows[0].model != want.model ||
 							math.Abs(usage.rows[0].inputCost-want.inputCost) > 1e-12 ||
 							math.Abs(usage.rows[0].outputCost-want.outputCost) > 1e-12 {

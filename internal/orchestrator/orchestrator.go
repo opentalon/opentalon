@@ -110,9 +110,21 @@ type GroupPluginLookup interface {
 // interactionKind is the run's kind ("chat" | "system"); systemSource is an
 // optional per-feature label for system runs. Both come from the run's Profile.
 // inputCost and outputCost are the sums of the costs the provider returned
-// for the run's model calls.
+// for the run's model calls; price is the sum of their prices, nil when none
+// of them had one.
 type UsageRecorder interface {
-	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int, inputCost, outputCost float64)
+	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int, inputCost, outputCost float64, price *float64)
+}
+
+func addPrice(total, price *float64) *float64 {
+	if price == nil {
+		return total
+	}
+	sum := *price
+	if total != nil {
+		sum += *total
+	}
+	return &sum
 }
 
 // PromptSnapshotUpserter persists content-addressed prompt bodies so a
@@ -2263,13 +2275,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 	var totalInputTokens, totalOutputTokens, totalToolCalls int
 	var totalInputCost, totalOutputCost float64
+	var totalPrice *float64
 	var modelUsed string
 	defer func() {
 		if o.usageRecorder != nil {
 			if p := profile.FromContext(ctx); p != nil {
 				o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group,
 					p.ChannelID, sessionID, modelUsed, p.Kind, p.SystemSource,
-					totalInputTokens, totalOutputTokens, totalToolCalls, totalInputCost, totalOutputCost)
+					totalInputTokens, totalOutputTokens, totalToolCalls, totalInputCost, totalOutputCost, totalPrice)
 			}
 		}
 	}()
@@ -2542,6 +2555,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		totalOutputTokens += resp.Usage.OutputTokens
 		totalInputCost += resp.Usage.InputCost
 		totalOutputCost += resp.Usage.OutputCost
+		totalPrice = addPrice(totalPrice, resp.Usage.Price)
 
 		// Prefer native tool calls from the API response over text-based parsing.
 		var calls []ToolCall
@@ -3711,7 +3725,7 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 			model = chunk.Model
 		}
 		fallback = fallback || chunk.Fallback
-		if chunk.Usage.InputTokens > 0 || chunk.Usage.OutputTokens > 0 {
+		if chunk.Usage.InputTokens > 0 || chunk.Usage.OutputTokens > 0 || chunk.Usage.Price != nil {
 			usage = chunk.Usage
 		}
 		if chunk.Done {

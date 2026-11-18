@@ -716,6 +716,7 @@ func main() {
 			LimitField:        cfg.Profiles.WhoAmI.LimitField,
 			LimitTimeField:    cfg.Profiles.WhoAmI.LimitTimeField,
 			NameField:         cfg.Profiles.WhoAmI.NameField,
+			TariffsField:      cfg.Profiles.WhoAmI.TariffsField,
 			ExtraHeaders:      cfg.Profiles.WhoAmI.ExtraHeaders,
 			MetadataHeaders:   cfg.Profiles.WhoAmI.MetadataHeaders,
 		}
@@ -1357,7 +1358,7 @@ type usageRecorderAdapter struct {
 	collector *metrics.Collector
 }
 
-func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int, inputCost, outputCost float64) {
+func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int, inputCost, outputCost float64, price *float64) {
 	if a.store != nil {
 		if err := a.store.Record(ctx, store.UsageRecord{
 			EntityID:        entityID,
@@ -1372,6 +1373,7 @@ func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupI
 			ToolCalls:       toolCalls,
 			InputCost:       inputCost,
 			OutputCost:      outputCost,
+			Price:           price,
 		}); err != nil {
 			slog.Warn("usage record failed", "entity", entityID, "error", err)
 		}
@@ -1810,6 +1812,7 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 			InputTypes:      m.InputTypes,
 			ContextWindow:   m.ContextWindow,
 			MaxTokens:       m.MaxTokens,
+			Currency:        pc.Currency,
 			Cost: provider.ModelCost{
 				Input:      m.Cost.Input,
 				Output:     m.Cost.Output,

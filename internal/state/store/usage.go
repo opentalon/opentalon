@@ -23,6 +23,7 @@ type UsageRecord struct {
 	ToolCalls       int
 	InputCost       float64
 	OutputCost      float64
+	Price           *float64
 }
 
 // UsageStore records LLM usage statistics per profile.
@@ -65,17 +66,21 @@ func (s *UsageStore) Record(ctx context.Context, r UsageRecord) error {
 		kind = "chat"
 	}
 	source := sql.NullString{String: r.SystemSource, Valid: r.SystemSource != ""}
+	var price sql.NullFloat64
+	if r.Price != nil {
+		price = sql.NullFloat64{Float64: *r.Price, Valid: true}
+	}
 	_, err := s.db.SQLDB().ExecContext(ctx, s.db.Dialect().Rebind(`
 		INSERT INTO profile_usage
 		  (id, entity_id, group_id, channel_id, session_id, model_id,
 		   interaction_kind, system_source,
 		   input_tokens, output_tokens, tool_calls,
-		   input_cost, output_cost, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		   input_cost, output_cost, price, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		id, r.EntityID, r.GroupID, r.ChannelID, r.SessionID, r.ModelID,
 		kind, source,
 		r.InputTokens, r.OutputTokens, r.ToolCalls,
-		r.InputCost, r.OutputCost, now)
+		r.InputCost, r.OutputCost, price, now)
 	if err != nil {
 		return fmt.Errorf("usage store: record: %w", err)
 	}

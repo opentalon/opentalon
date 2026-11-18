@@ -114,12 +114,13 @@ type CompletionRequest struct {
 // the prompt cache. InputCost and OutputCost price the call at the model's
 // configured rates; both are 0 for a model without a price.
 type Usage struct {
-	InputTokens      int     `json:"input_tokens"`
-	OutputTokens     int     `json:"output_tokens"`
-	CacheWriteTokens int     `json:"cache_write_tokens,omitempty"`
-	CacheReadTokens  int     `json:"cache_read_tokens,omitempty"`
-	InputCost        float64 `json:"input_cost,omitempty"`
-	OutputCost       float64 `json:"output_cost,omitempty"`
+	InputTokens      int      `json:"input_tokens"`
+	OutputTokens     int      `json:"output_tokens"`
+	CacheWriteTokens int      `json:"cache_write_tokens,omitempty"`
+	CacheReadTokens  int      `json:"cache_read_tokens,omitempty"`
+	InputCost        float64  `json:"input_cost,omitempty"`
+	OutputCost       float64  `json:"output_cost,omitempty"`
+	Price            *float64 `json:"price,omitempty"`
 }
 
 type CompletionResponse struct {

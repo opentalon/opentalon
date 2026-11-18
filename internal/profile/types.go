@@ -31,6 +31,13 @@ type Profile struct {
 	Credentials  map[string]CredentialHeader // per-MCP-server credentials from WhoAmI, keyed by server name
 	Kind         string                      // interaction kind: "chat" (human) | "system" (backend-originated); the verifier always sets one, "" only on a profile built without it
 	SystemSource string                      // per-feature label for system runs (e.g. "csv_mapping", "job_notify"); empty for chat
+	Tariffs      map[string]Tariff           // customer prices by model id from WhoAmI; nil = the profile carries no tariffs
+}
+
+type Tariff struct {
+	Input       float64
+	CachedInput *float64
+	Output      float64
 }
 
 // Interaction kinds carried on Profile.Kind (and stamped onto sessions +

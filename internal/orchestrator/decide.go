@@ -236,10 +236,12 @@ func (o *Orchestrator) decideOverLimit(ctx context.Context) string {
 // with no profile in context is recorded under unattributedEntity, so its
 // spend is visible rather than free, and warned about once per decider.
 func (o *Orchestrator) recordDecideUsage(ctx context.Context, decider string, u decideprovider.Usage) {
-	o.observePluginUsage(ctx, decideModelPrefix+decider, provider.Usage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, InputCost: u.InputCost, OutputCost: u.OutputCost})
+	pu := provider.Usage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, InputCost: u.InputCost, OutputCost: u.OutputCost}
+	o.observePluginUsage(ctx, decideModelPrefix+decider, pu)
 	if o.usageRecorder == nil {
 		return
 	}
+	price := provider.Price(ctx, decider, "", pu)
 	p := profile.FromContext(ctx)
 	if p == nil || p.EntityID == "" {
 		if _, warned := o.decideUnattributed.LoadOrStore(decider, true); !warned {
@@ -247,9 +249,9 @@ func (o *Orchestrator) recordDecideUsage(ctx context.Context, decider string, u 
 				"decider", decider, "entity", unattributedEntity)
 		}
 		o.usageRecorder.RecordUsage(ctx, unattributedEntity, "", "", actor.SessionID(ctx),
-			decideModelPrefix+decider, profile.KindSystem, "decide", u.InputTokens, u.OutputTokens, 0, u.InputCost, u.OutputCost)
+			decideModelPrefix+decider, profile.KindSystem, "decide", u.InputTokens, u.OutputTokens, 0, u.InputCost, u.OutputCost, price)
 		return
 	}
 	o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group, p.ChannelID, actor.SessionID(ctx),
-		decideModelPrefix+decider, p.Kind, p.SystemSource, u.InputTokens, u.OutputTokens, 0, u.InputCost, u.OutputCost)
+		decideModelPrefix+decider, p.Kind, p.SystemSource, u.InputTokens, u.OutputTokens, 0, u.InputCost, u.OutputCost, price)
 }

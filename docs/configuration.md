@@ -182,6 +182,29 @@ models:
   or 504, or failing on the way, is tried up to 4 times with at most 30
   seconds of waiting; `retry: {max_attempts: 1}` makes one attempt.
 
+### Currency
+
+```yaml
+models:
+  providers:
+    anthropic:
+      api_key: "${ANTHROPIC_API_KEY}"
+      api: anthropic-messages
+      currency: USD
+```
+
+- `currency` is the ISO 4217 code of the currency the provider's model
+  `cost` prices are in: the currency of its invoice. It takes three
+  upper-case letters, such as `USD` or `EUR`. Any other value, and the key
+  without a value, `null`, `~` or `""`, stops the start with an error naming
+  the key.
+- Without it the provider's costs carry no currency, as before.
+- Each call's `llm_response` event carries it as `cost_currency`. It also
+  decides how a call of a model the profile's tariffs do not name is priced;
+  see [Customer price](profiles.md#customer-price).
+- Nothing converts between currencies. The usage row's `input_cost` and
+  `output_cost` add up the costs of a run's calls whatever their currency.
+
 ### Prompt caching (Anthropic)
 
 For an `anthropic-messages` provider, `prompt_cache: true` marks the chat
@@ -295,10 +318,10 @@ Model fields:
 | `input` | no | Supported input types (`[text]`, `[text, image]`) |
 | `context_window` | no | Max context size in tokens |
 | `max_tokens` | no | Max output tokens |
-| `cost.input` | no | Cost per 1M input tokens (USD). Used by smart router |
-| `cost.output` | no | Cost per 1M output tokens (USD) |
-| `cost.cache_write` | no | Cost per 1M tokens written to the prompt cache (USD). Required with `prompt_cache: true` when the model has a cost |
-| `cost.cache_read` | no | Cost per 1M tokens read from the prompt cache (USD). Required like `cache_write` |
+| `cost.input` | no | Cost per 1M input tokens, in the provider's [`currency`](#currency). Used by smart router |
+| `cost.output` | no | Cost per 1M output tokens, in the provider's `currency` |
+| `cost.cache_write` | no | Cost per 1M tokens written to the prompt cache, in the provider's `currency`. Required with `prompt_cache: true` when the model has a cost |
+| `cost.cache_read` | no | Cost per 1M tokens read from the prompt cache, in the provider's `currency`. Required like `cache_write` |
 
 ### Adaptive thinking (Anthropic)
 

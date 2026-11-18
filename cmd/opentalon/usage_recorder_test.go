@@ -20,12 +20,13 @@ func TestUsageRecorderAdapterRecordsTheGivenCost(t *testing.T) {
 	c := metrics.New()
 	a := &usageRecorderAdapter{store: store.NewUsageStore(db), collector: c}
 
-	a.RecordUsage(context.Background(), "ent1", "g1", "web", "s1", "m", "chat", "", 2100, 50, 1, 0.75, 1.125)
+	price := 2.5
+	a.RecordUsage(context.Background(), "ent1", "g1", "web", "s1", "m", "chat", "", 2100, 50, 1, 0.75, 1.125, &price)
 
-	var in, out float64
-	row := db.SQLDB().QueryRow(`SELECT input_cost, output_cost FROM profile_usage WHERE session_id = 's1'`)
-	if err := row.Scan(&in, &out); err != nil || in != 0.75 || out != 1.125 {
-		t.Errorf("usage row cost = %v/%v (%v), want 0.75/1.125", in, out, err)
+	var in, out, stored float64
+	row := db.SQLDB().QueryRow(`SELECT input_cost, output_cost, price FROM profile_usage WHERE session_id = 's1'`)
+	if err := row.Scan(&in, &out, &stored); err != nil || in != 0.75 || out != 1.125 || stored != 2.5 {
+		t.Errorf("usage row cost = %v/%v, price %v (%v), want 0.75/1.125, price 2.5", in, out, stored, err)
 	}
 	rec := httptest.NewRecorder()
 	c.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))

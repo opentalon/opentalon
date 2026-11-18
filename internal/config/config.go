@@ -146,6 +146,7 @@ type WhoAmIConfig struct {
 	LimitTimeField    string            `yaml:"limit_time_field"`        // optional JSON field for limit window duration (e.g. "1h"); default "limit_time"
 	CredentialsField  string            `yaml:"credentials_field"`       // optional JSON field for per-MCP-server tokens map; default "credentials"
 	NameField         string            `yaml:"name_field"`              // optional JSON field for user display name; default "name"
+	TariffsField      string            `yaml:"tariffs_field"`           // optional JSON field for customer prices per model; default "tariffs"
 	ExtraHeaders      map[string]string `yaml:"extra_headers,omitempty"` // static headers added to every WhoAmI call; values support ${ENV_VAR}
 	// MetadataHeaders maps an inbound message metadata key to an outbound HTTP
 	// header name. For each entry, the verifier reads msg.Metadata[key] and
@@ -604,6 +605,8 @@ type ProviderConfig struct {
 	CacheDiagnostics StrictBool `yaml:"cache_diagnostics"`
 	Timeout          string     `yaml:"timeout,omitempty"`
 	timeoutLine      int
+	Currency         string `yaml:"currency,omitempty"`
+	currencyLine     int
 }
 
 // UnmarshalYAML decodes a provider. yaml.v3 never hands a null value to
@@ -622,6 +625,9 @@ func (p *ProviderConfig) UnmarshalYAML(n *yaml.Node) error {
 	}
 	if v := mappingValue(n, "timeout"); v != nil && (v.ShortTag() == "!!null" || v.Value == "") {
 		p.timeoutLine = v.Line
+	}
+	if v := mappingValue(n, "currency"); v != nil && (v.ShortTag() == "!!null" || v.Value == "") {
+		p.currencyLine = v.Line
 	}
 	return nil
 }
@@ -1095,6 +1101,26 @@ func validateTimeouts(cfg *Config) error {
 	return nil
 }
 
+var currencyCode = regexp.MustCompile(`^[A-Z]{3}$`)
+
+func validateCurrencies(cfg *Config) error {
+	ids := make([]string, 0, len(cfg.Models.Providers))
+	for id := range cfg.Models.Providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		p := cfg.Models.Providers[id]
+		if p.currencyLine != 0 {
+			return fmt.Errorf("models.providers.%s.currency: line %d: must be an ISO 4217 code of three upper-case letters, such as USD", id, p.currencyLine)
+		}
+		if p.Currency != "" && !currencyCode.MatchString(p.Currency) {
+			return fmt.Errorf("models.providers.%s.currency: must be an ISO 4217 code of three upper-case letters, such as USD, got %q", id, p.Currency)
+		}
+	}
+	return nil
+}
+
 // validHeaderName reports whether name is an HTTP field name (an RFC 9110
 // token).
 func validHeaderName(name string) bool {
@@ -1215,6 +1241,9 @@ func Parse(data []byte) (*Config, error) {
 		return nil, err
 	}
 	if err := validateTimeouts(&cfg); err != nil {
+		return nil, err
+	}
+	if err := validateCurrencies(&cfg); err != nil {
 		return nil, err
 	}
 

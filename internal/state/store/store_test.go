@@ -29,8 +29,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 19 {
-		t.Errorf("schema_version = %d, want 19", v)
+	if v != 20 {
+		t.Errorf("schema_version = %d, want 20", v)
 	}
 
 	// Re-open: idempotent, no error
@@ -43,8 +43,8 @@ func TestOpenAndMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version (second open): %v", err)
 	}
-	if v != 19 {
-		t.Errorf("schema_version after re-open = %d, want 19", v)
+	if v != 20 {
+		t.Errorf("schema_version after re-open = %d, want 20", v)
 	}
 }
 
@@ -766,5 +766,30 @@ func TestUsageStore_TotalTokensSince_Empty(t *testing.T) {
 	}
 	if total != 0 {
 		t.Errorf("TotalTokensSince for unknown entity = %d, want 0", total)
+	}
+}
+
+func TestUsageStore_RecordPrice(t *testing.T) {
+	db, err := Open(config.DBConfig{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	usage := NewUsageStore(db)
+	zero, priced := 0.0, 0.125
+	for session, price := range map[string]*float64{"none": nil, "zero": &zero, "priced": &priced} {
+		if err := usage.Record(context.Background(), UsageRecord{EntityID: "e1", GroupID: "g1", ChannelID: "web",
+			SessionID: session, ModelID: "m1", Price: price}); err != nil {
+			t.Fatalf("Record %s: %v", session, err)
+		}
+	}
+	for session, want := range map[string]sql.NullFloat64{"none": {}, "zero": {Valid: true}, "priced": {Float64: 0.125, Valid: true}} {
+		var got sql.NullFloat64
+		if err := db.SQLDB().QueryRow(`SELECT price FROM profile_usage WHERE session_id = ?`, session).Scan(&got); err != nil {
+			t.Fatalf("read %s: %v", session, err)
+		}
+		if got != want {
+			t.Errorf("price of %s = %+v, want %+v", session, got, want)
+		}
 	}
 }

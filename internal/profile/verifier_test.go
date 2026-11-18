@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -769,4 +772,111 @@ func TestVerifier_ModelField(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVerifier_Tariffs(t *testing.T) {
+	ptr := func(f float64) *float64 { return &f }
+	cases := []struct {
+		name     string
+		field    string
+		want     map[string]Tariff
+		wantWarn string
+	}{
+		{"absent", ``, nil, ""},
+		{"null", `,"tariffs":null`, nil, ""},
+		{"entries", `,"tariffs":{"gpt-oss-120b":{"input":0,"cached_input":0,"output":0},` +
+			`"claude-sonnet-5-5":{"input":1.5,"cached_input":0.15,"output":7.5},"claude-haiku":{"input":0.5,"output":2}}`,
+			map[string]Tariff{
+				"gpt-oss-120b":      {Input: 0, CachedInput: ptr(0), Output: 0},
+				"claude-sonnet-5-5": {Input: 1.5, CachedInput: ptr(0.15), Output: 7.5},
+				"claude-haiku":      {Input: 0.5, Output: 2},
+			}, ""},
+		{"null cached input", `,"tariffs":{"m":{"input":1,"cached_input":null,"output":2}}`,
+			map[string]Tariff{"m": {Input: 1, Output: 2}}, ""},
+		{"no input", `,"tariffs":{"bad":{"output":2},"m":{"input":1,"output":2}}`, map[string]Tariff{"m": {Input: 1, Output: 2}}, "model=bad"},
+		{"no output", `,"tariffs":{"bad":{"input":1}}`, map[string]Tariff{}, "model=bad"},
+		{"negative output", `,"tariffs":{"claude-sonnet-5-5":{"input":1,"output":-5}}`, map[string]Tariff{}, "model=claude-sonnet-5-5"},
+		{"negative input", `,"tariffs":{"bad":{"input":-1,"output":2}}`, map[string]Tariff{}, "model=bad"},
+		{"negative cached input", `,"tariffs":{"bad":{"input":1,"cached_input":-0.1,"output":2}}`, map[string]Tariff{}, "model=bad"},
+		{"a price as a string", `,"tariffs":{"bad":{"input":"1.0","output":2}}`, map[string]Tariff{}, "model=bad"},
+		{"null output", `,"tariffs":{"bad":{"input":1,"output":null}}`, map[string]Tariff{}, "model=bad"},
+		{"an entry that is no object", `,"tariffs":{"bad":5}`, map[string]Tariff{}, "model=bad"},
+		{"a field that is no object", `,"tariffs":["m"]`, nil, "malformed tariffs field"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"entity_id":"u1","limit":2000,"limit_time":"1h"` + tc.field + `}`))
+			}))
+			defer srv.Close()
+			var logs bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			defer slog.SetDefault(prev)
+
+			v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
+			defer v.Close()
+			p, err := v.Verify(context.Background(), "tok", "", nil)
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if !equalTariffs(p.Tariffs, tc.want) {
+				t.Errorf("Tariffs = %s, want %s", formatTariffs(p.Tariffs), formatTariffs(tc.want))
+			}
+			if p.Limit != 2000 || p.LimitWindow != time.Hour {
+				t.Errorf("Limit = %d over %v, want 2000 over 1h", p.Limit, p.LimitWindow)
+			}
+			var warns []string
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if strings.Contains(line, "level=WARN") && strings.Contains(line, "tariff") {
+					warns = append(warns, line)
+				}
+			}
+			named := slices.ContainsFunc(warns, func(l string) bool { return strings.Contains(l, tc.wantWarn) })
+			if tc.wantWarn == "" && len(warns) > 0 || tc.wantWarn != "" && !named {
+				t.Errorf("tariff warnings %q, want one naming %q", warns, tc.wantWarn)
+			}
+		})
+	}
+}
+
+func TestVerifier_TariffsCustomField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"entity_id":"u1","prices":{"m":{"input":1,"output":2}},"tariffs":{"other":{"input":3,"output":4}}}`))
+	}))
+	defer srv.Close()
+	v := NewVerifier(VerifierConfig{URL: srv.URL, TariffsField: "prices"}, nil, nil)
+	defer v.Close()
+	p, err := v.Verify(context.Background(), "tok", "", nil)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if want := map[string]Tariff{"m": {Input: 1, Output: 2}}; !equalTariffs(p.Tariffs, want) {
+		t.Errorf("Tariffs = %s, want %s", formatTariffs(p.Tariffs), formatTariffs(want))
+	}
+}
+
+func equalTariffs(a, b map[string]Tariff) bool {
+	return (a == nil) == (b == nil) && formatTariffs(a) == formatTariffs(b)
+}
+
+func formatTariffs(m map[string]Tariff) string {
+	if m == nil {
+		return "nil"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		t := m[k]
+		cached := "none"
+		if t.CachedInput != nil {
+			cached = fmt.Sprint(*t.CachedInput)
+		}
+		fmt.Fprintf(&b, "%s{in %v cached %s out %v} ", k, t.Input, cached, t.Output)
+	}
+	return "{" + b.String() + "}"
 }

@@ -157,25 +157,20 @@ func NewAnthropicProvider(id, baseURL, apiKey string, models []ModelInfo, opts .
 // InputTokens adds them. Per million tokens, uncached ones cost Cost.Input,
 // written ones Cost.CacheWrite and read ones Cost.CacheRead. A modelID not
 // in p.models costs 0, which LLMResponsePayload leaves out (omitempty)
-// rather than recording a misleading "free call". Currency is unitless:
-// the operator's deployment convention sets the unit.
-func (p *AnthropicProvider) usage(modelID string, u anthUsage) Usage {
+// rather than recording a misleading "free call".
+func (p *AnthropicProvider) usage(ctx context.Context, modelID string, u anthUsage) Usage {
 	usage := Usage{
 		InputTokens:      u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens,
 		OutputTokens:     u.OutputTokens,
 		CacheWriteTokens: u.CacheCreationInputTokens,
 		CacheReadTokens:  u.CacheReadInputTokens,
 	}
-	for _, m := range p.models {
-		if m.ID != modelID {
-			continue
-		}
-		usage.InputCost = (float64(u.InputTokens)*m.Cost.Input +
-			float64(u.CacheCreationInputTokens)*m.Cost.CacheWrite +
-			float64(u.CacheReadInputTokens)*m.Cost.CacheRead) / 1_000_000
-		usage.OutputCost = float64(u.OutputTokens) * m.Cost.Output / 1_000_000
-		break
-	}
+	m := findModel(p.models, modelID)
+	usage.InputCost = (float64(u.InputTokens)*m.Cost.Input +
+		float64(u.CacheCreationInputTokens)*m.Cost.CacheWrite +
+		float64(u.CacheReadInputTokens)*m.Cost.CacheRead) / 1_000_000
+	usage.OutputCost = float64(u.OutputTokens) * m.Cost.Output / 1_000_000
+	usage.Price = Price(ctx, modelID, m.Currency, usage)
 	return usage
 }
 
@@ -493,7 +488,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		nativeToolCallsRaw, _ = json.Marshal(toolBlocks)
 	}
 
-	usage := p.usage(anthReq.Model, anthResp.Usage)
+	usage := p.usage(ctx, anthReq.Model, anthResp.Usage)
 	eventID := emit.EmitLLMResponse(ctx, p.eventSink, emit.LLMResponseArgs{
 		RawContent:         content,
 		NativeToolCallsRaw: nativeToolCallsRaw,
@@ -504,6 +499,8 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		CacheReadTokens:    usage.CacheReadTokens,
 		CostInput:          usage.InputCost,
 		CostOutput:         usage.OutputCost,
+		CostCurrency:       findModel(p.models, anthReq.Model).Currency,
+		Price:              usage.Price,
 		LatencyMS:          latencyMS,
 		ProviderResponseID: anthResp.ID,
 		ChatLoop:           req.Segments != nil,

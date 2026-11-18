@@ -51,6 +51,7 @@ type VerifierConfig struct {
 	BudgetTokensField string            // optional JSON field for reasoning budget tokens; default "budget_tokens"
 	KindField         string            // optional JSON field for interaction kind ("chat"|"system"); default "kind"; absent ⇒ "chat"
 	SystemSourceField string            // optional JSON field for per-feature system label; default "system_source"
+	TariffsField      string            // optional JSON field for customer prices per model; default "tariffs"
 	ExtraHeaders      map[string]string // static headers sent on every WhoAmI call; ${ENV_VAR} expanded once at construction
 	// MetadataHeaders maps an inbound metadata key to an outbound HTTP header
 	// name. For each entry, Verify reads metadata[key] from its caller and
@@ -135,6 +136,9 @@ func (c *VerifierConfig) setDefaults() {
 	}
 	if c.SystemSourceField == "" {
 		c.SystemSourceField = "system_source"
+	}
+	if c.TariffsField == "" {
+		c.TariffsField = "tariffs"
 	}
 	// Expand env vars in ExtraHeaders once at construction time so values are
 	// immutable for the verifier's lifetime and can't drift mid-run. Also guard
@@ -487,6 +491,11 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 		}
 	}
 
+	var tariffs map[string]Tariff
+	if traw, ok := raw[v.cfg.TariffsField]; ok {
+		tariffs = parseTariffs(ctx, v.cfg.TariffsField, traw)
+	}
+
 	p := &Profile{
 		EntityID:     entityID,
 		Group:        group,
@@ -501,6 +510,7 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 		Credentials:  credentials,
 		Kind:         kind,
 		SystemSource: systemSource,
+		Tariffs:      tariffs,
 	}
 	slog.DebugContext(ctx, "whoami profile resolved",
 		"entity_id", p.EntityID,
@@ -511,6 +521,59 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 		"name", p.Name,
 	)
 	return p, nil
+}
+
+func parseTariffs(ctx context.Context, field string, raw json.RawMessage) map[string]Tariff {
+	var entries map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		slog.WarnContext(ctx, "whoami: malformed tariffs field, ignoring", "field", field, "error", err)
+		return nil
+	}
+	if entries == nil {
+		return nil
+	}
+	tariffs := make(map[string]Tariff, len(entries))
+	for model, entry := range entries {
+		t, ok := parseTariff(entry)
+		if !ok {
+			slog.WarnContext(ctx, "whoami: malformed tariff, ignoring", "field", field, "model", model)
+			continue
+		}
+		tariffs[model] = t
+	}
+	return tariffs
+}
+
+func parseTariff(raw json.RawMessage) (Tariff, bool) {
+	var fields struct {
+		Input       json.RawMessage `json:"input"`
+		CachedInput json.RawMessage `json:"cached_input"`
+		Output      json.RawMessage `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return Tariff{}, false
+	}
+	input, errIn := tariffPrice(fields.Input)
+	output, errOut := tariffPrice(fields.Output)
+	cached, errCached := tariffPrice(fields.CachedInput)
+	if errIn != nil || errOut != nil || errCached != nil || input == nil || output == nil {
+		return Tariff{}, false
+	}
+	return Tariff{Input: *input, CachedInput: cached, Output: *output}, true
+}
+
+func tariffPrice(raw json.RawMessage) (*float64, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	var price *float64
+	if err := json.Unmarshal(raw, &price); err != nil {
+		return nil, err
+	}
+	if price != nil && *price < 0 {
+		return nil, fmt.Errorf("negative price %v", *price)
+	}
+	return price, nil
 }
 
 func jsonString(raw json.RawMessage) string {
