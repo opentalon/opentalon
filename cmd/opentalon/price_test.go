@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"math"
+	"sync"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
+	"github.com/opentalon/opentalon/internal/state/store/events"
+	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 )
 
 func TestRunPricesEachCallAtItsModelsTariff(t *testing.T) {
@@ -78,5 +83,63 @@ routing:
 	}
 	if got := *usage.rows[0].price; math.Abs(got-want) > 1e-9 {
 		t.Errorf("row price = %v, want %v", got, want)
+	}
+}
+
+type llmResponseSink struct {
+	mu       sync.Mutex
+	payloads []events.LLMResponsePayload
+}
+
+func (s *llmResponseSink) Emit(_ context.Context, e emit.Event) {
+	if e.EventType != events.TypeLLMResponse {
+		return
+	}
+	var p events.LLMResponsePayload
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		panic(err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.payloads = append(s.payloads, p)
+}
+
+// A provider's currency belongs to the provider, not to the entries of its
+// models list: a model it serves without an entry (here the routing model of a
+// provider that lists none) is still priced in that currency.
+func TestProviderCurrencyCoversAModelOutsideItsModelsList(t *testing.T) {
+	captureLogs(t)
+	def := newFakeLLMServer(t, fakeAnswer{200, `{"id":"c1","model":"m-2026","choices":[{"message":{"role":"assistant",` +
+		`"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":100}}`})
+	cfg, err := config.Parse([]byte(`
+models:
+  providers:
+    primary:
+      api: openai-completions
+      base_url: ` + def.URL + `
+      currency: EUR
+routing:
+  primary: primary/m
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &llmResponseSink{}
+	prov, model, err := buildProvider(cfg, nil, nil, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{EntityID: "e1",
+		Tariffs: map[string]profile.Tariff{"other": {Input: 1, Output: 1}}})
+
+	resp, err := prov.Complete(ctx, &provider.CompletionRequest{Model: model, Messages: []provider.Message{{Role: provider.RoleUser, Content: "Hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Usage.Price == nil || *resp.Usage.Price != 0 {
+		t.Errorf("price = %v, want 0: a model without a tariff is priced at its EUR provider cost", resp.Usage.Price)
+	}
+	if len(sink.payloads) != 1 || sink.payloads[0].CostCurrency != "EUR" {
+		t.Fatalf("llm_response events = %+v, want one with cost_currency EUR", sink.payloads)
 	}
 }
