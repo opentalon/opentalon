@@ -93,3 +93,47 @@ func TestDecideRowCarriesTheDecidersPrice(t *testing.T) {
 		t.Fatalf("usage = %+v, want one decide/snap row priced %v", usage.calls, 2*0.5+0.5*2)
 	}
 }
+
+func TestDecideRowIsPricedByTheModelItsDeciderServes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		const answer = `{"type":"choice","choice":"match","probabilities":{"match":1,"mismatch":0}}`
+		_, _ = io.WriteString(w, `{"model":"subq-snap-2026","answers":{"decision":`+answer+`,"q":`+answer+`},`+
+			`"usage":{"input_tokens":2000000,"output_tokens":500000}}`)
+	}))
+	defer server.Close()
+	const want = 2*0.5 + 0.5*2
+	cases := []struct {
+		name, model, tariffed string
+		args                  map[string]string
+	}{
+		{"the backend's default model", "", "subq-snap-preview", map[string]string{"state": "s", "choices": `["match","mismatch"]`}},
+		{"the configured model", "subq-snap-2", "subq-snap-2", map[string]string{"state": "s", "choices": `["match","mismatch"]`}},
+		{"several questions", "subq-snap-2", "subq-snap-2",
+			map[string]string{"state": "s", "questions": `{"q":{"instructions":"i","choices":["match","mismatch"]}}`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deciders, err := decideprovider.RegistryFromConfigs(map[string]decideprovider.DeciderConfig{
+				"snap": {Backend: decideprovider.BackendSubQ, BaseURL: server.URL, Model: tc.model},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			usage := &usageSpy{}
+			orch := NewWithRules(&fakeLLM{}, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), state.NewSessionStore(""),
+				OrchestratorOpts{UsageRecorder: usage, Deciders: deciders})
+			ctx := profile.WithProfile(context.Background(), &profile.Profile{EntityID: "ent1", Tariffs: map[string]profile.Tariff{
+				"snap":      {Input: 9, Output: 9},
+				tc.tariffed: {Input: 0.5, Output: 2},
+			}})
+
+			if _, _, err := orch.RunActionResult(ctx, "snap", "decide", tc.args); err != nil {
+				t.Fatal(err)
+			}
+			if len(usage.calls) != 1 || usage.calls[0].modelID != "decide/snap" || !usage.calls[0].priced || !near(usage.calls[0].price, want) {
+				t.Fatalf("usage = %+v, want one decide/snap row priced %v at %s's tariff", usage.calls, want, tc.tariffed)
+			}
+		})
+	}
+}
