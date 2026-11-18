@@ -111,6 +111,23 @@ func TestRegistryFromConfigsKeepsCosts(t *testing.T) {
 	}
 }
 
+func TestRegistryFromConfigsKeepsServedModels(t *testing.T) {
+	reg, err := RegistryFromConfigs(map[string]DeciderConfig{
+		"snap":   {Backend: BackendSubQ, BaseURL: "http://subq"},
+		"jev":    {Backend: BackendJev, BaseURL: "http://jev", Model: "jev-1.13"},
+		"local":  {Backend: BackendLocalLogits, BaseURL: "http://local", Model: "qwen3-8b"},
+		"policy": {Backend: BackendLaya, BaseURL: "http://laya"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"snap": "subq-snap-preview", "jev": "jev-1.13", "local": "qwen3-8b", "policy": "policy"} {
+		if got := reg.Model(name); got != want {
+			t.Errorf("decider %s is priced by %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestCostPrice(t *testing.T) {
 	u := Cost{Input: 0.5, Output: 4}.Price(Usage{InputTokens: 2_000_000, OutputTokens: 250_000})
 	if u.InputCost != 1 || u.OutputCost != 1 || u.InputTokens != 2_000_000 || u.OutputTokens != 250_000 {
