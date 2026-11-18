@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker run --rm -v "$PWD:/repo" -w /repo --entrypoint tln ghcr.io/talooner/talooner-runner:1.2.2 test .talooner/
+      - run: docker run --rm -v "$PWD:/repo" -w /repo --entrypoint tln ghcr.io/talooner/talooner-runner:1.3.2 test .talooner/
   review:
     needs: rules
     # Runs when rules passed or was skipped (review, comment events). Only
@@ -47,6 +47,7 @@ jobs:
       pull-requests: write
       checks: write
       statuses: read
+      actions: read
     outputs:
       resolve_threads: ${{ steps.talooner.outputs.resolve_threads }}
       unresolve_threads: ${{ steps.talooner.outputs.unresolve_threads }}
@@ -63,11 +64,40 @@ jobs:
             echo "::error::the rules test failed on $sha — fix .talooner/ and push before asking for a review"
             exit 1
           fi
+      # A review of a moving target is a blocked review: `pr.checks_pending`
+      # is true while ci.yml is still running, and the base rule refuses to
+      # approve. Nothing re-runs the review when a check suite completes, so
+      # wait for the commit's other checks here instead. The current run's own
+      # check suite (rules, review, resolve and the `talooner` check run) is
+      # excluded by suite id; everything ci.yml started is waited for.
+      - name: wait for the other checks on this commit
+        if: >-
+          github.event.action != 'closed' &&
+          (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)
+          suite=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .check_suite_id)
+          for _ in $(seq 1 60); do
+            pending=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?per_page=100" \
+              --jq "[.check_runs[] | select(.status != \"completed\" and .check_suite.id != $suite)] | length")
+            statuses=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/status" \
+              --jq '[.statuses[] | select(.state == "pending")] | length')
+            if [ "$pending" -eq 0 ] && [ "$statuses" -eq 0 ]; then
+              echo "no checks pending on $sha"
+              exit 0
+            fi
+            echo "waiting on $pending check run(s) and $statuses status(es)"
+            sleep 10
+          done
+          echo "::warning::checks are still running on $sha after 10 minutes; reviewing without them"
       - id: talooner
         # -gh: root, because only root can append to the runner's $GITHUB_OUTPUT
         # (0644, owned by the runner's uid) for the resolve job below. The rules
         # step only reads and stays on the non-root image.
-        uses: docker://ghcr.io/talooner/talooner-runner:1.2.2-gh
+        uses: docker://ghcr.io/talooner/talooner-runner:1.3.2-gh
         env:
           TALOONER_PROVIDER: github
           TALOONER_LICENSE_KEY: ${{ secrets.TALOONER_LICENSE_KEY }}
