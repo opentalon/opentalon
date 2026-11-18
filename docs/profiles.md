@@ -337,7 +337,7 @@ The OpenAI-compatible provider reports no cache tokens, so all its input is bill
 - The tariff is looked up by the model id the config names for the model that served the call, also after the default chain answered for a profile model, never by the model string the provider sends back. A `decide` call is looked up by the model its decider serves: `models.deciders.<name>.model`, or the backend's default model when that is empty (`jev-latest`, `subq-snap-preview`), or the decider's name for a `laya` decider without one. Its row keeps the `decide/<name>` label.
 - A model the tariffs do not name is priced at its provider cost when its provider's `currency` is `EUR`, with a warning naming the model. With another currency, or none, the call has no price and the warning names the model and the currency (`none` when the provider names none). A `decide` call has no currency.
 - A tariff of 0 stores a price of 0. A profile without `tariffs` (a run a plugin starts without whoami, an older whoami server) leaves the price empty and logs nothing.
-- An entry with a missing, negative or non-numeric `input` or `output`, or a negative or non-numeric `cached_input`, is dropped with a warning and counts as missing. A `tariffs` value that is not an object is ignored with a warning. Neither fails the whoami check.
+- An entry with a missing, negative or non-numeric `input` or `output`, or a negative or non-numeric `cached_input`, is dropped with a warning and counts as missing; a `cached_input` of `null` counts as omitted, so cache reads are billed at `input`. A `tariffs` value that is not an object is ignored with a warning. Neither fails the whoami check.
 - Prices are frozen at call time: a changed tariff prices new calls only.
 
 ## Channel plugin integration
