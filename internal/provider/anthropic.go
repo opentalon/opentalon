@@ -68,6 +68,7 @@ type AnthropicProvider struct {
 	baseURL   string
 	apiKey    string
 	models    []ModelInfo
+	currency  string // ISO 4217 code of the models' prices; "" names none
 	client    *http.Client
 	eventSink emit.Sink         // structured session-event sink; nil disables emission
 	retry     RetryPolicy       // transient-failure retry policy (DefaultRetryPolicy unless configured)
@@ -111,6 +112,11 @@ func WithAnthropicHeaders(h map[string]string) AnthropicOption {
 // fields fall back to DefaultRetryPolicy, so a partial config is safe.
 func WithAnthropicRetryPolicy(rp RetryPolicy) AnthropicOption {
 	return func(p *AnthropicProvider) { p.retry = rp.withDefaults() }
+}
+
+// WithAnthropicCurrency names the currency of the provider's model prices.
+func WithAnthropicCurrency(currency string) AnthropicOption {
+	return func(p *AnthropicProvider) { p.currency = currency }
 }
 
 // WithAnthropicPromptCache turns Anthropic prompt caching on or off.
@@ -170,7 +176,7 @@ func (p *AnthropicProvider) usage(ctx context.Context, modelID string, u anthUsa
 		float64(u.CacheCreationInputTokens)*m.Cost.CacheWrite +
 		float64(u.CacheReadInputTokens)*m.Cost.CacheRead) / 1_000_000
 	usage.OutputCost = float64(u.OutputTokens) * m.Cost.Output / 1_000_000
-	usage.Price = Price(ctx, modelID, m.Currency, usage)
+	usage.Price = Price(ctx, modelID, p.currency, usage)
 	return usage
 }
 
@@ -499,7 +505,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		CacheReadTokens:    usage.CacheReadTokens,
 		CostInput:          usage.InputCost,
 		CostOutput:         usage.OutputCost,
-		CostCurrency:       findModel(p.models, anthReq.Model).Currency,
+		CostCurrency:       p.currency,
 		Price:              usage.Price,
 		LatencyMS:          latencyMS,
 		ProviderResponseID: anthResp.ID,

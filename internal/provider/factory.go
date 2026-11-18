@@ -30,6 +30,7 @@ type ProviderConfig struct {
 	APIKey       string
 	API          string
 	Models       []ModelInfo
+	Currency     string // ISO 4217 code of the models' prices; "" names none
 	DebugSink    DebugEventSink
 	DebugResolve DebugContextResolver
 	EventSink    emit.Sink
@@ -64,7 +65,7 @@ func FromConfig(cfg ProviderConfig) (Provider, error) {
 		if cfg.Timeout > 0 {
 			opts = append(opts, WithOpenAIHTTPClient(&http.Client{Timeout: cfg.Timeout}))
 		}
-		opts = append(opts, WithOpenAIRetryPolicy(cfg.Retry))
+		opts = append(opts, WithOpenAIRetryPolicy(cfg.Retry), WithOpenAICurrency(cfg.Currency))
 		return NewOpenAIProvider(cfg.ID, cfg.BaseURL, cfg.APIKey, cfg.Models, opts...), nil
 	case APIAnthropic:
 		opts := []AnthropicOption{}
@@ -78,7 +79,7 @@ func FromConfig(cfg ProviderConfig) (Provider, error) {
 			opts = append(opts, WithAnthropicHTTPClient(&http.Client{Timeout: cfg.Timeout}))
 		}
 		opts = append(opts, WithAnthropicRetryPolicy(cfg.Retry), WithAnthropicPromptCache(cfg.PromptCache),
-			WithAnthropicCacheDiagnostics(cfg.CacheDiagnostics))
+			WithAnthropicCacheDiagnostics(cfg.CacheDiagnostics), WithAnthropicCurrency(cfg.Currency))
 		return NewAnthropicProvider(cfg.ID, cfg.BaseURL, cfg.APIKey, cfg.Models, opts...), nil
 	default:
 		return nil, fmt.Errorf("unknown api type %q for provider %q (supported: %s, %s)",

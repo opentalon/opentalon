@@ -71,7 +71,6 @@ type ModelInfo struct {
 	ContextWindow   int       `json:"context_window" yaml:"context_window"`
 	MaxTokens       int       `json:"max_tokens" yaml:"max_tokens"`
 	Cost            ModelCost `json:"cost" yaml:"cost"`
-	Currency        string    `json:"currency,omitempty" yaml:"currency,omitempty"`
 	Features        []Feature `json:"features" yaml:"features"`
 }
 

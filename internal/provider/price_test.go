@@ -98,7 +98,7 @@ func TestAnthropicCallPrice(t *testing.T) {
 			defer server.Close()
 			sink := &recordingEventSink{}
 			p := NewAnthropicProvider("anthropic", server.URL, "key",
-				[]ModelInfo{{ID: "claude-x", Cost: cost, Currency: tc.currency}}, WithAnthropicSessionEventSink(sink))
+				[]ModelInfo{{ID: "claude-x", Cost: cost}}, WithAnthropicSessionEventSink(sink), WithAnthropicCurrency(tc.currency))
 			resp, err := p.Complete(tc.ctx, &CompletionRequest{Model: "claude-x", Messages: []Message{{Role: RoleUser, Content: "Hi"}}})
 			if err != nil {
 				t.Fatal(err)
@@ -164,7 +164,7 @@ func TestOpenAICallPrice(t *testing.T) {
 			defer server.Close()
 			sink := &recordingEventSink{}
 			p := NewOpenAIProvider("ovh", server.URL, "key",
-				[]ModelInfo{{ID: "m", Cost: ModelCost{Input: 0.08, Output: 0.4}, Currency: "EUR"}}, WithOpenAISessionEventSink(sink))
+				[]ModelInfo{{ID: "m", Cost: ModelCost{Input: 0.08, Output: 0.4}}}, WithOpenAISessionEventSink(sink), WithOpenAICurrency("EUR"))
 			req := &CompletionRequest{Model: "m", Messages: []Message{{Role: RoleUser, Content: "Hi"}}}
 			var got *float64
 			if stream {

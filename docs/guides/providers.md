@@ -59,8 +59,9 @@ request's context and the call's usage and cost. User-facing rules:
 - The tariff is keyed by the request's model id (`anthReq.Model`, the OpenAI
   request's `model`), the id the config names. After the selecting provider
   falls back, that is the default model's id.
-- The currency is `ModelInfo.Currency`, which `buildProviderRef` copies from
-  the provider's `currency` into each of its models.
+- The currency is the provider's own (`ProviderConfig.Currency`, from its
+  `currency` in the config), so a model the provider serves without an entry
+  in its `models` list is priced in it as well.
 - A streamed call is priced when a chunk reports usage, and the chunk carries
   the price like its usage.
 

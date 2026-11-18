@@ -1812,7 +1812,6 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 			InputTypes:      m.InputTypes,
 			ContextWindow:   m.ContextWindow,
 			MaxTokens:       m.MaxTokens,
-			Currency:        pc.Currency,
 			Cost: provider.ModelCost{
 				Input:      m.Cost.Input,
 				Output:     m.Cost.Output,
@@ -1829,6 +1828,7 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 		APIKey:       pc.APIKey,
 		API:          pc.API,
 		Models:       models,
+		Currency:     pc.Currency,
 		DebugSink:    debugSink,
 		DebugResolve: debugResolve,
 		EventSink:    eventSink,

@@ -30,6 +30,7 @@ type OpenAIProvider struct {
 	baseURL      string
 	apiKey       string
 	models       []ModelInfo
+	currency     string // ISO 4217 code of the models' prices; "" names none
 	client       *http.Client
 	debugSink    DebugEventSink       // optional; nil disables persistent debug capture
 	debugResolve DebugContextResolver // optional; returns (sessionID, traceID, enabled?) for this ctx
@@ -86,6 +87,11 @@ func WithOpenAISessionEventSink(s emit.Sink) OpenAIOption {
 // value are dropped. The map is copied.
 func WithOpenAIHeaders(h map[string]string) OpenAIOption {
 	return func(p *OpenAIProvider) { p.headers = copyExtraHeaders(h) }
+}
+
+// WithOpenAICurrency names the currency of the provider's model prices.
+func WithOpenAICurrency(currency string) OpenAIOption {
+	return func(p *OpenAIProvider) { p.currency = currency }
 }
 
 // WithOpenAIRetryPolicy sets the transient-failure retry policy. Zero-valued
@@ -149,7 +155,7 @@ func (p *OpenAIProvider) usage(ctx context.Context, modelID string, tokensIn, to
 		InputCost:    float64(tokensIn) * m.Cost.Input / 1_000_000,
 		OutputCost:   float64(tokensOut) * m.Cost.Output / 1_000_000,
 	}
-	u.Price = Price(ctx, modelID, m.Currency, u)
+	u.Price = Price(ctx, modelID, p.currency, u)
 	return u
 }
 
@@ -597,7 +603,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 			TokensOut:          usage.OutputTokens,
 			CostInput:          usage.InputCost,
 			CostOutput:         usage.OutputCost,
-			CostCurrency:       findModel(p.models, oaiReq.Model).Currency,
+			CostCurrency:       p.currency,
 			Price:              usage.Price,
 			LatencyMS:          latencyMS,
 			ProviderResponseID: oaiResp.ID,
@@ -718,7 +724,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 		eventSink: p.eventSink,
 		startTime: start,
 		chatLoop:  req.Segments != nil,
-		currency:  findModel(p.models, oaiReq.Model).Currency,
+		currency:  p.currency,
 		usageFn: func(in, out int) Usage {
 			return p.usage(ctx, oaiReq.Model, in, out)
 		},
