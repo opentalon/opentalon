@@ -93,10 +93,7 @@ func newSessionErrorState() *sessionErrorState {
 func (s *sessionErrorState) record(turn int, fqn string, success, repaired bool) (turnCount, sessionCount int, wasFailing bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if turn != s.currentTurn {
-		s.currentTurn = turn
-		s.turnErrors = make(map[string]int)
-	}
+	s.rollTurn(turn)
 	if success {
 		wasFailing = s.sessionErrors[fqn] > 0
 		delete(s.turnErrors, fqn)
@@ -109,6 +106,28 @@ func (s *sessionErrorState) record(turn int, fqn string, success, repaired bool)
 	s.turnErrors[fqn]++
 	s.sessionErrors[fqn]++
 	return s.turnErrors[fqn], s.sessionErrors[fqn], false
+}
+
+// recordTurnError counts an error within the turn only, under the same
+// lock and turn rollover as record, and returns the turn's count. A refused
+// check takes it: it tells the model to stop repeating a failing call, but
+// a refusal is how a healthy tool answers, so the session count that demotes
+// the tool, and a success's reset of it, are left as they were.
+func (s *sessionErrorState) recordTurnError(turn int, fqn string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rollTurn(turn)
+	s.turnErrors[fqn]++
+	return s.turnErrors[fqn]
+}
+
+// rollTurn starts the per-turn counters afresh when the turn number
+// changed. Callers hold s.mu.
+func (s *sessionErrorState) rollTurn(turn int) {
+	if turn != s.currentTurn {
+		s.currentTurn = turn
+		s.turnErrors = make(map[string]int)
+	}
 }
 
 // recordRepairAttempt bumps the separate per-tool repair counter (one bump
@@ -155,7 +174,8 @@ func (t *toolErrorTracker) stateFor(sessionID string) *sessionErrorState {
 //     Demoted=false self-heal (success on a previously-failing tool)
 //
 // A call answered without running (result.NotRun) neither failed nor
-// succeeded, so it leaves every counter as it was.
+// succeeded, so it leaves every counter as it was. A refused check
+// (result.RefusedByCheck) counts within the turn only (recordTurnError).
 //
 // The Demoted flag lives in InjectionState, so the demotion side of the
 // tracker only does durable work when a state store is wired; the loop-cap
@@ -167,7 +187,11 @@ func (o *Orchestrator) recordToolOutcome(ctx context.Context, sessionID string, 
 	}
 	fqn := toolFQN(call.Plugin, call.Action)
 	st := o.toolErrorTracker.stateFor(sessionID)
-	turnCount, sessionCount, wasFailing := st.record(o.sessionTurnNumber(sessionID), fqn, result.Error == "", repaired)
+	turn := o.sessionTurnNumber(sessionID)
+	if result.RefusedByCheck {
+		return o.loopCapNudge(fqn, st.recordTurnError(turn, fqn))
+	}
+	turnCount, sessionCount, wasFailing := st.record(turn, fqn, result.Error == "", repaired)
 
 	if result.Error == "" {
 		if wasFailing && o.injectionStateStore != nil {
@@ -180,7 +204,13 @@ func (o *Orchestrator) recordToolOutcome(ctx context.Context, sessionID string, 
 		sessionCount >= o.toolErrorHandling.StickyDemotionThreshold && o.injectionStateStore != nil {
 		o.markDemotedFlag(ctx, sessionID, fqn)
 	}
+	return o.loopCapNudge(fqn, turnCount)
+}
 
+// loopCapNudge is the message that tells the model to stop repeating a tool
+// once turnCount, its errors in this turn, reaches LoopCapPerTurn; nil below
+// it or when the cap is off.
+func (o *Orchestrator) loopCapNudge(fqn string, turnCount int) *provider.Message {
 	if o.toolErrorHandling.LoopCapPerTurn > 0 && turnCount >= o.toolErrorHandling.LoopCapPerTurn {
 		// Carried back to the agent loop as a transient RoleUser message with
 		// the "[system]" textual prefix the other retry nudges use. NOT a

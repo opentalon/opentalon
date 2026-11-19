@@ -126,6 +126,13 @@ type ToolResult struct {
 	// answer the model reads, but the call did not fail, so no failed-call
 	// count takes it.
 	NotRun bool `yaml:"-"`
+	// RefusedByCheck marks a call its plugin refused when the call was sent
+	// for a check before the confirmation question (CheckExecutor): Error is
+	// the refusal and the call was never executed. It is neither NotRun nor
+	// ArgsInvalid, so the repair step leaves it alone and an identical repeat
+	// is not run again. It counts as a failed call within the turn, not toward
+	// the tool's demotion, and the plugin-call observer leaves it out.
+	RefusedByCheck bool `yaml:"-"`
 }
 
 // CheckVerdict is a plugin's answer to a check of a call (CheckExecutor).

@@ -408,7 +408,11 @@ func TestMaybeRequireConfirmation_UnresolvableCallNeverPrompts(t *testing.T) {
 		{ID: "c2", Plugin: "ghost", Action: "sent_write", FromLLM: true}, // unknown plugin
 		{ID: "c3", Plugin: "p", Action: "p__load_tools", FromLLM: true},  // meta action mangled under a plugin prefix
 	} {
-		rr, raised := orch.maybeRequireConfirmation(ctx, sessions, "s1", call, "do it", nil, false, nil)
+		d, err := orch.maybeRequireConfirmation(ctx, sessions, "s1", call, "do it", nil, false, nil)
+		if err != nil {
+			t.Fatalf("gate: %v", err)
+		}
+		rr, raised := d.question, d.outcome == gateAwaitApproval
 		if raised || rr != nil {
 			t.Fatalf("unresolvable call %s/%s must not raise a confirmation, got raised=%v rr=%v",
 				call.Plugin, call.Action, raised, rr)
@@ -453,7 +457,11 @@ func TestMaybeRequireConfirmation_InterruptedBatchRecordedBeforePrompt(t *testin
 
 	gated := ToolCall{ID: "c-a", Plugin: "p", Action: "write_a", FromLLM: true, Args: map[string]string{"name": "A"}}
 	dropped := ToolCall{ID: "c-b", Plugin: "p", Action: "write_b", FromLLM: true, Args: map[string]string{"name": "B"}}
-	rr, raised := orch.maybeRequireConfirmation(ctx, sessions, "s1", gated, "create both", []ToolCall{dropped}, true, nil)
+	d, err := orch.maybeRequireConfirmation(ctx, sessions, "s1", gated, "create both", []ToolCall{dropped}, true, nil)
+	if err != nil {
+		t.Fatalf("gate: %v", err)
+	}
+	rr, raised := d.question, d.outcome == gateAwaitApproval
 	if !raised || rr == nil {
 		t.Fatalf("gated write must raise a confirmation, got raised=%v rr=%v", raised, rr)
 	}
@@ -489,8 +497,8 @@ func TestMaybeRequireConfirmation_InterruptedBatchRecordedInTextMode(t *testing.
 
 	gated := ToolCall{ID: "c-a", Plugin: "p", Action: "write_a", FromLLM: true, Args: map[string]string{"name": "A"}}
 	dropped := ToolCall{ID: "c-b", Plugin: "p", Action: "write_b", FromLLM: true, Args: map[string]string{"name": "B"}}
-	if _, raised := orch.maybeRequireConfirmation(sentCtx("p__write_a", "p__write_b"), sessions, "s1",
-		gated, "create both", []ToolCall{dropped}, false, nil); !raised {
+	if d, err := orch.maybeRequireConfirmation(sentCtx("p__write_a", "p__write_b"), sessions, "s1",
+		gated, "create both", []ToolCall{dropped}, false, nil); err != nil || d.outcome != gateAwaitApproval {
 		t.Fatal("gated write must raise a confirmation")
 	}
 
@@ -522,8 +530,12 @@ func TestMaybeRequireConfirmation_NoConfirmationRecordsNoTrace(t *testing.T) {
 
 	readOnly := ToolCall{ID: "c-r", Plugin: "p", Action: "read_x", FromLLM: true}
 	dropped := ToolCall{ID: "c-b", Plugin: "p", Action: "write_b", FromLLM: true}
-	rr, raised := orch.maybeRequireConfirmation(sentCtx("p__read_x", "p__write_b"), sessions, "s1",
+	d, err := orch.maybeRequireConfirmation(sentCtx("p__read_x", "p__write_b"), sessions, "s1",
 		readOnly, "just look", []ToolCall{dropped}, true, nil)
+	if err != nil {
+		t.Fatalf("gate: %v", err)
+	}
+	rr, raised := d.question, d.outcome == gateAwaitApproval
 	if raised || rr != nil {
 		t.Fatalf("a read-only call must not raise a confirmation, got raised=%v rr=%v", raised, rr)
 	}

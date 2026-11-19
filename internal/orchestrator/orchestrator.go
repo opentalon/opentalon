@@ -2153,12 +2153,21 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				// like the agent-loop path (same helper). Without this the
 				// server-side single-step path would execute a write — including
 				// an amend re-plan's corrected write — with no consent. Read-only
-				// / bypass calls fall straight through to execution.
-				if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, call, userMessage, nil, false, nil); raised {
-					return rr, nil
+				// / bypass calls fall straight through to execution. A call the
+				// gate answered (its check refused it) is not executed: its
+				// refusal seeds the history like a result, so the model reads it.
+				decision, gateErr := o.maybeRequireConfirmation(ctx, sessions, sessionID, call, userMessage, nil, false, nil)
+				if gateErr != nil {
+					return nil, gateErr
 				}
-				toolResult := o.executeCall(ctx, call)
-				if toolResult.Error == "" {
+				if decision.outcome == gateAwaitApproval {
+					return decision.question, nil
+				}
+				toolResult := decision.result
+				if decision.outcome == gateExecute {
+					toolResult = o.executeCall(ctx, call)
+				}
+				if toolResult.Error == "" || decision.outcome == gateAnswered {
 					// Seed session: user message, assistant tool call, tool result.
 					if !inputStored {
 						_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
@@ -2862,15 +2871,25 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// the two sites can't drift. Narrates the prompt in the user's
 			// language, stores + persists the pending call, and returns the
 			// confirmation; read-only / bypass calls fall through to execution.
-			if rr, raised := o.maybeRequireConfirmation(ctx, sessions, sessionID, calls[i], userMessage, calls[i+1:], nativeToolCalls, &thinking); raised {
-				return rr, nil
+			// A call the gate answered (its check refused it) is not executed:
+			// its result takes the place of the execution's below, and the
+			// response's later calls go on, since no confirmation was raised.
+			decision, gateErr := o.maybeRequireConfirmation(ctx, sessions, sessionID, calls[i], userMessage, calls[i+1:], nativeToolCalls, &thinking)
+			if gateErr != nil {
+				return nil, gateErr
+			}
+			if decision.outcome == gateAwaitApproval {
+				return decision.question, nil
 			}
 
 			if timing != nil {
 				timing.begin("tool_" + toolFQN(calls[i].Plugin, calls[i].Action))
 			}
 			pluginStart := time.Now()
-			toolResult := o.executeCall(ctx, calls[i])
+			toolResult := decision.result
+			if decision.outcome == gateExecute {
+				toolResult = o.executeCall(ctx, calls[i])
+			}
 			if toolResult.NotRun {
 				unrun[toolCallSignature(calls[i:i+1])] = true
 			}
@@ -2946,7 +2965,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if warning := o.recordToolOutcome(ctx, sessionID, call, toolResult, repaired); warning != nil {
 				transientMessages = append(transientMessages, *warning)
 			}
-			if o.pluginCallObserver != nil && !toolResult.NotRun {
+			// A refused check never reached an execution, so the plugin-call
+			// metrics leave it out like a call that did not run.
+			if o.pluginCallObserver != nil && !toolResult.NotRun && !toolResult.RefusedByCheck {
 				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, failed, perCallInput, perCallOutput)
 			}
 
@@ -3339,14 +3360,45 @@ func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content strin
 	return "", nil, false
 }
 
+// gateOutcome is what the confirmation gate (maybeRequireConfirmation)
+// decided for a call.
+type gateOutcome int
+
+const (
+	// gateExecute: the call needs no confirmation (read-only, bypass, no
+	// confirmation plugin, or a call executeCall refuses by OpenTalon's own
+	// lookups); the caller executes it.
+	gateExecute gateOutcome = iota
+	// gateAwaitApproval: the user is asked and the call is stored as pending;
+	// the caller returns the question and executes nothing.
+	gateAwaitApproval
+	// gateAnswered: the call is answered without being executed, with an
+	// admission refusal or the refusal of its check; the caller records the
+	// result as the call's and executes nothing.
+	gateAnswered
+)
+
+// gateDecision is the confirmation gate's outcome for one call, with the
+// question the turn ends with (gateAwaitApproval) or the call's result
+// (gateAnswered).
+type gateDecision struct {
+	outcome  gateOutcome
+	question *RunResult
+	result   ToolResult
+}
+
 // maybeRequireConfirmation raises a confirmation_requested for a privileged
 // write call and records the pending state, mirroring the agent-loop gate. It is
 // the single place that decides "does this call need confirmation?" and is used
 // by BOTH the agent loop and the server-side single-step path so the two can
-// never drift into a write-without-consent gap. Returns (runResult, true) when a
-// confirmation was raised — the caller must return it and NOT execute the call;
-// (nil, false) when the call is exempt (read-only / bypass / no plugin) and the
-// caller should proceed to execute.
+// never drift into a write-without-consent gap. Its decision is one of three
+// outcomes (gateOutcome): execute the call now, wait for the user's approval
+// (the caller returns the question and executes nothing), or answered with a
+// result (the caller records the result and executes nothing). A call to an
+// action that declares a check is sent for one before the question is worded
+// (checkBeforeConfirmation). A non-nil error is the turn's ctx error when the
+// turn ended while the call was checked: the caller returns it; nothing was
+// stored or emitted for the call.
 //
 // interrupted carries the not-yet-executed calls from the SAME model response
 // that this confirmation abandons (the agent loop stops at the gated call and
@@ -3365,9 +3417,9 @@ func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content strin
 func (o *Orchestrator) maybeRequireConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
 	interrupted []ToolCall, interruptedNative bool, thinking *responseThinking,
-) (*RunResult, bool) {
+) (gateDecision, error) {
 	if call.ConfirmationBypass {
-		return nil, false
+		return gateDecision{outcome: gateExecute}, nil
 	}
 	// A call to a tool the model has not loaded (a native-mode catalog tool)
 	// is never run: executeCall answers it (answerUnloadedCall), so it must
@@ -3380,7 +3432,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
 		logger.FromContext(ctx).Debug("skipping confirmation for unloaded catalog tool; executeCall answers it without running it",
 			"plugin", call.Plugin, "action", call.Action)
-		return nil, false
+		return gateDecision{outcome: gateExecute}, nil
 	}
 	// A call whose action does not resolve at all — a hallucinated or mangled
 	// name (e.g. plugin "timly", action "timly__load_tools") — will be refused
@@ -3400,7 +3452,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	if call.FromLLM && o.resolveAction(call.Plugin, call.Action) == nil {
 		logger.FromContext(ctx).Debug("skipping confirmation for unresolvable tool call; executeCall will refuse it as not-found",
 			"plugin", call.Plugin, "action", call.Action)
-		return nil, false
+		return gateDecision{outcome: gateExecute}, nil
 	}
 	// Validate argument names BEFORE narrating and storing the pending call.
 	// A call that executeCall's rejectUnknownArgs would refuse anyway must
@@ -3424,17 +3476,27 @@ func (o *Orchestrator) maybeRequireConfirmation(
 			if err := rejectUnknownArgs(call, action); err != nil {
 				logger.FromContext(ctx).Debug("skipping confirmation for call with unknown args; executeCall will reject it",
 					"plugin", call.Plugin, "action", call.Action, "error", err.Error())
-				return nil, false
+				return gateDecision{outcome: gateExecute}, nil
 			}
 		}
 	}
 	// Shared head with the repair phase's consent boundary: gate configured,
 	// action not read-only, confirmation plugin says yes.
 	if !o.callRequiresConfirmation(ctx, call) {
-		return nil, false
+		return gateDecision{outcome: gateExecute}, nil
 	}
 	log := logger.FromContext(ctx)
 	log.Info("tool call requires confirmation", "plugin", call.Plugin, "action", call.Action)
+	// The check sits here: only a call that needs the user's approval is
+	// checked, and before the question is worded. A refusal answers the call;
+	// every other verdict asks the user as without a check.
+	checked, answered, err := o.checkBeforeConfirmation(ctx, call)
+	if err != nil {
+		return gateDecision{}, err
+	}
+	if answered {
+		return gateDecision{outcome: gateAnswered, result: checked}, nil
+	}
 	// Narrate with the main LLM so the prompt is in the user's language and the
 	// effect (e.g. batch count) is explicit; fall back to a static template.
 	var recentMsgs []provider.Message
@@ -3477,10 +3539,83 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	// the corrector the approved intent without the session history.
 	pending := call
 	savePendingToolCall(sessions, sessionID, &pending, confID, confirmMsg, actor.SpokenReply(ctx), thinking)
-	return &RunResult{
+	return gateDecision{outcome: gateAwaitApproval, question: &RunResult{
 		Response: confirmMsg,
 		Metadata: frameMeta,
-	}, true
+	}}, nil
+}
+
+// checkBeforeConfirmation sends a call that needs the user's approval to its
+// plugin for a check, when its action declares one (Action.Check). The call is
+// admitted first, on a copy (admitCall): a call OpenTalon refuses itself is
+// answered with that refusal, without a check, and the plugin checks the call
+// its execution would get. answered is true when the call is answered without
+// a question, with the admission refusal or with the plugin's refusal. Every
+// other case asks the user as without a check: the action declares none, the
+// check passed, or it could not be answered (the plugin does not check calls,
+// a transport error, the deadline of a plugin call, no verdict, a refusal
+// without a message, which would read as a success). Only the typed verdict
+// refuses; no error text is read as one. err is the turn's ctx error when the
+// turn ended while the call was checked; then nothing is emitted.
+//
+// A model's call that is answered emits the call's pair once the outcome is
+// known: tool_call_extracted with the call as issued and one outcome event
+// parented to it, the admission refusal's own or a tool_call_result with the
+// status refused. A pass or a check that cannot be answered emits nothing,
+// as a call waiting for approval emits nothing.
+func (o *Orchestrator) checkBeforeConfirmation(ctx context.Context, call ToolCall) (result ToolResult, answered bool, err error) {
+	action := o.resolveAction(call.Plugin, call.Action)
+	if action == nil || !action.Check {
+		return ToolResult{}, false, nil
+	}
+	log := logger.FromContext(ctx)
+	dispatchStart := time.Now()
+	admitted, refuse, ok := o.admitCall(ctx, call, dispatchStart)
+	if !ok {
+		return refuse(o.emitToolCallExtracted(ctx, call)), true, nil
+	}
+	checker, ok := admitted.exec.(CheckExecutor)
+	if !ok {
+		log.Info("plugin does not check calls; asking for confirmation without a check",
+			"plugin", call.Plugin, "action", call.Action)
+		return ToolResult{}, false, nil
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, o.callDeadline(admitted.call))
+	verdict, checkErr := checker.Check(checkCtx, admitted.call)
+	cancel()
+	// The deadline of the check and the end of the turn both end checkCtx;
+	// only the turn's own ctx tells them apart.
+	if err := ctx.Err(); err != nil {
+		return ToolResult{}, false, err
+	}
+	switch {
+	case checkErr != nil:
+		log.Warn("tool call check could not be answered; asking for confirmation",
+			"plugin", call.Plugin, "action", call.Action, "error", checkErr)
+		return ToolResult{}, false, nil
+	case verdict.Verdict == CheckPassed:
+		return ToolResult{}, false, nil
+	case verdict.Verdict != CheckRefused:
+		log.Warn("tool call check gave no verdict; asking for confirmation",
+			"plugin", call.Plugin, "action", call.Action)
+		return ToolResult{}, false, nil
+	case strings.TrimSpace(verdict.Message) == "":
+		log.Warn("tool call check refused without a message; asking for confirmation",
+			"plugin", call.Plugin, "action", call.Action, "kind", verdict.Kind)
+		return ToolResult{}, false, nil
+	}
+	log.Info("tool call refused by its check; answering it without asking",
+		"plugin", call.Plugin, "action", call.Action, "kind", verdict.Kind)
+	refused := o.guard.Sanitize(ToolResult{CallID: call.ID, Error: verdict.Message, RefusedByCheck: true})
+	if call.FromLLM {
+		refused.EventID = emit.EmitToolCallResult(o.emitToolCallExtracted(ctx, call), o.eventSink, emit.ToolCallResultArgs{
+			CallID:    call.ID,
+			Status:    "refused",
+			Response:  refused.Error,
+			LatencyMS: time.Since(dispatchStart).Milliseconds(),
+		})
+	}
+	return refused, true, nil
 }
 
 // confirmationNarratePrompt steers the pre-write confirmation: it must be in the
@@ -4766,29 +4901,11 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	// gate fires. Even non-FromLLM calls pay one time.Now() — cheap and
 	// keeps the contract simple.
 	dispatchStart := time.Now()
-	if call.FromLLM {
-		mode := emit.ToolCallModeText
-		if o.supportsNativeTools() {
-			mode = emit.ToolCallModeNative
-		}
-		// Arguments captured as the raw map ref: admitCall below injects
-		// the context args into a new map, so this one stays as the model
-		// issued it.
-		extractedID := emit.EmitToolCallExtracted(ctx, o.eventSink, emit.ToolCallExtractedArgs{
-			CallID:    call.ID,
-			Plugin:    call.Plugin,
-			Action:    call.Action,
-			Arguments: call.Args,
-			Mode:      mode,
-		})
-		if extractedID != "" {
-			ctx = emit.WithParent(ctx, extractedID)
-		}
-	}
+	ctx = o.emitToolCallExtracted(ctx, call)
 
-	admitted, refusal, ok := o.admitCall(ctx, call, dispatchStart)
+	admitted, refuse, ok := o.admitCall(ctx, call, dispatchStart)
 	if !ok {
-		return refusal
+		return refuse(ctx)
 	}
 	call, exec := admitted.call, admitted.exec
 	// Audit log when the action declares AuditLog (no hardcoded plugin/action names).
@@ -4839,6 +4956,30 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	return result
 }
 
+// emitToolCallExtracted emits tool_call_extracted for a model's call, with the
+// call as the model issued it, so the raw decoded view is captured before any
+// validation, normalization, policy gating, or context-arg injection mutates
+// it (raw-capture rule; admitCall injects into a new map). It returns ctx with
+// that event as the parent of the call's outcome event. Internal calls
+// (preparers, guards, pipelines) are host-orchestrated, not part of the LLM
+// reasoning trace, and emit nothing.
+func (o *Orchestrator) emitToolCallExtracted(ctx context.Context, call ToolCall) context.Context {
+	if !call.FromLLM {
+		return ctx
+	}
+	mode := emit.ToolCallModeText
+	if o.supportsNativeTools() {
+		mode = emit.ToolCallModeNative
+	}
+	return emit.WithParent(ctx, emit.EmitToolCallExtracted(ctx, o.eventSink, emit.ToolCallExtractedArgs{
+		CallID:    call.ID,
+		Plugin:    call.Plugin,
+		Action:    call.Action,
+		Arguments: call.Args,
+		Mode:      mode,
+	}))
+}
+
 // admittedCall is a call admitCall let through: the call as it is
 // dispatched (the action under its registered name, the context args the
 // action declares injected), the plugin's executor, and the action the
@@ -4849,30 +4990,43 @@ type admittedCall struct {
 	action *Action
 }
 
+// admissionRefusal answers a call admitCall refused, without dispatching it:
+// it emits the refusal's event under ctx's parent and returns the result the
+// model reads. The caller answers it with the ctx that carries the call's
+// extracted event, which it may emit only once it knows the call is refused.
+type admissionRefusal func(ctx context.Context) ToolResult
+
+// notFoundRefusal answers a call whose plugin or action does not resolve.
+func (o *Orchestrator) notFoundRefusal(call ToolCall, errMsg string) admissionRefusal {
+	return func(ctx context.Context) ToolResult {
+		o.emitToolCallNotFound(ctx, call)
+		return ToolResult{CallID: call.ID, Error: errMsg}
+	}
+}
+
+// policyRefusal answers a call a permission, profile or user-only gate refused.
+func (o *Orchestrator) policyRefusal(call ToolCall, errMsg string, dispatchStart time.Time) admissionRefusal {
+	return func(ctx context.Context) ToolResult {
+		return o.emitRefusalResult(ctx, call, errMsg, dispatchStart)
+	}
+}
+
 // admitCall is everything OpenTalon decides about a call before it is
 // dispatched: the plugin and the action under its normalized name, and for a
 // model's call the permission, profile and user-only gates, the tool-load gate
 // and the argument names, then the context args the action declares. It
-// returns the admitted call, or false and the result that answers the call
-// instead, whose events it has emitted under ctx's parent. call is the
-// caller's copy and the injection fills a new Args map, so the call the
-// caller holds stays as issued.
-func (o *Orchestrator) admitCall(ctx context.Context, call ToolCall, dispatchStart time.Time) (admittedCall, ToolResult, bool) {
+// returns the admitted call, or false and the refusal that answers the call
+// instead. It emits no event itself. call is the caller's copy and the
+// injection fills a new Args map, so the call the caller holds stays as
+// issued.
+func (o *Orchestrator) admitCall(ctx context.Context, call ToolCall, dispatchStart time.Time) (admittedCall, admissionRefusal, bool) {
 	if call.Plugin == "" {
-		o.emitToolCallNotFound(ctx, call)
 		_, native := sentNativeToolsFromContext(ctx)
-		return admittedCall{}, ToolResult{
-			CallID: call.ID,
-			Error:  recoveryHint(native, nativeWrongNameFormError, textWrongNameFormError),
-		}, false
+		return admittedCall{}, o.notFoundRefusal(call, recoveryHint(native, nativeWrongNameFormError, textWrongNameFormError)), false
 	}
 	exec, ok := o.registry.GetExecutor(call.Plugin)
 	if !ok {
-		o.emitToolCallNotFound(ctx, call)
-		return admittedCall{}, ToolResult{
-			CallID: call.ID,
-			Error:  fmt.Sprintf("plugin %q not found", call.Plugin),
-		}, false
+		return admittedCall{}, o.notFoundRefusal(call, fmt.Sprintf("plugin %q not found", call.Plugin)), false
 	}
 	if !o.registry.HasAction(call.Plugin, call.Action) {
 		// LLMs frequently mangle action names in two ways:
@@ -4889,11 +5043,8 @@ func (o *Orchestrator) admitCall(ctx context.Context, call ToolCall, dispatchSta
 			}
 		}
 		if !resolved {
-			o.emitToolCallNotFound(ctx, call)
-			return admittedCall{}, ToolResult{
-				CallID: call.ID,
-				Error:  fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin),
-			}, false
+			return admittedCall{}, o.notFoundRefusal(call,
+				fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin)), false
 		}
 	}
 
@@ -4906,10 +5057,10 @@ func (o *Orchestrator) admitCall(ctx context.Context, call ToolCall, dispatchSta
 		allowed, err := o.permissionChecker.Allowed(ctx, actorID, call.Plugin)
 		if err != nil {
 			slog.Warn("permission check failed", "actor", actorID, "plugin", call.Plugin, "error", err)
-			return admittedCall{}, o.emitRefusalResult(ctx, call, "permission denied", dispatchStart), false
+			return admittedCall{}, o.policyRefusal(call, "permission denied", dispatchStart), false
 		}
 		if !allowed {
-			return admittedCall{}, o.emitRefusalResult(ctx, call, "permission denied", dispatchStart), false
+			return admittedCall{}, o.policyRefusal(call, "permission denied", dispatchStart), false
 		}
 	}
 
@@ -4943,7 +5094,7 @@ func (o *Orchestrator) admitCall(ctx context.Context, call ToolCall, dispatchSta
 				"in_allowlist", allowed.m[capForCheck.Name],
 				"allowlist_keys", mapKeys(allowed.m),
 			)
-			return admittedCall{}, o.emitRefusalResult(ctx, call,
+			return admittedCall{}, o.policyRefusal(call,
 				fmt.Sprintf("plugin %q is not available for this profile", call.Plugin),
 				dispatchStart), false
 		} else {
@@ -4958,7 +5109,7 @@ func (o *Orchestrator) admitCall(ctx context.Context, call ToolCall, dispatchSta
 
 	if call.FromLLM && action != nil && action.UserOnly {
 		slog.Warn("BLOCKED LLM attempt to invoke user_only action", "actor", actorID, "plugin", call.Plugin, "action", call.Action, "args", call.Args)
-		return admittedCall{}, o.emitRefusalResult(ctx, call,
+		return admittedCall{}, o.policyRefusal(call,
 			fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
 			dispatchStart), false
 	}
@@ -4978,7 +5129,10 @@ func (o *Orchestrator) admitCall(ctx context.Context, call ToolCall, dispatchSta
 	// and before arg validation (loading the real schema is the actionable fix,
 	// not the guessed args).
 	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
-		return admittedCall{}, o.answerUnloadedCall(ctx, call, dispatchStart), false
+		unloaded := call
+		return admittedCall{}, func(ctx context.Context) ToolResult {
+			return o.answerUnloadedCall(ctx, unloaded, dispatchStart)
+		}, false
 	}
 	// Reject unknown args from LLM-originated calls. Without this, stray keys
 	// (e.g. Haiku emitting `message=` at top level instead of inside `args`)
@@ -4998,16 +5152,19 @@ func (o *Orchestrator) admitCall(ctx context.Context, call ToolCall, dispatchSta
 	if call.FromLLM && action != nil && len(call.Args) > 0 {
 		if err := rejectUnknownArgs(call, action); err != nil {
 			slog.Warn("BLOCKED LLM call with unknown args", "plugin", call.Plugin, "action", call.Action, "error", err.Error())
-			invalidID := emit.EmitToolCallArgsInvalid(ctx, o.eventSink, emit.ToolCallArgsInvalidArgs{
-				CallID:          call.ID,
-				Plugin:          call.Plugin,
-				Action:          call.Action,
-				ValidationError: err.Error(),
-			})
-			// ArgsInvalid is the typed pre-dispatch marker the repair phase
-			// keys on: this early return is the one failure that provably
-			// never reached the tool.
-			return admittedCall{}, ToolResult{CallID: call.ID, Error: err.Error(), EventID: invalidID, ArgsInvalid: true}, false
+			invalid := call
+			return admittedCall{}, func(ctx context.Context) ToolResult {
+				invalidID := emit.EmitToolCallArgsInvalid(ctx, o.eventSink, emit.ToolCallArgsInvalidArgs{
+					CallID:          invalid.ID,
+					Plugin:          invalid.Plugin,
+					Action:          invalid.Action,
+					ValidationError: err.Error(),
+				})
+				// ArgsInvalid is the typed pre-dispatch marker the repair phase
+				// keys on: this early return is the one failure that provably
+				// never reached the tool.
+				return ToolResult{CallID: invalid.ID, Error: err.Error(), EventID: invalidID, ArgsInvalid: true}
+			}, false
 		}
 	}
 	// Inject only declared context arg names that have a provider (e.g.
@@ -5035,7 +5192,7 @@ func (o *Orchestrator) admitCall(ctx context.Context, call ToolCall, dispatchSta
 		}
 		call.Args = args
 	}
-	return admittedCall{call: call, exec: exec, action: action}, ToolResult{}, true
+	return admittedCall{call: call, exec: exec, action: action}, nil, true
 }
 
 // emitToolCallNotFound emits a tool_call_not_found event for an LLM-originated
