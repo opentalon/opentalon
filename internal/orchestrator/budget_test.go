@@ -328,3 +328,20 @@ func TestBudgetQueuedTurnSeesThePreviousTurnsPrice(t *testing.T) {
 			results[0].Metadata[BudgetMetadataKey], results[1].Metadata[BudgetMetadataKey], profile.ScopeGroup)
 	}
 }
+
+// A switched turn whose answer asks a confirmation for a change carries the
+// notice on the confirmation frame.
+func TestBudgetNoticeOnAConfirmation(t *testing.T) {
+	h := newLUMHarness(t, false)
+	h.orch.budget = &budgetStub{group: 50}
+	h.orch.defaultModel = budgetDefault
+	p := budgetProfile(budgetPremium, map[string]profile.Tariff{"claude-x": {Input: 3, Output: 15}},
+		profile.BudgetLimit{Scope: profile.ScopeGroup, Max: 50, Since: budgetSince, Kinds: []string{profile.KindChat}})
+	h.llm.script([]provider.CompletionResponse{lumToolCall("c-purge", "store__purge")}, "Shall I remove the records?")
+
+	res := h.run(profile.WithProfile(context.Background(), p), "Remove the old records")
+
+	if res.Metadata["type"] != "confirmation" || res.Metadata[BudgetMetadataKey] != profile.ScopeGroup {
+		t.Errorf("metadata = %+v, want a confirmation carrying %s=%s", res.Metadata, BudgetMetadataKey, profile.ScopeGroup)
+	}
+}
