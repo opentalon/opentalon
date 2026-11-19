@@ -33,6 +33,8 @@ type usageCall struct {
 	entityID, sessionID, modelID string
 	in, out                      int
 	inCost, outCost              float64
+	price                        float64
+	priced                       bool
 }
 
 type usageSpy struct {
@@ -40,10 +42,14 @@ type usageSpy struct {
 	calls []usageCall
 }
 
-func (u *usageSpy) RecordUsage(_ context.Context, entityID, _, _, sessionID, modelID, _, _ string, in, out, _ int, inCost, outCost float64) {
+func (u *usageSpy) RecordUsage(_ context.Context, entityID, _, _, sessionID, modelID, _, _ string, in, out, _ int, inCost, outCost float64, price *float64) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.calls = append(u.calls, usageCall{entityID: entityID, sessionID: sessionID, modelID: modelID, in: in, out: out, inCost: inCost, outCost: outCost})
+	c := usageCall{entityID: entityID, sessionID: sessionID, modelID: modelID, in: in, out: out, inCost: inCost, outCost: outCost}
+	if price != nil {
+		c.price, c.priced = *price, true
+	}
+	u.calls = append(u.calls, c)
 }
 
 func decideTestOrch(t *testing.T, d *fakeDecider, usage UsageRecorder) *Orchestrator {

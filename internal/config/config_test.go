@@ -1587,3 +1587,51 @@ func indentLines(s, prefix string) string {
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
+
+func TestParseProviderCurrency(t *testing.T) {
+	const lineErr = "models.providers.p.currency: line 4: must be an ISO 4217 code of three upper-case letters, such as USD"
+	cases := []struct {
+		name    string
+		field   string
+		want    string
+		wantErr string
+	}{
+		{"absent", "", "", ""},
+		{"a code", "currency: USD", "USD", ""},
+		{"a quoted code", `currency: "EUR"`, "EUR", ""},
+		{"null", "currency: null", "", lineErr},
+		{"~", "currency: ~", "", lineErr},
+		{"an empty value", "currency:", "", lineErr},
+		{"an empty string", `currency: ""`, "", lineErr},
+		{"lower case", "currency: usd", "", `models.providers.p.currency: must be an ISO 4217 code of three upper-case letters, such as USD, got "usd"`},
+		{"a number", "currency: 840", "", `models.providers.p.currency: must be an ISO 4217 code of three upper-case letters, such as USD, got "840"`},
+		{"a sign", "currency: $", "", `models.providers.p.currency: must be an ISO 4217 code of three upper-case letters, such as USD, got "$"`},
+		{"four letters", "currency: EURO", "", `models.providers.p.currency: must be an ISO 4217 code of three upper-case letters, such as USD, got "EURO"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]byte("models:\n  providers:\n    p:\n      " + tc.field + "\n      api: anthropic-messages\n"))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := cfg.Models.Providers["p"].Currency; got != tc.want {
+				t.Errorf("currency = %q, want %q", got, tc.want)
+			}
+			out, err := yaml.Marshal(cfg.Models.Providers["p"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := Parse([]byte("models:\n  providers:\n    p:\n" + indentLines(string(out), "      ")))
+			if err != nil || again.Models.Providers["p"].Currency != tc.want {
+				t.Errorf("the marshalled provider parses again with currency %q (%v), want %q\n%s",
+					again.Models.Providers["p"].Currency, err, tc.want, out)
+			}
+		})
+	}
+}

@@ -8,6 +8,9 @@ models:
       base_url: "https://api.deepseek.com/v1"
       api_key: "${DEEPSEEK_API_KEY}"
       api: openai-completions
+      # ISO 4217 code the model costs below are in (the provider's invoice).
+      # See docs/configuration.md, "Currency".
+      currency: USD
       models:
         - id: deepseek-chat
           name: DeepSeek Chat
@@ -48,6 +51,7 @@ models:
     # anthropic:
     #   api_key: "${ANTHROPIC_API_KEY}"
     #   api: anthropic-messages
+    #   currency: USD
     #   prompt_cache: true          # default false
     #   cache_diagnostics: false    # default false
     #   models:
@@ -124,6 +128,7 @@ routing:
 #       base_url: "${VLLM_DEDICATED_URL}"   # e.g. https://<app-id>.app.gra.ai.cloud.ovh.net/v1
 #       api_key: "${VLLM_DEDICATED_KEY}"
 #       api: openai-completions
+#       currency: EUR
 #       models:
 #         - id: gpt-oss-120b
 #           name: GPT OSS 120B (self-hosted)
@@ -134,6 +139,7 @@ routing:
 #       base_url: "${OVH_AI_URL}"
 #       api_key: "${OVH_AI_KEY}"
 #       api: openai-completions
+#       currency: EUR
 #       models:
 #         - id: gpt-oss-120b-ovh
 #           name: GPT OSS 120B (OVH shared)

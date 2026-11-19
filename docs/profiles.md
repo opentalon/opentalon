@@ -83,6 +83,8 @@ Authorization: Bearer <token>
 | `model` | No | Model override for this profile (e.g. `"anthropic/claude-3-5-sonnet-20241022"`). Overrides the server default for this request. |
 | `kind` | No | `chat` (default) for a person's turn, `system` for a run a backend feature started on a user's behalf. Stamped on the session row at creation (`sessions.interaction_kind`) and on every usage row. |
 | `system_source` | No | Name of the feature behind a `system` run, e.g. `job_notify`. Only honoured together with `kind: system`; on any other run it is ignored and logged — a source never upgrades a run's kind, because `system` skips the interactive spend limit. Stamped once on the session that the run opened (`sessions.system_source`, NULL for chat) and on each usage row; see [Run labels](#run-labels). |
+| `tariffs` | No | Customer prices in EUR per million tokens, by model id as `models.providers.<id>.models[].id` names it (without the provider): `{"claude-sonnet-5-5": {"input": 3, "cached_input": 0.3, "output": 15}}`. `input` and `output` are required numbers of 0 or more, `cached_input` is optional. Every model call of the run is priced at them; see [Customer price](#customer-price). |
+| `limits` | No | Money budgets in EUR, checked when a turn starts: `[{"scope": "group", "max": 50, "since": "2026-11-01T00:00:00+01:00", "kinds": ["chat"]}]`. `scope` is `group` or `entity`, `max` a number of 0 or more, `since` an RFC 3339 time with offset, `kinds` the interaction kinds the budget counts and checks (`chat` when absent or empty). See [Budgets](#budgets). The token rule from `limit` and `limit_time` applies on its own. |
 
 ### Full WhoAmI config
 
@@ -99,6 +101,7 @@ profiles:
     group_field: group            # JSON key for group; default "group"
     plugins_field: plugins        # JSON key for plugin list; default "plugins"
     model_field: model            # JSON key for model override; default "model"
+    tariffs_field: tariffs        # JSON key for customer prices per model; default "tariffs"
     extra_headers: {}             # static headers added to every WhoAmI call (see below)
     metadata_headers: {}          # forward per-message metadata as headers (see below)
 ```
@@ -303,7 +306,7 @@ ORDER BY SUM(input_tokens) DESC;
 
 Each sub-agent LLM call (`_subprocess.run` / `_subprocess.parallel`) and each `decide` records its own row under the caller's profile, with the caller's `interaction_kind`, so it counts against the same limits. A call with no profile (e.g. a plugin callback that sets no `__ot_cb_entity_id`) is recorded under entity `_unattributed` as `system` / `subprocess` (or `decide`).
 
-Fields: `id`, `entity_id`, `group_id`, `channel_id`, `session_id`, `model_id`, `input_tokens`, `output_tokens`, `tool_calls`, `input_cost`, `output_cost`, `interaction_kind`, `system_source`, `created_at`.
+Fields: `id`, `entity_id`, `group_id`, `channel_id`, `session_id`, `model_id`, `input_tokens`, `output_tokens`, `tool_calls`, `input_cost`, `output_cost`, `price`, `interaction_kind`, `system_source`, `created_at`.
 
 `interaction_kind` is `chat` (a human turn) or `system` (a backend-originated run, e.g. a job-completion note); `system_source` is a per-feature label for system runs (e.g. `job_notify`), NULL for chat. The interactive spend-limit query (see `TotalTokensSince`) counts only `interaction_kind = 'chat'`, so system runs are attributed but never charged against the customer's chat budget.
 
@@ -316,7 +319,53 @@ The two labels live in two places on purpose:
 
 Tool plugins can receive the current run's labels as injected context arguments; see [Context arguments the host injects](extensibility.md#context-arguments-the-host-injects).
 
-`input_cost` and `output_cost` are the sums of the costs the provider returned for the run's model calls, priced with the model's configured price per million tokens (set in `models.providers.<id>.models[].cost`, cached input at `cache_write` / `cache_read`). They will be zero if the model has no cost configured.
+`input_cost` and `output_cost` are the sums of the costs the provider returned for the run's model calls, priced with the model's configured price per million tokens (set in `models.providers.<id>.models[].cost`, cached input at `cache_write` / `cache_read`). They will be zero if the model has no cost configured. The sum carries no currency: a run whose calls were served by providers with different `currency` adds amounts in different currencies.
+
+`price` is the sum of the customer prices of the run's model calls (see [Customer price](#customer-price)), NULL when none of them had a price. Every row writer stores it: chat runs, sub-agent calls and `decide`.
+
+### Customer price
+
+When the run's profile carries `tariffs`, OpenTalon prices every model call when it returns, at the tariff of the model that served it:
+
+| Tokens | Tariff |
+|---|---|
+| input tokens that are not cache reads (cache writes among them) | `input` |
+| cache reads | `cached_input`, or `input` when the tariff has none |
+| output tokens | `output` |
+
+The OpenAI-compatible provider reports no cache tokens, so all its input is billed at `input`. The call's price is stored in its `llm_response` event as `price`, next to `cost_currency`, the [`currency`](configuration.md#currency) of the provider that served it; the run's row stores the sum.
+
+- The tariff is looked up by the model id the config names for the model that served the call, also after the default chain answered for a profile model, never by the model string the provider sends back. A `decide` call is looked up by the model its decider serves: `models.deciders.<name>.model`, or the backend's default model when that is empty (`jev-latest`, `subq-snap-preview`), or the decider's name for a `laya` decider without one. Its row keeps the `decide/<name>` label.
+- A model the tariffs do not name is priced at its provider cost when its provider's `currency` is `EUR`, with a warning naming the model. With another currency, or none, the call has no price and the warning names the model and the currency (`none` when the provider names none). A `decide` call has no currency.
+- A tariff of 0 stores a price of 0. A profile without `tariffs` (a run a plugin starts without whoami, an older whoami server) leaves the price empty and logs nothing.
+- An entry with a missing, negative or non-numeric `input` or `output`, or a negative or non-numeric `cached_input`, is dropped with a warning and counts as missing; a `cached_input` of `null` counts as omitted, so cache reads are billed at `input`. A `tariffs` value that is not an object is ignored with a warning. Neither fails the whoami check.
+- Prices are frozen at call time: a changed tariff prices new calls only.
+
+### Budgets
+
+A turn whose run kind a `limits` entry names is checked once, under the conversation's turn lock and before its first model call. The entry's budget is used up when the summed `price` of its rows since `since` reaches `max`:
+
+| `scope` | Rows summed |
+|---|---|
+| `group` | the group's rows of the entry's `kinds` |
+| `entity` | the entity's rows of the entry's `kinds` in the profile's group |
+
+`since` is compared in UTC; rows without a price count 0. What a used-up budget does depends on the model the turn would run on (the profile's `model`, else the default model) and on the tariffs:
+
+| Case | Turn |
+|---|---|
+| no budget used up, or the turn's model has a tariff of 0 | runs as before |
+| a budget used up, the turn's model is priced above 0 or has no tariff | runs on the default chain; the reply carries `budget_used_up` = the scope |
+| a budget used up, the default model is priced above 0 as well | refused with the error code `budget_used_up_group` or `budget_used_up_entity` |
+| a budget used up, the turn runs on the default model anyway | runs as before, unless the default model is priced above 0: refused |
+
+- With both budgets used up, the notice and the refusal name `group`.
+- A tariff is priced above 0 when any of its prices is. A default model without a tariff is never refused.
+- The switch applies to the one turn; the cached profile, which other turns share, keeps its `model`.
+- A turn writes its row before it releases the turn lock, so a turn queued behind it in the same conversation sees its price. Turns of other conversations run at the same time and can overshoot a budget by one turn each.
+- A run of a kind no entry names is neither counted nor checked. The resume handshake (a `control` message) is answered before any turn runs, so it is never checked.
+- A sum that cannot be read lets the turn run on its model, with a warning.
+- An entry with an unknown `scope`, a missing, negative or non-numeric `max`, or a `since` that does not parse is ignored with a warning, and so is one whose `kinds` name no known kind; an unknown kind in `kinds` is dropped with a warning. A `limits` value that is not an array is ignored with a warning. None of these fails the whoami check.
 
 ## Channel plugin integration
 

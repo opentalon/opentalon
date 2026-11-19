@@ -87,6 +87,7 @@ type Provider interface {
 type Registry struct {
 	byName map[string]Provider
 	costs  map[string]Cost
+	models map[string]string
 }
 
 // NewRegistry builds a Registry from the given providers, keyed by ID().
@@ -122,6 +123,22 @@ func (r *Registry) Cost(name string) Cost {
 		return Cost{}
 	}
 	return r.costs[name]
+}
+
+// WithModels sets the model ids the deciders' calls are priced by, keyed by
+// name, and returns r. Call it while building the registry, before it is shared.
+func (r *Registry) WithModels(models map[string]string) *Registry {
+	r.models = models
+	return r
+}
+
+// Model returns the model id the calls of the decider bound to name are priced
+// by; the name itself when the registry holds none for it.
+func (r *Registry) Model(name string) string {
+	if r != nil && r.models[name] != "" {
+		return r.models[name]
+	}
+	return name
 }
 
 // Has reports whether name is a configured decider.

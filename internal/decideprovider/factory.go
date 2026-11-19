@@ -94,6 +94,7 @@ func RegistryFromConfigs(cfgs map[string]DeciderConfig) (*Registry, error) {
 
 	providers := make([]Provider, 0, len(cfgs))
 	costs := make(map[string]Cost, len(cfgs))
+	models := make(map[string]string, len(cfgs))
 	seen := make(map[string]bool, len(cfgs))
 	for _, name := range names {
 		cfg := cfgs[name]
@@ -110,6 +111,22 @@ func RegistryFromConfigs(cfgs map[string]DeciderConfig) (*Registry, error) {
 		seen[cfg.Name] = true
 		providers = append(providers, p)
 		costs[cfg.Name] = cfg.Cost
+		models[cfg.Name] = servedModel(cfg)
 	}
-	return NewRegistry(providers...).WithCosts(costs), nil
+	return NewRegistry(providers...).WithCosts(costs).WithModels(models), nil
+}
+
+// servedModel is the model id cfg's calls are priced by: its configured model,
+// else its backend's default; empty for a laya decider without one, which
+// serves a fixed model per endpoint.
+func servedModel(cfg DeciderConfig) string {
+	switch {
+	case cfg.Model != "":
+		return cfg.Model
+	case cfg.Backend == BackendJev:
+		return defaultJevModel
+	case cfg.Backend == BackendSubQ:
+		return defaultSubQModel
+	}
+	return ""
 }

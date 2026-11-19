@@ -716,6 +716,7 @@ func main() {
 			LimitField:        cfg.Profiles.WhoAmI.LimitField,
 			LimitTimeField:    cfg.Profiles.WhoAmI.LimitTimeField,
 			NameField:         cfg.Profiles.WhoAmI.NameField,
+			TariffsField:      cfg.Profiles.WhoAmI.TariffsField,
 			ExtraHeaders:      cfg.Profiles.WhoAmI.ExtraHeaders,
 			MetadataHeaders:   cfg.Profiles.WhoAmI.MetadataHeaders,
 		}
@@ -819,8 +820,11 @@ func main() {
 	// *store.UsageStore does not become a non-nil interface (which would defeat
 	// the nil guard in the escalation path and panic on use).
 	var escalationLimit orchestrator.UsageLimitChecker
+	// The money budgets read the same store, through the same typed nil guard.
+	var budgetReader orchestrator.BudgetReader
 	if usageStore != nil {
 		escalationLimit = usageStore
+		budgetReader = usageStore
 	}
 
 	deciders, err := buildDeciders(cfg.Models.Deciders)
@@ -913,6 +917,8 @@ func main() {
 			Enabled: cfg.Orchestrator.Escalation.Enabled,
 		},
 		EscalationLimitChecker: escalationLimit,
+		BudgetReader:           budgetReader,
+		DefaultModel:           defaultModel,
 		Notify: orchestrator.NotifyConfig{
 			Enabled: cfg.Orchestrator.Notify.Enabled,
 		},
@@ -1357,7 +1363,7 @@ type usageRecorderAdapter struct {
 	collector *metrics.Collector
 }
 
-func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int, inputCost, outputCost float64) {
+func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int, inputCost, outputCost float64, price *float64) {
 	if a.store != nil {
 		if err := a.store.Record(ctx, store.UsageRecord{
 			EntityID:        entityID,
@@ -1372,6 +1378,7 @@ func (a *usageRecorderAdapter) RecordUsage(ctx context.Context, entityID, groupI
 			ToolCalls:       toolCalls,
 			InputCost:       inputCost,
 			OutputCost:      outputCost,
+			Price:           price,
 		}); err != nil {
 			slog.Warn("usage record failed", "entity", entityID, "error", err)
 		}
@@ -1826,6 +1833,7 @@ func buildProviderRef(cfg *config.Config, ref string, debugSink provider.DebugEv
 		APIKey:       pc.APIKey,
 		API:          pc.API,
 		Models:       models,
+		Currency:     pc.Currency,
 		DebugSink:    debugSink,
 		DebugResolve: debugResolve,
 		EventSink:    eventSink,

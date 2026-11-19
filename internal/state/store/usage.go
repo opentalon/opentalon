@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +24,7 @@ type UsageRecord struct {
 	ToolCalls       int
 	InputCost       float64
 	OutputCost      float64
+	Price           *float64
 }
 
 // UsageStore records LLM usage statistics per profile.
@@ -56,6 +58,30 @@ func (s *UsageStore) TotalTokensSince(ctx context.Context, entityID string, sinc
 	return total, nil
 }
 
+// PriceSince returns the summed customer price of groupID's rows of the
+// given interaction kinds recorded on or after since, or of entityID's rows
+// in groupID when entityID is set. Rows without a price count 0.
+func (s *UsageStore) PriceSince(ctx context.Context, groupID, entityID string, kinds []string, since time.Time) (float64, error) {
+	query := `
+		SELECT COALESCE(SUM(price), 0)
+		FROM profile_usage
+		WHERE group_id = ? AND created_at >= ? AND interaction_kind IN (` +
+		strings.TrimSuffix(strings.Repeat("?, ", len(kinds)), ", ") + `)`
+	args := []any{groupID, since.UTC().Format(time.RFC3339)}
+	for _, k := range kinds {
+		args = append(args, k)
+	}
+	if entityID != "" {
+		query += ` AND entity_id = ?`
+		args = append(args, entityID)
+	}
+	var total float64
+	if err := s.db.SQLDB().QueryRowContext(ctx, s.db.Dialect().Rebind(query), args...).Scan(&total); err != nil {
+		return 0, fmt.Errorf("usage store: price since: %w", err)
+	}
+	return total, nil
+}
+
 // Record inserts a usage record.
 func (s *UsageStore) Record(ctx context.Context, r UsageRecord) error {
 	id := "usg_" + uuid.New().String()
@@ -65,17 +91,21 @@ func (s *UsageStore) Record(ctx context.Context, r UsageRecord) error {
 		kind = "chat"
 	}
 	source := sql.NullString{String: r.SystemSource, Valid: r.SystemSource != ""}
+	var price sql.NullFloat64
+	if r.Price != nil {
+		price = sql.NullFloat64{Float64: *r.Price, Valid: true}
+	}
 	_, err := s.db.SQLDB().ExecContext(ctx, s.db.Dialect().Rebind(`
 		INSERT INTO profile_usage
 		  (id, entity_id, group_id, channel_id, session_id, model_id,
 		   interaction_kind, system_source,
 		   input_tokens, output_tokens, tool_calls,
-		   input_cost, output_cost, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		   input_cost, output_cost, price, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		id, r.EntityID, r.GroupID, r.ChannelID, r.SessionID, r.ModelID,
 		kind, source,
 		r.InputTokens, r.OutputTokens, r.ToolCalls,
-		r.InputCost, r.OutputCost, now)
+		r.InputCost, r.OutputCost, price, now)
 	if err != nil {
 		return fmt.Errorf("usage store: record: %w", err)
 	}

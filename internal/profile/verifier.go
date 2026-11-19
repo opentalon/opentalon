@@ -51,6 +51,7 @@ type VerifierConfig struct {
 	BudgetTokensField string            // optional JSON field for reasoning budget tokens; default "budget_tokens"
 	KindField         string            // optional JSON field for interaction kind ("chat"|"system"); default "kind"; absent ⇒ "chat"
 	SystemSourceField string            // optional JSON field for per-feature system label; default "system_source"
+	TariffsField      string            // optional JSON field for customer prices per model; default "tariffs"
 	ExtraHeaders      map[string]string // static headers sent on every WhoAmI call; ${ENV_VAR} expanded once at construction
 	// MetadataHeaders maps an inbound metadata key to an outbound HTTP header
 	// name. For each entry, Verify reads metadata[key] from its caller and
@@ -135,6 +136,9 @@ func (c *VerifierConfig) setDefaults() {
 	}
 	if c.SystemSourceField == "" {
 		c.SystemSourceField = "system_source"
+	}
+	if c.TariffsField == "" {
+		c.TariffsField = "tariffs"
 	}
 	// Expand env vars in ExtraHeaders once at construction time so values are
 	// immutable for the verifier's lifetime and can't drift mid-run. Also guard
@@ -487,6 +491,15 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 		}
 	}
 
+	var tariffs map[string]Tariff
+	if traw, ok := raw[v.cfg.TariffsField]; ok {
+		tariffs = parseTariffs(ctx, v.cfg.TariffsField, traw)
+	}
+	var limits []BudgetLimit
+	if lraw, ok := raw[limitsField]; ok {
+		limits = parseLimits(ctx, lraw)
+	}
+
 	p := &Profile{
 		EntityID:     entityID,
 		Group:        group,
@@ -501,6 +514,8 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 		Credentials:  credentials,
 		Kind:         kind,
 		SystemSource: systemSource,
+		Tariffs:      tariffs,
+		Limits:       limits,
 	}
 	slog.DebugContext(ctx, "whoami profile resolved",
 		"entity_id", p.EntityID,
@@ -511,6 +526,122 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 		"name", p.Name,
 	)
 	return p, nil
+}
+
+func parseTariffs(ctx context.Context, field string, raw json.RawMessage) map[string]Tariff {
+	var entries map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		slog.WarnContext(ctx, "whoami: malformed tariffs field, ignoring", "field", field, "error", err)
+		return nil
+	}
+	if entries == nil {
+		return nil
+	}
+	tariffs := make(map[string]Tariff, len(entries))
+	for model, entry := range entries {
+		t, ok := parseTariff(entry)
+		if !ok {
+			slog.WarnContext(ctx, "whoami: malformed tariff, ignoring", "field", field, "model", model)
+			continue
+		}
+		tariffs[model] = t
+	}
+	return tariffs
+}
+
+func parseTariff(raw json.RawMessage) (Tariff, bool) {
+	var fields struct {
+		Input       json.RawMessage `json:"input"`
+		CachedInput json.RawMessage `json:"cached_input"`
+		Output      json.RawMessage `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return Tariff{}, false
+	}
+	input, errIn := tariffPrice(fields.Input)
+	output, errOut := tariffPrice(fields.Output)
+	cached, errCached := tariffPrice(fields.CachedInput)
+	if errIn != nil || errOut != nil || errCached != nil || input == nil || output == nil {
+		return Tariff{}, false
+	}
+	return Tariff{Input: *input, CachedInput: cached, Output: *output}, true
+}
+
+func tariffPrice(raw json.RawMessage) (*float64, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	var price *float64
+	if err := json.Unmarshal(raw, &price); err != nil {
+		return nil, err
+	}
+	if price != nil && *price < 0 {
+		return nil, fmt.Errorf("negative price %v", *price)
+	}
+	return price, nil
+}
+
+// limitsField is the WhoAmI JSON key of the money budgets.
+const limitsField = "limits"
+
+// parseLimits keeps the well-formed budgets of a limits field and drops every
+// other entry with a warning; nothing in it fails the whoami check.
+func parseLimits(ctx context.Context, raw json.RawMessage) []BudgetLimit {
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		slog.WarnContext(ctx, "whoami: malformed limits field, ignoring", "field", limitsField, "error", err)
+		return nil
+	}
+	var limits []BudgetLimit
+	for i, entry := range entries {
+		l, problem := parseLimit(ctx, i, entry)
+		if problem != "" {
+			slog.WarnContext(ctx, "whoami: malformed limit, ignoring", "field", limitsField, "index", i, "problem", problem)
+			continue
+		}
+		limits = append(limits, l)
+	}
+	return limits
+}
+
+func parseLimit(ctx context.Context, index int, raw json.RawMessage) (BudgetLimit, string) {
+	var fields struct {
+		Scope string   `json:"scope"`
+		Max   *float64 `json:"max"`
+		Since string   `json:"since"`
+		Kinds []string `json:"kinds"`
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return BudgetLimit{}, err.Error()
+	}
+	if fields.Scope != ScopeGroup && fields.Scope != ScopeEntity {
+		return BudgetLimit{}, fmt.Sprintf("unknown scope %q", fields.Scope)
+	}
+	if fields.Max == nil {
+		return BudgetLimit{}, "no max"
+	}
+	if *fields.Max < 0 {
+		return BudgetLimit{}, fmt.Sprintf("negative max %v", *fields.Max)
+	}
+	since, err := time.Parse(time.RFC3339, fields.Since)
+	if err != nil {
+		return BudgetLimit{}, fmt.Sprintf("since %q is no RFC 3339 time", fields.Since)
+	}
+	kinds := []string{KindChat}
+	if len(fields.Kinds) > 0 {
+		kinds = nil
+		for _, k := range fields.Kinds {
+			if k != KindChat && k != KindSystem {
+				slog.WarnContext(ctx, "whoami: unknown kind in a limit, ignoring", "field", limitsField, "index", index, "kind", k)
+				continue
+			}
+			kinds = append(kinds, k)
+		}
+		if len(kinds) == 0 {
+			return BudgetLimit{}, "no known kind"
+		}
+	}
+	return BudgetLimit{Scope: fields.Scope, Max: *fields.Max, Since: since, Kinds: kinds}, ""
 }
 
 func jsonString(raw json.RawMessage) string {

@@ -48,6 +48,27 @@ endpoint health gate on it either — the endpoint is fine.
 Keep the phrase list narrow. A false positive turns a real endpoint failure into
 "oversized prompt" and hides an outage.
 
+## A call is priced where it returns, by the model it was sent to
+
+Both providers set `Usage.Price` and the `llm_response` event's `price` and
+`cost_currency` through `Price`, from the tariffs of the profile in the
+request's context and the call's usage and cost. User-facing rules:
+[Customer price](../profiles.md#customer-price). `Price` is a pointer: nil is
+"no price", 0 is a price.
+
+- The tariff is keyed by the request's model id (`anthReq.Model`, the OpenAI
+  request's `model`), the id the config names. After the selecting provider
+  falls back, that is the default model's id.
+- The currency is the provider's own (`ProviderConfig.Currency`, from its
+  `currency` in the config), so a model the provider serves without an entry
+  in its `models` list is priced in it as well.
+- A streamed call is priced when a chunk reports usage, and the chunk carries
+  the price like its usage.
+
+> **Gotcha**: keying the tariff by `resp.Model`. Providers send back a dated
+> or otherwise different string (`claude-sonnet-5-5-20261101`), the lookup
+> misses, and the call is priced at its provider cost or not at all.
+
 ## A profile model goes through the selecting provider
 
 `NewSelectingProvider` stands in front of the default provider (the health gate,

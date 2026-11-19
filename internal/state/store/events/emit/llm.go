@@ -45,8 +45,8 @@ func EmitLLMRequest(ctx context.Context, sink Sink, args LLMRequestArgs) string 
 // caller (the provider wrapper) from token counts and the per-million
 // rates on the matching ModelInfo. Computing here rather than at read
 // time freezes pricing at call time so later config changes do not
-// retroactively re-price historical events. Currency is whatever
-// ModelInfo.Cost is denominated in — see LLMResponsePayload doc. Zero
+// retroactively re-price historical events. CostCurrency names their
+// currency — see LLMResponsePayload doc. Zero
 // values are passed through unchanged; the payload uses omitempty so
 // unpriced models simply leave the fields out.
 type LLMResponseArgs struct {
@@ -64,6 +64,8 @@ type LLMResponseArgs struct {
 	ChatLoop           bool
 	CacheMissReason    string
 	ThinkingDropped    int
+	CostCurrency       string
+	Price              *float64
 }
 
 // EmitLLMResponse writes one llm_response event. The helper computes
@@ -92,6 +94,8 @@ func EmitLLMResponse(ctx context.Context, sink Sink, args LLMResponseArgs) strin
 		ChatLoop:            args.ChatLoop,
 		CacheMissReason:     args.CacheMissReason,
 		ThinkingDropped:     args.ThinkingDropped,
+		CostCurrency:        args.CostCurrency,
+		Price:               args.Price,
 	}, args.LatencyMS)
 }
 

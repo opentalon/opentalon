@@ -110,9 +110,21 @@ type GroupPluginLookup interface {
 // interactionKind is the run's kind ("chat" | "system"); systemSource is an
 // optional per-feature label for system runs. Both come from the run's Profile.
 // inputCost and outputCost are the sums of the costs the provider returned
-// for the run's model calls.
+// for the run's model calls; price is the sum of their prices, nil when none
+// of them had one.
 type UsageRecorder interface {
-	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int, inputCost, outputCost float64)
+	RecordUsage(ctx context.Context, entityID, groupID, channelID, sessionID, modelID, interactionKind, systemSource string, inputTokens, outputTokens, toolCalls int, inputCost, outputCost float64, price *float64)
+}
+
+func addPrice(total, price *float64) *float64 {
+	if price == nil {
+		return total
+	}
+	sum := *price
+	if total != nil {
+		sum += *total
+	}
+	return &sum
 }
 
 // PromptSnapshotUpserter persists content-addressed prompt bodies so a
@@ -206,6 +218,8 @@ type OrchestratorOpts struct {
 	Subprocess                    SubprocessConfig        // optional; subprocess (sub-agent) support
 	Escalation                    EscalationConfig        // optional; background-trigger LLM turn entrypoint (_escalate)
 	EscalationLimitChecker        UsageLimitChecker       // optional; pre-checks a background turn against the entity's token budget
+	BudgetReader                  BudgetReader            // optional; sums the usage rows of a profile's limits when a turn starts; nil = no money budgets
+	DefaultModel                  string                  // the default model's id, without provider; the budget check reads its tariff
 	Notify                        NotifyConfig            // optional; background-trigger message push entrypoint (_notify)
 	ConversationSender            ConversationSender      // optional; when set, _notify can push to an explicit channel+conversation (not just a packed session key)
 	OnStreamChunk                 StreamChunkCallback     // optional; when set and LLM supports streaming, final answers are streamed
@@ -444,6 +458,8 @@ type Orchestrator struct {
 	subprocessConfig    SubprocessConfig       // optional; subprocess (sub-agent) support
 	escalationConfig    EscalationConfig       // optional; background-trigger LLM turn entrypoint (_escalate)
 	escalationLimit     UsageLimitChecker      // optional; pre-checks a background turn (and a decide) against the entity's token budget
+	budget              BudgetReader           // optional; nil = no money budgets
+	defaultModel        string                 // the default model's id; the budget check reads its tariff
 	decideUnattributed  sync.Map               // decider name → warned once that its callbacks carry no identity
 	notifyConfig        NotifyConfig           // optional; background-trigger message push entrypoint (_notify)
 	conversationSender  ConversationSender     // optional; nil = _notify can only reach a conversation via a packed session key
@@ -787,6 +803,8 @@ func NewWithRules(
 		channelSender:           opts.ChannelSender,
 		titleMuxes:              newKeyedMutex(),
 		escalationLimit:         opts.EscalationLimitChecker,
+		budget:                  opts.BudgetReader,
+		defaultModel:            opts.DefaultModel,
 		escalationMuxes:         newKeyedMutex(),
 		conversationSender:      opts.ConversationSender,
 		langDetector:            buildReplyLanguageDetector(),
@@ -1496,6 +1514,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		timing = newRunTiming()
 		defer timing.log(log)
 	}
+
+	// Money budgets are checked under the turn lock, before anything of this
+	// turn is stored: a turn queued behind another turn of the session sees
+	// that turn's usage row, which is written before the lock is released.
+	budgetScope, err := o.checkBudget(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { markBudgetUsedUp(runResult, budgetScope) }()
 
 	// Snapshot session state before this Run so we can rollback on rejection.
 	var msgCountAtStart int
@@ -2264,21 +2291,24 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	result := &RunResult{}
 
 	// Resolve profile model override: strip the provider prefix if present (e.g. "anthropic/claude-3-5" -> "claude-3-5").
+	// A turn a used-up budget moved to the default model sends none, so the
+	// default chain serves it; the shared profile stays as it is.
 	var profileRef provider.ModelRef
-	if p := profile.FromContext(ctx); p != nil {
+	if p := profile.FromContext(ctx); p != nil && budgetScope == "" {
 		profileRef = provider.ModelRef(p.Model)
 	}
 	profileModel := profileRef.Model()
 
 	var totalInputTokens, totalOutputTokens, totalToolCalls int
 	var totalInputCost, totalOutputCost float64
+	var totalPrice *float64
 	var modelUsed string
 	defer func() {
 		if o.usageRecorder != nil {
 			if p := profile.FromContext(ctx); p != nil {
 				o.usageRecorder.RecordUsage(ctx, p.EntityID, p.Group,
 					p.ChannelID, sessionID, modelUsed, p.Kind, p.SystemSource,
-					totalInputTokens, totalOutputTokens, totalToolCalls, totalInputCost, totalOutputCost)
+					totalInputTokens, totalOutputTokens, totalToolCalls, totalInputCost, totalOutputCost, totalPrice)
 			}
 		}
 	}()
@@ -2551,6 +2581,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		totalOutputTokens += resp.Usage.OutputTokens
 		totalInputCost += resp.Usage.InputCost
 		totalOutputCost += resp.Usage.OutputCost
+		totalPrice = addPrice(totalPrice, resp.Usage.Price)
 
 		// Prefer native tool calls from the API response over text-based parsing.
 		var calls []ToolCall
@@ -3846,7 +3877,7 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 			model = chunk.Model
 		}
 		fallback = fallback || chunk.Fallback
-		if chunk.Usage.InputTokens > 0 || chunk.Usage.OutputTokens > 0 {
+		if chunk.Usage.InputTokens > 0 || chunk.Usage.OutputTokens > 0 || chunk.Usage.Price != nil {
 			usage = chunk.Usage
 		}
 		if chunk.Done {

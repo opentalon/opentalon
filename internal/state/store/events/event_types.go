@@ -430,13 +430,14 @@ const LLMRequestVersion = 2
 // wrapper at call time from token counts and the per-million rates
 // configured on the matching ModelInfo. Frozen at call time so later
 // config changes (or model retirement) do not retroactively re-price
-// historical events. Fields are unitless floats; the currency is
-// whatever ModelInfo.Cost is denominated in — operators document the
-// convention at deployment level (matching the existing store.UsageRecord
-// {InputCost, OutputCost} convention in internal/state/store/usage.go).
-// Both fields use omitempty: a zero value means "model not in the
-// catalogue at emit time", not "free" — analytics should treat absent
-// fields as unpriced rather than summing them as zero-cost calls.
+// historical events. Both fields use omitempty: a zero value means "model
+// not in the catalogue at emit time", not "free" — analytics should treat
+// absent fields as unpriced rather than summing them as zero-cost calls.
+// CostCurrency is the currency the answering provider's config names for
+// its prices, absent when it names none.
+//
+// Price is the call's customer price at the profile's tariffs. It is a
+// pointer so a price of 0 is kept; it is absent when the call has none.
 //
 // TokensIn counts every input token: uncached, written to the prompt cache
 // (CacheWriteTokens) and read from it (CacheReadTokens). CostInput prices
@@ -464,12 +465,15 @@ type LLMResponsePayload struct {
 	ChatLoop            bool            `json:"chat_loop,omitempty"`
 	CacheMissReason     string          `json:"cache_miss_reason,omitempty"`
 	ThinkingDropped     int             `json:"thinking_dropped,omitempty"`
+	CostCurrency        string          `json:"cost_currency,omitempty"`
+	Price               *float64        `json:"price,omitempty"`
 }
 
 // LLMResponseVersion bumped to 2 when the payload gained cache_write_tokens,
-// cache_read_tokens, chat_loop, cache_miss_reason and thinking_dropped. All
-// five are omitempty, so v=1 rows decode cleanly with the fields absent.
-const LLMResponseVersion = 2
+// cache_read_tokens, chat_loop, cache_miss_reason and thinking_dropped, and
+// to 3 when it gained cost_currency and price. All are omitempty, so older
+// rows decode cleanly with the fields absent.
+const LLMResponseVersion = 3
 
 // PlannerInvokedPayload / PlannerRequestPayload / PlannerResponsePayload /
 // PlannerStepPayload — populated by the future planner instrumentation.

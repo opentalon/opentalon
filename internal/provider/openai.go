@@ -30,6 +30,7 @@ type OpenAIProvider struct {
 	baseURL      string
 	apiKey       string
 	models       []ModelInfo
+	currency     string // ISO 4217 code of the models' prices; "" names none
 	client       *http.Client
 	debugSink    DebugEventSink       // optional; nil disables persistent debug capture
 	debugResolve DebugContextResolver // optional; returns (sessionID, traceID, enabled?) for this ctx
@@ -88,6 +89,11 @@ func WithOpenAIHeaders(h map[string]string) OpenAIOption {
 	return func(p *OpenAIProvider) { p.headers = copyExtraHeaders(h) }
 }
 
+// WithOpenAICurrency names the currency of the provider's model prices.
+func WithOpenAICurrency(currency string) OpenAIOption {
+	return func(p *OpenAIProvider) { p.currency = currency }
+}
+
 // WithOpenAIRetryPolicy sets the transient-failure retry policy. Zero-valued
 // fields fall back to DefaultRetryPolicy, so a partial config is safe.
 func WithOpenAIRetryPolicy(rp RetryPolicy) OpenAIOption {
@@ -135,24 +141,22 @@ func (p *OpenAIProvider) ID() string { return p.id }
 
 func (p *OpenAIProvider) Models() []ModelInfo { return p.models }
 
-// costForTokens computes input/output cost for tokensIn/tokensOut against
-// this provider's configured per-million-token rate for modelID. Returns
-// (0, 0) when modelID is not in p.models — emit helpers stamp
-// LLMResponsePayload with omitempty so a zero cost simply leaves the
-// fields out rather than recording a misleading "free call".
-//
-// Currency is unitless: ModelInfo.Cost values are stamped as-is, the
-// operator's deployment convention sets the unit. Centralising the math
-// here keeps the streaming and non-streaming emit sites from drifting.
-func (p *OpenAIProvider) costForTokens(modelID string, tokensIn, tokensOut int) (float64, float64) {
-	for _, m := range p.models {
-		if m.ID != modelID {
-			continue
-		}
-		return float64(tokensIn) * m.Cost.Input / 1_000_000,
-			float64(tokensOut) * m.Cost.Output / 1_000_000
+// usage prices tokensIn/tokensOut at this provider's configured
+// per-million-token rate for modelID. The cost is 0 when modelID is not in
+// p.models — emit helpers stamp LLMResponsePayload with omitempty so a zero
+// cost simply leaves the fields out rather than recording a misleading
+// "free call". Centralising the math here keeps the streaming and
+// non-streaming emit sites from drifting.
+func (p *OpenAIProvider) usage(ctx context.Context, modelID string, tokensIn, tokensOut int) Usage {
+	m := findModel(p.models, modelID)
+	u := Usage{
+		InputTokens:  tokensIn,
+		OutputTokens: tokensOut,
+		InputCost:    float64(tokensIn) * m.Cost.Input / 1_000_000,
+		OutputCost:   float64(tokensOut) * m.Cost.Output / 1_000_000,
 	}
-	return 0, 0
+	u.Price = Price(ctx, modelID, p.currency, u)
+	return u
 }
 
 func (p *OpenAIProvider) SupportsFeature(f Feature) bool {
@@ -346,14 +350,14 @@ type oaiResponseStream struct {
 	responseID   string
 	contentBuf   strings.Builder
 	finishReason string
-	usage        Usage // the last usage the stream reported, priced by costFn
+	usage        Usage // the last usage the stream reported, priced by usageFn
 	chatLoop     bool  // the request carried system segments
-	// costFn computes (inputCost, outputCost) from token counts when a
-	// chunk reports usage. Captured as a closure rather than a back-pointer to
-	// the provider so the stream stays decoupled from OpenAIProvider for
-	// targeted tests. nil when no pricing should be computed (test fakes
-	// that skip provider construction).
-	costFn    func(tokensIn, tokensOut int) (float64, float64)
+	currency     string
+	// usageFn prices token counts when a chunk reports usage. Captured as a
+	// closure rather than a back-pointer to the provider so the stream stays
+	// decoupled from OpenAIProvider for targeted tests. nil when no pricing
+	// should be computed (test fakes that skip provider construction).
+	usageFn   func(tokensIn, tokensOut int) Usage
 	streamErr error // non-nil → Close emits llm_error instead of llm_response/llm_refused
 
 	// lastEventID is the session-event id of the llm_response event emitted
@@ -573,8 +577,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 	}
 
 	// A refusal is billed too, so its usage carries the cost as well.
-	usage := Usage{InputTokens: oaiResp.Usage.PromptTokens, OutputTokens: oaiResp.Usage.CompletionTokens}
-	usage.InputCost, usage.OutputCost = p.costForTokens(oaiReq.Model, usage.InputTokens, usage.OutputTokens)
+	usage := p.usage(ctx, oaiReq.Model, oaiResp.Usage.PromptTokens, oaiResp.Usage.CompletionTokens)
 
 	// Refusal detection: OpenAI signals content-safety blocks via
 	// finish_reason="content_filter" (no separate refusal field). Emit
@@ -600,6 +603,8 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 			TokensOut:          usage.OutputTokens,
 			CostInput:          usage.InputCost,
 			CostOutput:         usage.OutputCost,
+			CostCurrency:       p.currency,
+			Price:              usage.Price,
 			LatencyMS:          latencyMS,
 			ProviderResponseID: oaiResp.ID,
 			ChatLoop:           req.Segments != nil,
@@ -719,8 +724,9 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 		eventSink: p.eventSink,
 		startTime: start,
 		chatLoop:  req.Segments != nil,
-		costFn: func(in, out int) (float64, float64) {
-			return p.costForTokens(oaiReq.Model, in, out)
+		currency:  p.currency,
+		usageFn: func(in, out int) Usage {
+			return p.usage(ctx, oaiReq.Model, in, out)
 		},
 	}
 	// Wire end-of-stream capture only when this session opted in. Sessions
@@ -879,19 +885,20 @@ func (s *oaiResponseStream) emitStreamEnd() {
 		TokensOut:          s.usage.OutputTokens,
 		CostInput:          s.usage.InputCost,
 		CostOutput:         s.usage.OutputCost,
+		CostCurrency:       s.currency,
+		Price:              s.usage.Price,
 		LatencyMS:          latencyMS,
 		ProviderResponseID: s.responseID,
 		ChatLoop:           s.chatLoop,
 	})
 }
 
-// priced returns u with its cost from costFn.
+// priced returns u with its cost and price from usageFn.
 func (s *oaiResponseStream) priced(u oaiUsage) Usage {
-	usage := Usage{InputTokens: u.PromptTokens, OutputTokens: u.CompletionTokens}
-	if s.costFn != nil {
-		usage.InputCost, usage.OutputCost = s.costFn(usage.InputTokens, usage.OutputTokens)
+	if s.usageFn == nil {
+		return Usage{InputTokens: u.PromptTokens, OutputTokens: u.CompletionTokens}
 	}
-	return usage
+	return s.usageFn(u.PromptTokens, u.CompletionTokens)
 }
 
 func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error) {

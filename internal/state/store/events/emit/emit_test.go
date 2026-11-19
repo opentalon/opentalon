@@ -264,7 +264,7 @@ func TestEmitLLMResponse_CacheFields(t *testing.T) {
 
 	got := sink.snapshot()
 	set, unset := string(got[0].Payload), string(got[1].Payload)
-	for _, want := range []string{`"v":2,`, `"tokens_in":40210,`, `"cache_write_tokens":2104,`, `"cache_read_tokens":37950,`, `"chat_loop":true}`} {
+	for _, want := range []string{`"v":3,`, `"tokens_in":40210,`, `"cache_write_tokens":2104,`, `"cache_read_tokens":37950,`, `"chat_loop":true}`} {
 		if !strings.Contains(set, want) {
 			t.Errorf("payload lacks %s: %s", want, set)
 		}

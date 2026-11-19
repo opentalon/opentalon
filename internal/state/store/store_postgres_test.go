@@ -60,10 +60,13 @@ func TestPostgres_OpenAndMigrations(t *testing.T) {
 	if err := db.SQLDB().QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 19 {
-		t.Errorf("schema_version = %d, want 19", v)
+	if v != 20 {
+		t.Errorf("schema_version = %d, want 20", v)
 	}
 }
+
+// The budget sum on Postgres; the check is shared with the SQLite test in store_test.go.
+func TestPostgres_PriceSince(t *testing.T) { checkPriceSince(t, pgDB(t)) }
 
 // The open-session contracts on Postgres; the checks are shared with the
 // SQLite tests in session_test.go.
