@@ -217,7 +217,9 @@ func TestExecuteBidi_CallbackError(t *testing.T) {
 	}
 
 	stream.close()
-	<-done
+	if err := <-done; err != nil && !errors.Is(err, io.EOF) {
+		t.Errorf("ExecuteBidi returned: %v", err)
+	}
 }
 
 // TestExecuteBidi_HandlerWithoutStreamingImpl: plain Handler that

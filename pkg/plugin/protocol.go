@@ -118,6 +118,37 @@ type ActionMsg struct {
 	// parameter values, so the model does not spend a step loading them.
 	// Companions of a companion are not loaded.
 	Companions []string `json:"companions,omitempty"`
+	// Check, when true, declares that the plugin can check a call to this
+	// action without executing it: the Handler implements Checker. Before
+	// the host asks the user to confirm a call to the action, it sends the
+	// call for a check.
+	Check bool `json:"check,omitempty"`
+}
+
+// CheckVerdict is a plugin's answer to a check (Checker).
+type CheckVerdict int
+
+const (
+	// CheckUnspecified is no verdict: the host reads it as a check that
+	// could not be answered and asks the user as it would without a check.
+	CheckUnspecified CheckVerdict = iota
+	// CheckPassed: the plugin would not refuse the call, and the host asks
+	// the user to confirm it.
+	CheckPassed
+	// CheckRefused: the plugin refuses the call. The host answers the call
+	// with the refusal, does not ask the user and never executes the call.
+	CheckRefused
+)
+
+// CheckResult is a plugin's verdict on a call sent for a check.
+type CheckResult struct {
+	Verdict CheckVerdict `json:"verdict"`
+	// Kind and Message describe a refusal: the kind of error the execution
+	// would give (e.g. "forbidden", "invalid_argument") and the text its
+	// error would carry. The host gives the model Message as the call's
+	// failed result.
+	Kind    string `json:"kind,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // ParameterMsg describes one parameter of an action.

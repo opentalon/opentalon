@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -46,6 +47,17 @@ type Configurable interface {
 // capabilities untouched.
 type Refreshable interface {
 	RefreshCapabilities() CapabilitiesMsg
+}
+
+// Checker may be implemented by a Handler whose actions declare Check. The
+// host calls Check before it asks the user to confirm a call to such an
+// action, with the request Execute would get. Check returns the refusal the
+// execution would give, or CheckPassed; it must not execute the call or
+// change anything. ctx is the host's: it ends when the host stops waiting.
+// Handlers that do not implement it report gRPC Unimplemented, and the host
+// asks the user as it would without a check.
+type Checker interface {
+	Check(ctx context.Context, req Request) CheckResult
 }
 
 // ServeListener starts a gRPC server on an existing listener. The caller is

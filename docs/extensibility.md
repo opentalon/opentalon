@@ -110,6 +110,47 @@ answer, so the model can call them in its next step.
   it is.
 - Only the action's own companions load, not theirs.
 
+### Checking a call before the user confirms it
+
+The host asks the user to confirm a call to an action that is not read-only.
+When the plugin would refuse the call anyway (a value is missing, a name is
+taken, a right is missing), the user approved it for nothing. An action that
+sets `check` (`Check` in the Go SDK) declares that the plugin can check a
+call without executing it:
+
+```json
+{"name": "start_walkthrough", "check": true}
+```
+
+Before the host asks the user to confirm a call to such an action, it runs
+its own gates on the call (permission, profile, user-only actions, argument
+names); a call they refuse gets that refusal, without a check and without a
+question. It then sends the call to the plugin's `Check` operation, with the
+request `Execute` would get (the action, its arguments with the context
+arguments the host injects, and the credential headers). In the Go SDK the
+handler implements `Checker`; the answer is a `CheckResult`:
+
+| Verdict | What the host does |
+|---|---|
+| `passed` | Asks the user to confirm the call, as without a check. |
+| `refused`, with `kind` and `message` | Gives the model `message` as the call's failed result; its `tool_call_result` session event has the status `refused`. The user is not asked and the call is never executed. |
+| `unspecified`, `refused` without a `message`, or no answer | Asks the user, as without a check. |
+
+- A check must not change anything. It is a plain request and answer, also
+  for a plugin that sets `supports_callbacks`, so it cannot call back into
+  the host.
+- Refuse with the `kind` and `message` the execution would give, so the
+  model reads the same refusal either way.
+- A plugin that does not check calls answers `Unimplemented` (the SDK does
+  this for a handler without `Checker`), which the host treats as no answer.
+  So does an error, and a check that runs past the deadline of a plugin call.
+- A passed check is no promise: the data can change before the user answers,
+  and the execution keeps every check of its own.
+- A call that needs no confirmation (a read-only action) is never checked,
+  and an approved call is not checked again.
+- A turn that ends while its call is checked (the user cancels it) ends
+  there: no question, and nothing is recorded for the call.
+
 ### Context arguments the host injects
 
 An action can ask the host for facts about the request it runs in — facts the

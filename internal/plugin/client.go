@@ -134,8 +134,10 @@ func (c *Client) Execute(ctx context.Context, call orchestrator.ToolCall) orches
 	return c.ExecuteContext(ctx, call)
 }
 
-// ExecuteContext is like Execute but respects context cancellation.
-func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+// toolCallRequest builds the request the plugin receives for call: its
+// action and arguments, and the credential headers of the verified profile
+// in ctx (none without one).
+func toolCallRequest(ctx context.Context, call orchestrator.ToolCall) *pluginpb.ToolCallRequest {
 	var credHeaders map[string]*pluginpb.CredentialHeader
 	if p := profile.FromContext(ctx); p != nil && len(p.Credentials) > 0 {
 		credHeaders = make(map[string]*pluginpb.CredentialHeader, len(p.Credentials))
@@ -143,13 +145,18 @@ func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall)
 			credHeaders[k] = &pluginpb.CredentialHeader{Header: v.Header, Value: v.Value}
 		}
 	}
-	resp, err := c.client.Execute(ctx, &pluginpb.ToolCallRequest{
+	return &pluginpb.ToolCallRequest{
 		Id:                call.ID,
 		Plugin:            call.Plugin,
 		Action:            call.Action,
 		Args:              ensureValidUTF8Map(call.Args),
 		CredentialHeaders: credHeaders,
-	})
+	}
+}
+
+// ExecuteContext is like Execute but respects context cancellation.
+func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall) orchestrator.ToolResult {
+	resp, err := c.client.Execute(ctx, toolCallRequest(ctx, call))
 	if err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: fmt.Sprintf("grpc: %v", err)}
 	}
@@ -161,29 +168,38 @@ func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall)
 	}
 }
 
+// Check sends call to the plugin for a check, with the request Execute
+// sends, and returns the plugin's verdict. It implements
+// orchestrator.CheckExecutor. The request ends with ctx. An error means the
+// check could not be answered: a plugin that does not check calls answers
+// gRPC Unimplemented (inspect with status.Code(err)).
+func (c *Client) Check(ctx context.Context, call orchestrator.ToolCall) (orchestrator.CheckResult, error) {
+	resp, err := c.client.Check(ctx, toolCallRequest(ctx, call))
+	if err != nil {
+		return orchestrator.CheckResult{}, err
+	}
+	switch resp.GetVerdict() {
+	case pluginpb.CheckVerdict_CHECK_VERDICT_PASSED:
+		return orchestrator.CheckResult{Verdict: orchestrator.CheckPassed}, nil
+	case pluginpb.CheckVerdict_CHECK_VERDICT_REFUSED:
+		return orchestrator.CheckResult{
+			Verdict: orchestrator.CheckRefused,
+			Kind:    resp.GetKind(),
+			Message: resp.GetMessage(),
+		}, nil
+	default:
+		// Unspecified, or a verdict this host does not know.
+		return orchestrator.CheckResult{}, nil
+	}
+}
+
 // ExecuteBidi sends a tool call to the plugin over the bidirectional
 // streaming RPC, dispatches any inbound CallbackRequest frames via
 // cb.RunAction, and returns the plugin's final ToolResultResponse.
 // Implements orchestrator.BidiExecutor. The orchestrator picks this
 // path when the plugin's PluginCapability.SupportsCallbacks is true.
 func (c *Client) ExecuteBidi(ctx context.Context, call orchestrator.ToolCall, cb orchestrator.CallbackHandler) orchestrator.ToolResult {
-	var credHeaders map[string]*pluginpb.CredentialHeader
-	if p := profile.FromContext(ctx); p != nil && len(p.Credentials) > 0 {
-		credHeaders = make(map[string]*pluginpb.CredentialHeader, len(p.Credentials))
-		for k, v := range p.Credentials {
-			credHeaders[k] = &pluginpb.CredentialHeader{Header: v.Header, Value: v.Value}
-		}
-	}
-
-	req := &pluginpb.ToolCallRequest{
-		Id:                call.ID,
-		Plugin:            call.Plugin,
-		Action:            call.Action,
-		Args:              ensureValidUTF8Map(call.Args),
-		CredentialHeaders: credHeaders,
-	}
-
-	r, err := c.executeBidiStream(ctx, req, cb)
+	r, err := c.executeBidiStream(ctx, toolCallRequest(ctx, call), cb)
 	if err != nil {
 		return orchestrator.ToolResult{CallID: call.ID, Error: err.Error()}
 	}
@@ -387,6 +403,7 @@ func toPluginCapability(pb *pluginpb.PluginCapabilities) orchestrator.PluginCapa
 			ReadOnly:          a.ReadOnly,
 			ConfirmationHint:  a.ConfirmationHint,
 			Companions:        a.Companions,
+			Check:             a.Check,
 		}
 	}
 	knowledge := make([]orchestrator.KnowledgeArticle, len(pb.KnowledgeArticles))

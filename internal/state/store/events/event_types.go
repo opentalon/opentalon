@@ -796,7 +796,9 @@ const ToolCallExtractedVersion = 1
 // ToolCallResultPayload — emitted after the tool dispatch returns or
 // errors out. Status mirrors plugin convention ("ok" / "error"), or is
 // "not_run" for a call answered without running it (a call to a tool that
-// was not loaded, which loads it). Parent event_id of the corresponding
+// was not loaded, which loads it), or "refused" for a call its plugin
+// refused when it was sent for a check before the confirmation question
+// (the call was never executed; ResponseExcerpt holds the refusal). Parent event_id of the corresponding
 // tool_call_extracted is linked via the session_events.parent_id column,
 // not duplicated in payload.
 //

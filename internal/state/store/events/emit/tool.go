@@ -43,7 +43,9 @@ func EmitToolCallExtracted(ctx context.Context, sink Sink, args ToolCallExtracte
 // ToolCallResultArgs is the dispatch outcome. Status follows plugin
 // convention ("ok" or "error"), or is "not_run" for a call answered
 // without running it (a call to a tool that was not loaded, which loads
-// it). Response is the human-readable half of the tool result; Structured
+// it), or "refused" for a call its plugin refused when it was sent for a
+// check before the confirmation question, which was never executed.
+// Response is the human-readable half of the tool result; Structured
 // carries the raw structured-content half (typically JSON) that the
 // orchestrator appends to the LLM-bound message via nativeToolContent.
 // Both are sanitized + excerpted independently so the event log captures

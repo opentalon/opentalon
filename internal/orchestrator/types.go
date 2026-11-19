@@ -45,6 +45,9 @@ type Parameter struct {
 // that builds that prompt. Set for actions that don't mutate user-
 // visible state (list/show/get/query). Default false — fail-safe to
 // "treat as potential write".
+// Check, when true, declares that the plugin can check a call to this action
+// without executing it (CheckExecutor). Default false: the action is never
+// checked.
 type Action struct {
 	Name              string      `yaml:"name"`
 	Description       string      `yaml:"description"`
@@ -56,6 +59,7 @@ type Action struct {
 	ReadOnly          bool        `yaml:"read_only,omitempty"`         // if true, skip per-call user-confirmation gate (pure query)
 	ConfirmationHint  string      `yaml:"confirmation_hint,omitempty"` // how to word this action's confirmation question; see narrateConfirmation
 	Companions        []string    `yaml:"companions,omitempty"`        // actions of the same plugin loaded together with this one
+	Check             bool        `yaml:"check,omitempty"`             // if true, the plugin can check a call without executing it
 }
 
 type PluginCapability struct {
@@ -122,6 +126,35 @@ type ToolResult struct {
 	// answer the model reads, but the call did not fail, so no failed-call
 	// count takes it.
 	NotRun bool `yaml:"-"`
+	// RefusedByCheck marks a call its plugin refused when the call was sent
+	// for a check before the confirmation question (CheckExecutor): Error is
+	// the refusal and the call was never executed. It is neither NotRun nor
+	// ArgsInvalid, so the repair step leaves it alone and an identical repeat
+	// is not run again. It counts as a failed call within the turn, not toward
+	// the tool's demotion, and the plugin-call observer leaves it out.
+	RefusedByCheck bool `yaml:"-"`
+}
+
+// CheckVerdict is a plugin's answer to a check of a call (CheckExecutor).
+type CheckVerdict int
+
+const (
+	// CheckUnspecified is no verdict: the check could not be answered.
+	CheckUnspecified CheckVerdict = iota
+	// CheckPassed: the plugin would not refuse the call.
+	CheckPassed
+	// CheckRefused: the plugin refuses the call for the reason in Kind and
+	// Message.
+	CheckRefused
+)
+
+// CheckResult is a plugin's verdict on a call sent for a check. Kind and
+// Message describe a refusal: the kind of error the execution would give
+// (e.g. "forbidden", "invalid_argument") and the text its error would carry.
+type CheckResult struct {
+	Verdict CheckVerdict
+	Kind    string
+	Message string
 }
 
 type WorkflowStep struct {

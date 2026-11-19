@@ -737,7 +737,11 @@ func raiseConfirmation(t *testing.T, ctx context.Context, narration string) (*Ru
 		ConfirmationPlugin: "conf", ConfirmationAction: "check",
 	})
 	call := ToolCall{ID: "c1", Plugin: "p", Action: "create_category", Args: map[string]string{"name": "Werkzeuge"}, FromLLM: true}
-	rr, raised := orch.maybeRequireConfirmation(ctx, sessions, "s1", call, "Lege Werkzeuge an", nil, false, nil)
+	d, err := orch.maybeRequireConfirmation(ctx, sessions, "s1", call, "Lege Werkzeuge an", nil, false, nil)
+	if err != nil {
+		t.Fatalf("gate: %v", err)
+	}
+	rr, raised := d.question, d.outcome == gateAwaitApproval
 	if !raised || rr == nil || len(llm.requests) != 1 {
 		t.Fatalf("no confirmation raised: raised=%v rr=%v narrator calls=%d", raised, rr, len(llm.requests))
 	}

@@ -203,6 +203,51 @@ func TestCapsToProto_Companions(t *testing.T) {
 	}
 }
 
+func TestCapsToProto_Check(t *testing.T) {
+	msg := CapabilitiesMsg{
+		Name: "myplugin",
+		Actions: []ActionMsg{
+			{Name: "start_walkthrough", Check: true},
+			{Name: "delete_thing"},
+		},
+	}
+	pb := capsToProto(msg)
+
+	if !pb.Actions[0].Check {
+		t.Error("start_walkthrough should carry its check declaration to proto")
+	}
+	if pb.Actions[1].Check {
+		t.Error("delete_thing declares no check and should default to Check=false")
+	}
+}
+
+// TestCheckResultToProto pins the verdict a handler returns onto the wire:
+// a refusal keeps its kind and message, and a verdict the SDK does not
+// define goes out as unspecified, which the host reads as unanswered.
+func TestCheckResultToProto(t *testing.T) {
+	tests := []struct {
+		name string
+		in   CheckResult
+		want *pluginpb.CheckResponse
+	}{
+		{"passed", CheckResult{Verdict: CheckPassed},
+			&pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_PASSED}},
+		{"refused", CheckResult{Verdict: CheckRefused, Kind: "invalid_argument", Message: "name is taken"},
+			&pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_REFUSED, Kind: "invalid_argument", Message: "name is taken"}},
+		{"unspecified", CheckResult{},
+			&pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_UNSPECIFIED}},
+		{"undefined verdict", CheckResult{Verdict: CheckVerdict(7)},
+			&pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_UNSPECIFIED}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := checkResultToProto(tt.in); !proto.Equal(got, tt.want) {
+				t.Errorf("checkResultToProto(%+v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCapsToProto_Parameters(t *testing.T) {
 	msg := CapabilitiesMsg{
 		Name:        "myplugin",
