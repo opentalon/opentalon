@@ -317,8 +317,13 @@ func runTurn(ctx context.Context, cfg HandlerConfig, sessionKey, content string,
 	response, inputForDisplay, resultMeta, err := cfg.Runner.Run(ctx, sessionKey, content, msg.Files...)
 	if err != nil {
 		// A run whose claim another run took over did not fail: its caller
-		// logs the takeover (see openSessions.run).
-		if !errors.Is(err, state.ErrClaimLost) && !errors.Is(err, state.ErrOwnerChanged) {
+		// logs the takeover (see openSessions.run). A turn a used-up budget
+		// refused did not fail either.
+		var budget *orchestrator.BudgetUsedUpError
+		switch {
+		case errors.As(err, &budget):
+			logger.FromContext(ctx).Warn("turn refused: budget used up", "session", sessionKey, "scope", budget.Scope)
+		case !errors.Is(err, state.ErrClaimLost) && !errors.Is(err, state.ErrOwnerChanged):
 			logger.FromContext(ctx).Error("handler run failed", "error", err)
 		}
 		errText, errCode := friendlyError(err)
@@ -427,7 +432,12 @@ func safeMetadata(m map[string]string) map[string]string {
 // frontends for i18n translations.
 func friendlyError(err error) (message string, errorCode string) {
 	msg := err.Error()
+	var budget *orchestrator.BudgetUsedUpError
 	switch {
+	case errors.As(err, &budget) && budget.Scope == profile.ScopeEntity:
+		return "Your AI budget is used up.", "budget_used_up_entity"
+	case errors.As(err, &budget):
+		return "Your account's AI budget is used up.", "budget_used_up_group"
 	// One classifier, shared with the routing layer that decides whether to
 	// try another endpoint. This case used to carry two phrases of its own, so
 	// an Anthropic "prompt is too long: …" or an OpenAI "please reduce the

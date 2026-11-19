@@ -717,6 +717,8 @@ func TestFriendlyError(t *testing.T) {
 		// The dedicated-node outage that masked a too-long prompt on
 		// 2026-08-01 must NOT be dressed up as "start a new conversation".
 		{"endpoint outage", errors.New(`openai api error (status 400): {"message":"app has no replica running"}`), "internal_error"},
+		{"the account's budget", &orchestrator.BudgetUsedUpError{Scope: profile.ScopeGroup}, "budget_used_up_group"},
+		{"the user's budget", fmt.Errorf("run: %w", &orchestrator.BudgetUsedUpError{Scope: profile.ScopeEntity}), "budget_used_up_entity"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -728,6 +730,33 @@ func TestFriendlyError(t *testing.T) {
 				t.Error("expected a user-facing message")
 			}
 		})
+	}
+}
+
+// budgetRunner refuses every turn as the orchestrator does once a budget is
+// used up and the default model is priced as well.
+type budgetRunner struct{ scope string }
+
+func (r budgetRunner) Run(context.Context, string, string, ...pkg.FileAttachment) (string, string, map[string]string, error) {
+	return "", "", nil, fmt.Errorf("run: %w", &orchestrator.BudgetUsedUpError{Scope: r.scope})
+}
+
+func TestHandler_BudgetRefusalIsAWarning(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+	cfg := baseHandlerConfig()
+	cfg.Runner = budgetRunner{scope: profile.ScopeEntity}
+	cfg.Verifier = &stubVerifier{p: &profile.Profile{EntityID: "u1", Group: "g1"}}
+
+	out := callHandler(NewMessageHandler(cfg), map[string]string{"profile_token": "tok"})
+
+	if out.Metadata["type"] != "error" || out.Metadata["error_code"] != "budget_used_up_entity" {
+		t.Errorf("frame metadata = %+v, want an error frame with budget_used_up_entity", out.Metadata)
+	}
+	if strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "level=WARN msg=\"turn refused: budget used up\"") {
+		t.Errorf("log = %s; want the refusal as a warning and no error", logs.String())
 	}
 }
 
