@@ -122,16 +122,19 @@ call without executing it:
 {"name": "start_walkthrough", "check": true}
 ```
 
-Before the host asks the user to confirm a call to such an action, it sends
-the call to the plugin's `Check` operation, with the request `Execute` would
-get (the action, its arguments and the credential headers). In the Go SDK the
+Before the host asks the user to confirm a call to such an action, it runs
+its own gates on the call (permission, profile, user-only actions, argument
+names); a call they refuse gets that refusal, without a check and without a
+question. It then sends the call to the plugin's `Check` operation, with the
+request `Execute` would get (the action, its arguments with the context
+arguments the host injects, and the credential headers). In the Go SDK the
 handler implements `Checker`; the answer is a `CheckResult`:
 
 | Verdict | What the host does |
 |---|---|
 | `passed` | Asks the user to confirm the call, as without a check. |
-| `refused`, with `kind` and `message` | Gives the model `message` as the call's failed result. The user is not asked and the call is never executed. |
-| `unspecified`, or no answer | Asks the user, as without a check. |
+| `refused`, with `kind` and `message` | Gives the model `message` as the call's failed result; its `tool_call_result` session event has the status `refused`. The user is not asked and the call is never executed. |
+| `unspecified`, `refused` without a `message`, or no answer | Asks the user, as without a check. |
 
 - A check must not change anything. It is a plain request and answer, also
   for a plugin that sets `supports_callbacks`, so it cannot call back into
@@ -145,6 +148,8 @@ handler implements `Checker`; the answer is a `CheckResult`:
   and the execution keeps every check of its own.
 - A call that needs no confirmation (a read-only action) is never checked,
   and an approved call is not checked again.
+- A turn that ends while its call is checked (the user cancels it) ends
+  there: no question, and nothing is recorded for the call.
 
 ### Context arguments the host injects
 
