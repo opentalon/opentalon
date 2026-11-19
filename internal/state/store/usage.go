@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -53,6 +54,30 @@ func (s *UsageStore) TotalTokensSince(ctx context.Context, entityID string, sinc
 	var total int
 	if err := row.Scan(&total); err != nil {
 		return 0, fmt.Errorf("usage store: total tokens since: %w", err)
+	}
+	return total, nil
+}
+
+// PriceSince returns the summed customer price of groupID's rows of the
+// given interaction kinds recorded on or after since, or of entityID's rows
+// in groupID when entityID is set. Rows without a price count 0.
+func (s *UsageStore) PriceSince(ctx context.Context, groupID, entityID string, kinds []string, since time.Time) (float64, error) {
+	query := `
+		SELECT COALESCE(SUM(price), 0)
+		FROM profile_usage
+		WHERE group_id = ? AND created_at >= ? AND interaction_kind IN (` +
+		strings.TrimSuffix(strings.Repeat("?, ", len(kinds)), ", ") + `)`
+	args := []any{groupID, since.UTC().Format(time.RFC3339)}
+	for _, k := range kinds {
+		args = append(args, k)
+	}
+	if entityID != "" {
+		query += ` AND entity_id = ?`
+		args = append(args, entityID)
+	}
+	var total float64
+	if err := s.db.SQLDB().QueryRowContext(ctx, s.db.Dialect().Rebind(query), args...).Scan(&total); err != nil {
+		return 0, fmt.Errorf("usage store: price since: %w", err)
 	}
 	return total, nil
 }

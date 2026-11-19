@@ -65,6 +65,9 @@ func TestPostgres_OpenAndMigrations(t *testing.T) {
 	}
 }
 
+// The budget sum on Postgres; the check is shared with the SQLite test in store_test.go.
+func TestPostgres_PriceSince(t *testing.T) { checkPriceSince(t, pgDB(t)) }
+
 // The open-session contracts on Postgres; the checks are shared with the
 // SQLite tests in session_test.go.
 func TestPostgres_OpenSessionCreateOrFind(t *testing.T) { checkOpenSessionCreateOrFind(t, pgDB(t)) }

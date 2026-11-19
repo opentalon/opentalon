@@ -793,3 +793,68 @@ func TestUsageStore_RecordPrice(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageStore_PriceSince(t *testing.T) {
+	db, err := Open(config.DBConfig{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	checkPriceSince(t, db)
+}
+
+func checkPriceSince(t *testing.T, db *DB) {
+	usage := NewUsageStore(db)
+	ctx := context.Background()
+	price := func(f float64) *float64 { return &f }
+	rows := []struct {
+		session, entity, group, kind, at string
+		price                            *float64
+	}{
+		{"chat", "e1", "g1", "chat", "2026-11-05T10:00:00Z", price(1)},
+		{"other-user", "e2", "g1", "chat", "2026-11-05T10:00:00Z", price(2)},
+		{"system", "e1", "g1", "system", "2026-11-05T10:00:00Z", price(4)},
+		{"unpriced", "e1", "g1", "chat", "2026-11-05T10:00:00Z", nil},
+		{"other-account", "e1", "g2", "chat", "2026-11-05T10:00:00Z", price(8)},
+		{"before-midnight-utc", "e1", "g1", "chat", "2026-10-31T23:30:00Z", price(16)},
+		{"october", "e1", "g1", "chat", "2026-10-31T22:59:59Z", price(32)},
+	}
+	for _, r := range rows {
+		if err := usage.Record(ctx, UsageRecord{EntityID: r.entity, GroupID: r.group, ChannelID: "web", SessionID: r.session,
+			ModelID: "m1", InteractionKind: r.kind, Price: r.price}); err != nil {
+			t.Fatalf("Record %s: %v", r.session, err)
+		}
+		if _, err := db.SQLDB().Exec(db.Dialect().Rebind(`UPDATE profile_usage SET created_at = ? WHERE session_id = ?`), r.at, r.session); err != nil {
+			t.Fatalf("date %s: %v", r.session, err)
+		}
+	}
+	// The month starts at midnight in Zurich, 23:00 UTC the day before.
+	since, err := time.Parse(time.RFC3339, "2026-11-01T00:00:00+01:00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		entity string
+		kinds  []string
+		want   float64
+	}{
+		{"the group's chat rows", "", []string{"chat"}, 1 + 2 + 16},
+		{"the entity's chat rows in the group", "e1", []string{"chat"}, 1 + 16},
+		{"chat and system rows", "e1", []string{"chat", "system"}, 1 + 4 + 16},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := usage.PriceSince(ctx, "g1", tc.entity, tc.kinds, since)
+			if err != nil {
+				t.Fatalf("PriceSince: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("PriceSince = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if got, err := usage.PriceSince(ctx, "g3", "", []string{"chat"}, since); err != nil || got != 0 {
+		t.Errorf("PriceSince of a group without rows = %v, %v; want 0", got, err)
+	}
+}
