@@ -363,7 +363,7 @@ A turn whose run kind a `limits` entry names is checked once, under the conversa
 - A tariff is priced above 0 when any of its prices is. A default model without a tariff is never refused.
 - The switch applies to the one turn; the cached profile, which other turns share, keeps its `model`.
 - A turn writes its row before it releases the turn lock, so a turn queued behind it in the same conversation sees its price. Turns of other conversations run at the same time and can overshoot a budget by one turn each.
-- A run of a kind no entry names is neither counted nor checked; a control message never reaches the check.
+- A run of a kind no entry names is neither counted nor checked. The resume handshake (a `control` message) is answered before any turn runs, so it is never checked.
 - A sum that cannot be read lets the turn run on its model, with a warning.
 - An entry with an unknown `scope`, a missing, negative or non-numeric `max`, or a `since` that does not parse is ignored with a warning, and so is one whose `kinds` name no known kind; an unknown kind in `kinds` is dropped with a warning. A `limits` value that is not an array is ignored with a warning. None of these fails the whoami check.
 
