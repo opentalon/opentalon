@@ -210,18 +210,22 @@ func TestClientCheck_PluginWithoutCheck(t *testing.T) {
 
 // TestClientCheck_EndsAtTheDeadline verifies the host's check ends at the
 // deadline of the context it is given, and that the handler's check gets
-// that context, so the plugin can stop too.
+// that context, so the plugin can stop too. The handler answers only after
+// the test, so its answer cannot race the host's own deadline.
 func TestClientCheck_EndsAtTheDeadline(t *testing.T) {
 	handlerSaw := make(chan error, 1)
+	release := make(chan struct{})
 	h := &checkHandler{
 		check: func(ctx context.Context, _ pkg.Request) pkg.CheckResult {
 			<-ctx.Done()
 			handlerSaw <- ctx.Err()
+			<-release
 			return pkg.CheckResult{Verdict: pkg.CheckPassed}
 		},
 		requests: make(chan pkg.Request, 1),
 	}
 	client := startSDKPlugin(t, h)
+	t.Cleanup(func() { close(release) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
