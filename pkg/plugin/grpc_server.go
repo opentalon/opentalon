@@ -41,3 +41,13 @@ func (s *grpcServer) Execute(_ context.Context, req *pluginpb.ToolCallRequest) (
 	resp := s.handler.Execute(requestFromProto(req))
 	return responseToProto(resp), nil
 }
+
+func (s *grpcServer) Check(ctx context.Context, req *pluginpb.ToolCallRequest) (*pluginpb.CheckResponse, error) {
+	c, ok := s.handler.(Checker)
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "plugin does not support checks")
+	}
+	r := requestFromProto(req)
+	r.Method = "check"
+	return checkResultToProto(c.Check(ctx, r)), nil
+}

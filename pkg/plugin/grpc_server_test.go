@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -128,5 +129,80 @@ func TestGRPCServer_RefreshCapabilities_NotRefreshable(t *testing.T) {
 	_, err := client.RefreshCapabilities(context.Background(), &emptypb.Empty{})
 	if status.Code(err) != codes.Unimplemented {
 		t.Fatalf("expected Unimplemented for non-refreshable handler, got %v", err)
+	}
+}
+
+// checkingHandler implements Handler + Checker. It answers every check with
+// verdict and records the request it got. Execute fails the test: a check
+// must never reach it.
+type checkingHandler struct {
+	t        *testing.T
+	verdict  CheckResult
+	received chan Request
+}
+
+func (h *checkingHandler) Capabilities() CapabilitiesMsg { return CapabilitiesMsg{Name: "test"} }
+func (h *checkingHandler) Execute(req Request) Response {
+	h.t.Errorf("Execute called for %q; a check must not execute", req.Action)
+	return Response{CallID: req.ID}
+}
+func (h *checkingHandler) Check(_ context.Context, req Request) CheckResult {
+	h.received <- req
+	return h.verdict
+}
+
+// TestGRPCServer_Check verifies the Check RPC hands the handler the request
+// Execute would get, marked as a check, and answers with its typed verdict.
+func TestGRPCServer_Check(t *testing.T) {
+	tests := []struct {
+		name    string
+		verdict CheckResult
+		want    *pluginpb.CheckResponse
+	}{
+		{"passed", CheckResult{Verdict: CheckPassed},
+			&pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_PASSED}},
+		{"refused", CheckResult{Verdict: CheckRefused, Kind: "forbidden", Message: "missing right: tickets"},
+			&pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_REFUSED, Kind: "forbidden", Message: "missing right: tickets"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &checkingHandler{t: t, verdict: tt.verdict, received: make(chan Request, 1)}
+			client := startGRPCServer(t, h)
+
+			resp, err := client.Check(context.Background(), &pluginpb.ToolCallRequest{
+				Id:     "c1",
+				Plugin: "mcp",
+				Action: "start_walkthrough",
+				Args:   map[string]string{"guide": "ticket"},
+				CredentialHeaders: map[string]*pluginpb.CredentialHeader{
+					"myapp": {Header: "X-App-User", Value: "user-123"},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+			if !proto.Equal(resp, tt.want) {
+				t.Errorf("Check = %v, want %v", resp, tt.want)
+			}
+
+			req := <-h.received
+			if req.Method != "check" || req.ID != "c1" || req.Action != "start_walkthrough" || req.Args["guide"] != "ticket" {
+				t.Errorf("handler got %+v, want the check of c1 start_walkthrough with guide=ticket", req)
+			}
+			if c := req.CredentialHeaders["myapp"]; c.Header != "X-App-User" || c.Value != "user-123" {
+				t.Errorf("CredentialHeaders[myapp] = %+v, want {X-App-User user-123}", c)
+			}
+		})
+	}
+}
+
+// TestGRPCServer_Check_NotChecker verifies a handler that does not implement
+// Checker reports gRPC Unimplemented, which the host reads as a check that
+// could not be answered.
+func TestGRPCServer_Check_NotChecker(t *testing.T) {
+	client := startGRPCServer(t, &credHeaderCapturingHandler{received: make(chan map[string]CredentialHeader, 1)})
+	_, err := client.Check(context.Background(), &pluginpb.ToolCallRequest{Id: "c1", Action: "call"})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected Unimplemented for a handler without Checker, got %v", err)
 	}
 }

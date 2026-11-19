@@ -34,6 +34,16 @@ service PluginService {
   // true may receive ExecuteBidi traffic; the host calls Execute (unary)
   // for everyone else, so existing plugins keep working unchanged.
   rpc ExecuteBidi(stream HostMessage) returns (stream PluginMessage);
+
+  // Check asks the plugin whether it would refuse a call, without executing
+  // it. The host sends it for an action that declares Action.check, before
+  // it asks the user to confirm the call. The request is the one Execute
+  // takes, with the same credential headers. A check is a plain request and
+  // answer, also for a plugin that executes over ExecuteBidi, so the plugin
+  // cannot call back into the host while it answers; it must not change
+  // anything. Plugins that do not check calls return Unimplemented, and the
+  // host then asks the user as it would without a check.
+  rpc Check(ToolCallRequest) returns (CheckResponse);
 }
 
 // HostMessage is one frame on the host → plugin direction of an
@@ -117,6 +127,28 @@ message ToolResultResponse {
   // render or forward it as a separate channel without relying on string
   // delimiters embedded in `content`. JSON-encoded; empty when omitted.
   string structured_content = 4;
+}
+
+// CheckResponse is the plugin's verdict on a call sent to Check.
+message CheckResponse {
+  CheckVerdict verdict = 1;
+  // For a refusal: the kind of error the execution would give (e.g.
+  // "forbidden", "invalid_argument") and its message, the text the
+  // execution's error would carry. The host gives the model the message as
+  // the call's failed result.
+  string kind = 2;
+  string message = 3;
+}
+
+enum CheckVerdict {
+  // No verdict. The host reads it as a check that could not be answered and
+  // asks the user as it would without a check.
+  CHECK_VERDICT_UNSPECIFIED = 0;
+  // The plugin would not refuse the call; the host asks the user to confirm it.
+  CHECK_VERDICT_PASSED = 1;
+  // The plugin refuses the call. The host answers the call with the refusal,
+  // does not ask the user and never executes the call.
+  CHECK_VERDICT_REFUSED = 2;
 }
 
 message PluginCapabilities {
@@ -210,6 +242,12 @@ message Action {
   // loaded, always included or demoted. Companions of a companion are not
   // loaded. Empty (the default) means the action loads alone.
   repeated string companions = 9;
+  // If true, the plugin can check a call to this action without executing
+  // it (rpc Check). Before the host asks the user to confirm a call to the
+  // action, it sends the call for a check. Default false: a call to the
+  // action is never checked. Plugins that aggregate upstream tools (e.g. the
+  // mcp-plugin) propagate it from the tool's `_meta.check`.
+  bool check = 10;
 }
 
 message Parameter {

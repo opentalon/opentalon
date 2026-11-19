@@ -53,6 +53,7 @@ func capsToProto(c CapabilitiesMsg) *pluginpb.PluginCapabilities {
 			ReadOnly:          a.ReadOnly,
 			ConfirmationHint:  a.ConfirmationHint,
 			Companions:        a.Companions,
+			Check:             a.Check,
 		}
 	}
 	glossary := make([]*pluginpb.GlossaryEntry, len(c.Glossary))
@@ -115,4 +116,18 @@ func responseToProto(r Response) *pluginpb.ToolResultResponse {
 		StructuredContent: r.StructuredContent,
 		Error:             r.Error,
 	}
+}
+
+// checkResultToProto maps a handler's verdict onto the wire. A verdict the
+// SDK does not define goes out as unspecified, which the host reads as a
+// check that could not be answered.
+func checkResultToProto(r CheckResult) *pluginpb.CheckResponse {
+	verdict := pluginpb.CheckVerdict_CHECK_VERDICT_UNSPECIFIED
+	switch r.Verdict {
+	case CheckPassed:
+		verdict = pluginpb.CheckVerdict_CHECK_VERDICT_PASSED
+	case CheckRefused:
+		verdict = pluginpb.CheckVerdict_CHECK_VERDICT_REFUSED
+	}
+	return &pluginpb.CheckResponse{Verdict: verdict, Kind: r.Kind, Message: r.Message}
 }

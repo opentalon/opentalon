@@ -25,6 +25,7 @@ const (
 	PluginService_Capabilities_FullMethodName        = "/opentalon.plugin.v1.PluginService/Capabilities"
 	PluginService_RefreshCapabilities_FullMethodName = "/opentalon.plugin.v1.PluginService/RefreshCapabilities"
 	PluginService_ExecuteBidi_FullMethodName         = "/opentalon.plugin.v1.PluginService/ExecuteBidi"
+	PluginService_Check_FullMethodName               = "/opentalon.plugin.v1.PluginService/Check"
 )
 
 // PluginServiceClient is the client API for PluginService service.
@@ -56,6 +57,15 @@ type PluginServiceClient interface {
 	// true may receive ExecuteBidi traffic; the host calls Execute (unary)
 	// for everyone else, so existing plugins keep working unchanged.
 	ExecuteBidi(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[HostMessage, PluginMessage], error)
+	// Check asks the plugin whether it would refuse a call, without executing
+	// it. The host sends it for an action that declares Action.check, before
+	// it asks the user to confirm the call. The request is the one Execute
+	// takes, with the same credential headers. A check is a plain request and
+	// answer, also for a plugin that executes over ExecuteBidi, so the plugin
+	// cannot call back into the host while it answers; it must not change
+	// anything. Plugins that do not check calls return Unimplemented, and the
+	// host then asks the user as it would without a check.
+	Check(ctx context.Context, in *ToolCallRequest, opts ...grpc.CallOption) (*CheckResponse, error)
 }
 
 type pluginServiceClient struct {
@@ -119,6 +129,16 @@ func (c *pluginServiceClient) ExecuteBidi(ctx context.Context, opts ...grpc.Call
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type PluginService_ExecuteBidiClient = grpc.BidiStreamingClient[HostMessage, PluginMessage]
 
+func (c *pluginServiceClient) Check(ctx context.Context, in *ToolCallRequest, opts ...grpc.CallOption) (*CheckResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckResponse)
+	err := c.cc.Invoke(ctx, PluginService_Check_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PluginServiceServer is the server API for PluginService service.
 // All implementations must embed UnimplementedPluginServiceServer
 // for forward compatibility.
@@ -148,6 +168,15 @@ type PluginServiceServer interface {
 	// true may receive ExecuteBidi traffic; the host calls Execute (unary)
 	// for everyone else, so existing plugins keep working unchanged.
 	ExecuteBidi(grpc.BidiStreamingServer[HostMessage, PluginMessage]) error
+	// Check asks the plugin whether it would refuse a call, without executing
+	// it. The host sends it for an action that declares Action.check, before
+	// it asks the user to confirm the call. The request is the one Execute
+	// takes, with the same credential headers. A check is a plain request and
+	// answer, also for a plugin that executes over ExecuteBidi, so the plugin
+	// cannot call back into the host while it answers; it must not change
+	// anything. Plugins that do not check calls return Unimplemented, and the
+	// host then asks the user as it would without a check.
+	Check(context.Context, *ToolCallRequest) (*CheckResponse, error)
 	mustEmbedUnimplementedPluginServiceServer()
 }
 
@@ -172,6 +201,9 @@ func (UnimplementedPluginServiceServer) RefreshCapabilities(context.Context, *em
 }
 func (UnimplementedPluginServiceServer) ExecuteBidi(grpc.BidiStreamingServer[HostMessage, PluginMessage]) error {
 	return status.Error(codes.Unimplemented, "method ExecuteBidi not implemented")
+}
+func (UnimplementedPluginServiceServer) Check(context.Context, *ToolCallRequest) (*CheckResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Check not implemented")
 }
 func (UnimplementedPluginServiceServer) mustEmbedUnimplementedPluginServiceServer() {}
 func (UnimplementedPluginServiceServer) testEmbeddedByValue()                       {}
@@ -273,6 +305,24 @@ func _PluginService_ExecuteBidi_Handler(srv interface{}, stream grpc.ServerStrea
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type PluginService_ExecuteBidiServer = grpc.BidiStreamingServer[HostMessage, PluginMessage]
 
+func _PluginService_Check_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ToolCallRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).Check(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_Check_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).Check(ctx, req.(*ToolCallRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PluginService_ServiceDesc is the grpc.ServiceDesc for PluginService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -295,6 +345,10 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RefreshCapabilities",
 			Handler:    _PluginService_RefreshCapabilities_Handler,
+		},
+		{
+			MethodName: "Check",
+			Handler:    _PluginService_Check_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -22,6 +22,60 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type CheckVerdict int32
+
+const (
+	// No verdict. The host reads it as a check that could not be answered and
+	// asks the user as it would without a check.
+	CheckVerdict_CHECK_VERDICT_UNSPECIFIED CheckVerdict = 0
+	// The plugin would not refuse the call; the host asks the user to confirm it.
+	CheckVerdict_CHECK_VERDICT_PASSED CheckVerdict = 1
+	// The plugin refuses the call. The host answers the call with the refusal,
+	// does not ask the user and never executes the call.
+	CheckVerdict_CHECK_VERDICT_REFUSED CheckVerdict = 2
+)
+
+// Enum value maps for CheckVerdict.
+var (
+	CheckVerdict_name = map[int32]string{
+		0: "CHECK_VERDICT_UNSPECIFIED",
+		1: "CHECK_VERDICT_PASSED",
+		2: "CHECK_VERDICT_REFUSED",
+	}
+	CheckVerdict_value = map[string]int32{
+		"CHECK_VERDICT_UNSPECIFIED": 0,
+		"CHECK_VERDICT_PASSED":      1,
+		"CHECK_VERDICT_REFUSED":     2,
+	}
+)
+
+func (x CheckVerdict) Enum() *CheckVerdict {
+	p := new(CheckVerdict)
+	*p = x
+	return p
+}
+
+func (x CheckVerdict) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CheckVerdict) Descriptor() protoreflect.EnumDescriptor {
+	return file_plugin_proto_enumTypes[0].Descriptor()
+}
+
+func (CheckVerdict) Type() protoreflect.EnumType {
+	return &file_plugin_proto_enumTypes[0]
+}
+
+func (x CheckVerdict) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CheckVerdict.Descriptor instead.
+func (CheckVerdict) EnumDescriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{0}
+}
+
 // HostMessage is one frame on the host → plugin direction of an
 // ExecuteBidi stream. The first frame is always {call}; subsequent
 // frames are {callback_response}, each correlated by id to a prior
@@ -592,6 +646,71 @@ func (x *ToolResultResponse) GetStructuredContent() string {
 	return ""
 }
 
+// CheckResponse is the plugin's verdict on a call sent to Check.
+type CheckResponse struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Verdict CheckVerdict           `protobuf:"varint,1,opt,name=verdict,proto3,enum=opentalon.plugin.v1.CheckVerdict" json:"verdict,omitempty"`
+	// For a refusal: the kind of error the execution would give (e.g.
+	// "forbidden", "invalid_argument") and its message, the text the
+	// execution's error would carry. The host gives the model the message as
+	// the call's failed result.
+	Kind          string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	Message       string `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CheckResponse) Reset() {
+	*x = CheckResponse{}
+	mi := &file_plugin_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CheckResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CheckResponse) ProtoMessage() {}
+
+func (x *CheckResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CheckResponse.ProtoReflect.Descriptor instead.
+func (*CheckResponse) Descriptor() ([]byte, []int) {
+	return file_plugin_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *CheckResponse) GetVerdict() CheckVerdict {
+	if x != nil {
+		return x.Verdict
+	}
+	return CheckVerdict_CHECK_VERDICT_UNSPECIFIED
+}
+
+func (x *CheckResponse) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *CheckResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 type PluginCapabilities struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -629,7 +748,7 @@ type PluginCapabilities struct {
 
 func (x *PluginCapabilities) Reset() {
 	*x = PluginCapabilities{}
-	mi := &file_plugin_proto_msgTypes[8]
+	mi := &file_plugin_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -641,7 +760,7 @@ func (x *PluginCapabilities) String() string {
 func (*PluginCapabilities) ProtoMessage() {}
 
 func (x *PluginCapabilities) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_proto_msgTypes[8]
+	mi := &file_plugin_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -654,7 +773,7 @@ func (x *PluginCapabilities) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PluginCapabilities.ProtoReflect.Descriptor instead.
 func (*PluginCapabilities) Descriptor() ([]byte, []int) {
-	return file_plugin_proto_rawDescGZIP(), []int{8}
+	return file_plugin_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *PluginCapabilities) GetName() string {
@@ -719,7 +838,7 @@ type GlossaryEntry struct {
 
 func (x *GlossaryEntry) Reset() {
 	*x = GlossaryEntry{}
-	mi := &file_plugin_proto_msgTypes[9]
+	mi := &file_plugin_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -731,7 +850,7 @@ func (x *GlossaryEntry) String() string {
 func (*GlossaryEntry) ProtoMessage() {}
 
 func (x *GlossaryEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_proto_msgTypes[9]
+	mi := &file_plugin_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -744,7 +863,7 @@ func (x *GlossaryEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GlossaryEntry.ProtoReflect.Descriptor instead.
 func (*GlossaryEntry) Descriptor() ([]byte, []int) {
-	return file_plugin_proto_rawDescGZIP(), []int{9}
+	return file_plugin_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GlossaryEntry) GetTerm() string {
@@ -797,7 +916,7 @@ type KnowledgeArticle struct {
 
 func (x *KnowledgeArticle) Reset() {
 	*x = KnowledgeArticle{}
-	mi := &file_plugin_proto_msgTypes[10]
+	mi := &file_plugin_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -809,7 +928,7 @@ func (x *KnowledgeArticle) String() string {
 func (*KnowledgeArticle) ProtoMessage() {}
 
 func (x *KnowledgeArticle) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_proto_msgTypes[10]
+	mi := &file_plugin_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -822,7 +941,7 @@ func (x *KnowledgeArticle) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KnowledgeArticle.ProtoReflect.Descriptor instead.
 func (*KnowledgeArticle) Descriptor() ([]byte, []int) {
-	return file_plugin_proto_rawDescGZIP(), []int{10}
+	return file_plugin_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *KnowledgeArticle) GetId() string {
@@ -893,14 +1012,20 @@ type Action struct {
 	// companion the session may see is loaded too, unless it is already
 	// loaded, always included or demoted. Companions of a companion are not
 	// loaded. Empty (the default) means the action loads alone.
-	Companions    []string `protobuf:"bytes,9,rep,name=companions,proto3" json:"companions,omitempty"`
+	Companions []string `protobuf:"bytes,9,rep,name=companions,proto3" json:"companions,omitempty"`
+	// If true, the plugin can check a call to this action without executing
+	// it (rpc Check). Before the host asks the user to confirm a call to the
+	// action, it sends the call for a check. Default false: a call to the
+	// action is never checked. Plugins that aggregate upstream tools (e.g. the
+	// mcp-plugin) propagate it from the tool's `_meta.check`.
+	Check         bool `protobuf:"varint,10,opt,name=check,proto3" json:"check,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Action) Reset() {
 	*x = Action{}
-	mi := &file_plugin_proto_msgTypes[11]
+	mi := &file_plugin_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -912,7 +1037,7 @@ func (x *Action) String() string {
 func (*Action) ProtoMessage() {}
 
 func (x *Action) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_proto_msgTypes[11]
+	mi := &file_plugin_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -925,7 +1050,7 @@ func (x *Action) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Action.ProtoReflect.Descriptor instead.
 func (*Action) Descriptor() ([]byte, []int) {
-	return file_plugin_proto_rawDescGZIP(), []int{11}
+	return file_plugin_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Action) GetName() string {
@@ -991,6 +1116,13 @@ func (x *Action) GetCompanions() []string {
 	return nil
 }
 
+func (x *Action) GetCheck() bool {
+	if x != nil {
+		return x.Check
+	}
+	return false
+}
+
 type Parameter struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -1020,7 +1152,7 @@ type Parameter struct {
 
 func (x *Parameter) Reset() {
 	*x = Parameter{}
-	mi := &file_plugin_proto_msgTypes[12]
+	mi := &file_plugin_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1032,7 +1164,7 @@ func (x *Parameter) String() string {
 func (*Parameter) ProtoMessage() {}
 
 func (x *Parameter) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_proto_msgTypes[12]
+	mi := &file_plugin_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1045,7 +1177,7 @@ func (x *Parameter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Parameter.ProtoReflect.Descriptor instead.
 func (*Parameter) Descriptor() ([]byte, []int) {
-	return file_plugin_proto_rawDescGZIP(), []int{12}
+	return file_plugin_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Parameter) GetName() string {
@@ -1131,7 +1263,11 @@ const file_plugin_proto_rawDesc = "" +
 	"\acall_id\x18\x01 \x01(\tR\x06callId\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12-\n" +
-	"\x12structured_content\x18\x04 \x01(\tR\x11structuredContent\"\xfc\x02\n" +
+	"\x12structured_content\x18\x04 \x01(\tR\x11structuredContent\"z\n" +
+	"\rCheckResponse\x12;\n" +
+	"\averdict\x18\x01 \x01(\x0e2!.opentalon.plugin.v1.CheckVerdictR\averdict\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"\xfc\x02\n" +
 	"\x12PluginCapabilities\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x125\n" +
@@ -1152,7 +1288,7 @@ const file_plugin_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x18\n" +
 	"\acontent\x18\x03 \x01(\tR\acontent\x12\x12\n" +
-	"\x04tags\x18\x04 \x03(\tR\x04tags\"\xdc\x02\n" +
+	"\x04tags\x18\x04 \x03(\tR\x04tags\"\xf2\x02\n" +
 	"\x06Action\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12>\n" +
@@ -1166,19 +1302,26 @@ const file_plugin_proto_rawDesc = "" +
 	"\x11confirmation_hint\x18\b \x01(\tR\x10confirmationHint\x12\x1e\n" +
 	"\n" +
 	"companions\x18\t \x03(\tR\n" +
-	"companions\"\x89\x01\n" +
+	"companions\x12\x14\n" +
+	"\x05check\x18\n" +
+	" \x01(\bR\x05check\"\x89\x01\n" +
 	"\tParameter\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x12\n" +
 	"\x04type\x18\x03 \x01(\tR\x04type\x12\x1a\n" +
 	"\brequired\x18\x04 \x01(\bR\brequired\x12\x16\n" +
-	"\x06schema\x18\x05 \x01(\tR\x06schema2\xb3\x03\n" +
+	"\x06schema\x18\x05 \x01(\tR\x06schema*b\n" +
+	"\fCheckVerdict\x12\x1d\n" +
+	"\x19CHECK_VERDICT_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14CHECK_VERDICT_PASSED\x10\x01\x12\x19\n" +
+	"\x15CHECK_VERDICT_REFUSED\x10\x022\x86\x04\n" +
 	"\rPluginService\x12F\n" +
 	"\x04Init\x12&.opentalon.plugin.v1.PluginInitRequest\x1a\x16.google.protobuf.Empty\x12X\n" +
 	"\aExecute\x12$.opentalon.plugin.v1.ToolCallRequest\x1a'.opentalon.plugin.v1.ToolResultResponse\x12O\n" +
 	"\fCapabilities\x12\x16.google.protobuf.Empty\x1a'.opentalon.plugin.v1.PluginCapabilities\x12V\n" +
 	"\x13RefreshCapabilities\x12\x16.google.protobuf.Empty\x1a'.opentalon.plugin.v1.PluginCapabilities\x12W\n" +
-	"\vExecuteBidi\x12 .opentalon.plugin.v1.HostMessage\x1a\".opentalon.plugin.v1.PluginMessage(\x010\x01B/Z-github.com/opentalon/opentalon/proto/pluginpbb\x06proto3"
+	"\vExecuteBidi\x12 .opentalon.plugin.v1.HostMessage\x1a\".opentalon.plugin.v1.PluginMessage(\x010\x01\x12Q\n" +
+	"\x05Check\x12$.opentalon.plugin.v1.ToolCallRequest\x1a\".opentalon.plugin.v1.CheckResponseB/Z-github.com/opentalon/opentalon/proto/pluginpbb\x06proto3"
 
 var (
 	file_plugin_proto_rawDescOnce sync.Once
@@ -1192,54 +1335,60 @@ func file_plugin_proto_rawDescGZIP() []byte {
 	return file_plugin_proto_rawDescData
 }
 
-var file_plugin_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_plugin_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_plugin_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_plugin_proto_goTypes = []any{
-	(*HostMessage)(nil),        // 0: opentalon.plugin.v1.HostMessage
-	(*PluginMessage)(nil),      // 1: opentalon.plugin.v1.PluginMessage
-	(*CallbackRequest)(nil),    // 2: opentalon.plugin.v1.CallbackRequest
-	(*CallbackResponse)(nil),   // 3: opentalon.plugin.v1.CallbackResponse
-	(*PluginInitRequest)(nil),  // 4: opentalon.plugin.v1.PluginInitRequest
-	(*ToolCallRequest)(nil),    // 5: opentalon.plugin.v1.ToolCallRequest
-	(*CredentialHeader)(nil),   // 6: opentalon.plugin.v1.CredentialHeader
-	(*ToolResultResponse)(nil), // 7: opentalon.plugin.v1.ToolResultResponse
-	(*PluginCapabilities)(nil), // 8: opentalon.plugin.v1.PluginCapabilities
-	(*GlossaryEntry)(nil),      // 9: opentalon.plugin.v1.GlossaryEntry
-	(*KnowledgeArticle)(nil),   // 10: opentalon.plugin.v1.KnowledgeArticle
-	(*Action)(nil),             // 11: opentalon.plugin.v1.Action
-	(*Parameter)(nil),          // 12: opentalon.plugin.v1.Parameter
-	nil,                        // 13: opentalon.plugin.v1.CallbackRequest.ArgsEntry
-	nil,                        // 14: opentalon.plugin.v1.ToolCallRequest.ArgsEntry
-	nil,                        // 15: opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry
-	(*emptypb.Empty)(nil),      // 16: google.protobuf.Empty
+	(CheckVerdict)(0),          // 0: opentalon.plugin.v1.CheckVerdict
+	(*HostMessage)(nil),        // 1: opentalon.plugin.v1.HostMessage
+	(*PluginMessage)(nil),      // 2: opentalon.plugin.v1.PluginMessage
+	(*CallbackRequest)(nil),    // 3: opentalon.plugin.v1.CallbackRequest
+	(*CallbackResponse)(nil),   // 4: opentalon.plugin.v1.CallbackResponse
+	(*PluginInitRequest)(nil),  // 5: opentalon.plugin.v1.PluginInitRequest
+	(*ToolCallRequest)(nil),    // 6: opentalon.plugin.v1.ToolCallRequest
+	(*CredentialHeader)(nil),   // 7: opentalon.plugin.v1.CredentialHeader
+	(*ToolResultResponse)(nil), // 8: opentalon.plugin.v1.ToolResultResponse
+	(*CheckResponse)(nil),      // 9: opentalon.plugin.v1.CheckResponse
+	(*PluginCapabilities)(nil), // 10: opentalon.plugin.v1.PluginCapabilities
+	(*GlossaryEntry)(nil),      // 11: opentalon.plugin.v1.GlossaryEntry
+	(*KnowledgeArticle)(nil),   // 12: opentalon.plugin.v1.KnowledgeArticle
+	(*Action)(nil),             // 13: opentalon.plugin.v1.Action
+	(*Parameter)(nil),          // 14: opentalon.plugin.v1.Parameter
+	nil,                        // 15: opentalon.plugin.v1.CallbackRequest.ArgsEntry
+	nil,                        // 16: opentalon.plugin.v1.ToolCallRequest.ArgsEntry
+	nil,                        // 17: opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry
+	(*emptypb.Empty)(nil),      // 18: google.protobuf.Empty
 }
 var file_plugin_proto_depIdxs = []int32{
-	5,  // 0: opentalon.plugin.v1.HostMessage.call:type_name -> opentalon.plugin.v1.ToolCallRequest
-	3,  // 1: opentalon.plugin.v1.HostMessage.callback_response:type_name -> opentalon.plugin.v1.CallbackResponse
-	2,  // 2: opentalon.plugin.v1.PluginMessage.callback_request:type_name -> opentalon.plugin.v1.CallbackRequest
-	7,  // 3: opentalon.plugin.v1.PluginMessage.result:type_name -> opentalon.plugin.v1.ToolResultResponse
-	13, // 4: opentalon.plugin.v1.CallbackRequest.args:type_name -> opentalon.plugin.v1.CallbackRequest.ArgsEntry
-	14, // 5: opentalon.plugin.v1.ToolCallRequest.args:type_name -> opentalon.plugin.v1.ToolCallRequest.ArgsEntry
-	15, // 6: opentalon.plugin.v1.ToolCallRequest.credential_headers:type_name -> opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry
-	11, // 7: opentalon.plugin.v1.PluginCapabilities.actions:type_name -> opentalon.plugin.v1.Action
-	9,  // 8: opentalon.plugin.v1.PluginCapabilities.glossary:type_name -> opentalon.plugin.v1.GlossaryEntry
-	10, // 9: opentalon.plugin.v1.PluginCapabilities.knowledge_articles:type_name -> opentalon.plugin.v1.KnowledgeArticle
-	12, // 10: opentalon.plugin.v1.Action.parameters:type_name -> opentalon.plugin.v1.Parameter
-	6,  // 11: opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry.value:type_name -> opentalon.plugin.v1.CredentialHeader
-	4,  // 12: opentalon.plugin.v1.PluginService.Init:input_type -> opentalon.plugin.v1.PluginInitRequest
-	5,  // 13: opentalon.plugin.v1.PluginService.Execute:input_type -> opentalon.plugin.v1.ToolCallRequest
-	16, // 14: opentalon.plugin.v1.PluginService.Capabilities:input_type -> google.protobuf.Empty
-	16, // 15: opentalon.plugin.v1.PluginService.RefreshCapabilities:input_type -> google.protobuf.Empty
-	0,  // 16: opentalon.plugin.v1.PluginService.ExecuteBidi:input_type -> opentalon.plugin.v1.HostMessage
-	16, // 17: opentalon.plugin.v1.PluginService.Init:output_type -> google.protobuf.Empty
-	7,  // 18: opentalon.plugin.v1.PluginService.Execute:output_type -> opentalon.plugin.v1.ToolResultResponse
-	8,  // 19: opentalon.plugin.v1.PluginService.Capabilities:output_type -> opentalon.plugin.v1.PluginCapabilities
-	8,  // 20: opentalon.plugin.v1.PluginService.RefreshCapabilities:output_type -> opentalon.plugin.v1.PluginCapabilities
-	1,  // 21: opentalon.plugin.v1.PluginService.ExecuteBidi:output_type -> opentalon.plugin.v1.PluginMessage
-	17, // [17:22] is the sub-list for method output_type
-	12, // [12:17] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	6,  // 0: opentalon.plugin.v1.HostMessage.call:type_name -> opentalon.plugin.v1.ToolCallRequest
+	4,  // 1: opentalon.plugin.v1.HostMessage.callback_response:type_name -> opentalon.plugin.v1.CallbackResponse
+	3,  // 2: opentalon.plugin.v1.PluginMessage.callback_request:type_name -> opentalon.plugin.v1.CallbackRequest
+	8,  // 3: opentalon.plugin.v1.PluginMessage.result:type_name -> opentalon.plugin.v1.ToolResultResponse
+	15, // 4: opentalon.plugin.v1.CallbackRequest.args:type_name -> opentalon.plugin.v1.CallbackRequest.ArgsEntry
+	16, // 5: opentalon.plugin.v1.ToolCallRequest.args:type_name -> opentalon.plugin.v1.ToolCallRequest.ArgsEntry
+	17, // 6: opentalon.plugin.v1.ToolCallRequest.credential_headers:type_name -> opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry
+	0,  // 7: opentalon.plugin.v1.CheckResponse.verdict:type_name -> opentalon.plugin.v1.CheckVerdict
+	13, // 8: opentalon.plugin.v1.PluginCapabilities.actions:type_name -> opentalon.plugin.v1.Action
+	11, // 9: opentalon.plugin.v1.PluginCapabilities.glossary:type_name -> opentalon.plugin.v1.GlossaryEntry
+	12, // 10: opentalon.plugin.v1.PluginCapabilities.knowledge_articles:type_name -> opentalon.plugin.v1.KnowledgeArticle
+	14, // 11: opentalon.plugin.v1.Action.parameters:type_name -> opentalon.plugin.v1.Parameter
+	7,  // 12: opentalon.plugin.v1.ToolCallRequest.CredentialHeadersEntry.value:type_name -> opentalon.plugin.v1.CredentialHeader
+	5,  // 13: opentalon.plugin.v1.PluginService.Init:input_type -> opentalon.plugin.v1.PluginInitRequest
+	6,  // 14: opentalon.plugin.v1.PluginService.Execute:input_type -> opentalon.plugin.v1.ToolCallRequest
+	18, // 15: opentalon.plugin.v1.PluginService.Capabilities:input_type -> google.protobuf.Empty
+	18, // 16: opentalon.plugin.v1.PluginService.RefreshCapabilities:input_type -> google.protobuf.Empty
+	1,  // 17: opentalon.plugin.v1.PluginService.ExecuteBidi:input_type -> opentalon.plugin.v1.HostMessage
+	6,  // 18: opentalon.plugin.v1.PluginService.Check:input_type -> opentalon.plugin.v1.ToolCallRequest
+	18, // 19: opentalon.plugin.v1.PluginService.Init:output_type -> google.protobuf.Empty
+	8,  // 20: opentalon.plugin.v1.PluginService.Execute:output_type -> opentalon.plugin.v1.ToolResultResponse
+	10, // 21: opentalon.plugin.v1.PluginService.Capabilities:output_type -> opentalon.plugin.v1.PluginCapabilities
+	10, // 22: opentalon.plugin.v1.PluginService.RefreshCapabilities:output_type -> opentalon.plugin.v1.PluginCapabilities
+	2,  // 23: opentalon.plugin.v1.PluginService.ExecuteBidi:output_type -> opentalon.plugin.v1.PluginMessage
+	9,  // 24: opentalon.plugin.v1.PluginService.Check:output_type -> opentalon.plugin.v1.CheckResponse
+	19, // [19:25] is the sub-list for method output_type
+	13, // [13:19] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_plugin_proto_init() }
@@ -1260,13 +1409,14 @@ func file_plugin_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_plugin_proto_rawDesc), len(file_plugin_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   16,
+			NumEnums:      1,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_plugin_proto_goTypes,
 		DependencyIndexes: file_plugin_proto_depIdxs,
+		EnumInfos:         file_plugin_proto_enumTypes,
 		MessageInfos:      file_plugin_proto_msgTypes,
 	}.Build()
 	File_plugin_proto = out.File
