@@ -495,6 +495,10 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 	if traw, ok := raw[v.cfg.TariffsField]; ok {
 		tariffs = parseTariffs(ctx, v.cfg.TariffsField, traw)
 	}
+	var limits []BudgetLimit
+	if lraw, ok := raw[limitsField]; ok {
+		limits = parseLimits(ctx, lraw)
+	}
 
 	p := &Profile{
 		EntityID:     entityID,
@@ -511,6 +515,7 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 		Kind:         kind,
 		SystemSource: systemSource,
 		Tariffs:      tariffs,
+		Limits:       limits,
 	}
 	slog.DebugContext(ctx, "whoami profile resolved",
 		"entity_id", p.EntityID,
@@ -574,6 +579,69 @@ func tariffPrice(raw json.RawMessage) (*float64, error) {
 		return nil, fmt.Errorf("negative price %v", *price)
 	}
 	return price, nil
+}
+
+// limitsField is the WhoAmI JSON key of the money budgets.
+const limitsField = "limits"
+
+// parseLimits keeps the well-formed budgets of a limits field and drops every
+// other entry with a warning; nothing in it fails the whoami check.
+func parseLimits(ctx context.Context, raw json.RawMessage) []BudgetLimit {
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		slog.WarnContext(ctx, "whoami: malformed limits field, ignoring", "field", limitsField, "error", err)
+		return nil
+	}
+	var limits []BudgetLimit
+	for i, entry := range entries {
+		l, problem := parseLimit(ctx, i, entry)
+		if problem != "" {
+			slog.WarnContext(ctx, "whoami: malformed limit, ignoring", "field", limitsField, "index", i, "problem", problem)
+			continue
+		}
+		limits = append(limits, l)
+	}
+	return limits
+}
+
+func parseLimit(ctx context.Context, index int, raw json.RawMessage) (BudgetLimit, string) {
+	var fields struct {
+		Scope string   `json:"scope"`
+		Max   *float64 `json:"max"`
+		Since string   `json:"since"`
+		Kinds []string `json:"kinds"`
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return BudgetLimit{}, err.Error()
+	}
+	if fields.Scope != ScopeGroup && fields.Scope != ScopeEntity {
+		return BudgetLimit{}, fmt.Sprintf("unknown scope %q", fields.Scope)
+	}
+	if fields.Max == nil {
+		return BudgetLimit{}, "no max"
+	}
+	if *fields.Max < 0 {
+		return BudgetLimit{}, fmt.Sprintf("negative max %v", *fields.Max)
+	}
+	since, err := time.Parse(time.RFC3339, fields.Since)
+	if err != nil {
+		return BudgetLimit{}, fmt.Sprintf("since %q is no RFC 3339 time", fields.Since)
+	}
+	kinds := []string{KindChat}
+	if len(fields.Kinds) > 0 {
+		kinds = nil
+		for _, k := range fields.Kinds {
+			if k != KindChat && k != KindSystem {
+				slog.WarnContext(ctx, "whoami: unknown kind in a limit, ignoring", "field", limitsField, "index", index, "kind", k)
+				continue
+			}
+			kinds = append(kinds, k)
+		}
+		if len(kinds) == 0 {
+			return BudgetLimit{}, "no known kind"
+		}
+	}
+	return BudgetLimit{Scope: fields.Scope, Max: *fields.Max, Since: since, Kinds: kinds}, ""
 }
 
 func jsonString(raw json.RawMessage) string {

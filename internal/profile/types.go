@@ -32,7 +32,25 @@ type Profile struct {
 	Kind         string                      // interaction kind: "chat" (human) | "system" (backend-originated); the verifier always sets one, "" only on a profile built without it
 	SystemSource string                      // per-feature label for system runs (e.g. "csv_mapping", "job_notify"); empty for chat
 	Tariffs      map[string]Tariff           // customer prices by model id from WhoAmI; nil = the profile carries no tariffs
+	Limits       []BudgetLimit               // money budgets from WhoAmI, checked when a turn starts; nil = none
 }
+
+// BudgetLimit is one money budget: it is used up once the customer price of
+// the usage rows of Kinds recorded since Since reaches Max. A ScopeGroup
+// budget counts the group's rows, a ScopeEntity budget the entity's rows in
+// the profile's group.
+type BudgetLimit struct {
+	Scope string
+	Max   float64
+	Since time.Time
+	Kinds []string
+}
+
+// Budget scopes carried on BudgetLimit.Scope.
+const (
+	ScopeGroup  = "group"
+	ScopeEntity = "entity"
+)
 
 type Tariff struct {
 	Input       float64

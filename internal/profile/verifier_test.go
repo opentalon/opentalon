@@ -880,3 +880,77 @@ func formatTariffs(m map[string]Tariff) string {
 	}
 	return "{" + b.String() + "}"
 }
+
+func TestVerifier_Limits(t *testing.T) {
+	const since = `"since":"2026-11-01T00:00:00+01:00"`
+	cases := []struct {
+		name     string
+		field    string
+		want     string
+		wantWarn string
+	}{
+		{"absent", ``, "", ""},
+		{"group and entity", `,"limits":[{"scope":"group","max":50,` + since + `,"kinds":["chat"]},` +
+			`{"scope":"entity","max":10.5,` + since + `,"kinds":["chat","system"]}]`,
+			"group 50 2026-11-01T00:00:00+01:00 [chat]; entity 10.5 2026-11-01T00:00:00+01:00 [chat system]", ""},
+		{"a max of 0", `,"limits":[{"scope":"group","max":0,` + since + `}]`, "group 0 2026-11-01T00:00:00+01:00 [chat]", ""},
+		{"no kinds", `,"limits":[{"scope":"entity","max":1,` + since + `}]`, "entity 1 2026-11-01T00:00:00+01:00 [chat]", ""},
+		{"empty kinds", `,"limits":[{"scope":"entity","max":1,` + since + `,"kinds":[]}]`, "entity 1 2026-11-01T00:00:00+01:00 [chat]", ""},
+		{"an unknown kind", `,"limits":[{"scope":"group","max":1,` + since + `,"kinds":["chat","agent"]}]`,
+			"group 1 2026-11-01T00:00:00+01:00 [chat]", "kind=agent"},
+		{"no known kind", `,"limits":[{"scope":"group","max":1,` + since + `,"kinds":["agent"]}]`, "", "no known kind"},
+		{"an unknown scope", `,"limits":[{"scope":"account","max":1,` + since + `},{"scope":"group","max":2,` + since + `}]`,
+			"group 2 2026-11-01T00:00:00+01:00 [chat]", `unknown scope \"account\"`},
+		{"no max", `,"limits":[{"scope":"group",` + since + `}]`, "", "no max"},
+		{"a null max", `,"limits":[{"scope":"group","max":null,` + since + `}]`, "", "no max"},
+		{"a negative max", `,"limits":[{"scope":"group","max":-1,` + since + `}]`, "", "negative max"},
+		{"a max as a string", `,"limits":[{"scope":"group","max":"50",` + since + `}]`, "", "index=0"},
+		{"a since without offset", `,"limits":[{"scope":"group","max":1,"since":"2026-11-01T00:00:00"}]`, "", "no RFC 3339 time"},
+		{"no since", `,"limits":[{"scope":"group","max":1}]`, "", "no RFC 3339 time"},
+		{"an entry that is no object", `,"limits":[5]`, "", "index=0"},
+		{"a field that is no array", `,"limits":{"scope":"group","max":1}`, "", "malformed limits field"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"entity_id":"u1","limit":2000,"limit_time":"1h"` + tc.field + `}`))
+			}))
+			defer srv.Close()
+			var logs bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			defer slog.SetDefault(prev)
+
+			v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
+			defer v.Close()
+			p, err := v.Verify(context.Background(), "tok", "", nil)
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if got := formatLimits(p.Limits); got != tc.want {
+				t.Errorf("Limits = %q, want %q", got, tc.want)
+			}
+			if p.Limit != 2000 || p.LimitWindow != time.Hour {
+				t.Errorf("Limit = %d over %v, want 2000 over 1h", p.Limit, p.LimitWindow)
+			}
+			var warns []string
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if strings.Contains(line, "level=WARN") && strings.Contains(line, "limit") {
+					warns = append(warns, line)
+				}
+			}
+			named := slices.ContainsFunc(warns, func(l string) bool { return strings.Contains(l, tc.wantWarn) })
+			if tc.wantWarn == "" && len(warns) > 0 || tc.wantWarn != "" && !named {
+				t.Errorf("limit warnings %q, want one naming %q", warns, tc.wantWarn)
+			}
+		})
+	}
+}
+
+func formatLimits(limits []BudgetLimit) string {
+	parts := make([]string, 0, len(limits))
+	for _, l := range limits {
+		parts = append(parts, fmt.Sprintf("%s %v %s %v", l.Scope, l.Max, l.Since.Format(time.RFC3339), l.Kinds))
+	}
+	return strings.Join(parts, "; ")
+}
