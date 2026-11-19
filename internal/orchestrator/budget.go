@@ -63,8 +63,8 @@ func (o *Orchestrator) checkBudget(ctx context.Context) (string, error) {
 }
 
 // usedUpBudget returns the scope of a budget of p that covers this run's kind
-// and is used up, ScopeGroup when both are. A budget whose sum cannot be read
-// counts as not used up.
+// and is used up, ScopeGroup when both are. A sum that cannot be read leaves
+// the turn on its model: no scope, whatever the other budgets' sums.
 func (o *Orchestrator) usedUpBudget(ctx context.Context, p *profile.Profile) string {
 	kind := cmp.Or(p.Kind, profile.KindChat)
 	for _, scope := range []string{profile.ScopeGroup, profile.ScopeEntity} {
@@ -80,7 +80,7 @@ func (o *Orchestrator) usedUpBudget(ctx context.Context, p *profile.Profile) str
 			if err != nil {
 				logger.FromContext(ctx).Warn("budget check failed; the turn runs on its model",
 					"scope", scope, "group", p.Group, "entity", p.EntityID, "error", err)
-				continue
+				return ""
 			}
 			if used >= l.Max {
 				return scope
