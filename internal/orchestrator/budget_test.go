@@ -30,10 +30,11 @@ type budgetRead struct {
 	since         time.Time
 }
 
-// budgetStub answers every group sum with group and every entity sum with entity.
+// budgetStub answers every group sum with group and every entity sum with
+// entity; err fails every sum, groupErr only the group sums.
 type budgetStub struct {
 	group, entity float64
-	err           error
+	err, groupErr error
 	mu            sync.Mutex
 	reads         []budgetRead
 }
@@ -44,6 +45,9 @@ func (b *budgetStub) PriceSince(_ context.Context, groupID, entityID string, kin
 	b.reads = append(b.reads, budgetRead{groupID, entityID, kinds, since})
 	if b.err != nil {
 		return 0, b.err
+	}
+	if entityID == "" && b.groupErr != nil {
+		return 0, b.groupErr
 	}
 	if entityID != "" {
 		return b.entity, nil
@@ -238,6 +242,28 @@ func TestBudgetSumErrorRunsTheTurnOnItsModel(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "db down") {
 		t.Errorf("no warning naming the sum error in the log:\n%s", logs.String())
+	}
+}
+
+// The account's sum cannot be read while the user's reads as used up: the
+// turn still runs on its model, whether the default is free or priced.
+func TestBudgetSumErrorRunsTheTurnOnItsModelWhateverTheOtherSum(t *testing.T) {
+	for name, def := range map[string]profile.Tariff{"default free": {}, "default priced": {Input: 0.1}} {
+		t.Run(name, func(t *testing.T) {
+			llm := &refLLM{}
+			orch, _ := budgetOrch(llm, OrchestratorOpts{BudgetReader: &budgetStub{groupErr: errors.New("db down"), entity: 12}})
+			p := budgetProfile(budgetPremium, map[string]profile.Tariff{"claude-x": {Input: 3, Output: 15}, budgetDefault: def},
+				profile.BudgetLimit{Scope: profile.ScopeGroup, Max: 50, Since: budgetSince, Kinds: []string{profile.KindChat}},
+				profile.BudgetLimit{Scope: profile.ScopeEntity, Max: 10, Since: budgetSince, Kinds: []string{profile.KindChat}})
+
+			res, err := orch.Run(profile.WithProfile(context.Background(), p), "s1", "Hi")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := llm.sent(); len(got) != 1 || got[0] != budgetPremium || res.Metadata[BudgetMetadataKey] != "" {
+				t.Errorf("refs %q, notice %q; want the profile's model and no notice", got, res.Metadata[BudgetMetadataKey])
+			}
+		})
 	}
 }
 
