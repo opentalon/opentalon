@@ -30,6 +30,12 @@ Normal LLM response. No special `type` metadata is set (or absent). The `content
 
 Frontend: render as a chat bubble from the assistant.
 
+A reply the default model gave because a budget is used up (see [Budgets](profiles.md#budgets)) carries `budget_used_up`: `group` for the account's budget, `entity` for the user's own, `group` when both are used up. A confirmation frame of such a turn carries it too.
+
+```json
+{ "budget_used_up": "group" }
+```
+
 ---
 
 ### `system`
@@ -102,6 +108,8 @@ An error occurred. The `content` is a human-readable fallback message (English).
 | `token_required` | profile token required | WebSocket connection missing auth token |
 | `auth_failed` | authentication failed | Token validation failed |
 | `token_limit_exceeded` | token limit reached, please try again later | User's token spend limit exceeded |
+| `budget_used_up_group` | Your account's AI budget is used up. | The group's budget is used up and the default model is priced above 0 |
+| `budget_used_up_entity` | Your AI budget is used up. | The user's budget is used up and the default model is priced above 0 |
 | `empty_content` | I received your message but couldn't read its content. Could you try sending it as text? | Empty message with no file attachments |
 | `guard_blocked` | Request blocked: guard {name} failed. | Content guard rejected the message |
 

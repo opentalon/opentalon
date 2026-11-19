@@ -84,6 +84,7 @@ Authorization: Bearer <token>
 | `kind` | No | `chat` (default) for a person's turn, `system` for a run a backend feature started on a user's behalf. Stamped on the session row at creation (`sessions.interaction_kind`) and on every usage row. |
 | `system_source` | No | Name of the feature behind a `system` run, e.g. `job_notify`. Only honoured together with `kind: system`; on any other run it is ignored and logged — a source never upgrades a run's kind, because `system` skips the interactive spend limit. Stamped once on the session that the run opened (`sessions.system_source`, NULL for chat) and on each usage row; see [Run labels](#run-labels). |
 | `tariffs` | No | Customer prices in EUR per million tokens, by model id as `models.providers.<id>.models[].id` names it (without the provider): `{"claude-sonnet-5-5": {"input": 3, "cached_input": 0.3, "output": 15}}`. `input` and `output` are required numbers of 0 or more, `cached_input` is optional. Every model call of the run is priced at them; see [Customer price](#customer-price). |
+| `limits` | No | Money budgets in EUR, checked when a turn starts: `[{"scope": "group", "max": 50, "since": "2026-11-01T00:00:00+01:00", "kinds": ["chat"]}]`. `scope` is `group` or `entity`, `max` a number of 0 or more, `since` an RFC 3339 time with offset, `kinds` the interaction kinds the budget counts and checks (`chat` when absent or empty). See [Budgets](#budgets). The token rule from `limit` and `limit_time` applies on its own. |
 
 ### Full WhoAmI config
 
@@ -339,6 +340,32 @@ The OpenAI-compatible provider reports no cache tokens, so all its input is bill
 - A tariff of 0 stores a price of 0. A profile without `tariffs` (a run a plugin starts without whoami, an older whoami server) leaves the price empty and logs nothing.
 - An entry with a missing, negative or non-numeric `input` or `output`, or a negative or non-numeric `cached_input`, is dropped with a warning and counts as missing; a `cached_input` of `null` counts as omitted, so cache reads are billed at `input`. A `tariffs` value that is not an object is ignored with a warning. Neither fails the whoami check.
 - Prices are frozen at call time: a changed tariff prices new calls only.
+
+### Budgets
+
+A turn whose run kind a `limits` entry names is checked once, under the conversation's turn lock and before its first model call. The entry's budget is used up when the summed `price` of its rows since `since` reaches `max`:
+
+| `scope` | Rows summed |
+|---|---|
+| `group` | the group's rows of the entry's `kinds` |
+| `entity` | the entity's rows of the entry's `kinds` in the profile's group |
+
+`since` is compared in UTC; rows without a price count 0. What a used-up budget does depends on the model the turn would run on (the profile's `model`, else the default model) and on the tariffs:
+
+| Case | Turn |
+|---|---|
+| no budget used up, or the turn's model has a tariff of 0 | runs as before |
+| a budget used up, the turn's model is priced above 0 or has no tariff | runs on the default chain; the reply carries `budget_used_up` = the scope |
+| a budget used up, the default model is priced above 0 as well | refused with the error code `budget_used_up_group` or `budget_used_up_entity` |
+| a budget used up, the turn runs on the default model anyway | runs as before, unless the default model is priced above 0: refused |
+
+- With both budgets used up, the notice and the refusal name `group`.
+- A tariff is priced above 0 when any of its prices is. A default model without a tariff is never refused.
+- The switch applies to the one turn; the cached profile, which other turns share, keeps its `model`.
+- A turn writes its row before it releases the turn lock, so a turn queued behind it in the same conversation sees its price. Turns of other conversations run at the same time and can overshoot a budget by one turn each.
+- A run of a kind no entry names is neither counted nor checked; a control message never reaches the check.
+- A sum that cannot be read lets the turn run on its model, with a warning.
+- An entry with an unknown `scope`, a missing, negative or non-numeric `max`, or a `since` that does not parse is ignored with a warning, and so is one whose `kinds` name no known kind; an unknown kind in `kinds` is dropped with a warning. A `limits` value that is not an array is ignored with a warning. None of these fails the whoami check.
 
 ## Channel plugin integration
 
