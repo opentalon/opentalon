@@ -4771,11 +4771,9 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		if o.supportsNativeTools() {
 			mode = emit.ToolCallModeNative
 		}
-		// Arguments captured as the raw map ref; send() in the emit
-		// package marshals payload synchronously, so the JSON snapshot is
-		// frozen here BEFORE the context-arg injection below mutates
-		// call.Args. If this emit ever becomes async, the call.Args map
-		// must be copied first to preserve the raw-capture invariant.
+		// Arguments captured as the raw map ref: admitCall below injects
+		// the context args into a new map, so this one stays as the model
+		// issued it.
 		extractedID := emit.EmitToolCallExtracted(ctx, o.eventSink, emit.ToolCallExtractedArgs{
 			CallID:    call.ID,
 			Plugin:    call.Plugin,
@@ -4788,188 +4786,14 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		}
 	}
 
-	if call.Plugin == "" {
-		o.emitToolCallNotFound(ctx, call)
-		_, native := sentNativeToolsFromContext(ctx)
-		return ToolResult{
-			CallID: call.ID,
-			Error:  recoveryHint(native, nativeWrongNameFormError, textWrongNameFormError),
-		}
-	}
-	exec, ok := o.registry.GetExecutor(call.Plugin)
+	admitted, refusal, ok := o.admitCall(ctx, call, dispatchStart)
 	if !ok {
-		o.emitToolCallNotFound(ctx, call)
-		return ToolResult{
-			CallID: call.ID,
-			Error:  fmt.Sprintf("plugin %q not found", call.Plugin),
-		}
+		return refusal
 	}
-	if !o.registry.HasAction(call.Plugin, call.Action) {
-		// LLMs frequently mangle action names in two ways:
-		// 1. Underscores instead of hyphens: "list_persons" → "list-persons"
-		// 2. Dropping plugin prefix: "list-items" → "plugin__list-items"
-		// Try each normalization and their combination before giving up.
-		resolved := false
-		candidates := actionNameCandidates(call.Plugin, call.Action)
-		for _, candidate := range candidates {
-			if candidate != call.Action && o.registry.HasAction(call.Plugin, candidate) {
-				call.Action = candidate
-				resolved = true
-				break
-			}
-		}
-		if !resolved {
-			o.emitToolCallNotFound(ctx, call)
-			return ToolResult{
-				CallID: call.ID,
-				Error:  fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin),
-			}
-		}
-	}
-
-	actorID := actor.Actor(ctx)
-	// permission_plugin gates LLM-originated plugin actions (including e.g.
-	// install_skill); configure it for team deployments.  Internal calls
-	// (guards, preparers, formatters, pipelines) are exempt — they are
-	// constructed programmatically by the host, not by the LLM.
-	if call.FromLLM && actorID != "" && o.permissionChecker != nil && call.Plugin != o.permissionPluginName {
-		allowed, err := o.permissionChecker.Allowed(ctx, actorID, call.Plugin)
-		if err != nil {
-			slog.Warn("permission check failed", "actor", actorID, "plugin", call.Plugin, "error", err)
-			return o.emitRefusalResult(ctx, call, "permission denied", dispatchStart)
-		}
-		if !allowed {
-			return o.emitRefusalResult(ctx, call, "permission denied", dispatchStart)
-		}
-	}
-
-	// Single lookup: get capability and find the action for context injection, audit logging, and UserOnly enforcement.
-	var action *Action
-	var capForCheck PluginCapability
-	if cap, ok := o.registry.GetCapability(call.Plugin); ok {
-		capForCheck = cap
-		for i := range cap.Actions {
-			if cap.Actions[i].Name == call.Action {
-				action = &cap.Actions[i]
-				break
-			}
-		}
-	}
-
-	// Defense-in-depth: block plugins that are not allowed for this profile.
-	// In strict mode (WhoAmI plugins list) every plugin is checked; in non-strict
-	// mode only capabilities with AllowedGroups set are gated (pluginAllowed handles both).
-	// This mirrors buildSystemPrompt and protects against crafted tool calls.
-	// Internal calls (guards, preparers, pipelines) are exempt: they are constructed
-	// programmatically by the host, not by the LLM, so they are trusted. This matches
-	// the exemptions already in place for UserOnly and rejectUnknownArgs below.
-	if call.FromLLM {
-		if allowed := o.resolveAllowedPlugins(ctx); !o.pluginAllowed(capForCheck, allowed) {
-			slog.Warn("BLOCKED tool call for restricted plugin",
-				"plugin", call.Plugin,
-				"action", call.Action,
-				"strict", allowed.strict,
-				"allowed_groups", capForCheck.AllowedGroups,
-				"in_allowlist", allowed.m[capForCheck.Name],
-				"allowlist_keys", mapKeys(allowed.m),
-			)
-			return o.emitRefusalResult(ctx, call,
-				fmt.Sprintf("plugin %q is not available for this profile", call.Plugin),
-				dispatchStart)
-		} else {
-			slog.Debug("tool call allowed",
-				"plugin", call.Plugin,
-				"action", call.Action,
-				"strict", allowed.strict,
-				"in_allowlist", allowed.m[capForCheck.Name],
-			)
-		}
-	}
-
-	if call.FromLLM && action != nil && action.UserOnly {
-		slog.Warn("BLOCKED LLM attempt to invoke user_only action", "actor", actorID, "plugin", call.Plugin, "action", call.Action, "args", call.Args)
-		return o.emitRefusalResult(ctx, call,
-			fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
-			dispatchStart)
-	}
-	// Tool-load gate: when this request surfaced tools via the native array, the
-	// model was given only that array (always-include core + the tools it loaded
-	// via _meta__load_tools); every other allowed tool appears in the
-	// system-prompt catalog as a name + one-line summary with NO parameter
-	// schema. A call to a tool that was NOT in the sent array means the model is
-	// inventing arguments from that summary — the call never runs:
-	// answerUnloadedCall loads the tool when load_tools could, and tells the
-	// model to call it again from its description. The gate keys off the set
-	// actually sent this request (recorded on ctx by the agent loop), so it fires
-	// exactly where "unloaded" is meaningful: it is a no-op for text mode and the
-	// sub-agent loop (both list every tool in full inline, no native array) and
-	// for host-constructed calls (FromLLM=false). Placed after the plugin /
-	// user-only gates (a hidden tool is refused for that stronger reason first)
-	// and before arg validation (loading the real schema is the actionable fix,
-	// not the guessed args).
-	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
-		return o.answerUnloadedCall(ctx, call, dispatchStart)
-	}
-	// Reject unknown args from LLM-originated calls. Without this, stray keys
-	// (e.g. Haiku emitting `message=` at top level instead of inside `args`)
-	// are silently dropped; the call reaches the plugin with empty args and
-	// fails later with an error the LLM can't trace back to its own mistake.
-	// Internal callers (pipelines, permission checks, context preparers) are
-	// exempt — they construct calls programmatically and may legitimately use
-	// names outside the declared Parameters set. InjectContextArgs are not
-	// accepted from the LLM; the host injects them below.
-	// rejectUnknownArgs is pre-dispatch validation: emit
-	// tool_call_args_invalid (its own typed failure event) and return
-	// early. Unlike the policy refusals further up, no tool_call_result
-	// fires here — the dispatcher never ran, so there is no "result" to
-	// record. Consumer-side analytics count
-	//   extracted == not_found + args_invalid + result
-	// for orthogonality.
-	if call.FromLLM && action != nil && len(call.Args) > 0 {
-		if err := rejectUnknownArgs(call, action); err != nil {
-			slog.Warn("BLOCKED LLM call with unknown args", "plugin", call.Plugin, "action", call.Action, "error", err.Error())
-			invalidID := emit.EmitToolCallArgsInvalid(ctx, o.eventSink, emit.ToolCallArgsInvalidArgs{
-				CallID:          call.ID,
-				Plugin:          call.Plugin,
-				Action:          call.Action,
-				ValidationError: err.Error(),
-			})
-			// ArgsInvalid is the typed pre-dispatch marker the repair phase
-			// keys on: this early return is the one failure that provably
-			// never reached the tool.
-			return ToolResult{CallID: call.ID, Error: err.Error(), EventID: invalidID, ArgsInvalid: true}
-		}
-	}
-	if action != nil {
-		// Inject only declared context arg names that have a provider (e.g.
-		// session_id). Plugins never receive session content or message
-		// history. A declared name is host-owned: the provider's value
-		// replaces whatever the caller sent, and when the provider has
-		// nothing (no session, no profile) the key is removed — a
-		// caller-supplied value never stands in for a scope or label the host
-		// did not resolve.
-		if len(action.InjectContextArgs) > 0 {
-			args := make(map[string]string)
-			for k, v := range call.Args {
-				args[k] = v
-			}
-			for _, name := range action.InjectContextArgs {
-				v := ""
-				if provide := o.contextArgProviders[name]; provide != nil {
-					v = provide(ctx, name)
-				}
-				if v == "" {
-					delete(args, name)
-					continue
-				}
-				args[name] = v
-			}
-			call.Args = args
-		}
-		// Audit log when the action declares AuditLog (no hardcoded plugin/action names).
-		if actorID != "" && action.AuditLog {
-			slog.Info("audit", "actor", actorID, "plugin", call.Plugin, "action", call.Action, "args", call.Args)
-		}
+	call, exec := admitted.call, admitted.exec
+	// Audit log when the action declares AuditLog (no hardcoded plugin/action names).
+	if actorID := actor.Actor(ctx); actorID != "" && admitted.action != nil && admitted.action.AuditLog {
+		slog.Info("audit", "actor", actorID, "plugin", call.Plugin, "action", call.Action, "args", call.Args)
 	}
 
 	// Pick bidi when the plugin declared SupportsCallbacks AND the
@@ -5013,6 +4837,205 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		})
 	}
 	return result
+}
+
+// admittedCall is a call admitCall let through: the call as it is
+// dispatched (the action under its registered name, the context args the
+// action declares injected), the plugin's executor, and the action the
+// plugin's capability lists under that name (nil when it lists none).
+type admittedCall struct {
+	call   ToolCall
+	exec   PluginExecutor
+	action *Action
+}
+
+// admitCall is everything OpenTalon decides about a call before it is
+// dispatched: the plugin and the action under its normalized name, and for a
+// model's call the permission, profile and user-only gates, the tool-load gate
+// and the argument names, then the context args the action declares. It
+// returns the admitted call, or false and the result that answers the call
+// instead, whose events it has emitted under ctx's parent. call is the
+// caller's copy and the injection fills a new Args map, so the call the
+// caller holds stays as issued.
+func (o *Orchestrator) admitCall(ctx context.Context, call ToolCall, dispatchStart time.Time) (admittedCall, ToolResult, bool) {
+	if call.Plugin == "" {
+		o.emitToolCallNotFound(ctx, call)
+		_, native := sentNativeToolsFromContext(ctx)
+		return admittedCall{}, ToolResult{
+			CallID: call.ID,
+			Error:  recoveryHint(native, nativeWrongNameFormError, textWrongNameFormError),
+		}, false
+	}
+	exec, ok := o.registry.GetExecutor(call.Plugin)
+	if !ok {
+		o.emitToolCallNotFound(ctx, call)
+		return admittedCall{}, ToolResult{
+			CallID: call.ID,
+			Error:  fmt.Sprintf("plugin %q not found", call.Plugin),
+		}, false
+	}
+	if !o.registry.HasAction(call.Plugin, call.Action) {
+		// LLMs frequently mangle action names in two ways:
+		// 1. Underscores instead of hyphens: "list_persons" → "list-persons"
+		// 2. Dropping plugin prefix: "list-items" → "plugin__list-items"
+		// Try each normalization and their combination before giving up.
+		resolved := false
+		candidates := actionNameCandidates(call.Plugin, call.Action)
+		for _, candidate := range candidates {
+			if candidate != call.Action && o.registry.HasAction(call.Plugin, candidate) {
+				call.Action = candidate
+				resolved = true
+				break
+			}
+		}
+		if !resolved {
+			o.emitToolCallNotFound(ctx, call)
+			return admittedCall{}, ToolResult{
+				CallID: call.ID,
+				Error:  fmt.Sprintf("action %q not found in plugin %q", call.Action, call.Plugin),
+			}, false
+		}
+	}
+
+	actorID := actor.Actor(ctx)
+	// permission_plugin gates LLM-originated plugin actions (including e.g.
+	// install_skill); configure it for team deployments.  Internal calls
+	// (guards, preparers, formatters, pipelines) are exempt — they are
+	// constructed programmatically by the host, not by the LLM.
+	if call.FromLLM && actorID != "" && o.permissionChecker != nil && call.Plugin != o.permissionPluginName {
+		allowed, err := o.permissionChecker.Allowed(ctx, actorID, call.Plugin)
+		if err != nil {
+			slog.Warn("permission check failed", "actor", actorID, "plugin", call.Plugin, "error", err)
+			return admittedCall{}, o.emitRefusalResult(ctx, call, "permission denied", dispatchStart), false
+		}
+		if !allowed {
+			return admittedCall{}, o.emitRefusalResult(ctx, call, "permission denied", dispatchStart), false
+		}
+	}
+
+	// Single lookup: get capability and find the action for context injection, audit logging, and UserOnly enforcement.
+	var action *Action
+	var capForCheck PluginCapability
+	if cap, ok := o.registry.GetCapability(call.Plugin); ok {
+		capForCheck = cap
+		for i := range cap.Actions {
+			if cap.Actions[i].Name == call.Action {
+				action = &cap.Actions[i]
+				break
+			}
+		}
+	}
+
+	// Defense-in-depth: block plugins that are not allowed for this profile.
+	// In strict mode (WhoAmI plugins list) every plugin is checked; in non-strict
+	// mode only capabilities with AllowedGroups set are gated (pluginAllowed handles both).
+	// This mirrors buildSystemPrompt and protects against crafted tool calls.
+	// Internal calls (guards, preparers, pipelines) are exempt: they are constructed
+	// programmatically by the host, not by the LLM, so they are trusted. This matches
+	// the exemptions already in place for UserOnly and rejectUnknownArgs below.
+	if call.FromLLM {
+		if allowed := o.resolveAllowedPlugins(ctx); !o.pluginAllowed(capForCheck, allowed) {
+			slog.Warn("BLOCKED tool call for restricted plugin",
+				"plugin", call.Plugin,
+				"action", call.Action,
+				"strict", allowed.strict,
+				"allowed_groups", capForCheck.AllowedGroups,
+				"in_allowlist", allowed.m[capForCheck.Name],
+				"allowlist_keys", mapKeys(allowed.m),
+			)
+			return admittedCall{}, o.emitRefusalResult(ctx, call,
+				fmt.Sprintf("plugin %q is not available for this profile", call.Plugin),
+				dispatchStart), false
+		} else {
+			slog.Debug("tool call allowed",
+				"plugin", call.Plugin,
+				"action", call.Action,
+				"strict", allowed.strict,
+				"in_allowlist", allowed.m[capForCheck.Name],
+			)
+		}
+	}
+
+	if call.FromLLM && action != nil && action.UserOnly {
+		slog.Warn("BLOCKED LLM attempt to invoke user_only action", "actor", actorID, "plugin", call.Plugin, "action", call.Action, "args", call.Args)
+		return admittedCall{}, o.emitRefusalResult(ctx, call,
+			fmt.Sprintf("action %q can only be invoked by the user, not the LLM", call.Action),
+			dispatchStart), false
+	}
+	// Tool-load gate: when this request surfaced tools via the native array, the
+	// model was given only that array (always-include core + the tools it loaded
+	// via _meta__load_tools); every other allowed tool appears in the
+	// system-prompt catalog as a name + one-line summary with NO parameter
+	// schema. A call to a tool that was NOT in the sent array means the model is
+	// inventing arguments from that summary — the call never runs:
+	// answerUnloadedCall loads the tool when load_tools could, and tells the
+	// model to call it again from its description. The gate keys off the set
+	// actually sent this request (recorded on ctx by the agent loop), so it fires
+	// exactly where "unloaded" is meaningful: it is a no-op for text mode and the
+	// sub-agent loop (both list every tool in full inline, no native array) and
+	// for host-constructed calls (FromLLM=false). Placed after the plugin /
+	// user-only gates (a hidden tool is refused for that stronger reason first)
+	// and before arg validation (loading the real schema is the actionable fix,
+	// not the guessed args).
+	if call.FromLLM && o.callToUnloadedTool(ctx, call) {
+		return admittedCall{}, o.answerUnloadedCall(ctx, call, dispatchStart), false
+	}
+	// Reject unknown args from LLM-originated calls. Without this, stray keys
+	// (e.g. Haiku emitting `message=` at top level instead of inside `args`)
+	// are silently dropped; the call reaches the plugin with empty args and
+	// fails later with an error the LLM can't trace back to its own mistake.
+	// Internal callers (pipelines, permission checks, context preparers) are
+	// exempt — they construct calls programmatically and may legitimately use
+	// names outside the declared Parameters set. InjectContextArgs are not
+	// accepted from the LLM; the host injects them below.
+	// rejectUnknownArgs is pre-dispatch validation: emit
+	// tool_call_args_invalid (its own typed failure event) and return
+	// early. Unlike the policy refusals further up, no tool_call_result
+	// fires here — the dispatcher never ran, so there is no "result" to
+	// record. Consumer-side analytics count
+	//   extracted == not_found + args_invalid + result
+	// for orthogonality.
+	if call.FromLLM && action != nil && len(call.Args) > 0 {
+		if err := rejectUnknownArgs(call, action); err != nil {
+			slog.Warn("BLOCKED LLM call with unknown args", "plugin", call.Plugin, "action", call.Action, "error", err.Error())
+			invalidID := emit.EmitToolCallArgsInvalid(ctx, o.eventSink, emit.ToolCallArgsInvalidArgs{
+				CallID:          call.ID,
+				Plugin:          call.Plugin,
+				Action:          call.Action,
+				ValidationError: err.Error(),
+			})
+			// ArgsInvalid is the typed pre-dispatch marker the repair phase
+			// keys on: this early return is the one failure that provably
+			// never reached the tool.
+			return admittedCall{}, ToolResult{CallID: call.ID, Error: err.Error(), EventID: invalidID, ArgsInvalid: true}, false
+		}
+	}
+	// Inject only declared context arg names that have a provider (e.g.
+	// session_id). Plugins never receive session content or message
+	// history. A declared name is host-owned: the provider's value
+	// replaces whatever the caller sent, and when the provider has
+	// nothing (no session, no profile) the key is removed — a
+	// caller-supplied value never stands in for a scope or label the host
+	// did not resolve.
+	if action != nil && len(action.InjectContextArgs) > 0 {
+		args := make(map[string]string)
+		for k, v := range call.Args {
+			args[k] = v
+		}
+		for _, name := range action.InjectContextArgs {
+			v := ""
+			if provide := o.contextArgProviders[name]; provide != nil {
+				v = provide(ctx, name)
+			}
+			if v == "" {
+				delete(args, name)
+				continue
+			}
+			args[name] = v
+		}
+		call.Args = args
+	}
+	return admittedCall{call: call, exec: exec, action: action}, ToolResult{}, true
 }
 
 // emitToolCallNotFound emits a tool_call_not_found event for an LLM-originated

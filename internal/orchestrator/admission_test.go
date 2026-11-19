@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/profile"
@@ -197,6 +198,39 @@ func TestExecuteCall_LeavesTheIssuedCallUnchanged(t *testing.T) {
 	if len(extracted) != 1 || extracted[0].Action != "tag_item" ||
 		!reflect.DeepEqual(extracted[0].Arguments, map[string]string{"name": "A"}) {
 		t.Errorf("the extracted event must record the call as issued, got %+v", extracted)
+	}
+}
+
+// Admission works on a copy: the admitted call carries the action's registered
+// name and the injected context arg, and the call passed in, the one a caller
+// stores for approval, is unchanged.
+func TestAdmitCall_LeavesTheCallPassedInUnchanged(t *testing.T) {
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{Name: "p", Actions: []Action{{
+		Name: "tag-item", Description: "Tag an item.",
+		Parameters:        []Parameter{{Name: "name"}},
+		InjectContextArgs: []string{contextargs.SessionID},
+	}}}, &recordingExecutor{}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, state.NewMemoryStore(""), state.NewSessionStore(""),
+		OrchestratorOpts{})
+
+	call := ToolCall{ID: "c1", Plugin: "p", Action: "tag_item", Args: map[string]string{"name": "A"}, FromLLM: true}
+	issued := call
+	issued.Args = maps.Clone(call.Args)
+	admitted, refusal, ok := orch.admitCall(actor.WithSessionID(context.Background(), "s1"), call, time.Now())
+	if !ok {
+		t.Fatalf("the call must be admitted, got %+v", refusal)
+	}
+
+	if !reflect.DeepEqual(call, issued) {
+		t.Errorf("the call passed in changed: %+v, issued %+v", call, issued)
+	}
+	if admitted.call.Action != "tag-item" || admitted.action == nil || admitted.action.Name != "tag-item" ||
+		!reflect.DeepEqual(admitted.call.Args, map[string]string{"name": "A", contextargs.SessionID: "s1"}) {
+		t.Errorf("the admitted call must carry the registered name and the injected arg, got %+v (action %+v)",
+			admitted.call, admitted.action)
 	}
 }
 
