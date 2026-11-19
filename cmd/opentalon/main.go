@@ -820,8 +820,11 @@ func main() {
 	// *store.UsageStore does not become a non-nil interface (which would defeat
 	// the nil guard in the escalation path and panic on use).
 	var escalationLimit orchestrator.UsageLimitChecker
+	// The money budgets read the same store, through the same typed nil guard.
+	var budgetReader orchestrator.BudgetReader
 	if usageStore != nil {
 		escalationLimit = usageStore
+		budgetReader = usageStore
 	}
 
 	deciders, err := buildDeciders(cfg.Models.Deciders)
@@ -914,6 +917,8 @@ func main() {
 			Enabled: cfg.Orchestrator.Escalation.Enabled,
 		},
 		EscalationLimitChecker: escalationLimit,
+		BudgetReader:           budgetReader,
+		DefaultModel:           defaultModel,
 		Notify: orchestrator.NotifyConfig{
 			Enabled: cfg.Orchestrator.Notify.Enabled,
 		},

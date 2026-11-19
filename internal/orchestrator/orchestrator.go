@@ -218,6 +218,8 @@ type OrchestratorOpts struct {
 	Subprocess                    SubprocessConfig        // optional; subprocess (sub-agent) support
 	Escalation                    EscalationConfig        // optional; background-trigger LLM turn entrypoint (_escalate)
 	EscalationLimitChecker        UsageLimitChecker       // optional; pre-checks a background turn against the entity's token budget
+	BudgetReader                  BudgetReader            // optional; sums the usage rows of a profile's limits when a turn starts; nil = no money budgets
+	DefaultModel                  string                  // the default model's id, without provider; the budget check reads its tariff
 	Notify                        NotifyConfig            // optional; background-trigger message push entrypoint (_notify)
 	ConversationSender            ConversationSender      // optional; when set, _notify can push to an explicit channel+conversation (not just a packed session key)
 	OnStreamChunk                 StreamChunkCallback     // optional; when set and LLM supports streaming, final answers are streamed
@@ -456,6 +458,8 @@ type Orchestrator struct {
 	subprocessConfig    SubprocessConfig       // optional; subprocess (sub-agent) support
 	escalationConfig    EscalationConfig       // optional; background-trigger LLM turn entrypoint (_escalate)
 	escalationLimit     UsageLimitChecker      // optional; pre-checks a background turn (and a decide) against the entity's token budget
+	budget              BudgetReader           // optional; nil = no money budgets
+	defaultModel        string                 // the default model's id; the budget check reads its tariff
 	decideUnattributed  sync.Map               // decider name → warned once that its callbacks carry no identity
 	notifyConfig        NotifyConfig           // optional; background-trigger message push entrypoint (_notify)
 	conversationSender  ConversationSender     // optional; nil = _notify can only reach a conversation via a packed session key
@@ -799,6 +803,8 @@ func NewWithRules(
 		channelSender:           opts.ChannelSender,
 		titleMuxes:              newKeyedMutex(),
 		escalationLimit:         opts.EscalationLimitChecker,
+		budget:                  opts.BudgetReader,
+		defaultModel:            opts.DefaultModel,
 		escalationMuxes:         newKeyedMutex(),
 		conversationSender:      opts.ConversationSender,
 		langDetector:            buildReplyLanguageDetector(),
@@ -1508,6 +1514,15 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		timing = newRunTiming()
 		defer timing.log(log)
 	}
+
+	// Money budgets are checked under the turn lock, before anything of this
+	// turn is stored: a turn queued behind another turn of the session sees
+	// that turn's usage row, which is written before the lock is released.
+	budgetScope, err := o.checkBudget(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { markBudgetUsedUp(runResult, budgetScope) }()
 
 	// Snapshot session state before this Run so we can rollback on rejection.
 	var msgCountAtStart int
@@ -2267,8 +2282,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	result := &RunResult{}
 
 	// Resolve profile model override: strip the provider prefix if present (e.g. "anthropic/claude-3-5" -> "claude-3-5").
+	// A turn a used-up budget moved to the default model sends none, so the
+	// default chain serves it; the shared profile stays as it is.
 	var profileRef provider.ModelRef
-	if p := profile.FromContext(ctx); p != nil {
+	if p := profile.FromContext(ctx); p != nil && budgetScope == "" {
 		profileRef = provider.ModelRef(p.Model)
 	}
 	profileModel := profileRef.Model()
