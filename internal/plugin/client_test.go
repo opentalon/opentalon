@@ -341,6 +341,25 @@ func TestCompanionsMappedFromProto(t *testing.T) {
 	}
 }
 
+func TestCheckMappedFromProto(t *testing.T) {
+	// The check declaration crosses from the proto into orchestrator.Action;
+	// a plugin that sends none (one built before the field) reads as false.
+	pb := &pluginpb.PluginCapabilities{
+		Name: "myplugin",
+		Actions: []*pluginpb.Action{
+			{Name: "start_walkthrough", Check: true},
+			{Name: "delete_thing"},
+		},
+	}
+	cap := toPluginCapability(pb)
+	if !cap.Actions[0].Check {
+		t.Error("start_walkthrough should have Check=true")
+	}
+	if cap.Actions[1].Check {
+		t.Error("delete_thing sends no declaration and should have Check=false")
+	}
+}
+
 // TestParameterTypeMappedFromProto pins the boundary where a declared
 // parameter type used to be dropped: the wire has always carried
 // Parameter.type, but toPluginCapability copied only name, description and

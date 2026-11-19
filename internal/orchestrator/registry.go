@@ -32,6 +32,17 @@ type BidiExecutor interface {
 	ExecuteBidi(ctx context.Context, call ToolCall, cb CallbackHandler) ToolResult
 }
 
+// CheckExecutor is the optional interface a PluginExecutor may
+// additionally implement to check a call to an action that declares
+// Action.Check, without executing it. The gRPC client
+// (internal/plugin.Client) implements it. A non-nil error means the check
+// could not be answered: the plugin does not check calls (gRPC
+// Unimplemented), the transport failed, or ctx ended.
+type CheckExecutor interface {
+	PluginExecutor
+	Check(ctx context.Context, call ToolCall) (CheckResult, error)
+}
+
 // CallbackHandler is the host-side bridge a BidiExecutor uses to
 // dispatch the plugin's outbound CallbackRequest frames back into
 // the orchestrator's tool dispatch path. The orchestrator itself
