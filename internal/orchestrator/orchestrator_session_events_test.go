@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -3425,37 +3426,138 @@ func TestOrchestrator_PendingToolCall_ApproveWithChange_CoercedToAmend(t *testin
 	}
 }
 
-// A classifier LLM error / garbage reply must fail closed: resolve to reject via
-// the "fallback" path (never a free-text approve) and ask the user to repeat
-// the reply rather than treat it as a no — verified end-to-end through Run.
-func TestOrchestrator_PendingToolCall_ClassifierError_FallsBackToReject(t *testing.T) {
-	sink := &recordingEventSink{}
-	// Non-JSON classifier output → ClassifyConfirmation returns an error.
-	llm := &fakeLLM{responses: []string{"I'm not sure what you mean."}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-	orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
+type stepAnswer struct {
+	content string
+	err     error
+}
 
-	savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-err", Plugin: "gitlab", Action: "analyze_code", Args: map[string]string{}}, "", "", false, nil)
+// stepLLM answers the calls in order with its steps and records every request.
+type stepLLM struct {
+	mu       sync.Mutex
+	steps    []stepAnswer
+	requests []*provider.CompletionRequest
+}
 
-	result, err := orch.Run(context.Background(), sessID, "asdf qwer")
-	if err != nil {
-		t.Fatal(err)
+func (l *stepLLM) Complete(_ context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.requests = append(l.requests, req)
+	if len(l.requests) > len(l.steps) {
+		return nil, errors.New("no more steps")
 	}
-	if result.Response != confirmationUninterpretableReply || result.Metadata["action"] != "confirmation_uninterpretable" {
-		t.Errorf("Response = %q, action = %q, want the ask-again reply, not a no", result.Response, result.Metadata["action"])
+	s := l.steps[len(l.requests)-1]
+	if s.err != nil {
+		return nil, s.err
 	}
-	got := findConfirmationResolvedPayloads(t, sink.snapshot())
-	if len(got) != 1 || got[0].Choice != "reject" {
-		t.Fatalf("want one reject resolved, got %+v", got)
+	return &provider.CompletionResponse{Content: s.content}, nil
+}
+
+var classifierFailures = []struct {
+	name       string
+	classifier stepAnswer
+	wantReason string
+}{
+	{"unusable output", stepAnswer{content: "I'm not sure what you mean."}, "classify confirmation parse"},
+	{"model error", stepAnswer{err: errors.New("upstream unavailable")}, "upstream unavailable"},
+	{"time limit", stepAnswer{err: context.DeadlineExceeded}, context.DeadlineExceeded.Error()},
+}
+
+// A reply the classifier could not read is answered like an amend: the pending
+// call is dropped unexecuted and the main model gets the reply.
+func TestOrchestrator_PendingToolCall_ClassifierFailure_AnswersTheReply(t *testing.T) {
+	const prompt = "Shall I analyze the code of myrepo?"
+	const reply = "which branch would you analyze?"
+	const answer = "The default branch, main."
+	for _, tc := range classifierFailures {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &recordingEventSink{}
+			llm := &stepLLM{steps: []stepAnswer{tc.classifier, {content: answer}}}
+			parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+			orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
+			_ = orch.sessions.AddMessage(sessID, provider.Message{Role: provider.RoleAssistant, Content: prompt})
+			savePendingToolCall(orch.sessions, sessID, &ToolCall{ID: "pending-err", Plugin: "gitlab", Action: "analyze_code",
+				Args: map[string]string{"repo": "myrepo"}}, "", prompt, false, nil)
+
+			result, err := orch.Run(context.Background(), sessID, reply)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if result.Response != answer || result.Metadata["action"] == "confirmation_uninterpretable" {
+				t.Errorf("Response = %q, action = %q, want the main model's answer", result.Response, result.Metadata["action"])
+			}
+			got := findConfirmationResolvedPayloads(t, sink.snapshot())
+			if len(got) != 1 || got[0].Choice != pipeline.DecisionAmend || got[0].ResolvedBy != resolvedByFallback ||
+				got[0].ToolCallID != "pending-err" || !strings.Contains(got[0].Reason, tc.wantReason) {
+				t.Errorf("confirmation_resolved = %+v, want one amend by fallback whose reason names %q", got, tc.wantReason)
+			}
+			if len(llm.requests) != 2 {
+				t.Fatalf("model calls = %d, want the classifier's and the main model's", len(llm.requests))
+			}
+			main := llm.requests[1]
+			if lastUserContentForTest(main) != reply || !slices.ContainsFunc(main.Messages, func(m provider.Message) bool {
+				return m.Role == provider.RoleAssistant && m.Content == prompt
+			}) {
+				t.Errorf("the main model was sent %+v, want the confirmation prompt and the reply", main.Messages)
+			}
+			if pc, _, _, _ := loadPendingToolCall(orch.sessions, sessID); pc != nil {
+				t.Errorf("pending call %+v left in place", pc)
+			}
+			sess, _ := orch.sessions.Get(sessID)
+			stored := 0
+			for _, m := range sess.Messages {
+				if strings.Contains(m.Content, "executed gitlab.analyze_code") {
+					t.Errorf("the pending call ran: %+v", m)
+				}
+				if m.Role == provider.RoleUser && m.Content == reply {
+					stored++
+					if m.PromptType != "" {
+						t.Errorf("the reply was stored as a confirmation reply: %+v", m)
+					}
+				}
+			}
+			if stored != 1 || len(result.ToolCalls) != 0 {
+				t.Errorf("reply stored %d times and %d tool calls ran, want once and none", stored, len(result.ToolCalls))
+			}
+		})
 	}
-	if got[0].Reason != confirmationUninterpretableReply {
-		t.Errorf("Reason = %q, want the uninterpretable-reply line in the event", got[0].Reason)
-	}
-	if got[0].ResolvedBy != "fallback" {
-		t.Errorf("ResolvedBy = %q, want fallback", got[0].ResolvedBy)
-	}
-	if len(result.ToolCalls) != 0 {
-		t.Errorf("expected NO execution on classifier error, got %d tool calls", len(result.ToolCalls))
+}
+
+// A plan whose reply the classifier could not read is cancelled and the reply
+// answered, as for an amend.
+func TestOrchestrator_PendingPipeline_ClassifierFailure_AnswersTheReply(t *testing.T) {
+	const reply = "check first whether it already exists"
+	const answer = "There is no such category yet."
+	for _, tc := range classifierFailures {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &recordingEventSink{}
+			llm := &stepLLM{steps: []stepAnswer{tc.classifier, {content: answer}}}
+			parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
+			orch, sessID := setupClassifierOrchestrator(llm, parser, sink)
+			orch.pendingMu.Lock()
+			orch.pendingPipelines[sessID] = pendingPipeline{plan: pipeline.NewPipeline(nil, pipeline.PipelineConfig{})}
+			orch.pendingMu.Unlock()
+
+			result, err := orch.Run(context.Background(), sessID, reply)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if result.Response != answer {
+				t.Errorf("Response = %q, action = %q, want the main model's answer", result.Response, result.Metadata["action"])
+			}
+			if orch.pendingPipelines[sessID].plan != nil {
+				t.Error("the plan must be cancelled")
+			}
+			got := findConfirmationResolvedPayloads(t, sink.snapshot())
+			if len(got) != 1 || got[0].Choice != pipeline.DecisionAmend || got[0].ResolvedBy != resolvedByFallback ||
+				!strings.Contains(got[0].Reason, tc.wantReason) {
+				t.Errorf("confirmation_resolved = %+v, want one amend by fallback whose reason names %q", got, tc.wantReason)
+			}
+			if len(llm.requests) != 2 || lastUserContentForTest(llm.requests[1]) != reply {
+				t.Errorf("model calls = %d, want the classifier's and one sending the reply to the main model", len(llm.requests))
+			}
+		})
 	}
 }
 
