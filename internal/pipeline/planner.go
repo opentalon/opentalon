@@ -416,9 +416,9 @@ type ConfirmationClassification struct {
 
 // ClassifyConfirmation interprets a free-text reply to a pending tool-call
 // confirmation into approve / amend / reject. It is RESTRICTIVE: "approve" only
-// for unambiguous consent with no requested change; any doubt, ambiguity, mixed
-// reply, parse failure, or LLM error resolves to "reject" (with a reason for the
-// explanatory user reply). It never returns "amend" on error.
+// for unambiguous consent with no requested change. An LLM error, an answer
+// that does not parse, and a decision that is none of the three are errors,
+// returned with "reject"; it never returns "approve" or "amend" on error.
 //
 // The call is bounded by the planner's own timeout (the confirmation classifier
 // is constructed with a short dedicated budget) so a failed classification
@@ -458,10 +458,8 @@ func (p *Planner) ClassifyConfirmation(
 	case DecisionApprove, DecisionAmend, DecisionReject:
 		// recognized
 	default:
-		decision = DecisionReject // restrictive default for any unexpected value
-		if result.Reason == "" {
-			result.Reason = "could not classify the reply"
-		}
+		return ConfirmationClassification{Decision: DecisionReject, Reason: "could not classify the reply"},
+			fmt.Errorf("classify confirmation: unusable decision %q", result.Decision)
 	}
 	return ConfirmationClassification{
 		Decision:       decision,
