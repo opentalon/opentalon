@@ -2192,6 +2192,21 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				// / bypass calls fall straight through to execution. A call the
 				// gate answered (its check refused it) is not executed: its
 				// refusal seeds the history like a result, so the model reads it.
+				//
+				// The message is stored before the gate, as in the agent loop: a
+				// question ends the turn, and the turn answering it needs the
+				// request. The stores further down skip it.
+				if !inputStored {
+					if err := addUserMessage(ctx, sessions, sessionID, provider.Message{
+						Role:       provider.RoleUser,
+						Content:    content,
+						Files:      files,
+						Visibility: actor.Visibility(ctx),
+					}); err != nil {
+						return nil, fmt.Errorf("adding user message: %w", err)
+					}
+					inputStored = true
+				}
 				decision, gateErr := o.maybeRequireConfirmation(ctx, sessions, sessionID, call, userMessage, nil, false, nil)
 				if gateErr != nil {
 					return nil, gateErr
@@ -2204,10 +2219,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					toolResult = o.executeCall(ctx, call)
 				}
 				if toolResult.Error == "" || decision.outcome == gateAnswered {
-					// Seed session: user message, assistant tool call, tool result.
-					if !inputStored {
-						_ = addUserMessage(ctx, sessions, sessionID, provider.Message{Role: provider.RoleUser, Content: content, Visibility: actor.Visibility(ctx)})
-					}
+					// Seed session after the user message: assistant tool call, tool result.
 					if o.supportsNativeTools() {
 						// Native format: assistant with tool_calls + tool result with tool_call_id.
 						_ = sessions.AddMessage(sessionID, provider.Message{
