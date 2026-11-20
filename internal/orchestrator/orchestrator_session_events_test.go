@@ -3458,6 +3458,8 @@ var classifierFailures = []struct {
 	wantReason string
 }{
 	{"unusable output", stepAnswer{content: "I'm not sure what you mean."}, "classify confirmation parse"},
+	{"unknown decision", stepAnswer{content: `{"decision":"maybe"}`}, `unusable decision "maybe"`},
+	{"no decision", stepAnswer{content: `{}`}, `unusable decision ""`},
 	{"model error", stepAnswer{err: errors.New("upstream unavailable")}, "upstream unavailable"},
 	{"time limit", stepAnswer{err: context.DeadlineExceeded}, context.DeadlineExceeded.Error()},
 }

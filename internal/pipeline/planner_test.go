@@ -451,16 +451,20 @@ func TestClassifyConfirmationPromptSendsRequestsAndQuestionsToAmend(t *testing.T
 	}
 }
 
-// Any unrecognized decision value falls to the restrictive reject default.
-func TestClassifyConfirmationRestrictiveDefault(t *testing.T) {
-	llm := &fakePlannerLLM{response: `{"decision": "maybe"}`}
-	planner := NewPlanner(llm, 0)
-	got, err := planner.ClassifyConfirmation(context.Background(), "hmm", "create_ticket", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Decision != DecisionReject {
-		t.Errorf("Decision = %q, want %q for an unrecognized value", got.Decision, DecisionReject)
+// A decision value that is none of the three is unusable output, like a parse
+// failure: an error, and never an approve.
+func TestClassifyConfirmationUnusableDecision(t *testing.T) {
+	for _, response := range []string{`{"decision": "maybe"}`, `{}`, `{"decision": "", "reason": "unsure"}`} {
+		t.Run(response, func(t *testing.T) {
+			planner := NewPlanner(&fakePlannerLLM{response: response}, 0)
+			got, err := planner.ClassifyConfirmation(context.Background(), "hmm", "create_ticket", nil)
+			if err == nil || !strings.Contains(err.Error(), "unusable decision") {
+				t.Errorf("err = %v, want an unusable decision error", err)
+			}
+			if got.Decision != DecisionReject {
+				t.Errorf("Decision = %q, want %q for an unusable value", got.Decision, DecisionReject)
+			}
+		})
 	}
 }
 
