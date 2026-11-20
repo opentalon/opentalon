@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"strconv"
@@ -3352,6 +3353,129 @@ func TestSingleStepPipeline_PrivilegedWrite_RequiresConfirmation(t *testing.T) {
 	}
 	if pc, _, _, _ := loadPendingToolCall(orch.sessions, "sess"); pc == nil {
 		t.Error("expected the single-step write stored as a pending tool call (not executed)")
+	}
+}
+
+// singleStepOrch is an orchestrator with the planner and the confirmation
+// classifier on: gitlab.analyze_code is a write the confirmation plugin asks
+// for, gitlab.list_branches a read, and broken.list a read whose call fails.
+func singleStepOrch(llm LLMClient) (*Orchestrator, *state.SessionStore) {
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{Name: "gitlab", Actions: []Action{
+		{Name: "analyze_code", Description: "Analyze code"},
+		{Name: "list_branches", Description: "List branches", ReadOnly: true},
+	}}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{Name: "broken", Actions: []Action{{Name: "list", Description: "List", ReadOnly: true}}},
+		&errorExecutor{msg: "backend down"})
+	_ = registry.Register(PluginCapability{Name: "conf", Actions: []Action{{Name: "check"}}}, confirmingExecutor{})
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "sess"})
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
+		state.NewMemoryStore(""), sessions, OrchestratorOpts{
+			PipelineEnabled:               true,
+			ConfirmationClassifierEnabled: true,
+			ConfirmationPlugin:            "conf",
+			ConfirmationAction:            "check",
+		})
+	return orch, sessions
+}
+
+func singleStepPlan(plugin, action string) string {
+	return fmt.Sprintf(`{"type":"pipeline","steps":[{"id":"1","name":"Step","plugin":%q,"action":%q}]}`, plugin, action)
+}
+
+func userRowsWith(msgs []provider.Message, content string) []int {
+	var at []int
+	for i, m := range msgs {
+		if m.Role == provider.RoleUser && m.Content == content {
+			at = append(at, i)
+		}
+	}
+	return at
+}
+
+// A turn the planner's single write step ends with a question keeps the user's
+// message in the history, once and right before the question, whether it is a
+// new request or a reply that dropped a pending call or plan: a later turn
+// answers the question with the request in view.
+func TestSingleStepQuestion_KeepsTheTurnsMessage(t *testing.T) {
+	const earlier = "Shall I analyze the code of myrepo?"
+	const msg = "analyze the branch develop instead"
+	const question = "Shall I analyze the branch develop?"
+	for _, tc := range []struct {
+		name       string
+		pending    string
+		classifier string
+	}{
+		{"a new request", "", ""},
+		{"a correction the classifier read", "call", `{"decision":"amend","requests_change":true,"reason":"another branch"}`},
+		{"a reply the classifier could not read", "call", "I'm not sure."},
+		{"a correction to a pending plan", "plan", `{"decision":"amend","reason":"another branch"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var steps []stepAnswer
+			if tc.classifier != "" {
+				steps = append(steps, stepAnswer{content: tc.classifier})
+			}
+			steps = append(steps, stepAnswer{content: singleStepPlan("gitlab", "analyze_code")}, stepAnswer{content: question})
+			orch, sessions := singleStepOrch(&stepLLM{steps: steps})
+			switch tc.pending {
+			case "call":
+				_ = sessions.AddMessage("sess", provider.Message{Role: provider.RoleAssistant, Content: earlier})
+				savePendingToolCall(sessions, "sess", &ToolCall{ID: "pending", Plugin: "gitlab", Action: "analyze_code"}, "", earlier, false, nil)
+			case "plan":
+				_ = sessions.AddMessage("sess", provider.Message{Role: provider.RoleAssistant, Content: earlier})
+				orch.pendingMu.Lock()
+				orch.pendingPipelines["sess"] = pendingPipeline{plan: pipeline.NewPipeline(nil, pipeline.PipelineConfig{})}
+				orch.pendingMu.Unlock()
+			}
+
+			result, err := orch.Run(context.Background(), "sess", msg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Metadata["type"] != "confirmation" || result.Response != question {
+				t.Fatalf("result = %+v, want the single step's question", result)
+			}
+			sess, _ := sessions.Get("sess")
+			last := len(sess.Messages) - 1
+			if at := userRowsWith(sess.Messages, msg); len(at) != 1 || at[0] != last-1 ||
+				sess.Messages[last].Role != provider.RoleAssistant || sess.Messages[last].Content != question {
+				t.Errorf("stored messages = %+v, want the message once, then the question", sess.Messages)
+			}
+		})
+	}
+}
+
+// The single step's other outcomes store the turn's message as before, once:
+// a read that ran seeds the history after it, and a read that failed leaves it
+// to the agent loop.
+func TestSingleStepWithoutQuestion_StoresTheTurnsMessageOnce(t *testing.T) {
+	const msg = "list the branches"
+	for _, tc := range []struct {
+		name           string
+		plugin, action string
+	}{
+		{"a read that ran", "gitlab", "list_branches"},
+		{"a read that failed", "broken", "list"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orch, sessions := singleStepOrch(&stepLLM{steps: []stepAnswer{
+				{content: singleStepPlan(tc.plugin, tc.action)}, {content: "Here they are."},
+			}})
+
+			result, err := orch.Run(context.Background(), "sess", msg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Response != "Here they are." {
+				t.Fatalf("result = %+v, want the model's answer", result)
+			}
+			sess, _ := sessions.Get("sess")
+			if at := userRowsWith(sess.Messages, msg); len(at) != 1 || at[0] != 0 {
+				t.Errorf("stored messages = %+v, want the message once, first", sess.Messages)
+			}
+		})
 	}
 }
 
