@@ -449,9 +449,16 @@ provider does not have to be part of `routing`:
 | `<model>` without a provider, listed by a model of the default chain | the default chain, sent that id as before |
 | `<model>` without a provider that no model of the default chain lists, or a reference with an empty provider or model part (`/model`, `provider/`) | the default model, with a warning |
 
-- Only the chat loop follows the profile, for `chat` and `system` runs alike.
-  Session titles, summaries, the planner, the confirmation classifier, the
-  repair call and sub-agents stay on the default chain.
+- The chat loop follows the profile, for `chat` and `system` runs alike, and
+  so do the turn's other calls to the chat models, with the same fallback:
+  the planner and the text of a plan's confirmation, the confirmation
+  question, the confirmation classifier, the repair call, and the session
+  title and summary written after the turn. A turn a used-up budget moved
+  to the default chain sends all of them there.
+- A set `repair.model` keeps the repair call on that model. Sub-agents run
+  on the model a host-side caller names, else on their parent's, else on
+  the default chain, so a task the chat model starts never fans out onto
+  the profile's model.
 - The call uses the selected model's own entry: its `thinking` and
   `reasoning_effort`, and reasoning only when it has `features: [reasoning]`,
   whatever the default model has. A turn's `reasoning_effort` still replaces
@@ -460,7 +467,10 @@ provider does not have to be part of `routing`:
   would stream with its non-streaming call.
 - The usage row names the model that answered the run's first round, and each
   round's cost comes from the price list of the provider that served it,
-  cache prices included.
+  cache prices included. The row counts the chat loop's rounds only. Every
+  other call of the turn has its own `llm_request` event, which names the
+  model it was sent to (after a fallback a second one names the default
+  model), and its `llm_response`.
 - Every provider in `models.providers` is started. One whose `api_key`
   references an unset variable still starts; its calls fail and the default
   chain answers. One that cannot be built is left out with a warning

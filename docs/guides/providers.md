@@ -76,9 +76,12 @@ or the single routing provider). `ID`, `Models`, `SupportsFeature` and
 `PrimaryModels` are the default provider's. User-facing behaviour:
 [Model from the profile](../configuration.md#model-from-the-profile).
 
-- `CompletionRequest.ModelRef` is the profile's model as the chat loop received
+- `CompletionRequest.ModelRef` is the profile's model as the turn received
   it; `Model` holds its model part, for a provider that serves the request
-  itself. Only the chat loop sets `ModelRef`.
+  itself. `Run` puts it on the turn's context once, after the budget check,
+  and every call of the turn sets it from there (`onSessionModel`), the
+  session title and summary included. A call that names its own `Model` (a
+  set `repair.model`) and a sub-agent send none.
 - A request for a selected model carries that model's id and its own reasoning
   flag (`features: [reasoning]`), not the default model's.
 - A non-200 answer is a `StatusError` (status and body; its text is

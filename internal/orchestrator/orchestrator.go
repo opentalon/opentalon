@@ -245,7 +245,7 @@ type OrchestratorOpts struct {
 // RepairConfig tunes the post-failure tool-call repair phase (see
 // tool_call_repair.go). Enabled is the master switch (default false → ship
 // dark). Model optionally routes the corrector side-call to a dedicated —
-// typically stronger — model; empty keeps the deployment default. Prompt
+// typically stronger — model; empty uses the turn's model. Prompt
 // overrides the built-in corrector instructions. MaxAttempts bounds repair
 // attempts per failed call (<= 0 → default 2); Timeout bounds each corrector
 // LLM call (<= 0 → pipeline.DefaultRepairTimeout).
@@ -1523,6 +1523,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		return nil, err
 	}
 	defer func() { markBudgetUsedUp(runResult, budgetScope) }()
+	// Every model call of the turn asks for this model. A turn a used-up budget
+	// moved to the default model sends none, so the default chain serves it;
+	// the shared profile stays as it is.
+	var modelRef provider.ModelRef
+	if p := profile.FromContext(ctx); p != nil && budgetScope == "" {
+		modelRef = provider.ModelRef(p.Model)
+	}
+	ctx = withSessionModel(ctx, modelRef)
 
 	// Snapshot session state before this Run so we can rollback on rejection.
 	var msgCountAtStart int
@@ -1991,7 +1999,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// below isn't pulled into the planner span.
 		plannerCtx := emit.WithParent(ctx, plannerInvokedID)
 		emit.EmitPlannerRequest(plannerCtx, o.eventSink, emit.PlannerRequestArgs{
-			ModelID:      "", // planner uses provider-default routing; not exposed by pipeline.Planner
+			ModelID:      "", // not known before the call; the nested llm_request names the model it was sent to
 			MessageCount: 2,  // planner hardcodes system+user, see pipeline.Planner.Plan
 		})
 		plannerStart := time.Now()
@@ -2273,7 +2281,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 	}
 	// Run summarization asynchronously so it doesn't block the user's request.
-	go o.maybeSummarizeSession(context.Background(), sessionID)
+	backgroundCtx := withSessionModel(context.Background(), sessionModel(ctx))
+	go o.maybeSummarizeSession(backgroundCtx, sessionID)
 	// Title generation also runs in the background, but spawns on Run
 	// return instead of here: it uses its own titleMux (not sessionMux),
 	// so it can't ride summarization's "wait for sessionMux release"
@@ -2286,18 +2295,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// single-turn call needs no human-facing title, and system sessions are
 	// excluded from the chat-session picker anyway.
 	if p := profile.FromContext(ctx); p == nil || p.Kind != profile.KindSystem {
-		defer func() { go o.maybeGenerateTitle(context.Background(), sessionID) }()
+		defer func() { go o.maybeGenerateTitle(backgroundCtx, sessionID) }()
 	}
 
 	result := &RunResult{}
 
-	// Resolve profile model override: strip the provider prefix if present (e.g. "anthropic/claude-3-5" -> "claude-3-5").
-	// A turn a used-up budget moved to the default model sends none, so the
-	// default chain serves it; the shared profile stays as it is.
-	var profileRef provider.ModelRef
-	if p := profile.FromContext(ctx); p != nil && budgetScope == "" {
-		profileRef = provider.ModelRef(p.Model)
-	}
+	profileRef := sessionModel(ctx)
 	profileModel := profileRef.Model()
 
 	var totalInputTokens, totalOutputTokens, totalToolCalls int
@@ -3812,12 +3815,12 @@ func (o *Orchestrator) narrateConfirmation(ctx context.Context, recent []provide
 	if a := o.resolveAction(call.Plugin, call.Action); a != nil {
 		hint = a.ConfirmationHint
 	}
-	resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{
+	resp, err := o.llm.Complete(ctx, onSessionModel(ctx, &provider.CompletionRequest{
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: confirmationNarrateSystemPrompt(ctx, hint)},
 			{Role: provider.RoleUser, Content: ub.String()},
 		},
-	})
+	}))
 	if err != nil {
 		slog.Warn("confirmation narration failed, using fallback", "error", err)
 		return ""
@@ -5371,13 +5374,13 @@ func (o *Orchestrator) maybeGenerateTitle(ctx context.Context, sessionID string)
 	})
 	titleCtx := emit.WithParent(ctx, invokedID)
 
-	req := &provider.CompletionRequest{
+	req := onSessionModel(ctx, &provider.CompletionRequest{
 		Model: "",
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: o.sessionTitlePrompt},
 			{Role: provider.RoleUser, Content: firstUser},
 		},
-	}
+	})
 	start := time.Now()
 	resp, err := o.llm.Complete(titleCtx, req)
 	if err != nil {
@@ -5538,13 +5541,13 @@ func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID stri
 		}
 		userContent = b.String()
 	}
-	req := &provider.CompletionRequest{
+	req := onSessionModel(ctx, &provider.CompletionRequest{
 		Model: "",
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: sysPrompt},
 			{Role: provider.RoleUser, Content: userContent},
 		},
-	}
+	})
 	summarizeStart := time.Now()
 	resp, err := o.llm.Complete(summCtx, req)
 	if err != nil {
@@ -6154,12 +6157,12 @@ func (a *plannerLLMAdapter) Complete(ctx context.Context, req *pipeline.Completi
 	for i, m := range req.Messages {
 		msgs[i] = provider.Message{Role: provider.Role(m.Role), Content: m.Content}
 	}
-	resp, err := a.llm.Complete(ctx, &provider.CompletionRequest{
+	resp, err := a.llm.Complete(ctx, onSessionModel(ctx, &provider.CompletionRequest{
 		Model:           req.Model,
 		Messages:        msgs,
 		MaxTokens:       req.MaxTokens,
 		ReasoningEffort: req.ReasoningEffort,
-	})
+	}))
 	if err != nil {
 		return nil, err
 	}
