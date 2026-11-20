@@ -108,11 +108,11 @@ const DefaultPlanTimeout = 15 * time.Second
 
 // DefaultConfirmationClassifierTimeout bounds the confirmation classifier's LLM
 // call. Independent of DefaultPlanTimeout: a reply to a pending confirmation must
-// resolve reasonably fast, and "classifier unavailable -> reject" should never
-// hang on the (larger) multi-step plan budget. Sized as a safety net above the
-// expected sub-second/low-reasoning latency, with headroom for a slow reasoning
-// model on a latency-variable shared endpoint so a transient blip doesn't turn a
-// genuine correction into a reject.
+// resolve reasonably fast, and a failed classification should never hang on the
+// (larger) multi-step plan budget. Sized as a safety net above the expected
+// sub-second/low-reasoning latency, with headroom for a slow reasoning model on
+// a latency-variable shared endpoint so a transient blip doesn't fail a reply
+// that could be classified.
 const DefaultConfirmationClassifierTimeout = 15 * time.Second
 
 // confirmationClassifyMaxTokens caps the classifier's output. The reply itself is
@@ -421,8 +421,8 @@ type ConfirmationClassification struct {
 // explanatory user reply). It never returns "amend" on error.
 //
 // The call is bounded by the planner's own timeout (the confirmation classifier
-// is constructed with a short dedicated budget) so "classifier unavailable ->
-// reject" stays snappy regardless of the multi-step plan timeout.
+// is constructed with a short dedicated budget) so a failed classification
+// stays snappy regardless of the multi-step plan timeout.
 func (p *Planner) ClassifyConfirmation(
 	ctx context.Context,
 	userReply, pendingAction string,

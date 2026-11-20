@@ -754,7 +754,8 @@ type ConfirmationResolvedPayload struct {
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	// ResolvedBy records how the choice was decided: "frontend_button"
 	// (deterministic structured signal), "classifier" (LLM free-text
-	// classification), or "fallback" (classifier unavailable -> reject).
+	// classification), or "fallback" (no classifier -> reject; the classifier
+	// failed -> amend, with the failure as Reason).
 	ResolvedBy string `json:"resolved_by,omitempty"`
 	// Reason is the classifier's one-sentence explanation, surfaced to the
 	// user on reject and useful for diagnosing amend/reject distribution.

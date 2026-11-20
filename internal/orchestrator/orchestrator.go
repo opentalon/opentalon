@@ -1567,7 +1567,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// to re-run, so a reply that is neither yes nor no (amend) cancels the
 		// plan and is answered as an ordinary message, as for a single call
 		// below. classifyConfirmationReply still gives us the button bypass, the
-		// LLM classifier, and "im Zweifel reject" in one place.
+		// LLM classifier, and its fallbacks in one place.
 		decision, reason, resolvedBy := o.classifyConfirmationReply(ctx, userMessage, "pipeline_plan", map[string]string{"steps": fmt.Sprintf("%d", len(p.Steps))})
 		log.Debug("pipeline pending", "pipeline_id", p.ID, "session", sessionID, "input", userMessage, "decision", decision)
 		switch decision {
@@ -1690,7 +1690,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 		case pipeline.DecisionAmend:
 			// The user replied with neither a yes nor a no: a correction,
-			// another instruction or a question. The pending call
+			// another instruction or a question, or a reply the classifier
+			// failed on. The pending call
 			// is already torn down (in-memory maps + persisted metadata cleared
 			// above). Do NOT execute and do NOT roll back: fall through to the
 			// normal turn so the planner / agent loop re-plans from history + the
@@ -3245,9 +3246,9 @@ func (o *Orchestrator) resolveStreamCallback(ctx context.Context) StreamChunkCal
 }
 
 // confirmationUninterpretableReply answers, and is logged as the reason, when no
-// classifier is available or the classifier call fails — the "im Zweifel
-// reject" branch: the user's reply was not read, so they are asked to repeat
-// it rather than told it was a no (notApprovedResult).
+// classifier is configured or the pending call could not be cleared — the
+// "im Zweifel reject" branch: the user's reply was not read, so they are asked
+// to repeat it rather than told it was a no (notApprovedResult).
 const confirmationUninterpretableReply = "I couldn't reliably interpret your reply, so I cancelled the pending action to be safe. Please tell me again — confirm, change, or cancel?"
 
 // Confirmation resolution provenance (confirmation_resolved.resolved_by).
@@ -3259,8 +3260,9 @@ const (
 
 // classifyConfirmationReply resolves a free-text reply to a pending confirmation
 // into a decision (approve/amend/reject). Priority: explicit frontend button
-// signal (deterministic) > LLM classifier > restrictive reject fallback. The
-// "im Zweifel reject" rule lives here, in one place. It returns the decision,
+// signal (deterministic) > LLM classifier. Without a classifier the reply is
+// rejected; when the classifier fails it is an amend, so the pending action is
+// dropped unrun and the reply is still answered. It returns the decision,
 // a one-sentence reason (for the user-facing reject reply / observability), and
 // how it was resolved (for confirmation_resolved.resolved_by).
 func (o *Orchestrator) classifyConfirmationReply(
@@ -3288,8 +3290,8 @@ func (o *Orchestrator) classifyConfirmationReply(
 	}
 	res, err := o.classifier.ClassifyConfirmation(classifyCtx, userMessage, action, args)
 	if err != nil {
-		logger.FromContext(ctx).Warn("confirmation classification failed; rejecting (im Zweifel reject)", "error", err)
-		return pipeline.DecisionReject, confirmationUninterpretableReply, resolvedByFallback
+		logger.FromContext(ctx).Warn("confirmation classification failed; answering the reply as a new message", "error", err)
+		return pipeline.DecisionAmend, "classifier failed: " + err.Error(), resolvedByFallback
 	}
 	// 4. Hardening: a self-contradicting "approve" that also flags a requested
 	//    change is downgraded to amend — never execute frozen args when the
