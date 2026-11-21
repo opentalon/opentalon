@@ -241,7 +241,7 @@ orchestrator:
   # tiny focused prompt.
   # repair:
   #   enabled: true
-  #   model: ""              # corrector model id; empty = deployment default model.
+  #   model: ""              # corrector model id; empty = the turn's model (the profile's, else the default).
   #                          # Must be a bare model id served by the same (primary)
   #                          # provider as the session model — NOT the "provider/model"
   #                          # routing form. Ids missing from the models list are

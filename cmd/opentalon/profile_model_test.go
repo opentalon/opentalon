@@ -9,15 +9,19 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/state"
+	"github.com/opentalon/opentalon/internal/state/store/events"
+	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 )
 
 type recordingServer struct {
@@ -235,4 +239,137 @@ func warnedAbout(logs, s string) bool {
 		}
 	}
 	return false
+}
+
+type eventRecorder struct {
+	mu  sync.Mutex
+	evs []emit.Event
+}
+
+func (r *eventRecorder) Emit(_ context.Context, e emit.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.evs = append(r.evs, e)
+}
+
+func (r *eventRecorder) modelIDs(eventType string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var ids []string
+	for _, e := range r.evs {
+		if e.EventType != eventType {
+			continue
+		}
+		var p struct {
+			ModelID string `json:"model_id"`
+		}
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			panic(err)
+		}
+		ids = append(ids, p.ModelID)
+	}
+	return ids
+}
+
+func sentModels(bodies []string) []string {
+	models := make([]string, 0, len(bodies))
+	for _, b := range bodies {
+		var sent struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal([]byte(b), &sent); err != nil {
+			panic(err)
+		}
+		models = append(models, sent.Model)
+	}
+	return models
+}
+
+// The session title, written in the background after the turn, is served
+// like the turn: at the profile's provider, by the default chain without a
+// profile model or when that provider refuses, and its events name the model
+// that served it.
+func TestSessionTitleServedLikeTheTurn(t *testing.T) {
+	const (
+		defaultAnswer = `{"id":"c1","model":"default-model","choices":[{"message":{"role":"assistant","content":"From the default"},` +
+			`"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`
+		claudeAnswer = `{"id":"msg_1","model":"claude-x","content":[{"type":"text","text":"From Claude"}],"stop_reason":"end_turn",` +
+			`"usage":{"input_tokens":100,"output_tokens":10}}`
+	)
+	cases := []struct {
+		name         string
+		model        string
+		anthStatus   int
+		wantAnth     []string
+		wantDefault  []string
+		wantRequests []string
+		wantTitle    string
+	}{
+		{name: "the profile's provider serves", model: "anthropic/claude-x", anthStatus: http.StatusOK,
+			wantAnth: []string{"claude-x", "claude-x"}, wantRequests: []string{"claude-x", "claude-x"}, wantTitle: "claude-x"},
+		{name: "the profile's provider refuses the key and is marked", model: "anthropic/claude-x", anthStatus: http.StatusUnauthorized,
+			wantAnth: []string{"claude-x"}, wantDefault: []string{"default-model", "default-model"},
+			wantRequests: []string{"claude-x", "default-model", "default-model"}, wantTitle: "default-model"},
+		{name: "no profile model", anthStatus: http.StatusOK,
+			wantDefault: []string{"default-model", "default-model"}, wantRequests: []string{"default-model", "default-model"}, wantTitle: "default-model"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captureLogs(t)
+			def := newRecordingServer(t, http.StatusOK, defaultAnswer)
+			anth := newRecordingServer(t, tc.anthStatus, claudeAnswer)
+			cfg, err := config.Parse([]byte(`
+models:
+  providers:
+    primary:
+      api: openai-completions
+      base_url: ` + def.URL + `
+      models:
+        - id: default-model
+    anthropic:
+      api: anthropic-messages
+      base_url: ` + anth.URL + `
+      api_key: "${OPENTALON_TEST_PROFILE_MODEL_UNSET_KEY}"
+      models:
+        - id: claude-x
+routing:
+  primary: primary/default-model
+`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sink := &eventRecorder{}
+			prov, defaultModel, err := buildProvider(cfg, nil, nil, sink)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessions := state.NewSessionStore("")
+			sessions.Create(state.SessionParams{ID: "s1"})
+			orch := orchestrator.NewWithRules(&defaultModelClient{provider: prov, model: defaultModel},
+				orchestrator.DefaultParser, orchestrator.NewToolRegistry(), state.NewMemoryStore(""), sessions,
+				orchestrator.OrchestratorOpts{EventSink: sink, SessionTitlesEnabled: true})
+			ctx := profile.WithProfile(context.Background(), &profile.Profile{EntityID: "e1", Model: tc.model})
+
+			if _, err := orch.Run(ctx, "s1", "Hi"); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for len(sink.modelIDs(events.TypeSessionTitleGenerated)) == 0 && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			if got := sentModels(anth.received()); !slices.Equal(got, tc.wantAnth) {
+				t.Errorf("Anthropic was sent %q, want %q", got, tc.wantAnth)
+			}
+			if got := sentModels(def.received()); !slices.Equal(got, tc.wantDefault) {
+				t.Errorf("the default provider was sent %q, want %q", got, tc.wantDefault)
+			}
+			if got := sink.modelIDs(events.TypeLLMRequest); !slices.Equal(got, tc.wantRequests) {
+				t.Errorf("llm_request events name %q, want %q", got, tc.wantRequests)
+			}
+			if got := sink.modelIDs(events.TypeSessionTitleGenerated); !slices.Equal(got, []string{tc.wantTitle}) {
+				t.Errorf("session_title_generated names %q, want %q", got, tc.wantTitle)
+			}
+		})
+	}
 }

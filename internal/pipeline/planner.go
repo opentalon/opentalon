@@ -21,8 +21,8 @@ type LLMClient interface {
 // MaxTokens and ReasoningEffort are optional (zero = provider default) and let
 // short, latency-sensitive calls (e.g. confirmation classification) cap output
 // and dial reasoning down instead of inheriting the agent loop's large defaults.
-// Model is optional: "" keeps the deployment default (the host's model-default
-// wrapper fills it in); a non-empty id routes the side-call to that model
+// Model is optional: "" leaves the model to the host (the session's model, else
+// the deployment default); a non-empty id routes the side-call to that model
 // (e.g. a stronger corrector model for tool-call repair).
 type CompletionRequest struct {
 	Model           string
@@ -108,11 +108,11 @@ const DefaultPlanTimeout = 15 * time.Second
 
 // DefaultConfirmationClassifierTimeout bounds the confirmation classifier's LLM
 // call. Independent of DefaultPlanTimeout: a reply to a pending confirmation must
-// resolve reasonably fast, and "classifier unavailable -> reject" should never
-// hang on the (larger) multi-step plan budget. Sized as a safety net above the
-// expected sub-second/low-reasoning latency, with headroom for a slow reasoning
-// model on a latency-variable shared endpoint so a transient blip doesn't turn a
-// genuine correction into a reject.
+// resolve reasonably fast, and a failed classification should never hang on the
+// (larger) multi-step plan budget. Sized as a safety net above the expected
+// sub-second/low-reasoning latency, with headroom for a slow reasoning model on
+// a latency-variable shared endpoint so a transient blip doesn't fail a reply
+// that could be classified.
 const DefaultConfirmationClassifierTimeout = 15 * time.Second
 
 // confirmationClassifyMaxTokens caps the classifier's output. The reply itself is
@@ -416,13 +416,13 @@ type ConfirmationClassification struct {
 
 // ClassifyConfirmation interprets a free-text reply to a pending tool-call
 // confirmation into approve / amend / reject. It is RESTRICTIVE: "approve" only
-// for unambiguous consent with no requested change; any doubt, ambiguity, mixed
-// reply, parse failure, or LLM error resolves to "reject" (with a reason for the
-// explanatory user reply). It never returns "amend" on error.
+// for unambiguous consent with no requested change. An LLM error, an answer
+// that does not parse, and a decision that is none of the three are errors,
+// returned with "reject"; it never returns "approve" or "amend" on error.
 //
 // The call is bounded by the planner's own timeout (the confirmation classifier
-// is constructed with a short dedicated budget) so "classifier unavailable ->
-// reject" stays snappy regardless of the multi-step plan timeout.
+// is constructed with a short dedicated budget) so a failed classification
+// stays snappy regardless of the multi-step plan timeout.
 func (p *Planner) ClassifyConfirmation(
 	ctx context.Context,
 	userReply, pendingAction string,
@@ -458,10 +458,8 @@ func (p *Planner) ClassifyConfirmation(
 	case DecisionApprove, DecisionAmend, DecisionReject:
 		// recognized
 	default:
-		decision = DecisionReject // restrictive default for any unexpected value
-		if result.Reason == "" {
-			result.Reason = "could not classify the reply"
-		}
+		return ConfirmationClassification{Decision: DecisionReject, Reason: "could not classify the reply"},
+			fmt.Errorf("classify confirmation: unusable decision %q", result.Decision)
 	}
 	return ConfirmationClassification{
 		Decision:       decision,

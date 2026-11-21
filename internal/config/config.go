@@ -402,13 +402,13 @@ type OrchestratorConfig struct {
 // and the corrected call re-executes under the same user approval instead of
 // burning a fresh confirmation. Model is the recommended knob for
 // cheap-session-model deployments: point it at a stronger tier that fires
-// only on failures and sees a few-KB focused prompt; empty = the deployment
-// default model. It must be a bare model id served by the same (primary)
-// provider as the session model — not the "provider/model" routing form;
-// unknown ids are warned about at startup.
+// only on failures and sees a few-KB focused prompt; empty = the turn's model
+// (the profile's, else the default). It must be a bare model id served by the
+// same (primary) provider as the session model — not the "provider/model"
+// routing form; unknown ids are warned about at startup.
 type RepairOrchestratorConfig struct {
 	Enabled     bool   `yaml:"enabled"`                // default false
-	Model       string `yaml:"model,omitempty"`        // bare corrector model id on the primary provider; empty = deployment default model
+	Model       string `yaml:"model,omitempty"`        // bare corrector model id on the primary provider; empty = the turn's model
 	Prompt      string `yaml:"prompt,omitempty"`       // optional override of the built-in corrector instructions (must keep the JSON output contract)
 	MaxAttempts int    `yaml:"max_attempts,omitempty"` // repair attempts per failed call; default 2
 	Timeout     string `yaml:"timeout,omitempty"`      // Go duration for each corrector call; default "10s"
