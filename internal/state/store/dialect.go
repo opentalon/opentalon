@@ -90,6 +90,22 @@ func (d Dialect) BeginExclusive(ctx context.Context, db *sql.DB) (ExclusiveTx, f
 	return &sqliteConnTx{conn: conn, ctx: ctx}, cleanup, nil
 }
 
+const migrationLockKey int64 = 0x6f70656e74616c6f
+
+func (d Dialect) beginMigration(ctx context.Context, db *sql.DB) (ExclusiveTx, func(), error) {
+	tx, cleanup, err := d.BeginExclusive(ctx, db)
+	if err != nil || d.name != "postgres" {
+		return tx, cleanup, err
+	}
+	// Postgres releases this lock when the transaction ends, also when the holder's session drops.
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", migrationLockKey); err != nil {
+		_ = tx.Rollback()
+		cleanup()
+		return nil, func() {}, fmt.Errorf("migration lock: %w", err)
+	}
+	return tx, cleanup, nil
+}
+
 // sqliteConnTx wraps a *sql.Conn that has an open BEGIN IMMEDIATE transaction.
 type sqliteConnTx struct {
 	conn *sql.Conn

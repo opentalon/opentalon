@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"fmt"
@@ -158,56 +159,79 @@ func (d *DB) Close() error {
 }
 
 func (d *DB) runMigrations() error {
-	// Ensure schema_version exists (idempotent).
-	if _, err := d.db.Exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)"); err != nil {
-		return fmt.Errorf("migrations: create schema_version: %w", err)
-	}
-	current, err := d.currentVersion()
-	if err != nil {
-		return err
-	}
 	names, err := migrationNames()
 	if err != nil {
 		return err
+	}
+	return migrate(d.db, d.dialect, names, migrationSQL)
+}
+
+func migrate(db *sql.DB, dialect Dialect, names []string, load func(name string) (string, error)) error {
+	ctx := context.Background()
+	if err := migrationStep(ctx, db, dialect, func(tx ExclusiveTx) error {
+		_, err := tx.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)")
+		return err
+	}); err != nil {
+		return fmt.Errorf("migrations: create schema_version: %w", err)
 	}
 	for _, name := range names {
 		n, err := migrationNumber(name)
 		if err != nil || n <= 0 {
 			continue
 		}
-		if n <= current {
-			continue
-		}
-		sqlStr, err := migrationSQL(name)
-		if err != nil {
+		if err := migrationStep(ctx, db, dialect, func(tx ExclusiveTx) error {
+			current, err := readVersion(ctx, tx)
+			if err != nil || n <= current {
+				return err
+			}
+			sqlStr, err := load(name)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, sqlStr); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM schema_version"); err != nil {
+				return fmt.Errorf("clear version: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, dialect.Rebind("INSERT INTO schema_version (version) VALUES (?)"), n); err != nil {
+				return fmt.Errorf("set version: %w", err)
+			}
+			return nil
+		}); err != nil {
 			return fmt.Errorf("migration %s: %w", name, err)
-		}
-		tx, err := d.db.Begin()
-		if err != nil {
-			return fmt.Errorf("migration %s: begin: %w", name, err)
-		}
-		if _, err := tx.Exec(sqlStr); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("migration %s: %w", name, err)
-		}
-		if _, err := tx.Exec("DELETE FROM schema_version"); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("migration %s: clear version: %w", name, err)
-		}
-		if _, err := tx.Exec(d.dialect.Rebind("INSERT INTO schema_version (version) VALUES (?)"), n); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("migration %s: set version: %w", name, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("migration %s: commit: %w", name, err)
 		}
 	}
 	return nil
 }
 
+func migrationStep(ctx context.Context, db *sql.DB, dialect Dialect, apply func(tx ExclusiveTx) error) error {
+	tx, cleanup, err := dialect.beginMigration(ctx, db)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if err := apply(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
 func (d *DB) currentVersion() (int, error) {
+	return readVersion(context.Background(), d.db)
+}
+
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func readVersion(ctx context.Context, q rowQuerier) (int, error) {
 	var v sql.NullInt64
-	err := d.db.QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v)
+	err := q.QueryRowContext(ctx, "SELECT version FROM schema_version LIMIT 1").Scan(&v)
 	if err == sql.ErrNoRows || (err == nil && !v.Valid) {
 		return 0, nil
 	}

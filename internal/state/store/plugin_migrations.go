@@ -12,7 +12,7 @@ import (
 )
 
 // RunPluginMigrations opens or creates the plugin DB at dataDir/plugin_data/pluginName.db
-// and runs migrations from pluginPath/migrations/*.sql in order. Same versioned pattern as
+// and runs migrations from pluginPath/migrations/*.sql in order. Same runner as
 // the main DB (schema_version table). If pluginPath/migrations does not exist, no-op.
 func RunPluginMigrations(dataDir, pluginName, pluginPath string) error {
 	if dataDir == "" || pluginName == "" || pluginPath == "" {
@@ -52,47 +52,11 @@ func RunPluginMigrations(dataDir, pluginName, pluginPath string) error {
 	if err := verifySQLitePragmas(db); err != nil {
 		return fmt.Errorf("plugin db: %w", err)
 	}
-	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)"); err != nil {
-		return fmt.Errorf("plugin schema_version: %w", err)
-	}
-	var current int
-	var v sql.NullInt64
-	if err := db.QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v); err == nil && v.Valid {
-		current = int(v.Int64)
-	}
-
-	for _, name := range names {
-		n, err := migrationNumber(name)
-		if err != nil || n <= 0 {
-			continue
-		}
-		if n <= current {
-			continue
-		}
-		sqlPath := filepath.Join(migrationsDir, name)
-		data, err := os.ReadFile(sqlPath)
-		if err != nil {
-			return fmt.Errorf("plugin migration %s: %w", name, err)
-		}
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("plugin migration %s begin: %w", name, err)
-		}
-		if _, err := tx.Exec(string(data)); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("plugin migration %s: %w", name, err)
-		}
-		if _, err := tx.Exec("DELETE FROM schema_version"); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		if _, err := tx.Exec("INSERT INTO schema_version (version) VALUES (?)", n); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
+	if err := migrate(db, SQLiteDialect, names, func(name string) (string, error) {
+		data, err := os.ReadFile(filepath.Join(migrationsDir, name))
+		return string(data), err
+	}); err != nil {
+		return fmt.Errorf("plugin %w", err)
 	}
 	return nil
 }

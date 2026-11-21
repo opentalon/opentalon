@@ -160,16 +160,7 @@ func checkAnnouncementMigration(t *testing.T, db *DB) {
 	t.Helper()
 	store := NewSessionStore(db, 0, 0)
 	store.Create(state.SessionParams{ID: "s1"})
-	for _, q := range []string{
-		`ALTER TABLE messages DROP COLUMN announcement`,
-		`ALTER TABLE messages DROP COLUMN message_key`,
-		`DELETE FROM schema_version`,
-		`INSERT INTO schema_version (version) VALUES (20)`,
-	} {
-		if _, err := db.SQLDB().Exec(q); err != nil {
-			t.Fatalf("set the schema back to 20: %s: %v", q, err)
-		}
-	}
+	setSchemaBackTo20(t, db)
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows := []provider.Message{
 		{Role: provider.RoleUser, Content: "u1"},
