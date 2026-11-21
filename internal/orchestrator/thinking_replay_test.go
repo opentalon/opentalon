@@ -1,12 +1,14 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -422,6 +424,60 @@ func TestRun_BudgetThinkingReplaysUnfinishedTurn(t *testing.T) {
 	const callA = `{"role":"assistant","content":[` + thinkingSig1 + `,{"type":"tool_use","id":"toolu_a","name":"p__read_a","input":{}}]}`
 	if !containsMessage(sentMessages(t, bodies[1]), callA) {
 		t.Errorf("round 2 does not replay the block ahead of its call %s:\n%s", callA, bodies[1])
+	}
+}
+
+func TestRun_InlineToolsReplayThinkingAcrossALoad(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		features []provider.Feature
+		replayed [][]string
+	}{
+		{"with inline_tools", []provider.Feature{provider.FeatureTools, provider.FeatureInlineTools},
+			[][]string{{}, {"sig-2"}, {"sig-2", "sig-3"}}},
+		{"without inline_tools", []provider.Feature{provider.FeatureTools},
+			[][]string{{}, {}, {"sig-3"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := provider.ModelInfo{ID: "claude-x", Thinking: "adaptive", ReasoningEffort: "high", Features: tc.features}
+			run := newModelRun(t, model, inlineRegistry(t, announceActions(), &countingExecutor{}), OrchestratorOpts{},
+				`{"type":"thinking","thinking":"","signature":"sig-1"},`+
+					`{"type":"tool_use","id":"toolu_1","name":"_meta__load_tools","input":{"names":"p__other"}}`,
+				`{"type":"thinking","thinking":"","signature":"sig-2"},`+
+					`{"type":"tool_use","id":"toolu_2","name":"_meta__load_tools","input":{"names":"p__catalog"}}`,
+				`{"type":"thinking","thinking":"","signature":"sig-3"},`+
+					`{"type":"tool_use","id":"toolu_3","name":"p__other","input":{"q":"x"}}`,
+			)
+			run.turn(t, run.ctx, "Which items are low on stock?")
+
+			reqs := run.api.requests(t)
+			if len(reqs) != 4 {
+				t.Fatalf("chat-loop requests = %d, want 4", len(reqs))
+			}
+			first, second := reqs[0], reqs[1]
+			if !bytes.Equal(first.System[0], second.System[0]) {
+				t.Errorf("the fixed system block changes with the first tool result")
+			}
+			if bytes.Equal(first.System[len(first.System)-1], second.System[len(second.System)-1]) {
+				t.Fatal("the per-round part of the system text must change with the first tool result for this test")
+			}
+			if slices.Contains(tc.features, provider.FeatureInlineTools) && !bytes.Equal(first.Tools, second.Tools) {
+				t.Errorf("the tools change with the first tool result:\n%s\n%s", first.Tools, second.Tools)
+			}
+			for i, want := range tc.replayed {
+				var got []string
+				for _, m := range reqs[i+1].Messages {
+					for _, sig := range []string{"sig-1", "sig-2", "sig-3"} {
+						if strings.Contains(string(m), `"signature":"`+sig+`"`) {
+							got = append(got, sig)
+						}
+					}
+				}
+				if !slices.Equal(got, want) {
+					t.Errorf("request %d replays %v, want %v", i+2, got, want)
+				}
+			}
+		})
 	}
 }
 
