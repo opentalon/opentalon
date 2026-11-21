@@ -3,8 +3,10 @@ package orchestrator
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
@@ -240,6 +242,144 @@ func TestReplyLanguageDirectiveWithProfile(t *testing.T) {
 	}
 }
 
+// TestReplyLanguageDirectiveWithProfile_FromHistory covers the profile
+// confirmation on a turn whose current message is too short to detect, as the
+// summary turn after an approval ("y", a tapped button): the newest user
+// message of at least replyLanguageMinChars runes decides, the current message
+// first, then the visible user messages of the history from newest to oldest.
+// Older messages are not consulted once one decides. The two requests detect
+// below replyLanguageMinConfidence: "How do I create a new item?" English
+// 0.577, "Zeig mir die Tickets." German 0.544; "Erklär mir die
+// Organisationseinheiten." detects as German at 0.999.
+func TestReplyLanguageDirectiveWithProfile_FromHistory(t *testing.T) {
+	o := newDetectorOrchestrator()
+	reference := map[string]string{
+		"English": o.replyLanguageDirective("Can you show me how to create a ticket in my account?"),
+		"German":  o.replyLanguageDirective("Kannst du mir zeigen, wie ich ein Ticket in meinem Konto anlege?"),
+	}
+	english := provider.Message{Role: provider.RoleUser, Content: "How do I create a new item?"}
+	german := provider.Message{Role: provider.RoleUser, Content: "Zeig mir die Tickets."}
+	confidentGerman := provider.Message{Role: provider.RoleUser, Content: "Erklär mir die Organisationseinheiten."}
+	// Each skipped row would lean German if it counted.
+	skipped := []provider.Message{
+		{Role: provider.RoleAssistant, Content: "Ich lege den Artikel gleich an. Soll ich fortfahren?"},
+		{Role: provider.RoleTool, ToolCallID: "c1", Content: "Der Artikel wurde erfolgreich angelegt."},
+		{Role: provider.RoleUser, Visibility: provider.VisibilityHidden,
+			Content: "[system] Automatische Meldung zum Hintergrundauftrag: abgeschlossen."},
+		{Role: provider.RoleUser, Content: "ok"},
+	}
+	cases := []struct {
+		name     string
+		msg      string
+		language string
+		history  []provider.Message
+		want     string // language of the expected directive; "" = no directive
+	}{
+		{"request behind the approval confirmed", "y", "en", []provider.Message{english}, "English"},
+		{"non-user, hidden and short rows skipped", "y", "en", append([]provider.Message{english}, skipped...), "English"},
+		{"request leaning german not confirmed by en", "y", "en", []provider.Message{german}, ""},
+		{"newest request decides, the older one is not reached", "y", "en", []provider.Message{english, german}, ""},
+		{"newest request confirmed over an older one", "y", "en", []provider.Message{german, english}, "English"},
+		{"request not confirmed by de", "y", "de", []provider.Message{english}, ""},
+		{"no profile language", "y", "", []provider.Message{english}, ""},
+		{"long enough current message decides", "Zeig mir die Tickets.", "en", []provider.Message{english}, ""},
+		{"confident history message wins over the profile", "y", "en", []provider.Message{confidentGerman, english}, "German"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := o.replyLanguageDirectiveWithProfile(tc.msg, tc.history, tc.language)
+			if tc.want == "" {
+				if got != "" {
+					t.Errorf("replyLanguageDirectiveWithProfile(%q, profile %q) = %q, want no directive", tc.msg, tc.language, got)
+				}
+				return
+			}
+			want := reference[tc.want]
+			if !strings.Contains(want, "Reply in "+tc.want+".") {
+				t.Fatalf("reference directive for %s is %q", tc.want, want)
+			}
+			if got != want {
+				t.Errorf("replyLanguageDirectiveWithProfile(%q, profile %q) = %q, want the %s directive %q",
+					tc.msg, tc.language, got, tc.want, want)
+			}
+		})
+	}
+}
+
+// requestRecordingLUMLLM routes requests like lumLLM and records each one.
+type requestRecordingLUMLLM struct {
+	*lumLLM
+	reqMu    sync.Mutex
+	requests []*provider.CompletionRequest
+}
+
+func (l *requestRecordingLUMLLM) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	l.reqMu.Lock()
+	l.requests = append(l.requests, req)
+	l.reqMu.Unlock()
+	return l.lumLLM.Complete(ctx, req)
+}
+
+func (l *requestRecordingLUMLLM) snapshot() []*provider.CompletionRequest {
+	l.reqMu.Lock()
+	defer l.reqMu.Unlock()
+	return append([]*provider.CompletionRequest(nil), l.requests...)
+}
+
+// TestRun_ApprovalSummaryKeepsTheProfileConfirmedLanguage runs a confirmation
+// and its approval with the profile language en. The request "How do I create
+// a new item?" detects below the confidence floor and is pinned to English by
+// the profile; the approval turn's own message is a tapped button, so the
+// model call that summarises the approved call must still be pinned to
+// English through the request in the history.
+func TestRun_ApprovalSummaryKeepsTheProfileConfirmedLanguage(t *testing.T) {
+	llm := &requestRecordingLUMLLM{lumLLM: &lumLLM{}}
+	exec := &recordingExecutor{}
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "s1"})
+	registry := NewToolRegistry()
+	_ = registry.Register(PluginCapability{
+		Name:    "items",
+		Actions: []Action{native(Action{Name: "create", Description: "Create an item"})},
+	}, exec)
+	_ = registry.Register(PluginCapability{Name: "conf", Actions: []Action{{Name: "check"}}}, confirmingExecutor{})
+	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
+		state.NewMemoryStore(""), sessions, OrchestratorOpts{ConfirmationPlugin: "conf", ConfirmationAction: "check"})
+	ctx := profile.WithProfile(context.Background(), &profile.Profile{ChannelID: "web", Language: "en"})
+	const pinned = "## Reply language\nReply in English."
+
+	llm.script([]provider.CompletionResponse{lumToolCall("c-create", "items__create")}, "Shall I create the item?")
+	res, err := orch.Run(ctx, "s1", "How do I create a new item?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Metadata["type"] != "confirmation" {
+		t.Fatalf("the request turn did not pause for confirmation: %+v", res)
+	}
+	requestTurn := llm.snapshot()
+	if len(requestTurn) == 0 || !strings.Contains(requestTurn[0].Messages[0].Content, pinned) {
+		t.Fatalf("the request turn is not pinned to English, so the approval turn has nothing to follow")
+	}
+
+	llm.script([]provider.CompletionResponse{{Content: "The item was created."}})
+	if _, err := orch.Run(actor.WithConfirmationDecision(ctx, "approve"), "s1", "Approve"); err != nil {
+		t.Fatal(err)
+	}
+	if calls := exec.snapshot(); len(calls) != 1 || calls[0].Action != "create" {
+		t.Fatalf("executed calls = %+v, want the approved create", calls)
+	}
+	approvalTurn := llm.snapshot()[len(requestTurn):]
+	if len(approvalTurn) == 0 {
+		t.Fatal("no model call followed the approval")
+	}
+	if len(approvalTurn[0].Tools) == 0 {
+		t.Fatalf("the first model call after the approval is not the summarising agent-loop call: %+v", approvalTurn[0].Messages)
+	}
+	if system := approvalTurn[0].Messages[0].Content; !strings.Contains(system, pinned) {
+		t.Errorf("the model call after the approval does not pin English:\n%s", system)
+	}
+}
+
 // TestRun_FirstTurnProfileLanguageConfirmsUnsureDetection runs the first turn
 // of a conversation whose message detects below the confidence floor and
 // checks the system prompt the model receives: the profile language en pins
@@ -323,5 +463,59 @@ func TestReplyLanguageDirectiveForHidden_NoDetectableHistory(t *testing.T) {
 	}
 	if got := o.replyLanguageDirectiveForHidden(history); got != "" {
 		t.Errorf("undetectable history should leave the turn unpinned, got %q", got)
+	}
+}
+
+// TestRun_HiddenTurnProfileLanguageConfirmsHistory runs a hidden turn (a
+// background job's note, English text) with the profile language en after a
+// history that detects below the confidence floor, and checks the system
+// prompt the model receives. Only the history's visible user messages are
+// candidates for the profile confirmation, never the note's own text and never
+// an assistant row.
+func TestRun_HiddenTurnProfileLanguageConfirmsHistory(t *testing.T) {
+	cases := []struct {
+		name    string
+		history []provider.Message
+		pinned  bool
+	}{
+		{"request confirmed by en", []provider.Message{
+			{Role: provider.RoleUser, Content: "How do I create a new item?"},
+			{Role: provider.RoleAssistant, Content: "Open the item list and choose New."},
+		}, true},
+		{"request leaning german not confirmed by en", []provider.Message{
+			{Role: provider.RoleUser, Content: "Zeig mir die Tickets."},
+			{Role: provider.RoleAssistant, Content: "Hier sind die offenen Tickets."},
+		}, false},
+		{"no user message", []provider.Message{
+			{Role: provider.RoleAssistant, Content: "Welcome! How can I help you today?"},
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			llm := &segmentsTestLLM{}
+			sessions := state.NewSessionStore("")
+			sessions.Create(state.SessionParams{ID: "s1"})
+			for _, m := range tc.history {
+				if err := sessions.AddMessage("s1", m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			orch := NewWithRules(llm, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
+			ctx := profile.WithProfile(context.Background(), &profile.Profile{ChannelID: "web", Language: "en"})
+			ctx = actor.WithVisibility(ctx, provider.VisibilityHidden)
+			if _, err := orch.Run(ctx, "s1", "[system] Automated update on the background job. Outcome: completed."); err != nil {
+				t.Fatal(err)
+			}
+			if len(llm.requests) == 0 {
+				t.Fatal("no model call was made")
+			}
+			system := llm.requests[0].Messages[0].Content
+			if tc.pinned && !strings.Contains(system, "## Reply language\nReply in English.") {
+				t.Errorf("system prompt does not pin English:\n%s", system)
+			}
+			if !tc.pinned && strings.Contains(system, "## Reply language") {
+				t.Errorf("system prompt pins a language:\n%s", system)
+			}
+		})
 	}
 }
