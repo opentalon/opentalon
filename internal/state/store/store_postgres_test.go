@@ -60,8 +60,8 @@ func TestPostgres_OpenAndMigrations(t *testing.T) {
 	if err := db.SQLDB().QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 20 {
-		t.Errorf("schema_version = %d, want 20", v)
+	if v != 21 {
+		t.Errorf("schema_version = %d, want 21", v)
 	}
 }
 
@@ -104,6 +104,15 @@ func TestPostgres_SessionAccount(t *testing.T) {
 }
 func TestPostgres_MigrationMarksNoSession(t *testing.T) {
 	checkMigrationMarksNoSession(t, pgDB(t))
+}
+func TestPostgres_AnnouncementRoundTrip(t *testing.T) {
+	checkAnnouncementRoundTrip(t, NewSessionStore(pgDB(t), 0, 0))
+}
+func TestPostgres_AnnouncementSurvivesTrim(t *testing.T) {
+	checkAnnouncementSurvivesTrim(t, pgDB(t))
+}
+func TestPostgres_AnnouncementMigration(t *testing.T) {
+	checkAnnouncementMigration(t, pgDB(t))
 }
 func TestPostgres_ClaimOwner(t *testing.T) {
 	checkClaimOwner(t, NewSessionStore(pgDB(t), 0, 0))

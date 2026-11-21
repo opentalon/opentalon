@@ -413,7 +413,7 @@ func (o *Orchestrator) loadCompanions(
 		return nil
 	}
 	sessionID := actor.SessionID(ctx)
-	loaded := o.promotedToolSet(ctx)
+	loaded, _ := o.promotedToolSet(ctx)
 	var out []string
 	for _, companion := range action.Companions {
 		fqn, visible := o.resolveVisibleTool(toolFQN(plugin, companion), allowed, allowedPlugins)

@@ -379,13 +379,32 @@ func (s *SessionStore) Get(id string) (*Session, error) {
 	return sess.clone(), nil
 }
 
-// Messages are copied as values: nothing changes a stored message in place.
+// Messages are copied as values: only SetAnnouncement changes a stored message, and only its announcement.
 func (sess *Session) clone() *Session {
 	cp := *sess
 	cp.Messages = slices.Clone(sess.Messages)
+	for i := range cp.Messages {
+		cp.Messages[i].Announcement = cloneAnnouncement(cp.Messages[i].Announcement)
+	}
 	cp.Metadata = maps.Clone(sess.Metadata)
 	cp.VerifiedOwner = sess.VerifiedOwner.clone()
 	return &cp
+}
+
+func cloneAnnouncement(a *provider.ToolAnnouncement) *provider.ToolAnnouncement {
+	if a == nil {
+		return nil
+	}
+	return &provider.ToolAnnouncement{Added: slices.Clone(a.Added), Removed: slices.Clone(a.Removed)}
+}
+
+func LastUserRole(msgs []provider.Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == provider.RoleUser || msgs[i].Role == provider.RoleTool {
+			return i
+		}
+	}
+	return -1
 }
 
 func (o *VerifiedOwner) clone() *VerifiedOwner {
@@ -435,6 +454,20 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	}
 	sess.Messages = append(sess.Messages, msg)
 	sess.UpdatedAt = time.Now()
+	return nil
+}
+
+func (s *SessionStore) SetAnnouncement(id string, announcement *provider.ToolAnnouncement) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[id]
+	if !ok {
+		return fmt.Errorf("session %q not found", id)
+	}
+	if i := LastUserRole(sess.Messages); i >= 0 {
+		sess.Messages[i].Announcement = cloneAnnouncement(announcement)
+	}
 	return nil
 }
 
@@ -506,7 +539,7 @@ func (s *SessionStore) SetSummary(id string, summary string, messages []provider
 		return fmt.Errorf("session %q not found", id)
 	}
 	sess.Summary = summary
-	sess.Messages = messages
+	sess.Messages = slices.Clone(messages)
 	sess.UpdatedAt = time.Now()
 	return nil
 }

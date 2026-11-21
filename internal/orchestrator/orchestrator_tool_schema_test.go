@@ -44,7 +44,7 @@ func TestBuildToolDefinitions_RequiredKeyShape(t *testing.T) {
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
 	params := map[string]map[string]interface{}{}
-	callable, _ := orch.buildToolDefinitions(ctx)
+	callable, _, _ := orch.buildToolDefinitions(ctx)
 	for _, td := range callable {
 		params[td.Name] = td.Parameters
 	}
@@ -111,7 +111,7 @@ func TestBuildToolDefinitions_ParameterTypes(t *testing.T) {
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
 	var props map[string]interface{}
-	callable, _ := orch.buildToolDefinitions(ctx)
+	callable, _, _ := orch.buildToolDefinitions(ctx)
 	for _, td := range callable {
 		if td.Name == toolFQN("typed-plugin", "search") {
 			props, _ = td.Parameters["properties"].(map[string]interface{})
@@ -201,7 +201,7 @@ func TestBuildToolDefinitions_SuppliedSchemaFragment(t *testing.T) {
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
 	var props map[string]interface{}
-	callable, _ := orch.buildToolDefinitions(ctx)
+	callable, _, _ := orch.buildToolDefinitions(ctx)
 	for _, td := range callable {
 		if td.Name == toolFQN("fragment-plugin", "list") {
 			props, _ = td.Parameters["properties"].(map[string]interface{})
@@ -361,7 +361,7 @@ func TestPromptAndToolsByteIdenticalAcrossBuilds(t *testing.T) {
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
 	build := func() (prompt, tools string) {
-		callable, _ := orch.buildToolDefinitions(ctx)
+		callable, _, _ := orch.buildToolDefinitions(ctx)
 		raw, err := json.Marshal(callable)
 		if err != nil {
 			t.Fatalf("marshal tools: %v", err)

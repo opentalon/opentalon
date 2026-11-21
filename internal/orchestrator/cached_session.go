@@ -71,6 +71,18 @@ func (c *cachedSessionStore) AddMessageWithMetadata(id string, msg provider.Mess
 	return nil
 }
 
+func (c *cachedSessionStore) SetAnnouncement(id string, announcement *provider.ToolAnnouncement) error {
+	if err := c.inner.SetAnnouncement(id, announcement); err != nil {
+		return err
+	}
+	if s, ok := c.cache[id]; ok {
+		if i := state.LastUserRole(s.Messages); i >= 0 {
+			s.Messages[i].Announcement = announcement
+		}
+	}
+	return nil
+}
+
 func (c *cachedSessionStore) SetModel(id string, model provider.ModelRef) error {
 	if err := c.inner.SetModel(id, model); err != nil {
 		return err

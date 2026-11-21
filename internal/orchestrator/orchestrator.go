@@ -285,6 +285,8 @@ type SessionStoreInterface interface {
 	// reloaded client can redraw the Approve/Reject UI. A nil map behaves like
 	// AddMessage.
 	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
+	// SetAnnouncement replaces the announcement of the session's last message with role user or tool.
+	SetAnnouncement(id string, announcement *provider.ToolAnnouncement) error
 	SetModel(id string, model provider.ModelRef) error
 	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op
 	SetTitle(id, title string) error                                         // fill the short session label ONLY while empty; never overwrites a title set elsewhere; missing id is a no-op
@@ -2345,10 +2347,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// cache hits (vLLM automatic prefix caching, OpenAI prompt caching) and
 	// avoids rebuilding ~25k tokens of tool definitions on every round.
 	var cachedTools, loadableTools []provider.ToolDefinition
+	var loadedRead bool
 	var toolCatalog string
 	nativeMode := o.supportsNativeTools()
 	if nativeMode {
-		cachedTools, loadableTools = o.buildToolDefinitions(ctx)
+		cachedTools, loadableTools, loadedRead = o.buildToolDefinitions(ctx)
 		toolCatalog = o.renderToolCatalog(toolArraySet(cachedTools), o.resolveAllowedPlugins(ctx))
 	}
 	// Build the system prompt once per Run; appendConversation derives each
@@ -2407,6 +2410,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 		messages, system := o.appendConversation(ctx, sess, withToolCatalog(sysPrompt, toolCatalog))
 		messages = append(messages, transientMessages...)
+		transient := len(transientMessages)
 		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
 		if err != nil {
@@ -2521,6 +2525,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		sentMessages := 0
 		for attempt := 0; ; attempt++ {
 			estimatedTokens = fitRequestToWindow(ctx, req, o.contextWindow, o.maxOutputTokens, o.calibrators.factor(req.Model))
+			if nativeMode && loadedRead {
+				recordToolChange(ctx, sessions, sessionID, sess.Messages, req, transient)
+			}
 			// The fit only ever drops messages. When the re-fit after a
 			// refusal dropped none (nothing left to drop, or the last tool
 			// call and its result kept together over budget), the provider
@@ -2998,7 +3005,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// result (a failed batch promoted nothing).
 			if nativeMode && (toolResult.NotRun || (toolResult.Error == "" &&
 				call.Plugin == metaPluginName && call.Action == metaLoadTools)) {
-				cachedTools, loadableTools = o.buildToolDefinitions(ctx)
+				cachedTools, loadableTools, loadedRead = o.buildToolDefinitions(ctx)
 				toolCatalog = o.renderToolCatalog(toolArraySet(cachedTools), o.resolveAllowedPlugins(ctx))
 				log.Debug("cachedTools refreshed after a tool load",
 					"tools_count", len(cachedTools), "loaded_on_call", toolResult.NotRun)
@@ -3090,11 +3097,11 @@ func (o *Orchestrator) supportsNativeTools() bool {
 // action) plus the tools the session has loaded via load_tools (sticky,
 // capped at maxStickyTools). Every other allowed tool is discoverable via
 // the system-prompt catalog and comes back in loadable. Profile / preparer / UserOnly
-// filters still apply.
-func (o *Orchestrator) buildToolDefinitions(ctx context.Context) (callable, loadable []provider.ToolDefinition) {
+// filters still apply. read is false when the session's loaded tools could not be read.
+func (o *Orchestrator) buildToolDefinitions(ctx context.Context) (callable, loadable []provider.ToolDefinition, read bool) {
 	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
 	preparerAction := o.preparerActions
-	promoted := o.promotedToolSet(ctx)
+	promoted, read := o.promotedToolSet(ctx)
 
 	for _, cap := range o.registry.ListCapabilities() {
 		if !o.pluginAllowed(cap, allowedPlugins) {
@@ -3160,7 +3167,7 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) (callable, load
 		}
 	}
 	sort.Slice(loadable, func(i, j int) bool { return loadable[i].Name < loadable[j].Name })
-	return callable, loadable
+	return callable, loadable, read
 }
 
 // prepareTurnStart assembles the turn_start event payload from the static
@@ -4647,7 +4654,8 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	if !o.supportsNativeTools() {
 		return segs
 	}
-	return withToolCatalog(segs, o.renderToolCatalog(o.promotedToolSet(ctx), o.resolveAllowedPlugins(ctx)))
+	promoted, _ := o.promotedToolSet(ctx)
+	return withToolCatalog(segs, o.renderToolCatalog(promoted, o.resolveAllowedPlugins(ctx)))
 }
 
 func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, userMessage string, includeServerInstructions bool) provider.SystemSegments {
@@ -6235,7 +6243,7 @@ func appendStrippingHistoricalKC(dst []provider.Message, msgs []provider.Message
 			if i != lastUserIdx {
 				stripped := stripKnowledgeContext(m.Content)
 				if stripped != m.Content {
-					m = provider.Message{Role: m.Role, Content: stripped, Files: m.Files}
+					m = provider.Message{Role: m.Role, Content: stripped, Files: m.Files, Announcement: m.Announcement}
 				}
 			}
 			// Deduplicate knowledge article plugin outputs.
@@ -6276,7 +6284,7 @@ func deduplicateLargeToolResult(m provider.Message, seen map[uint64]bool) provid
 	replaced := m.Content[:start] +
 		"[plugin_output]\n(Same tool result as a previous call — see above.)\n[/plugin_output]" +
 		m.Content[end+len(closeTag):]
-	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files}
+	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files, Announcement: m.Announcement}
 }
 
 // deduplicateKnowledgeOutput replaces repeated knowledge article plugin
@@ -6305,7 +6313,7 @@ func deduplicateKnowledgeOutput(m provider.Message, seen map[uint64]bool) provid
 	replaced := m.Content[:start] +
 		"[plugin_output]\n(Same knowledge articles as a previous lookup — see above.)\n[/plugin_output]" +
 		m.Content[end+len(closeTag):]
-	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files}
+	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files, Announcement: m.Announcement}
 }
 
 // isVisibleUserMessage reports whether m is the user's own visible turn: a real

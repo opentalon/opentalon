@@ -63,14 +63,14 @@ func TestBuildToolDefinitions_CallableAndLoadable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store.store = map[string]state.InjectionState{"s1": {KnownTools: tc.loaded}}
-			callable, loadable := orch.buildToolDefinitions(ctx)
+			callable, loadable, _ := orch.buildToolDefinitions(ctx)
 			if got := toolMarks(callable); !reflect.DeepEqual(got, tc.callable) {
 				t.Errorf("callable = %v, want %v", got, tc.callable)
 			}
 			if got := toolMarks(loadable); !reflect.DeepEqual(got, tc.loadable) {
 				t.Errorf("loadable = %v, want %v", got, tc.loadable)
 			}
-			againCallable, againLoadable := orch.buildToolDefinitions(ctx)
+			againCallable, againLoadable, _ := orch.buildToolDefinitions(ctx)
 			if !reflect.DeepEqual(againCallable, callable) || !reflect.DeepEqual(againLoadable, loadable) {
 				t.Errorf("a second build differs: %+v %+v, first %+v %+v", againCallable, againLoadable, callable, loadable)
 			}

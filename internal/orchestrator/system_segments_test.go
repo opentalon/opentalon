@@ -144,6 +144,7 @@ type promptSections struct {
 }
 
 func (f segmentsFixture) sections() promptSections {
+	promoted, _ := f.orch.promotedToolSet(f.ctx)
 	return promptSections{
 		grounding:    f.orch.buildAgentGroundingPrompt(f.ctx, "agent-7"),
 		preamble:     prompts.OrchestratorPreambleNative,
@@ -156,7 +157,7 @@ func (f segmentsFixture) sections() promptSections {
 		plugins: "## _meta\nOrchestrator-owned meta-tools.\n\n" +
 			"## _subprocess\nFork a focused sub-agent process to handle a sub-task\n\n" +
 			"## inventory\nInventory tools\n--- plugin: inventory ---\nCount items with list-items.\n--- end plugin: inventory ---\n\n",
-		toolCatalog:    f.orch.renderToolCatalog(f.orch.promotedToolSet(f.ctx), f.orch.resolveAllowedPlugins(f.ctx)),
+		toolCatalog:    f.orch.renderToolCatalog(promoted, f.orch.resolveAllowedPlugins(f.ctx)),
 		subprocess:     prompts.OrchestratorSubprocess,
 		outputFormat:   "## OUTPUT FORMAT\n" + prompts.FormatMarkdown + "\n",
 		user:           "## User\nThe user's name is Ada. Address them by name where it feels natural; do not force it into every message.\n\n",
