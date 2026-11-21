@@ -132,7 +132,9 @@ User-facing behaviour: [Inline tools](../configuration.md#inline-tools).
   on-demand tools that became callable and those that stopped since the
   request before. The chat loop sets it on every native-tools request whose
   loaded tools it could read, whatever the model, and the session store keeps
-  it in `messages.announcement`, addressed by `Message.StoreKey`.
+  it in `messages.announcement`, addressed by `Message.StoreKey`. A request
+  whose last user or tool message already carries a record an earlier request
+  sent sets none: that record stays as sent.
 - The Anthropic provider reads `LoadableTools`, `InlineCatalog` and the
   records only on a chat-loop request (`Segments != nil`) for a model with
   `FeatureInlineTools`. Every other request, and every OpenAI-compatible one,
