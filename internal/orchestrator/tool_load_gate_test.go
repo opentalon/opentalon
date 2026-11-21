@@ -891,25 +891,31 @@ func TestRun_LoadedToolsLeaveTheNextRequestsCatalog(t *testing.T) {
 			}
 			before, after, next := *llm.requests[0].Segments, *llm.requests[1].Segments, *llm.requests[2].Segments
 			tools := sentToolsJSON(t, llm.requests[1])
-			want := before.Conversation
+			want := before.Catalog
 			for _, fqn := range tc.loaded {
 				line := "- " + fqn + ": " + descriptions[fqn] + "\n"
 				if !strings.Contains(want, line) {
-					t.Fatalf("the first request's catalog must list %s, got %q", fqn, before.Conversation)
+					t.Fatalf("the first request's catalog must list %s, got %q", fqn, before.Catalog)
+				}
+				if !strings.Contains(after.InlineCatalog, line) {
+					t.Errorf("the inline catalog after the load must still list %s, got %q", fqn, after.InlineCatalog)
 				}
 				want = strings.Replace(want, line, "", 1)
 				if !strings.Contains(tools, `"name":"`+fqn+`"`) {
 					t.Errorf("the next request's tools must carry %s, got %s", fqn, tools)
 				}
 			}
-			if after.Fixed != before.Fixed {
-				t.Errorf("a load changed the Fixed segment:\n got %q\nwant %q", after.Fixed, before.Fixed)
+			if after.Fixed != before.Fixed || after.Conversation != before.Conversation {
+				t.Errorf("a load changed the segments around the catalog:\n got %#v\nwant %#v", after, before)
 			}
-			if after.Conversation != want {
-				t.Errorf("after the load, the Conversation segment must only lose the loaded tools' catalog lines:\n got %q\nwant %q",
-					after.Conversation, want)
+			if after.Catalog != want {
+				t.Errorf("after the load, the catalog must only lose the loaded tools' lines:\n got %q\nwant %q", after.Catalog, want)
 			}
-			if next.Fixed != after.Fixed || next.Conversation != after.Conversation {
+			if after.InlineCatalog != before.InlineCatalog {
+				t.Errorf("a load changed the inline catalog:\n got %q\nwant %q", after.InlineCatalog, before.InlineCatalog)
+			}
+			if next.Fixed != after.Fixed || next.Catalog != after.Catalog || next.InlineCatalog != after.InlineCatalog ||
+				next.Conversation != after.Conversation {
 				t.Errorf("a request without a load changed the segments before the per-round one:\n got %#v\nwant %#v", next, after)
 			}
 		})

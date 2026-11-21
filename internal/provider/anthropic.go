@@ -561,11 +561,11 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		}
 		conversation = append(conversation, m)
 	}
-	system, cached, err := p.toAnthSystem(req, systemParts)
+	inlineTools := req.Segments != nil && model.SupportsFeature(FeatureInlineTools)
+	system, cached, err := p.toAnthSystem(req, systemParts, inlineTools)
 	if err != nil {
 		return anthRequest{}, err
 	}
-	inlineTools := req.Segments != nil && model.SupportsFeature(FeatureInlineTools)
 	tools := toolDefsToAnthTools(req.Tools)
 	if inlineTools {
 		tools = inlineAnthTools(req.Tools, req.LoadableTools)
@@ -649,15 +649,22 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 }
 
 // toAnthSystem renders the system field from the request's system messages,
-// systemParts in order: as cache-marked text blocks when cachedSystemBlocks
+// systemParts in order, the leading one from its segments when they describe
+// it: as cache-marked text blocks when caching is on and cachedSystemBlocks
 // returns any, which cached reports, else as their join in one string.
-func (p *AnthropicProvider) toAnthSystem(req *CompletionRequest, systemParts []string) (system json.RawMessage, cached bool, err error) {
-	if blocks := p.cachedSystemBlocks(req, systemParts); len(blocks) > 0 {
-		system, err = json.Marshal(blocks)
-		if err != nil {
-			return nil, false, fmt.Errorf("marshal system blocks: %w", err)
+func (p *AnthropicProvider) toAnthSystem(req *CompletionRequest, systemParts []string, inlineTools bool) (system json.RawMessage, cached bool, err error) {
+	lead, segmented := leadSegments(req, inlineTools)
+	if segmented && p.promptCache {
+		if blocks := cachedSystemBlocks(append(lead, systemParts[1:]...)); len(blocks) > 0 {
+			system, err = json.Marshal(blocks)
+			if err != nil {
+				return nil, false, fmt.Errorf("marshal system blocks: %w", err)
+			}
+			return system, true, nil
 		}
-		return system, true, nil
+	}
+	if segmented {
+		systemParts = append([]string{strings.Join(lead, "")}, systemParts[1:]...)
 	}
 	text := joinStrings(systemParts)
 	if text == "" {
@@ -670,20 +677,24 @@ func (p *AnthropicProvider) toAnthSystem(req *CompletionRequest, systemParts []s
 	return system, false, nil
 }
 
-// cachedSystemBlocks returns the system field's text blocks when prompt
-// caching is on and req.Segments describes the leading system message: one
-// block per segment, then one per further system message, leaving out blank
-// ones (Anthropic rejects them), with a cache marker on the first block.
-// Otherwise it returns nil.
-func (p *AnthropicProvider) cachedSystemBlocks(req *CompletionRequest, systemParts []string) []anthTextBlock {
+func leadSegments(req *CompletionRequest, inlineTools bool) (lead []string, segmented bool) {
 	segs := req.Segments
-	if !p.promptCache || segs == nil || len(req.Messages) == 0 ||
+	if segs == nil || len(req.Messages) == 0 ||
 		req.Messages[0].Role != RoleSystem || req.Messages[0].Content != segs.Join() {
-		return nil
+		return nil, false
 	}
+	catalog := segs.Catalog
+	if inlineTools {
+		catalog = segs.InlineCatalog
+	}
+	return []string{segs.Fixed, catalog + segs.Conversation, segs.Round}, true
+}
+
+// cachedSystemBlocks returns one text block per text, leaving out blank ones
+// (Anthropic rejects them), with a cache marker on the first block.
+func cachedSystemBlocks(texts []string) []anthTextBlock {
 	var blocks []anthTextBlock
-	// systemParts[0] is the leading system message, sent as its segments.
-	for _, text := range append([]string{segs.Fixed, segs.Catalog + segs.Conversation, segs.Round}, systemParts[1:]...) {
+	for _, text := range texts {
 		if strings.TrimSpace(text) != "" {
 			blocks = append(blocks, anthTextBlock{Type: "text", Text: text})
 		}

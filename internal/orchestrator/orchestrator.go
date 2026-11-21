@@ -2349,11 +2349,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// avoids rebuilding ~25k tokens of tool definitions on every round.
 	var cachedTools, loadableTools []provider.ToolDefinition
 	var loadedRead bool
-	var toolCatalog string
+	var toolCatalog, inlineCatalog string
 	nativeMode := o.supportsNativeTools()
 	if nativeMode {
 		cachedTools, loadableTools, loadedRead = o.buildToolDefinitions(ctx)
 		toolCatalog = o.renderToolCatalog(toolArraySet(cachedTools), o.resolveAllowedPlugins(ctx))
+		inlineCatalog = renderInlineToolCatalog(cachedTools, loadableTools)
 	}
 	// Build the system prompt once per Run; appendConversation derives each
 	// round's per-round segment from it.
@@ -2375,7 +2376,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// confirmation) intentionally bypass this emission: the LLM is not
 	// driving those decisions, so there's no "turn" to start. They still
 	// emit user_message (above) because the user did send input.
-	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, withToolCatalog(sysPrompt, toolCatalog).Join(), profileModel, cachedTools))
+	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, withToolCatalog(sysPrompt, toolCatalog, inlineCatalog).Join(), profileModel, cachedTools))
 	// Root every subsequent event in this turn under turn_start by
 	// stamping it as the default parent on ctx. Specific spans (planner,
 	// llm_response, tool_call_extracted) overwrite this slot with their
@@ -2409,7 +2410,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		agentRound = i + 1
 		sess, _ := sessions.Get(sessionID)
 
-		messages, system := o.appendConversation(ctx, sess, withToolCatalog(sysPrompt, toolCatalog))
+		messages, system := o.appendConversation(ctx, sess, withToolCatalog(sysPrompt, toolCatalog, inlineCatalog))
 		messages = append(messages, transientMessages...)
 		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
@@ -3007,6 +3008,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				call.Plugin == metaPluginName && call.Action == metaLoadTools)) {
 				cachedTools, loadableTools, loadedRead = o.buildToolDefinitions(ctx)
 				toolCatalog = o.renderToolCatalog(toolArraySet(cachedTools), o.resolveAllowedPlugins(ctx))
+				inlineCatalog = renderInlineToolCatalog(cachedTools, loadableTools)
 				log.Debug("cachedTools refreshed after a tool load",
 					"tools_count", len(cachedTools), "loaded_on_call", toolResult.NotRun)
 			}
@@ -4655,7 +4657,7 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 		return segs
 	}
 	promoted, _ := o.promotedToolSet(ctx)
-	return withToolCatalog(segs, o.renderToolCatalog(promoted, o.resolveAllowedPlugins(ctx)))
+	return withToolCatalog(segs, o.renderToolCatalog(promoted, o.resolveAllowedPlugins(ctx)), "")
 }
 
 func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, userMessage string, includeServerInstructions bool) provider.SystemSegments {

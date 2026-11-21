@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
@@ -342,15 +343,39 @@ func (o *Orchestrator) renderToolCatalog(promoted map[string]bool, allowedPlugin
 		"then call it on your next step. Calling a catalog tool you have not loaded is REJECTED — you cannot see its "+
 		"parameters, so never guess them from the summary.\n",
 		toolFQN(metaPluginName, metaLoadTools))
+	writeCatalogEntries(&sb, entries)
+	return sb.String()
+}
+
+func renderInlineToolCatalog(callable, loadable []provider.ToolDefinition) string {
+	var entries []catalogEntry
+	for _, defs := range [][]provider.ToolDefinition{callable, loadable} {
+		for _, td := range defs {
+			if td.OnDemand {
+				entries = append(entries, catalogEntry{fqn: td.Name, summary: firstLine(td.Description)})
+			}
+		}
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].fqn < entries[j].fqn })
+	var sb strings.Builder
+	sb.WriteString(prompts.OrchestratorToolCatalogInline)
+	sb.WriteString("\n")
+	writeCatalogEntries(&sb, entries)
+	return sb.String()
+}
+
+func writeCatalogEntries(sb *strings.Builder, entries []catalogEntry) {
 	for _, e := range entries {
 		if e.summary == "" {
-			fmt.Fprintf(&sb, "- %s\n", e.fqn)
+			fmt.Fprintf(sb, "- %s\n", e.fqn)
 			continue
 		}
-		fmt.Fprintf(&sb, "- %s: %s\n", e.fqn, e.summary)
+		fmt.Fprintf(sb, "- %s: %s\n", e.fqn, e.summary)
 	}
 	sb.WriteString("\n")
-	return sb.String()
 }
 
 // toolArraySet is the promoted set under which renderToolCatalog lists exactly the allowed tools the array lacks.
@@ -362,8 +387,9 @@ func toolArraySet(tools []provider.ToolDefinition) map[string]bool {
 	return set
 }
 
-func withToolCatalog(segs provider.SystemSegments, catalog string) provider.SystemSegments {
-	segs.Conversation = catalog + segs.Conversation
+func withToolCatalog(segs provider.SystemSegments, catalog, inlineCatalog string) provider.SystemSegments {
+	segs.Catalog = catalog
+	segs.InlineCatalog = inlineCatalog
 	return segs
 }
 
