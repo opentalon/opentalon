@@ -81,6 +81,7 @@ Authorization: Bearer <token>
 | `group` | No | Group name. Used to look up allowed plugins in the `group_plugins` table. |
 | `plugins` | No | Plugin IDs allowed for this group. Auto-saved to DB (see [Dynamic plugin assignments](#dynamic-plugin-assignments)). |
 | `model` | No | Model override for this profile (e.g. `"anthropic/claude-3-5-sonnet-20241022"`). Overrides the server default for this request. |
+| `language` | No | The user's language as an ISO 639-1 code (`en`, `de`; any case, a region subtag such as `de-CH` or `pt_BR` is ignored). Never overrides the language of the user's own messages: when neither the current message nor an earlier visible one is detected with confidence, it pins the reply language only if the current message has at least 12 characters and the detector's strictly leading candidate for it is this language. Only the detector's languages count (`en`, `de`, `fr`, `es`, `it`, `pt`, `pl`, `lt`); any other code is ignored. |
 | `kind` | No | `chat` (default) for a person's turn, `system` for a run a backend feature started on a user's behalf. Stamped on the session row at creation (`sessions.interaction_kind`) and on every usage row. |
 | `system_source` | No | Name of the feature behind a `system` run, e.g. `job_notify`. Only honoured together with `kind: system`; on any other run it is ignored and logged — a source never upgrades a run's kind, because `system` skips the interactive spend limit. Stamped once on the session that the run opened (`sessions.system_source`, NULL for chat) and on each usage row; see [Run labels](#run-labels). |
 | `tariffs` | No | Customer prices in EUR per million tokens, by model id as `models.providers.<id>.models[].id` names it (without the provider): `{"claude-sonnet-5-5": {"input": 3, "cached_input": 0.3, "output": 15}}`. `input` and `output` are required numbers of 0 or more, `cached_input` is optional. Every model call of the run is priced at them; see [Customer price](#customer-price). |
@@ -101,6 +102,7 @@ profiles:
     group_field: group            # JSON key for group; default "group"
     plugins_field: plugins        # JSON key for plugin list; default "plugins"
     model_field: model            # JSON key for model override; default "model"
+    language_field: language      # JSON key for the user's language; default "language"
     tariffs_field: tariffs        # JSON key for customer prices per model; default "tariffs"
     extra_headers: {}             # static headers added to every WhoAmI call (see below)
     metadata_headers: {}          # forward per-message metadata as headers (see below)

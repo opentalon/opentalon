@@ -1812,11 +1812,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// in via the inject path — carries no signal about the user's own language,
 	// so detecting on its text would answer the conversation in the note's
 	// language. Derive the reply language from the visible history instead.
+	// A visible turn that neither its message nor the history pins can still be
+	// pinned by the profile's language confirming an unsure detection.
 	var replyLangDirective string
 	if hidden { // computed once at the confirmation-skip guard above
 		replyLangDirective = o.replyLanguageDirectiveForHidden(priorMessages)
 	} else {
-		replyLangDirective = o.replyLanguageDirectiveWithHistory(content, priorMessages)
+		var profileLanguage string
+		if p := profile.FromContext(ctx); p != nil {
+			profileLanguage = p.Language
+		}
+		replyLangDirective = o.replyLanguageDirectiveWithProfile(content, priorMessages, profileLanguage)
 	}
 	ctx = withReplyLanguageDirective(ctx, replyLangDirective)
 

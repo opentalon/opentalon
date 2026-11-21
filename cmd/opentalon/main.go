@@ -715,6 +715,7 @@ func main() {
 			ChannelTypeHeader: cfg.Profiles.WhoAmI.ChannelTypeHeader,
 			LimitField:        cfg.Profiles.WhoAmI.LimitField,
 			LimitTimeField:    cfg.Profiles.WhoAmI.LimitTimeField,
+			LanguageField:     cfg.Profiles.WhoAmI.LanguageField,
 			NameField:         cfg.Profiles.WhoAmI.NameField,
 			TariffsField:      cfg.Profiles.WhoAmI.TariffsField,
 			ExtraHeaders:      cfg.Profiles.WhoAmI.ExtraHeaders,

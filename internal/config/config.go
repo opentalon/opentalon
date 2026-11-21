@@ -145,6 +145,7 @@ type WhoAmIConfig struct {
 	LimitField        string            `yaml:"limit_field"`             // optional JSON field for token spend limit; default "limit"
 	LimitTimeField    string            `yaml:"limit_time_field"`        // optional JSON field for limit window duration (e.g. "1h"); default "limit_time"
 	CredentialsField  string            `yaml:"credentials_field"`       // optional JSON field for per-MCP-server tokens map; default "credentials"
+	LanguageField     string            `yaml:"language_field"`          // optional JSON field for the user's language (ISO 639-1 code); default "language"
 	NameField         string            `yaml:"name_field"`              // optional JSON field for user display name; default "name"
 	TariffsField      string            `yaml:"tariffs_field"`           // optional JSON field for customer prices per model; default "tariffs"
 	ExtraHeaders      map[string]string `yaml:"extra_headers,omitempty"` // static headers added to every WhoAmI call; values support ${ENV_VAR}
