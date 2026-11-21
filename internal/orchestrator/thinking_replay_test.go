@@ -440,7 +440,7 @@ func TestRun_InlineToolsReplayThinkingAcrossALoad(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			model := provider.ModelInfo{ID: "claude-x", Thinking: "adaptive", ReasoningEffort: "high", Features: tc.features}
-			run := newModelRun(t, model, inlineRegistry(t, announceActions(), &countingExecutor{}), OrchestratorOpts{},
+			run := newModelRun(t, sqliteSessions(t), model, inlineRegistry(t, announceActions(), &countingExecutor{}), OrchestratorOpts{},
 				`{"type":"thinking","thinking":"","signature":"sig-1"},`+
 					`{"type":"tool_use","id":"toolu_1","name":"_meta__load_tools","input":{"names":"p__other"}}`,
 				`{"type":"thinking","thinking":"","signature":"sig-2"},`+

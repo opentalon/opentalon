@@ -2524,9 +2524,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// for a failure that has nothing to do with them.
 		var estimatedTokens int
 		sentMessages := 0
+		// Before the first fit only the store has set records, so a record on the last user-role message was sent by an earlier request.
+		recordChange := nativeMode && loadedRead && !endsOnRecord(req.Messages)
 		for attempt := 0; ; attempt++ {
 			estimatedTokens = fitRequestToWindow(ctx, req, o.contextWindow, o.maxOutputTokens, o.calibrators.factor(req.Model))
-			if nativeMode && loadedRead {
+			if recordChange {
 				recordToolChange(ctx, sessions, sessionID, req)
 			}
 			// The fit only ever drops messages. When the re-fit after a

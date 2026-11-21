@@ -414,6 +414,11 @@ func recordToolChange(ctx context.Context, sessions SessionStoreInterface, sessi
 	}
 }
 
+func endsOnRecord(msgs []provider.Message) bool {
+	at := lastUserRole(msgs)
+	return at >= 0 && msgs[at].Announcement != nil
+}
+
 func lastUserRole(msgs []provider.Message) int {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role == provider.RoleUser || msgs[i].Role == provider.RoleTool {

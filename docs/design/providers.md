@@ -313,16 +313,16 @@ A load adds tools to `CompletionRequest.Tools` and takes them out of `Catalog`. 
 |---|---|
 | `Tools` | the callable tools; `OnDemand` is false for an always-included tool |
 | `LoadableTools` | the allowed tools the session has not loaded, in name order |
-| `Message.Announcement` | on the last user or tool message of each request: the on-demand tools that became callable and those that stopped being callable since the request before |
+| `Message.Announcement` | on the last user or tool message of a request: the on-demand tools that became callable and those that stopped being callable since the request before |
 | `Segments.Catalog`, `Segments.InlineCatalog` | the catalog in both forms |
 
-The chat loop computes the announcement record after the request is fitted to the window, for every model, from the records the request's earlier messages carry. The session store keeps it with its message (`messages.announcement`, migration `021`), so it stays with the message when the history is summarised or trimmed. No record is computed when the session's loaded tools cannot be read.
+The chat loop computes the announcement record after each fit of the request to the window, for every model, from the records the request's earlier messages carry; a request the provider refuses as too long is fitted again and its record computed again. The session store keeps it with its message (`messages.announcement`, migration `021`), so it stays with the message when the history is summarised or trimmed. No record is computed when the session's loaded tools cannot be read, nor when the request's last user or tool message carries a record before the first fit: an earlier request ended on that message and sent the record, and it stays as sent. Two requests end on the same message when the session store saved no message of the calls in between, or saved a call's result without its assistant message so that pairing leaves the result out (a resolved confirmation prompt and its approval never reach the request).
 
 For a chat-loop request to a model with `inline_tools`, the Anthropic provider:
 
 - sends the fixed tools in request order, then every on-demand tool of `Tools` and `LoadableTools` in name order with `defer_loading: true`, and the `anthropic-beta` value `inline-tools-2026-09-15`;
 - renders the records in message order as `tool_addition` and `tool_removal` blocks that refer to a tool by name (`tool_reference`), in one system message directly before the next assistant message or at the end of the request. It leaves out an addition of a tool that is already announced or not declared, and a removal of a tool that is not announced;
-- after the request's last user or tool message, adds the blocks that make the announced tools equal the callable on-demand tools of `Tools`. They differ after a failed read of the loaded tools, for which the chat loop records nothing, and nothing stores these blocks;
+- after the request's last user or tool message, adds the blocks that make the announced tools equal the callable on-demand tools of `Tools`. They differ after a failed read of the loaded tools, for which the chat loop records nothing, and when that message carries a record an earlier request sent before the callable tools changed; nothing stores these blocks;
 - sends `InlineCatalog` in the system field;
 - adds each announcement message to the thinking binding, so a thinking block is replayed only while the announcements before it are unchanged.
 

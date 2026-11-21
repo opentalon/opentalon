@@ -153,10 +153,10 @@ func announcedSet(msgs []provider.Message) []string {
 	return slices.Sorted(maps.Keys(set))
 }
 
-func checkAnnounced(t *testing.T, seen []announceRequest, unread ...int) {
+func checkAnnounced(t *testing.T, seen []announceRequest, unrecorded ...int) {
 	t.Helper()
 	for i, r := range seen {
-		if slices.Contains(unread, i) {
+		if slices.Contains(unrecorded, i) {
 			continue
 		}
 		if got := announcedSet(r.messages); !slices.Equal(got, r.onDemand) {
@@ -336,6 +336,33 @@ func TestRun_ShortenedHistoryAnnouncesTheCallableToolsAgain(t *testing.T) {
 			t.Errorf("stored records = %q, want %q", got, want)
 		}
 	})
+	t.Run("re-fit recomputes the record the refused request set", func(t *testing.T) {
+		orch, llm, sessions := announceOrch(t, OrchestratorOpts{ToolErrorHandling: ToolErrorHandlingConfig{StickyDemotionThreshold: 1}},
+			&errorExecutor{msg: "boom"}, announceActions(), loadCall("l1", "p__catalog"),
+			callOf("k1", "p__lookup", map[string]string{"q": "x"}), provider.CompletionResponse{Content: strings.Repeat("filler ", 20000)})
+		llm.onCall = func(call int, req *provider.CompletionRequest) error {
+			if call != 3 {
+				return nil
+			}
+			whole := fitRequestToWindow(context.Background(), &provider.CompletionRequest{Messages: req.Messages, Tools: req.Tools}, 0, 0, 1)
+			orch.contextWindow = whole*10/9 + 10
+			return errors.New("anthropic api error (status 400): prompt is too long: 250000 tokens > 200000 maximum")
+		}
+		announceTurn(t, context.Background(), orch, "turn 1")
+		announceTurn(t, context.Background(), orch, "turn 2")
+		if len(llm.seen) != 5 || len(llm.seen[4].messages) >= len(llm.seen[3].messages) {
+			t.Fatalf("want turn 2 sent twice, the second time shorter; got %d requests", len(llm.seen))
+		}
+		checkAnnounced(t, llm.seen)
+		for i, want := range map[int][]string{3: {"tool l1" + loaded, "user turn 2 -p__lookup"}, 4: {"user turn 2 +p__catalog +p__list"}} {
+			if got := recordsOf(llm.seen[i].messages); !reflect.DeepEqual(got, want) {
+				t.Errorf("request %d records = %q, want %q", i+1, got, want)
+			}
+		}
+		if got, want := storedRecords(t, sessions), []string{"tool l1" + loaded, "user turn 2 +p__catalog +p__list"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("stored records = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestRun_ModelSwitchKeepsOneRecordHistory(t *testing.T) {
@@ -450,7 +477,7 @@ func TestRun_RetryMessageCarriesTheRecordWhenTheFitDropsIt(t *testing.T) {
 }
 
 type lostCallStore struct {
-	*state.SessionStore
+	SessionStoreInterface
 	lose func(provider.Message) bool
 }
 
@@ -462,11 +489,11 @@ func (s *lostCallStore) AddMessageWithMetadata(id string, msg provider.Message, 
 	if s.lose(msg) {
 		return errors.New("simulated insert failure")
 	}
-	return s.SessionStore.AddMessageWithMetadata(id, msg, metadata)
+	return s.SessionStoreInterface.AddMessageWithMetadata(id, msg, metadata)
 }
 
 func TestRun_RecordGoesToTheStoredMessageTheRequestCarries(t *testing.T) {
-	sessions := &lostCallStore{SessionStore: state.NewSessionStore(""), lose: func(m provider.Message) bool {
+	sessions := &lostCallStore{SessionStoreInterface: state.NewSessionStore(""), lose: func(m provider.Message) bool {
 		return len(m.ToolCalls) > 0 && m.ToolCalls[0].Arguments["names"] == "p__other"
 	}}
 	orch, llm := announceOrchOn(t, sessions, OrchestratorOpts{}, &countingExecutor{}, announceActions(),
@@ -489,11 +516,15 @@ func TestRun_RecordGoesToTheStoredMessageTheRequestCarries(t *testing.T) {
 	if last := llm.seen[2].messages; results != 2 || len(last) != 4 || last[3].Role != provider.RoleTool {
 		t.Fatalf("want two stored c1 results and the later one dropped from request 3; got %d results, request 3 %v", results, recordsOf(last))
 	}
-	checkAnnounced(t, llm.seen)
-	checkRecordsKept(t, llm.seen[2:])
-	want := []string{"tool c1 +p__catalog +p__list +p__lookup +p__other"}
-	if got := recordsOf(llm.seen[2].messages); !reflect.DeepEqual(got, want) {
+	checkAnnounced(t, llm.seen, 2)
+	checkRecordsKept(t, llm.seen)
+	loaded := "tool c1 +p__catalog +p__list +p__lookup"
+	if got, want := recordsOf(llm.seen[2].messages), []string{loaded}; !reflect.DeepEqual(got, want) {
 		t.Errorf("records in request 3 = %q, want %q", got, want)
+	}
+	want := []string{loaded, "user turn 2 +p__other"}
+	if got := recordsOf(llm.seen[3].messages); !reflect.DeepEqual(got, want) {
+		t.Errorf("records in request 4 = %q, want %q", got, want)
 	}
 	if got := storedRecords(t, sessions); !reflect.DeepEqual(got, want) {
 		t.Errorf("stored records = %q, want %q", got, want)

@@ -890,7 +890,7 @@ func (a *toolAnnouncements) add(record *ToolAnnouncement) {
 func (a *toolAnnouncements) messages(last bool) ([]anthMessage, error) {
 	runs := [][]anthToolChange{a.take()}
 	if last {
-		// Callable and announced tools differ only after a failed read of the loaded tools; nothing stores this.
+		// Callable and announced tools differ after a failed read of the loaded tools or when an earlier request sent the last message's record; nothing stores this.
 		a.add(a.difference())
 		runs = append(runs, a.take())
 	}

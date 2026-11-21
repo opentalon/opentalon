@@ -248,11 +248,17 @@ type inlineRun struct {
 
 func newInlineRun(t *testing.T, registry *ToolRegistry, opts OrchestratorOpts, script ...string) *inlineRun {
 	t.Helper()
-	model := provider.ModelInfo{ID: "claude-x", Features: []provider.Feature{provider.FeatureTools, provider.FeatureInlineTools}}
-	return newModelRun(t, model, registry, opts, script...)
+	return newInlineRunOn(t, sqliteSessions(t), registry, opts, script...)
 }
 
-func newModelRun(t *testing.T, model provider.ModelInfo, registry *ToolRegistry, opts OrchestratorOpts, script ...string) *inlineRun {
+func newInlineRunOn(t *testing.T, sessions SessionStoreInterface, registry *ToolRegistry, opts OrchestratorOpts, script ...string) *inlineRun {
+	t.Helper()
+	model := provider.ModelInfo{ID: "claude-x", Features: []provider.Feature{provider.FeatureTools, provider.FeatureInlineTools}}
+	return newModelRun(t, sessions, model, registry, opts, script...)
+}
+
+func newModelRun(t *testing.T, sessions SessionStoreInterface, model provider.ModelInfo, registry *ToolRegistry, opts OrchestratorOpts,
+	script ...string) *inlineRun {
 	t.Helper()
 	api := &scriptedMessagesAPI{script: script}
 	server := httptest.NewServer(api)
@@ -268,7 +274,6 @@ func newModelRun(t *testing.T, model provider.ModelInfo, registry *ToolRegistry,
 		opts.InjectionStateStore = &fakeInjectionStateStore{}
 	}
 	llm := &callableRecorder{Provider: anth}
-	sessions := sqliteSessions(t)
 	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
 		state.NewMemoryStore(""), sessions, opts)
 	ctx := actor.WithSessionID(profile.WithProfile(context.Background(), &profile.Profile{Model: "anthropic/claude-x"}), "s1")
@@ -587,4 +592,87 @@ func TestAnthropicInlineToolsAnnouncementMovesBehindAFollowingUserMessage(t *tes
 		t.Errorf("the announcement must keep its bytes behind the note")
 	}
 	checkWireAnnouncedIsCallable(t, reqs, run.llm.callable)
+}
+
+func TestAnthropicInlineToolsKeepTheSentRecordOfAMessageARequestEndsOnAgain(t *testing.T) {
+	load := func(id, names string) string {
+		return `{"type":"tool_use","id":"` + id + `","name":"_meta__load_tools","input":{"names":"` + names + `"}}`
+	}
+	lost := func(id string, withResult bool) func(provider.Message) bool {
+		return func(m provider.Message) bool {
+			return (len(m.ToolCalls) > 0 && m.ToolCalls[0].ID == id) || (withResult && m.Role == provider.RoleTool && m.ToolCallID == id)
+		}
+	}
+	capped := []Action{{Name: "delete", Description: "Delete an item.", Parameters: []Parameter{{Name: "id", Description: "Item id.", Required: true}}}}
+	names := []string{"p__delete"}
+	for i := range maxStickyTools + 5 {
+		capped = append(capped, Action{Name: fmt.Sprintf("t%02d", i), Description: "Capped tool.", ReadOnly: true})
+		names = append(names, fmt.Sprintf("p__t%02d", i))
+	}
+	var withdrawn []string
+	for _, name := range names[maxStickyTools:] {
+		withdrawn = append(withdrawn, "-"+name)
+	}
+	loadsCatalog := "tool toolu_c +p__catalog +p__list +p__lookup"
+	for _, tc := range []struct {
+		name    string
+		actions []Action
+		lose    func(provider.Message) bool
+		script  []string
+		turns   []string
+		record  string
+		change  []string
+	}{
+		{"the assistant message of a later load is not stored", announceActions(), lost("toolu_o", false),
+			[]string{load("toolu_c", "p__catalog"), load("toolu_o", "p__other")},
+			[]string{"turn 1", "turn 2"}, loadsCatalog, []string{"+p__other"}},
+		{"neither message of a later load is stored", announceActions(), lost("toolu_o", true),
+			[]string{load("toolu_c", "p__catalog"), load("toolu_o", "p__other")},
+			[]string{"turn 1", "turn 2"}, loadsCatalog, []string{"+p__other"}},
+		{"neither message of an approved call is stored", capped, lost("toolu_d", true),
+			[]string{load("toolu_l", strings.Join(names, ",")), `{"type":"tool_use","id":"toolu_d","name":"p__delete","input":{"id":"7"}}`},
+			[]string{"turn 1", "approve", "turn 3"}, "tool toolu_l +" + strings.Join(names, " +"), withdrawn},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := inlineRegistry(t, tc.actions, &countingExecutor{})
+			if err := registry.Register(PluginCapability{Name: "conf", Actions: []Action{{Name: "check"}}}, confirmingExecutor{}); err != nil {
+				t.Fatal(err)
+			}
+			run := newInlineRunOn(t, &lostCallStore{SessionStoreInterface: sqliteSessions(t), lose: tc.lose}, registry,
+				OrchestratorOpts{ConfirmationPlugin: "conf", ConfirmationAction: "check"}, tc.script...)
+			for _, message := range tc.turns {
+				ctx := run.ctx
+				if message == "approve" {
+					ctx = actor.WithConfirmationDecision(ctx, "approve")
+				}
+				run.turn(t, ctx, message)
+			}
+
+			reqs := run.api.requests(t)
+			if len(reqs) != 4 {
+				t.Fatalf("chat-loop requests = %d, want 4", len(reqs))
+			}
+			sent, again, next := reqs[1].Messages, reqs[2].Messages, reqs[3].Messages
+			checkStartsWith(t, "the request that ends again on the same message", reqs[1], reqs[2], true)
+			if len(again) != len(sent)+1 || !slices.Equal(wireChanges(again[len(again)-1]), tc.change) {
+				t.Errorf("the request that ends again must add exactly %v after the sent announcement, ends with %s", tc.change, again[max(0, len(again)-2):])
+			}
+			last := tc.turns[len(tc.turns)-1]
+			if len(next) != len(sent)+3 || string(next[len(next)-2]) != `{"role":"user","content":"`+last+`"}` ||
+				!slices.Equal(wireChanges(next[len(next)-1]), tc.change) {
+				t.Errorf("the next request must end with the reply, %q and %v, got %d messages ending with %s",
+					last, tc.change, len(next), next[max(0, len(next)-3):])
+			}
+			for j, m := range sent[:min(len(sent), len(next))] {
+				if !bytes.Equal(next[j], m) {
+					t.Errorf("message %d of the next request differs from the sent one:\n got %s\nwant %s", j, next[j], m)
+				}
+			}
+			checkWireAnnouncedIsCallable(t, reqs, run.llm.callable)
+			want := []string{tc.record, "user " + last + " " + strings.Join(tc.change, " ")}
+			if got := storedRecords(t, run.sessions); !slices.Equal(got, want) {
+				t.Errorf("stored records = %q, want %q", got, want)
+			}
+		})
+	}
 }

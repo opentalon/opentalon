@@ -343,6 +343,15 @@ How the announcements follow the session:
   that is stored. The next request that reads the loaded tools carries no
   such withdrawal, so the conversation from that place is written to the
   cache once.
+- A request ends on the same user message or tool result as the request
+  before it when the session store saved no message of the calls in between,
+  or saved a call's result without its assistant message so that the result
+  is left out (a confirmation prompt and the approval that answers it are
+  left out of every request). That message keeps the announcement it was
+  sent with. A tool that became callable or stopped being callable since is
+  announced after it for that request only, and the request after it
+  announces the change after its own last user message or tool result. The
+  conversation from that place is written to the cache once.
 - A user message stored after the message an announcement follows, such as
   a note added while a call waits for confirmation, comes before the
   announcement from the next request on. The conversation from that place is
