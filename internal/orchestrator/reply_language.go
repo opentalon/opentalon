@@ -33,13 +33,22 @@ import (
 // floor — "How do I create a new item?" detects as English at about 0.58 —
 // and as the first message of a conversation they have no history to fall
 // back on, so the model picks the language and sometimes picks the wrong one.
-// Step (c) pins such a message only when lingua's strictly leading candidate
-// for it is the language the profile names. It never overrides a detection:
-// when lingua leans elsewhere, or the profile names no language or one outside
-// the candidate set, the turn stays unpinned. History comes before the profile
-// so a running conversation does not switch language because one short
-// message, for example one built around a product name, happens to lean
+// Step (c) runs only when (a) and (b) pin nothing. It looks at one message:
+// the current message when it has at least replyLanguageMinChars runes,
+// otherwise the newest visible user message in the history that has, so the
+// turn after a bare approval ("y", a tapped button) follows the request behind
+// it. That message pins the turn only when lingua's strictly leading candidate
+// for it is the language the profile names; older messages are not consulted,
+// so a newer message that leans elsewhere is never overruled by an older one
+// that leans toward the profile's language. Step (c) never overrides a
+// detection: when lingua leans elsewhere, or the profile names no language or
+// one outside the candidate set, the turn stays unpinned. History comes before
+// the profile so a running conversation does not switch language because one
+// short message, for example one built around a product name, happens to lean
 // toward the profile's language.
+//
+// A hidden (system-injected) turn tries (b) and then (c) on the history alone:
+// its own text is not the user's words and never counts.
 
 // replyLanguageCandidates bounds detection to a fixed set of common languages.
 // A bounded set keeps lingua's memory footprint modest and avoids pinning an
@@ -156,14 +165,38 @@ func (o *Orchestrator) replyLanguageDirectiveWithHistory(current string, priorHi
 
 // replyLanguageDirectiveWithProfile returns the reply-language directive for a
 // visible turn: replyLanguageDirectiveWithHistory, and when that pins nothing,
-// the profile's confirmation of an unsure detection on the current message
-// (step (c) in the file header). profileLanguage is the profile's ISO 639-1
+// the profile's confirmation of an unsure detection on the newest user message
+// long enough to detect (step (c) in the file header, see
+// replyLanguageProfileCandidate). profileLanguage is the profile's ISO 639-1
 // code; "" skips the confirmation.
 func (o *Orchestrator) replyLanguageDirectiveWithProfile(current string, priorHistory []provider.Message, profileLanguage string) string {
 	if directive := o.replyLanguageDirectiveWithHistory(current, priorHistory); directive != "" {
 		return directive
 	}
-	return o.replyLanguageConfirmedByProfile(current, profileLanguage)
+	return o.replyLanguageConfirmedByProfile(replyLanguageProfileCandidate(current, priorHistory), profileLanguage)
+}
+
+// replyLanguageProfileCandidate returns the one message the profile
+// confirmation runs on: current when it has at least replyLanguageMinChars
+// runes, otherwise the newest visible user message in priorHistory that has,
+// with its [knowledge_context] stripped as in the history walk-back. Shorter
+// messages ("y", "ok", a tapped button), assistant and tool rows and hidden
+// notes are skipped. It returns "" when there is none. A hidden turn passes ""
+// as current, so only the history counts.
+func replyLanguageProfileCandidate(current string, priorHistory []provider.Message) string {
+	if msg := strings.TrimSpace(current); len([]rune(msg)) >= replyLanguageMinChars {
+		return msg
+	}
+	for i := len(priorHistory) - 1; i >= 0; i-- {
+		m := priorHistory[i]
+		if !isVisibleUserMessage(m) {
+			continue
+		}
+		if msg := strings.TrimSpace(stripKnowledgeContext(m.Content)); len([]rune(msg)) >= replyLanguageMinChars {
+			return msg
+		}
+	}
+	return ""
 }
 
 // replyLanguageConfirmedByProfile returns the reply-language directive for the
@@ -217,9 +250,15 @@ func replyLanguageFromISOCode(code string) (lingua.Language, bool) {
 // the inject path. Its text is not the user's own words (it is often an English
 // facts line), so detecting on it would answer a German conversation in English.
 // The visible history is the only trustworthy signal here, so this path has
-// nothing to try first and goes straight to the walk-back.
-func (o *Orchestrator) replyLanguageDirectiveForHidden(priorHistory []provider.Message) string {
-	return o.replyLanguageDirectiveFromHistory(priorHistory)
+// nothing to try first and goes straight to the walk-back, and when that pins
+// nothing, to the profile's confirmation on the newest visible user message
+// long enough to detect. profileLanguage is the profile's ISO 639-1 code; ""
+// skips the confirmation.
+func (o *Orchestrator) replyLanguageDirectiveForHidden(priorHistory []provider.Message, profileLanguage string) string {
+	if directive := o.replyLanguageDirectiveFromHistory(priorHistory); directive != "" {
+		return directive
+	}
+	return o.replyLanguageConfirmedByProfile(replyLanguageProfileCandidate("", priorHistory), profileLanguage)
 }
 
 // replyLanguageDirectiveFromHistory walks back to the most recent VISIBLE user
