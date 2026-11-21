@@ -7,8 +7,8 @@ SQLite (default) and PostgreSQL behind one `Dialect`. Design background:
 ## Migrations are `NNN_name.sql` and sort lexicographically
 
 `migrationNames` sorts filenames with `sort.Strings`, then `migrationNumber`
-parses the digits before the first `_`. Numbering is currently at `020`. A new
-migration is `021_short_name.sql`.
+parses the digits before the first `_`. Numbering is currently at `021`. A new
+migration is `022_short_name.sql`.
 
 > **Gotcha**: mixing widths — adding `18_sessions_flag.sql` next to the
 > `017_…` files. `sort.Strings` does not order `18_…` where its number says
