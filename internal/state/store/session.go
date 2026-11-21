@@ -587,6 +587,7 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	if err != nil {
 		return err
 	}
+	msg = state.WithStoreKey(msg)
 	toolCallID := sql.NullString{String: msg.ToolCallID, Valid: msg.ToolCallID != ""}
 	visibility := sql.NullString{String: msg.Visibility, Valid: msg.Visibility != ""}
 	noteKey := sql.NullString{String: tc.NoteKey, Valid: tc.NoteKey != ""}
@@ -622,9 +623,9 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, thinking, announcement, metadata, visibility, note_key, created_at)
-		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
-		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, thinkingJSON, announcementJSON, metadataJSON, visibility, noteKey, now, id); err != nil {
+		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, thinking, announcement, message_key, metadata, visibility, note_key, created_at)
+		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
+		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, thinkingJSON, announcementJSON, msg.StoreKey, metadataJSON, visibility, noteKey, now, id); err != nil {
 		return fmt.Errorf("add message insert: %w", err)
 	}
 
@@ -698,7 +699,7 @@ func (s *SessionStore) SetModel(id string, model provider.ModelRef) error {
 	return nil
 }
 
-func (s *SessionStore) SetAnnouncement(id string, announcement *provider.ToolAnnouncement) error {
+func (s *SessionStore) SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error {
 	ctx := context.Background()
 	d := s.db.Dialect()
 	column, err := announcementAsNullString(announcement)
@@ -716,11 +717,18 @@ func (s *SessionStore) SetAnnouncement(id string, announcement *provider.ToolAnn
 	if err := lockSessionRow(ctx, tx, d, id); err != nil {
 		return fmt.Errorf("set announcement lock: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		d.Rebind(`UPDATE messages SET announcement = ? WHERE session_id = ? AND seq =
-		(SELECT MAX(seq) FROM messages WHERE session_id = ? AND role IN (?, ?))`),
-		column, id, id, string(provider.RoleUser), string(provider.RoleTool)); err != nil {
+	res, err := tx.ExecContext(ctx,
+		d.Rebind(`UPDATE messages SET announcement = ? WHERE session_id = ? AND message_key = ?`),
+		column, id, storeKey)
+	if err != nil {
 		return fmt.Errorf("set announcement: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set announcement rows: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("set announcement: %d messages with key %q in session %q: %w", n, storeKey, id, state.ErrMessageNotFound)
 	}
 	return tx.Commit()
 }
@@ -835,9 +843,10 @@ func (s *SessionStore) SetSummary(id string, summary string, messages []provider
 		}
 		toolCallID := sql.NullString{String: msg.ToolCallID, Valid: msg.ToolCallID != ""}
 		visibility := sql.NullString{String: msg.Visibility, Valid: msg.Visibility != ""}
+		storeKey := sql.NullString{String: msg.StoreKey, Valid: msg.StoreKey != ""}
 		if _, err := tx.ExecContext(ctx,
-			d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, thinking, announcement, visibility, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-			id, i+1, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, thinkingJSON, announcementJSON, visibility, now); err != nil {
+			d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, thinking, announcement, message_key, visibility, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			id, i+1, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, thinkingJSON, announcementJSON, storeKey, visibility, now); err != nil {
 			return fmt.Errorf("set summary insert: %w", err)
 		}
 	}
@@ -975,7 +984,7 @@ func (s *SessionStore) PruneIdleSessions() error {
 // loadMessages reads all messages for a session from the messages table, ordered by seq.
 func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error) {
 	rows, err := s.db.SQLDB().Query(
-		s.db.Dialect().Rebind(`SELECT role, content, tool_calls, tool_call_id, thinking, announcement, visibility, metadata FROM messages WHERE session_id = ? ORDER BY seq`),
+		s.db.Dialect().Rebind(`SELECT role, content, tool_calls, tool_call_id, thinking, announcement, message_key, visibility, metadata FROM messages WHERE session_id = ? ORDER BY seq`),
 		sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load messages: %w", err)
@@ -985,8 +994,8 @@ func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error
 	var messages []provider.Message
 	for rows.Next() {
 		var role, content string
-		var toolCallsJSON, toolCallID, thinkingJSON, announcementJSON, visibility, metadataJSON sql.NullString
-		if err := rows.Scan(&role, &content, &toolCallsJSON, &toolCallID, &thinkingJSON, &announcementJSON, &visibility, &metadataJSON); err != nil {
+		var toolCallsJSON, toolCallID, thinkingJSON, announcementJSON, storeKey, visibility, metadataJSON sql.NullString
+		if err := rows.Scan(&role, &content, &toolCallsJSON, &toolCallID, &thinkingJSON, &announcementJSON, &storeKey, &visibility, &metadataJSON); err != nil {
 			return nil, fmt.Errorf("load messages scan: %w", err)
 		}
 		msg := provider.Message{
@@ -994,6 +1003,7 @@ func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error
 			Content:    content,
 			ToolCallID: toolCallID.String, // zero value "" when NULL — safe
 			Visibility: visibility.String, // "" when NULL = visible
+			StoreKey:   storeKey.String,
 		}
 		if toolCallsJSON.Valid {
 			if err := json.Unmarshal([]byte(toolCallsJSON.String), &msg.ToolCalls); err != nil {

@@ -1,8 +1,10 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -13,7 +15,7 @@ import (
 type announcementStore interface {
 	Create(p state.SessionParams) *state.Session
 	AddMessage(id string, msg provider.Message) error
-	SetAnnouncement(id string, announcement *provider.ToolAnnouncement) error
+	SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error
 	SetSummary(id string, summary string, messages []provider.Message) error
 	Get(id string) (*state.Session, error)
 }
@@ -38,6 +40,19 @@ func storedAnnouncements(t *testing.T, store announcementStore, id string) []str
 	return renderAnnouncements(sess.Messages)
 }
 
+func storeKeys(t *testing.T, store announcementStore, id string) []string {
+	t.Helper()
+	sess, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	keys := make([]string, len(sess.Messages))
+	for i, m := range sess.Messages {
+		keys[i] = m.StoreKey
+	}
+	return keys
+}
+
 func checkAnnouncementRoundTrip(t *testing.T, store announcementStore) {
 	t.Helper()
 	store.Create(state.SessionParams{ID: "s1"})
@@ -46,28 +61,34 @@ func checkAnnouncementRoundTrip(t *testing.T, store announcementStore) {
 	call := func(id string) []provider.ToolCall {
 		return []provider.ToolCall{{ID: id, Name: "p__a", Arguments: map[string]string{}}}
 	}
-	steps := []struct {
-		msg          provider.Message
-		announcement *provider.ToolAnnouncement
-	}{
-		{provider.Message{Role: provider.RoleUser, Content: "u1"}, nil},
-		{provider.Message{Role: provider.RoleAssistant, ToolCalls: call("c1")}, nil},
-		{provider.Message{Role: provider.RoleTool, ToolCallID: "c1", Content: "r1"}, added},
-		{provider.Message{Role: provider.RoleAssistant, Content: "a1"}, nil},
-		{provider.Message{Role: provider.RoleUser, Content: "u2"}, nil},
-		{provider.Message{Role: provider.RoleAssistant, Content: "a2"}, removed},
-		{provider.Message{Role: provider.RoleAssistant, ToolCalls: call("c2")}, nil},
-		{provider.Message{Role: provider.RoleTool, ToolCallID: "c2", Content: "r2"}, nil},
-	}
-	for _, step := range steps {
-		if err := store.AddMessage("s1", step.msg); err != nil {
+	for _, m := range []provider.Message{
+		{Role: provider.RoleUser, Content: "u1"},
+		{Role: provider.RoleAssistant, ToolCalls: call("c1")},
+		{Role: provider.RoleTool, ToolCallID: "c1", Content: "r1"},
+		{Role: provider.RoleAssistant, Content: "a1"},
+		{Role: provider.RoleUser, Content: "u2", StoreKey: "key-u2"},
+		{Role: provider.RoleAssistant, Content: "a2"},
+		{Role: provider.RoleAssistant, ToolCalls: call("c1")},
+		{Role: provider.RoleTool, ToolCallID: "c1", Content: "r2"},
+	} {
+		if err := store.AddMessage("s1", m); err != nil {
 			t.Fatalf("AddMessage: %v", err)
 		}
-		if step.announcement != nil {
-			if err := store.SetAnnouncement("s1", step.announcement); err != nil {
-				t.Fatalf("SetAnnouncement: %v", err)
-			}
+	}
+	keys := storeKeys(t, store, "s1")
+	if keys[4] != "key-u2" || slices.Contains(keys, "") || len(slices.Compact(slices.Sorted(slices.Values(keys)))) != len(keys) {
+		t.Fatalf("store keys = %q, want a distinct key per message and the given key-u2 kept", keys)
+	}
+	for _, set := range []struct {
+		key          string
+		announcement *provider.ToolAnnouncement
+	}{{keys[2], added}, {keys[4], removed}} {
+		if err := store.SetAnnouncement("s1", set.key, set.announcement); err != nil {
+			t.Fatalf("SetAnnouncement: %v", err)
 		}
+	}
+	if err := store.SetAnnouncement("s1", "unknown", added); !errors.Is(err, state.ErrMessageNotFound) {
+		t.Errorf("SetAnnouncement with an unknown key = %v, want ErrMessageNotFound", err)
 	}
 	want := []string{"none", "none", "+[p__a p__b] -[]", "none", "+[] -[p__b]", "none", "none", "none"}
 	if got := storedAnnouncements(t, store, "s1"); !reflect.DeepEqual(got, want) {
@@ -90,6 +111,15 @@ func checkAnnouncementRoundTrip(t *testing.T, store announcementStore) {
 	if got := storedAnnouncements(t, store, "s1"); !reflect.DeepEqual(got, want[:5]) {
 		t.Errorf("after the rollback: %q, want %q", got, want[:5])
 	}
+	if got := storeKeys(t, store, "s1"); !reflect.DeepEqual(got, keys[:5]) {
+		t.Errorf("store keys after the rollback = %q, want %q", got, keys[:5])
+	}
+	if err := store.SetAnnouncement("s1", keys[4], nil); err != nil {
+		t.Fatalf("SetAnnouncement after the rollback: %v", err)
+	}
+	if got := storedAnnouncements(t, store, "s1"); !reflect.DeepEqual(got, append(want[:4:4], "none")) {
+		t.Errorf("after clearing u2's record: %q", got)
+	}
 }
 
 func checkAnnouncementSurvivesTrim(t *testing.T, db *DB) {
@@ -105,7 +135,7 @@ func checkAnnouncementSurvivesTrim(t *testing.T, db *DB) {
 	add(provider.RoleUser, "u1")
 	add(provider.RoleAssistant, "a1")
 	add(provider.RoleUser, "u2")
-	if err := store.SetAnnouncement("s1", &provider.ToolAnnouncement{Added: []string{"p__a"}}); err != nil {
+	if err := store.SetAnnouncement("s1", storeKeys(t, store, "s1")[2], &provider.ToolAnnouncement{Added: []string{"p__a"}}); err != nil {
 		t.Fatalf("SetAnnouncement: %v", err)
 	}
 	add(provider.RoleAssistant, "a2")
@@ -132,6 +162,7 @@ func checkAnnouncementMigration(t *testing.T, db *DB) {
 	store.Create(state.SessionParams{ID: "s1"})
 	for _, q := range []string{
 		`ALTER TABLE messages DROP COLUMN announcement`,
+		`ALTER TABLE messages DROP COLUMN message_key`,
 		`DELETE FROM schema_version`,
 		`INSERT INTO schema_version (version) VALUES (20)`,
 	} {
@@ -191,6 +222,9 @@ func TestInMemorySessionStore_AnnouncementRoundTrip(t *testing.T) {
 	}
 	if got, want := storedAnnouncements(t, loaded, "s1"), storedAnnouncements(t, store, "s1"); !reflect.DeepEqual(got, want) {
 		t.Errorf("after Save and Load: %q, want %q", got, want)
+	}
+	if got, want := storeKeys(t, loaded, "s1"), storeKeys(t, store, "s1"); !reflect.DeepEqual(got, want) {
+		t.Errorf("store keys after Save and Load: %q, want %q", got, want)
 	}
 }
 

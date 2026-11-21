@@ -367,9 +367,8 @@ func withToolCatalog(segs provider.SystemSegments, catalog string) provider.Syst
 	return segs
 }
 
-func recordToolChange(ctx context.Context, sessions SessionStoreInterface, sessionID string,
-	stored []provider.Message, req *provider.CompletionRequest, transient int) {
-	at := state.LastUserRole(req.Messages[:max(len(req.Messages)-transient, 0)])
+func recordToolChange(ctx context.Context, sessions SessionStoreInterface, sessionID string, req *provider.CompletionRequest) {
+	at := lastUserRole(req.Messages)
 	if at < 0 {
 		return
 	}
@@ -378,15 +377,24 @@ func recordToolChange(ctx context.Context, sessions SessionStoreInterface, sessi
 		return
 	}
 	req.Messages[at].Announcement = change
-	// SetAnnouncement reaches only the session's last user or tool message; a change on any other one stays in this request.
-	last := state.LastUserRole(stored)
-	if last < 0 || stored[last].Role != req.Messages[at].Role || stored[last].ToolCallID != req.Messages[at].ToolCallID {
+	key := req.Messages[at].StoreKey
+	// One-round messages and pairing notices have no stored row: their record lives in this request only.
+	if key == "" {
 		return
 	}
-	if err := sessions.SetAnnouncement(sessionID, change); err != nil {
+	if err := sessions.SetAnnouncement(sessionID, key, change); err != nil {
 		slog.WarnContext(ctx, "tool_catalog: announcement not stored",
 			"component", "orchestrator", "session", sessionID, "error", err)
 	}
+}
+
+func lastUserRole(msgs []provider.Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == provider.RoleUser || msgs[i].Role == provider.RoleTool {
+			return i
+		}
+	}
+	return -1
 }
 
 func announcedTools(msgs []provider.Message) map[string]bool {

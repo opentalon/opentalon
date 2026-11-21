@@ -76,11 +76,18 @@ func announceOrch(t *testing.T, opts OrchestratorOpts, exec PluginExecutor, acti
 	*Orchestrator, *announceLLM, *state.SessionStore,
 ) {
 	t.Helper()
+	sessions := state.NewSessionStore("")
+	orch, llm := announceOrchOn(t, sessions, opts, exec, actions, rounds...)
+	return orch, llm, sessions
+}
+
+func announceOrchOn(t *testing.T, sessions SessionStoreInterface, opts OrchestratorOpts, exec PluginExecutor, actions []Action,
+	rounds ...provider.CompletionResponse) (*Orchestrator, *announceLLM) {
+	t.Helper()
 	registry := NewToolRegistry()
 	if err := registry.Register(PluginCapability{Name: "p", Description: "announcement fixtures", Actions: actions}, exec); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
 	if opts.InjectionStateStore == nil {
 		opts.InjectionStateStore = &fakeInjectionStateStore{}
@@ -88,7 +95,7 @@ func announceOrch(t *testing.T, opts OrchestratorOpts, exec PluginExecutor, acti
 	llm := &announceLLM{rounds: rounds}
 	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
 		state.NewMemoryStore(""), sessions, opts)
-	return orch, llm, sessions
+	return orch, llm
 }
 
 func announceTurn(t *testing.T, ctx context.Context, orch *Orchestrator, message string) {
@@ -121,7 +128,7 @@ func recordsOf(msgs []provider.Message) []string {
 	return out
 }
 
-func storedRecords(t *testing.T, sessions *state.SessionStore) []string {
+func storedRecords(t *testing.T, sessions SessionStoreInterface) []string {
 	t.Helper()
 	sess, err := sessions.Get("s1")
 	if err != nil {
@@ -160,17 +167,19 @@ func checkAnnounced(t *testing.T, seen []announceRequest, unread ...int) {
 
 func checkRecordsKept(t *testing.T, seen []announceRequest) {
 	t.Helper()
-	for k := 1; k < len(seen); k++ {
-		prev, cur := seen[k-1].messages, seen[k].messages
-		for j := 0; j < len(prev) && j < len(cur); j++ {
-			p, c := prev[j], cur[j]
-			if p.Role != c.Role || p.Content != c.Content || p.ToolCallID != c.ToolCallID {
-				continue
+	type identity struct {
+		role        provider.Role
+		id, content string
+	}
+	carried := map[identity]*provider.ToolAnnouncement{}
+	for k, r := range seen {
+		for _, m := range r.messages {
+			id := identity{m.Role, m.ToolCallID, m.Content}
+			if before, ok := carried[id]; ok && !reflect.DeepEqual(before, m.Announcement) {
+				t.Errorf("request %d changed a carried record: %v, before %v", k+1,
+					recordsOf([]provider.Message{m}), recordsOf([]provider.Message{{Role: m.Role, ToolCallID: m.ToolCallID, Content: m.Content, Announcement: before}}))
 			}
-			if !reflect.DeepEqual(p.Announcement, c.Announcement) {
-				t.Errorf("request %d changed the record of message %d: %v, before %v",
-					k+1, j+1, recordsOf([]provider.Message{c}), recordsOf([]provider.Message{p}))
-			}
+			carried[id] = m.Announcement
 		}
 	}
 }
@@ -380,5 +389,113 @@ func TestAppendStrippingHistoricalKC_KeepsTheRecord(t *testing.T) {
 		if out[i].Announcement != msgs[i].Announcement {
 			t.Errorf("message %d record = %v, want %v", i+1, out[i].Announcement, msgs[i].Announcement)
 		}
+	}
+}
+
+func TestRun_RetryMessageCarriesTheRecordWhenTheFitDropsIt(t *testing.T) {
+	loaded := " +p__catalog +p__list +p__lookup"
+	bigAnswer := strings.Repeat("filler ", 20000)
+	for _, tc := range []struct {
+		name   string
+		window func(req *provider.CompletionRequest) int
+		kept   []string
+	}{
+		{"the fit keeps only the retry message", func(*provider.CompletionRequest) int { return 1 }, nil},
+		{"the fit keeps the turn's user message", func(req *provider.CompletionRequest) int {
+			whole := fitRequestToWindow(context.Background(), &provider.CompletionRequest{Messages: req.Messages, Tools: req.Tools}, 0, 0, 1)
+			big := estimateMessageTokens(provider.Message{Role: provider.RoleAssistant, Content: bigAnswer})
+			return (whole - big/2) * 10 / 9
+		}, []string{"turn 2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orch, llm, sessions := announceOrch(t, OrchestratorOpts{}, &countingExecutor{}, announceActions(),
+				loadCall("l1", "p__catalog"), provider.CompletionResponse{Content: bigAnswer},
+				provider.CompletionResponse{Content: "There are {{plugin_output.total}} items."})
+			llm.onCall = func(call int, req *provider.CompletionRequest) error {
+				switch call {
+				case 2:
+					orch.contextWindow = tc.window(req)
+				case 3:
+					orch.contextWindow = 0
+				}
+				return nil
+			}
+			for turn := 1; turn <= 3; turn++ {
+				announceTurn(t, context.Background(), orch, fmt.Sprintf("turn %d", turn))
+			}
+			if len(llm.seen) != 5 {
+				t.Fatalf("requests = %d, want 5 (load, answer, the turn 2 request, its retry, turn 3)", len(llm.seen))
+			}
+			retry := llm.seen[3].messages
+			var kept []string
+			for _, m := range retry[1 : len(retry)-1] {
+				if m.Role == provider.RoleUser {
+					kept = append(kept, m.Content)
+				}
+			}
+			hint := retry[len(retry)-1]
+			if !slices.Equal(kept, tc.kept) || hint.Role != provider.RoleUser || !strings.HasPrefix(hint.Content, "[system]") {
+				t.Fatalf("retry request keeps user messages %q and ends with %s %q; want %q and the retry hint", kept, hint.Role, hint.Content, tc.kept)
+			}
+			checkAnnounced(t, llm.seen)
+			checkRecordsKept(t, llm.seen)
+			if got, want := recordsOf(retry), []string{"user " + hint.Content + loaded}; !reflect.DeepEqual(got, want) {
+				t.Errorf("records in the retry = %q, want %q", got, want)
+			}
+			if got, want := storedRecords(t, sessions), []string{"tool l1" + loaded}; !reflect.DeepEqual(got, want) {
+				t.Errorf("stored records = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+type lostCallStore struct {
+	*state.SessionStore
+	lose func(provider.Message) bool
+}
+
+func (s *lostCallStore) AddMessage(id string, msg provider.Message) error {
+	return s.AddMessageWithMetadata(id, msg, nil)
+}
+
+func (s *lostCallStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
+	if s.lose(msg) {
+		return errors.New("simulated insert failure")
+	}
+	return s.SessionStore.AddMessageWithMetadata(id, msg, metadata)
+}
+
+func TestRun_RecordGoesToTheStoredMessageTheRequestCarries(t *testing.T) {
+	sessions := &lostCallStore{SessionStore: state.NewSessionStore(""), lose: func(m provider.Message) bool {
+		return len(m.ToolCalls) > 0 && m.ToolCalls[0].Arguments["names"] == "p__other"
+	}}
+	orch, llm := announceOrchOn(t, sessions, OrchestratorOpts{}, &countingExecutor{}, announceActions(),
+		loadCall("c1", "p__catalog"), loadCall("c1", "p__other"))
+	announceTurn(t, context.Background(), orch, "turn 1")
+	announceTurn(t, context.Background(), orch, "turn 2")
+	if len(llm.seen) != 4 {
+		t.Fatalf("requests = %d, want 4", len(llm.seen))
+	}
+	sess, err := sessions.Get("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results int
+	for _, m := range sess.Messages {
+		if m.Role == provider.RoleTool && m.ToolCallID == "c1" {
+			results++
+		}
+	}
+	if last := llm.seen[2].messages; results != 2 || len(last) != 4 || last[3].Role != provider.RoleTool {
+		t.Fatalf("want two stored c1 results and the later one dropped from request 3; got %d results, request 3 %v", results, recordsOf(last))
+	}
+	checkAnnounced(t, llm.seen)
+	checkRecordsKept(t, llm.seen[2:])
+	want := []string{"tool c1 +p__catalog +p__list +p__lookup +p__other"}
+	if got := recordsOf(llm.seen[2].messages); !reflect.DeepEqual(got, want) {
+		t.Errorf("records in request 3 = %q, want %q", got, want)
+	}
+	if got := storedRecords(t, sessions); !reflect.DeepEqual(got, want) {
+		t.Errorf("stored records = %q, want %q", got, want)
 	}
 }

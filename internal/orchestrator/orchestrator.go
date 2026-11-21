@@ -285,8 +285,9 @@ type SessionStoreInterface interface {
 	// reloaded client can redraw the Approve/Reject UI. A nil map behaves like
 	// AddMessage.
 	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
-	// SetAnnouncement replaces the announcement of the session's last message with role user or tool.
-	SetAnnouncement(id string, announcement *provider.ToolAnnouncement) error
+	// SetAnnouncement replaces the announcement of the session's message with the given StoreKey;
+	// AddMessage and AddMessageWithMetadata give a message without one a new StoreKey.
+	SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error
 	SetModel(id string, model provider.ModelRef) error
 	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op
 	SetTitle(id, title string) error                                         // fill the short session label ONLY while empty; never overwrites a title set elsewhere; missing id is a no-op
@@ -2410,7 +2411,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 
 		messages, system := o.appendConversation(ctx, sess, withToolCatalog(sysPrompt, toolCatalog))
 		messages = append(messages, transientMessages...)
-		transient := len(transientMessages)
 		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
 		if err != nil {
@@ -2526,7 +2526,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		for attempt := 0; ; attempt++ {
 			estimatedTokens = fitRequestToWindow(ctx, req, o.contextWindow, o.maxOutputTokens, o.calibrators.factor(req.Model))
 			if nativeMode && loadedRead {
-				recordToolChange(ctx, sessions, sessionID, sess.Messages, req, transient)
+				recordToolChange(ctx, sessions, sessionID, req)
 			}
 			// The fit only ever drops messages. When the re-fit after a
 			// refusal dropped none (nothing left to drop, or the last tool
@@ -6243,7 +6243,7 @@ func appendStrippingHistoricalKC(dst []provider.Message, msgs []provider.Message
 			if i != lastUserIdx {
 				stripped := stripKnowledgeContext(m.Content)
 				if stripped != m.Content {
-					m = provider.Message{Role: m.Role, Content: stripped, Files: m.Files, Announcement: m.Announcement}
+					m = provider.Message{Role: m.Role, Content: stripped, Files: m.Files, Announcement: m.Announcement, StoreKey: m.StoreKey}
 				}
 			}
 			// Deduplicate knowledge article plugin outputs.
@@ -6284,7 +6284,7 @@ func deduplicateLargeToolResult(m provider.Message, seen map[uint64]bool) provid
 	replaced := m.Content[:start] +
 		"[plugin_output]\n(Same tool result as a previous call — see above.)\n[/plugin_output]" +
 		m.Content[end+len(closeTag):]
-	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files, Announcement: m.Announcement}
+	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files, Announcement: m.Announcement, StoreKey: m.StoreKey}
 }
 
 // deduplicateKnowledgeOutput replaces repeated knowledge article plugin
@@ -6313,7 +6313,7 @@ func deduplicateKnowledgeOutput(m provider.Message, seen map[uint64]bool) provid
 	replaced := m.Content[:start] +
 		"[plugin_output]\n(Same knowledge articles as a previous lookup — see above.)\n[/plugin_output]" +
 		m.Content[end+len(closeTag):]
-	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files, Announcement: m.Announcement}
+	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files, Announcement: m.Announcement, StoreKey: m.StoreKey}
 }
 
 // isVisibleUserMessage reports whether m is the user's own visible turn: a real

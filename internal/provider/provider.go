@@ -50,6 +50,8 @@ type Message struct {
 	PromptType string `json:"-"`
 	// Announcement is set only on the user-role message that ends a request.
 	Announcement *ToolAnnouncement `json:"-"`
+	// StoreKey identifies the stored row of the message; empty on a message no session store wrote.
+	StoreKey string `json:"-"`
 }
 
 type ToolAnnouncement struct {

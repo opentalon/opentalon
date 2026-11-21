@@ -43,6 +43,7 @@ func (c *cachedSessionStore) Create(p state.SessionParams) *state.Session {
 }
 
 func (c *cachedSessionStore) AddMessage(id string, msg provider.Message) error {
+	msg = state.WithStoreKey(msg)
 	if err := c.inner.AddMessage(id, msg); err != nil {
 		return err
 	}
@@ -61,6 +62,7 @@ func (c *cachedSessionStore) AddMessageWithMetadata(id string, msg provider.Mess
 	// after an approval would still replay the exchange to the model. The rest
 	// of the map stays transcript-only.
 	msg.PromptType = metadata["prompt_type"]
+	msg = state.WithStoreKey(msg)
 	if err := c.inner.AddMessageWithMetadata(id, msg, metadata); err != nil {
 		return err
 	}
@@ -71,13 +73,15 @@ func (c *cachedSessionStore) AddMessageWithMetadata(id string, msg provider.Mess
 	return nil
 }
 
-func (c *cachedSessionStore) SetAnnouncement(id string, announcement *provider.ToolAnnouncement) error {
-	if err := c.inner.SetAnnouncement(id, announcement); err != nil {
+func (c *cachedSessionStore) SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error {
+	if err := c.inner.SetAnnouncement(id, storeKey, announcement); err != nil {
 		return err
 	}
 	if s, ok := c.cache[id]; ok {
-		if i := state.LastUserRole(s.Messages); i >= 0 {
-			s.Messages[i].Announcement = announcement
+		for i := range s.Messages {
+			if s.Messages[i].StoreKey == storeKey {
+				s.Messages[i].Announcement = announcement
+			}
 		}
 	}
 	return nil

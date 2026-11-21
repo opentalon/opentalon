@@ -1059,6 +1059,7 @@ func checkMigrationMarksNoSession(t *testing.T, db *DB) {
 		`DROP INDEX idx_profile_usage_group_kind_created`,
 		`ALTER TABLE profile_usage DROP COLUMN price`,
 		`ALTER TABLE messages DROP COLUMN announcement`,
+		`ALTER TABLE messages DROP COLUMN message_key`,
 		`DELETE FROM schema_version`,
 		`INSERT INTO schema_version (version) VALUES (18)`,
 	} {

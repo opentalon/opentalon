@@ -253,10 +253,10 @@ func (s *blockingSetSummaryStore) AddMessage(id string, msg provider.Message) er
 	defer s.writeEnd()
 	return s.inner.AddMessage(id, msg)
 }
-func (s *blockingSetSummaryStore) SetAnnouncement(id string, announcement *provider.ToolAnnouncement) error {
+func (s *blockingSetSummaryStore) SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error {
 	s.writeStart()
 	defer s.writeEnd()
-	return s.inner.SetAnnouncement(id, announcement)
+	return s.inner.SetAnnouncement(id, storeKey, announcement)
 }
 func (s *blockingSetSummaryStore) AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error {
 	s.writeStart()

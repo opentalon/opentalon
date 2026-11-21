@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,8 @@ import (
 // "session expired"; the latter is a transient internal error and must not
 // cause the client to discard a valid conversation_id.
 var ErrSessionNotFound = errors.New("session not found")
+
+var ErrMessageNotFound = errors.New("message not found")
 
 type Session struct {
 	ID          string             `yaml:"id"`
@@ -398,13 +401,11 @@ func cloneAnnouncement(a *provider.ToolAnnouncement) *provider.ToolAnnouncement 
 	return &provider.ToolAnnouncement{Added: slices.Clone(a.Added), Removed: slices.Clone(a.Removed)}
 }
 
-func LastUserRole(msgs []provider.Message) int {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == provider.RoleUser || msgs[i].Role == provider.RoleTool {
-			return i
-		}
+func WithStoreKey(msg provider.Message) provider.Message {
+	if msg.StoreKey == "" {
+		msg.StoreKey = rand.Text()
 	}
-	return -1
+	return msg
 }
 
 func (o *VerifiedOwner) clone() *VerifiedOwner {
@@ -452,12 +453,12 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 		}
 		held.stored = true
 	}
-	sess.Messages = append(sess.Messages, msg)
+	sess.Messages = append(sess.Messages, WithStoreKey(msg))
 	sess.UpdatedAt = time.Now()
 	return nil
 }
 
-func (s *SessionStore) SetAnnouncement(id string, announcement *provider.ToolAnnouncement) error {
+func (s *SessionStore) SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -465,10 +466,13 @@ func (s *SessionStore) SetAnnouncement(id string, announcement *provider.ToolAnn
 	if !ok {
 		return fmt.Errorf("session %q not found", id)
 	}
-	if i := LastUserRole(sess.Messages); i >= 0 {
-		sess.Messages[i].Announcement = cloneAnnouncement(announcement)
+	for i := range sess.Messages {
+		if storeKey != "" && sess.Messages[i].StoreKey == storeKey {
+			sess.Messages[i].Announcement = cloneAnnouncement(announcement)
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("session %q: %w", id, ErrMessageNotFound)
 }
 
 func (s *SessionStore) SetModel(id string, model provider.ModelRef) error {
