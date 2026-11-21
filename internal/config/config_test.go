@@ -1476,6 +1476,37 @@ func TestParseThinking(t *testing.T) {
 	}
 }
 
+// TestParseModelFeatures covers the values a model's features key can take:
+// null, an empty list, no key and an unknown name all parse and leave
+// inline_tools out, and inline_tools parses on either api.
+func TestParseModelFeatures(t *testing.T) {
+	cases := []struct {
+		name  string
+		api   string
+		field string // the line under the model, after its id; "" = no features key
+		want  string // the parsed features, as %q prints them
+	}{
+		{"absent", "anthropic-messages", "", "[]"},
+		{"null", "anthropic-messages", "features: null", "[]"},
+		{"empty", "anthropic-messages", "features: []", "[]"},
+		{"an unknown name", "anthropic-messages", "features: [tools, inline-tools]", `["tools" "inline-tools"]`},
+		{"inline_tools", "anthropic-messages", "features: [tools, inline_tools]", `["tools" "inline_tools"]`},
+		{"inline_tools on an openai-completions provider", "openai-completions", "features: [tools, inline_tools]", `["tools" "inline_tools"]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := "models:\n  providers:\n    p:\n      api: \"" + tc.api + "\"\n      models:\n        - id: claude-x\n          " + tc.field + "\n"
+			cfg, err := Parse([]byte(yaml))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := fmt.Sprintf("%q", cfg.Models.Providers["p"].Models[0].Features); got != tc.want {
+				t.Errorf("features = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParsePromptCacheValues(t *testing.T) {
 	cfg, err := Parse([]byte(`
 models:

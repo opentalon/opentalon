@@ -2344,11 +2344,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// round sends a byte-identical prefix. This maximizes provider-side KV
 	// cache hits (vLLM automatic prefix caching, OpenAI prompt caching) and
 	// avoids rebuilding ~25k tokens of tool definitions on every round.
-	var cachedTools []provider.ToolDefinition
+	var cachedTools, loadableTools []provider.ToolDefinition
 	var toolCatalog string
 	nativeMode := o.supportsNativeTools()
 	if nativeMode {
-		cachedTools = o.buildToolDefinitions(ctx)
+		cachedTools, loadableTools = o.buildToolDefinitions(ctx)
 		toolCatalog = o.renderToolCatalog(toolArraySet(cachedTools), o.resolveAllowedPlugins(ctx))
 	}
 	// Build the system prompt once per Run; appendConversation derives each
@@ -2435,6 +2435,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// maximizes provider-side KV cache hits.
 		if nativeMode {
 			req.Tools = cachedTools
+			req.LoadableTools = loadableTools
 			// Record exactly what the model is being sent this round so the
 			// tool-load gate (executeCall / maybeRequireConfirmation) can admit a
 			// call iff its tool was in this array — no per-call state re-read, and
@@ -2997,7 +2998,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// result (a failed batch promoted nothing).
 			if nativeMode && (toolResult.NotRun || (toolResult.Error == "" &&
 				call.Plugin == metaPluginName && call.Action == metaLoadTools)) {
-				cachedTools = o.buildToolDefinitions(ctx)
+				cachedTools, loadableTools = o.buildToolDefinitions(ctx)
 				toolCatalog = o.renderToolCatalog(toolArraySet(cachedTools), o.resolveAllowedPlugins(ctx))
 				log.Debug("cachedTools refreshed after a tool load",
 					"tools_count", len(cachedTools), "loaded_on_call", toolResult.NotRun)
@@ -3084,18 +3085,17 @@ func (o *Orchestrator) supportsNativeTools() bool {
 }
 
 // buildToolDefinitions converts the visible plugin actions into provider.ToolDefinition
-// for native function calling. The tools array carries only the small
-// native set: the always-include core (load_tools + any AlwaysInclude
+// for native function calling. callable, the tools array, carries only the
+// small native set: the always-include core (load_tools + any AlwaysInclude
 // action) plus the tools the session has loaded via load_tools (sticky,
 // capped at maxStickyTools). Every other allowed tool is discoverable via
-// the system-prompt catalog, not here. Profile / preparer / UserOnly
-// filters still apply.
-func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.ToolDefinition {
+// the system-prompt catalog and is returned in loadable, in name order.
+// Profile / preparer / UserOnly filters apply to both.
+func (o *Orchestrator) buildToolDefinitions(ctx context.Context) (callable, loadable []provider.ToolDefinition) {
 	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
 	preparerAction := o.preparerActions
 	promoted := o.promotedToolSet(ctx)
 
-	var tools []provider.ToolDefinition
 	for _, cap := range o.registry.ListCapabilities() {
 		if !o.pluginAllowed(cap, allowedPlugins) {
 			slog.Debug("tool registration: plugin excluded", "plugin", cap.Name)
@@ -3112,17 +3112,14 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 			// the catalog until the LLM loads them via load_tools. Same
 			// predicate the tool-load gate enforces (toolIsNative) so the array
 			// the model sees and the calls executeCall admits cannot diverge.
-			if !toolIsNative(action, fqn, promoted) {
-				slog.Debug("tool registration: action skipped (catalog-only, not loaded)", "tool", fqn)
-				continue
-			}
+			native := toolIsNative(action, fqn, promoted)
 			// Build JSON Schema for parameters.
 			properties := make(map[string]interface{})
 			var required []string
 			for _, p := range action.Parameters {
 				schema, fromPlugin := parameterSchema(p)
 				properties[p.Name] = schema
-				if p.Schema != "" && !fromPlugin {
+				if native && p.Schema != "" && !fromPlugin {
 					// The plugin went to the trouble of declaring a schema and
 					// the model is not getting it. Silence here would leave a
 					// missing enum looking exactly like a parameter that never
@@ -3147,15 +3144,23 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 			if len(required) > 0 {
 				params["required"] = required
 			}
-			tools = append(tools, provider.ToolDefinition{
+			td := provider.ToolDefinition{
 				Name:        fqn,
 				Description: action.Description,
 				Parameters:  params,
-			})
+				OnDemand:    !action.AlwaysInclude,
+			}
+			if !native {
+				loadable = append(loadable, td)
+				slog.Debug("tool registration: loadable (catalog-only, not loaded)", "tool", fqn)
+				continue
+			}
+			callable = append(callable, td)
 			slog.Debug("tool registration: registered", "tool", fqn, "params", len(action.Parameters))
 		}
 	}
-	return tools
+	sort.Slice(loadable, func(i, j int) bool { return loadable[i].Name < loadable[j].Name })
+	return callable, loadable
 }
 
 // prepareTurnStart assembles the turn_start event payload from the static

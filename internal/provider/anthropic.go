@@ -38,6 +38,7 @@ const (
 	anthropicCacheDiagnosisBeta = "cache-diagnosis-2026-04-07"
 	// anthropicThinkingBindingBeta allows thinking.block_binding.
 	anthropicThinkingBindingBeta = "thinking-binding-controls-2026-08-01"
+	anthropicInlineToolsBeta     = "inline-tools-2026-09-15"
 	// maxDiagnosedSessions bounds the sessions whose last response id is kept
 	// for cache diagnostics.
 	maxDiagnosedSessions = 10_000
@@ -212,6 +213,7 @@ type anthRequest struct {
 	// fingerprint is the thinking binding of the whole request, for the
 	// thinking blocks its response returns (see thinkingBinding).
 	fingerprint string
+	inlineTools bool
 }
 
 // anthDiagnostics opts a request in to cache diagnostics. PreviousMessageID
@@ -233,9 +235,10 @@ type anthCacheControl struct {
 }
 
 type anthTool struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description,omitempty"`
-	InputSchema map[string]interface{} `json:"input_schema"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description,omitempty"`
+	InputSchema  map[string]interface{} `json:"input_schema"`
+	DeferLoading bool                   `json:"defer_loading,omitempty"`
 }
 
 type anthThinking struct {
@@ -388,6 +391,9 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 	}
 	if anthReq.Thinking != nil && anthReq.Thinking.BlockBinding != nil {
 		addListHeader(httpReq.Header, "anthropic-beta", anthropicThinkingBindingBeta)
+	}
+	if anthReq.inlineTools {
+		addListHeader(httpReq.Header, "anthropic-beta", anthropicInlineToolsBeta)
 	}
 
 	// Structured session-event capture: emit metadata about the outbound
@@ -559,7 +565,11 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 	if err != nil {
 		return anthRequest{}, err
 	}
+	inlineTools := req.Segments != nil && model.SupportsFeature(FeatureInlineTools)
 	tools := toolDefsToAnthTools(req.Tools)
+	if inlineTools {
+		tools = inlineAnthTools(req.Tools, req.LoadableTools)
+	}
 	binding, err := newThinkingBinding(system, tools)
 	if err != nil {
 		return anthRequest{}, err
@@ -606,6 +616,7 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		MaxTokens:   maxTokens,
 		Tools:       tools,
 		fingerprint: binding.sum(),
+		inlineTools: inlineTools,
 	}
 	if cached {
 		ar.CacheControl = &anthCacheControl{Type: "ephemeral"}
@@ -672,7 +683,7 @@ func (p *AnthropicProvider) cachedSystemBlocks(req *CompletionRequest, systemPar
 	}
 	var blocks []anthTextBlock
 	// systemParts[0] is the leading system message, sent as its segments.
-	for _, text := range append([]string{segs.Fixed, segs.Conversation, segs.Round}, systemParts[1:]...) {
+	for _, text := range append([]string{segs.Fixed, segs.Catalog + segs.Conversation, segs.Round}, systemParts[1:]...) {
 		if strings.TrimSpace(text) != "" {
 			blocks = append(blocks, anthTextBlock{Type: "text", Text: text})
 		}
@@ -759,13 +770,37 @@ func toolDefsToAnthTools(defs []ToolDefinition) []anthTool {
 	}
 	tools := make([]anthTool, len(defs))
 	for i, d := range defs {
-		tools[i] = anthTool{
-			Name:        d.Name,
-			Description: d.Description,
-			InputSchema: d.Parameters,
-		}
+		tools[i] = toAnthTool(d)
 	}
 	return tools
+}
+
+// inlineAnthTools returns the tools of a chat-loop request to a model with
+// FeatureInlineTools: the fixed tools, then the on-demand ones, then every
+// loadable tool with defer_loading. With no loadable tool they are the tools
+// toolDefsToAnthTools returns.
+func inlineAnthTools(callable, loadable []ToolDefinition) []anthTool {
+	if len(loadable) == 0 {
+		return toolDefsToAnthTools(callable)
+	}
+	tools := make([]anthTool, 0, len(callable)+len(loadable))
+	for _, onDemand := range []bool{false, true} {
+		for _, d := range callable {
+			if d.OnDemand == onDemand {
+				tools = append(tools, toAnthTool(d))
+			}
+		}
+	}
+	for _, d := range loadable {
+		t := toAnthTool(d)
+		t.DeferLoading = true
+		tools = append(tools, t)
+	}
+	return tools
+}
+
+func toAnthTool(d ToolDefinition) anthTool {
+	return anthTool{Name: d.Name, Description: d.Description, InputSchema: d.Parameters}
 }
 
 // toAnthMessage converts a provider.Message to an anthMessage. Routes by

@@ -3040,7 +3040,7 @@ func TestToolCatalog_NativeMode_RendersCatalogAndKeepsToolsArraySmall(t *testing
 	}
 
 	// Native tools array: only the always-include load_tools meta-tool.
-	tools := orch.buildToolDefinitions(ctx)
+	tools, _ := orch.buildToolDefinitions(ctx)
 	if len(tools) != 1 || tools[0].Name != toolFQN(metaPluginName, metaLoadTools) {
 		t.Errorf("tools array = %+v, want only the always-include load_tools meta-tool", tools)
 	}
@@ -3067,7 +3067,7 @@ func TestToolCatalog_LoadedToolLeavesCatalogAndEntersToolsArray(t *testing.T) {
 	if !promoted["tools-plugin__t1"] {
 		t.Fatalf("promotedToolSet missing tools-plugin__t1, got %v", promoted)
 	}
-	tools := orch.buildToolDefinitions(ctx)
+	tools, _ := orch.buildToolDefinitions(ctx)
 	names := map[string]bool{}
 	for _, td := range tools {
 		names[td.Name] = true
