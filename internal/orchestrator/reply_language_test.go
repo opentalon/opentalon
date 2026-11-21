@@ -430,7 +430,7 @@ func TestReplyLanguageDirectiveForHidden_FollowsVisibleConversation(t *testing.T
 		{Role: provider.RoleUser, Content: "Genehmigen"}, // short approval, carries no signal
 		{Role: provider.RoleAssistant, Content: "Der Batch-Job wurde erstellt."},
 	}
-	if got := o.replyLanguageDirectiveForHidden(history); !strings.Contains(got, "Reply in German.") {
+	if got := o.replyLanguageDirectiveForHidden(history, ""); !strings.Contains(got, "Reply in German.") {
 		t.Errorf("hidden turn should follow the visible German conversation, got %q", got)
 	}
 }
@@ -447,7 +447,7 @@ func TestReplyLanguageDirectiveForHidden_SkipsEarlierHiddenTurn(t *testing.T) {
 			Content: "[system] Automated update on the background job. Outcome: completed."},
 		{Role: provider.RoleAssistant, Content: "Ihr Ticket wurde erstellt."},
 	}
-	if got := o.replyLanguageDirectiveForHidden(history); !strings.Contains(got, "Reply in German.") {
+	if got := o.replyLanguageDirectiveForHidden(history, ""); !strings.Contains(got, "Reply in German.") {
 		t.Errorf("earlier hidden English turn must be skipped, got %q", got)
 	}
 }
@@ -461,7 +461,7 @@ func TestReplyLanguageDirectiveForHidden_NoDetectableHistory(t *testing.T) {
 		{Role: provider.RoleUser, Content: "ok"},
 		{Role: provider.RoleAssistant, Content: "..."},
 	}
-	if got := o.replyLanguageDirectiveForHidden(history); got != "" {
+	if got := o.replyLanguageDirectiveForHidden(history, ""); got != "" {
 		t.Errorf("undetectable history should leave the turn unpinned, got %q", got)
 	}
 }
