@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -893,44 +894,207 @@ func TestAnthropicThinkingReplayFollowsBinding(t *testing.T) {
 	}
 }
 
-// TestAnthropicThinkingReplayAfterToolLoad loads a tool between two rounds of
-// a turn: the block produced before the tool list changed is left out, the
-// one produced after it goes back unchanged.
 func TestAnthropicThinkingReplayAfterToolLoad(t *testing.T) {
 	const block1 = `{"type":"thinking","thinking":"","signature":"sig-1"}`
 	const block2 = `{"type":"thinking","thinking":"","signature":"sig-2"}`
 	const call1 = `{"type":"tool_use","id":"toolu_1","name":"inv__load","input":{}}`
 	const call2 = `{"type":"tool_use","id":"toolu_2","name":"inv__show-item","input":{}}`
-	p, bodies := thinkingReplayRig(t, []ModelInfo{{ID: "claude-x", Thinking: "adaptive"}}, block1+","+call1, block2+","+call2)
 	load := ToolDefinition{Name: "inv__load", Description: "Load tools", Parameters: map[string]interface{}{"type": "object"}}
-	show := ToolDefinition{Name: "inv__show-item", Description: "Show an item", Parameters: map[string]interface{}{"type": "object"}}
-	msgs := []Message{{Role: RoleUser, Content: "Show item 7."}}
-	complete := func(tools ...ToolDefinition) {
-		t.Helper()
-		resp, err := p.Complete(context.Background(), &CompletionRequest{Model: "claude-x", Messages: msgs, Tools: tools})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(resp.ToolCalls) == 1 {
-			msgs = append(msgs,
-				Message{Role: RoleAssistant, ToolCalls: resp.ToolCalls, Thinking: resp.Thinking, ThinkingFingerprint: resp.ThinkingFingerprint},
-				Message{Role: RoleTool, Content: "ok", ToolCallID: resp.ToolCalls[0].ID})
-		}
-	}
-	complete(load)
-	complete(load, show)
-	complete(load, show)
+	show := ToolDefinition{Name: "inv__show-item", Description: "Show an item", Parameters: map[string]interface{}{"type": "object"}, OnDemand: true}
+	segs := SystemSegments{Fixed: "Rules."}
+	for _, tc := range []struct {
+		name     string
+		features []Feature
+		want     []string
+	}{
+		{"without inline_tools", nil, []string{
+			`{"role":"user","content":"Show item 7."}`,
+			`{"role":"assistant","content":[` + call1 + `]}`,
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}`,
+			`{"role":"assistant","content":[` + block2 + `,` + call2 + `]}`,
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"ok"}]}`,
+		}},
+		{"with inline_tools", []Feature{FeatureInlineTools}, []string{
+			`{"role":"user","content":"Show item 7."}`,
+			`{"role":"assistant","content":[` + block1 + `,` + call1 + `]}`,
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}`,
+			`{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"inv__show-item"}}]}`,
+			`{"role":"assistant","content":[` + block2 + `,` + call2 + `]}`,
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"ok"}]}`,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, bodies := thinkingReplayRig(t, []ModelInfo{{ID: "claude-x", Thinking: "adaptive", Features: tc.features}},
+				block1+","+call1, block2+","+call2)
+			msgs := []Message{{Role: RoleSystem, Content: segs.Join()}, {Role: RoleUser, Content: "Show item 7."}}
+			complete := func(tools []ToolDefinition, loadable ...ToolDefinition) {
+				t.Helper()
+				resp, err := p.Complete(context.Background(), &CompletionRequest{
+					Model: "claude-x", Messages: msgs, Tools: tools, LoadableTools: loadable, Segments: &segs,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(resp.ToolCalls) == 1 {
+					msgs = append(msgs,
+						Message{Role: RoleAssistant, ToolCalls: resp.ToolCalls, Thinking: resp.Thinking, ThinkingFingerprint: resp.ThinkingFingerprint},
+						Message{Role: RoleTool, Content: "ok", ToolCallID: resp.ToolCalls[0].ID})
+				}
+			}
+			complete([]ToolDefinition{load}, show)
+			msgs[len(msgs)-1].Announcement = &ToolAnnouncement{Added: []string{show.Name}}
+			complete([]ToolDefinition{load, show})
+			complete([]ToolDefinition{load, show})
 
-	got := sentAnthMessages(t, bodies()[2])
-	want := []string{
-		`{"role":"user","content":"Show item 7."}`,
-		`{"role":"assistant","content":[` + call1 + `]}`,
-		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}`,
-		`{"role":"assistant","content":[` + block2 + `,` + call2 + `]}`,
-		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"ok"}]}`,
+			if got := sentAnthMessages(t, bodies()[2]); strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
+				t.Errorf("third request messages:\n got %s\nwant %s", strings.Join(got, "\n"), strings.Join(tc.want, "\n"))
+			}
+		})
 	}
+}
+
+func TestAnthropicThinkingAfterAOneRequestWithdrawal(t *testing.T) {
+	const block = `{"type":"thinking","thinking":"","signature":"sig-1"}`
+	const call = `{"type":"tool_use","id":"toolu_1","name":"inv__load","input":{}}`
+	const added = `{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"inv__show-item"}}]}`
+	const removed = `{"role":"system","content":[{"type":"tool_removal","tool":{"type":"tool_reference","name":"inv__show-item"}}]}`
+	p, bodies := thinkingReplayRig(t, []ModelInfo{{ID: "claude-x", Thinking: "adaptive", Features: []Feature{FeatureInlineTools}}}, block+","+call)
+	load := ToolDefinition{Name: "inv__load", Description: "Load tools", Parameters: map[string]interface{}{"type": "object"}}
+	show := ToolDefinition{Name: "inv__show-item", Description: "Show an item", Parameters: map[string]interface{}{"type": "object"}, OnDemand: true}
+	segs := SystemSegments{Fixed: "Rules."}
+	msgs := []Message{
+		{Role: RoleSystem, Content: segs.Join()},
+		{Role: RoleUser, Content: "Show item 7.", Announcement: &ToolAnnouncement{Added: []string{show.Name}}},
+	}
+	resp, err := p.Complete(context.Background(), &CompletionRequest{
+		Model: "claude-x", Messages: msgs, Tools: []ToolDefinition{load}, LoadableTools: []ToolDefinition{show}, Segments: &segs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs = append(msgs,
+		Message{Role: RoleAssistant, ToolCalls: resp.ToolCalls, Thinking: resp.Thinking, ThinkingFingerprint: resp.ThinkingFingerprint},
+		Message{Role: RoleTool, Content: "ok", ToolCallID: "toolu_1"})
+	if _, err := p.Complete(context.Background(), &CompletionRequest{
+		Model: "claude-x", Messages: msgs, Tools: []ToolDefinition{load, show}, Segments: &segs,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		`{"role":"user","content":"Show item 7."}`, added, removed, "",
+		`{"role":"user","content":"Show item 7."}`, added,
+		`{"role":"assistant","content":[` + call + `]}`,
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}`,
+	}
+	got := append(append(sentAnthMessages(t, bodies()[0]), ""), sentAnthMessages(t, bodies()[1])...)
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Errorf("third request messages:\n got %s\nwant %s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		t.Errorf("messages of the request that withdrew the tool, then of the next:\n got %s\nwant %s",
+			strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func announcementRequest(callable []string, history []Message) *CompletionRequest {
+	segs := inlineTestSegments
+	req := &CompletionRequest{
+		Model:    "claude-x",
+		Messages: append([]Message{{Role: RoleSystem, Content: segs.Join()}}, history...),
+		Tools:    []ToolDefinition{inlineTestTool("p__fixed", "Fixed tool.", false)},
+		Segments: &segs,
+	}
+	for _, name := range []string{"p__a", "p__b", "p__c"} {
+		td := inlineTestTool(name, "On-demand tool.", true)
+		if slices.Contains(callable, name) {
+			req.Tools = append(req.Tools, td)
+			continue
+		}
+		req.LoadableTools = append(req.LoadableTools, td)
+	}
+	return req
+}
+
+func TestAnthropicToolAnnouncements(t *testing.T) {
+	record := func(changes ...string) *ToolAnnouncement {
+		var r ToolAnnouncement
+		for _, c := range changes {
+			if c[0] == '+' {
+				r.Added = append(r.Added, c[1:])
+				continue
+			}
+			r.Removed = append(r.Removed, c[1:])
+		}
+		return &r
+	}
+	user := func(content string, r *ToolAnnouncement) Message {
+		return Message{Role: RoleUser, Content: content, Announcement: r}
+	}
+	call := func(id string) Message {
+		return Message{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: id, Name: "p__fixed"}}}
+	}
+	result := func(id string, r *ToolAnnouncement) Message {
+		return Message{Role: RoleTool, Content: "ok", ToolCallID: id, Announcement: r}
+	}
+	wUser := func(content string) string { return `{"role":"user","content":"` + content + `"}` }
+	wCall := func(id string) string {
+		return `{"role":"assistant","content":[{"type":"tool_use","id":"` + id + `","name":"p__fixed","input":{}}]}`
+	}
+	wResult := func(id string) string {
+		return `{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + id + `","content":"ok"}]}`
+	}
+	wAnnounce := func(changes ...string) string {
+		blocks := make([]string, len(changes))
+		for i, c := range changes {
+			kind := "tool_addition"
+			if c[0] == '-' {
+				kind = "tool_removal"
+			}
+			blocks[i] = `{"type":"` + kind + `","tool":{"type":"tool_reference","name":"` + c[1:] + `"}}`
+		}
+		return `{"role":"system","content":[` + strings.Join(blocks, ",") + `]}`
+	}
+	cases := []struct {
+		name     string
+		callable []string
+		history  []Message
+		want     []string
+	}{
+		{"after the user-role messages that hold the record", []string{"p__a", "p__b"},
+			[]Message{user("u1", record("+p__a")), call("t1"), result("t1", record("+p__b"))},
+			[]string{wUser("u1"), wAnnounce("+p__a"), wCall("t1"), wResult("t1"), wAnnounce("+p__b")}},
+		{"behind a user message that follows the recording message", []string{"p__a"},
+			[]Message{user("u1", nil), call("t1"), result("t1", record("+p__a")), user("[system] nudge", nil)},
+			[]string{wUser("u1"), wCall("t1"), wResult("t1"), wUser("[system] nudge"), wAnnounce("+p__a")}},
+		{"a duplicate addition, an orphan withdrawal and an undeclared name", []string{"p__a"},
+			[]Message{user("u1", record("+p__a")), call("t1"), result("t1", record("+p__a", "+p__gone", "-p__c"))},
+			[]string{wUser("u1"), wAnnounce("+p__a"), wCall("t1"), wResult("t1")}},
+		{"a tool withdrawn and announced again", []string{"p__a"},
+			[]Message{user("u1", record("+p__a")), call("t1"), result("t1", nil),
+				user("u2", record("-p__a")), call("t2"), result("t2", record("+p__a"))},
+			[]string{wUser("u1"), wAnnounce("+p__a"), wCall("t1"), wResult("t1"),
+				wUser("u2"), wAnnounce("-p__a"), wCall("t2"), wResult("t2"), wAnnounce("+p__a")}},
+		{"callable tools that differ from the records", []string{"p__b"},
+			[]Message{user("u1", record("+p__a", "+p__c")), call("t1"), result("t1", nil)},
+			[]string{wUser("u1"), wAnnounce("+p__a", "+p__c"), wCall("t1"), wResult("t1"), wAnnounce("+p__b", "-p__a", "-p__c")}},
+	}
+	complete := anthropicComplete(inlineModels(FeatureInlineTools))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := announcementRequest(tc.callable, tc.history)
+			for i, r := range sentRequests(t, complete, req, req) {
+				if got := sentAnthMessages(t, string(r.body)); strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
+					t.Errorf("request %d messages:\n got %s\nwant %s", i+1, strings.Join(got, "\n"), strings.Join(tc.want, "\n"))
+				}
+			}
+		})
+	}
+
+	first := cases[0]
+	next := append(slices.Clone(first.history), call("t2"), result("t2", nil))
+	sent := sentRequests(t, complete, announcementRequest(first.callable, first.history), announcementRequest(first.callable, next))
+	before, after := sentAnthMessages(t, string(sent[0].body)), sentAnthMessages(t, string(sent[1].body))
+	if len(after) < len(before) || !slices.Equal(after[:len(before)], before) {
+		t.Errorf("the next round does not start with the messages of the round before:\n got %s\nwant prefix %s",
+			strings.Join(after, "\n"), strings.Join(before, "\n"))
 	}
 }
 

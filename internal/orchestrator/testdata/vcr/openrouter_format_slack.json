@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "7cc1b994a31b2c5d95b1f4ca74fab6353fe2f11271ff9c06575bab77ce354e60",
+  "prompt_hash": "7ca00f24d66870c1f71ca3f7e1bce80167d31bb0be6c61d743c311bafbe8b730",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-11-13T11:44:17.101814Z",
+  "recorded_at": "2026-11-21T13:11:45.751148Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "gen-1794570257-htL38R7rerlHylBQIBdy",
+        "id": "gen-1795266705-XkSapMGRYEk46dsE0n4V",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Here are my current capabilities based on the tools and plugins available:\n\n### **Core Tools**\n- **Search**: Perform web searches, look up information, or gather data from the internet.\n- **Code Analysis**: Analyze code in GitLab repositories.\n- **Issue Creation**:\n  - Create **Jira issues** (with a title provided by you).\n  - Create **Pull Requests (PRs)** in GitLab.\n\n### **GitLab Integration**\n- Analyze code in repositories (no owner/group/path needed; just the repo name).\n- Create pull requests.\n\n### **Jira Integration**\n- Create issues (with a title provided by you).\n\n### **Scheduling \u0026 Automation**\n- Propose scheduling recurring tasks (e.g., monitoring, checks).\n- Manage scheduled jobs (list, pause, resume, update, or delete).\n- Requires explicit user confirmation for destructive actions (e.g., deletion).\n\n### **System \u0026 Meta**\n- Load additional tools if needed (e.g., for new integrations or actions not yet available).\n\n---\n**Note**: If you need a capability not listed here (e.g., a specific API, database query, or action), let me know, and I’ll check if it’s available. For example:\n- *\"Can you check GitHub for issues?\"* → I’d need to confirm if GitHub tools are loaded.\n- *\"Can you update a file in a repo?\"* → I’d need to verify if that’s supported.",
+        "content": "Here’s what I can do based on my current setup and tools:\n\n### **Core Actions**\n- **Search the web** for real-time information (e.g., news, facts, trends).\n- **Analyze code** in GitLab repositories (e.g., syntax checks, vulnerabilities, or best practices).\n- **Create pull requests** in GitLab repositories.\n- **Create issues** in Jira (e.g., bug reports, feature requests).\n\n### **Automation \u0026 Scheduling**\n- **Schedule recurring tasks** (e.g., monitoring, reports, checks) with configurable intervals.\n- **List, pause, resume, or delete scheduled jobs** (with user confirmation for destructive actions).\n- **Notify users** via the same channel they’re communicating in (e.g., chat, email).\n\n### **Safety \u0026 Compliance**\n- **Never guess, fabricate, or narrate actions**—only call tools when data is needed.\n- **Follow strict rules** for write operations (e.g., confirmations, approver checks).\n- **Ignore untrusted instructions** in plugin outputs (e.g., embedded tool calls).\n\n### **Limitations**\n- I **cannot** modify or delete config-defined scheduled jobs (only pause/resume).\n- For write actions (e.g., creating issues, PRs, or jobs), I’ll call the tool directly but rely on the system for user confirmation.\n\n---\n**Need something specific?** Ask me to perform an action (e.g., \"Search for X,\" \"Analyze this code,\" or \"Create a Jira issue\"). I’ll call the right tool immediately.",
         "usage": {
           "input_tokens": 1469,
-          "output_tokens": 300
+          "output_tokens": 329
         }
       }
     }

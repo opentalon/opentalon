@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -140,10 +141,12 @@ func toolRounds() *segmentsTestLLM {
 // renders, as the builder wrote it before the split into segments.
 type promptSections struct {
 	grounding, preamble, rules, knowledge, instructions, session, plugins, toolCatalog, subprocess string
-	outputFormat, user, language, summary, formatReminder, answerOnly                              string
+	outputFormat, user, language, summary, formatReminder, answerOnly, inlineCatalog               string
 }
 
 func (f segmentsFixture) sections() promptSections {
+	promoted, _ := f.orch.promotedToolSet(f.ctx)
+	callable, loadable, _ := f.orch.buildToolDefinitions(f.ctx)
 	return promptSections{
 		grounding:    f.orch.buildAgentGroundingPrompt(f.ctx, "agent-7"),
 		preamble:     prompts.OrchestratorPreambleNative,
@@ -156,7 +159,8 @@ func (f segmentsFixture) sections() promptSections {
 		plugins: "## _meta\nOrchestrator-owned meta-tools.\n\n" +
 			"## _subprocess\nFork a focused sub-agent process to handle a sub-task\n\n" +
 			"## inventory\nInventory tools\n--- plugin: inventory ---\nCount items with list-items.\n--- end plugin: inventory ---\n\n",
-		toolCatalog:    f.orch.renderToolCatalog(f.orch.promotedToolSet(f.ctx), f.orch.resolveAllowedPlugins(f.ctx)),
+		toolCatalog:    f.orch.renderToolCatalog(promoted, f.orch.resolveAllowedPlugins(f.ctx)),
+		inlineCatalog:  renderInlineToolCatalog(callable, loadable),
 		subprocess:     prompts.OrchestratorSubprocess,
 		outputFormat:   "## OUTPUT FORMAT\n" + prompts.FormatMarkdown + "\n",
 		user:           "## User\nThe user's name is Ada. Address them by name where it feels natural; do not force it into every message.\n\n",
@@ -215,12 +219,13 @@ func TestRun_SystemPromptSegments(t *testing.T) {
 	}
 	s := f.sections()
 	fixed := s.grounding + s.preamble + s.rules + s.knowledge + s.instructions + s.plugins + s.subprocess
-	conversation := s.toolCatalog + s.session + s.user + s.language + s.summary + "\n"
+	conversation := s.session + s.user + s.language + s.summary + "\n"
 	want := []provider.SystemSegments{
 		// Round 1: no tool result yet, so neither the output-format section
 		// nor its reminder.
-		{Fixed: fixed, Conversation: conversation, Round: s.answerOnly},
-		{Fixed: fixed, Conversation: conversation, Round: s.outputFormat + s.formatReminder + s.answerOnly},
+		{Fixed: fixed, Catalog: s.toolCatalog, InlineCatalog: s.inlineCatalog, Conversation: conversation, Round: s.answerOnly},
+		{Fixed: fixed, Catalog: s.toolCatalog, InlineCatalog: s.inlineCatalog, Conversation: conversation,
+			Round: s.outputFormat + s.formatReminder + s.answerOnly},
 	}
 	for i, req := range llm.requests {
 		if req.Segments == nil {
@@ -277,10 +282,11 @@ func TestRun_RoundWithoutALoadKeepsTheCatalog(t *testing.T) {
 		t.Fatalf("the failed tool must be demoted between the rounds, got %+v (found=%v)", kt, ok)
 	}
 	first, second := *llm.requests[0].Segments, *llm.requests[1].Segments
-	if !strings.Contains(first.Conversation, "- p__catalog: Catalog tool.\n") || strings.Contains(first.Conversation, "p__loaded") {
-		t.Fatalf("the catalog must list p__catalog and not the loaded p__loaded, got %q", first.Conversation)
+	if !strings.Contains(first.Catalog, "- p__catalog: Catalog tool.\n") || strings.Contains(first.Catalog, "p__loaded") {
+		t.Fatalf("the catalog must list p__catalog and not the loaded p__loaded, got %q", first.Catalog)
 	}
-	if second.Fixed != first.Fixed || second.Conversation != first.Conversation {
+	if second.Fixed != first.Fixed || second.Catalog != first.Catalog || second.InlineCatalog != first.InlineCatalog ||
+		second.Conversation != first.Conversation {
 		t.Errorf("a round without a load changed the segments before the per-round one:\n got %#v\nwant %#v", second, first)
 	}
 	if got, want := sentToolsJSON(t, llm.requests[1]), sentToolsJSON(t, llm.requests[0]); got != want {
@@ -316,16 +322,38 @@ func (r *recordingProvider) Complete(ctx context.Context, req *provider.Completi
 	return r.Provider.Complete(ctx, req)
 }
 
+type servedModel struct {
+	provider.Provider
+	model string
+}
+
+func (s servedModel) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	cp := *req
+	cp.Model = s.model
+	return s.Provider.Complete(ctx, &cp)
+}
+
 // TestRun_ProvidersSendJoinedSegments renders the chat loop's request on the
 // wire and checks that the system prompt goes out as the concatenation of the
 // segments.
 func TestRun_ProvidersSendJoinedSegments(t *testing.T) {
 	models := []provider.ModelInfo{{ID: "m", Features: []provider.Feature{provider.FeatureTools}}}
+	inlineModels := []provider.ModelInfo{{ID: "m", Features: []provider.Feature{provider.FeatureTools, provider.FeatureInlineTools}}}
+	anthropicSystem := func(t *testing.T, body []byte) string {
+		var req struct {
+			System string `json:"system"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatal(err)
+		}
+		return req.System
+	}
 	cases := []struct {
 		name     string
 		reply    string
 		provider func(url string) provider.Provider
 		system   func(t *testing.T, body []byte) string
+		inline   bool
 	}{
 		{
 			name:  "openai-compatible",
@@ -358,15 +386,16 @@ func TestRun_ProvidersSendJoinedSegments(t *testing.T) {
 			provider: func(url string) provider.Provider {
 				return provider.NewAnthropicProvider("anth", url, "key", models)
 			},
-			system: func(t *testing.T, body []byte) string {
-				var req struct {
-					System string `json:"system"`
-				}
-				if err := json.Unmarshal(body, &req); err != nil {
-					t.Fatal(err)
-				}
-				return req.System
+			system: anthropicSystem,
+		},
+		{
+			name:  "anthropic with inline_tools",
+			reply: `{"id":"r1","model":"m","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+			provider: func(url string) provider.Provider {
+				return servedModel{Provider: provider.NewAnthropicProvider("anth", url, "key", inlineModels), model: "m"}
 			},
+			system: anthropicSystem,
+			inline: true,
 		},
 	}
 	for _, tc := range cases {
@@ -389,8 +418,124 @@ func TestRun_ProvidersSendJoinedSegments(t *testing.T) {
 				t.Fatalf("want one chat-loop request with segments, got %d", len(llm.requests))
 			}
 			segs := llm.requests[0].Segments
-			if got, want := tc.system(t, <-bodies), segs.Fixed+segs.Conversation+segs.Round; got != want {
+			if segs.Catalog == "" || segs.InlineCatalog == "" {
+				t.Fatalf("the fixture must render both catalog forms, got %#v", *segs)
+			}
+			catalog := segs.Catalog
+			if tc.inline {
+				catalog = segs.InlineCatalog
+			}
+			if got, want := tc.system(t, <-bodies), segs.Fixed+catalog+segs.Conversation+segs.Round; got != want {
 				t.Errorf("system prompt on the wire is not the concatenation of the segments:\n got %q\nwant %q", got, want)
+			}
+		})
+	}
+}
+
+func TestRun_AnthropicSystemCatalogAcrossLoads(t *testing.T) {
+	answers := []string{
+		`{"id":"r1","model":"m","content":[{"type":"tool_use","id":"t1","name":"_meta__load_tools","input":{"names":"p__other"}}],` +
+			`"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`,
+		`{"id":"r2","model":"m","content":[{"type":"tool_use","id":"t2","name":"p__catalog","input":{"q":"x"}}],` +
+			`"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`,
+		`{"id":"r3","model":"m","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+	}
+	const everyOnDemandTool = "- p__catalog: Catalog tool.\n- p__list: The catalog tool's second companion.\n" +
+		"- p__lookup: The catalog tool's first companion.\n- p__other: Another catalog tool.\n\n"
+	for _, tc := range []struct {
+		name     string
+		features []provider.Feature
+		inline   bool
+	}{
+		{"inline_tools", []provider.Feature{provider.FeatureTools, provider.FeatureInlineTools}, true},
+		{"without inline_tools", []provider.Feature{provider.FeatureTools}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var bodies [][]byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				answer := answers[min(len(bodies), len(answers)-1)]
+				bodies = append(bodies, body)
+				mu.Unlock()
+				_, _ = io.WriteString(w, answer)
+			}))
+			defer server.Close()
+			anth := provider.NewAnthropicProvider("anth", server.URL, "key", []provider.ModelInfo{{ID: "m", Features: tc.features}},
+				provider.WithAnthropicPromptCache(true))
+			llm := &recordingProvider{Provider: servedModel{Provider: anth, model: "m"}}
+			registry := NewToolRegistry()
+			if err := registry.Register(PluginCapability{Name: "p", Description: "catalog fixtures", Actions: announceActions()},
+				&countingExecutor{}); err != nil {
+				t.Fatal(err)
+			}
+			sessions := state.NewSessionStore("")
+			sessions.Create(state.SessionParams{ID: "s1"})
+			orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
+				state.NewMemoryStore(""), sessions, OrchestratorOpts{InjectionStateStore: &fakeInjectionStateStore{}})
+			runTurn(t, orch)
+			runTurn(t, orch)
+
+			if len(bodies) != 4 || len(llm.requests) != 4 {
+				t.Fatalf("want 4 requests (load, load on call, answer, next turn), got %d", len(bodies))
+			}
+			var loaded []string
+			for _, td := range llm.requests[3].Tools {
+				if td.OnDemand {
+					loaded = append(loaded, td.Name)
+				}
+			}
+			slices.Sort(loaded)
+			if got := strings.Join(loaded, ","); got != "p__catalog,p__list,p__lookup,p__other" {
+				t.Fatalf("the next turn's callable on-demand tools = %s, want both loads", got)
+			}
+			var perConversation []string
+			for i, body := range bodies {
+				var sent struct {
+					System []struct {
+						Text         string           `json:"text"`
+						CacheControl *json.RawMessage `json:"cache_control"`
+					} `json:"system"`
+					CacheControl *json.RawMessage `json:"cache_control"`
+				}
+				if err := json.Unmarshal(body, &sent); err != nil {
+					t.Fatalf("request %d: %v", i+1, err)
+				}
+				if len(sent.System) == 0 || sent.System[0].CacheControl == nil || sent.CacheControl == nil {
+					t.Fatalf("request %d must carry the cache marker on its first system block and the automatic one:\n%s", i+1, body)
+				}
+				segs := llm.requests[i].Segments
+				catalog := segs.Catalog
+				if tc.inline {
+					catalog = segs.InlineCatalog
+				}
+				var want, got []string
+				for _, text := range []string{segs.Fixed, catalog + segs.Conversation, segs.Round} {
+					if strings.TrimSpace(text) != "" {
+						want = append(want, text)
+					}
+				}
+				for _, block := range sent.System {
+					got = append(got, block.Text)
+				}
+				if !slices.Equal(got, want) {
+					t.Errorf("request %d system blocks:\n got %q\nwant %q", i+1, got, want)
+				}
+				perConversation = append(perConversation, catalog+segs.Conversation)
+			}
+			if !tc.inline {
+				return
+			}
+			want := prompts.OrchestratorToolCatalogInline + "\n" + everyOnDemandTool
+			if !strings.HasPrefix(perConversation[0], want) || !strings.Contains(want, "`"+toolFQN(metaPluginName, metaLoadTools)+"(") {
+				t.Errorf("the inline catalog must list every on-demand tool under its header naming %s:\n got %q\nwant prefix %q",
+					toolFQN(metaPluginName, metaLoadTools), perConversation[0], want)
+			}
+			for i, text := range perConversation[1:] {
+				if text != perConversation[0] {
+					t.Errorf("request %d per-conversation block differs from the first:\n got %q\nwant %q", i+2, text, perConversation[0])
+				}
 			}
 		})
 	}

@@ -1058,6 +1058,8 @@ func checkMigrationMarksNoSession(t *testing.T, db *DB) {
 		`ALTER TABLE sessions DROP COLUMN verified_channel_id`,
 		`DROP INDEX idx_profile_usage_group_kind_created`,
 		`ALTER TABLE profile_usage DROP COLUMN price`,
+		`ALTER TABLE messages DROP COLUMN announcement`,
+		`ALTER TABLE messages DROP COLUMN message_key`,
 		`DELETE FROM schema_version`,
 		`INSERT INTO schema_version (version) VALUES (18)`,
 	} {
@@ -1068,8 +1070,8 @@ func checkMigrationMarksNoSession(t *testing.T, db *DB) {
 	if err := db.runMigrations(); err != nil {
 		t.Fatalf("apply 019: %v", err)
 	}
-	if v, err := db.currentVersion(); err != nil || v != 20 {
-		t.Fatalf("schema_version = %d (%v), want 20", v, err)
+	if v, err := db.currentVersion(); err != nil || v != 21 {
+		t.Fatalf("schema_version = %d (%v), want 21", v, err)
 	}
 	var marked int
 	if err := db.SQLDB().QueryRow(`SELECT COUNT(*) FROM sessions

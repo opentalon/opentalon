@@ -106,6 +106,11 @@ var OrchestratorSpokenReply string
 //go:embed confirmation_spoken_question.txt
 var ConfirmationSpokenQuestion string
 
+//go:embed orchestrator_tool_catalog_inline.txt
+var orchestratorToolCatalogInlineRaw string
+
+var OrchestratorToolCatalogInline = strings.TrimRight(orchestratorToolCatalogInlineRaw, "\n")
+
 //go:embed subprocess_preamble.txt
 var SubprocessPreamble string
 
@@ -181,6 +186,9 @@ var promptSetters = map[string]func(string){
 	"orchestrator_subprocess":      func(s string) { OrchestratorSubprocess = s },
 	"orchestrator_knowledge_instructions": func(s string) {
 		OrchestratorKnowledgeInstructions = strings.TrimRight(s, "\n")
+	},
+	"orchestrator_tool_catalog_inline": func(s string) {
+		OrchestratorToolCatalogInline = strings.TrimRight(s, "\n")
 	},
 	"subprocess_preamble":           func(s string) { SubprocessPreamble = s },
 	"planner_preamble":              func(s string) { PlannerPreamble = s },

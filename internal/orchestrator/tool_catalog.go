@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
@@ -39,30 +41,31 @@ const maxStickyTools = 40
 // call, and their companions). The latter come from memory, so they stay in
 // the array for the rest of the turn even when the store did not save their
 // promotion, and they are exempt from the sticky cap, so a tool just
-// loaded is never missing from the next request.
-func (o *Orchestrator) promotedToolSet(ctx context.Context) map[string]bool {
-	out := o.storedPromotedToolSet(ctx)
+// loaded is never missing from the next request. read is false when the
+// stored set could not be read.
+func (o *Orchestrator) promotedToolSet(ctx context.Context) (promoted map[string]bool, read bool) {
+	promoted, read = o.storedPromotedToolSet(ctx)
 	for fqn := range turnToolLoadsFromContext(ctx).snapshot() {
-		out[fqn] = true
+		promoted[fqn] = true
 	}
-	return out
+	return promoted, read
 }
 
 // storedPromotedToolSet reads the session's KnownTools, keeps the
 // non-demoted entries, sorts by LRURank descending, and takes the top
 // maxStickyTools. Returns an empty map when there's no session, no state
-// store, or a read failure (logged) — the always-include core still
+// store, or a read failure (logged, read false) — the always-include core still
 // renders, so the LLM is never left with no tools.
-func (o *Orchestrator) storedPromotedToolSet(ctx context.Context) map[string]bool {
+func (o *Orchestrator) storedPromotedToolSet(ctx context.Context) (promoted map[string]bool, read bool) {
 	sessionID := actor.SessionID(ctx)
 	if sessionID == "" || o.injectionStateStore == nil {
-		return map[string]bool{}
+		return map[string]bool{}, true
 	}
 	st, err := o.injectionStateStore.GetInjectionState(ctx, sessionID)
 	if err != nil {
 		slog.WarnContext(ctx, "tool_catalog: read state failed, no sticky tools this request",
 			"component", "orchestrator", "session", sessionID, "error", err)
-		return map[string]bool{}
+		return map[string]bool{}, false
 	}
 	entries := make([]state.KnownToolEntry, 0, len(st.KnownTools))
 	for _, kt := range st.KnownTools {
@@ -86,7 +89,7 @@ func (o *Orchestrator) storedPromotedToolSet(ctx context.Context) map[string]boo
 	for _, kt := range entries {
 		out[kt.ToolName] = true
 	}
-	return out
+	return out, true
 }
 
 // toolIsNative reports whether an allowed action belongs to the native tools
@@ -340,15 +343,39 @@ func (o *Orchestrator) renderToolCatalog(promoted map[string]bool, allowedPlugin
 		"then call it on your next step. Calling a catalog tool you have not loaded is REJECTED — you cannot see its "+
 		"parameters, so never guess them from the summary.\n",
 		toolFQN(metaPluginName, metaLoadTools))
+	writeCatalogEntries(&sb, entries)
+	return sb.String()
+}
+
+func renderInlineToolCatalog(callable, loadable []provider.ToolDefinition) string {
+	var entries []catalogEntry
+	for _, defs := range [][]provider.ToolDefinition{callable, loadable} {
+		for _, td := range defs {
+			if td.OnDemand {
+				entries = append(entries, catalogEntry{fqn: td.Name, summary: firstLine(td.Description)})
+			}
+		}
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].fqn < entries[j].fqn })
+	var sb strings.Builder
+	sb.WriteString(prompts.OrchestratorToolCatalogInline)
+	sb.WriteString("\n")
+	writeCatalogEntries(&sb, entries)
+	return sb.String()
+}
+
+func writeCatalogEntries(sb *strings.Builder, entries []catalogEntry) {
 	for _, e := range entries {
 		if e.summary == "" {
-			fmt.Fprintf(&sb, "- %s\n", e.fqn)
+			fmt.Fprintf(sb, "- %s\n", e.fqn)
 			continue
 		}
-		fmt.Fprintf(&sb, "- %s: %s\n", e.fqn, e.summary)
+		fmt.Fprintf(sb, "- %s: %s\n", e.fqn, e.summary)
 	}
 	sb.WriteString("\n")
-	return sb.String()
 }
 
 // toolArraySet is the promoted set under which renderToolCatalog lists exactly the allowed tools the array lacks.
@@ -360,9 +387,88 @@ func toolArraySet(tools []provider.ToolDefinition) map[string]bool {
 	return set
 }
 
-func withToolCatalog(segs provider.SystemSegments, catalog string) provider.SystemSegments {
-	segs.Conversation = catalog + segs.Conversation
+func withToolCatalog(segs provider.SystemSegments, catalog, inlineCatalog string) provider.SystemSegments {
+	segs.Catalog = catalog
+	segs.InlineCatalog = inlineCatalog
 	return segs
+}
+
+func recordToolChange(ctx context.Context, sessions SessionStoreInterface, sessionID string, req *provider.CompletionRequest) {
+	at := lastUserRole(req.Messages)
+	if at < 0 {
+		return
+	}
+	change := toolChange(announcedTools(req.Messages[:at]), req.Tools)
+	if sameAnnouncement(change, req.Messages[at].Announcement) {
+		return
+	}
+	req.Messages[at].Announcement = change
+	key := req.Messages[at].StoreKey
+	// One-round messages and pairing notices have no stored row: their record lives in this request only.
+	if key == "" {
+		return
+	}
+	if err := sessions.SetAnnouncement(sessionID, key, change); err != nil {
+		slog.WarnContext(ctx, "tool_catalog: announcement not stored",
+			"component", "orchestrator", "session", sessionID, "error", err)
+	}
+}
+
+func lastUserRole(msgs []provider.Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == provider.RoleUser || msgs[i].Role == provider.RoleTool {
+			return i
+		}
+	}
+	return -1
+}
+
+func announcedTools(msgs []provider.Message) map[string]bool {
+	announced := map[string]bool{}
+	for _, m := range msgs {
+		if m.Announcement == nil {
+			continue
+		}
+		for _, name := range m.Announcement.Added {
+			announced[name] = true
+		}
+		for _, name := range m.Announcement.Removed {
+			delete(announced, name)
+		}
+	}
+	return announced
+}
+
+func toolChange(announced map[string]bool, tools []provider.ToolDefinition) *provider.ToolAnnouncement {
+	var change provider.ToolAnnouncement
+	callable := make(map[string]bool, len(tools))
+	for _, td := range tools {
+		if !td.OnDemand {
+			continue
+		}
+		callable[td.Name] = true
+		if !announced[td.Name] {
+			change.Added = append(change.Added, td.Name)
+		}
+	}
+	for name := range announced {
+		if !callable[name] {
+			change.Removed = append(change.Removed, name)
+		}
+	}
+	if len(change.Added) == 0 && len(change.Removed) == 0 {
+		return nil
+	}
+	sort.Strings(change.Added)
+	sort.Strings(change.Removed)
+	return &change
+}
+
+func sameAnnouncement(a, b *provider.ToolAnnouncement) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return slices.Equal(a.Added, b.Added) && slices.Equal(a.Removed, b.Removed)
 }
 
 // preparerActionSet pre-computes the FQNs the preparer pipeline itself

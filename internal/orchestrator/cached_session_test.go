@@ -1,6 +1,10 @@
 package orchestrator
 
 import (
+	"errors"
+	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/provider"
@@ -54,6 +58,20 @@ func (s *stubSessionStore) AddMessage(id string, msg provider.Message) error {
 
 func (s *stubSessionStore) AddMessageWithMetadata(id string, msg provider.Message, _ map[string]string) error {
 	return s.AddMessage(id, msg)
+}
+
+func (s *stubSessionStore) SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error {
+	sess := s.sessions[id]
+	if sess == nil {
+		return &sessionNotFoundError{id}
+	}
+	for i := range sess.Messages {
+		if sess.Messages[i].StoreKey == storeKey {
+			sess.Messages[i].Announcement = announcement
+			return nil
+		}
+	}
+	return state.ErrMessageNotFound
 }
 
 func (s *stubSessionStore) SetModel(id string, model provider.ModelRef) error {
@@ -286,5 +304,60 @@ func TestCachedSessionStore_CreateForwardsLabels(t *testing.T) {
 
 	if got := stub.created["s-sys"]; got != [2]string{"system", "csv_mapping"} {
 		t.Errorf("inner Create got (kind, source) = %v, want (system, csv_mapping)", got)
+	}
+}
+
+func TestCachedSessionStore_SetAnnouncementReachesCacheAndInner(t *testing.T) {
+	inner := state.NewSessionStore("")
+	inner.Create(state.SessionParams{ID: "s1"})
+	cached := newCachedSessionStore(inner)
+	if _, err := cached.Get("s1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []provider.Message{
+		{Role: provider.RoleUser, Content: "u1"},
+		{Role: provider.RoleTool, ToolCallID: "c1", Content: "r1"},
+		{Role: provider.RoleAssistant, Content: "a1"},
+	} {
+		if err := cached.AddMessage("s1", m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keysOf := func(store SessionStoreInterface) []string {
+		s, err := store.Get("s1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var keys []string
+		for _, m := range s.Messages {
+			keys = append(keys, m.StoreKey)
+		}
+		return keys
+	}
+	keys := keysOf(cached)
+	if inKeys := keysOf(inner); !reflect.DeepEqual(keys, inKeys) || len(keys) != 3 || slices.Contains(keys, "") ||
+		keys[0] == keys[1] || keys[1] == keys[2] {
+		t.Fatalf("store keys: cache %q, inner %q; want three distinct keys, the same in both", keys, inKeys)
+	}
+	if err := cached.SetAnnouncement("s1", keys[1], &provider.ToolAnnouncement{Added: []string{"p__a"}}); err != nil {
+		t.Fatal(err)
+	}
+	for name, store := range map[string]SessionStoreInterface{"cache": cached, "inner": inner} {
+		s, err := store.Get("s1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, m := range s.Messages {
+			if m.Announcement != nil {
+				got = append(got, m.Content+" +"+strings.Join(m.Announcement.Added, ","))
+			}
+		}
+		if want := []string{"r1 +p__a"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: announcements %q, want %q", name, got, want)
+		}
+	}
+	if err := cached.SetAnnouncement("s1", "unknown", &provider.ToolAnnouncement{}); !errors.Is(err, state.ErrMessageNotFound) {
+		t.Errorf("SetAnnouncement with an unknown key = %v, want ErrMessageNotFound", err)
 	}
 }

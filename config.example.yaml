@@ -59,7 +59,11 @@ models:
     #       cost: { input: 1.00, output: 5.00, cache_write: 1.25, cache_read: 0.10 }
     #     # Claude 4.6 and later: adaptive thinking, effort low, medium, high,
     #     # xhigh or max. See docs/configuration.md, "Adaptive thinking (Anthropic)".
+    #     # inline_tools: a tool load leaves the tools and the system prompt as
+    #     # first sent, so the cached prompt stays valid. See
+    #     # docs/configuration.md, "Inline tools".
     #     - id: claude-sonnet-5-5
+    #       features: [tools, inline_tools]
     #       thinking: adaptive
     #       reasoning_effort: high
     #       cost: { input: 2.00, output: 10.00, cache_write: 2.50, cache_read: 0.20 }

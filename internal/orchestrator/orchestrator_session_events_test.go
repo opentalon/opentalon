@@ -3040,7 +3040,7 @@ func TestToolCatalog_NativeMode_RendersCatalogAndKeepsToolsArraySmall(t *testing
 	}
 
 	// Native tools array: only the always-include load_tools meta-tool.
-	tools := orch.buildToolDefinitions(ctx)
+	tools, _, _ := orch.buildToolDefinitions(ctx)
 	if len(tools) != 1 || tools[0].Name != toolFQN(metaPluginName, metaLoadTools) {
 		t.Errorf("tools array = %+v, want only the always-include load_tools meta-tool", tools)
 	}
@@ -3063,11 +3063,11 @@ func TestToolCatalog_LoadedToolLeavesCatalogAndEntersToolsArray(t *testing.T) {
 	}
 
 	// Now t1 is sticky: tools array has load_tools + t1; catalog omits t1.
-	promoted := orch.promotedToolSet(ctx)
+	promoted, _ := orch.promotedToolSet(ctx)
 	if !promoted["tools-plugin__t1"] {
 		t.Fatalf("promotedToolSet missing tools-plugin__t1, got %v", promoted)
 	}
-	tools := orch.buildToolDefinitions(ctx)
+	tools, _, _ := orch.buildToolDefinitions(ctx)
 	names := map[string]bool{}
 	for _, td := range tools {
 		names[td.Name] = true
@@ -3111,7 +3111,7 @@ func TestToolCatalog_StickyCapKeepsMostRecentlyUsed(t *testing.T) {
 	})
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
-	promoted := orch.promotedToolSet(ctx)
+	promoted, _ := orch.promotedToolSet(ctx)
 	if len(promoted) != maxStickyTools {
 		t.Fatalf("sticky set size = %d, want cap %d", len(promoted), maxStickyTools)
 	}
@@ -3145,7 +3145,7 @@ func TestToolCatalog_DemotedToolNotSticky(t *testing.T) {
 	})
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
-	promoted := orch.promotedToolSet(ctx)
+	promoted, _ := orch.promotedToolSet(ctx)
 	if promoted["tools-plugin__t1"] {
 		t.Errorf("Demoted tool must be excluded from the sticky set")
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/opentalon/opentalon/internal/config"
 	"github.com/opentalon/opentalon/internal/orchestrator"
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
@@ -38,6 +39,11 @@ const (
 	anthCreditTooLow   = `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`
 	anthOverloaded     = `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`
 	anthInvalidRequest = `{"type":"error","error":{"type":"invalid_request_error","message":"messages.3.content.0: unexpected tool_use_id found in tool_result blocks"}}`
+	defaultLoadBody    = `{"id":"c3","model":"default-model","choices":[{"message":{"role":"assistant","content":"",` +
+		`"tool_calls":[{"id":"call_load","type":"function","function":{"name":"_meta__load_tools","arguments":"{\"names\":\"inv__find\"}"}}]},` +
+		`"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`
+	anthBetaRejected = `{"type":"error","error":{"type":"invalid_request_error","message":"Unexpected value(s) ` +
+		"`inline-tools-2026-09-15`" + ` for the ` + "`anthropic-beta`" + ` header. Please consult our documentation at docs.claude.com or try again without the header."}}`
 )
 
 type fakeAnswer struct {
@@ -125,6 +131,11 @@ var routingSetups = []struct{ name, fallbacks string }{
 
 func selectedProviderConfig(t *testing.T, defURL, backupURL, anthURL, fallbacks, health string) *config.Config {
 	t.Helper()
+	return selectedProviderConfigWith(t, defURL, backupURL, anthURL, fallbacks, health, "[tools]")
+}
+
+func selectedProviderConfigWith(t *testing.T, defURL, backupURL, anthURL, fallbacks, health, claudeFeatures string) *config.Config {
+	t.Helper()
 	cfg, err := config.Parse([]byte(`
 models:
   providers:
@@ -149,7 +160,7 @@ models:
         max_attempts: 1
       models:
         - id: claude-x
-          features: [tools]
+          features: ` + claudeFeatures + `
           thinking: adaptive
           reasoning_effort: medium
 routing:
@@ -301,6 +312,131 @@ func TestSelectedProviderFailure(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestSelectedInlineToolsModelFailsOverToTodaysRequest(t *testing.T) {
+	registry := orchestrator.NewToolRegistry()
+	if err := registry.Register(orchestrator.PluginCapability{
+		Name:        "inv",
+		Description: "Inventory",
+		Actions: []orchestrator.Action{
+			{Name: "list", Description: "List items", AlwaysInclude: true, ReadOnly: true},
+			{Name: "find", Description: "Find an item", ReadOnly: true},
+			{Name: "count", Description: "Count items", ReadOnly: true},
+		},
+	}, listExecutor{}); err != nil {
+		t.Fatal(err)
+	}
+	type sent struct{ anth, def []string }
+	run := func(t *testing.T, fallbacks, claudeFeatures string) (sent, string) {
+		logs := captureLogs(t)
+		anth := newFakeLLMServer(t, fakeAnswer{400, anthBetaRejected})
+		def := newFakeLLMServer(t, fakeAnswer{200, defaultLoadBody}, fakeAnswer{200, defaultTextBody})
+		backup := newFakeLLMServer(t, fakeAnswer{200, defaultTextBody})
+		cfg := selectedProviderConfigWith(t, def.URL, backup.URL, anth.URL, fallbacks, "{}", claudeFeatures)
+		orch, _ := newSelectedProviderOrch(t, cfg, registry)
+		res, err := orch.Run(selectedProfile(context.Background(), "anthropic/claude-x"), "s1", "Find the drill")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Response != fromDefault {
+			t.Errorf("answered %q, want the default model's answer", res.Response)
+		}
+		return sent{anth: anth.received(), def: def.received()}, logs.String()
+	}
+	for _, setup := range routingSetups {
+		t.Run(setup.name, func(t *testing.T) {
+			inline, logs := run(t, setup.fallbacks, "[tools, inline_tools]")
+			today, _ := run(t, setup.fallbacks, "[tools]")
+			if len(inline.anth) != 2 || len(inline.def) != 2 {
+				t.Fatalf("Anthropic received %d calls and the default model %d, want 2 and 2: a 400 leaves claude-x healthy",
+					len(inline.anth), len(inline.def))
+			}
+			for i, body := range inline.anth {
+				if !strings.Contains(anthropicSystem(t, body), prompts.OrchestratorToolCatalogInline) || !strings.Contains(body, `"defer_loading":true`) {
+					t.Errorf("Anthropic request %d is not in the inline_tools shape:\n%s", i+1, body)
+				}
+			}
+			for i, body := range today.anth {
+				if strings.Contains(anthropicSystem(t, body), prompts.OrchestratorToolCatalogInline) || strings.Contains(body, "defer_loading") {
+					t.Errorf("Anthropic request %d without the feature is in the inline_tools shape:\n%s", i+1, body)
+				}
+			}
+			warned := warnings(logs, "model=claude-x")
+			if len(warned) != 2 || !strings.Contains(warned[0], "anthropic-beta") {
+				t.Errorf("want one warning per round naming claude-x and the rejected header, got:\n%s", strings.Join(warned, "\n"))
+			}
+			afterLoad := openAIRequest(t, inline.def[1])
+			if got := strings.Join(afterLoad.tools, ","); !strings.Contains(","+got+",", ",inv__find,") || strings.Contains(got, "inv__count") {
+				t.Errorf("the default model's request after the load sends tools %s, want inv__find and not inv__count", got)
+			}
+			if strings.Contains(afterLoad.system, "- inv__find") || !strings.Contains(afterLoad.system, "- inv__count: Count items\n") ||
+				strings.Contains(afterLoad.system, prompts.OrchestratorToolCatalogInline) {
+				t.Errorf("the default model's system after the load is not today's catalog:\n%s", afterLoad.system)
+			}
+			for i := range inline.def {
+				if inline.def[i] != today.def[i] {
+					t.Errorf("default model request %d differs from the one without the feature:\n got %s\nwant %s", i+1, inline.def[i], today.def[i])
+				}
+			}
+		})
+	}
+}
+
+type openAISent struct {
+	system string
+	tools  []string
+}
+
+func openAIRequest(t *testing.T, body string) openAISent {
+	t.Helper()
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatal(err)
+	}
+	var out openAISent
+	if len(req.Messages) > 0 && req.Messages[0].Role == "system" {
+		out.system = req.Messages[0].Content
+	}
+	for _, tool := range req.Tools {
+		out.tools = append(out.tools, tool.Function.Name)
+	}
+	return out
+}
+
+func anthropicSystem(t *testing.T, body string) string {
+	t.Helper()
+	var req struct {
+		System json.RawMessage `json:"system"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatal(err)
+	}
+	var text string
+	if json.Unmarshal(req.System, &text) == nil {
+		return text
+	}
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(req.System, &blocks); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, block := range blocks {
+		b.WriteString(block.Text)
+	}
+	return b.String()
 }
 
 func TestSelectedProviderReturnsAfterHealthyProbes(t *testing.T) {

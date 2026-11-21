@@ -40,21 +40,22 @@ func TestHashCoversAllFiles(t *testing.T) {
 }
 
 func TestApplyOverrides_AppliesWithTransforms(t *testing.T) {
-	origNative, origSched, origSuffix := OrchestratorPreambleNative, SchedulingRules, PlannerSuffix
+	origNative, origSched, origSuffix, origCatalog := OrchestratorPreambleNative, SchedulingRules, PlannerSuffix, OrchestratorToolCatalogInline
 	t.Cleanup(func() {
-		OrchestratorPreambleNative, SchedulingRules, PlannerSuffix = origNative, origSched, origSuffix
+		OrchestratorPreambleNative, SchedulingRules, PlannerSuffix, OrchestratorToolCatalogInline = origNative, origSched, origSuffix, origCatalog
 	})
 
 	applied, unknown := ApplyOverrides(map[string]string{
-		"orchestrator_preamble_native": "RAW PREAMBLE",         // raw, no transform
-		"rules_scheduling":             "rule one\nrule two\n", // splitLines
-		"planner_suffix":               "suffix text\n",        // trailing newline trimmed
+		"orchestrator_preamble_native":     "RAW PREAMBLE",         // raw, no transform
+		"rules_scheduling":                 "rule one\nrule two\n", // splitLines
+		"planner_suffix":                   "suffix text\n",        // trailing newline trimmed
+		"orchestrator_tool_catalog_inline": "catalog header\n",
 	})
 
 	if len(unknown) != 0 {
 		t.Fatalf("unexpected unknown keys: %v", unknown)
 	}
-	if got, want := strings.Join(applied, ","), "orchestrator_preamble_native,planner_suffix,rules_scheduling"; got != want {
+	if got, want := strings.Join(applied, ","), "orchestrator_preamble_native,orchestrator_tool_catalog_inline,planner_suffix,rules_scheduling"; got != want {
 		t.Errorf("applied = %q, want sorted %q", got, want)
 	}
 	if OrchestratorPreambleNative != "RAW PREAMBLE" {
@@ -65,6 +66,9 @@ func TestApplyOverrides_AppliesWithTransforms(t *testing.T) {
 	}
 	if PlannerSuffix != "suffix text" {
 		t.Errorf("planner suffix not trimmed: %q", PlannerSuffix)
+	}
+	if OrchestratorToolCatalogInline != "catalog header" {
+		t.Errorf("inline tool catalog header not trimmed: %q", OrchestratorToolCatalogInline)
 	}
 }
 

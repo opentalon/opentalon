@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "7cc1b994a31b2c5d95b1f4ca74fab6353fe2f11271ff9c06575bab77ce354e60",
+  "prompt_hash": "7ca00f24d66870c1f71ca3f7e1bce80167d31bb0be6c61d743c311bafbe8b730",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-11-13T11:44:13.590769Z",
+  "recorded_at": "2026-11-21T13:11:42.119227Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CgzsNCkeqYDVNFRqLrGfz",
+        "id": "msg_011ChG8WRG1SMqmrjAmRGUPJ",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant that can help you by calling tools and plugins to perform actions. Here are my key capabilities:\n\n**Code \u0026 Repository Management:**\n- Analyze code in GitLab repositories\n- Create pull requests in GitLab\n\n**Issue Tracking:**\n- Create issues in Jira with titles and descriptions\n\n**Search \u0026 Information:**\n- Search the web using Brave Search for current information and news\n\n**Task Scheduling:**\n- Create, list, pause, update, and delete scheduled jobs\n- Set up recurring or one-time monitoring tasks\n- Schedule automated checks and reports\n\n**General Assistance:**\n- Answer questions and provide information\n- Help you understand tool outputs and results\n- Guide you through multi-step processes\n\n**How I Work:**\n- When you ask for data or need an action performed, I call the appropriate tools to get real information rather than guessing\n- I don't ask permission before calling write/action tools—the system handles confirmation automatically\n- I base my responses on actual tool results, not assumptions\n\n**Important Note:**\nI can only use tools that are listed in my available tools. If you need a capability that requires a tool not yet loaded, I can request to load it from the tool catalog.\n\nWhat would you like me to help you with?",
+        "content": "I'm an AI assistant that can help you by calling tools and plugins to perform actions. Here are my key capabilities:\n\n**Code \u0026 Development:**\n- Analyze code in GitLab repositories\n- Create pull requests in GitLab\n\n**Project Management:**\n- Create issues in Jira\n\n**General Capabilities:**\n- Search the web using Brave Search\n- Call other plugins and tools as needed\n- Answer questions using data retrieved from tools (never guessing or fabricating)\n\n**How I Work:**\n- When you ask me something that requires data or action, I call the appropriate tool and use the real results to answer you\n- I don't guess or make things up — if I need information, I fetch it\n- For actions like creating issues or PRs, I call the tool directly; the system handles any confirmation needed\n- I only answer your current question and don't repeat previous responses\n\n**Important:** I can only use tools that are explicitly available to me. If you need a capability not listed above, let me know and I can try to load additional tools if they're in the system catalog.\n\nWhat would you like help with?",
         "usage": {
           "input_tokens": 1535,
-          "output_tokens": 278
+          "output_tokens": 246
         }
       }
     }

@@ -83,11 +83,17 @@ or the single routing provider). `ID`, `Models`, `SupportsFeature` and
   session title and summary included. A call that names its own `Model` (a
   set `repair.model`) and a sub-agent send none.
 - A request for a selected model carries that model's id and its own reasoning
-  flag (`features: [reasoning]`), not the default model's.
+  flag (`features: [reasoning]`), not the default model's. The provider reads
+  `inline_tools` from the entry of the id it is sent, so the default model's
+  request after a failure takes the default model's form (see
+  [The provider that sends a request renders its tools](#the-provider-that-sends-a-request-renders-its-tools)).
 - A non-200 answer is a `StatusError` (status and body; its text is
   `<api> api error (status N): <body>`). `providerFailure` decides from it, or
   from a `net.Error`, whether the provider is marked unhealthy; the classes are
   the table in [When the selected provider fails](../configuration.md#when-the-selected-provider-fails).
+  An Anthropic 400 on the inline form (an `anthropic-beta` value the endpoint
+  refuses) is a refused request: the default chain answers and the provider
+  stays in use.
 - A `SelectableProvider` without a `Probe` is never marked. With one, the probes
   start at its first mark, run with `routing.health` interval, timeout and
   `recover_after`, and stop when the context passed to `NewSelectingProvider`
@@ -107,6 +113,43 @@ or the single routing provider). `ID`, `Models`, `SupportsFeature` and
 - `ProviderConfig.Timeout` is the HTTP client's `Timeout` for calls that do not
   stream, retries included; 0 keeps 120 s. The OpenAI-compatible stream uses a
   client of its own without it.
+
+## The provider that sends a request renders its tools
+
+The chat loop builds a round's request before the selecting provider picks the
+model, and the default model can answer the same request when the selected one
+fails. The request therefore carries facts, and the provider that sends it
+renders them for the model it sends to (`findModel(p.models, req.Model)`).
+User-facing behaviour: [Inline tools](../configuration.md#inline-tools).
+
+- `Tools` are the callable tools, `OnDemand` false for an always-included one.
+  `LoadableTools` are the allowed tools the session has not loaded, in name
+  order, never in `Tools`.
+- `Segments.Catalog` lists the allowed tools `Tools` lacks and is part of
+  `Join()`, so `Messages[0]` carries it. `Segments.InlineCatalog` lists every
+  on-demand tool, loaded or not, and is no part of `Join()`.
+- `Message.Announcement` sits on a request's last user or tool message: the
+  on-demand tools that became callable and those that stopped since the
+  request before. The chat loop sets it on every native-tools request whose
+  loaded tools it could read, whatever the model, and the session store keeps
+  it in `messages.announcement`, addressed by `Message.StoreKey`.
+- The Anthropic provider reads `LoadableTools`, `InlineCatalog` and the
+  records only on a chat-loop request (`Segments != nil`) for a model with
+  `FeatureInlineTools`. Every other request, and every OpenAI-compatible one,
+  ignores them and is sent as if they were empty.
+- Each announcement message enters the thinking binding like any message, so a
+  block produced under a withdrawal sent for one request is not replayed once
+  that withdrawal is gone.
+
+> **Gotcha**: choosing the tool form in the orchestrator from the profile's
+> model. When the selected provider fails, the default model answers the same
+> request and gets hidden tools and a catalog it cannot use.
+
+> **Gotcha**: rebuilding a history message as
+> `provider.Message{Role: m.Role, Content: …}`. The record and the store key
+> are lost, the request announces the tool again at its end, and the messages
+> Anthropic cached no longer match. Copy `Announcement` and `StoreKey` with the
+> content, as `appendStrippingHistoricalKC` does.
 
 ## Retry policy: zero fields fall back to defaults
 

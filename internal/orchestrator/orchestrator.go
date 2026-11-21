@@ -285,6 +285,9 @@ type SessionStoreInterface interface {
 	// reloaded client can redraw the Approve/Reject UI. A nil map behaves like
 	// AddMessage.
 	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
+	// SetAnnouncement replaces the announcement of the session's message with the given StoreKey;
+	// AddMessage and AddMessageWithMetadata give a message without one a new StoreKey.
+	SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error
 	SetModel(id string, model provider.ModelRef) error
 	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op
 	SetTitle(id, title string) error                                         // fill the short session label ONLY while empty; never overwrites a title set elsewhere; missing id is a no-op
@@ -2344,12 +2347,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// round sends a byte-identical prefix. This maximizes provider-side KV
 	// cache hits (vLLM automatic prefix caching, OpenAI prompt caching) and
 	// avoids rebuilding ~25k tokens of tool definitions on every round.
-	var cachedTools []provider.ToolDefinition
-	var toolCatalog string
+	var cachedTools, loadableTools []provider.ToolDefinition
+	var loadedRead bool
+	var toolCatalog, inlineCatalog string
 	nativeMode := o.supportsNativeTools()
 	if nativeMode {
-		cachedTools = o.buildToolDefinitions(ctx)
+		cachedTools, loadableTools, loadedRead = o.buildToolDefinitions(ctx)
 		toolCatalog = o.renderToolCatalog(toolArraySet(cachedTools), o.resolveAllowedPlugins(ctx))
+		inlineCatalog = renderInlineToolCatalog(cachedTools, loadableTools)
 	}
 	// Build the system prompt once per Run; appendConversation derives each
 	// round's per-round segment from it.
@@ -2371,7 +2376,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// confirmation) intentionally bypass this emission: the LLM is not
 	// driving those decisions, so there's no "turn" to start. They still
 	// emit user_message (above) because the user did send input.
-	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, withToolCatalog(sysPrompt, toolCatalog).Join(), profileModel, cachedTools))
+	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, withToolCatalog(sysPrompt, toolCatalog, inlineCatalog).Join(), profileModel, cachedTools))
 	// Root every subsequent event in this turn under turn_start by
 	// stamping it as the default parent on ctx. Specific spans (planner,
 	// llm_response, tool_call_extracted) overwrite this slot with their
@@ -2405,7 +2410,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		agentRound = i + 1
 		sess, _ := sessions.Get(sessionID)
 
-		messages, system := o.appendConversation(ctx, sess, withToolCatalog(sysPrompt, toolCatalog))
+		messages, system := o.appendConversation(ctx, sess, withToolCatalog(sysPrompt, toolCatalog, inlineCatalog))
 		messages = append(messages, transientMessages...)
 		transientMessages = nil
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
@@ -2435,6 +2440,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// maximizes provider-side KV cache hits.
 		if nativeMode {
 			req.Tools = cachedTools
+			req.LoadableTools = loadableTools
 			// Record exactly what the model is being sent this round so the
 			// tool-load gate (executeCall / maybeRequireConfirmation) can admit a
 			// call iff its tool was in this array — no per-call state re-read, and
@@ -2520,6 +2526,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		sentMessages := 0
 		for attempt := 0; ; attempt++ {
 			estimatedTokens = fitRequestToWindow(ctx, req, o.contextWindow, o.maxOutputTokens, o.calibrators.factor(req.Model))
+			if nativeMode && loadedRead {
+				recordToolChange(ctx, sessions, sessionID, req)
+			}
 			// The fit only ever drops messages. When the re-fit after a
 			// refusal dropped none (nothing left to drop, or the last tool
 			// call and its result kept together over budget), the provider
@@ -2997,8 +3006,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// result (a failed batch promoted nothing).
 			if nativeMode && (toolResult.NotRun || (toolResult.Error == "" &&
 				call.Plugin == metaPluginName && call.Action == metaLoadTools)) {
-				cachedTools = o.buildToolDefinitions(ctx)
+				cachedTools, loadableTools, loadedRead = o.buildToolDefinitions(ctx)
 				toolCatalog = o.renderToolCatalog(toolArraySet(cachedTools), o.resolveAllowedPlugins(ctx))
+				inlineCatalog = renderInlineToolCatalog(cachedTools, loadableTools)
 				log.Debug("cachedTools refreshed after a tool load",
 					"tools_count", len(cachedTools), "loaded_on_call", toolResult.NotRun)
 			}
@@ -3088,14 +3098,13 @@ func (o *Orchestrator) supportsNativeTools() bool {
 // native set: the always-include core (load_tools + any AlwaysInclude
 // action) plus the tools the session has loaded via load_tools (sticky,
 // capped at maxStickyTools). Every other allowed tool is discoverable via
-// the system-prompt catalog, not here. Profile / preparer / UserOnly
-// filters still apply.
-func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.ToolDefinition {
+// the system-prompt catalog and comes back in loadable. Profile / preparer / UserOnly
+// filters still apply. read is false when the session's loaded tools could not be read.
+func (o *Orchestrator) buildToolDefinitions(ctx context.Context) (callable, loadable []provider.ToolDefinition, read bool) {
 	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
 	preparerAction := o.preparerActions
-	promoted := o.promotedToolSet(ctx)
+	promoted, read := o.promotedToolSet(ctx)
 
-	var tools []provider.ToolDefinition
 	for _, cap := range o.registry.ListCapabilities() {
 		if !o.pluginAllowed(cap, allowedPlugins) {
 			slog.Debug("tool registration: plugin excluded", "plugin", cap.Name)
@@ -3112,17 +3121,14 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 			// the catalog until the LLM loads them via load_tools. Same
 			// predicate the tool-load gate enforces (toolIsNative) so the array
 			// the model sees and the calls executeCall admits cannot diverge.
-			if !toolIsNative(action, fqn, promoted) {
-				slog.Debug("tool registration: action skipped (catalog-only, not loaded)", "tool", fqn)
-				continue
-			}
+			native := toolIsNative(action, fqn, promoted)
 			// Build JSON Schema for parameters.
 			properties := make(map[string]interface{})
 			var required []string
 			for _, p := range action.Parameters {
 				schema, fromPlugin := parameterSchema(p)
 				properties[p.Name] = schema
-				if p.Schema != "" && !fromPlugin {
+				if native && p.Schema != "" && !fromPlugin {
 					// The plugin went to the trouble of declaring a schema and
 					// the model is not getting it. Silence here would leave a
 					// missing enum looking exactly like a parameter that never
@@ -3147,15 +3153,23 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) []provider.Tool
 			if len(required) > 0 {
 				params["required"] = required
 			}
-			tools = append(tools, provider.ToolDefinition{
+			td := provider.ToolDefinition{
 				Name:        fqn,
 				Description: action.Description,
 				Parameters:  params,
-			})
+				OnDemand:    !action.AlwaysInclude,
+			}
+			if !native {
+				loadable = append(loadable, td)
+				slog.Debug("tool registration: loadable (catalog-only, not loaded)", "tool", fqn)
+				continue
+			}
+			callable = append(callable, td)
 			slog.Debug("tool registration: registered", "tool", fqn, "params", len(action.Parameters))
 		}
 	}
-	return tools
+	sort.Slice(loadable, func(i, j int) bool { return loadable[i].Name < loadable[j].Name })
+	return callable, loadable, read
 }
 
 // prepareTurnStart assembles the turn_start event payload from the static
@@ -4642,7 +4656,8 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 	if !o.supportsNativeTools() {
 		return segs
 	}
-	return withToolCatalog(segs, o.renderToolCatalog(o.promotedToolSet(ctx), o.resolveAllowedPlugins(ctx)))
+	promoted, _ := o.promotedToolSet(ctx)
+	return withToolCatalog(segs, o.renderToolCatalog(promoted, o.resolveAllowedPlugins(ctx)), "")
 }
 
 func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, userMessage string, includeServerInstructions bool) provider.SystemSegments {
@@ -6230,7 +6245,7 @@ func appendStrippingHistoricalKC(dst []provider.Message, msgs []provider.Message
 			if i != lastUserIdx {
 				stripped := stripKnowledgeContext(m.Content)
 				if stripped != m.Content {
-					m = provider.Message{Role: m.Role, Content: stripped, Files: m.Files}
+					m = provider.Message{Role: m.Role, Content: stripped, Files: m.Files, Announcement: m.Announcement, StoreKey: m.StoreKey}
 				}
 			}
 			// Deduplicate knowledge article plugin outputs.
@@ -6271,7 +6286,7 @@ func deduplicateLargeToolResult(m provider.Message, seen map[uint64]bool) provid
 	replaced := m.Content[:start] +
 		"[plugin_output]\n(Same tool result as a previous call — see above.)\n[/plugin_output]" +
 		m.Content[end+len(closeTag):]
-	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files}
+	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files, Announcement: m.Announcement, StoreKey: m.StoreKey}
 }
 
 // deduplicateKnowledgeOutput replaces repeated knowledge article plugin
@@ -6300,7 +6315,7 @@ func deduplicateKnowledgeOutput(m provider.Message, seen map[uint64]bool) provid
 	replaced := m.Content[:start] +
 		"[plugin_output]\n(Same knowledge articles as a previous lookup — see above.)\n[/plugin_output]" +
 		m.Content[end+len(closeTag):]
-	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files}
+	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files, Announcement: m.Announcement, StoreKey: m.StoreKey}
 }
 
 // isVisibleUserMessage reports whether m is the user's own visible turn: a real
