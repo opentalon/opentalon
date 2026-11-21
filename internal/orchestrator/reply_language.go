@@ -25,6 +25,21 @@ import (
 // id) fall back to the model plus the standing language rule rather than being
 // pinned to a guess. Because detection runs per turn on the current message,
 // this also makes mid-conversation language switches follow reliably.
+//
+// A visible turn tries three sources in order: (a) a confident detection on
+// the current message, (b) the most recent confidently detectable visible user
+// message in the history, (c) the profile's language as a confirmation of an
+// unsure detection. Short plain questions often detect below the confidence
+// floor — "How do I create a new item?" detects as English at about 0.58 —
+// and as the first message of a conversation they have no history to fall
+// back on, so the model picks the language and sometimes picks the wrong one.
+// Step (c) pins such a message only when lingua's strictly leading candidate
+// for it is the language the profile names. It never overrides a detection:
+// when lingua leans elsewhere, or the profile names no language or one outside
+// the candidate set, the turn stays unpinned. History comes before the profile
+// so a running conversation does not switch language because one short
+// message, for example one built around a product name, happens to lean
+// toward the profile's language.
 
 // replyLanguageCandidates bounds detection to a fixed set of common languages.
 // A bounded set keeps lingua's memory footprint modest and avoids pinning an
@@ -98,7 +113,12 @@ func (o *Orchestrator) replyLanguageDirective(userMessage string) string {
 	if len(values) == 0 || values[0].Value() < replyLanguageMinConfidence {
 		return ""
 	}
-	name := values[0].Language().String()
+	return replyLanguageDirectiveFor(values[0].Language())
+}
+
+// replyLanguageDirectiveFor renders the reply-language directive for lang.
+func replyLanguageDirectiveFor(lang lingua.Language) string {
+	name := lang.String()
 	return fmt.Sprintf("## Reply language\nReply in %s. Use %s for your entire reply, regardless of the language of any "+
 		"retrieved context or earlier messages. Technical terms (field, tool and status names) stay in English.\n\n", name, name)
 }
@@ -132,6 +152,64 @@ func (o *Orchestrator) replyLanguageDirectiveWithHistory(current string, priorHi
 		return directive
 	}
 	return o.replyLanguageDirectiveFromHistory(priorHistory)
+}
+
+// replyLanguageDirectiveWithProfile returns the reply-language directive for a
+// visible turn: replyLanguageDirectiveWithHistory, and when that pins nothing,
+// the profile's confirmation of an unsure detection on the current message
+// (step (c) in the file header). profileLanguage is the profile's ISO 639-1
+// code; "" skips the confirmation.
+func (o *Orchestrator) replyLanguageDirectiveWithProfile(current string, priorHistory []provider.Message, profileLanguage string) string {
+	if directive := o.replyLanguageDirectiveWithHistory(current, priorHistory); directive != "" {
+		return directive
+	}
+	return o.replyLanguageConfirmedByProfile(current, profileLanguage)
+}
+
+// replyLanguageConfirmedByProfile returns the reply-language directive for the
+// profile's language when lingua's leading candidate for the user's message is
+// that language and leads strictly (above 0 and above the runner-up), with no
+// confidence floor. It returns "" for a message shorter than
+// replyLanguageMinChars, a lead that is another language or a tie, and a
+// profile language that is empty or outside replyLanguageCandidates.
+func (o *Orchestrator) replyLanguageConfirmedByProfile(userMessage, profileLanguage string) string {
+	if o.langDetector == nil {
+		return ""
+	}
+	want, ok := replyLanguageFromISOCode(profileLanguage)
+	if !ok {
+		return ""
+	}
+	msg := strings.TrimSpace(userMessage)
+	if len([]rune(msg)) < replyLanguageMinChars {
+		return ""
+	}
+	values := o.langDetector.ComputeLanguageConfidenceValues(msg)
+	if len(values) == 0 || values[0].Language() != want || values[0].Value() <= 0 {
+		return ""
+	}
+	if len(values) > 1 && values[0].Value() <= values[1].Value() {
+		return ""
+	}
+	return replyLanguageDirectiveFor(want)
+}
+
+// replyLanguageFromISOCode maps a profile language to a candidate language. It
+// takes an ISO 639-1 code in any case, optionally followed by a region subtag
+// after "-" or "_" ("en", "EN", "en-US", "de_CH", "pt-BR"); the subtag is
+// ignored. ok is false for an empty value, a code outside
+// replyLanguageCandidates and anything that is not such a code.
+func replyLanguageFromISOCode(code string) (lingua.Language, bool) {
+	if i := strings.IndexAny(code, "-_"); i >= 0 {
+		code = code[:i]
+	}
+	iso := lingua.GetIsoCode639_1FromValue(code)
+	for _, lang := range replyLanguageCandidates {
+		if lang.IsoCode639_1() == iso {
+			return lang, true
+		}
+	}
+	return lingua.Unknown, false
 }
 
 // replyLanguageDirectiveForHidden returns the reply-language directive for a

@@ -47,6 +47,7 @@ type VerifierConfig struct {
 	LimitField        string            // optional JSON field for token spend limit; default "limit"
 	LimitTimeField    string            // optional JSON field for limit window duration (e.g. "1h"); default "limit_time"
 	CredentialsField  string            // optional JSON field for per-MCP-server credential headers; default "credentials"
+	LanguageField     string            // optional JSON field for the user's language (ISO 639-1 code); default "language"
 	NameField         string            // optional JSON field for user display name; default "name"
 	BudgetTokensField string            // optional JSON field for reasoning budget tokens; default "budget_tokens"
 	KindField         string            // optional JSON field for interaction kind ("chat"|"system"); default "kind"; absent ⇒ "chat"
@@ -124,6 +125,9 @@ func (c *VerifierConfig) setDefaults() {
 	}
 	if c.CredentialsField == "" {
 		c.CredentialsField = "credentials"
+	}
+	if c.LanguageField == "" {
+		c.LanguageField = "language"
 	}
 	if c.NameField == "" {
 		c.NameField = "name"
@@ -443,6 +447,7 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 		slog.WarnContext(ctx, "whoami: model field is not a non-empty string, ignoring", "field", v.cfg.ModelField)
 	}
 	channelTypeResp := jsonString(raw[v.cfg.ChannelTypeField])
+	language := jsonString(raw[v.cfg.LanguageField])
 	name := jsonString(raw[v.cfg.NameField])
 	kind := jsonString(raw[v.cfg.KindField])
 	if kind == "" {
@@ -507,6 +512,7 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 		Plugins:      plugins,
 		Model:        model,
 		ChannelType:  channelTypeResp,
+		Language:     language,
 		Name:         name,
 		Limit:        limit,
 		LimitWindow:  limitWindow,
@@ -523,6 +529,7 @@ func (v *Verifier) callServer(ctx context.Context, token, channelType string, me
 		"plugins", p.Plugins,
 		"model", p.Model,
 		"channel_type", p.ChannelType,
+		"language", p.Language,
 		"name", p.Name,
 	)
 	return p, nil

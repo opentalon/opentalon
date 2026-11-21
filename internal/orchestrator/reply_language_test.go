@@ -1,10 +1,13 @@
 package orchestrator
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/opentalon/opentalon/internal/profile"
 	"github.com/opentalon/opentalon/internal/provider"
+	"github.com/opentalon/opentalon/internal/state"
 )
 
 func newDetectorOrchestrator() *Orchestrator {
@@ -174,6 +177,103 @@ func TestReplyLanguageDirectiveWithHistory_NoSignal(t *testing.T) {
 	history := []provider.Message{{Role: provider.RoleUser, Content: "ok"}}
 	if got := o.replyLanguageDirectiveWithHistory("y", history); got != "" {
 		t.Errorf("no detectable signal should yield empty directive, got %q", got)
+	}
+}
+
+// TestReplyLanguageDirectiveWithProfile covers the profile confirmation. When
+// neither the current message nor the visible history pins a language, the
+// profile's language pins the reply only if it is lingua's strictly leading
+// candidate for a message of at least replyLanguageMinChars runes. The
+// messages detect below replyLanguageMinConfidence on their own: "How do I
+// create a new item?" English 0.577 (Polish 0.165), "Zeig mir die Tickets."
+// German 0.544 (English 0.233), "Tour starten" German 0.431 (French 0.209).
+func TestReplyLanguageDirectiveWithProfile(t *testing.T) {
+	o := newDetectorOrchestrator()
+	// The confirmation emits the same directive as a confident detection.
+	reference := map[string]string{
+		"English": o.replyLanguageDirective("Can you show me how to create a ticket in my account?"),
+		"German":  o.replyLanguageDirective("Kannst du mir zeigen, wie ich ein Ticket in meinem Konto anlege?"),
+	}
+	germanRequest := []provider.Message{
+		{Role: provider.RoleUser, Content: "Bitte lege ein neues Ticket für die defekte Bohrmaschine an."},
+	}
+	cases := []struct {
+		name     string
+		msg      string
+		language string
+		history  []provider.Message
+		want     string // language of the expected directive; "" = no directive
+	}{
+		{"english confirmed by en", "How do I create a new item?", "en", nil, "English"},
+		{"upper-case code", "How do I create a new item?", "EN", nil, "English"},
+		{"region subtag after a hyphen", "How do I create a new item?", "en-US", nil, "English"},
+		{"german confirmed by de", "Zeig mir die Tickets.", "de", nil, "German"},
+		{"region subtag after an underscore", "Zeig mir die Tickets.", "de_CH", nil, "German"},
+		{"shortest detectable message confirmed", "Tour starten", "de", nil, "German"},
+		{"german lead not confirmed by en", "Zeig mir die Tickets.", "en", nil, ""},
+		{"shortest message not confirmed by en", "Tour starten", "en", nil, ""},
+		{"english lead not confirmed by de", "How do I create a new item?", "de", nil, ""},
+		{"no profile language", "How do I create a new item?", "", nil, ""},
+		{"code outside the candidates", "How do I create a new item?", "hr", nil, ""},
+		{"confident detection wins over the profile", "Erklär mir die Organisationseinheiten.", "en", nil, "German"},
+		{"history wins over the profile", "How do I create a new item?", "en", germanRequest, "German"},
+		{"no letters to detect on", "1234567890123456", "en", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := o.replyLanguageDirectiveWithProfile(tc.msg, tc.history, tc.language)
+			if tc.want == "" {
+				if got != "" {
+					t.Errorf("replyLanguageDirectiveWithProfile(%q, profile %q) = %q, want no directive", tc.msg, tc.language, got)
+				}
+				return
+			}
+			want := reference[tc.want]
+			if !strings.Contains(want, "Reply in "+tc.want+".") {
+				t.Fatalf("reference directive for %s is %q", tc.want, want)
+			}
+			if got != want {
+				t.Errorf("replyLanguageDirectiveWithProfile(%q, profile %q) = %q, want the %s directive %q",
+					tc.msg, tc.language, got, tc.want, want)
+			}
+		})
+	}
+}
+
+// TestRun_FirstTurnProfileLanguageConfirmsUnsureDetection runs the first turn
+// of a conversation whose message detects below the confidence floor and
+// checks the system prompt the model receives: the profile language en pins
+// English, and without a profile language the turn stays unpinned.
+func TestRun_FirstTurnProfileLanguageConfirmsUnsureDetection(t *testing.T) {
+	cases := []struct {
+		name     string
+		language string
+		pinned   bool
+	}{
+		{"profile language en", "en", true},
+		{"no profile language", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			llm := &segmentsTestLLM{}
+			sessions := state.NewSessionStore("")
+			sessions.Create(state.SessionParams{ID: "s1"})
+			orch := NewWithRules(llm, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{})
+			ctx := profile.WithProfile(context.Background(), &profile.Profile{ChannelID: "web", Language: tc.language})
+			if _, err := orch.Run(ctx, "s1", "How do I create a new item?"); err != nil {
+				t.Fatal(err)
+			}
+			if len(llm.requests) == 0 {
+				t.Fatal("no model call was made")
+			}
+			system := llm.requests[0].Messages[0].Content
+			if tc.pinned && !strings.Contains(system, "## Reply language\nReply in English.") {
+				t.Errorf("system prompt does not pin English:\n%s", system)
+			}
+			if !tc.pinned && strings.Contains(system, "## Reply language") {
+				t.Errorf("system prompt pins a language without a profile language:\n%s", system)
+			}
+		})
 	}
 }
 

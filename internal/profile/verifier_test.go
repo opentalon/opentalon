@@ -599,6 +599,77 @@ func TestVerifier_Name_Missing(t *testing.T) {
 	}
 }
 
+// TestVerifier_Language verifies that the language field from the WhoAmI
+// response is stored on the profile as sent.
+func TestVerifier_Language(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"entity_id": "u1",
+			"group":     "g1",
+			"language":  "en",
+		})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
+	defer v.Close()
+
+	p, err := v.Verify(context.Background(), "tok", "", nil)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if p.Language != "en" {
+		t.Errorf("Language = %q, want en", p.Language)
+	}
+}
+
+// TestVerifier_Language_Missing verifies that an absent language field
+// results in an empty string.
+func TestVerifier_Language_Missing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"entity_id": "u1",
+			"group":     "g1",
+		})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{URL: srv.URL}, nil, nil)
+	defer v.Close()
+
+	p, err := v.Verify(context.Background(), "tok", "", nil)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if p.Language != "" {
+		t.Errorf("Language = %q, want empty when not provided", p.Language)
+	}
+}
+
+// TestVerifier_Language_CustomField verifies that LanguageField reads the
+// language from a different JSON key.
+func TestVerifier_Language_CustomField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"entity_id": "u1",
+			"group":     "g1",
+			"locale":    "de-CH",
+		})
+	}))
+	defer srv.Close()
+
+	v := NewVerifier(VerifierConfig{URL: srv.URL, LanguageField: "locale"}, nil, nil)
+	defer v.Close()
+
+	p, err := v.Verify(context.Background(), "tok", "", nil)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if p.Language != "de-CH" {
+		t.Errorf("Language = %q, want de-CH", p.Language)
+	}
+}
+
 // TestVerifier_MetadataHeaders_Forwarded verifies that values from the
 // inbound metadata map configured under MetadataHeaders are sent as outbound
 // HTTP headers on every WhoAmI request.

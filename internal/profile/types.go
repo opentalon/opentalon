@@ -24,6 +24,7 @@ type Profile struct {
 	ChannelID    string                      // set by the handler; used for usage statistics
 	Model        string                      // optional model override returned by WhoAmI (e.g. "anthropic/claude-3-5-sonnet-20241022")
 	ChannelType  string                      // optional channel type returned by WhoAmI (e.g. "slack", "web", "api")
+	Language     string                      // optional ISO 639-1 code of the user's language from WhoAmI (e.g. "en", "de-CH"); confirms an unsure reply-language detection (empty = unknown)
 	Name         string                      // optional display name from WhoAmI, used to address the user (empty = unknown)
 	Limit        int                         // token spend limit per LimitWindow (0 = unlimited)
 	LimitWindow  time.Duration               // rolling window for Limit (0 = unlimited)
