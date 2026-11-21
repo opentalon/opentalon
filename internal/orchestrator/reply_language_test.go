@@ -184,8 +184,9 @@ func TestReplyLanguageDirectiveWithHistory_NoSignal(t *testing.T) {
 
 // TestReplyLanguageDirectiveWithProfile covers the profile confirmation. When
 // neither the current message nor the visible history pins a language, the
-// profile's language pins the reply only if it is lingua's strictly leading
-// candidate for a message of at least replyLanguageMinChars runes. The
+// profile's language pins the reply only if it is lingua's leading candidate
+// by a clear lead (replyLanguageProfileLeadRatio) for a message of at least
+// replyLanguageMinChars runes. The
 // messages detect below replyLanguageMinConfidence on their own: "How do I
 // create a new item?" English 0.577 (Polish 0.165), "Zeig mir die Tickets."
 // German 0.544 (English 0.233), "Tour starten" German 0.431 (French 0.209).
@@ -284,6 +285,68 @@ func TestReplyLanguageDirectiveWithProfile_FromHistory(t *testing.T) {
 		{"no profile language", "y", "", []provider.Message{english}, ""},
 		{"long enough current message decides", "Zeig mir die Tickets.", "en", []provider.Message{english}, ""},
 		{"confident history message wins over the profile", "y", "en", []provider.Message{confidentGerman, english}, "German"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := o.replyLanguageDirectiveWithProfile(tc.msg, tc.history, tc.language)
+			if tc.want == "" {
+				if got != "" {
+					t.Errorf("replyLanguageDirectiveWithProfile(%q, profile %q) = %q, want no directive", tc.msg, tc.language, got)
+				}
+				return
+			}
+			want := reference[tc.want]
+			if !strings.Contains(want, "Reply in "+tc.want+".") {
+				t.Fatalf("reference directive for %s is %q", tc.want, want)
+			}
+			if got != want {
+				t.Errorf("replyLanguageDirectiveWithProfile(%q, profile %q) = %q, want the %s directive %q",
+					tc.msg, tc.language, got, tc.want, want)
+			}
+		})
+	}
+}
+
+// TestReplyLanguageDirectiveWithProfile_ClearLead covers the size of the lead
+// the profile confirmation requires: lingua's leading candidate must be the
+// profile's language with at least replyLanguageProfileLeadRatio times the
+// runner-up's value. A sentence in another language that names products or
+// companies leans only weakly toward the profile's language and stays
+// unpinned. Values (leading, runner-up, ratio): "Gib Dell XPS 15 an Sample
+// Parts Ltd aus." English 0.384, German 0.306, 1.25; "It's about the Bosch GSR
+// 18V." English 0.398, German 0.317, 1.25; "Delete the order for the Munich
+// branch spare parts." English 0.481, German 0.282, 1.70; "Tour starten"
+// German 0.431, French 0.209, 2.06; "Zeig mir die Tickets." German 0.544,
+// English 0.233, 2.33; "How do I create a new item?" English 0.577, Polish
+// 0.165, 3.50. "Please create a ticket for the broken drill in the workshop."
+// detects as English with confidence.
+func TestReplyLanguageDirectiveWithProfile_ClearLead(t *testing.T) {
+	o := newDetectorOrchestrator()
+	reference := map[string]string{
+		"English": o.replyLanguageDirective("Can you show me how to create a ticket in my account?"),
+		"German":  o.replyLanguageDirective("Kannst du mir zeigen, wie ich ein Ticket in meinem Konto anlege?"),
+	}
+	englishRequest := []provider.Message{
+		{Role: provider.RoleUser, Content: "Please create a ticket for the broken drill in the workshop."},
+	}
+	germanWithNames := []provider.Message{
+		{Role: provider.RoleUser, Content: "Gib Dell XPS 15 an Sample Parts Ltd aus."},
+	}
+	cases := []struct {
+		name     string
+		msg      string
+		language string
+		history  []provider.Message
+		want     string // language of the expected directive; "" = no directive
+	}{
+		{"german sentence with english names not confirmed by en", "Gib Dell XPS 15 an Sample Parts Ltd aus.", "en", nil, ""},
+		{"ambiguous lead not confirmed by en", "It's about the Bosch GSR 18V.", "en", nil, ""},
+		{"ambiguous message follows a confident history message", "It's about the Bosch GSR 18V.", "en", englishRequest, "English"},
+		{"lead of 1.70 confirmed by en", "Delete the order for the Munich branch spare parts.", "en", nil, "English"},
+		{"lead of 2.06 confirmed by de", "Tour starten", "de", nil, "German"},
+		{"lead of 2.33 confirmed by de", "Zeig mir die Tickets.", "de", nil, "German"},
+		{"lead of 3.50 confirmed by en", "How do I create a new item?", "en", nil, "English"},
+		{"history request without a clear lead not confirmed by en", "y", "en", germanWithNames, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
