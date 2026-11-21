@@ -37,15 +37,17 @@ import (
 // the current message when it has at least replyLanguageMinChars runes,
 // otherwise the newest visible user message in the history that has, so the
 // turn after a bare approval ("y", a tapped button) follows the request behind
-// it. That message pins the turn only when lingua's strictly leading candidate
-// for it is the language the profile names; older messages are not consulted,
-// so a newer message that leans elsewhere is never overruled by an older one
-// that leans toward the profile's language. Step (c) never overrides a
-// detection: when lingua leans elsewhere, or the profile names no language or
-// one outside the candidate set, the turn stays unpinned. History comes before
-// the profile so a running conversation does not switch language because one
-// short message, for example one built around a product name, happens to lean
-// toward the profile's language.
+// it. That message pins the turn only when lingua's leading candidate for it is
+// the language the profile names and leads clearly, with at least
+// replyLanguageProfileLeadRatio (1.5) times the runner-up's value; a narrower
+// lead leaves the turn unpinned. Older messages are not consulted, so a newer
+// message that leans elsewhere is never overruled by an older one that leans
+// toward the profile's language. Step (c) never overrides a detection: when
+// lingua leans elsewhere, or the profile names no language or one outside the
+// candidate set, the turn stays unpinned. History comes before the profile so
+// a running conversation does not switch language because one short message,
+// for example one built around a product name, happens to lean toward the
+// profile's language.
 //
 // A hidden (system-injected) turn tries (b) and then (c) on the history alone:
 // its own text is not the user's words and never counts.
@@ -72,6 +74,13 @@ const (
 	// replyLanguageMinConfidence gates the directive on lingua's relative
 	// confidence for the top language (0..1). Tuned empirically.
 	replyLanguageMinConfidence = 0.65
+	// replyLanguageProfileLeadRatio is how many times the runner-up's value
+	// the leading candidate needs before the profile's language confirms it.
+	// A sentence in another language that names products or companies leans
+	// only weakly toward the profile's language ("Gib Dell XPS 15 an Sample
+	// Parts Ltd aus." leads English 0.384 to German 0.306); a narrower lead
+	// leaves the turn unpinned. Tuned empirically.
+	replyLanguageProfileLeadRatio = 1.5
 )
 
 func buildReplyLanguageDetector() lingua.LanguageDetector {
@@ -201,10 +210,12 @@ func replyLanguageProfileCandidate(current string, priorHistory []provider.Messa
 
 // replyLanguageConfirmedByProfile returns the reply-language directive for the
 // profile's language when lingua's leading candidate for the user's message is
-// that language and leads strictly (above 0 and above the runner-up), with no
-// confidence floor. It returns "" for a message shorter than
-// replyLanguageMinChars, a lead that is another language or a tie, and a
-// profile language that is empty or outside replyLanguageCandidates.
+// that language and leads clearly (above 0 and at least
+// replyLanguageProfileLeadRatio times the runner-up's value; a runner-up of 0
+// counts as clear), with no confidence floor. It returns "" for a message
+// shorter than replyLanguageMinChars, a lead that is another language or
+// narrower than that, and a profile language that is empty or outside
+// replyLanguageCandidates.
 func (o *Orchestrator) replyLanguageConfirmedByProfile(userMessage, profileLanguage string) string {
 	if o.langDetector == nil {
 		return ""
@@ -221,7 +232,7 @@ func (o *Orchestrator) replyLanguageConfirmedByProfile(userMessage, profileLangu
 	if len(values) == 0 || values[0].Language() != want || values[0].Value() <= 0 {
 		return ""
 	}
-	if len(values) > 1 && values[0].Value() <= values[1].Value() {
+	if len(values) > 1 && values[0].Value() < replyLanguageProfileLeadRatio*values[1].Value() {
 		return ""
 	}
 	return replyLanguageDirectiveFor(want)
