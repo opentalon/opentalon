@@ -22,7 +22,7 @@ func inlineTestRequest(chatLoop bool) *CompletionRequest {
 		Model: "claude-x",
 		Messages: []Message{
 			{Role: RoleSystem, Content: inlineTestSegments.Join()},
-			{Role: RoleUser, Content: "How many items?"},
+			{Role: RoleUser, Content: "How many items?", Announcement: &ToolAnnouncement{Added: []string{"p__loaded"}}},
 		},
 		Tools: []ToolDefinition{
 			inlineTestTool("p__loaded", "Loaded tool.", true),
@@ -95,11 +95,14 @@ func inlineModels(features ...Feature) []ModelInfo {
 }
 
 func TestAnthropicInlineTools(t *testing.T) {
-	const want = inlineTestChatLoopHead + `"tools":[` +
-		`{"name":"p__fixed","description":"Fixed tool.","input_schema":{"type":"object"}},` +
-		`{"name":"p__loaded","description":"Loaded tool.","input_schema":{"type":"object"}},` +
+	const want = `{"model":"claude-x","system":[{"type":"text","text":"Fixed.\n","cache_control":{"type":"ephemeral"}},` +
+		`{"type":"text","text":"Conversation.\n"},{"type":"text","text":"Round."}],` +
+		`"messages":[{"role":"user","content":"How many items?"},` +
+		`{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"p__loaded"}}]}],"max_tokens":4096,` +
+		`"tools":[{"name":"p__fixed","description":"Fixed tool.","input_schema":{"type":"object"}},` +
 		`{"name":"p__a","description":"Loadable tool a.","input_schema":{"type":"object"},"defer_loading":true},` +
-		`{"name":"p__b","description":"Loadable tool b.","input_schema":{"type":"object"},"defer_loading":true}]` +
+		`{"name":"p__b","description":"Loadable tool b.","input_schema":{"type":"object"},"defer_loading":true},` +
+		`{"name":"p__loaded","description":"Loaded tool.","input_schema":{"type":"object"},"defer_loading":true}]` +
 		`,"cache_control":{"type":"ephemeral"}}`
 	req := inlineTestRequest(true)
 	sent := sentRequests(t, anthropicComplete(inlineModels(FeatureTools, FeatureInlineTools)), req, req)
@@ -150,8 +153,6 @@ func TestInlineToolsOffSendsTodaysBody(t *testing.T) {
 			Complete(context.Background(), req)
 		return err
 	}
-	noLoadable := inlineTestRequest(true)
-	noLoadable.LoadableTools = nil
 	cases := []struct {
 		name     string
 		complete func(string, *CompletionRequest) error
@@ -165,7 +166,6 @@ func TestInlineToolsOffSendsTodaysBody(t *testing.T) {
 		{"the feature on another model of the provider", anthropicComplete([]ModelInfo{{ID: "claude-x"}, {ID: "claude-y", Features: []Feature{FeatureInlineTools}}}),
 			inlineTestRequest(true), inlineTestChatLoopBody, ""},
 		{"not the chat loop", anthropicComplete(inlineModels(FeatureInlineTools)), inlineTestRequest(false), inlineTestOtherBody, ""},
-		{"no loadable tool", anthropicComplete(inlineModels(FeatureInlineTools)), noLoadable, inlineTestChatLoopBody, anthropicInlineToolsBeta},
 		{"an OpenAI-compatible provider", openAI, inlineTestRequest(true), inlineTestOpenAIBody, ""},
 	}
 	for _, tc := range cases {

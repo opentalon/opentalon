@@ -567,16 +567,24 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		return anthRequest{}, err
 	}
 	tools := toolDefsToAnthTools(req.Tools)
+	var announcements *toolAnnouncements
 	if inlineTools {
 		tools = inlineAnthTools(req.Tools, req.LoadableTools)
+		announcements = newToolAnnouncements(tools, req.Tools)
 	}
 	binding, err := newThinkingBinding(system, tools)
 	if err != nil {
 		return anthRequest{}, err
 	}
 
+	lastUserRole := -1
+	for i, m := range conversation {
+		if m.Role != RoleAssistant {
+			lastUserRole = i
+		}
+	}
 	msgs := make([]anthMessage, 0, len(conversation))
-	for _, m := range conversation {
+	for i, m := range conversation {
 		blocks := m.Thinking
 		m.Thinking = nil
 		plain, err := p.toAnthMessage(m)
@@ -598,6 +606,24 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		msgs = append(msgs, msg)
 		if err := binding.add(plain); err != nil {
 			return anthRequest{}, err
+		}
+		if announcements == nil || m.Role == RoleAssistant {
+			continue
+		}
+		announcements.add(m.Announcement)
+		// An announcement directly before a user message is a 400.
+		if i+1 < len(conversation) && conversation[i+1].Role != RoleAssistant {
+			continue
+		}
+		after, err := announcements.messages(i == lastUserRole)
+		if err != nil {
+			return anthRequest{}, err
+		}
+		for _, a := range after {
+			msgs = append(msgs, a)
+			if err := binding.add(a); err != nil {
+				return anthRequest{}, err
+			}
 		}
 	}
 
@@ -787,27 +813,123 @@ func toolDefsToAnthTools(defs []ToolDefinition) []anthTool {
 }
 
 func inlineAnthTools(callable, loadable []ToolDefinition) []anthTool {
-	if len(loadable) == 0 {
-		return toolDefsToAnthTools(callable)
-	}
-	tools := make([]anthTool, 0, len(callable)+len(loadable))
-	for _, onDemand := range []bool{false, true} {
-		for _, d := range callable {
-			if d.OnDemand == onDemand {
-				tools = append(tools, toAnthTool(d))
-			}
+	var tools, hidden []anthTool
+	for _, d := range callable {
+		if d.OnDemand {
+			hidden = append(hidden, toAnthTool(d))
+			continue
 		}
+		tools = append(tools, toAnthTool(d))
 	}
 	for _, d := range loadable {
-		t := toAnthTool(d)
-		t.DeferLoading = true
-		tools = append(tools, t)
+		hidden = append(hidden, toAnthTool(d))
 	}
-	return tools
+	sort.Slice(hidden, func(i, j int) bool { return hidden[i].Name < hidden[j].Name })
+	for i := range hidden {
+		hidden[i].DeferLoading = true
+	}
+	return append(tools, hidden...)
 }
 
 func toAnthTool(d ToolDefinition) anthTool {
 	return anthTool{Name: d.Name, Description: d.Description, InputSchema: d.Parameters}
+}
+
+type anthToolChange struct {
+	Type string            `json:"type"`
+	Tool anthToolReference `json:"tool"`
+}
+
+type anthToolReference struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+}
+
+type toolAnnouncements struct {
+	declared  map[string]bool
+	callable  []string
+	announced map[string]bool
+	pending   []anthToolChange
+}
+
+func newToolAnnouncements(tools []anthTool, callable []ToolDefinition) *toolAnnouncements {
+	a := &toolAnnouncements{declared: map[string]bool{}, announced: map[string]bool{}}
+	for _, t := range tools {
+		if t.DeferLoading {
+			a.declared[t.Name] = true
+		}
+	}
+	for _, d := range callable {
+		if d.OnDemand {
+			a.callable = append(a.callable, d.Name)
+		}
+	}
+	sort.Strings(a.callable)
+	return a
+}
+
+func (a *toolAnnouncements) add(record *ToolAnnouncement) {
+	if record == nil {
+		return
+	}
+	for _, name := range record.Added {
+		// A reference to a tool the request does not declare is a 400.
+		if a.declared[name] && !a.announced[name] {
+			a.announced[name] = true
+			a.pending = append(a.pending, anthToolChange{Type: "tool_addition", Tool: anthToolReference{Type: "tool_reference", Name: name}})
+		}
+	}
+	for _, name := range record.Removed {
+		if a.announced[name] {
+			delete(a.announced, name)
+			a.pending = append(a.pending, anthToolChange{Type: "tool_removal", Tool: anthToolReference{Type: "tool_reference", Name: name}})
+		}
+	}
+}
+
+func (a *toolAnnouncements) messages(last bool) ([]anthMessage, error) {
+	runs := [][]anthToolChange{a.take()}
+	if last {
+		// Callable and announced tools differ only after a failed read of the loaded tools; nothing stores this.
+		a.add(a.difference())
+		runs = append(runs, a.take())
+	}
+	var out []anthMessage
+	for _, blocks := range runs {
+		if len(blocks) == 0 {
+			continue
+		}
+		raw, err := json.Marshal(blocks)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tool announcement: %w", err)
+		}
+		out = append(out, anthMessage{Role: string(RoleSystem), Content: raw})
+	}
+	return out, nil
+}
+
+func (a *toolAnnouncements) take() []anthToolChange {
+	blocks := a.pending
+	a.pending = nil
+	return blocks
+}
+
+func (a *toolAnnouncements) difference() *ToolAnnouncement {
+	var d ToolAnnouncement
+	callable := make(map[string]bool, len(a.callable))
+	for _, name := range a.callable {
+		callable[name] = true
+		if !a.announced[name] {
+			d.Added = append(d.Added, name)
+		}
+	}
+	for name := range a.announced {
+		if !callable[name] {
+			d.Removed = append(d.Removed, name)
+		}
+	}
+	sort.Strings(d.Removed)
+	return &d
 }
 
 // toAnthMessage converts a provider.Message to an anthMessage. Routes by
