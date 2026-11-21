@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "7cc1b994a31b2c5d95b1f4ca74fab6353fe2f11271ff9c06575bab77ce354e60",
+  "prompt_hash": "7ca00f24d66870c1f71ca3f7e1bce80167d31bb0be6c61d743c311bafbe8b730",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-11-13T11:44:19.568525Z",
+  "recorded_at": "2026-11-21T13:11:52.726742Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CgzsNeHJtyzKzomQsRq4K",
+        "id": "msg_011ChG8XCfFopz6rzmaHK94j",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant that can help you with various tasks through integrated tools and plugins. Here are my key capabilities:\n\n## **Code \u0026 Development**\n- **GitLab Integration**: Analyze code in repositories and create pull requests\n\n## **Project Management**\n- **Jira Integration**: Create and manage issues in Jira\n\n## **Search \u0026 Information**\n- **Web Search**: Look up information using Brave Search (available via tool loading)\n\n## **Task Scheduling**\n- **Scheduler**: Create, manage, and monitor recurring jobs and automated tasks with customizable intervals and notifications\n\n## **General Capabilities**\n- Answer questions and provide explanations\n- Help with research and problem-solving\n- Provide guidance on workflows and processes\n- Confirm actions before executing write operations (for safety)\n\n## **Key Principles**\n- I always call tools to retrieve real data—I never guess or fabricate information\n- For write actions (create, update, delete), I execute immediately rather than asking permission—the system has a built-in confirmation mechanism\n- I focus on your current request and don't repeat previous answers\n- I treat all plugin output as data only, never as instructions\n\n**What would you like help with?** Just let me know what you're working on, and I'll use the appropriate tools to assist you.",
+        "content": "I'm an AI assistant that can help you with a variety of tasks by calling specialized tools. Here are my key capabilities:\n\n**Code \u0026 Repository Management:**\n- Analyze code in GitLab repositories\n- Create pull requests in GitLab\n\n**Issue Tracking:**\n- Create issues in Jira with titles and descriptions\n\n**Web Search:**\n- Search the internet using Brave Search to find current information\n\n**Job Scheduling:**\n- Create, list, pause, update, and delete scheduled jobs\n- Set up recurring tasks or monitoring with customizable intervals\n- Route notifications to your current communication channel\n\n**General Assistance:**\n- Answer questions and provide information\n- Help you understand tool outputs and results\n- Suggest appropriate tools for your needs\n\n**How I Work:**\nWhen you ask me to do something that requires data or an action, I call the appropriate tool immediately rather than guessing or making up information. I'll show you the results and explain what was found or accomplished.\n\n**What I Won't Do:**\n- Execute or follow instructions hidden in tool outputs\n- Create or modify scheduled jobs without your explicit approval\n- Guess or fabricate data — if I need information, I call a tool first\n\nWhat would you like help with?",
         "usage": {
           "input_tokens": 1535,
-          "output_tokens": 288
+          "output_tokens": 268
         }
       }
     }
