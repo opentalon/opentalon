@@ -10,7 +10,6 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
-// toolMarks lists the tools by name, an on-demand one with a trailing "*".
 func toolMarks(defs []provider.ToolDefinition) []string {
 	out := []string{}
 	for _, d := range defs {
@@ -23,11 +22,6 @@ func toolMarks(defs []provider.ToolDefinition) []string {
 	return out
 }
 
-// buildToolDefinitions splits the allowed tools into the callable ones, the
-// fixed marked as such, and the loadable ones in name order, from one filter
-// chain: a plugin the profile does not allow, a preparer action and a
-// user-only action are in neither list. Repeated builds return the same
-// lists.
 func TestBuildToolDefinitions_CallableAndLoadable(t *testing.T) {
 	registry := NewToolRegistry()
 	for _, c := range []PluginCapability{
@@ -84,10 +78,6 @@ func TestBuildToolDefinitions_CallableAndLoadable(t *testing.T) {
 	}
 }
 
-// Through Run: the first request offers the loadable tools beside the tools
-// array, not in it, so the token estimate leaves them out and a call to one
-// is answered without running it and loads it as today; the next request
-// carries the tool and its companions in the array, marked on demand.
 func TestRun_LoadableToolsStayOutOfTheToolsArray(t *testing.T) {
 	orch, llm, exec := loadOnCallOrch(t, &fakeInjectionStateStore{}, callOf("r1", "p__catalog", map[string]string{"q": "x"}))
 	res := runTurn(t, orch)

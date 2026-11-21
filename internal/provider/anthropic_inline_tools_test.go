@@ -17,8 +17,6 @@ func inlineTestTool(name, description string, onDemand bool) ToolDefinition {
 	return ToolDefinition{Name: name, Description: description, Parameters: map[string]interface{}{"type": "object"}, OnDemand: onDemand}
 }
 
-// inlineTestRequest offers a loaded tool ahead of a fixed one, as the
-// registry order can, and two loadable tools; chatLoop sets its segments.
 func inlineTestRequest(chatLoop bool) *CompletionRequest {
 	req := &CompletionRequest{
 		Model: "claude-x",
@@ -42,7 +40,7 @@ func inlineTestRequest(chatLoop bool) *CompletionRequest {
 	return req
 }
 
-// The bodies origin/master sent for inlineTestRequest without the new fields.
+// Bodies 8ba8891 (origin/master) sent for inlineTestRequest without OnDemand and LoadableTools.
 const (
 	inlineTestTodaysTools = `"tools":[{"name":"p__loaded","description":"Loaded tool.","input_schema":{"type":"object"}},` +
 		`{"name":"p__fixed","description":"Fixed tool.","input_schema":{"type":"object"}}]`
@@ -58,8 +56,6 @@ const (
 		`{"type":"function","function":{"name":"p__fixed","description":"Fixed tool.","parameters":{"type":"object"}}}]}`
 )
 
-// sentRequests sends each request through complete against a server that
-// answers in both providers' formats, and returns what the server received.
 func sentRequests(t *testing.T, complete func(baseURL string, req *CompletionRequest) error, reqs ...*CompletionRequest) []capturedRequest {
 	t.Helper()
 	var mu sync.Mutex
@@ -98,11 +94,6 @@ func inlineModels(features ...Feature) []ModelInfo {
 	return []ModelInfo{{ID: "claude-x", Features: features}}
 }
 
-// TestAnthropicInlineTools covers a model with FeatureInlineTools: each
-// chat-loop request of a conversation carries the beta header and declares
-// the fixed tools, then the loaded ones, then every loadable tool with
-// defer_loading, the same bytes on every request; the request itself is left
-// as it was.
 func TestAnthropicInlineTools(t *testing.T) {
 	const want = inlineTestChatLoopHead + `"tools":[` +
 		`{"name":"p__fixed","description":"Fixed tool.","input_schema":{"type":"object"}},` +
@@ -125,9 +116,6 @@ func TestAnthropicInlineTools(t *testing.T) {
 	}
 }
 
-// TestAnthropicInlineToolsBetaJoins checks that the inline-tools beta joins
-// the configured value and the betas the request carries already, on chat-loop
-// requests only, without repeating a configured one.
 func TestAnthropicInlineToolsBetaJoins(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -156,11 +144,6 @@ func TestAnthropicInlineToolsBetaJoins(t *testing.T) {
 	}
 }
 
-// TestInlineToolsOffSendsTodaysBody covers every request the feature leaves
-// alone: a model without it, whatever its features hold, a request outside
-// the chat loop, and an OpenAI-compatible provider. Each sends the body
-// origin/master sent for the same request and no inline-tools beta. A model
-// with the feature and no loadable tool sends today's tools with the beta.
 func TestInlineToolsOffSendsTodaysBody(t *testing.T) {
 	openAI := func(baseURL string, req *CompletionRequest) error {
 		_, err := NewOpenAIProvider("openai", baseURL, "key", inlineModels(FeatureTools, FeatureInlineTools)).
@@ -198,10 +181,6 @@ func TestInlineToolsOffSendsTodaysBody(t *testing.T) {
 	}
 }
 
-// TestCatalogSegment checks the catalog parts of the segments for a model
-// without FeatureInlineTools: Catalog opens the per-conversation part of the
-// message and of the system blocks, and InlineCatalog is in neither, so the
-// body is the one sent with the catalog written into Conversation.
 func TestCatalogSegment(t *testing.T) {
 	catalog := "## Catalog\n"
 	split := SystemSegments{Fixed: "Fixed.\n", Catalog: catalog, InlineCatalog: "## Every tool\n",

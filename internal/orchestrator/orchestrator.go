@@ -3085,12 +3085,12 @@ func (o *Orchestrator) supportsNativeTools() bool {
 }
 
 // buildToolDefinitions converts the visible plugin actions into provider.ToolDefinition
-// for native function calling. callable, the tools array, carries only the
-// small native set: the always-include core (load_tools + any AlwaysInclude
+// for native function calling. The tools array carries only the small
+// native set: the always-include core (load_tools + any AlwaysInclude
 // action) plus the tools the session has loaded via load_tools (sticky,
 // capped at maxStickyTools). Every other allowed tool is discoverable via
-// the system-prompt catalog and is returned in loadable, in name order.
-// Profile / preparer / UserOnly filters apply to both.
+// the system-prompt catalog and comes back in loadable. Profile / preparer / UserOnly
+// filters still apply.
 func (o *Orchestrator) buildToolDefinitions(ctx context.Context) (callable, loadable []provider.ToolDefinition) {
 	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
 	preparerAction := o.preparerActions

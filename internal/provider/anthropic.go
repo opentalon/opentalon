@@ -775,10 +775,6 @@ func toolDefsToAnthTools(defs []ToolDefinition) []anthTool {
 	return tools
 }
 
-// inlineAnthTools returns the tools of a chat-loop request to a model with
-// FeatureInlineTools: the fixed tools, then the on-demand ones, then every
-// loadable tool with defer_loading. With no loadable tool they are the tools
-// toolDefsToAnthTools returns.
 func inlineAnthTools(callable, loadable []ToolDefinition) []anthTool {
 	if len(loadable) == 0 {
 		return toolDefsToAnthTools(callable)

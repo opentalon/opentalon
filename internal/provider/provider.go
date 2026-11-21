@@ -48,13 +48,10 @@ type Message struct {
 	// it). Internal history-filtering signal only — never serialized toward
 	// a provider (see orchestrator's stripApprovedConfirmationExchanges).
 	PromptType string `json:"-"`
-	// Announcement records, on the user-role message that ends a request, the
-	// on-demand tools that became callable or stopped being callable with it.
+	// Announcement is set only on the user-role message that ends a request.
 	Announcement *ToolAnnouncement `json:"-"`
 }
 
-// ToolAnnouncement names, by tool name, the on-demand tools that became
-// callable with a request and those that stopped being callable.
 type ToolAnnouncement struct {
 	Added   []string
 	Removed []string
@@ -78,8 +75,7 @@ type ToolDefinition struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	Parameters  map[string]interface{} `json:"parameters"` // JSON Schema object
-	// OnDemand marks a tool the session loads on demand. A tool without it
-	// is fixed: every request of the conversation offers it.
+	// OnDemand is false for a fixed tool, which every request of the conversation offers.
 	OnDemand bool `json:"-"`
 }
 
@@ -92,22 +88,19 @@ type ToolCall struct {
 
 // SystemSegments is the leading system message of a chat-loop request, split
 // by how often each part changes: Fixed can be shared across conversations,
-// Catalog and Conversation across the rounds and turns of one conversation,
-// and Round may change from one round to the next.
+// Conversation across the rounds and turns of one conversation, and Round may
+// change from one round to the next.
 type SystemSegments struct {
 	Fixed string
-	// Catalog lists the allowed tools the request's Tools lack. It opens the
-	// per-conversation part.
+	// Catalog lists the allowed tools the request's Tools lack.
 	Catalog string
-	// InlineCatalog is the catalog for a model with FeatureInlineTools: every
-	// on-demand tool, loaded or not. It is no part of the message.
+	// InlineCatalog lists every on-demand tool, loaded or not, for a model with FeatureInlineTools.
 	InlineCatalog string
 	Conversation  string
 	Round         string
 }
 
-// Join returns the system message the segments make up: Fixed, Catalog,
-// Conversation and Round in order.
+// Join returns the system message the segments make up; InlineCatalog is no part of it.
 func (s SystemSegments) Join() string {
 	return s.Fixed + s.Catalog + s.Conversation + s.Round
 }
@@ -125,10 +118,7 @@ type CompletionRequest struct {
 	// Segments describes Messages[0], whose content is Segments.Join(). Only
 	// the chat loop sets it; nil on every other call.
 	Segments *SystemSegments `json:"-"`
-	// LoadableTools are the allowed tools the session has not loaded, in
-	// name order, each marked OnDemand. They are no part of Tools: a provider
-	// may declare them only in a form the model cannot call. Only the chat
-	// loop sets them.
+	// LoadableTools are the allowed tools the session has not loaded, in name order, never in Tools.
 	LoadableTools []ToolDefinition `json:"-"`
 	ModelRef      ModelRef         `json:"-"`
 }

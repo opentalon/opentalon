@@ -1476,15 +1476,12 @@ func TestParseThinking(t *testing.T) {
 	}
 }
 
-// TestParseModelFeatures covers the values a model's features key can take:
-// null, an empty list, no key and an unknown name all parse and leave
-// inline_tools out, and inline_tools parses on either api.
 func TestParseModelFeatures(t *testing.T) {
 	cases := []struct {
 		name  string
 		api   string
-		field string // the line under the model, after its id; "" = no features key
-		want  string // the parsed features, as %q prints them
+		field string
+		want  string
 	}{
 		{"absent", "anthropic-messages", "", "[]"},
 		{"null", "anthropic-messages", "features: null", "[]"},
