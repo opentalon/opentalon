@@ -134,6 +134,12 @@ func (o *Orchestrator) replyLanguageDirectiveWithHistory(current string, priorHi
 	return o.replyLanguageDirectiveFromHistory(priorHistory)
 }
 
+// replyLanguageDirectiveWithProfile returns the reply-language directive for a
+// visible turn of a user whose profile names profileLanguage.
+func (o *Orchestrator) replyLanguageDirectiveWithProfile(current string, priorHistory []provider.Message, profileLanguage string) string {
+	return o.replyLanguageDirectiveWithHistory(current, priorHistory)
+}
+
 // replyLanguageDirectiveForHidden returns the reply-language directive for a
 // hidden (system-injected) turn — a background-job status note delivered via
 // the inject path. Its text is not the user's own words (it is often an English

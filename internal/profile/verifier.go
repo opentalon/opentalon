@@ -47,6 +47,7 @@ type VerifierConfig struct {
 	LimitField        string            // optional JSON field for token spend limit; default "limit"
 	LimitTimeField    string            // optional JSON field for limit window duration (e.g. "1h"); default "limit_time"
 	CredentialsField  string            // optional JSON field for per-MCP-server credential headers; default "credentials"
+	LanguageField     string            // optional JSON field for the user's language (ISO 639-1 code); default "language"
 	NameField         string            // optional JSON field for user display name; default "name"
 	BudgetTokensField string            // optional JSON field for reasoning budget tokens; default "budget_tokens"
 	KindField         string            // optional JSON field for interaction kind ("chat"|"system"); default "kind"; absent ⇒ "chat"
