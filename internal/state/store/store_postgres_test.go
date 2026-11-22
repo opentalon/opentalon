@@ -22,36 +22,57 @@ import (
 // Run with: go test -tags postgres -run TestPostgres ./internal/state/store/
 // Requires DATABASE_URL pointing at a Postgres instance (e.g. "postgres://localhost/opentalon_test?sslmode=disable").
 
+func openPG() (*DB, error) {
+	return Open(config.DBConfig{Driver: "postgres", DSN: os.Getenv("DATABASE_URL")}, "")
+}
+
 func pgDB(t *testing.T) *DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
+	if os.Getenv("DATABASE_URL") == "" {
 		t.Skip("DATABASE_URL not set")
 	}
-	db, err := Open(config.DBConfig{Driver: "postgres", DSN: dsn}, "")
+	db, err := openPG()
 	if err != nil {
 		t.Fatalf("Open postgres: %v", err)
 	}
 	t.Cleanup(func() {
-		// Drop every table the migrations create so each test starts clean.
-		// Order matters only insofar as schema_version is re-created by the
-		// next Open(); dropping it ensures a fresh migration replay. Keep
-		// this list in sync with internal/state/store/migrations/*.sql.
-		db.SQLDB().Exec(`DROP TABLE IF EXISTS
-			session_events,
-			session_note_reservations,
-			prompt_snapshots,
-			ai_debug_events,
-			messages,
-			profile_usage,
-			group_plugins,
-			entities,
-			sessions,
-			memories,
-			schema_version`)
-		db.Close()
+		dropPGTables(t, db)
+		_ = db.Close()
 	})
 	return db
+}
+
+func dropPGTables(t *testing.T, db *DB) {
+	t.Helper()
+	// Drop every table the migrations create so each test starts clean.
+	// Order matters only insofar as schema_version is re-created by the
+	// next Open(); dropping it ensures a fresh migration replay. Keep
+	// this list in sync with internal/state/store/migrations/*.sql.
+	if _, err := db.SQLDB().Exec(`DROP TABLE IF EXISTS
+		session_events,
+		session_note_reservations,
+		prompt_snapshots,
+		ai_debug_events,
+		messages,
+		profile_usage,
+		group_plugins,
+		entities,
+		sessions,
+		memories,
+		schema_version`); err != nil {
+		t.Errorf("drop the tables: %v", err)
+	}
+}
+
+func TestPostgres_ConcurrentOpensMigrateOnce(t *testing.T) {
+	t.Run("from version 20", func(t *testing.T) {
+		setSchemaBackTo20(t, pgDB(t))
+		checkConcurrentOpens(t, openPG)
+	})
+	t.Run("from an empty database", func(t *testing.T) {
+		dropPGTables(t, pgDB(t))
+		checkConcurrentOpens(t, openPG)
+	})
 }
 
 func TestPostgres_OpenAndMigrations(t *testing.T) {
@@ -60,8 +81,8 @@ func TestPostgres_OpenAndMigrations(t *testing.T) {
 	if err := db.SQLDB().QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&v); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if v != 20 {
-		t.Errorf("schema_version = %d, want 20", v)
+	if v != 21 {
+		t.Errorf("schema_version = %d, want 21", v)
 	}
 }
 
@@ -104,6 +125,15 @@ func TestPostgres_SessionAccount(t *testing.T) {
 }
 func TestPostgres_MigrationMarksNoSession(t *testing.T) {
 	checkMigrationMarksNoSession(t, pgDB(t))
+}
+func TestPostgres_AnnouncementRoundTrip(t *testing.T) {
+	checkAnnouncementRoundTrip(t, NewSessionStore(pgDB(t), 0, 0))
+}
+func TestPostgres_AnnouncementSurvivesTrim(t *testing.T) {
+	checkAnnouncementSurvivesTrim(t, pgDB(t))
+}
+func TestPostgres_AnnouncementMigration(t *testing.T) {
+	checkAnnouncementMigration(t, pgDB(t))
 }
 func TestPostgres_ClaimOwner(t *testing.T) {
 	checkClaimOwner(t, NewSessionStore(pgDB(t), 0, 0))

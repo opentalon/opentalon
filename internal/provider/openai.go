@@ -958,7 +958,7 @@ func (p *OpenAIProvider) toOAIRequest(req *CompletionRequest) (oaiRequest, error
 	for _, t := range req.Tools {
 		oai.Tools = append(oai.Tools, oaiTool{
 			Type:     "function",
-			Function: oaiToolFunction(t),
+			Function: oaiToolFunction{Name: t.Name, Description: t.Description, Parameters: t.Parameters},
 		})
 	}
 	return oai, nil

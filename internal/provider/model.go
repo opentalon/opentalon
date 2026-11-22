@@ -51,6 +51,7 @@ const (
 	FeatureImages         Feature = "images"
 	FeatureTools          Feature = "tools"
 	FeatureRetryToolCalls Feature = "retry_tool_calls"
+	FeatureInlineTools    Feature = "inline_tools"
 )
 
 type ModelCost struct {

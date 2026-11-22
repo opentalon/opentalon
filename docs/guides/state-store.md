@@ -7,8 +7,8 @@ SQLite (default) and PostgreSQL behind one `Dialect`. Design background:
 ## Migrations are `NNN_name.sql` and sort lexicographically
 
 `migrationNames` sorts filenames with `sort.Strings`, then `migrationNumber`
-parses the digits before the first `_`. Numbering is currently at `020`. A new
-migration is `021_short_name.sql`.
+parses the digits before the first `_`. Numbering is currently at `021`. A new
+migration is `022_short_name.sql`.
 
 > **Gotcha**: mixing widths — adding `18_sessions_flag.sql` next to the
 > `017_…` files. `sort.Strings` does not order `18_…` where its number says
@@ -26,6 +26,24 @@ DDL/DML and avoid `?`, `$1`, and engine-specific syntax (`AUTOINCREMENT`,
 
 > **Gotcha**: `INSERT INTO entities (id) VALUES (?)` inside a migration. It
 > works on SQLite and fails on PostgreSQL with a syntax error at `?`.
+
+## A migration runs alone across every client of the database
+
+`migrate` applies each migration in its own transaction that no other process
+holds at the same time: on SQLite `BEGIN IMMEDIATE`, the database's write lock;
+on PostgreSQL a transaction that first takes
+`pg_advisory_xact_lock(migrationLockKey)`, which PostgreSQL releases at commit,
+at rollback and when the holder's session ends. Inside that transaction the
+runner reads `schema_version` again and skips a migration another process has
+applied, so processes that open one database at the same time all reach the
+newest version and each migration runs once. Creating `schema_version` is such
+a step too. A waiting process waits up to `busy_timeout` per step on SQLite and
+until the holder's transaction ends on PostgreSQL.
+
+> **Gotcha**: deciding what to apply from a `schema_version` read taken before
+> the step's transaction. Two replicas starting together then apply the same
+> migration, the second fails on the duplicate column, `store.Open` returns the
+> error and that process runs on in-memory state.
 
 ## `schema_version` holds exactly one row
 
@@ -63,11 +81,12 @@ defaults.
 > **Gotcha**: dropping `busy_timeout` from the DSN and calling
 > `db.Exec("PRAGMA busy_timeout = 5000")` — the `SQLITE_BUSY` failures come back.
 
-## Plugin databases have their own runner and version table
+## Plugin databases have their own version table
 
 `RunPluginMigrations` opens `<data_dir>/plugin_data/<plugin>.db` (always SQLite,
 regardless of the main driver) and applies `<pluginPath>/migrations/*.sql` in
-sorted order against that database's own `schema_version`. A plugin migration is
+sorted order with the same `migrate` runner against that database's own
+`schema_version`. A plugin migration is
 not a main-DB migration: it never runs on PostgreSQL and never touches the main
 schema.
 
@@ -96,8 +115,16 @@ schema.
 - A migration needing data movement keeps it in the file itself, or gates the Go
   fix on `prevVersion < N`.
 - New queries go through `d.dialect.Rebind(...)` before execution.
+- What a migration step applies follows only from the `schema_version` it reads
+  inside `migrationStep`.
 
 ### `internal/state/store/store_test.go`
 
 - A fresh-open test proves the migration applies on an empty database.
 - A re-open test proves a second `Open` is a no-op (no re-run, no error).
+
+### `internal/state/store/migrate_test.go`
+
+- Concurrent `Open` calls from an older version and from an empty database all
+  succeed and end with one `schema_version` row at the newest number; the
+  PostgreSQL variant is `TestPostgres_ConcurrentOpensMigrateOnce`.

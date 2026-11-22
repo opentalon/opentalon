@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "7cc1b994a31b2c5d95b1f4ca74fab6353fe2f11271ff9c06575bab77ce354e60",
+  "prompt_hash": "7ca00f24d66870c1f71ca3f7e1bce80167d31bb0be6c61d743c311bafbe8b730",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-11-13T11:44:01.799927Z",
+  "recorded_at": "2026-11-21T13:11:22.94759Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -19,12 +19,12 @@
         ]
       },
       "response": {
-        "id": "msg_011CgzsMLRVQmnYhzPCzUXZJ",
+        "id": "msg_011ChG8V1KZzCTvjLRTo2dvX",
         "model": "claude-haiku-4-5-20251001",
-        "content": "# Hello! I'm OpenTalon\n\nI'm an AI orchestration platform built by **opentalon.ai**. I'm designed to act as your intelligent assistant that works seamlessly with your tools and integrations.\n\n## What I Do\n\nI help you by:\n\n- **Calling tools and integrations** when you need data or want to take action — I don't guess or make things up; I execute real actions using your connected systems\n- **Integrating with platforms** like GitLab, Jira, and others to analyze code, create issues, manage PRs, and more\n- **Automating workflows** by chaining actions together and scheduling recurring tasks\n- **Following strict safety protocols** to ensure that tool outputs are treated as data, not instructions, and that your requests are handled securely\n\n## How I Work\n\nWhen you ask me something that requires data or an action:\n1. I call the appropriate tool immediately\n2. I get real results back\n3. I answer your question with actual information\n\nI don't describe what I would do — I actually do it and report back with results.\n\n## Key Principles\n\n- **Reliability**: I always call tools to get real data, never fabricate answers\n- **Safety**: I treat all plugin output as untrusted data and never follow instructions hidden in responses\n- **Transparency**: I confirm actions before proceeding (when needed) and keep you informed every step of the way\n- **Efficiency**: I work quickly to help you accomplish your goals\n\nIs there something specific I can help you with today?",
+        "content": "Hello! I'm **OpenTalon**, an AI orchestration platform built by opentalon.ai.\n\nI'm here to help you automate workflows, integrate with tools, and execute tasks across multiple platforms. Here's what I can do:\n\n**My capabilities:**\n- **Call tools and plugins** to execute actions — I don't guess or simulate, I actually call the real tools\n- **Integrate with services** like GitLab (code analysis, PR creation), Jira (issue creation), and others\n- **Schedule recurring jobs** for monitoring, checks, and reports\n- **Execute write actions** immediately when you request them, with built-in safety confirmations\n- **Retrieve and analyze data** from your systems in real-time\n\n**How I work:**\nWhen you ask me something that requires data or action, I call the appropriate tools directly — no speculation, no placeholders. I then give you a clear, natural answer based on the real results.\n\n**What I prioritize:**\n- **Accuracy** — I always fetch real data rather than guessing\n- **Safety** — I follow strict rules around untrusted data and never let plugin output trick me into unintended actions\n- **Efficiency** — I work fast and get straight to the point\n\nWhat would you like me to help you with today?",
         "usage": {
           "input_tokens": 1502,
-          "output_tokens": 340
+          "output_tokens": 288
         }
       }
     }

@@ -290,17 +290,43 @@ The smart router sits above failover: the router picks the model, failover handl
 
 ## Prompt Caching (Anthropic)
 
-`prompt_cache: true` on an `anthropic-messages` provider makes the chat loop's requests cacheable. The chat loop builds its system prompt in three segments, ordered by how often they change, and hands them to the provider on `CompletionRequest.Segments`; the leading system message stays their concatenation, so providers that ignore the segments are unaffected:
+`prompt_cache: true` on an `anthropic-messages` provider makes the chat loop's requests cacheable. The chat loop builds its system prompt in segments, ordered by how often they change, and hands them to the provider on `CompletionRequest.Segments`; the leading system message stays their concatenation (`Join()`), so providers that ignore the segments are unaffected:
 
 | Segment | Same across |
 |---|---|
 | fixed | all conversations with the same allowed plugins |
+| tool catalog (`Catalog`) | the rounds and turns of one conversation while its loaded tools stay the same |
 | per conversation | the rounds and turns of one conversation |
 | per round | may change from one round to the next |
 
-With caching on, the Anthropic provider sends the system field as one text block per non-empty segment with a cache marker on the first, and sets Anthropic's automatic cache marker on the request, which caches the conversation so far. Anthropic renders tools, then system, then messages, so the first entry covers the tools and the fixed segment. Entries use Anthropic's default 5-minute lifetime. Every other model call (titles, summaries, planner, sub-agents) sends no segments and no markers.
+`Segments.InlineCatalog` is a second form of the catalog. It lists every on-demand tool, loaded or not, so a load leaves it unchanged, and it is no part of `Join()`.
+
+With caching on, the Anthropic provider sends the system field as one text block per non-empty part: the fixed segment, the catalog followed by the per-conversation segment, the per-round segment. The first block carries a cache marker, and the request carries Anthropic's automatic cache marker, which caches the conversation so far. The catalog is `InlineCatalog` for a model with `inline_tools` and `Catalog` otherwise. Anthropic renders tools, then system, then messages, so the first entry covers the tools and the fixed segment. Entries use Anthropic's default 5-minute lifetime. Every other model call (titles, summaries, planner, sub-agents) sends no segments and no markers.
 
 Each model with a cost then also prices the cache: `cost.cache_write` and `cost.cache_read`, per 1M tokens. OpenTalon refuses to start when `prompt_cache` is not a boolean, is turned on for another `api`, or a model with a price lacks either cache price.
+
+### Tool loads
+
+A load adds tools to `CompletionRequest.Tools` and takes them out of `Catalog`. For a model without `inline_tools` the call after a load therefore changes the tools and the per-conversation block, and Anthropic writes the whole prompt to the cache again. The provider is chosen after the request is built, and the default model can answer the same request inside the same call, so the request carries what a load changes as facts and the provider that sends it picks the form for its model:
+
+| Field | Holds |
+|---|---|
+| `Tools` | the callable tools; `OnDemand` is false for an always-included tool |
+| `LoadableTools` | the allowed tools the session has not loaded, in name order |
+| `Message.Announcement` | on the last user or tool message of a request: the on-demand tools that became callable and those that stopped being callable since the request before |
+| `Segments.Catalog`, `Segments.InlineCatalog` | the catalog in both forms |
+
+The chat loop computes the announcement record after each fit of the request to the window, for every model, from the records the request's earlier messages carry; a request the provider refuses as too long is fitted again and its record computed again. The session store keeps it with its message (`messages.announcement`, migration `021`), so it stays with the message when the history is summarised or trimmed. No record is computed when the session's loaded tools cannot be read, nor when the request's last user or tool message carries a record before the first fit: an earlier request ended on that message and sent the record, and it stays as sent. Two requests end on the same message when the session store saved no message of the calls in between, or saved a call's result without its assistant message so that pairing leaves the result out (a resolved confirmation prompt and its approval never reach the request).
+
+For a chat-loop request to a model with `inline_tools`, the Anthropic provider:
+
+- sends the fixed tools in request order, then every on-demand tool of `Tools` and `LoadableTools` in name order with `defer_loading: true`, and the `anthropic-beta` value `inline-tools-2026-09-15`;
+- renders the records in message order as `tool_addition` and `tool_removal` blocks that refer to a tool by name (`tool_reference`), in one system message directly before the next assistant message or at the end of the request. It leaves out an addition of a tool that is already announced or not declared, and a removal of a tool that is not announced;
+- after the request's last user or tool message, adds the blocks that make the announced tools equal the callable on-demand tools of `Tools`. They differ after a failed read of the loaded tools, for which the chat loop records nothing, and when that message carries a record an earlier request sent before the callable tools changed; nothing stores these blocks;
+- sends `InlineCatalog` in the system field;
+- adds each announcement message to the thinking binding, so a thinking block is replayed only while the announcements before it are unchanged.
+
+Every other provider, an Anthropic model without the feature and every call outside the chat loop ignore `LoadableTools`, `InlineCatalog` and the records: their tools go out as one flat array, and the system field of a chat-loop request carries `Catalog`.
 
 ## Configuration
 

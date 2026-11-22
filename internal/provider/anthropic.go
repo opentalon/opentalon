@@ -38,6 +38,7 @@ const (
 	anthropicCacheDiagnosisBeta = "cache-diagnosis-2026-04-07"
 	// anthropicThinkingBindingBeta allows thinking.block_binding.
 	anthropicThinkingBindingBeta = "thinking-binding-controls-2026-08-01"
+	anthropicInlineToolsBeta     = "inline-tools-2026-09-15"
 	// maxDiagnosedSessions bounds the sessions whose last response id is kept
 	// for cache diagnostics.
 	maxDiagnosedSessions = 10_000
@@ -212,6 +213,7 @@ type anthRequest struct {
 	// fingerprint is the thinking binding of the whole request, for the
 	// thinking blocks its response returns (see thinkingBinding).
 	fingerprint string
+	inlineTools bool
 }
 
 // anthDiagnostics opts a request in to cache diagnostics. PreviousMessageID
@@ -233,9 +235,10 @@ type anthCacheControl struct {
 }
 
 type anthTool struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description,omitempty"`
-	InputSchema map[string]interface{} `json:"input_schema"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description,omitempty"`
+	InputSchema  map[string]interface{} `json:"input_schema"`
+	DeferLoading bool                   `json:"defer_loading,omitempty"`
 }
 
 type anthThinking struct {
@@ -388,6 +391,9 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 	}
 	if anthReq.Thinking != nil && anthReq.Thinking.BlockBinding != nil {
 		addListHeader(httpReq.Header, "anthropic-beta", anthropicThinkingBindingBeta)
+	}
+	if anthReq.inlineTools {
+		addListHeader(httpReq.Header, "anthropic-beta", anthropicInlineToolsBeta)
 	}
 
 	// Structured session-event capture: emit metadata about the outbound
@@ -555,18 +561,30 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		}
 		conversation = append(conversation, m)
 	}
-	system, cached, err := p.toAnthSystem(req, systemParts)
+	inlineTools := req.Segments != nil && model.SupportsFeature(FeatureInlineTools)
+	system, cached, err := p.toAnthSystem(req, systemParts, inlineTools)
 	if err != nil {
 		return anthRequest{}, err
 	}
 	tools := toolDefsToAnthTools(req.Tools)
+	var announcements *toolAnnouncements
+	if inlineTools {
+		tools = inlineAnthTools(req.Tools, req.LoadableTools)
+		announcements = newToolAnnouncements(tools, req.Tools)
+	}
 	binding, err := newThinkingBinding(system, tools)
 	if err != nil {
 		return anthRequest{}, err
 	}
 
+	lastUserRole := -1
+	for i, m := range conversation {
+		if m.Role != RoleAssistant {
+			lastUserRole = i
+		}
+	}
 	msgs := make([]anthMessage, 0, len(conversation))
-	for _, m := range conversation {
+	for i, m := range conversation {
 		blocks := m.Thinking
 		m.Thinking = nil
 		plain, err := p.toAnthMessage(m)
@@ -589,6 +607,24 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		if err := binding.add(plain); err != nil {
 			return anthRequest{}, err
 		}
+		if announcements == nil || m.Role == RoleAssistant {
+			continue
+		}
+		announcements.add(m.Announcement)
+		// An announcement directly before a user message is a 400.
+		if i+1 < len(conversation) && conversation[i+1].Role != RoleAssistant {
+			continue
+		}
+		after, err := announcements.messages(i == lastUserRole)
+		if err != nil {
+			return anthRequest{}, err
+		}
+		for _, a := range after {
+			msgs = append(msgs, a)
+			if err := binding.add(a); err != nil {
+				return anthRequest{}, err
+			}
+		}
 	}
 
 	maxTokens := req.MaxTokens
@@ -606,6 +642,7 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		MaxTokens:   maxTokens,
 		Tools:       tools,
 		fingerprint: binding.sum(),
+		inlineTools: inlineTools,
 	}
 	if cached {
 		ar.CacheControl = &anthCacheControl{Type: "ephemeral"}
@@ -638,15 +675,22 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 }
 
 // toAnthSystem renders the system field from the request's system messages,
-// systemParts in order: as cache-marked text blocks when cachedSystemBlocks
+// systemParts in order, the leading one from its segments when they describe
+// it: as cache-marked text blocks when caching is on and cachedSystemBlocks
 // returns any, which cached reports, else as their join in one string.
-func (p *AnthropicProvider) toAnthSystem(req *CompletionRequest, systemParts []string) (system json.RawMessage, cached bool, err error) {
-	if blocks := p.cachedSystemBlocks(req, systemParts); len(blocks) > 0 {
-		system, err = json.Marshal(blocks)
-		if err != nil {
-			return nil, false, fmt.Errorf("marshal system blocks: %w", err)
+func (p *AnthropicProvider) toAnthSystem(req *CompletionRequest, systemParts []string, inlineTools bool) (system json.RawMessage, cached bool, err error) {
+	lead, segmented := leadSegments(req, inlineTools)
+	if segmented && p.promptCache {
+		if blocks := cachedSystemBlocks(append(lead, systemParts[1:]...)); len(blocks) > 0 {
+			system, err = json.Marshal(blocks)
+			if err != nil {
+				return nil, false, fmt.Errorf("marshal system blocks: %w", err)
+			}
+			return system, true, nil
 		}
-		return system, true, nil
+	}
+	if segmented {
+		systemParts = append([]string{strings.Join(lead, "")}, systemParts[1:]...)
 	}
 	text := joinStrings(systemParts)
 	if text == "" {
@@ -659,20 +703,24 @@ func (p *AnthropicProvider) toAnthSystem(req *CompletionRequest, systemParts []s
 	return system, false, nil
 }
 
-// cachedSystemBlocks returns the system field's text blocks when prompt
-// caching is on and req.Segments describes the leading system message: one
-// block per segment, then one per further system message, leaving out blank
-// ones (Anthropic rejects them), with a cache marker on the first block.
-// Otherwise it returns nil.
-func (p *AnthropicProvider) cachedSystemBlocks(req *CompletionRequest, systemParts []string) []anthTextBlock {
+func leadSegments(req *CompletionRequest, inlineTools bool) (lead []string, segmented bool) {
 	segs := req.Segments
-	if !p.promptCache || segs == nil || len(req.Messages) == 0 ||
+	if segs == nil || len(req.Messages) == 0 ||
 		req.Messages[0].Role != RoleSystem || req.Messages[0].Content != segs.Join() {
-		return nil
+		return nil, false
 	}
+	catalog := segs.Catalog
+	if inlineTools {
+		catalog = segs.InlineCatalog
+	}
+	return []string{segs.Fixed, catalog + segs.Conversation, segs.Round}, true
+}
+
+// cachedSystemBlocks returns one text block per text, leaving out blank ones
+// (Anthropic rejects them), with a cache marker on the first block.
+func cachedSystemBlocks(texts []string) []anthTextBlock {
 	var blocks []anthTextBlock
-	// systemParts[0] is the leading system message, sent as its segments.
-	for _, text := range append([]string{segs.Fixed, segs.Conversation, segs.Round}, systemParts[1:]...) {
+	for _, text := range texts {
 		if strings.TrimSpace(text) != "" {
 			blocks = append(blocks, anthTextBlock{Type: "text", Text: text})
 		}
@@ -759,13 +807,129 @@ func toolDefsToAnthTools(defs []ToolDefinition) []anthTool {
 	}
 	tools := make([]anthTool, len(defs))
 	for i, d := range defs {
-		tools[i] = anthTool{
-			Name:        d.Name,
-			Description: d.Description,
-			InputSchema: d.Parameters,
-		}
+		tools[i] = toAnthTool(d)
 	}
 	return tools
+}
+
+func inlineAnthTools(callable, loadable []ToolDefinition) []anthTool {
+	var tools, hidden []anthTool
+	for _, d := range callable {
+		if d.OnDemand {
+			hidden = append(hidden, toAnthTool(d))
+			continue
+		}
+		tools = append(tools, toAnthTool(d))
+	}
+	for _, d := range loadable {
+		hidden = append(hidden, toAnthTool(d))
+	}
+	sort.Slice(hidden, func(i, j int) bool { return hidden[i].Name < hidden[j].Name })
+	for i := range hidden {
+		hidden[i].DeferLoading = true
+	}
+	return append(tools, hidden...)
+}
+
+func toAnthTool(d ToolDefinition) anthTool {
+	return anthTool{Name: d.Name, Description: d.Description, InputSchema: d.Parameters}
+}
+
+type anthToolChange struct {
+	Type string            `json:"type"`
+	Tool anthToolReference `json:"tool"`
+}
+
+type anthToolReference struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+}
+
+type toolAnnouncements struct {
+	declared  map[string]bool
+	callable  []string
+	announced map[string]bool
+	pending   []anthToolChange
+}
+
+func newToolAnnouncements(tools []anthTool, callable []ToolDefinition) *toolAnnouncements {
+	a := &toolAnnouncements{declared: map[string]bool{}, announced: map[string]bool{}}
+	for _, t := range tools {
+		if t.DeferLoading {
+			a.declared[t.Name] = true
+		}
+	}
+	for _, d := range callable {
+		if d.OnDemand {
+			a.callable = append(a.callable, d.Name)
+		}
+	}
+	sort.Strings(a.callable)
+	return a
+}
+
+func (a *toolAnnouncements) add(record *ToolAnnouncement) {
+	if record == nil {
+		return
+	}
+	for _, name := range record.Added {
+		// A reference to a tool the request does not declare is a 400.
+		if a.declared[name] && !a.announced[name] {
+			a.announced[name] = true
+			a.pending = append(a.pending, anthToolChange{Type: "tool_addition", Tool: anthToolReference{Type: "tool_reference", Name: name}})
+		}
+	}
+	for _, name := range record.Removed {
+		if a.announced[name] {
+			delete(a.announced, name)
+			a.pending = append(a.pending, anthToolChange{Type: "tool_removal", Tool: anthToolReference{Type: "tool_reference", Name: name}})
+		}
+	}
+}
+
+func (a *toolAnnouncements) messages(last bool) ([]anthMessage, error) {
+	runs := [][]anthToolChange{a.take()}
+	if last {
+		// Callable and announced tools differ after a failed read of the loaded tools or when an earlier request sent the last message's record; nothing stores this.
+		a.add(a.difference())
+		runs = append(runs, a.take())
+	}
+	var out []anthMessage
+	for _, blocks := range runs {
+		if len(blocks) == 0 {
+			continue
+		}
+		raw, err := json.Marshal(blocks)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tool announcement: %w", err)
+		}
+		out = append(out, anthMessage{Role: string(RoleSystem), Content: raw})
+	}
+	return out, nil
+}
+
+func (a *toolAnnouncements) take() []anthToolChange {
+	blocks := a.pending
+	a.pending = nil
+	return blocks
+}
+
+func (a *toolAnnouncements) difference() *ToolAnnouncement {
+	var d ToolAnnouncement
+	callable := make(map[string]bool, len(a.callable))
+	for _, name := range a.callable {
+		callable[name] = true
+		if !a.announced[name] {
+			d.Added = append(d.Added, name)
+		}
+	}
+	for name := range a.announced {
+		if !callable[name] {
+			d.Removed = append(d.Removed, name)
+		}
+	}
+	sort.Strings(d.Removed)
+	return &d
 }
 
 // toAnthMessage converts a provider.Message to an anthMessage. Routes by

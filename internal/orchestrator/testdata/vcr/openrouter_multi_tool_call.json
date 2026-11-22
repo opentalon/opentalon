@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "7cc1b994a31b2c5d95b1f4ca74fab6353fe2f11271ff9c06575bab77ce354e60",
+  "prompt_hash": "7ca00f24d66870c1f71ca3f7e1bce80167d31bb0be6c61d743c311bafbe8b730",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-11-13T11:43:58.997061Z",
+  "recorded_at": "2026-11-21T13:11:18.507416Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -19,7 +19,7 @@
         ]
       },
       "response": {
-        "id": "gen-1794570239-dZhcaSrknEWMrKHkf3SY",
+        "id": "gen-1795266678-4vakH9wSq5gsOkR6Bycv",
         "model": "mistralai/ministral-8b-2512",
         "content": "[tool_call]\n{\"tool\": \"_meta__load_tools\", \"args\": {\"names\": \"gitlab__analyze_code,jira__create_issue\"}}\n[/tool_call]",
         "usage": {
@@ -51,7 +51,7 @@
         ]
       },
       "response": {
-        "id": "gen-1794570239-B56BwwjW1uQqVGEfQ4gQ",
+        "id": "gen-1795266680-x9Xxm2vqO3qxl6Fr6GB5",
         "model": "mistralai/ministral-8b-2512",
         "content": "[tool_call]\n{\"tool\": \"gitlab__analyze_code\", \"args\": {\"repo\": \"myrepo\"}}\n[/tool_call]",
         "usage": {
@@ -91,12 +91,12 @@
         ]
       },
       "response": {
-        "id": "gen-1794570240-RcUQtrjWbP4qAgE1Mlk3",
+        "id": "gen-1795266681-FVxroJcBW7f36BhZ1Bac",
         "model": "mistralai/ministral-8b-2512",
-        "content": "[tool_call] jira__create_issue(title=\"Code review\")",
+        "content": "[tool_call]\n{\"tool\": \"jira__create_issue\", \"args\": {\"title\": \"Code review\"}}\n[/tool_call]",
         "usage": {
           "input_tokens": 1695,
-          "output_tokens": 16
+          "output_tokens": 32
         }
       }
     },
@@ -139,7 +139,7 @@
         ]
       },
       "response": {
-        "id": "gen-1794570240-FBSPj7OJ0WfMf8bmHGUb",
+        "id": "gen-1795266682-S3gFyPVTHTM2r7ZTvw29",
         "model": "mistralai/ministral-8b-2512",
         "content": "The code in `myrepo` has been analyzed, and a Jira issue titled **\"Code review\"** has been created.",
         "usage": {

@@ -236,6 +236,11 @@ How it behaves:
   and the part that may change from round to round. The first block carries
   a cache marker, and the request carries Anthropic's automatic marker, which
   caches the conversation so far. Entries last Anthropic's default 5 minutes.
+- Loading tools adds them to the request's tools and takes them out of the
+  tool catalog in the system prompt. Anthropic renders the tools ahead of the
+  system prompt and the messages, so the call after a load writes the whole
+  prompt to the cache again. On a model with [`inline_tools`](#inline-tools)
+  a load leaves the tools and the system prompt as they were.
 - Only the chat loop's model calls are marked. Session titles, summaries, the
   planner, sub-agents and confirmation messages are sent as before.
 - With `prompt_cache: false`, the default, the system prompt is sent as one
@@ -262,14 +267,129 @@ session event.
 - It needs `prompt_cache: true`; without it OpenTalon refuses to start with
   an error naming the provider. Like `prompt_cache`, it takes `true` or
   `false` only.
-- A configured `anthropic-beta` header is kept: both betas are sent,
-  separated by a comma.
+- A configured `anthropic-beta` header is kept: OpenTalon joins its own
+  betas to it (this one, `thinking-binding-controls-2026-08-01` for adaptive
+  thinking and `inline-tools-2026-09-15` for inline tools), separated by
+  commas.
 - The previous response ids are kept in memory, for at most 10,000 sessions
   (the oldest is dropped first). After a restart, after a session's id was
   dropped, or when the previous request ran on another instance, the next
   request sends no id and the comparison starts over. `previous_message_not_found`
   is recorded only when an id was sent that Anthropic no longer knows; the
   request is answered as usual.
+
+#### Inline tools
+
+`inline_tools` in the `features` of a model on an `anthropic-messages`
+provider keeps a conversation's tools and system prompt as first sent when
+the chat loop loads tools. The call after a load then reads the earlier
+prompt from the cache and writes only what follows it.
+
+```yaml
+models:
+  providers:
+    anthropic:
+      api_key: "${ANTHROPIC_API_KEY}"
+      api: anthropic-messages
+      prompt_cache: true
+      models:
+        - id: claude-sonnet-5-5
+          features: [tools, inline_tools]
+          thinking: adaptive
+```
+
+Every chat-loop request to such a model, from a conversation's first round
+on:
+
+- carries the `anthropic-beta` value `inline-tools-2026-09-15`;
+- sends in `tools` the always-included tools (`_meta__load_tools` among
+  them), then every other tool the session may use, loaded or not, in name
+  order and each with `defer_loading: true`. Anthropic keeps such a tool out
+  of the model's context until a `tool_addition` names it, so a load leaves
+  `tools` as it was. The request carries the definitions of every tool the
+  session may use and is larger for it;
+- sends a tool catalog that lists every tool of that second part, loaded or
+  not, under its own header (prompt `orchestrator_tool_catalog_inline`), so a
+  load leaves the system prompt as it was;
+- announces each tool that became callable with a request (through
+  `_meta__load_tools`, as a companion, or by a call made before it was
+  loaded) with a `tool_addition` block that names it, and each tool that
+  stopped being callable with a `tool_removal` block. The blocks follow the
+  user message or tool result that ended that request, in one system message
+  directly before the next assistant message or at the end of the request.
+  Every later request sends each announcement again at its place, unchanged.
+
+How the announcements follow the session:
+
+- A tool stops being callable with the first request that no longer offers
+  it: it was pushed out of the 40 loaded tools, or demoted. Tools loaded in
+  the running turn stay callable until the turn ends, so their
+  `tool_removal` comes with the user message that opens the next turn. The
+  earlier `tool_addition` stays where it is; a tool loaded again later is
+  announced again at that later place.
+- A tool loaded again while it is announced is not announced a second time.
+- A tool the session may no longer use, or that no plugin offers any more,
+  is neither declared nor announced, and its earlier announcements are left
+  out. Anthropic then writes the conversation from the first of them to the
+  cache once.
+- A callable tool that no announcement in the request names, because the
+  message that carried it was trimmed or summarised away, was sent for one
+  request only (a retry hint), or was stored without one, is announced after
+  the request's last user message or tool result. Nothing is inserted
+  earlier.
+- When OpenTalon cannot read which tools the session has loaded, the request
+  offers only the always-included tools and those loaded in the running
+  turn, and it withdraws the other announced tools at its end. Nothing of
+  that is stored. The next request that reads the loaded tools carries no
+  such withdrawal, so the conversation from that place is written to the
+  cache once.
+- A request ends on the same user message or tool result as the request
+  before it when the session store saved no message of the calls in between,
+  or saved a call's result without its assistant message so that the result
+  is left out (a confirmation prompt and the approval that answers it are
+  left out of every request). That message keeps the announcement it was
+  sent with. A tool that became callable or stopped being callable since is
+  announced after it for that request only, and the request after it
+  announces the change after its own last user message or tool result. The
+  conversation from that place is written to the cache once.
+- A user message stored after the message an announcement follows, such as
+  a note added while a call waits for confirmation, comes before the
+  announcement from the next request on. The conversation from that place is
+  written to the cache once.
+- A load by itself does not stop earlier thinking blocks from going back;
+  see [Adaptive thinking (Anthropic)](#adaptive-thinking-anthropic).
+
+Which requests take this form:
+
+- A model without the feature and every `openai-completions` provider, also
+  with `inline_tools` in a model's `features`, get the callable tools in one
+  flat `tools` array and the catalog of the tools the session may use but
+  has not loaded, without announcements and without the beta value. So does
+  every call outside the chat loop (session titles, summaries, the planner,
+  sub-agents, confirmation messages).
+- The model that serves a round decides from its own entry. When the default
+  chain answers a round for a selected model with the feature (see [When the
+  selected provider fails](#when-the-selected-provider-fails)), a default
+  model without it gets the flat form, with every loaded tool in its
+  `tools`.
+- A 400 for this form, for example from an endpoint that does not accept the
+  beta value, is a refused request: for a model a profile selects, the
+  default chain answers the round with a warning and the provider stays in
+  use, so the next round tries it again. Removing `inline_tools` from the
+  model is the way back.
+- The feature acts only when the chat loop sends tools natively, which a
+  model with `features: [tools]` at the provider of `routing.primary` turns
+  on. Without that, its requests differ only by the beta value.
+- It does not need `prompt_cache: true`. Without it the system prompt is
+  sent as one string with the same catalog, and nothing is cached.
+- Turning the feature on or off changes the tools and the system prompt of a
+  running conversation: its next call writes the whole prompt to the cache
+  once and sends none of the earlier thinking blocks. The changes of the
+  callable tools are recorded with the messages for every model, so a
+  conversation that gets the feature has its tools announced where they were
+  loaded.
+- An absent `features`, `null` and `[]` turn nothing on, and a name OpenTalon
+  does not know (`inline-tools`) is ignored.
 
 ## Custom Models
 
@@ -315,6 +435,7 @@ Model fields:
 | `reasoning` | no | Whether the model supports chain-of-thought |
 | `reasoning_effort` | no | Effort the model is asked for: `low`, `medium` or `high`; with `thinking: adaptive` also `xhigh` and `max`. Empty = the provider's default |
 | `thinking` | no | `adaptive` on an `anthropic-messages` provider, for Claude 4.6 and later. See "Adaptive thinking (Anthropic)" |
+| `features` | no | Capabilities of the model: `tools` (native tool calls), `reasoning` (the request asks for reasoning), `retry_tool_calls` (a round answered with text where the planner expected a tool call is retried), `inline_tools` (see [Inline tools](#inline-tools)). Other names, `null` and `[]` turn nothing on |
 | `input` | no | Supported input types (`[text]`, `[text, image]`) |
 | `context_window` | no | Max context size in tokens |
 | `max_tokens` | no | Max output tokens |
@@ -361,20 +482,25 @@ models:
   sent none of them.
 - On Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 a thinking block
   stays valid only while the system prompt, the tools and every earlier
-  message are unchanged, and OpenTalon changes the system prompt after a
-  turn's first tool result and the tools when it loads tools. Anthropic drops
-  a block that is no longer valid, and a dropped block makes it write the
-  conversation after it to the cache again. To a model with `thinking:
-  adaptive` OpenTalon therefore sends a block only while the system prompt,
-  the tools and the earlier messages are what they were when the block was
-  produced (cache markers and the effort do not count); a block produced
-  after such a change goes back as long as nothing changes again. With a
-  thinking budget every block goes back, as those models need the unfinished
-  turn's blocks and do not check them.
+  message are unchanged. OpenTalon changes the system prompt when a
+  conversation first holds more than two messages and with its first tool
+  result, and, on a model without [`inline_tools`](#inline-tools), the tools
+  and the system prompt when it loads tools. Anthropic drops a block that is
+  no longer valid, and a dropped block makes it write the conversation after
+  it to the cache again. To a model with `thinking: adaptive` OpenTalon
+  therefore sends a block only while the system prompt, the tools and the
+  earlier messages, the announcements of `inline_tools` included, are what
+  they were when the block was produced (cache markers and the effort do not
+  count); a block produced after such a change goes back as long as nothing
+  changes again. On a model with `inline_tools` a load changes none of them,
+  so the blocks from before the load keep going back. With a thinking budget
+  every block goes back, as those models need the unfinished turn's blocks
+  and do not check them.
 - Every request to a model with `thinking: adaptive` also carries
   `thinking.block_binding.prefix_mismatch_behavior: drop_block` and the
   `anthropic-beta` value `thinking-binding-controls-2026-08-01` (joined with
-  `cache-diagnosis-2026-04-07` when cache diagnostics are on), so a block
+  `cache-diagnosis-2026-04-07` when cache diagnostics are on and with
+  `inline-tools-2026-09-15` on a model with `inline_tools`), so a block
   that is no longer valid is left out instead of failing the request. The
   `llm_response` session event records how many Anthropic left out as
   `thinking_dropped`.
@@ -460,9 +586,13 @@ provider does not have to be part of `routing`:
   the default chain, so a task the chat model starts never fans out onto
   the profile's model.
 - The call uses the selected model's own entry: its `thinking` and
-  `reasoning_effort`, and reasoning only when it has `features: [reasoning]`,
-  whatever the default model has. A turn's `reasoning_effort` still replaces
-  the model's effort.
+  `reasoning_effort`, reasoning only when it has `features: [reasoning]`, and
+  the request form of [`inline_tools`](#inline-tools) only when it has that
+  feature, whatever the default model has. When the default chain answers in
+  its place, the default model's entry decides the same way, so a default
+  model without `inline_tools` gets every loaded tool in a flat `tools` array
+  and the catalog of the tools not loaded. A turn's `reasoning_effort` still
+  replaces the model's effort.
 - A provider that cannot stream (`anthropic-messages`) answers a round that
   would stream with its non-streaming call.
 - The usage row names the model that answered the run's first round, and each
