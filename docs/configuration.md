@@ -241,7 +241,8 @@ How it behaves:
   system prompt and the messages, so the call after a load writes the whole
   prompt to the cache again. On a model with [`inline_tools`](#inline-tools)
   a load leaves the tools and the system prompt as they were.
-- Only the chat loop's model calls are marked. Session titles, summaries, the
+- Only the chat loop's model calls and a compaction's summary call (see
+  [Long conversations](#long-conversations)) are marked. Session titles, the
   planner, sub-agents and confirmation messages are sent as before.
 - With `prompt_cache: false`, the default, the system prompt is sent as one
   string, as before.
@@ -311,51 +312,26 @@ on:
 - sends a tool catalog that lists every tool of that second part, loaded or
   not, under its own header (prompt `orchestrator_tool_catalog_inline`), so a
   load leaves the system prompt as it was;
-- announces each tool that became callable with a request (through
-  `_meta__load_tools`, as a companion, or by a call made before it was
-  loaded) with a `tool_addition` block that names it, and each tool that
-  stopped being callable with a `tool_removal` block. The blocks follow the
-  user message or tool result that ended that request, in one system message
-  directly before the next assistant message or at the end of the request.
-  Every later request sends each announcement again at its place, unchanged.
+- announces each tool a call loaded (through `_meta__load_tools`, as a
+  companion, or by calling it before it was loaded) with a `tool_addition`
+  block that names it. The block follows the tool result that answers the
+  call, in one system message directly before the next assistant message or
+  at the end of the request. Every later request sends each announcement
+  again at its place, unchanged.
 
 How the announcements follow the session:
 
-- A tool stops being callable with the first request that no longer offers
-  it: it was pushed out of the 40 loaded tools, or demoted. Tools loaded in
-  the running turn stay callable until the turn ends, so their
-  `tool_removal` comes with the user message that opens the next turn. The
-  earlier `tool_addition` stays where it is; a tool loaded again later is
-  announced again at that later place.
-- A tool loaded again while it is announced is not announced a second time.
+- The loaded tools are read from the request's conversation: the tools the
+  calls since the session's last compaction loaded, each announced at the
+  first result that loaded it. A call whose result the request leaves out (a
+  confirmation prompt and the approval that answers it are left out of every
+  request) loads nothing.
 - A tool the session may no longer use, or that no plugin offers any more,
-  is neither declared nor announced, and its earlier announcements are left
-  out. Anthropic then writes the conversation from the first of them to the
-  cache once.
-- A callable tool that no announcement in the request names, because the
-  message that carried it was trimmed or summarised away, was sent for one
-  request only (a retry hint), or was stored without one, is announced after
-  the request's last user message or tool result. Nothing is inserted
-  earlier.
-- When OpenTalon cannot read which tools the session has loaded, the request
-  offers only the always-included tools and those loaded in the running
-  turn, and it withdraws the other announced tools at its end. Nothing of
-  that is stored. The next request that reads the loaded tools carries no
-  such withdrawal, so the conversation from that place is written to the
-  cache once.
-- A request ends on the same user message or tool result as the request
-  before it when the session store saved no message of the calls in between,
-  or saved a call's result without its assistant message so that the result
-  is left out (a confirmation prompt and the approval that answers it are
-  left out of every request). That message keeps the announcement it was
-  sent with. A tool that became callable or stopped being callable since is
-  announced after it for that request only, and the request after it
-  announces the change after its own last user message or tool result. The
-  conversation from that place is written to the cache once.
-- A user message stored after the message an announcement follows, such as
-  a note added while a call waits for confirmation, comes before the
-  announcement from the next request on. The conversation from that place is
-  written to the cache once.
+  is neither declared nor announced. Anthropic then writes the conversation
+  from its first announcement to the cache once.
+- A compaction ends every load: the request after it offers only the
+  always-included tools, and the summary names the tools called before it
+  (see [Long conversations](#long-conversations)).
 - A load by itself does not stop earlier thinking blocks from going back;
   see [Adaptive thinking (Anthropic)](#adaptive-thinking-anthropic).
 
@@ -365,8 +341,9 @@ Which requests take this form:
   with `inline_tools` in a model's `features`, get the callable tools in one
   flat `tools` array and the catalog of the tools the session may use but
   has not loaded, without announcements and without the beta value. So does
-  every call outside the chat loop (session titles, summaries, the planner,
-  sub-agents, confirmation messages).
+  every call outside the chat loop (session titles, the planner,
+  sub-agents, confirmation messages); a compaction's summary call takes the
+  form of the request it continues.
 - The model that serves a round decides from its own entry. When the default
   chain answers a round for a selected model with the feature (see [When the
   selected provider fails](#when-the-selected-provider-fails)), a default
@@ -384,10 +361,9 @@ Which requests take this form:
   sent as one string with the same catalog, and nothing is cached.
 - Turning the feature on or off changes the tools and the system prompt of a
   running conversation: its next call writes the whole prompt to the cache
-  once and sends none of the earlier thinking blocks. The changes of the
-  callable tools are recorded with the messages for every model, so a
-  conversation that gets the feature has its tools announced where they were
-  loaded.
+  once and sends none of the earlier thinking blocks. The loaded tools are
+  read from the conversation, so a conversation that gets the feature has
+  its tools announced where they were loaded.
 - An absent `features`, `null` and `[]` turn nothing on, and a name OpenTalon
   does not know (`inline-tools`) is ignored.
 
@@ -578,8 +554,8 @@ provider does not have to be part of `routing`:
 - The chat loop follows the profile, for `chat` and `system` runs alike, and
   so do the turn's other calls to the chat models, with the same fallback:
   the planner and the text of a plan's confirmation, the confirmation
-  question, the confirmation classifier, the repair call, and the session
-  title and summary written after the turn. A turn a used-up budget moved
+  question, the confirmation classifier, the repair call, a compaction's
+  summary, and the session title written after the turn. A turn a used-up budget moved
   to the default chain sends all of them there.
 - A set `repair.model` keeps the repair call on that model. Sub-agents run
   on the model a host-side caller names, else on their parent's, else on
@@ -609,11 +585,10 @@ provider does not have to be part of `routing`:
 - The token count of an answer corrects the size estimate of the model that
   answered: the default model's when the default chain answered in place of
   the selected one.
-- Conversations are trimmed to the default model's `context_window` and
-  `max_tokens`, whichever model answers.
-- A selected model whose `context_window` is smaller than the default
-  model's can refuse long conversations: give it at least the default
-  model's `context_window` and `max_tokens`.
+- A conversation is compacted when its request reaches the trigger of any
+  model that may answer it: the selected model and every model of the
+  default chain, each with its own `context_window`, `max_tokens` and size
+  estimate (see [Long conversations](#long-conversations)).
 
 #### When the selected provider fails
 
@@ -622,7 +597,7 @@ provider does not have to be part of `routing`:
 | answers with a status other than 400, 413 and 422 (a refused key or account, a rate or spend limit, an unknown model, an overload or server error), cannot be reached, or reaches its `timeout` | the default chain answers with the default model, and one warning names the provider, the model and the error, with `unhealthy=true`: the provider is marked unhealthy |
 | answers 400 with Anthropic's spend limit message ("You have reached your specified … API usage limits") or its empty credit message ("Your credit balance is too low to access the Anthropic API") | as above: the default chain answers and the provider is marked unhealthy |
 | answers 400, 413 or 422 otherwise (it refuses this request), or with a reply that cannot be read | the default chain answers, with the warning and `unhealthy=false`; the provider stays in use |
-| refuses the prompt as longer than the model's window | the chat loop gets the refusal, as before, and trims and sends again |
+| refuses the prompt as longer than the model's window | the chat loop gets the refusal, compacts the conversation once and sends again |
 | does not answer before the turn is cancelled | the turn ends; the default chain is not called and nothing is marked |
 
 While a provider is marked unhealthy:
@@ -709,6 +684,51 @@ Override with an environment variable:
 state:
   data_dir: "${OPENTALON_DATA_DIR}"
 ```
+
+## Long conversations
+
+A conversation whose next chat-loop request reaches 95 % of the input budget
+of a model that may answer it is compacted before that request is sent. A
+model's input budget is its `context_window` minus its `max_tokens` minus 5 %
+of the window, against the request's size estimate for that model, which each
+answer of the model corrects. The models are the selected one and those of
+the default chain; a model without `context_window` never triggers a
+compaction.
+
+- The session's model writes a summary of the conversation, through the
+  session's chain, as a continuation of the request at hand: the same system
+  text, tools and history, then the instruction to summarise (prompt
+  `orchestrator_compaction`). It therefore reads the prompt cache the
+  conversation built. Its `llm_response` reports `chat_loop: false`. Tool
+  results too large for that request are shortened in it only.
+- The summary is stored as one message at the end of the history, with
+  `prompt_type: compaction` in its metadata; no stored message is changed or
+  removed. The core ends it with a line that names every tool called before
+  it (prompt `orchestrator_compaction_tools`).
+- Every later request carries the system text, the summary, the user
+  messages the compaction kept and the messages stored after it. Kept are
+  the newest user message, hidden or not, and before it the newest visible
+  ones while they fit a quarter of the room the conversation has; the
+  summary is held to a tenth of it.
+- A refusal for size starts one compaction and one retry. When the request
+  right after a compaction is still over the budget or is refused, the turn
+  fails with `context_length_exceeded` and nothing is stored.
+- When the summary cannot be written, nothing is stored and the turn goes on
+  uncompacted while its requests fit the budget; the next request tries
+  again.
+- Each compaction writes `compaction_started` (`model`, `estimated_tokens`,
+  `trigger_tokens`, `expected_ms`) and then `compaction_finished`
+  (`summary_model`, `summary_bytes`, `user_messages_kept`, `tools_dropped`,
+  `duration_ms`, `fallback`) or `compaction_failed` (`error`), and sends the
+  [`session.compaction`](websocket-messages.md#sessioncompaction) frames. The
+  request breakdown names the summary `summary`.
+- `expected_ms` is the weighted mean of the durations of the session model's
+  last 8 compactions, each weighing 0.7 times the next newer one, read from the
+  stored `compaction_finished` events, so every instance gives the same value.
+  Only compactions without a fallback count, each for the model that wrote
+  its summary; a model without one gets no `expected_ms`.
+- Settings of the removed message-count summariser and message window are
+  ignored: a configuration that still sets them starts.
 
 ## Orchestrator
 

@@ -984,18 +984,15 @@ func TestRepair_ApprovedCall_RepairedWithoutReconfirmation(t *testing.T) {
 	}
 }
 
-// A repaired success resets the consecutive-error counters exactly like a
-// normal success — the loop-cap nudge must NOT fire after a repaired call —
-// but the corrector invocation is counted in the SEPARATE repair counter,
-// so a repair loop can never mask a tool whose schema chronically misleads
-// the planner.
-func TestRepair_SuccessResetsToolErrorCounterButCountsRepair(t *testing.T) {
+// A repaired success counts like a normal success: with the loop cap at one,
+// no failed-tool nudge follows the repaired call.
+func TestRepair_SuccessIsNotAFailedCall(t *testing.T) {
 	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{
+	llm := &requestRecordingLLM{fakeLLM: fakeLLM{responses: []string{
 		"[tool_call] update the item",
 		`{"repaired_args": {"item_id": "42", "responsible_user_id": "131349"}}`,
 		"Done.",
-	}}
+	}}}
 	parser := misnamedArgParser(map[string]string{"item_id": "42", "user_id": "131349"})
 	exec := &recordingExecutor{}
 	orch, sessID := setupRepairOrchestrator(llm, parser, sink, exec, OrchestratorOpts{
@@ -1006,16 +1003,11 @@ func TestRepair_SuccessResetsToolErrorCounterButCountsRepair(t *testing.T) {
 	if _, err := orch.Run(context.Background(), sessID, "set user 131349 on item 42"); err != nil {
 		t.Fatal(err)
 	}
-	// recordToolOutcome saw the repaired SUCCESS, so the per-tool error
-	// counter is clean — a fresh error would be the first, not a loop-cap
-	// trip. The repair counter, by contrast, keeps the corrector invocation.
-	st := orch.toolErrorTracker.stateFor(sessID)
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	if n := st.sessionErrors["inventory__update-item"]; n != 0 {
-		t.Errorf("consecutive-error count after repaired success = %d, want 0", n)
-	}
-	if n := st.sessionRepairs["inventory__update-item"]; n != 1 {
-		t.Errorf("repair-attempt count after repaired success = %d, want 1 (counted separately)", n)
+	for i, msgs := range llm.requests {
+		for _, m := range msgs {
+			if strings.Contains(m.Content, "[system] Tool inventory__update-item failed") {
+				t.Errorf("request %d carries a failed-tool nudge after the repaired call: %q", i+1, m.Content)
+			}
+		}
 	}
 }

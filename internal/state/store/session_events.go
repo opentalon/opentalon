@@ -245,3 +245,24 @@ func newSessionEventID() (string, error) {
 	}
 	return hex.EncodeToString(b[:]), nil
 }
+
+// RecentPayloads returns the payloads of the newest limit events of
+// eventType across all sessions, newest first.
+func (s *SessionEventStore) RecentPayloads(ctx context.Context, eventType string, limit int) ([]json.RawMessage, error) {
+	rows, err := s.db.SQLDB().QueryContext(ctx,
+		s.db.Dialect().Rebind(`SELECT payload FROM session_events WHERE event_type = ? ORDER BY ts DESC LIMIT ?`),
+		eventType, limit)
+	if err != nil {
+		return nil, fmt.Errorf("recent %s events: %w", eventType, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []json.RawMessage
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return nil, fmt.Errorf("recent %s events: %w", eventType, err)
+		}
+		out = append(out, json.RawMessage(payload))
+	}
+	return out, rows.Err()
+}

@@ -6,7 +6,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
 
@@ -84,83 +83,6 @@ func TestRun_ReleasesSessionLockerOnError(t *testing.T) {
 	}
 	if len(releases) != 1 || releases[0] != "missing" {
 		t.Fatalf("release must run on the error path too, got %v", releases)
-	}
-}
-
-// seedSummarizableSession configures the summarizer thresholds and commits
-// enough messages that maybeSummarizeSession attempts the rewrite.
-func seedSummarizableSession(t *testing.T, orch *Orchestrator, sessions *state.SessionStore, sessionID string) {
-	t.Helper()
-	sessions.Create(state.SessionParams{ID: sessionID})
-	orch.summarizeAfterMessages = 2
-	orch.maxMessagesAfterSummary = 1
-	for i := 0; i < 3; i++ {
-		if err := sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: "m"}); err != nil {
-			t.Fatalf("AddMessage: %v", err)
-		}
-	}
-}
-
-// The summarizer rewrites the session's message rows (SetSummary deletes and
-// reinserts), so it must hold the same cross-pod turn lease as Run — and
-// release it — even though it runs from a detached background goroutine.
-func TestMaybeSummarizeSession_AcquiresAndReleasesSessionLocker(t *testing.T) {
-	locker := &recordingLocker{}
-	orch, sessions := newLockerTestOrch(locker, &fakeLLM{responses: []string{"a summary"}})
-	seedSummarizableSession(t, orch, sessions, "s1")
-
-	orch.maybeSummarizeSession(context.Background(), "s1")
-
-	locks, releases := locker.snapshot()
-	if len(locks) != 1 || locks[0] != "s1" {
-		t.Fatalf("expected exactly one distributed Lock for s1, got %v", locks)
-	}
-	if len(releases) != 1 || releases[0] != "s1" {
-		t.Fatalf("expected exactly one distributed release for s1, got %v", releases)
-	}
-	sess, err := sessions.Get("s1")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if sess.Summary != "a summary" {
-		t.Fatalf("Summary = %q, want the LLM output committed under the lease", sess.Summary)
-	}
-}
-
-// The lease is released on the summarizer's error path too (the LLM call
-// fails after the lease is held).
-func TestMaybeSummarizeSession_ReleasesSessionLockerOnLLMError(t *testing.T) {
-	locker := &recordingLocker{}
-	orch, sessions := newLockerTestOrch(locker, &fakeLLM{}) // no responses → Complete errors
-	seedSummarizableSession(t, orch, sessions, "s1")
-
-	orch.maybeSummarizeSession(context.Background(), "s1")
-
-	locks, releases := locker.snapshot()
-	if len(locks) != 1 || len(releases) != 1 {
-		t.Fatalf("lease must be acquired and released on the LLM-error path, got locks=%v releases=%v", locks, releases)
-	}
-}
-
-// When the lease cannot be acquired the summarizer must not touch the
-// session at all: no LLM call, no message rewrite.
-func TestMaybeSummarizeSession_SkipsRewriteWhenLockerFails(t *testing.T) {
-	locker := &recordingLocker{lockErr: errors.New("lease wait aborted")}
-	llm := &fakeLLM{responses: []string{"a summary"}}
-	orch, sessions := newLockerTestOrch(locker, llm)
-	seedSummarizableSession(t, orch, sessions, "s1")
-
-	orch.maybeSummarizeSession(context.Background(), "s1")
-
-	if llm.callCount != 0 {
-		t.Fatal("summarizer must not call the LLM without the turn lease")
-	}
-	sess, err := sessions.Get("s1")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if len(sess.Messages) != 3 || sess.Summary != "" {
-		t.Fatalf("session must be untouched without the lease, got %d messages, summary %q", len(sess.Messages), sess.Summary)
 	}
 }
 

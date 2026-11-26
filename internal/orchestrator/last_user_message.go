@@ -14,9 +14,9 @@ import (
 // lastUserMessageIDMetaKey is the session-metadata key that holds the id
 // handed to plugins as contextargs.LastUserMessageID. Session metadata is
 // the right home for it: it survives restarts, every instance reads the same
-// row, and summarisation (SetSummary) and clear_session (ClearMessages)
-// rewrite only the messages. Message rows cannot carry it — they have no
-// stable id, and SetSummary renumbers them and drops their metadata.
+// row, and clear_session (ClearMessages) and the confirmation rollback
+// (TruncateMessages) rewrite only the messages. Message rows cannot carry it —
+// they have no stable id.
 const lastUserMessageIDMetaKey = "last_user_message_id"
 
 // withStoredLastUserMessageID puts the session's stored latest-user-message

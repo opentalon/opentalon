@@ -110,7 +110,7 @@ func (o *Orchestrator) emitPreparerRetrievals(ctx context.Context, query string,
 // Tools.Tier1New surfaces every ToolCandidate plus any legacy
 // relevant_tools fallback list, recording what RAG retrieved (it
 // no longer drives the LLM's tools array, which is selected by the
-// always-include + sticky model).
+// always-include tools and the ones the conversation loaded).
 //
 // Returns the emitted event id so the caller can chain it as
 // TurnStartPayload.PreparerDecisionID — empty when no event was
@@ -146,8 +146,8 @@ func (o *Orchestrator) emitPreparerDecision(ctx context.Context, agg preparerAgg
 // current aggregate. Every retrieved tool candidate (plus any legacy
 // relevant_tools fallback) appears in tier1_new — the instrumentation
 // signal that records what RAG surfaced. The tools array the LLM actually
-// gets is now selected by the always-include + sticky model, not by this
-// retrieval, so the other tier buckets stay empty.
+// gets is the always-include tools and the ones the conversation loaded, not
+// this retrieval, so the other tier buckets stay empty.
 func buildToolsBlock(agg preparerAggregate) events.PreparerDecisionToolsBlock {
 	return events.PreparerDecisionToolsBlock{
 		Tier1New: toolCandidateNames(agg.Tools, agg.LegacyRelevantTools),

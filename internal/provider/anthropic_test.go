@@ -942,7 +942,7 @@ func TestAnthropicThinkingReplayAfterToolLoad(t *testing.T) {
 				}
 			}
 			complete([]ToolDefinition{load}, show)
-			msgs[len(msgs)-1].Announcement = &ToolAnnouncement{Added: []string{show.Name}}
+			msgs[len(msgs)-1].LoadedTools = []string{show.Name}
 			complete([]ToolDefinition{load, show})
 			complete([]ToolDefinition{load, show})
 
@@ -950,47 +950,6 @@ func TestAnthropicThinkingReplayAfterToolLoad(t *testing.T) {
 				t.Errorf("third request messages:\n got %s\nwant %s", strings.Join(got, "\n"), strings.Join(tc.want, "\n"))
 			}
 		})
-	}
-}
-
-func TestAnthropicThinkingAfterAOneRequestWithdrawal(t *testing.T) {
-	const block = `{"type":"thinking","thinking":"","signature":"sig-1"}`
-	const call = `{"type":"tool_use","id":"toolu_1","name":"inv__load","input":{}}`
-	const added = `{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"inv__show-item"}}]}`
-	const removed = `{"role":"system","content":[{"type":"tool_removal","tool":{"type":"tool_reference","name":"inv__show-item"}}]}`
-	p, bodies := thinkingReplayRig(t, []ModelInfo{{ID: "claude-x", Thinking: "adaptive", Features: []Feature{FeatureInlineTools}}}, block+","+call)
-	load := ToolDefinition{Name: "inv__load", Description: "Load tools", Parameters: map[string]interface{}{"type": "object"}}
-	show := ToolDefinition{Name: "inv__show-item", Description: "Show an item", Parameters: map[string]interface{}{"type": "object"}, OnDemand: true}
-	segs := SystemSegments{Fixed: "Rules."}
-	msgs := []Message{
-		{Role: RoleSystem, Content: segs.Join()},
-		{Role: RoleUser, Content: "Show item 7.", Announcement: &ToolAnnouncement{Added: []string{show.Name}}},
-	}
-	resp, err := p.Complete(context.Background(), &CompletionRequest{
-		Model: "claude-x", Messages: msgs, Tools: []ToolDefinition{load}, LoadableTools: []ToolDefinition{show}, Segments: &segs,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	msgs = append(msgs,
-		Message{Role: RoleAssistant, ToolCalls: resp.ToolCalls, Thinking: resp.Thinking, ThinkingFingerprint: resp.ThinkingFingerprint},
-		Message{Role: RoleTool, Content: "ok", ToolCallID: "toolu_1"})
-	if _, err := p.Complete(context.Background(), &CompletionRequest{
-		Model: "claude-x", Messages: msgs, Tools: []ToolDefinition{load, show}, Segments: &segs,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	want := []string{
-		`{"role":"user","content":"Show item 7."}`, added, removed, "",
-		`{"role":"user","content":"Show item 7."}`, added,
-		`{"role":"assistant","content":[` + call + `]}`,
-		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}`,
-	}
-	got := append(append(sentAnthMessages(t, bodies()[0]), ""), sentAnthMessages(t, bodies()[1])...)
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Errorf("messages of the request that withdrew the tool, then of the next:\n got %s\nwant %s",
-			strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 
@@ -1014,25 +973,12 @@ func announcementRequest(callable []string, history []Message) *CompletionReques
 }
 
 func TestAnthropicToolAnnouncements(t *testing.T) {
-	record := func(changes ...string) *ToolAnnouncement {
-		var r ToolAnnouncement
-		for _, c := range changes {
-			if c[0] == '+' {
-				r.Added = append(r.Added, c[1:])
-				continue
-			}
-			r.Removed = append(r.Removed, c[1:])
-		}
-		return &r
-	}
-	user := func(content string, r *ToolAnnouncement) Message {
-		return Message{Role: RoleUser, Content: content, Announcement: r}
-	}
+	user := func(content string) Message { return Message{Role: RoleUser, Content: content} }
 	call := func(id string) Message {
 		return Message{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: id, Name: "p__fixed"}}}
 	}
-	result := func(id string, r *ToolAnnouncement) Message {
-		return Message{Role: RoleTool, Content: "ok", ToolCallID: id, Announcement: r}
+	result := func(id string, loaded ...string) Message {
+		return Message{Role: RoleTool, Content: "ok", ToolCallID: id, LoadedTools: loaded}
 	}
 	wUser := func(content string) string { return `{"role":"user","content":"` + content + `"}` }
 	wCall := func(id string) string {
@@ -1041,14 +987,10 @@ func TestAnthropicToolAnnouncements(t *testing.T) {
 	wResult := func(id string) string {
 		return `{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + id + `","content":"ok"}]}`
 	}
-	wAnnounce := func(changes ...string) string {
-		blocks := make([]string, len(changes))
-		for i, c := range changes {
-			kind := "tool_addition"
-			if c[0] == '-' {
-				kind = "tool_removal"
-			}
-			blocks[i] = `{"type":"` + kind + `","tool":{"type":"tool_reference","name":"` + c[1:] + `"}}`
+	wAdded := func(names ...string) string {
+		blocks := make([]string, len(names))
+		for i, name := range names {
+			blocks[i] = `{"type":"tool_addition","tool":{"type":"tool_reference","name":"` + name + `"}}`
 		}
 		return `{"role":"system","content":[` + strings.Join(blocks, ",") + `]}`
 	}
@@ -1058,23 +1000,15 @@ func TestAnthropicToolAnnouncements(t *testing.T) {
 		history  []Message
 		want     []string
 	}{
-		{"after the user-role messages that hold the record", []string{"p__a", "p__b"},
-			[]Message{user("u1", record("+p__a")), call("t1"), result("t1", record("+p__b"))},
-			[]string{wUser("u1"), wAnnounce("+p__a"), wCall("t1"), wResult("t1"), wAnnounce("+p__b")}},
-		{"behind a user message that follows the recording message", []string{"p__a"},
-			[]Message{user("u1", nil), call("t1"), result("t1", record("+p__a")), user("[system] nudge", nil)},
-			[]string{wUser("u1"), wCall("t1"), wResult("t1"), wUser("[system] nudge"), wAnnounce("+p__a")}},
-		{"a duplicate addition, an orphan withdrawal and an undeclared name", []string{"p__a"},
-			[]Message{user("u1", record("+p__a")), call("t1"), result("t1", record("+p__a", "+p__gone", "-p__c"))},
-			[]string{wUser("u1"), wAnnounce("+p__a"), wCall("t1"), wResult("t1")}},
-		{"a tool withdrawn and announced again", []string{"p__a"},
-			[]Message{user("u1", record("+p__a")), call("t1"), result("t1", nil),
-				user("u2", record("-p__a")), call("t2"), result("t2", record("+p__a"))},
-			[]string{wUser("u1"), wAnnounce("+p__a"), wCall("t1"), wResult("t1"),
-				wUser("u2"), wAnnounce("-p__a"), wCall("t2"), wResult("t2"), wAnnounce("+p__a")}},
-		{"callable tools that differ from the records", []string{"p__b"},
-			[]Message{user("u1", record("+p__a", "+p__c")), call("t1"), result("t1", nil)},
-			[]string{wUser("u1"), wAnnounce("+p__a", "+p__c"), wCall("t1"), wResult("t1"), wAnnounce("+p__b", "-p__a", "-p__c")}},
+		{"after the result that loaded them", []string{"p__a", "p__b"},
+			[]Message{user("u1"), call("t1"), result("t1", "p__a"), call("t2"), result("t2", "p__b")},
+			[]string{wUser("u1"), wCall("t1"), wResult("t1"), wAdded("p__a"), wCall("t2"), wResult("t2"), wAdded("p__b")}},
+		{"behind a user message that follows the loading result", []string{"p__a"},
+			[]Message{user("u1"), call("t1"), result("t1", "p__a"), user("[system] nudge")},
+			[]string{wUser("u1"), wCall("t1"), wResult("t1"), wUser("[system] nudge"), wAdded("p__a")}},
+		{"a duplicate and an undeclared name", []string{"p__a"},
+			[]Message{user("u1"), call("t1"), result("t1", "p__a"), call("t2"), result("t2", "p__a", "p__gone")},
+			[]string{wUser("u1"), wCall("t1"), wResult("t1"), wAdded("p__a"), wCall("t2"), wResult("t2")}},
 	}
 	complete := anthropicComplete(inlineModels(FeatureInlineTools))
 	for _, tc := range cases {
@@ -1089,7 +1023,7 @@ func TestAnthropicToolAnnouncements(t *testing.T) {
 	}
 
 	first := cases[0]
-	next := append(slices.Clone(first.history), call("t2"), result("t2", nil))
+	next := append(slices.Clone(first.history), call("t3"), result("t3"))
 	sent := sentRequests(t, complete, announcementRequest(first.callable, first.history), announcementRequest(first.callable, next))
 	before, after := sentAnthMessages(t, string(sent[0].body)), sentAnthMessages(t, string(sent[1].body))
 	if len(after) < len(before) || !slices.Equal(after[:len(before)], before) {
@@ -1596,10 +1530,10 @@ func TestAnthropicUsageAndCost(t *testing.T) {
 }
 
 // TestLLMResponseChatLoop checks chat_loop on the llm_response event of every
-// provider path: true when the request carried segments, absent otherwise.
-// Only the chat loop sets segments; TestNonChatLoopRequestsCarryNoSegments in
-// the orchestrator covers session titles, summaries, confirmation narration,
-// subprocesses and the planner.
+// provider path: true when the request carried segments and is no compaction's
+// summary call, absent otherwise. Only the chat loop sets segments;
+// TestNonChatLoopRequestsCarryNoSegments in the orchestrator covers session
+// titles, confirmation narration, subprocesses and the planner.
 func TestLLMResponseChatLoop(t *testing.T) {
 	segs := SystemSegments{Fixed: "Fixed.\n", Conversation: "Conversation.\n", Round: "Round."}
 	paths := []struct {
@@ -1643,24 +1577,31 @@ func TestLLMResponseChatLoop(t *testing.T) {
 		}},
 	}
 	for _, path := range paths {
-		for _, segments := range []*SystemSegments{&segs, nil} {
-			t.Run(fmt.Sprintf("%s/segments=%t", path.name, segments != nil), func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			segments   *SystemSegments
+			compaction bool
+			chatLoop   bool
+		}{
+			{"segments", &segs, false, true},
+			{"no segments", nil, false, false},
+			{"a compaction's summary call", &segs, true, false},
+		} {
+			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
 				sink := &recordingEventSink{}
 				path.call(t, sink, &CompletionRequest{
-					Model:    "m",
-					Messages: []Message{{Role: RoleSystem, Content: segs.Join()}, {Role: RoleUser, Content: "Hi"}},
-					Segments: segments,
+					Model:      "m",
+					Messages:   []Message{{Role: RoleSystem, Content: segs.Join()}, {Role: RoleUser, Content: "Hi"}},
+					Segments:   tc.segments,
+					Compaction: tc.compaction,
 				})
 				got := sink.snapshot()
 				if len(got) != 2 || got[1].EventType != events.TypeLLMResponse {
 					t.Fatalf("events = %v, want llm_request then llm_response", sink.types())
 				}
 				payload := string(got[1].Payload)
-				if segments != nil && !strings.Contains(payload, `"chat_loop":true`) {
-					t.Errorf("chat-loop call: chat_loop missing from %s", payload)
-				}
-				if segments == nil && strings.Contains(payload, `"chat_loop"`) {
-					t.Errorf("call without segments: chat_loop present in %s", payload)
+				if tc.chatLoop != strings.Contains(payload, `"chat_loop":true`) || (!tc.chatLoop && strings.Contains(payload, `"chat_loop"`)) {
+					t.Errorf("chat_loop in %s, want it %t", payload, tc.chatLoop)
 				}
 			})
 		}

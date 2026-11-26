@@ -36,9 +36,8 @@ type Parameter struct {
 // loaded it, for every session that may use it (the profile, preparer and
 // user-only filters still apply), so a plugin can guarantee critical
 // capabilities (e.g. emergency-stop) are never reduced to a one-line
-// tool-catalog entry the model must load first. The sticky cap and
-// demotion do not apply to it. Without native tool calling every tool is
-// listed in full anyway.
+// tool-catalog entry the model must load first. Without native tool
+// calling every tool is listed in full anyway.
 // ReadOnly is the per-call confirmation-gate hint: when true the
 // orchestrator skips the "I'm about to execute X" user prompt that
 // normally precedes a tool call, and the planner-narration LLM call

@@ -6,43 +6,56 @@ import (
 	"github.com/opentalon/opentalon/internal/state/store/events"
 )
 
-// SummarizationTriggeredArgs records why a summarization was kicked off
-// (context-window pressure, explicit user "clear", …) plus the message
-// count at trigger time.
-type SummarizationTriggeredArgs struct {
-	MessageCount int
-	Reason       string
+// CompactionStartedArgs: see events.CompactionStartedPayload. ExpectedMS 0
+// means no expected duration.
+type CompactionStartedArgs struct {
+	Model           string
+	EstimatedTokens int
+	TriggerTokens   int
+	ExpectedMS      int64
 }
 
-// EmitSummarizationTriggered writes one summarization_triggered event.
-func EmitSummarizationTriggered(ctx context.Context, sink Sink, args SummarizationTriggeredArgs) string {
-	return send(ctx, sink, events.TypeSummarizationTriggered, events.SummarizationTriggeredPayload{
-		Header:       events.Header{V: events.SummarizationTriggeredVersion},
-		MessageCount: args.MessageCount,
-		Reason:       args.Reason,
+// EmitCompactionStarted writes one compaction_started event and returns its
+// id, the parent of the summary call's events.
+func EmitCompactionStarted(ctx context.Context, sink Sink, args CompactionStartedArgs) string {
+	return send(ctx, sink, events.TypeCompactionStarted, events.CompactionStartedPayload{
+		Header:          events.Header{V: events.CompactionStartedVersion},
+		Model:           args.Model,
+		EstimatedTokens: args.EstimatedTokens,
+		TriggerTokens:   args.TriggerTokens,
+		ExpectedMS:      args.ExpectedMS,
 	}, 0)
 }
 
-// SummarizationCompletedArgs is the post-summarization snapshot. Summary
-// is sanitized + excerpted; KeptMessages is the count of original
-// messages that survived past the summary boundary.
-type SummarizationCompletedArgs struct {
-	Summary      string
-	KeptMessages int
-	LatencyMS    int64
+// CompactionFinishedArgs: see events.CompactionFinishedPayload.
+type CompactionFinishedArgs struct {
+	SummaryModel     string
+	SummaryBytes     int
+	UserMessagesKept int
+	ToolsDropped     []string
+	DurationMS       int64
+	Fallback         bool
 }
 
-// EmitSummarizationCompleted writes one summarization_completed event.
-func EmitSummarizationCompleted(ctx context.Context, sink Sink, args SummarizationCompletedArgs) string {
-	sanitized := events.SanitizeUTF8(args.Summary)
-	excerpt, truncated := events.Excerpt(sanitized)
-	return send(ctx, sink, events.TypeSummarizationCompleted, events.SummarizationCompletedPayload{
-		Header:           events.Header{V: events.SummarizationCompletedVersion},
-		SummaryExcerpt:   excerpt,
-		SummaryTruncated: truncated,
-		KeptMessages:     args.KeptMessages,
-		LatencyMS:        args.LatencyMS,
-	}, args.LatencyMS)
+// EmitCompactionFinished writes one compaction_finished event.
+func EmitCompactionFinished(ctx context.Context, sink Sink, args CompactionFinishedArgs) string {
+	return send(ctx, sink, events.TypeCompactionFinished, events.CompactionFinishedPayload{
+		Header:           events.Header{V: events.CompactionFinishedVersion},
+		SummaryModel:     args.SummaryModel,
+		SummaryBytes:     args.SummaryBytes,
+		UserMessagesKept: args.UserMessagesKept,
+		ToolsDropped:     args.ToolsDropped,
+		DurationMS:       args.DurationMS,
+		Fallback:         args.Fallback,
+	}, args.DurationMS)
+}
+
+// EmitCompactionFailed writes one compaction_failed event.
+func EmitCompactionFailed(ctx context.Context, sink Sink, err error) string {
+	return send(ctx, sink, events.TypeCompactionFailed, events.CompactionFailedPayload{
+		Header: events.Header{V: events.CompactionFailedVersion},
+		Error:  events.SanitizeUTF8(err.Error()),
+	}, 0)
 }
 
 // SessionTitleInvokedArgs records the entry to the title-generation

@@ -515,7 +515,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		Price:              usage.Price,
 		LatencyMS:          latencyMS,
 		ProviderResponseID: anthResp.ID,
-		ChatLoop:           req.Segments != nil,
+		ChatLoop:           req.chatLoop(),
 		CacheMissReason:    cacheMissReason,
 		ThinkingDropped:    anthResp.thinkingDropped(),
 		Request:            anthRequestSize(req, anthReq, len(body)),
@@ -529,6 +529,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		Thinking:  thinkingBlocks,
 		Usage:     usage,
 		EventID:   eventID,
+		ModelRef:  NewModelRef(p.id, req.Model),
 	}
 	if len(thinkingBlocks) > 0 {
 		resp.ThinkingFingerprint = anthReq.fingerprint
@@ -571,19 +572,13 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 	var announcements *toolAnnouncements
 	if inlineTools {
 		tools = inlineAnthTools(req.Tools, req.LoadableTools)
-		announcements = newToolAnnouncements(tools, req.Tools)
+		announcements = newToolAnnouncements(tools)
 	}
 	binding, err := newThinkingBinding(system, tools)
 	if err != nil {
 		return anthRequest{}, err
 	}
 
-	lastUserRole := -1
-	for i, m := range conversation {
-		if m.Role != RoleAssistant {
-			lastUserRole = i
-		}
-	}
 	msgs := make([]anthMessage, 0, len(conversation))
 	for i, m := range conversation {
 		blocks := m.Thinking
@@ -611,18 +606,18 @@ func (p *AnthropicProvider) toAnthRequest(req *CompletionRequest) (anthRequest, 
 		if announcements == nil || m.Role == RoleAssistant {
 			continue
 		}
-		announcements.add(m.Announcement)
+		announcements.add(m.LoadedTools)
 		// An announcement directly before a user message is a 400.
 		if i+1 < len(conversation) && conversation[i+1].Role != RoleAssistant {
 			continue
 		}
-		after, err := announcements.messages(i == lastUserRole)
+		after, err := announcements.message()
 		if err != nil {
 			return anthRequest{}, err
 		}
-		for _, a := range after {
-			msgs = append(msgs, a)
-			if err := binding.add(a); err != nil {
+		if after != nil {
+			msgs = append(msgs, *after)
+			if err := binding.add(*after); err != nil {
 				return anthRequest{}, err
 			}
 		}
@@ -842,91 +837,48 @@ type anthToolReference struct {
 	Name string `json:"name"`
 }
 
+// toolAnnouncements turns the tools a request's tool results loaded
+// (Message.LoadedTools) into tool_addition blocks, each tool announced once,
+// at the result that loaded it, so every later request repeats them at the
+// same place and keeps the cached prefix.
 type toolAnnouncements struct {
 	declared  map[string]bool
-	callable  []string
 	announced map[string]bool
 	pending   []anthToolChange
 }
 
-func newToolAnnouncements(tools []anthTool, callable []ToolDefinition) *toolAnnouncements {
+func newToolAnnouncements(tools []anthTool) *toolAnnouncements {
 	a := &toolAnnouncements{declared: map[string]bool{}, announced: map[string]bool{}}
 	for _, t := range tools {
 		if t.DeferLoading {
 			a.declared[t.Name] = true
 		}
 	}
-	for _, d := range callable {
-		if d.OnDemand {
-			a.callable = append(a.callable, d.Name)
-		}
-	}
-	sort.Strings(a.callable)
 	return a
 }
 
-func (a *toolAnnouncements) add(record *ToolAnnouncement) {
-	if record == nil {
-		return
-	}
-	for _, name := range record.Added {
+func (a *toolAnnouncements) add(loaded []string) {
+	for _, name := range loaded {
 		// A reference to a tool the request does not declare is a 400.
 		if a.declared[name] && !a.announced[name] {
 			a.announced[name] = true
 			a.pending = append(a.pending, anthToolChange{Type: "tool_addition", Tool: anthToolReference{Type: "tool_reference", Name: name}})
 		}
 	}
-	for _, name := range record.Removed {
-		if a.announced[name] {
-			delete(a.announced, name)
-			a.pending = append(a.pending, anthToolChange{Type: "tool_removal", Tool: anthToolReference{Type: "tool_reference", Name: name}})
-		}
-	}
 }
 
-func (a *toolAnnouncements) messages(last bool) ([]anthMessage, error) {
-	runs := [][]anthToolChange{a.take()}
-	if last {
-		// Callable and announced tools differ after a failed read of the loaded tools or when an earlier request sent the last message's record; nothing stores this.
-		a.add(a.difference())
-		runs = append(runs, a.take())
+// message returns the pending additions as one system message, or nil when
+// there are none.
+func (a *toolAnnouncements) message() (*anthMessage, error) {
+	if len(a.pending) == 0 {
+		return nil, nil
 	}
-	var out []anthMessage
-	for _, blocks := range runs {
-		if len(blocks) == 0 {
-			continue
-		}
-		raw, err := json.Marshal(blocks)
-		if err != nil {
-			return nil, fmt.Errorf("marshal tool announcement: %w", err)
-		}
-		out = append(out, anthMessage{Role: string(RoleSystem), Content: raw})
+	raw, err := json.Marshal(a.pending)
+	if err != nil {
+		return nil, fmt.Errorf("marshal tool announcement: %w", err)
 	}
-	return out, nil
-}
-
-func (a *toolAnnouncements) take() []anthToolChange {
-	blocks := a.pending
 	a.pending = nil
-	return blocks
-}
-
-func (a *toolAnnouncements) difference() *ToolAnnouncement {
-	var d ToolAnnouncement
-	callable := make(map[string]bool, len(a.callable))
-	for _, name := range a.callable {
-		callable[name] = true
-		if !a.announced[name] {
-			d.Added = append(d.Added, name)
-		}
-	}
-	for name := range a.announced {
-		if !callable[name] {
-			d.Removed = append(d.Removed, name)
-		}
-	}
-	sort.Strings(d.Removed)
-	return &d
+	return &anthMessage{Role: string(RoleSystem), Content: raw}, nil
 }
 
 // toAnthMessage converts a provider.Message to an anthMessage. Routes by

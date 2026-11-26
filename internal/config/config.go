@@ -421,18 +421,13 @@ type PreparerOrchestratorConfig struct {
 	ToolErrorHandling ToolErrorHandlingConfig `yaml:"tool_error_handling,omitempty"`
 }
 
-// ToolErrorHandlingConfig configures the runaway-tool-failure
-// protections. LoopCapPerTurn bounds how many consecutive identical-tool
-// errors the orchestrator tolerates in a single turn before injecting a
-// nudge message steering the LLM toward a different approach.
-// StickyDemotionThreshold tracks consecutive errors across the whole
-// session and flips the tool's Demoted bit in known_tools when the count
-// crosses; a subsequent successful call clears the flag (self-healing).
-// Both fields are opt-in: a zero/unset value turns that protection OFF —
-// no default is substituted.
+// ToolErrorHandlingConfig configures the runaway-tool-failure protection.
+// LoopCapPerTurn bounds how many consecutive identical-tool errors the
+// orchestrator tolerates in a single turn before injecting a nudge message
+// steering the LLM toward a different approach. Opt-in: a zero/unset value
+// turns it OFF — no default is substituted.
 type ToolErrorHandlingConfig struct {
-	LoopCapPerTurn          int `yaml:"loop_cap_per_turn,omitempty"`         // consecutive identical-tool errors per turn before nudge injection; <= 0 disables
-	StickyDemotionThreshold int `yaml:"sticky_demotion_threshold,omitempty"` // consecutive session-level errors before known_tools demotion; <= 0 disables
+	LoopCapPerTurn int `yaml:"loop_cap_per_turn,omitempty"` // consecutive identical-tool errors per turn before nudge injection; <= 0 disables
 }
 
 // PipelineOrchestratorConfig enables structured multi-step pipeline execution.
@@ -552,14 +547,9 @@ type DBConfig struct {
 
 // SessionConfig limits session size and optional idle pruning.
 type SessionConfig struct {
-	MaxMessages             int    `yaml:"max_messages"`               // cap messages per session (0 = no cap)
-	ContextMessages         int    `yaml:"context_messages"`           // send only last N messages to LLM (0 = all; default 0)
-	MaxIdleDays             int    `yaml:"max_idle_days"`              // delete sessions not updated in N days (0 = don't prune)
-	SummarizeAfter          int    `yaml:"summarize_after_messages"`   // run summarization after N messages (0 = off)
-	MaxMessagesAfterSummary int    `yaml:"max_messages_after_summary"` // keep this many messages after summarization
-	SummarizePrompt         string `yaml:"summarize_prompt"`           // system prompt for initial summarization (any language); empty = default English
-	SummarizeUpdatePrompt   string `yaml:"summarize_update_prompt"`    // system prompt for updating existing summary (any language); empty = default English
-	SessionTitlePrompt      string `yaml:"session_title_prompt"`       // system prompt for the background title-generation pass (any language); empty = default in internal/prompts/orchestrator_session_title.txt
+	MaxMessages        int    `yaml:"max_messages"`         // cap messages per session (0 = no cap)
+	MaxIdleDays        int    `yaml:"max_idle_days"`        // delete sessions not updated in N days (0 = don't prune)
+	SessionTitlePrompt string `yaml:"session_title_prompt"` // system prompt for the background title-generation pass (any language); empty = default in internal/prompts/orchestrator_session_title.txt
 }
 
 type ModelsConfig struct {

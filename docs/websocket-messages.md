@@ -117,6 +117,24 @@ Frontend: use `error_code` as an i18n translation key (e.g., `errors.timeout`, `
 
 ---
 
+### `session.compaction`
+
+A long conversation is being compacted (see [Long conversations](configuration.md#long-conversations)). Sent with empty `content`, before the turn's reply.
+
+```json
+{ "type": "session.compaction", "state": "started", "expected_ms": "41000" }
+```
+
+| `state` | When |
+|---|---|
+| `started` | the summary call starts; `expected_ms`, the expected duration in milliseconds, is present when the model has finished compactions to learn from |
+| `finished` | the summary is stored |
+| `failed` | the summary could not be written; the turn goes on uncompacted |
+
+Frontend: show progress while it runs, not a chat bubble. The stored summary is a message with `prompt_type: compaction`; render it as a marker, never as text.
+
+---
+
 ### `_typing` (typing indicator)
 
 Sent periodically (~25s) while the system is processing a request. Keeps the WebSocket alive and signals that work is in progress.
@@ -173,10 +191,12 @@ function renderMessage(msg: OutboundMessage) {
 
 | Key | Values | Present when |
 |---|---|---|
-| `type` | `system`, `error`, `confirmation`, `assistant` | Always (absent = `assistant`) |
+| `type` | `system`, `error`, `confirmation`, `assistant`, `session.compaction` | Always (absent = `assistant`) |
 | `error_code` | See error table above | `type=error` |
 | `action` | See system action table above | `type=system` |
 | `prompt_type` | `confirmation` | `type=confirmation` |
 | `pipeline_id` | UUID string | `type=confirmation` |
 | `options` | Comma-separated (e.g., `approve,reject`) | `type=confirmation` |
+| `state` | `started`, `finished`, `failed` | `type=session.compaction` |
+| `expected_ms` | milliseconds | `type=session.compaction`, `state=started`, when known |
 | `_typing` | `true` | Typing indicator only |

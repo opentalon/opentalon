@@ -69,7 +69,7 @@ func (e *groundingExecutor) Execute(_ context.Context, call ToolCall) ToolResult
 }
 
 // segmentsFixture is an agent-scoped chat whose system prompt carries every
-// section of the segment table: a session with a summary and history, a
+// section of the segment table: a session with history, a
 // channel format, a user name, a reply language, an operator's rule, a
 // knowledge catalog, additional instructions, a plugin with server
 // instructions, the tool catalog and the subprocess instructions.
@@ -112,11 +112,13 @@ func newSegmentsFixture(t *testing.T, llm LLMClient) segmentsFixture {
 
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
-	if err := sessions.SetSummary("s1", "The user runs a small warehouse.", []provider.Message{
+	for _, m := range []provider.Message{
 		{Role: provider.RoleUser, Content: "Which items are in stock?"},
 		{Role: provider.RoleAssistant, Content: "Three items are in stock."},
-	}); err != nil {
-		t.Fatal(err)
+	} {
+		if err := sessions.AddMessage("s1", m); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	orch := NewWithRules(llm, DefaultParser, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
@@ -147,14 +149,13 @@ func toolRounds() *segmentsTestLLM {
 // renders, as the builder wrote it before the split into segments.
 type promptSections struct {
 	grounding, preamble, rules, knowledge, instructions, session, plugins, toolCatalog, subprocess string
-	outputFormat, user, language, summary, formatReminder, answerOnly, inlineCatalog, operatorRule string
+	outputFormat, user, language, formatReminder, answerOnly, inlineCatalog, operatorRule          string
 
 	pluginSections [][2]string
 }
 
 func (f segmentsFixture) sections() promptSections {
-	promoted, _ := f.orch.promotedToolSet(f.ctx)
-	callable, loadable, _ := f.orch.buildToolDefinitions(f.ctx)
+	callable, loadable := f.orch.buildToolDefinitions(f.ctx, nil)
 	plugins := [][2]string{
 		{"_meta", "## _meta\nOrchestrator-owned meta-tools.\n\n"},
 		{"_subprocess", "## _subprocess\nFork a focused sub-agent process to handle a sub-task\n\n"},
@@ -172,13 +173,12 @@ func (f segmentsFixture) sections() promptSections {
 		plugins:        plugins[0][1] + plugins[1][1] + plugins[2][1],
 		pluginSections: plugins,
 		operatorRule:   "- [custom] " + segmentsOperatorRule + "\n",
-		toolCatalog:    f.orch.renderToolCatalog(promoted, f.orch.resolveAllowedPlugins(f.ctx)),
+		toolCatalog:    f.orch.renderToolCatalog(toolArraySet(callable), f.orch.resolveAllowedPlugins(f.ctx)),
 		inlineCatalog:  renderInlineToolCatalog(callable, loadable),
 		subprocess:     prompts.OrchestratorSubprocess,
 		outputFormat:   "## OUTPUT FORMAT\n" + prompts.FormatMarkdown + "\n",
 		user:           "## User\nThe user's name is Ada. Address them by name where it feels natural; do not force it into every message.\n\n",
 		language:       f.orch.replyLanguageDirective(segmentsUserMessage),
-		summary:        "\n\nPrevious conversation summary: The user runs a small warehouse.",
 		formatReminder: "\n\n[IMPORTANT — output format reminder] " + prompts.FormatMarkdown,
 		answerOnly: "\n\n[IMPORTANT] Answer ONLY the user's most recent message. " +
 			"Do NOT repeat or summarize any earlier answers from this conversation. Be concise.",
@@ -203,7 +203,7 @@ func TestRun_SystemPromptSectionsKeepTheirText(t *testing.T) {
 	rest := system
 	for i, text := range []string{
 		s.grounding, s.preamble, s.rules, s.knowledge, s.instructions, s.session, s.plugins, s.toolCatalog,
-		s.subprocess, s.outputFormat, s.user, s.language, s.summary, s.formatReminder, s.answerOnly,
+		s.subprocess, s.outputFormat, s.user, s.language, s.formatReminder, s.answerOnly,
 	} {
 		if text == "" {
 			t.Fatalf("section %d renders empty in the fixture", i)
@@ -232,7 +232,7 @@ func TestRun_SystemPromptSegments(t *testing.T) {
 	}
 	s := f.sections()
 	fixed := s.grounding + s.preamble + s.rules + s.knowledge + s.instructions + s.plugins + s.subprocess
-	conversation := s.session + s.user + s.language + s.summary + "\n"
+	conversation := s.session + s.user + s.language
 	if !strings.HasSuffix(s.rules, s.operatorRule+"\n") {
 		t.Fatalf("the rules section must end on the operator's rule, got %q", s.rules)
 	}
@@ -268,6 +268,8 @@ func TestRun_SystemPromptSegments(t *testing.T) {
 	}
 }
 
+// A round whose calls load nothing keeps the system text before the per-round
+// segment and the tools array byte for byte, also when a loaded tool fails.
 func TestRun_RoundWithoutALoadKeepsTheCatalog(t *testing.T) {
 	registry := NewToolRegistry()
 	if err := registry.Register(PluginCapability{
@@ -285,29 +287,32 @@ func TestRun_RoundWithoutALoadKeepsTheCatalog(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	store := &fakeInjectionStateStore{store: map[string]state.InjectionState{
-		"s1": {KnownTools: []state.KnownToolEntry{{ToolName: "p__loaded", LRURank: 1}}},
-	}}
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
-	// The demotion comes before the always-included call, so a rebuild after any call would show it.
+	for _, m := range []provider.Message{
+		{Role: provider.RoleUser, Content: "load it"},
+		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{
+			{ID: "l1", Name: toolFQN(metaPluginName, metaLoadTools), Arguments: map[string]string{"names": "p__loaded"}}}},
+		{Role: provider.RoleTool, ToolCallID: "l1", Content: "loaded"},
+		{Role: provider.RoleAssistant, Content: "Loaded."},
+	} {
+		if err := sessions.AddMessage("s1", m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The failed call comes before the always-included one, so a rebuild after any call would show it.
 	llm := &scriptedNativeLLM{rounds: []provider.CompletionResponse{{ToolCalls: []provider.ToolCall{
 		{ID: "f1", Name: "p__loaded", Arguments: map[string]string{}},
 		{ID: "a1", Name: "p__always", Arguments: map[string]string{}},
 	}}}}
 	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
-		state.NewMemoryStore(""), sessions, OrchestratorOpts{InjectionStateStore: store})
-	orch.toolErrorHandling = ToolErrorHandlingConfig{StickyDemotionThreshold: 1}
-	ctx := pkgchannel.WithCapabilities(actor.WithSessionID(context.Background(), "s1"),
-		pkgchannel.Capabilities{ResponseFormat: pkgchannel.FormatMarkdown})
+		state.NewMemoryStore(""), sessions, OrchestratorOpts{})
+	ctx := actor.WithSessionID(context.Background(), "s1")
 	if _, err := orch.Run(ctx, "s1", "look it up"); err != nil {
 		t.Fatal(err)
 	}
 	if len(llm.requests) != 2 {
 		t.Fatalf("chat loop made %d model calls, want 2", len(llm.requests))
-	}
-	if kt, ok := storedTool(store, "p__loaded"); !ok || !kt.Demoted {
-		t.Fatalf("the failed tool must be demoted between the rounds, got %+v (found=%v)", kt, ok)
 	}
 	first, second := *llm.requests[0].Segments, *llm.requests[1].Segments
 	if !strings.Contains(first.Catalog, "- p__catalog: Catalog tool.\n") || strings.Contains(first.Catalog, "p__loaded") {
@@ -319,11 +324,6 @@ func TestRun_RoundWithoutALoadKeepsTheCatalog(t *testing.T) {
 	}
 	if got, want := sentToolsJSON(t, llm.requests[1]), sentToolsJSON(t, llm.requests[0]); got != want {
 		t.Errorf("a round without a load changed the tools array:\n got %s\nwant %s", got, want)
-	}
-	reminder := "[IMPORTANT — output format reminder] " + prompts.FormatMarkdown
-	if strings.Contains(first.Round, reminder) || !strings.Contains(second.Round, "## OUTPUT FORMAT\n") ||
-		!strings.Contains(second.Round, reminder) {
-		t.Errorf("the tool result must bring in the output-format section and its reminder, rounds:\n%q\n%q", first.Round, second.Round)
 	}
 }
 
@@ -501,7 +501,7 @@ func TestRun_AnthropicSystemCatalogAcrossLoads(t *testing.T) {
 			sessions := state.NewSessionStore("")
 			sessions.Create(state.SessionParams{ID: "s1"})
 			orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
-				state.NewMemoryStore(""), sessions, OrchestratorOpts{InjectionStateStore: &fakeInjectionStateStore{}})
+				state.NewMemoryStore(""), sessions, OrchestratorOpts{})
 			runTurn(t, orch)
 			runTurn(t, orch)
 
@@ -590,10 +590,6 @@ func TestNonChatLoopRequestsCarryNoSegments(t *testing.T) {
 	}{
 		{"session title", func(_ *testing.T, llm *segmentsTestLLM) {
 			newOrch(llm, OrchestratorOpts{SessionTitlesEnabled: true}, 2).maybeGenerateTitle(context.Background(), "s1")
-		}},
-		{"summary", func(_ *testing.T, llm *segmentsTestLLM) {
-			opts := OrchestratorOpts{SummarizeAfterMessages: 5, MaxMessagesAfterSummary: 2}
-			newOrch(llm, opts, 10).maybeSummarizeSession(context.Background(), "s1")
 		}},
 		{"confirmation narration", func(_ *testing.T, llm *segmentsTestLLM) {
 			newOrch(llm, OrchestratorOpts{}, 0).narrateConfirmation(context.Background(), nil,

@@ -798,19 +798,11 @@ func TestExecuteCall_LastUserMessageIDIsHostOwned(t *testing.T) {
 	})
 }
 
-// The id lives in session metadata, which summarisation and clear_session
-// leave alone: after both, an approved call still carries the stored id.
-func TestLastUserMessageID_SurvivesSetSummaryAndClearMessages(t *testing.T) {
+// The id lives in session metadata, which clear_session leaves alone: an
+// approved call carries the stored id, and the id outlives the messages.
+func TestLastUserMessageID_SurvivesClearMessages(t *testing.T) {
 	h := newLUMHarness(t, false)
 	a := h.proposeAfterInspect("clean up the old records")
-
-	sess, _ := h.sessions.Get(lumSession)
-	if err := h.sessions.SetSummary(lumSession, "summary", sess.Messages[len(sess.Messages)-1:]); err != nil {
-		t.Fatalf("SetSummary: %v", err)
-	}
-	if got := h.stored(); got != a {
-		t.Fatalf("stored id after SetSummary = %q, want %q", got, a)
-	}
 
 	h.llm.script([]provider.CompletionResponse{{Content: "Removed."}})
 	h.run(actor.WithConfirmationDecision(context.Background(), "approve"), "approve")

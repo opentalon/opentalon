@@ -17,7 +17,7 @@ import (
 // metadata["reply"] == "spoken") gets its answer read aloud. The model writes a
 // short spoken version at the start of its reply to the user, between markers
 // (prompts.OrchestratorSpokenReply, added to the per-round system segment in every round
-// by appendConversation, so the cached prefix stays the same). Run takes it out
+// by roundSystem, so the cached prefix stays the same). Run takes it out
 // of every response the moment it arrives (takeSpoken), so tool parsing, the
 // checks on the response, what is stored and what is shown never see the
 // markers. What a spoken block holds is speech only: never parsed for a call,

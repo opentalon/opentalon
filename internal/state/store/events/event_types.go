@@ -46,16 +46,11 @@ const (
 	// Preparer-phase retrieval + decision events (RFC #249).
 	// Emitted children of user_message: each RAG retrieval becomes one
 	// *_retrieval event, then preparer_decision is the composite outcome
-	// the orchestrator landed on. messages_truncated fires from
-	// appendConversation inside the agent loop and parents to turn_start
-	// (it can fire more than once per turn when the cutter applies on
-	// successive iterations as the conversation grows during tool
-	// rounds).
+	// the orchestrator landed on.
 	TypeKnowledgeRetrieval = "knowledge_retrieval"
 	TypeGlossaryRetrieval  = "glossary_retrieval"
 	TypeToolRetrieval      = "tool_retrieval"
 	TypePreparerDecision   = "preparer_decision"
-	TypeMessagesTruncated  = "messages_truncated"
 	// tool_messages_repaired fires when the assembled LLM request broke the
 	// native tool-calling pairing (a tool result without its call, or a call
 	// without its result) and the orchestrator repaired it before sending.
@@ -63,13 +58,17 @@ const (
 	// write failed.
 	TypeToolMessagesRepaired = "tool_messages_repaired"
 
-	TypeSummarizationTriggered = "summarization_triggered"
-	TypeSummarizationCompleted = "summarization_completed"
-	TypeSessionTitleInvoked    = "session_title_invoked"
-	TypeSessionTitleGenerated  = "session_title_generated"
-	TypeModelSwitch            = "model_switch"
-	TypeConfirmationRequested  = "confirmation_requested"
-	TypeConfirmationResolved   = "confirmation_resolved"
+	// compaction_started fires when a chat-loop request reaches the trigger
+	// of a model of its chain; compaction_finished or compaction_failed
+	// follows, with the summary call's llm_request / llm_response between.
+	TypeCompactionStarted     = "compaction_started"
+	TypeCompactionFinished    = "compaction_finished"
+	TypeCompactionFailed      = "compaction_failed"
+	TypeSessionTitleInvoked   = "session_title_invoked"
+	TypeSessionTitleGenerated = "session_title_generated"
+	TypeModelSwitch           = "model_switch"
+	TypeConfirmationRequested = "confirmation_requested"
+	TypeConfirmationResolved  = "confirmation_resolved"
 	// confirmation_classification_invoked is the parent sentinel for the
 	// free-text confirmation classifier's LLM call, mirroring
 	// session_title_invoked: the provider-emitted llm_request/llm_response
@@ -135,10 +134,10 @@ var AllEventTypes = []string{
 	TypeGlossaryRetrieval,
 	TypeToolRetrieval,
 	TypePreparerDecision,
-	TypeMessagesTruncated,
 	TypeToolMessagesRepaired,
-	TypeSummarizationTriggered,
-	TypeSummarizationCompleted,
+	TypeCompactionStarted,
+	TypeCompactionFinished,
+	TypeCompactionFailed,
 	TypeSessionTitleInvoked,
 	TypeSessionTitleGenerated,
 	TypeModelSwitch,
@@ -507,6 +506,7 @@ const (
 	BlockRound               = "round"
 	BlockSystemOther         = "system_other"
 	BlockHistory             = "history"
+	BlockSummary             = "summary"
 	BlockToolResults         = "tool_results"
 	BlockOther               = "other"
 )
@@ -667,27 +667,14 @@ type PreparerDecisionScoreOverride struct {
 
 // PreparerDecisionToolsBlock records what tool RAG retrieved this turn.
 // Tier1New carries every retrieved tool candidate (the instrumentation
-// signal); tool discovery is now the registry catalog + load_tools sticky
-// model, so retrieval no longer drives the LLM's tools array and the old
+// signal); tool discovery is now the registry catalog + load_tools, so
+// retrieval no longer drives the LLM's tools array and the old
 // per-tier bookkeeping fields are gone.
 type PreparerDecisionToolsBlock struct {
 	Tier1New []string `json:"tier1_new,omitempty"`
 }
 
 const PreparerDecisionVersion = 1
-
-// MessagesTruncatedPayload — emitted when the sliding-window cutter
-// drops messages from the assembled LLM input. DroppedSeqRange is
-// [from, to] inclusive, indexed into sess.Messages (position-based,
-// since the in-memory provider.Message slice does not carry a seq
-// column).
-type MessagesTruncatedPayload struct {
-	Header
-	DroppedSeqRange []int `json:"dropped_seq_range,omitempty"` // [from, to] inclusive
-	DroppedCount    int   `json:"dropped_count"`
-}
-
-const MessagesTruncatedVersion = 1
 
 // ToolMessagesRepairedPayload — emitted when the assembled LLM request broke
 // the native tool-calling pairing and was repaired before it was sent.
@@ -700,7 +687,7 @@ const MessagesTruncatedVersion = 1
 //
 // The repair changes only the outgoing request, never the stored history, so
 // a damaged session is repaired — and this event emitted — once per turn until
-// summarization or a trim removes the damage. Count damaged sessions by
+// a compaction leaves the damage out of the request. Count damaged sessions by
 // deduping on session_id and call id, not by counting events. Call ids are not
 // unique across rounds (e.g. a synthesized "call-1"), so pair them with
 // UnansweredTools where available.
@@ -715,34 +702,50 @@ type ToolMessagesRepairedPayload struct {
 
 const ToolMessagesRepairedVersion = 1
 
-type SummarizationTriggeredPayload struct {
+// CompactionStartedPayload — Model is the model whose estimate reached its
+// trigger; ExpectedMS is the expected duration of the compaction for the
+// chain's first model, absent while it has no compaction that counts.
+type CompactionStartedPayload struct {
 	Header
-	MessageCount int    `json:"message_count"`
-	Reason       string `json:"reason,omitempty"`
+	Model           string `json:"model"`
+	EstimatedTokens int    `json:"estimated_tokens"`
+	TriggerTokens   int    `json:"trigger_tokens"`
+	ExpectedMS      int64  `json:"expected_ms,omitempty"`
 }
 
-const SummarizationTriggeredVersion = 1
+const CompactionStartedVersion = 1
 
-type SummarizationCompletedPayload struct {
+// CompactionFinishedPayload — SummaryModel wrote the summary; Fallback is
+// true when that is not the first model of the chain. ToolsDropped are the
+// loaded tools the compaction dropped.
+type CompactionFinishedPayload struct {
 	Header
-	SummaryExcerpt   string `json:"summary_excerpt"`
-	SummaryTruncated bool   `json:"summary_truncated,omitempty"`
-	KeptMessages     int    `json:"kept_messages"`
-	LatencyMS        int64  `json:"latency_ms,omitempty"`
+	SummaryModel     string   `json:"summary_model"`
+	SummaryBytes     int      `json:"summary_bytes"`
+	UserMessagesKept int      `json:"user_messages_kept"`
+	ToolsDropped     []string `json:"tools_dropped,omitempty"`
+	DurationMS       int64    `json:"duration_ms"`
+	Fallback         bool     `json:"fallback"`
 }
 
-const SummarizationCompletedVersion = 1
+const CompactionFinishedVersion = 1
+
+type CompactionFailedPayload struct {
+	Header
+	Error string `json:"error"`
+}
+
+const CompactionFailedVersion = 1
 
 // SessionTitleInvokedPayload — sentinel that anchors the parent scope for
 // the inner LLM call's llm_request / llm_response events. Mirrors the
-// planner_invoked / summarization_triggered role: emitted at the very
+// planner_invoked role: emitted at the very
 // start of the maybeGenerateTitle goroutine, its event_id is then wrapped
 // onto the goroutine's ctx via emit.WithParent so the provider's auto-
 // emit lands under the title span instead of with parent_id = NULL.
 // MessageCount is the assistant-turn count at trigger time — meaningful
 // only as "1" today (titles fire once after the first turn), but kept
-// for parity with summarization's analogous field and for a future
-// re-titling pass that might fire later in a session.
+// for a future re-titling pass that might fire later in a session.
 type SessionTitleInvokedPayload struct {
 	Header
 	MessageCount int `json:"message_count,omitempty"`

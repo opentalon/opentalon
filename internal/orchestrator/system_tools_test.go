@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,46 +12,7 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
-// fakeInjectionStateStore is a minimal InjectionStateStore
-// implementation used by the load_tools sticky-promotion and tool-error
-// tracking tests. It round-trips state per session (so a two-turn test
-// sees turn 1's writes in turn 2), counts calls for assertion, and lets
-// a test inject failure modes via failGetErr / failUpdateErr to exercise
-// the orchestrator's "warn-and-continue" fallback paths.
-type fakeInjectionStateStore struct {
-	getCalls      int
-	updateCalls   int
-	lastWritten   state.InjectionState
-	store         map[string]state.InjectionState
-	failGetErr    error
-	failUpdateErr error
-}
-
-func (f *fakeInjectionStateStore) GetInjectionState(_ context.Context, sessionID string) (state.InjectionState, error) {
-	f.getCalls++
-	if f.failGetErr != nil {
-		return state.InjectionState{}, f.failGetErr
-	}
-	if f.store == nil {
-		return state.InjectionState{}, nil
-	}
-	return f.store[sessionID], nil
-}
-
-func (f *fakeInjectionStateStore) UpdateInjectionState(_ context.Context, sessionID string, st state.InjectionState) error {
-	f.updateCalls++
-	f.lastWritten = st
-	if f.failUpdateErr != nil {
-		return f.failUpdateErr
-	}
-	if f.store == nil {
-		f.store = make(map[string]state.InjectionState)
-	}
-	f.store[sessionID] = st
-	return nil
-}
-
-func newOrchForMetaTests(t *testing.T, store *fakeInjectionStateStore) *Orchestrator {
+func newOrchForMetaTests(t *testing.T) *Orchestrator {
 	t.Helper()
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
@@ -68,11 +28,7 @@ func newOrchForMetaTests(t *testing.T, store *fakeInjectionStateStore) *Orchestr
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
-	opts := OrchestratorOpts{}
-	if store != nil {
-		opts.InjectionStateStore = store
-	}
-	return NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, opts)
+	return NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{})
 }
 
 // decodeLoadResult unmarshals the load_tools status JSON for assertions.
@@ -92,7 +48,7 @@ func TestRegisterLoadTools_RegistersMetaPluginWithAlwaysInclude(t *testing.T) {
 	// load_tools is the core discovery mechanism — it must ALWAYS be
 	// registered, AlwaysInclude (so it stays in the native tools array),
 	// and ReadOnly (no user-confirmation gate).
-	orch := newOrchForMetaTests(t, nil)
+	orch := newOrchForMetaTests(t)
 	cap, ok := orch.registry.GetCapability(metaPluginName)
 	if !ok {
 		t.Fatalf("meta plugin %q must always be registered", metaPluginName)
@@ -115,7 +71,7 @@ func TestLoadTools_ReturnsStatusJSON_NotDescription(t *testing.T) {
 	// load_tools must return STATUS ONLY (loaded/ready) — never the
 	// description or parameter schema. The schema reaches the LLM via the
 	// native tools array on the next request, not from this result.
-	orch := newOrchForMetaTests(t, &fakeInjectionStateStore{})
+	orch := newOrchForMetaTests(t)
 	exec, ok := orch.registry.GetExecutor(metaPluginName)
 	if !ok {
 		t.Fatal("meta plugin executor missing")
@@ -149,7 +105,7 @@ func TestLoadTools_ReturnsStatusJSON_NotDescription(t *testing.T) {
 func TestLoadTools_BatchLoadsMultipleAndReportsFailures(t *testing.T) {
 	// Comma-separated names load each in turn; an unresolvable name lands
 	// in failed without aborting the rest of the batch.
-	orch := newOrchForMetaTests(t, &fakeInjectionStateStore{})
+	orch := newOrchForMetaTests(t)
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	ctx := actor.WithSessionID(context.Background(), "s1")
 	res := exec.Execute(ctx, ToolCall{
@@ -171,7 +127,7 @@ func TestLoadTools_BatchLoadsMultipleAndReportsFailures(t *testing.T) {
 
 func TestLoadTools_SingleNameFallback(t *testing.T) {
 	// Backward tolerance: a single "name" arg works when "names" is absent.
-	orch := newOrchForMetaTests(t, &fakeInjectionStateStore{})
+	orch := newOrchForMetaTests(t)
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	ctx := actor.WithSessionID(context.Background(), "s1")
 	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"name": "tools-plugin__t1"}})
@@ -182,7 +138,7 @@ func TestLoadTools_SingleNameFallback(t *testing.T) {
 }
 
 func TestLoadTools_AllFailedReportsNotReady(t *testing.T) {
-	orch := newOrchForMetaTests(t, &fakeInjectionStateStore{})
+	orch := newOrchForMetaTests(t)
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	ctx := actor.WithSessionID(context.Background(), "s1")
 	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": "missing__a,bad__b"}})
@@ -203,7 +159,7 @@ func TestLoadTools_AllFailedReportsNotReady(t *testing.T) {
 }
 
 func TestLoadTools_MissingNamesArgReturnsError(t *testing.T) {
-	orch := newOrchForMetaTests(t, nil)
+	orch := newOrchForMetaTests(t)
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	res := exec.Execute(context.Background(), ToolCall{ID: "c1", Args: map[string]string{}})
 	if res.Error == "" || !strings.Contains(res.Error, "names") {
@@ -212,7 +168,7 @@ func TestLoadTools_MissingNamesArgReturnsError(t *testing.T) {
 }
 
 func TestLoadTools_DeduplicatesRepeatedNamesInOneBatch(t *testing.T) {
-	orch := newOrchForMetaTests(t, &fakeInjectionStateStore{})
+	orch := newOrchForMetaTests(t)
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	ctx := actor.WithSessionID(context.Background(), "s1")
 	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": "tools-plugin__t1,tools-plugin__t1"}})
@@ -244,9 +200,7 @@ func TestLoadTools_ResolvesBridgedMCPBareName(t *testing.T) {
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
-	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
-		InjectionStateStore: &fakeInjectionStateStore{},
-	})
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{})
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
@@ -269,8 +223,7 @@ func TestLoadTools_ProfileRestrictedPluginFails(t *testing.T) {
 	// WhoAmI.Plugins must land in failed (not loaded) and must NOT write a
 	// promotion, so load_tools can't enumerate or load tools the operator
 	// hid.
-	store := &fakeInjectionStateStore{}
-	orch := newOrchForMetaTests(t, store)
+	orch := newOrchForMetaTests(t)
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 
 	p := &profile.Profile{EntityID: "u1", Plugins: []string{"something-else"}}
@@ -283,9 +236,6 @@ func TestLoadTools_ProfileRestrictedPluginFails(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Failed, []string{"tools-plugin__t1"}) {
 		t.Errorf("failed = %v, want [tools-plugin__t1]", got.Failed)
-	}
-	if store.updateCalls != 0 {
-		t.Errorf("denied load must not write to InjectionState, got %d UpdateInjectionState calls", store.updateCalls)
 	}
 }
 
@@ -306,10 +256,7 @@ func TestLoadTools_FilteredByUserOnlyActionFails(t *testing.T) {
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
-	store := &fakeInjectionStateStore{}
-	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
-		InjectionStateStore: store,
-	})
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{})
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
@@ -320,9 +267,6 @@ func TestLoadTools_FilteredByUserOnlyActionFails(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Failed, []string{"tools-plugin__user-only-tool"}) {
 		t.Errorf("failed = %v, want [tools-plugin__user-only-tool]", got.Failed)
-	}
-	if store.updateCalls != 0 {
-		t.Errorf("denied load must not promote a palette-filtered tool, got %d UpdateInjectionState calls", store.updateCalls)
 	}
 }
 
@@ -341,10 +285,8 @@ func TestLoadTools_FilteredByPreparerActionFails(t *testing.T) {
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
-	store := &fakeInjectionStateStore{}
 	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag", Action: "prepare"}},
-		InjectionStateStore: store,
+		ContentPreparers: []ContentPreparerEntry{{Plugin: "rag", Action: "prepare"}},
 	})
 	exec, _ := orch.registry.GetExecutor(metaPluginName)
 	ctx := actor.WithSessionID(context.Background(), "s1")
@@ -411,112 +353,5 @@ func TestAllowedToolsSet_ConsistentWithFQNs(t *testing.T) {
 		if _, ok := set[fqn]; !ok {
 			t.Errorf("JSON contains %q which is not in set (drift: %v vs %v)", fqn, fqns, set)
 		}
-	}
-}
-
-func TestLoadTools_PromotionPersistsStickyEntry(t *testing.T) {
-	// Loading a tool not yet in KnownTools must add a sticky entry with
-	// LRURank=currentTurn so the next request's tools array keeps it.
-	store := &fakeInjectionStateStore{}
-	orch := newOrchForMetaTests(t, store)
-	exec, _ := orch.registry.GetExecutor(metaPluginName)
-
-	ctx := actor.WithSessionID(context.Background(), "s1")
-	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": "tools-plugin__t1"}})
-	_ = decodeLoadResult(t, res)
-	if store.updateCalls != 1 {
-		t.Fatalf("UpdateInjectionState calls = %d, want 1", store.updateCalls)
-	}
-	var found *state.KnownToolEntry
-	for i := range store.lastWritten.KnownTools {
-		if store.lastWritten.KnownTools[i].ToolName == "tools-plugin__t1" {
-			found = &store.lastWritten.KnownTools[i]
-			break
-		}
-	}
-	if found == nil {
-		t.Fatalf("loaded tool missing from KnownTools, got %+v", store.lastWritten.KnownTools)
-	}
-	if found.LRURank < 1 {
-		t.Errorf("LRURank = %d, want >= 1", found.LRURank)
-	}
-}
-
-func TestLoadTools_PromotionClearsDemotedFlag(t *testing.T) {
-	// An existing Demoted=true entry must self-heal to Demoted=false on an
-	// explicit load — an explicit load is a strong relevance signal.
-	store := &fakeInjectionStateStore{
-		store: map[string]state.InjectionState{
-			"s1": {KnownTools: []state.KnownToolEntry{
-				{ToolName: "tools-plugin__t1", LRURank: 1, Demoted: true},
-			}},
-		},
-	}
-	orch := newOrchForMetaTests(t, store)
-	exec, _ := orch.registry.GetExecutor(metaPluginName)
-
-	ctx := actor.WithSessionID(context.Background(), "s1")
-	_ = exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": "tools-plugin__t1"}})
-
-	for _, kt := range store.lastWritten.KnownTools {
-		if kt.ToolName == "tools-plugin__t1" {
-			if kt.Demoted {
-				t.Errorf("Demoted must clear on load, got Demoted=true")
-			}
-		}
-	}
-}
-
-func TestLoadTools_StoreReadFailureStillReportsLoaded(t *testing.T) {
-	// A read failure must NOT fail the call — the name still counts as
-	// loaded for this round-trip; only the durable promotion is skipped.
-	store := &fakeInjectionStateStore{failGetErr: errors.New("simulated db read failure")}
-	orch := newOrchForMetaTests(t, store)
-	exec, _ := orch.registry.GetExecutor(metaPluginName)
-
-	ctx := actor.WithSessionID(context.Background(), "s1")
-	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": "tools-plugin__t1"}})
-	got := decodeLoadResult(t, res)
-	if !reflect.DeepEqual(got.Loaded, []string{"tools-plugin__t1"}) {
-		t.Errorf("loaded = %v, want [tools-plugin__t1] even on read failure", got.Loaded)
-	}
-	if store.updateCalls != 0 {
-		t.Errorf("read failure must skip the write, got %d update calls", store.updateCalls)
-	}
-}
-
-func TestLoadTools_PromotionDoesNotRegressLRURank(t *testing.T) {
-	// Existing sticky entry at LRURank >= currentTurn must not have its rank
-	// decreased on a re-load (guards the upward-only bump in persistToolPromotion).
-	store := &fakeInjectionStateStore{
-		store: map[string]state.InjectionState{
-			"s1": {KnownTools: []state.KnownToolEntry{
-				{ToolName: "tools-plugin__t1", LRURank: 99},
-			}},
-		},
-	}
-	orch := newOrchForMetaTests(t, store)
-	exec, _ := orch.registry.GetExecutor(metaPluginName)
-
-	ctx := actor.WithSessionID(context.Background(), "s1")
-	_ = exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": "tools-plugin__t1"}})
-
-	for _, kt := range store.lastWritten.KnownTools {
-		if kt.ToolName == "tools-plugin__t1" && kt.LRURank < 99 {
-			t.Errorf("LRURank regressed from 99 to %d on re-load", kt.LRURank)
-		}
-	}
-}
-
-func TestLoadTools_NoStoreWiredStillReportsLoaded(t *testing.T) {
-	// Minimal deploys may wire load_tools without an InjectionStateStore.
-	// The handler degrades gracefully — loaded reported, promotion skipped.
-	orch := newOrchForMetaTests(t, nil)
-	exec, _ := orch.registry.GetExecutor(metaPluginName)
-	ctx := actor.WithSessionID(context.Background(), "s1")
-	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": "tools-plugin__t1"}})
-	got := decodeLoadResult(t, res)
-	if !reflect.DeepEqual(got.Loaded, []string{"tools-plugin__t1"}) {
-		t.Errorf("loaded = %v, want [tools-plugin__t1] with no store wired", got.Loaded)
 	}
 }

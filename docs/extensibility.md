@@ -106,8 +106,7 @@ answer, so the model can call them in its next step.
 
 - A companion the session may not see (a user-only or preparer action, or a
   name the plugin does not have) is skipped; the action itself still loads.
-- A companion that is already loaded, always included or demoted is left as
-  it is.
+- A companion that is already loaded or always included is left as it is.
 - Only the action's own companions load, not theirs.
 
 ### Checking a call before the user confirms it

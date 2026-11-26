@@ -131,7 +131,7 @@ func TestRun_RequestSizeNamesTheSystemParts(t *testing.T) {
 				}
 				named = append(named,
 					events.RequestBlock{Name: events.BlockToolIndex, Bytes: len(catalog)},
-					events.RequestBlock{Name: events.BlockConversation, Bytes: len(s.session + s.user + s.language + s.summary + "\n")})
+					events.RequestBlock{Name: events.BlockConversation, Bytes: len(s.session + s.user + s.language)})
 				// The output-format section and its reminder follow a tool result only.
 				rounds := []string{s.answerOnly, s.outputFormat + s.formatReminder + s.answerOnly}
 				systemNames := map[string]bool{events.BlockSystem: true, events.BlockSystemOther: true, events.BlockRound: true}

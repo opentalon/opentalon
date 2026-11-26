@@ -80,7 +80,7 @@ or the single routing provider). `ID`, `Models`, `SupportsFeature` and
   it; `Model` holds its model part, for a provider that serves the request
   itself. `Run` puts it on the turn's context once, after the budget check,
   and every call of the turn sets it from there (`onSessionModel`), the
-  session title and summary included. A call that names its own `Model` (a
+  session title and a compaction's summary included. A call that names its own `Model` (a
   set `repair.model`) and a sub-agent send none.
 - A request for a selected model carries that model's id and its own reasoning
   flag (`features: [reasoning]`), not the default model's. The provider reads
@@ -128,30 +128,25 @@ User-facing behaviour: [Inline tools](../configuration.md#inline-tools).
 - `Segments.Catalog` lists the allowed tools `Tools` lacks and is part of
   `Join()`, so `Messages[0]` carries it. `Segments.InlineCatalog` lists every
   on-demand tool, loaded or not, and is no part of `Join()`.
-- `Message.Announcement` sits on a request's last user or tool message: the
-  on-demand tools that became callable and those that stopped since the
-  request before. The chat loop sets it on every native-tools request whose
-  loaded tools it could read, whatever the model, and the session store keeps
-  it in `messages.announcement`, addressed by `Message.StoreKey`. A request
-  whose last user or tool message already carries a record an earlier request
-  sent sets none: that record stays as sent.
-- The Anthropic provider reads `LoadableTools`, `InlineCatalog` and the
-  records only on a chat-loop request (`Segments != nil`) for a model with
-  `FeatureInlineTools`. Every other request, and every OpenAI-compatible one,
-  ignores them and is sent as if they were empty.
-- Each announcement message enters the thinking binding like any message, so a
-  block produced under a withdrawal sent for one request is not replayed once
-  that withdrawal is gone.
+- `Message.LoadedTools` sits on a tool result: the on-demand tools the call
+  it answers loaded, each on the first result that loaded it. The chat loop
+  derives it on every native-tools request from the request's conversation,
+  whatever the model; nothing of it is stored.
+- The Anthropic provider reads `LoadableTools`, `InlineCatalog` and
+  `LoadedTools` only on a chat-loop request (`Segments != nil`) for a model
+  with `FeatureInlineTools`. Every other request, and every OpenAI-compatible
+  one, ignores them and is sent as if they were empty.
+- Each announcement message enters the thinking binding like any message.
 
 > **Gotcha**: choosing the tool form in the orchestrator from the profile's
 > model. When the selected provider fails, the default model answers the same
 > request and gets hidden tools and a catalog it cannot use.
 
 > **Gotcha**: rebuilding a history message as
-> `provider.Message{Role: m.Role, Content: …}`. The record and the store key
-> are lost, the request announces the tool again at its end, and the messages
-> Anthropic cached no longer match. Copy `Announcement` and `StoreKey` with the
-> content, as `appendStrippingHistoricalKC` does.
+> `provider.Message{Role: m.Role, Content: …}`. `LoadedTools`, `PromptType`
+> and the compaction's `KeptUserMessages` are lost, the request announces no
+> tool the message loaded, and a compaction's summary is no longer told apart.
+> Set `m.Content` on the copy instead, as `appendStrippingHistoricalKC` does.
 
 ## Retry policy: zero fields fall back to defaults
 

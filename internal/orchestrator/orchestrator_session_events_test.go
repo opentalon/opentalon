@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1643,112 +1642,6 @@ func (l *erroringPlannerLLM) Complete(_ context.Context, _ *provider.CompletionR
 	return &provider.CompletionResponse{Content: "fallback ok"}, nil
 }
 
-func TestOrchestrator_Summarization_EmitsTriggeredAndCompleted(t *testing.T) {
-	// Pre-populate the session with messages over the threshold, then call
-	// maybeSummarizeSession directly (avoid goroutine timing flakiness — the
-	// production caller fires it via `go ...` after Run, but the function
-	// itself is fully synchronous once invoked).
-	sink := &recordingEventSink{}
-	registry := NewToolRegistry()
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create(state.SessionParams{ID: "sess"})
-	for i := 0; i < 10; i++ {
-		_ = sessions.AddMessage("sess", provider.Message{
-			Role: provider.RoleUser, Content: "msg " + strconv.Itoa(i),
-		})
-	}
-	llm := &fakeLLM{responses: []string{"summary of older turns"}}
-	orch := NewWithRules(llm, DefaultParser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:               sink,
-		SummarizeAfterMessages:  5,
-		MaxMessagesAfterSummary: 3,
-	})
-
-	orch.maybeSummarizeSession(context.Background(), "sess")
-
-	evs := sink.snapshot()
-	trig := findPayloadsByType(t, evs, events.TypeSummarizationTriggered)
-	comp := findPayloadsByType(t, evs, events.TypeSummarizationCompleted)
-	if len(trig) != 1 {
-		t.Fatalf("summarization_triggered count = %d, want 1", len(trig))
-	}
-	if len(comp) != 1 {
-		t.Fatalf("summarization_completed count = %d, want 1", len(comp))
-	}
-	var tp events.SummarizationTriggeredPayload
-	_ = json.Unmarshal(trig[0], &tp)
-	if tp.MessageCount != 10 {
-		t.Errorf("triggered.MessageCount = %d, want 10", tp.MessageCount)
-	}
-	if tp.Reason == "" {
-		t.Errorf("triggered.Reason empty")
-	}
-	var cp events.SummarizationCompletedPayload
-	_ = json.Unmarshal(comp[0], &cp)
-	if cp.SummaryExcerpt != "summary of older turns" {
-		t.Errorf("completed.SummaryExcerpt = %q", cp.SummaryExcerpt)
-	}
-	if cp.KeptMessages != 3 {
-		t.Errorf("completed.KeptMessages = %d, want 3", cp.KeptMessages)
-	}
-	if cp.LatencyMS < 0 {
-		t.Errorf("completed.LatencyMS = %d, want >= 0", cp.LatencyMS)
-	}
-}
-
-func TestOrchestrator_Summarization_NoCompletedOnLLMError(t *testing.T) {
-	// LLM errors on summarization → triggered fires, completed does not.
-	// Consumer-side analytics counts "triggered minus completed" as failure rate.
-	sink := &recordingEventSink{}
-	registry := NewToolRegistry()
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create(state.SessionParams{ID: "sess"})
-	for i := 0; i < 10; i++ {
-		_ = sessions.AddMessage("sess", provider.Message{
-			Role: provider.RoleUser, Content: "msg",
-		})
-	}
-	llm := &erroringPlannerLLM{plannerErr: errPlannerCallFailed}
-	orch := NewWithRules(llm, DefaultParser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:               sink,
-		SummarizeAfterMessages:  5,
-		MaxMessagesAfterSummary: 3,
-	})
-	orch.maybeSummarizeSession(context.Background(), "sess")
-
-	evs := sink.snapshot()
-	if len(findPayloadsByType(t, evs, events.TypeSummarizationTriggered)) != 1 {
-		t.Errorf("triggered count != 1")
-	}
-	if n := len(findPayloadsByType(t, evs, events.TypeSummarizationCompleted)); n != 0 {
-		t.Errorf("completed count = %d, want 0 on LLM error", n)
-	}
-}
-
-func TestOrchestrator_Summarization_BelowThreshold_NoEvents(t *testing.T) {
-	sink := &recordingEventSink{}
-	registry := NewToolRegistry()
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create(state.SessionParams{ID: "sess"})
-	// Only 2 messages; threshold is 5 → maybeSummarizeSession returns early.
-	for i := 0; i < 2; i++ {
-		_ = sessions.AddMessage("sess", provider.Message{Role: provider.RoleUser, Content: "m"})
-	}
-	orch := NewWithRules(&fakeLLM{}, DefaultParser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:               sink,
-		SummarizeAfterMessages:  5,
-		MaxMessagesAfterSummary: 3,
-	})
-	orch.maybeSummarizeSession(context.Background(), "sess")
-
-	if n := len(findPayloadsByType(t, sink.snapshot(), events.TypeSummarizationTriggered)); n != 0 {
-		t.Errorf("triggered fired below threshold (%d events)", n)
-	}
-}
-
 func TestOrchestrator_Planner_NoEventsWhenPlannerDisabled(t *testing.T) {
 	// PipelineEnabled defaults to false → planner is nil → no events.
 	sink := &recordingEventSink{}
@@ -2900,81 +2793,6 @@ func TestOrchestrator_PreparerPhase_MultiPreparerAggregation(t *testing.T) {
 	}
 }
 
-func TestOrchestrator_MessagesTruncated_EmittedWhenSlidingWindowCuts(t *testing.T) {
-	// Sliding window: when sess.Messages exceeds ContextMessages, the
-	// orchestrator drops the oldest N entries and emits one
-	// messages_truncated event carrying the dropped index range and
-	// count.
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"answer"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-
-	registry := NewToolRegistry()
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create(state.SessionParams{ID: "s1"})
-
-	// Seed sess.Messages with 6 user/assistant pairs (12 messages) so the
-	// cutter has work to do. ContextMessages = 4 → expect 8 dropped.
-	for i := 0; i < 6; i++ {
-		_ = sessions.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "user-msg"})
-		_ = sessions.AddMessage("s1", provider.Message{Role: provider.RoleAssistant, Content: "asst-msg"})
-	}
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:       sink,
-		ContextMessages: 4,
-	})
-
-	if _, err := orch.Run(context.Background(), "s1", "next message"); err != nil {
-		t.Fatal(err)
-	}
-
-	mt := findEventByType(sink.snapshot(), events.TypeMessagesTruncated)
-	if mt == nil {
-		t.Fatal("messages_truncated event not emitted")
-	}
-	var p events.MessagesTruncatedPayload
-	if err := json.Unmarshal(mt.Payload, &p); err != nil {
-		t.Fatalf("unmarshal messages_truncated payload: %v", err)
-	}
-	// 12 seeded + 1 current-turn user message (added before appendConversation
-	// runs) = 13; ContextMessages = 4 → drop 9 oldest (indices 0..8).
-	if p.DroppedCount != 9 {
-		t.Errorf("DroppedCount = %d, want 9 (12 seeded + 1 current = 13, keep 4)", p.DroppedCount)
-	}
-	if len(p.DroppedSeqRange) != 2 || p.DroppedSeqRange[0] != 0 || p.DroppedSeqRange[1] != 8 {
-		t.Errorf("DroppedSeqRange = %v, want [0, 8]", p.DroppedSeqRange)
-	}
-}
-
-func TestOrchestrator_MessagesTruncated_NotEmittedWhenWithinWindow(t *testing.T) {
-	// Sliding window does not fire when len(messages) <= ContextMessages.
-	// No messages_truncated event must reach the sink in that case.
-	sink := &recordingEventSink{}
-	llm := &fakeLLM{responses: []string{"answer"}}
-	parser := &fakeParser{parseFn: func(string) []ToolCall { return nil }}
-
-	registry := NewToolRegistry()
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create(state.SessionParams{ID: "s1"})
-	// Only one prior exchange — well below the window.
-	_ = sessions.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "u"})
-	_ = sessions.AddMessage("s1", provider.Message{Role: provider.RoleAssistant, Content: "a"})
-
-	orch := NewWithRules(llm, parser, registry, memory, sessions, OrchestratorOpts{
-		EventSink:       sink,
-		ContextMessages: 10,
-	})
-	if _, err := orch.Run(context.Background(), "s1", "next"); err != nil {
-		t.Fatal(err)
-	}
-	if mt := findEventByType(sink.snapshot(), events.TypeMessagesTruncated); mt != nil {
-		t.Errorf("messages_truncated must not emit when within window; got payload: %s", mt.Payload)
-	}
-}
-
 // --- Tool catalog + load_tools integration tests ---
 
 // registerTierTestPlugins wires a preparer (rag-plugin.prepare) + five
@@ -3004,9 +2822,8 @@ func registerTierTestPlugins(t *testing.T, registry *ToolRegistry, prepJSON stri
 }
 
 // newCatalogOrch builds a native-tools orchestrator over the tier test
-// plugins + a wired state store, so the catalog renders and load_tools can
-// persist sticky promotions.
-func newCatalogOrch(t *testing.T, store *fakeInjectionStateStore) *Orchestrator {
+// plugins, so the catalog renders.
+func newCatalogOrch(t *testing.T) *Orchestrator {
 	t.Helper()
 	registry := NewToolRegistry()
 	registerTierTestPlugins(t, registry, `{"send_to_llm": true, "message": "q"}`)
@@ -3014,8 +2831,7 @@ func newCatalogOrch(t *testing.T, store *fakeInjectionStateStore) *Orchestrator 
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
 	return NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
-		ContentPreparers:    []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
-		InjectionStateStore: store,
+		ContentPreparers: []ContentPreparerEntry{{Plugin: "rag-plugin", Action: "prepare"}},
 	})
 }
 
@@ -3023,10 +2839,10 @@ func TestToolCatalog_NativeMode_RendersCatalogAndKeepsToolsArraySmall(t *testing
 	// With native tools and nothing loaded, the tools array carries only the
 	// always-include core (load_tools); every other allowed tool surfaces in
 	// the system-prompt catalog with the load_tools nudge.
-	orch := newCatalogOrch(t, &fakeInjectionStateStore{})
+	orch := newCatalogOrch(t)
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
-	sysMsg := orch.buildSystemPrompt(ctx, "ask", true).Join()
+	sysMsg := orch.turnSystemPrompt(ctx, "ask", true).Join()
 	if !strings.Contains(sysMsg, "## Tool catalog — name + one-line summary") {
 		t.Errorf("system prompt missing catalog header, got:\n%s", sysMsg)
 	}
@@ -3040,117 +2856,36 @@ func TestToolCatalog_NativeMode_RendersCatalogAndKeepsToolsArraySmall(t *testing
 	}
 
 	// Native tools array: only the always-include load_tools meta-tool.
-	tools, _, _ := orch.buildToolDefinitions(ctx)
+	tools, _ := orch.buildToolDefinitions(ctx, nil)
 	if len(tools) != 1 || tools[0].Name != toolFQN(metaPluginName, metaLoadTools) {
 		t.Errorf("tools array = %+v, want only the always-include load_tools meta-tool", tools)
 	}
 }
 
+// After a load_tools call the conversation answered, the loaded tool drops out
+// of the catalog and into the native tools array with its full schema; the
+// rest stay in the catalog.
 func TestToolCatalog_LoadedToolLeavesCatalogAndEntersToolsArray(t *testing.T) {
-	// After load_tools promotes a tool, it drops out of the catalog and into
-	// the native tools array with its full schema; the rest stay in the catalog.
-	store := &fakeInjectionStateStore{}
-	orch := newCatalogOrch(t, store)
-	exec, ok := orch.registry.GetExecutor(metaPluginName)
-	if !ok {
-		t.Fatal("load_tools executor missing")
-	}
+	orch := newCatalogOrch(t)
 	ctx := actor.WithSessionID(context.Background(), "s1")
-
-	res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": "tools-plugin__t1"}})
-	if res.Error != "" {
-		t.Fatalf("load_tools failed: %q", res.Error)
+	conv := []provider.Message{
+		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{
+			{ID: "c1", Name: toolFQN(metaPluginName, metaLoadTools), Arguments: map[string]string{"names": "tools-plugin__t1"}}}},
+		{Role: provider.RoleTool, ToolCallID: "c1", Content: "loaded"},
 	}
 
-	// Now t1 is sticky: tools array has load_tools + t1; catalog omits t1.
-	promoted, _ := orch.promotedToolSet(ctx)
-	if !promoted["tools-plugin__t1"] {
-		t.Fatalf("promotedToolSet missing tools-plugin__t1, got %v", promoted)
+	var surface toolSurface
+	surface.update(ctx, orch, conv)
+	names := toolArraySet(surface.callable)
+	if !names[toolFQN(metaPluginName, metaLoadTools)] || !names["tools-plugin__t1"] || names["tools-plugin__t2"] {
+		t.Errorf("tools array must contain load_tools + tools-plugin__t1 and not t2, got %v", names)
 	}
-	tools, _, _ := orch.buildToolDefinitions(ctx)
-	names := map[string]bool{}
-	for _, td := range tools {
-		names[td.Name] = true
-	}
-	if !names[toolFQN(metaPluginName, metaLoadTools)] || !names["tools-plugin__t1"] {
-		t.Errorf("tools array must contain load_tools + tools-plugin__t1, got %v", names)
-	}
-	if names["tools-plugin__t2"] {
-		t.Errorf("tools array must NOT contain the un-loaded tools-plugin__t2, got %v", names)
-	}
-
-	sysMsg := orch.buildSystemPrompt(ctx, "ask", true).Join()
+	sysMsg := withToolCatalog(orch.buildSystemPrompt(ctx, "ask", true), surface.catalog, surface.inline).Join()
 	if strings.Contains(sysMsg, "- tools-plugin__t1:") {
 		t.Errorf("loaded tool must drop out of the catalog, still present:\n%s", sysMsg)
 	}
 	if !strings.Contains(sysMsg, "tools-plugin__t2") {
 		t.Errorf("un-loaded tools must remain in the catalog, missing t2:\n%s", sysMsg)
-	}
-}
-
-func TestToolCatalog_StickyCapKeepsMostRecentlyUsed(t *testing.T) {
-	// promotedToolSet caps the sticky set at maxStickyTools, keeping the
-	// highest-LRURank entries.
-	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, `{"send_to_llm": true, "message": "q"}`)
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create(state.SessionParams{ID: "s1"})
-
-	// Seed more than the cap; the lowest ranks must be dropped.
-	known := make([]state.KnownToolEntry, 0, maxStickyTools+5)
-	for i := 0; i < maxStickyTools+5; i++ {
-		known = append(known, state.KnownToolEntry{
-			ToolName: "p__a" + string(rune('A'+i%26)) + string(rune('0'+i/26)),
-			LRURank:  i, // higher i = more recent
-		})
-	}
-	store := &fakeInjectionStateStore{store: map[string]state.InjectionState{"s1": {KnownTools: known}}}
-	orch := NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
-		InjectionStateStore: store,
-	})
-	ctx := actor.WithSessionID(context.Background(), "s1")
-
-	promoted, _ := orch.promotedToolSet(ctx)
-	if len(promoted) != maxStickyTools {
-		t.Fatalf("sticky set size = %d, want cap %d", len(promoted), maxStickyTools)
-	}
-	// The lowest-rank entry (i=0) must have been dropped; the highest (i=last) kept.
-	lowest := known[0].ToolName
-	highest := known[len(known)-1].ToolName
-	if promoted[lowest] {
-		t.Errorf("lowest-LRURank tool %q must be dropped past the cap", lowest)
-	}
-	if !promoted[highest] {
-		t.Errorf("highest-LRURank tool %q must be kept under the cap", highest)
-	}
-}
-
-func TestToolCatalog_DemotedToolNotSticky(t *testing.T) {
-	// A Demoted entry is excluded from the sticky set even if its LRURank is
-	// high — it falls back to the catalog.
-	registry := NewToolRegistry()
-	registerTierTestPlugins(t, registry, `{"send_to_llm": true, "message": "q"}`)
-	memory := state.NewMemoryStore("")
-	sessions := state.NewSessionStore("")
-	sessions.Create(state.SessionParams{ID: "s1"})
-	store := &fakeInjectionStateStore{store: map[string]state.InjectionState{
-		"s1": {KnownTools: []state.KnownToolEntry{
-			{ToolName: "tools-plugin__t1", LRURank: 99, Demoted: true},
-			{ToolName: "tools-plugin__t2", LRURank: 5},
-		}},
-	}}
-	orch := NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry, memory, sessions, OrchestratorOpts{
-		InjectionStateStore: store,
-	})
-	ctx := actor.WithSessionID(context.Background(), "s1")
-
-	promoted, _ := orch.promotedToolSet(ctx)
-	if promoted["tools-plugin__t1"] {
-		t.Errorf("Demoted tool must be excluded from the sticky set")
-	}
-	if !promoted["tools-plugin__t2"] {
-		t.Errorf("non-demoted tool must be in the sticky set")
 	}
 }
 

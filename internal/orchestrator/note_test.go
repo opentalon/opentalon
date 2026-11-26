@@ -59,7 +59,7 @@ func noToolCalls() *fakeParser {
 	return &fakeParser{parseFn: func(string) []ToolCall { return nil }}
 }
 
-// A note runs no turn: no other event, model call, usage, summarisation or title, and the session's metadata stays.
+// A note runs no turn: no other event, model call, usage or title, and the session's metadata stays.
 func TestStoreNote_StoresAHiddenRowWithoutATurn(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		sessions := kind.open(t)
@@ -72,7 +72,7 @@ func TestStoreNote_StoresAHiddenRowWithoutATurn(t *testing.T) {
 		usage := &usageSpy{}
 		orch := NewWithRules(llm, noToolCalls(), NewToolRegistry(), state.NewMemoryStore(""), sessions, OrchestratorOpts{
 			EventSink: sink, UsageRecorder: usage,
-			SummarizeAfterMessages: 1, MaxMessagesAfterSummary: 1, SessionTitlesEnabled: true,
+			SessionTitlesEnabled: true,
 		})
 		claim := reserveNote(t, sessions, "s1", time.Now())
 		before, _ := sessions.Get("s1")
@@ -106,8 +106,8 @@ func TestStoreNote_StoresAHiddenRowWithoutATurn(t *testing.T) {
 		if len(llm.prompts) != 0 || len(usage.calls) != 0 {
 			t.Errorf("model prompts %q, usage %+v, want neither", llm.prompts, usage.calls)
 		}
-		if sess.Summary != "" || sess.Title != "" {
-			t.Errorf("summary %q, title %q, want neither", sess.Summary, sess.Title)
+		if sess.Title != "" {
+			t.Errorf("title %q, want none", sess.Title)
 		}
 		if !noteSettled(t, sessions, "s1") {
 			t.Error("the note's reservation was not marked stored")
@@ -304,49 +304,6 @@ func TestStoreNote_WaitsForATurnOnAnotherPod(t *testing.T) {
 		call := slices.IndexFunc(msgs, func(m provider.Message) bool { return strings.HasPrefix(m.Content, "[tool_call]") })
 		if call < 0 || !strings.Contains(msgs[call+1].Content, "executed repo.analyze") {
 			t.Errorf("stored messages = %+v, want the tool call directly followed by its result", msgs)
-		}
-	})
-}
-
-// A note is stored after a summarisation in flight, whose rewrite would otherwise drop it.
-func TestStoreNote_WaitsForASummarisationInFlight(t *testing.T) {
-	eachStore(t, func(t *testing.T, kind storeKind) {
-		inner := kind.open(t)
-		inner.Create(state.SessionParams{ID: "s1"})
-		summarising := make(chan struct{}, 1)
-		release := make(chan struct{})
-		store := &blockingSetSummaryStore{inner: inner, setSummaryStarted: summarising, setSummaryRelease: release}
-		orch := NewWithRules(&immediateLLM{resp: "reply"}, noToolCalls(), NewToolRegistry(), state.NewMemoryStore(""), store,
-			OrchestratorOpts{SummarizeAfterMessages: 1, MaxMessagesAfterSummary: 1})
-		claim := reserveNote(t, inner, "s1", time.Now())
-
-		if _, err := orch.Run(context.Background(), "s1", "msg1"); err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-		select {
-		case <-summarising:
-		case <-time.After(2 * time.Second):
-			t.Fatal("the summarisation never started")
-		}
-		stored := make(chan error, 1)
-		go func() { stored <- orch.StoreNote(context.Background(), "s1", testNote, claim) }()
-		time.Sleep(20 * time.Millisecond)
-		select {
-		case err := <-stored:
-			t.Fatalf("StoreNote returned (%v) while the summarisation held the session", err)
-		default:
-		}
-		close(release)
-
-		if err := <-stored; err != nil {
-			t.Fatalf("StoreNote: %v", err)
-		}
-		sess, _ := inner.Get("s1")
-		if n := len(sess.Messages); n == 0 || sess.Messages[n-1].Content != testNote || countContent(sess.Messages, testNote) != 1 {
-			t.Errorf("stored messages = %+v, want the note once, after the summarised rows", sess.Messages)
-		}
-		if peak := atomic.LoadInt32(&store.maxInWrite); peak > 1 {
-			t.Errorf("peak concurrent writes = %d, want 1", peak)
 		}
 	})
 }

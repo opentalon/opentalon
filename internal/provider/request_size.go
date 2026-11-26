@@ -105,10 +105,13 @@ func oaiRequestSize(req *CompletionRequest, oai oaiRequest, bodyBytes int) *even
 	r.addCounted(events.BlockToolsSent, tools)
 	var parts []SystemPart
 	var system int
-	var history, results counted
+	var history, summary, results counted
+	summaryContent := compactionSummary(req)
 	for i, m := range oai.Messages {
 		text := string(m.Content)
 		switch {
+		case summaryContent != "" && m.Role == string(RoleUser) && text == summaryContent:
+			summary.add(TextBytes(text))
 		case m.Role == string(RoleSystem):
 			system += TextBytes(text)
 			if i == 0 && req.Segments != nil && text == req.Segments.Join() {
@@ -128,8 +131,20 @@ func oaiRequestSize(req *CompletionRequest, oai oaiRequest, bodyBytes int) *even
 	}
 	r.addSystem(req.Segments, parts, system)
 	r.addCounted(events.BlockHistory, history)
+	r.addCounted(events.BlockSummary, summary)
 	r.addCounted(events.BlockToolResults, results)
 	return r.finish(bodyBytes)
+}
+
+// compactionSummary returns the content of req's compaction summary message,
+// "" when it carries none.
+func compactionSummary(req *CompletionRequest) string {
+	for _, m := range req.Messages {
+		if m.PromptType == PromptTypeCompaction {
+			return m.Content
+		}
+	}
+	return ""
 }
 
 func anthRequestSize(req *CompletionRequest, ar anthRequest, bodyBytes int) *events.RequestSize {
@@ -155,16 +170,21 @@ func anthRequestSize(req *CompletionRequest, ar anthRequest, bodyBytes int) *eve
 		}
 	}
 	r.addSystem(req.Segments, parts, systemBytes)
-	var history, results counted
+	var history, summary, results counted
+	summaryContent := compactionSummary(req)
 	for _, m := range ar.Messages {
-		n, result := anthMessageBytes(m)
-		if result {
+		n, text, result := anthMessageBytes(m)
+		switch {
+		case result:
 			results.add(n)
-		} else {
+		case summaryContent != "" && m.Role == string(RoleUser) && text == summaryContent:
+			summary.add(n)
+		default:
 			history.add(n)
 		}
 	}
 	r.addCounted(events.BlockHistory, history)
+	r.addCounted(events.BlockSummary, summary)
 	r.addCounted(events.BlockToolResults, results)
 	return r.finish(bodyBytes)
 }
@@ -184,10 +204,11 @@ func anthSystemBytes(system json.RawMessage) (n int, inBlocks bool) {
 	return n, true
 }
 
-func anthMessageBytes(m anthMessage) (n int, result bool) {
-	var text string
+// anthMessageBytes returns m's size, its text when its content is plain text,
+// and whether it is a tool result.
+func anthMessageBytes(m anthMessage) (n int, text string, result bool) {
 	if json.Unmarshal(m.Content, &text) == nil {
-		return len(text), IsToolResult(Message{Role: Role(m.Role), Content: text})
+		return len(text), text, IsToolResult(Message{Role: Role(m.Role), Content: text})
 	}
 	var blocks []struct {
 		Type    string          `json:"type"`
@@ -195,7 +216,7 @@ func anthMessageBytes(m anthMessage) (n int, result bool) {
 	}
 	if json.Unmarshal(m.Content, &blocks) == nil && len(blocks) == 1 && blocks[0].Type == "tool_result" &&
 		json.Unmarshal(blocks[0].Content, &text) == nil {
-		return len(text), true
+		return len(text), "", true
 	}
-	return len(m.Content), false
+	return len(m.Content), "", false
 }

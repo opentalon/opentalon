@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,30 +65,6 @@ func loadThinking(column string, msg *provider.Message) error {
 	return nil
 }
 
-type storedAnnouncement struct {
-	Added   []string `json:"added,omitempty"`
-	Removed []string `json:"removed,omitempty"`
-}
-
-func announcementAsNullString(a *provider.ToolAnnouncement) (sql.NullString, error) {
-	if a == nil {
-		return sql.NullString{}, nil
-	}
-	b, err := json.Marshal(storedAnnouncement{Added: a.Added, Removed: a.Removed})
-	if err != nil {
-		return sql.NullString{}, fmt.Errorf("marshal announcement: %w", err)
-	}
-	return sql.NullString{String: string(b), Valid: true}, nil
-}
-
-func loadAnnouncement(column string) (*provider.ToolAnnouncement, error) {
-	var a storedAnnouncement
-	if err := json.Unmarshal([]byte(column), &a); err != nil {
-		return nil, err
-	}
-	return &provider.ToolAnnouncement{Added: a.Added, Removed: a.Removed}, nil
-}
-
 // metadataAsNullString marshals a non-empty per-message metadata map into JSON;
 // an empty/nil map persists as SQL NULL (not "{}") so an ordinary chat turn's
 // row stays byte-identical to the pre-013 shape and readers can cheaply filter
@@ -123,12 +100,12 @@ func NewSessionStore(db *DB, maxMessages, maxIdleDays int) *SessionStore {
 // user their conversation expired" and "tell the user to retry".
 func (s *SessionStore) Get(id string) (*state.Session, error) {
 	d := s.db.Dialect()
-	var summary, title, activeModel, metadataJSON, createdAt, updatedAt, entityID, groupID, openedBy, openKey, channelID string
+	var title, activeModel, metadataJSON, createdAt, updatedAt, entityID, groupID, openedBy, openKey, channelID string
 	var mark verifiedOwnerColumns
 	err := s.db.SQLDB().QueryRow(
-		d.Rebind(`SELECT COALESCE(summary,''), COALESCE(title,''), active_model, metadata, created_at, updated_at, COALESCE(entity_id,''), COALESCE(group_id,''), COALESCE(opened_by,''), COALESCE(open_key,''), COALESCE(channel_id,''), `+verifiedOwnerSelect+` FROM sessions WHERE id = ?`),
+		d.Rebind(`SELECT COALESCE(title,''), active_model, metadata, created_at, updated_at, COALESCE(entity_id,''), COALESCE(group_id,''), COALESCE(opened_by,''), COALESCE(open_key,''), COALESCE(channel_id,''), `+verifiedOwnerSelect+` FROM sessions WHERE id = ?`),
 		id,
-	).Scan(&summary, &title, &activeModel, &metadataJSON, &createdAt, &updatedAt, &entityID, &groupID, &openedBy, &openKey, &channelID,
+	).Scan(&title, &activeModel, &metadataJSON, &createdAt, &updatedAt, &entityID, &groupID, &openedBy, &openKey, &channelID,
 		&mark.entityID, &mark.groupID, &mark.channelID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -151,7 +128,6 @@ func (s *SessionStore) Get(id string) (*state.Session, error) {
 	return &state.Session{
 		ID:            id,
 		Messages:      messages,
-		Summary:       summary,
 		Title:         title,
 		ActiveModel:   provider.ModelRef(activeModel),
 		Metadata:      metadata,
@@ -202,8 +178,8 @@ func (s *SessionStore) Create(p state.SessionParams) *state.Session {
 	}
 	source := sql.NullString{String: p.SystemSource, Valid: p.SystemSource != ""}
 	_, err := s.db.SQLDB().Exec(
-		s.db.Dialect().Rebind(`INSERT INTO sessions (id, summary, active_model, metadata, entity_id, group_id, interaction_kind, system_source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		p.ID, "", "", "{}", p.EntityID, p.GroupID, kind, source, now, now)
+		s.db.Dialect().Rebind(`INSERT INTO sessions (id, active_model, metadata, entity_id, group_id, interaction_kind, system_source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		p.ID, "", "{}", p.EntityID, p.GroupID, kind, source, now, now)
 	if err != nil {
 		if existing, e := s.Get(p.ID); e == nil {
 			return existing
@@ -258,8 +234,8 @@ func (s *SessionStore) OpenSession(ctx context.Context, p state.SessionParams) (
 	now := time.Now().UTC()
 	ts := now.Format(time.RFC3339)
 	res, err := s.db.SQLDB().ExecContext(ctx,
-		d.Rebind(`INSERT INTO sessions (id, summary, active_model, metadata, entity_id, group_id, channel_id, interaction_kind, opened_by, open_key, created_at, updated_at)
-		VALUES (?, '', '', '{}', ?, ?, ?, 'chat', ?, ?, ?, ?) ON CONFLICT DO NOTHING`),
+		d.Rebind(`INSERT INTO sessions (id, active_model, metadata, entity_id, group_id, channel_id, interaction_kind, opened_by, open_key, created_at, updated_at)
+		VALUES (?, '', '{}', ?, ?, ?, 'chat', ?, ?, ?, ?) ON CONFLICT DO NOTHING`),
 		p.ID, p.EntityID, p.GroupID, p.ChannelID, p.OpenedBy, p.OpenKey, ts, ts)
 	if err != nil {
 		return nil, false, fmt.Errorf("open session %q insert: %w", p.ID, err)
@@ -355,7 +331,7 @@ func (s *SessionStore) SetVerifiedOwner(ctx context.Context, id string, owner st
 // state.ClaimHeld, a stored one and an unknown id state.ClaimSettled, which a
 // caller tells apart to recover only a turn that may still need its run. The
 // marker, not the transcript, is the proof:
-// clearing, summarising or trimming the messages must not make a first turn
+// clearing or truncating the messages must not make a first turn
 // that ran claimable again. The claim is separate from the message on
 // purpose: the turn runner stores that message, as for every turn, and a
 // claimant whose claim was taken over is refused when it stores.
@@ -583,11 +559,6 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	if err != nil {
 		return err
 	}
-	announcementJSON, err := announcementAsNullString(msg.Announcement)
-	if err != nil {
-		return err
-	}
-	msg = state.WithStoreKey(msg)
 	toolCallID := sql.NullString{String: msg.ToolCallID, Valid: msg.ToolCallID != ""}
 	visibility := sql.NullString{String: msg.Visibility, Valid: msg.Visibility != ""}
 	noteKey := sql.NullString{String: tc.NoteKey, Valid: tc.NoteKey != ""}
@@ -623,9 +594,9 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, thinking, announcement, message_key, metadata, visibility, note_key, created_at)
-		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
-		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, thinkingJSON, announcementJSON, msg.StoreKey, metadataJSON, visibility, noteKey, now, id); err != nil {
+		d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, thinking, metadata, visibility, note_key, created_at)
+		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE session_id = ?`),
+		id, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, thinkingJSON, metadataJSON, visibility, noteKey, now, id); err != nil {
 		return fmt.Errorf("add message insert: %w", err)
 	}
 
@@ -699,40 +670,6 @@ func (s *SessionStore) SetModel(id string, model provider.ModelRef) error {
 	return nil
 }
 
-func (s *SessionStore) SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error {
-	ctx := context.Background()
-	d := s.db.Dialect()
-	column, err := announcementAsNullString(announcement)
-	if err != nil {
-		return err
-	}
-
-	tx, cleanup, err := d.BeginExclusive(ctx, s.db.SQLDB())
-	if err != nil {
-		return fmt.Errorf("set announcement begin: %w", err)
-	}
-	defer cleanup()
-	defer func() { _ = tx.Rollback() }()
-
-	if err := lockSessionRow(ctx, tx, d, id); err != nil {
-		return fmt.Errorf("set announcement lock: %w", err)
-	}
-	res, err := tx.ExecContext(ctx,
-		d.Rebind(`UPDATE messages SET announcement = ? WHERE session_id = ? AND message_key = ?`),
-		column, id, storeKey)
-	if err != nil {
-		return fmt.Errorf("set announcement: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("set announcement rows: %w", err)
-	}
-	if n != 1 {
-		return fmt.Errorf("set announcement: %d messages with key %q in session %q: %w", n, storeKey, id, state.ErrMessageNotFound)
-	}
-	return tx.Commit()
-}
-
 // SetMetadata upserts a single key in the session's metadata JSON column. An
 // empty value removes the key. The whole map is read, mutated in memory, and
 // written back in one transaction — debug-toggle traffic is rare (one row per
@@ -799,63 +736,32 @@ func (s *SessionStore) SetTitle(id, title string) error {
 	return nil
 }
 
-// SetSummary updates the session summary and replaces messages with the given slice.
-func (s *SessionStore) SetSummary(id string, summary string, messages []provider.Message) error {
+// TruncateMessages keeps the session's first n messages and deletes the ones
+// after them; the kept rows, their seq and their metadata stay as they are.
+func (s *SessionStore) TruncateMessages(id string, n int) error {
 	ctx := context.Background()
 	d := s.db.Dialect()
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	tx, cleanup, err := d.BeginExclusive(ctx, s.db.SQLDB())
 	if err != nil {
-		return fmt.Errorf("set summary begin: %w", err)
+		return fmt.Errorf("truncate messages begin: %w", err)
 	}
 	defer cleanup()
 	defer func() { _ = tx.Rollback() }()
 
-	// Same lock order as AddMessage (sessions row first): this transaction
-	// also touches messages and then the sessions row, and taking them the
-	// other way round deadlocks against a concurrent AddMessage that trims
-	// old rows. The lock also keeps the fresh seq numbering below from
-	// colliding with a message appended in between.
+	// Sessions row first — the one lock order every transcript writer uses.
 	if err := lockSessionRow(ctx, tx, d, id); err != nil {
-		return fmt.Errorf("set summary lock: %w", err)
+		return fmt.Errorf("truncate messages lock: %w", err)
 	}
-
-	// Delete all existing messages for this session.
 	if _, err := tx.ExecContext(ctx,
-		d.Rebind(`DELETE FROM messages WHERE session_id = ?`), id); err != nil {
-		return fmt.Errorf("set summary delete: %w", err)
+		d.Rebind(`DELETE FROM messages WHERE session_id = ? AND seq NOT IN (SELECT seq FROM messages WHERE session_id = ? ORDER BY seq LIMIT ?)`),
+		id, id, n); err != nil {
+		return fmt.Errorf("truncate messages delete: %w", err)
 	}
-
-	// Insert the kept messages with fresh seq numbers.
-	for i, msg := range messages {
-		toolCallsJSON, err := toolCallsAsNullString(msg.ToolCalls)
-		if err != nil {
-			return err
-		}
-		thinkingJSON, err := thinkingAsNullString(msg)
-		if err != nil {
-			return err
-		}
-		announcementJSON, err := announcementAsNullString(msg.Announcement)
-		if err != nil {
-			return err
-		}
-		toolCallID := sql.NullString{String: msg.ToolCallID, Valid: msg.ToolCallID != ""}
-		visibility := sql.NullString{String: msg.Visibility, Valid: msg.Visibility != ""}
-		storeKey := sql.NullString{String: msg.StoreKey, Valid: msg.StoreKey != ""}
-		if _, err := tx.ExecContext(ctx,
-			d.Rebind(`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, thinking, announcement, message_key, visibility, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-			id, i+1, string(msg.Role), msg.Content, toolCallsJSON, toolCallID, thinkingJSON, announcementJSON, storeKey, visibility, now); err != nil {
-			return fmt.Errorf("set summary insert: %w", err)
-		}
-	}
-
-	// Update session summary and timestamp.
 	if _, err := tx.ExecContext(ctx,
-		d.Rebind(`UPDATE sessions SET summary = ?, updated_at = ? WHERE id = ?`),
-		summary, now, id); err != nil {
-		return fmt.Errorf("set summary update: %w", err)
+		d.Rebind(`UPDATE sessions SET updated_at = ? WHERE id = ?`), now, id); err != nil {
+		return fmt.Errorf("truncate messages update: %w", err)
 	}
 	return tx.Commit()
 }
@@ -878,8 +784,7 @@ func (s *SessionStore) List() ([]string, error) {
 	return ids, rows.Err()
 }
 
-// ClearMessages drops the conversation history of a session — messages and
-// the derived summary — atomically. The session row itself stays (entity_id,
+// ClearMessages drops the conversation history of a session atomically. The session row itself stays (entity_id,
 // group_id, active_model, metadata, title, created_at all preserved), and
 // the session_events audit log is untouched. Used by the clear_session
 // command so /clear resets LLM context without orphaning the session's
@@ -908,7 +813,7 @@ func (s *SessionStore) ClearMessages(id string) error {
 		return fmt.Errorf("clear messages delete: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		d.Rebind(`UPDATE sessions SET summary = '', updated_at = ? WHERE id = ?`),
+		d.Rebind(`UPDATE sessions SET updated_at = ? WHERE id = ?`),
 		now, id); err != nil {
 		return fmt.Errorf("clear messages update: %w", err)
 	}
@@ -984,7 +889,7 @@ func (s *SessionStore) PruneIdleSessions() error {
 // loadMessages reads all messages for a session from the messages table, ordered by seq.
 func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error) {
 	rows, err := s.db.SQLDB().Query(
-		s.db.Dialect().Rebind(`SELECT role, content, tool_calls, tool_call_id, thinking, announcement, message_key, visibility, metadata FROM messages WHERE session_id = ? ORDER BY seq`),
+		s.db.Dialect().Rebind(`SELECT role, content, tool_calls, tool_call_id, thinking, visibility, metadata FROM messages WHERE session_id = ? ORDER BY seq`),
 		sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load messages: %w", err)
@@ -994,8 +899,8 @@ func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error
 	var messages []provider.Message
 	for rows.Next() {
 		var role, content string
-		var toolCallsJSON, toolCallID, thinkingJSON, announcementJSON, storeKey, visibility, metadataJSON sql.NullString
-		if err := rows.Scan(&role, &content, &toolCallsJSON, &toolCallID, &thinkingJSON, &announcementJSON, &storeKey, &visibility, &metadataJSON); err != nil {
+		var toolCallsJSON, toolCallID, thinkingJSON, visibility, metadataJSON sql.NullString
+		if err := rows.Scan(&role, &content, &toolCallsJSON, &toolCallID, &thinkingJSON, &visibility, &metadataJSON); err != nil {
 			return nil, fmt.Errorf("load messages scan: %w", err)
 		}
 		msg := provider.Message{
@@ -1003,7 +908,6 @@ func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error
 			Content:    content,
 			ToolCallID: toolCallID.String, // zero value "" when NULL — safe
 			Visibility: visibility.String, // "" when NULL = visible
-			StoreKey:   storeKey.String,
 		}
 		if toolCallsJSON.Valid {
 			if err := json.Unmarshal([]byte(toolCallsJSON.String), &msg.ToolCalls); err != nil {
@@ -1015,19 +919,19 @@ func (s *SessionStore) loadMessages(sessionID string) ([]provider.Message, error
 				return nil, fmt.Errorf("load messages unmarshal thinking: %w", err)
 			}
 		}
-		if announcementJSON.Valid {
-			if msg.Announcement, err = loadAnnouncement(announcementJSON.String); err != nil {
-				return nil, fmt.Errorf("load messages unmarshal announcement: %w", err)
-			}
-		}
 		// Only the prompt_type marker is read back — the orchestrator uses it
-		// to keep resolved confirmation exchanges out of the LLM history. The
-		// rest of the metadata map stays presentation state. Tolerant parse: a
-		// broken blob on one row must not brick the whole session's history.
+		// to keep resolved confirmation exchanges out of the LLM history and
+		// to find the compactions — and, on a compaction's row, how many user
+		// messages it keeps. The rest of the metadata map stays presentation
+		// state. Tolerant parse: a broken blob on one row must not brick the
+		// whole session's history.
 		if metadataJSON.Valid && metadataJSON.String != "" {
 			var meta map[string]string
 			if err := json.Unmarshal([]byte(metadataJSON.String), &meta); err == nil {
 				msg.PromptType = meta["prompt_type"]
+				if msg.PromptType == provider.PromptTypeCompaction {
+					msg.KeptUserMessages, _ = strconv.Atoi(meta["kept"])
+				}
 			}
 		}
 		messages = append(messages, msg)

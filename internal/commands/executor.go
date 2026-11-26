@@ -475,7 +475,7 @@ func (e *Executor) clearSession(ctx context.Context, call orchestrator.ToolCall)
 	if sessionID == "" {
 		return orchestrator.ToolResult{CallID: call.ID, Error: "session_id not set (internal error)"}
 	}
-	// Drop messages + summary in one transaction. The session row itself
+	// Drop the messages in one transaction. The session row itself
 	// stays (entity_id, group_id, active_model, metadata preserved), and
 	// session_events is untouched — see SessionStoreInterface.ClearMessages.
 	// TODO: If the orchestrator maintains pending pipeline state per

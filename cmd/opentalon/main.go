@@ -51,13 +51,11 @@ import (
 	chanpkg "github.com/opentalon/opentalon/pkg/channel"
 )
 
-// Compile-time assertion that the DB-backed SessionStore satisfies the
-// orchestrator's optional InjectionStateStore interface. Lives here
-// because neither the store package nor the orchestrator package can
-// reference the other without a cycle — main.go is the wiring point
-// where both are already imported, so it's the right place to pin the
-// contract. RFC #249 Phase 3.
-var _ orchestrator.InjectionStateStore = (*store.SessionStore)(nil)
+// Compile-time assertion that the DB-backed SessionEventStore satisfies the
+// orchestrator's SessionEventReader. Lives here because neither the store
+// package nor the orchestrator package can reference the other without a
+// cycle — main.go is the wiring point where both are already imported.
+var _ orchestrator.SessionEventReader = (*store.SessionEventStore)(nil)
 
 // capabilityRefresher, capabilityRegistry and corpusSyncer are the slices of the
 // plugin manager, tool registry and orchestrator that the capability-refresh
@@ -245,12 +243,9 @@ func main() {
 	var sessionEventWriter *store.SessionEventWriter
 	var sessionEventsRetentionCancel context.CancelFunc
 	var eventWebhookSink *eventwebhook.Sink
-	// injectionStateStore persists load_tools sticky promotion (the
-	// per-session KnownTools set) across turns — the DB-backed SessionStore
-	// satisfies it, the in-memory fallback does not. Stays nil when the
-	// state DB is unavailable; load_tools promotion is then best-effort and
-	// does not survive past the request.
-	var injectionStateStore orchestrator.InjectionStateStore
+	// sessionEvents reads earlier compactions' durations; stays nil (no
+	// expected duration) when the state DB is unavailable.
+	var sessionEvents orchestrator.SessionEventReader
 	if dataDir != "" || cfg.State.DB.Driver == "postgres" {
 		db, err := store.Open(cfg.State.DB, dataDir)
 		if err != nil {
@@ -264,7 +259,6 @@ func main() {
 				slog.Warn("session prune failed", "error", err)
 			}
 			sessions = sessStore
-			injectionStateStore = sessStore
 			groupPluginStore = store.NewGroupPluginStore(db)
 			usageStore = store.NewUsageStore(db)
 			entityStore = store.NewEntityStore(db)
@@ -293,6 +287,7 @@ func main() {
 			// horizon from /debug because the analytics use case wants
 			// longer history than the raw-HTTP-replay use case.
 			sessionEventStore = store.NewSessionEventStore(db)
+			sessionEvents = sessionEventStore
 			sessionEventWriter = store.NewSessionEventWriter(sessionEventStore)
 			sessionEventWriter.Start(context.Background())
 			var sessionEventsRetention time.Duration
@@ -403,7 +398,7 @@ func main() {
 		os.Exit(1) //nolint:gocritic // matches the other main()-level fatal paths; the deferred db.Close is best-effort, the OS reclaims handles on exit
 	}
 
-	// Build model lookup map for the repair-model check and the context budget.
+	// Build model lookup map for the repair-model check.
 	modelMap := make(map[string]provider.ModelInfo)
 	for _, m := range prov.Models() {
 		modelMap[m.ID] = m
@@ -428,15 +423,6 @@ func main() {
 
 	// LLM client that sets default model when orchestrator doesn't
 	llm := &defaultModelClient{provider: prov, model: defaultModel}
-
-	// Look up context window and output budget for the default model. The
-	// output budget (max_tokens) is reserved from the window on every trim so
-	// prompt + completion cannot exceed the model's context length.
-	var contextWindow, maxOutputTokens int
-	if m, ok := modelMap[defaultModel]; ok {
-		contextWindow = m.ContextWindow
-		maxOutputTokens = m.MaxTokens
-	}
 
 	// Sessions created on first message per channel (session key from channel ID)
 
@@ -851,11 +837,6 @@ func main() {
 		PermissionChecker:             permChecker,
 		PermissionPluginName:          permPluginName,
 		RuntimePromptPath:             runtimePromptPath,
-		ContextMessages:               cfg.State.Session.ContextMessages, // 0 = all messages; >0 = send only last N messages to LLM
-		SummarizeAfterMessages:        cfg.State.Session.SummarizeAfter,  // 0 (default) = off; set to e.g. 10 to enable LLM summarization
-		MaxMessagesAfterSummary:       defaultInt(cfg.State.Session.MaxMessagesAfterSummary, 5),
-		SummarizePrompt:               cfg.State.Session.SummarizePrompt,
-		SummarizeUpdatePrompt:         cfg.State.Session.SummarizeUpdatePrompt,
 		SessionTitlePrompt:            cfg.State.Session.SessionTitlePrompt,
 		PipelineEnabled:               cfg.Orchestrator.Pipeline.Enabled,
 		PlanTimeout:                   planTimeout,
@@ -863,8 +844,6 @@ func main() {
 		ConfirmationPlugin:            cfg.Orchestrator.Pipeline.ConfirmationPlugin,
 		ConfirmationAction:            cfg.Orchestrator.Pipeline.ConfirmationAction,
 		ConfirmationClassifierEnabled: cfg.Orchestrator.Pipeline.ConfirmationClassifierEnabled,
-		ContextWindow:                 contextWindow,
-		MaxOutputTokens:               maxOutputTokens,
 		MaxConcurrentSessions:         cfg.Orchestrator.MaxConcurrentSessions,
 		GroupPluginLookup:             groupPluginStore,
 		UsageRecorder:                 usageRecorder,
@@ -880,15 +859,9 @@ func main() {
 			Dir:    cfg.Orchestrator.Knowledge.Dir,
 		},
 		ShowToolCalls: cfg.Orchestrator.ShowToolCalls,
-		// The DB-backed SessionStore satisfies InjectionStateStore via
-		// its GetInjectionState / UpdateInjectionState methods
-		// (migration 010). When state DB is not configured the variable
-		// stays nil and load_tools sticky promotions don't persist
-		// across turns.
-		InjectionStateStore: injectionStateStore,
+		SessionEvents: sessionEvents,
 		ToolErrorHandling: orchestrator.ToolErrorHandlingConfig{
-			LoopCapPerTurn:          cfg.Orchestrator.Preparer.ToolErrorHandling.LoopCapPerTurn,
-			StickyDemotionThreshold: cfg.Orchestrator.Preparer.ToolErrorHandling.StickyDemotionThreshold,
+			LoopCapPerTurn: cfg.Orchestrator.Preparer.ToolErrorHandling.LoopCapPerTurn,
 		},
 		ChannelSender:        notifier.SendToSession,
 		SessionTitlesEnabled: true,
@@ -1591,6 +1564,16 @@ func (c *defaultModelClient) Stream(ctx context.Context, req *provider.Completio
 	return c.provider.Stream(ctx, req)
 }
 
+// ModelChain implements orchestrator.ModelChainer: the models a request for
+// ref may be answered by, in the order they are tried.
+func (c *defaultModelClient) ModelChain(ref provider.ModelRef) []provider.ModelInfo {
+	model := ref.Model()
+	if model == "" {
+		model = c.model
+	}
+	return provider.Chain(c.provider, ref, model)
+}
+
 // SupportsFeature delegates to the underlying provider so the orchestrator
 // can detect reasoning support via type assertion.
 func (c *defaultModelClient) SupportsFeature(f provider.Feature) bool {
@@ -1876,11 +1859,4 @@ func valueOrZero(p *float64) float64 {
 		return 0
 	}
 	return *p
-}
-
-func defaultInt(v, fallback int) int {
-	if v != 0 {
-		return v
-	}
-	return fallback
 }

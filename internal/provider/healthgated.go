@@ -95,17 +95,24 @@ func (h *healthGatedProvider) Models() []ModelInfo {
 // silently run on the entry's default; an entry that does not serve it falls
 // back to its own id, with a warning naming both.
 func (h *healthGatedProvider) modelFor(e ProviderEntry, requested string) string {
+	model, served := h.served(e, requested)
+	if !served {
+		h.log.Warn("requested model not served by this endpoint; using its configured model",
+			"provider", e.Prov.ID(), "requested", requested, "model", e.Model)
+	}
+	return model
+}
+
+// served is modelFor's choice, and false when entry e does not serve the
+// explicitly requested model.
+func (h *healthGatedProvider) served(e ProviderEntry, requested string) (model string, ok bool) {
 	if requested == "" || requested == h.entries[0].Model || requested == e.Model {
-		return e.Model
+		return e.Model, true
 	}
-	for _, m := range e.Prov.Models() {
-		if m.ID == requested {
-			return requested
-		}
+	if findModel(e.Prov.Models(), requested).ID != "" {
+		return requested, true
 	}
-	h.log.Warn("requested model not served by this endpoint; using its configured model",
-		"provider", e.Prov.ID(), "requested", requested, "model", e.Model)
-	return e.Model
+	return e.Model, false
 }
 
 // PrimaryModels returns the models of the provider requests go to first: the

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -270,14 +269,24 @@ func newModelRun(t *testing.T, sessions SessionStoreInterface, model provider.Mo
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.InjectionStateStore == nil {
-		opts.InjectionStateStore = &fakeInjectionStateStore{}
-	}
 	llm := &callableRecorder{Provider: anth}
 	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
 		state.NewMemoryStore(""), sessions, opts)
 	ctx := actor.WithSessionID(profile.WithProfile(context.Background(), &profile.Profile{Model: "anthropic/claude-x"}), "s1")
 	return &inlineRun{api: api, llm: llm, orch: orch, ctx: ctx, sessions: sessions}
+}
+
+// announceActions are the on-demand tools of the inline-tools tests: catalog
+// loads two companions, other none.
+func announceActions() []Action {
+	query := []Parameter{{Name: "q", Description: "Query."}}
+	return []Action{
+		{Name: "always", Description: "Always-include tool.", AlwaysInclude: true, ReadOnly: true},
+		{Name: "catalog", Description: "Catalog tool.", ReadOnly: true, Parameters: query, Companions: []string{"lookup", "list"}},
+		{Name: "other", Description: "Another catalog tool.", ReadOnly: true, Parameters: query},
+		{Name: "lookup", Description: "The catalog tool's first companion.", ReadOnly: true, Parameters: query},
+		{Name: "list", Description: "The catalog tool's second companion.", ReadOnly: true, Parameters: query},
+	}
 }
 
 func inlineRegistry(t *testing.T, actions []Action, exec PluginExecutor) *ToolRegistry {
@@ -327,11 +336,10 @@ func wireChanges(msg json.RawMessage) []string {
 	}
 	out := []string{}
 	for _, b := range m.Content {
-		sign := map[string]string{"tool_addition": "+", "tool_removal": "-"}[b.Type]
-		if sign == "" || b.Tool.Type != "tool_reference" {
+		if b.Type != "tool_addition" || b.Tool.Type != "tool_reference" {
 			return []string{"unexpected block " + b.Type + "/" + b.Tool.Type}
 		}
-		out = append(out, sign+b.Tool.Name)
+		out = append(out, "+"+b.Tool.Name)
 	}
 	return out
 }
@@ -458,95 +466,9 @@ func TestAnthropicInlineToolsKeepThePrefixAcrossLoads(t *testing.T) {
 			got = append(got, announcement{toolResultID(last[j-1]), strings.Join(changes, " ")})
 		}
 	}
-	want := []announcement{{"toolu_l", "+p__other"}, {"toolu_c", "+p__catalog +p__list +p__lookup"}}
+	want := []announcement{{"toolu_l", "+p__other"}, {"toolu_c", "+p__catalog +p__lookup +p__list"}}
 	if !slices.Equal(got, want) {
 		t.Errorf("announcements in the last request (after the tool result of, blocks) = %v, want %v", got, want)
-	}
-	checkWireAnnouncedIsCallable(t, reqs, run.llm.callable)
-}
-
-func TestAnthropicInlineToolsWithdrawOnTheNextTurn(t *testing.T) {
-	var capped []Action
-	var names []string
-	for i := range maxStickyTools + 5 {
-		capped = append(capped, Action{Name: fmt.Sprintf("t%02d", i), Description: "Capped tool.", ReadOnly: true})
-		names = append(names, fmt.Sprintf("p__t%02d", i))
-	}
-	for _, tc := range []struct {
-		name      string
-		opts      OrchestratorOpts
-		exec      PluginExecutor
-		actions   []Action
-		script    []string
-		withdrawn []string
-	}{
-		{"more tools loaded in one turn than the loaded set holds", OrchestratorOpts{}, &countingExecutor{}, capped,
-			[]string{`{"type":"tool_use","id":"toolu_l","name":"_meta__load_tools","input":{"names":"` + strings.Join(names, ",") + `"}}`},
-			names[maxStickyTools:]},
-		{"a tool demoted in the turn that loaded it",
-			OrchestratorOpts{ToolErrorHandling: ToolErrorHandlingConfig{StickyDemotionThreshold: 1}}, &errorExecutor{msg: "boom"}, announceActions(),
-			[]string{`{"type":"tool_use","id":"toolu_l","name":"_meta__load_tools","input":{"names":"p__other"}}`,
-				`{"type":"tool_use","id":"toolu_o","name":"p__other","input":{"q":"x"}}`},
-			[]string{"p__other"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			run := newInlineRun(t, inlineRegistry(t, tc.actions, tc.exec), tc.opts, tc.script...)
-			run.turn(t, run.ctx, "turn 1")
-			opening := len(run.api.requests(t))
-			run.turn(t, run.ctx, "turn 2")
-
-			reqs := run.api.requests(t)
-			msgs := reqs[opening].Messages
-			var withdrawn []string
-			for _, name := range tc.withdrawn {
-				withdrawn = append(withdrawn, "-"+name)
-			}
-			if len(msgs) < 2 || string(msgs[len(msgs)-2]) != `{"role":"user","content":"turn 2"}` ||
-				!slices.Equal(wireChanges(msgs[len(msgs)-1]), withdrawn) {
-				t.Fatalf("the turn's first request must end with its user message and then %v, ends with %s", withdrawn, msgs[max(0, len(msgs)-2):])
-			}
-			checkStartsWith(t, "the turn's first request", reqs[opening-1], reqs[opening], false)
-			checkWireAnnouncedIsCallable(t, reqs, run.llm.callable)
-		})
-	}
-}
-
-func TestAnthropicInlineToolsUnreadableStateWithdrawsForOneRequest(t *testing.T) {
-	store := &fakeInjectionStateStore{}
-	run := newInlineRun(t, inlineRegistry(t, announceActions(), &countingExecutor{}), OrchestratorOpts{InjectionStateStore: store},
-		`{"type":"tool_use","id":"toolu_l","name":"_meta__load_tools","input":{"names":"p__other"}}`,
-		`{"type":"text","text":"Loaded."}`,
-		`{"type":"tool_use","id":"toolu_o","name":"p__other","input":{"q":"x"}}`,
-	)
-	run.turn(t, run.ctx, "turn 1")
-	store.failGetErr = errors.New("simulated db read failure")
-	run.turn(t, run.ctx, "turn 2")
-	store.failGetErr = nil
-	run.turn(t, run.ctx, "turn 3")
-
-	reqs := run.api.requests(t)
-	if len(reqs) != 5 {
-		t.Fatalf("chat-loop requests = %d, want 5 (load, answer, the call, answer, next turn)", len(reqs))
-	}
-	unread := reqs[2].Messages
-	if string(unread[len(unread)-2]) != `{"role":"user","content":"turn 2"}` ||
-		!slices.Equal(wireChanges(unread[len(unread)-1]), []string{"-p__other"}) {
-		t.Errorf("the request without a read must end with its user message and the withdrawal, ends with %s", unread[len(unread)-2:])
-	}
-	answer := reqs[3].Messages[len(reqs[3].Messages)-1]
-	if toolResultID(answer) != "toolu_o" || !strings.Contains(string(answer), "was NOT run: it was not loaded") {
-		t.Errorf("the call to the withdrawn tool must be answered as unloaded, got %s", answer)
-	}
-	if got, want := storedRecords(t, run.sessions), []string{"tool toolu_l +p__other"}; !slices.Equal(got, want) {
-		t.Errorf("stored records = %q, want %q", got, want)
-	}
-	for _, m := range reqs[4].Messages {
-		if strings.Contains(string(m), `"tool_removal"`) {
-			t.Errorf("the next turn with a readable state carries a withdrawal: %s", m)
-		}
-	}
-	if !slices.Contains(run.llm.callable[4], "p__other") {
-		t.Errorf("the next turn must offer p__other again, offers %v", run.llm.callable[4])
 	}
 	checkWireAnnouncedIsCallable(t, reqs, run.llm.callable)
 }
@@ -592,87 +514,4 @@ func TestAnthropicInlineToolsAnnouncementMovesBehindAFollowingUserMessage(t *tes
 		t.Errorf("the announcement must keep its bytes behind the note")
 	}
 	checkWireAnnouncedIsCallable(t, reqs, run.llm.callable)
-}
-
-func TestAnthropicInlineToolsKeepTheSentRecordOfAMessageARequestEndsOnAgain(t *testing.T) {
-	load := func(id, names string) string {
-		return `{"type":"tool_use","id":"` + id + `","name":"_meta__load_tools","input":{"names":"` + names + `"}}`
-	}
-	lost := func(id string, withResult bool) func(provider.Message) bool {
-		return func(m provider.Message) bool {
-			return (len(m.ToolCalls) > 0 && m.ToolCalls[0].ID == id) || (withResult && m.Role == provider.RoleTool && m.ToolCallID == id)
-		}
-	}
-	capped := []Action{{Name: "delete", Description: "Delete an item.", Parameters: []Parameter{{Name: "id", Description: "Item id.", Required: true}}}}
-	names := []string{"p__delete"}
-	for i := range maxStickyTools + 5 {
-		capped = append(capped, Action{Name: fmt.Sprintf("t%02d", i), Description: "Capped tool.", ReadOnly: true})
-		names = append(names, fmt.Sprintf("p__t%02d", i))
-	}
-	var withdrawn []string
-	for _, name := range names[maxStickyTools:] {
-		withdrawn = append(withdrawn, "-"+name)
-	}
-	loadsCatalog := "tool toolu_c +p__catalog +p__list +p__lookup"
-	for _, tc := range []struct {
-		name    string
-		actions []Action
-		lose    func(provider.Message) bool
-		script  []string
-		turns   []string
-		record  string
-		change  []string
-	}{
-		{"the assistant message of a later load is not stored", announceActions(), lost("toolu_o", false),
-			[]string{load("toolu_c", "p__catalog"), load("toolu_o", "p__other")},
-			[]string{"turn 1", "turn 2"}, loadsCatalog, []string{"+p__other"}},
-		{"neither message of a later load is stored", announceActions(), lost("toolu_o", true),
-			[]string{load("toolu_c", "p__catalog"), load("toolu_o", "p__other")},
-			[]string{"turn 1", "turn 2"}, loadsCatalog, []string{"+p__other"}},
-		{"neither message of an approved call is stored", capped, lost("toolu_d", true),
-			[]string{load("toolu_l", strings.Join(names, ",")), `{"type":"tool_use","id":"toolu_d","name":"p__delete","input":{"id":"7"}}`},
-			[]string{"turn 1", "approve", "turn 3"}, "tool toolu_l +" + strings.Join(names, " +"), withdrawn},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			registry := inlineRegistry(t, tc.actions, &countingExecutor{})
-			if err := registry.Register(PluginCapability{Name: "conf", Actions: []Action{{Name: "check"}}}, confirmingExecutor{}); err != nil {
-				t.Fatal(err)
-			}
-			run := newInlineRunOn(t, &lostCallStore{SessionStoreInterface: sqliteSessions(t), lose: tc.lose}, registry,
-				OrchestratorOpts{ConfirmationPlugin: "conf", ConfirmationAction: "check"}, tc.script...)
-			for _, message := range tc.turns {
-				ctx := run.ctx
-				if message == "approve" {
-					ctx = actor.WithConfirmationDecision(ctx, "approve")
-				}
-				run.turn(t, ctx, message)
-			}
-
-			reqs := run.api.requests(t)
-			if len(reqs) != 4 {
-				t.Fatalf("chat-loop requests = %d, want 4", len(reqs))
-			}
-			sent, again, next := reqs[1].Messages, reqs[2].Messages, reqs[3].Messages
-			checkStartsWith(t, "the request that ends again on the same message", reqs[1], reqs[2], true)
-			if len(again) != len(sent)+1 || !slices.Equal(wireChanges(again[len(again)-1]), tc.change) {
-				t.Errorf("the request that ends again must add exactly %v after the sent announcement, ends with %s", tc.change, again[max(0, len(again)-2):])
-			}
-			last := tc.turns[len(tc.turns)-1]
-			if len(next) != len(sent)+3 || string(next[len(next)-2]) != `{"role":"user","content":"`+last+`"}` ||
-				!slices.Equal(wireChanges(next[len(next)-1]), tc.change) {
-				t.Errorf("the next request must end with the reply, %q and %v, got %d messages ending with %s",
-					last, tc.change, len(next), next[max(0, len(next)-3):])
-			}
-			for j, m := range sent[:min(len(sent), len(next))] {
-				if !bytes.Equal(next[j], m) {
-					t.Errorf("message %d of the next request differs from the sent one:\n got %s\nwant %s", j, next[j], m)
-				}
-			}
-			checkWireAnnouncedIsCallable(t, reqs, run.llm.callable)
-			want := []string{tc.record, "user " + last + " " + strings.Join(tc.change, " ")}
-			if got := storedRecords(t, run.sessions); !slices.Equal(got, want) {
-				t.Errorf("stored records = %q, want %q", got, want)
-			}
-		})
-	}
 }

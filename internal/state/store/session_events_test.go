@@ -213,6 +213,29 @@ func TestSessionEventStore_PruneByTimestamp(t *testing.T) {
 	}
 }
 
+// RecentPayloads reads one event type across sessions, newest first, at most limit.
+func TestSessionEventStore_RecentPayloads(t *testing.T) {
+	es := NewSessionEventStore(openTestDB(t))
+	ctx := context.Background()
+	base := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	for i, ev := range []struct{ session, typ string }{
+		{"s1", events.TypeCompactionFinished}, {"s2", events.TypeCompactionFinished},
+		{"s1", events.TypeUserMessage}, {"s2", events.TypeCompactionFinished},
+	} {
+		if err := es.Insert(ctx, SessionEvent{SessionID: ev.session, EventType: ev.typ, Timestamp: base.Add(time.Duration(i) * time.Minute),
+			Payload: payloadJSON(t, map[string]int{"n": i})}); err != nil {
+			t.Fatalf("Insert %d: %v", i, err)
+		}
+	}
+	got, err := es.RecentPayloads(ctx, events.TypeCompactionFinished, 2)
+	if err != nil {
+		t.Fatalf("RecentPayloads: %v", err)
+	}
+	if len(got) != 2 || string(got[0]) != `{"n":3}` || string(got[1]) != `{"n":1}` {
+		t.Errorf("payloads = %s, want n 3 then n 1", got)
+	}
+}
+
 func TestSessionEventStore_PromptSnapshotUpsertIsIdempotent(t *testing.T) {
 	db := openTestDB(t)
 	store := NewSessionEventStore(db)

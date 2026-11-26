@@ -677,8 +677,7 @@ func TestPostgres_SessionSystemSourceRoundTrip(t *testing.T) {
 
 // Every transcript writer takes the sessions row before any messages row.
 // With the cap on, AddMessage also deletes old rows, so an AddMessage racing
-// a SetSummary or ClearMessages (which delete and re-insert or wipe the
-// transcript) would deadlock on Postgres if they took their locks in
+// a TruncateMessages or ClearMessages (which cut or wipe the transcript) would deadlock on Postgres if they took their locks in
 // opposite orders: Postgres then aborts one side with "deadlock detected".
 // Hammer all three paths on one session and require that no write fails.
 func TestPostgres_TranscriptWritersShareOneLockOrder(t *testing.T) {
@@ -705,8 +704,7 @@ func TestPostgres_TranscriptWritersShareOneLockOrder(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			kept := []provider.Message{{Role: provider.RoleAssistant, Content: "summary-kept"}}
-			if err := store.SetSummary("lock-order", "summary", kept); err != nil {
+			if err := store.TruncateMessages("lock-order", 1); err != nil {
 				errs <- err
 			}
 		}()

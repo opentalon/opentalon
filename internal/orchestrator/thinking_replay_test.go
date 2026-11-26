@@ -52,7 +52,7 @@ func TestRun_ThinkingRidesOnFirstToolCallMessage(t *testing.T) {
 		{Content: "Done.", Thinking: replayThinking, ThinkingFingerprint: "fp-2"},
 	}}
 	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
-		state.NewMemoryStore(""), sessions, OrchestratorOpts{InjectionStateStore: &fakeInjectionStateStore{}})
+		state.NewMemoryStore(""), sessions, OrchestratorOpts{})
 
 	if _, err := orch.Run(actor.WithSessionID(context.Background(), "s1"), "s1", "read both"); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -103,7 +103,7 @@ func TestRun_ResponseTextRidesOnFirstToolCallMessage(t *testing.T) {
 		{Content: "Done."},
 	}}
 	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
-		state.NewMemoryStore(""), sessions, OrchestratorOpts{InjectionStateStore: &fakeInjectionStateStore{}})
+		state.NewMemoryStore(""), sessions, OrchestratorOpts{})
 
 	if _, err := orch.Run(actor.WithSessionID(context.Background(), "s1"), "s1", "read both"); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -193,9 +193,8 @@ func TestRun_ApprovedCallReplaysThinkingAfterRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 		return NewWithRules(anth, DefaultParser, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
-			ConfirmationPlugin:  "conf",
-			ConfirmationAction:  "check",
-			InjectionStateStore: &fakeInjectionStateStore{},
+			ConfirmationPlugin: "conf",
+			ConfirmationAction: "check",
 		})
 	}
 	// The profile names the model, so its adaptive thinking applies.
@@ -338,7 +337,7 @@ func thinkingOrch(t *testing.T, url string, model provider.ModelInfo, sessions S
 		t.Fatal(err)
 	}
 	return NewWithRules(anth, DefaultParser, registry, state.NewMemoryStore(""), sessions,
-		OrchestratorOpts{InjectionStateStore: &fakeInjectionStateStore{}})
+		OrchestratorOpts{})
 }
 
 const (

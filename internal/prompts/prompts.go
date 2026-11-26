@@ -74,15 +74,19 @@ var orchestratorKnowledgeInstructionsRaw string
 // asking the user. Trailing newline trimmed so the caller controls spacing.
 var OrchestratorKnowledgeInstructions = strings.TrimRight(orchestratorKnowledgeInstructionsRaw, "\n")
 
-//go:embed orchestrator_summarize.txt
-var summarizeDefaultRaw string
+//go:embed orchestrator_compaction.txt
+var compactionRaw string
 
-var SummarizeDefault = strings.TrimRight(summarizeDefaultRaw, "\n")
+// Compaction is the last message of a compaction's summary request: it asks
+// for the summary that replaces the conversation before it, at most %d words.
+var Compaction = strings.TrimRight(compactionRaw, "\n")
 
-//go:embed orchestrator_summarize_update.txt
-var summarizeUpdateRaw string
+//go:embed orchestrator_compaction_tools.txt
+var compactionToolsRaw string
 
-var SummarizeUpdate = strings.TrimRight(summarizeUpdateRaw, "\n")
+// CompactionTools is the line the core appends to a compaction's summary: %s
+// is the comma-separated list of the tools called before it.
+var CompactionTools = strings.TrimRight(compactionToolsRaw, "\n")
 
 //go:embed orchestrator_session_title.txt
 var sessionTitleRaw string
@@ -195,8 +199,8 @@ var promptSetters = map[string]func(string){
 	"planner_suffix":                func(s string) { PlannerSuffix = strings.TrimRight(s, "\n") },
 	"planner_narrate":               func(s string) { PlannerNarrate = strings.TrimRight(s, "\n") },
 	"planner_narrate_tool":          func(s string) { PlannerNarrateTool = strings.TrimRight(s, "\n") },
-	"orchestrator_summarize":        func(s string) { SummarizeDefault = strings.TrimRight(s, "\n") },
-	"orchestrator_summarize_update": func(s string) { SummarizeUpdate = strings.TrimRight(s, "\n") },
+	"orchestrator_compaction":       func(s string) { Compaction = strings.TrimRight(s, "\n") },
+	"orchestrator_compaction_tools": func(s string) { CompactionTools = strings.TrimRight(s, "\n") },
 	"orchestrator_session_title":    func(s string) { SessionTitle = strings.TrimRight(s, "\n") },
 	"orchestrator_spoken_reply":     func(s string) { OrchestratorSpokenReply = s },
 	"confirmation_spoken_question":  func(s string) { ConfirmationSpokenQuestion = s },

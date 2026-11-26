@@ -1,0 +1,8 @@
+[system] This conversation has grown too long for the requests that continue it and is compacted now. Do not answer it and do not call any tool. Write a summary instead: it replaces every message above in the requests that follow, so the conversation must be able to go on from it alone.
+
+Carry over:
+- what the user wants, what has been done for it and what is still open, with the exact names, ids, numbers and values needed to go on;
+- every instruction still in force, whoever gave it and including those in hidden messages, word for word where its wording matters;
+- the last question asked and the next step.
+
+Write plain text in the language of the conversation, without a preamble, in at most %d words.

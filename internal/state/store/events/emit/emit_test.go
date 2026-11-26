@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -536,20 +537,6 @@ func TestEmitPreparerDecision_ModeAlwaysSerializes(t *testing.T) {
 	}
 }
 
-// TestEmitMessagesTruncated_NoOpRange verifies that a zero-DroppedCount
-// emission produces no dropped_seq_range field (avoiding noise in event
-// payloads when the cutter ran but dropped nothing). The helper still
-// emits the event so callers can rely on emission unconditional on
-// outcome — that's a producer-side decision, not enforced here.
-func TestEmitMessagesTruncated_NoOpRange(t *testing.T) {
-	sink := &fakeSink{}
-	EmitMessagesTruncated(context.Background(), sink, MessagesTruncatedArgs{DroppedCount: 0})
-	raw := string(sink.snapshot()[0].Payload)
-	if strings.Contains(raw, "dropped_seq_range") {
-		t.Errorf("dropped_seq_range must be absent when DroppedCount=0, got: %s", raw)
-	}
-}
-
 // ----- header.V coverage for every helper -----
 
 // Asserts the Header.V stamp for every Emit<Type> is the matching
@@ -581,10 +568,10 @@ func TestAllEmitHelpers_StampMatchingVersion(t *testing.T) {
 		{"PreparerDecision", func(c context.Context, s Sink) {
 			EmitPreparerDecision(c, s, PreparerDecisionArgs{Mode: events.PreparerDecisionModeInstrumentationOnly})
 		}, events.TypePreparerDecision, events.PreparerDecisionVersion},
-		{"MessagesTruncated", func(c context.Context, s Sink) { EmitMessagesTruncated(c, s, MessagesTruncatedArgs{}) }, events.TypeMessagesTruncated, events.MessagesTruncatedVersion},
 		{"ToolMessagesRepaired", func(c context.Context, s Sink) { EmitToolMessagesRepaired(c, s, ToolMessagesRepairedArgs{}) }, events.TypeToolMessagesRepaired, events.ToolMessagesRepairedVersion},
-		{"SummarizationTriggered", func(c context.Context, s Sink) { EmitSummarizationTriggered(c, s, SummarizationTriggeredArgs{}) }, events.TypeSummarizationTriggered, events.SummarizationTriggeredVersion},
-		{"SummarizationCompleted", func(c context.Context, s Sink) { EmitSummarizationCompleted(c, s, SummarizationCompletedArgs{}) }, events.TypeSummarizationCompleted, events.SummarizationCompletedVersion},
+		{"CompactionStarted", func(c context.Context, s Sink) { EmitCompactionStarted(c, s, CompactionStartedArgs{}) }, events.TypeCompactionStarted, events.CompactionStartedVersion},
+		{"CompactionFinished", func(c context.Context, s Sink) { EmitCompactionFinished(c, s, CompactionFinishedArgs{}) }, events.TypeCompactionFinished, events.CompactionFinishedVersion},
+		{"CompactionFailed", func(c context.Context, s Sink) { EmitCompactionFailed(c, s, errors.New("e")) }, events.TypeCompactionFailed, events.CompactionFailedVersion},
 		{"ModelSwitch", func(c context.Context, s Sink) { EmitModelSwitch(c, s, ModelSwitchArgs{}) }, events.TypeModelSwitch, events.ModelSwitchVersion},
 		{"ConfirmationRequested", func(c context.Context, s Sink) { EmitConfirmationRequested(c, s, ConfirmationRequestedArgs{}) }, events.TypeConfirmationRequested, events.ConfirmationRequestedVersion},
 		{"ConfirmationResolved", func(c context.Context, s Sink) { EmitConfirmationResolved(c, s, ConfirmationResolvedArgs{}) }, events.TypeConfirmationResolved, events.ConfirmationResolvedVersion},
@@ -912,16 +899,16 @@ func TestEmit_SanitizesAllFreeTextFields(t *testing.T) {
 			},
 		},
 		{
-			"SummarizationCompleted.SummaryExcerpt",
+			"CompactionFailed.Error",
 			func(c context.Context, s Sink) {
-				EmitSummarizationCompleted(c, s, SummarizationCompletedArgs{Summary: invalidUTF8Raw})
+				EmitCompactionFailed(c, s, errors.New(invalidUTF8Raw))
 			},
 			func(t *testing.T, p []byte) string {
-				var v events.SummarizationCompletedPayload
+				var v events.CompactionFailedPayload
 				if err := json.Unmarshal(p, &v); err != nil {
 					t.Fatalf("unmarshal: %v", err)
 				}
-				return v.SummaryExcerpt
+				return v.Error
 			},
 		},
 		{
@@ -1041,18 +1028,6 @@ func TestEmit_ExcerptAndTruncatedFlag_AllHelpers(t *testing.T) {
 			},
 			true,
 		},
-		{
-			"SummarizationCompleted.Summary",
-			func(c context.Context, s Sink) {
-				EmitSummarizationCompleted(c, s, SummarizationCompletedArgs{Summary: long})
-			},
-			func(p []byte) (string, bool) {
-				var v events.SummarizationCompletedPayload
-				_ = json.Unmarshal(p, &v)
-				return v.SummaryExcerpt, v.SummaryTruncated
-			},
-			true,
-		},
 	}
 
 	for _, tc := range cases {
@@ -1131,18 +1106,6 @@ func TestEmit_RowDurationMirrorsPayloadLatency(t *testing.T) {
 			432,
 			func(p []byte) int64 {
 				var v events.PlannerResponsePayload
-				_ = json.Unmarshal(p, &v)
-				return v.LatencyMS
-			},
-		},
-		{
-			"SummarizationCompleted",
-			func(c context.Context, s Sink) {
-				EmitSummarizationCompleted(c, s, SummarizationCompletedArgs{Summary: "s", LatencyMS: 789})
-			},
-			789,
-			func(p []byte) int64 {
-				var v events.SummarizationCompletedPayload
 				_ = json.Unmarshal(p, &v)
 				return v.LatencyMS
 			},
@@ -1345,24 +1308,6 @@ func TestAllEmitHelpers_PopulateDistinctiveField(t *testing.T) {
 			},
 		},
 		{
-			"MessagesTruncated.DroppedCount",
-			func(c context.Context, s Sink) {
-				EmitMessagesTruncated(c, s, MessagesTruncatedArgs{
-					DroppedSeqFrom: 12, DroppedSeqTo: 18, DroppedCount: 7,
-				})
-			},
-			func(t *testing.T, p []byte) {
-				var v events.MessagesTruncatedPayload
-				_ = json.Unmarshal(p, &v)
-				if v.DroppedCount != 7 {
-					t.Errorf("DroppedCount = %d", v.DroppedCount)
-				}
-				if len(v.DroppedSeqRange) != 2 || v.DroppedSeqRange[0] != 12 || v.DroppedSeqRange[1] != 18 {
-					t.Errorf("DroppedSeqRange = %v, want [12, 18]", v.DroppedSeqRange)
-				}
-			},
-		},
-		{
 			"ToolMessagesRepaired.IDs",
 			func(c context.Context, s Sink) {
 				EmitToolMessagesRepaired(c, s, ToolMessagesRepairedArgs{
@@ -1385,15 +1330,39 @@ func TestAllEmitHelpers_PopulateDistinctiveField(t *testing.T) {
 			},
 		},
 		{
-			"SummarizationTriggered.MessageCount",
+			"CompactionStarted.ExpectedMS",
 			func(c context.Context, s Sink) {
-				EmitSummarizationTriggered(c, s, SummarizationTriggeredArgs{MessageCount: 42, Reason: "ctx_pressure"})
+				EmitCompactionStarted(c, s, CompactionStartedArgs{Model: "p/m", EstimatedTokens: 120, TriggerTokens: 100, ExpectedMS: 900})
 			},
 			func(t *testing.T, p []byte) {
-				var v events.SummarizationTriggeredPayload
+				var v events.CompactionStartedPayload
 				_ = json.Unmarshal(p, &v)
-				if v.MessageCount != 42 {
-					t.Errorf("MessageCount = %d", v.MessageCount)
+				if v.Model != "p/m" || v.EstimatedTokens != 120 || v.TriggerTokens != 100 || v.ExpectedMS != 900 {
+					t.Errorf("payload = %+v", v)
+				}
+			},
+		},
+		{
+			"CompactionStarted.NoExpectedMS",
+			func(c context.Context, s Sink) { EmitCompactionStarted(c, s, CompactionStartedArgs{Model: "p/m"}) },
+			func(t *testing.T, p []byte) {
+				if strings.Contains(string(p), "expected_ms") {
+					t.Errorf("payload %s carries expected_ms without an expected duration", p)
+				}
+			},
+		},
+		{
+			"CompactionFinished.Fields",
+			func(c context.Context, s Sink) {
+				EmitCompactionFinished(c, s, CompactionFinishedArgs{SummaryModel: "p/m", SummaryBytes: 40, UserMessagesKept: 2,
+					ToolsDropped: []string{"a__b"}, DurationMS: 700, Fallback: true})
+			},
+			func(t *testing.T, p []byte) {
+				var v events.CompactionFinishedPayload
+				_ = json.Unmarshal(p, &v)
+				if v.SummaryModel != "p/m" || v.SummaryBytes != 40 || v.UserMessagesKept != 2 || len(v.ToolsDropped) != 1 ||
+					v.DurationMS != 700 || !v.Fallback {
+					t.Errorf("payload = %+v", v)
 				}
 			},
 		},

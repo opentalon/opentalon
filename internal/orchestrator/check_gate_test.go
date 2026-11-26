@@ -399,7 +399,6 @@ func TestCheckGate_TurnCancelledDuringCheck(t *testing.T) {
 // Native mode: there a result row does not count as a new turn.
 func TestCheckGate_RefusedCheckMarks(t *testing.T) {
 	exec := &checkingExecutor{check: refuseTaken}
-	store := &fakeInjectionStateStore{}
 	observer := &fakeObserver{}
 	tagCall := func(id, name string) provider.CompletionResponse {
 		return provider.CompletionResponse{ToolCalls: []provider.ToolCall{
@@ -410,10 +409,9 @@ func TestCheckGate_RefusedCheckMarks(t *testing.T) {
 		tagCall("n1", "A"), tagCall("n2", "A"), tagCall("n3", "B"), {Content: "Both names are taken."},
 	}}
 	orch, _, sink := checkGateOrch(t, exec, nil, true, llm, OrchestratorOpts{
-		Repair:              RepairConfig{Enabled: true},
-		ToolErrorHandling:   ToolErrorHandlingConfig{LoopCapPerTurn: 2, StickyDemotionThreshold: 1},
-		InjectionStateStore: store,
-		PluginCallObserver:  observer,
+		Repair:             RepairConfig{Enabled: true},
+		ToolErrorHandling:  ToolErrorHandlingConfig{LoopCapPerTurn: 2},
+		PluginCallObserver: observer,
 	})
 
 	res, err := orch.Run(context.Background(), "s1", "tag A, else B")
@@ -451,11 +449,6 @@ func TestCheckGate_RefusedCheckMarks(t *testing.T) {
 	}
 	if n := countEventType(sink.snapshot(), events.TypeToolCallRepairInvoked); n != 0 {
 		t.Errorf("a refused check must not be repaired, got %d repair(s)", n)
-	}
-	for _, kt := range store.store["s1"].KnownTools {
-		if kt.ToolName == "p__tag" && kt.Demoted {
-			t.Errorf("a refused check must not demote the tool, got %+v", kt)
-		}
 	}
 	observer.mu.Lock()
 	defer observer.mu.Unlock()

@@ -4,11 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
-
-	"github.com/opentalon/opentalon/internal/actor"
-	"github.com/opentalon/opentalon/internal/state"
 )
 
 // actionNameCandidates returns the forgiving normalizations of an LLM-supplied
@@ -67,15 +63,16 @@ func separatorSafeToggles(name string) []string {
 // Those tools carry only a summary — enough to know they EXIST, not
 // enough to invoke them safely. Calling
 // _meta__load_tools(names="plugin__a,plugin__b") pulls the named tools
-// into the LLM's native tools array (with full schemas) for the rest of
-// the session: each named tool gets a sticky KnownTools promotion, and
-// the rebuilt tools array on the NEXT request carries its full schema.
+// into the LLM's native tools array (with full schemas) until the
+// session's next compaction: the stored call is what loads them
+// (loadedTools), so the tools array of the NEXT request carries their
+// full schemas.
 //
 // load_tools returns STATUS ONLY — a JSON string like
 // {"loaded":["plugin__a"],"ready":true} (with "failed":[...] for names
 // that didn't resolve or aren't visible to this session). It does NOT
 // return the description / parameter schema; that surfaces in the native
-// tools array on the next request via the sticky promotion. The contract
+// tools array on the next request. The contract
 // for the LLM is: call load_tools first, then call the loaded tools on
 // the next step — never guess parameters from a one-line summary.
 //
@@ -95,16 +92,15 @@ const metaLoadTools = "load_tools"
 
 // loadToolsExecutor implements PluginExecutor for the meta-tool.
 // The closure-over-Orchestrator pattern matches subprocessExecutor —
-// the handler needs registry + state-store access plus the per-call
-// session id (pulled from ctx via actor.SessionID).
+// the handler needs the registry and the session's tool visibility.
 type loadToolsExecutor struct {
 	orch *Orchestrator
 }
 
 // loadToolsResult is the status-only payload load_tools returns. loaded
-// carries the canonical FQNs that were promoted this call, companions
-// included; failed carries the names that didn't resolve or aren't visible
-// to this session (omitted when empty). ready is true whenever at least one
+// carries the canonical FQNs the call loads, companions included; failed
+// carries the names that didn't resolve or aren't visible to this session
+// (omitted when empty). ready is true whenever at least one
 // tool loaded.
 // instruction is set exactly when ready: models routinely treat the load
 // status as a result worth reporting and end the turn without ever calling
@@ -145,7 +141,7 @@ const phantomCompletionNudge = "[system] Re-check your answer before it is sent:
 	"if it neither claims nor announces an action, for example when it is just a question."
 
 // loadedAnyWriteTool reports whether a successful load_tools result payload
-// promoted at least one non-read-only action. Feeds the phantom-completion
+// loaded at least one non-read-only action. Feeds the phantom-completion
 // guard: only turns that actively fetched a write tool are ever nudged, so
 // plain read/answer turns can never pay the extra round.
 func (o *Orchestrator) loadedAnyWriteTool(resultPayload string) bool {
@@ -165,21 +161,16 @@ func (o *Orchestrator) loadedAnyWriteTool(resultPayload string) bool {
 	return false
 }
 
-// Execute resolves each requested tool name, applies the same profile +
-// action-visibility gates the invoke path applies, and persists a sticky
-// promotion for the ones that pass. It returns a STATUS JSON string
-// (loaded / ready / failed) — never the description or parameter schema.
-// The full schema reaches the LLM via the native tools array on the next
-// request, once buildToolDefinitions picks up the promotion through
-// promotedToolSet.
+// Execute resolves each requested tool name and applies the same profile +
+// action-visibility gates the invoke path applies. It returns a STATUS JSON
+// string (loaded / ready / failed) — never the description or parameter
+// schema. The full schema reaches the LLM via the native tools array on the
+// next request, which loadedTools derives from this call once it is stored.
 //
 // Batch contract: names is a comma-separated list (tool-call args are
 // map[string]string), with a single-name fallback. A failure on one name
 // adds it to failed and does NOT abort the rest of the batch. Each loaded
-// tool's companions are loaded after it (loadToolAndCompanions). The
-// promotion write is best-effort: a store failure logs a warning and the
-// name still counts as loaded; the turn's turnToolLoads keeps it in the
-// requests of this turn, later turns won't see it.
+// tool's companions are listed after it (companionsOf).
 func (e *loadToolsExecutor) Execute(ctx context.Context, call ToolCall) ToolResult {
 	names := splitToolNames(call.Args["names"])
 	if len(names) == 0 {
@@ -189,12 +180,10 @@ func (e *loadToolsExecutor) Execute(ctx context.Context, call ToolCall) ToolResu
 		return ToolResult{CallID: call.ID, Error: `missing "names" parameter (expected a comma-separated list of "plugin__action" names)`}
 	}
 
-	sessionID := actor.SessionID(ctx)
 	allowed := allowedToolsSet(ctx, e.orch)
 	allowedPlugins := e.orch.resolveAllowedPlugins(ctx)
 
 	var loaded, failed []string
-	requested := make(map[string]bool, len(names))
 	listed := make(map[string]bool, len(names))
 	for _, name := range names {
 		canonical, ok := e.orch.resolveVisibleTool(name, allowed, allowedPlugins)
@@ -202,23 +191,10 @@ func (e *loadToolsExecutor) Execute(ctx context.Context, call ToolCall) ToolResu
 			failed = append(failed, name)
 			continue
 		}
-		if requested[canonical] {
-			continue
-		}
-		requested[canonical] = true
-		var companions []string
-		if listed[canonical] {
-			// An earlier name of this batch loaded it as a companion.
-			companions = e.orch.loadCompanions(ctx, canonical, allowed, allowedPlugins)
-		} else {
-			listed[canonical] = true
-			loaded = append(loaded, canonical)
-			companions = e.orch.loadToolAndCompanions(ctx, sessionID, canonical, allowed, allowedPlugins)
-		}
-		for _, companion := range companions {
-			if !listed[companion] {
-				listed[companion] = true
-				loaded = append(loaded, companion)
+		for _, fqn := range append([]string{canonical}, e.orch.companionsOf(canonical, allowed, allowedPlugins)...) {
+			if !listed[fqn] {
+				listed[fqn] = true
+				loaded = append(loaded, fqn)
 			}
 		}
 	}
@@ -297,7 +273,7 @@ func (o *Orchestrator) resolveVisibleTool(
 		return "", false
 	}
 	// Re-compose the canonical FQN from the resolved (plugin, action) so the
-	// visibility check and the promotion key match allowedToolsSet's keys
+	// visibility check and the loaded set match allowedToolsSet's keys
 	// regardless of the separator (or dropped MCP prefix) the LLM passed in.
 	canonical := toolFQN(plugin, action)
 	if _, visible := allowed[canonical]; !visible {
@@ -323,97 +299,17 @@ func splitToolNames(raw string) []string {
 	return out
 }
 
-// persistToolPromotion upserts a sticky entry for the named tool in the
-// session's KnownTools so future requests keep the tool in the native
-// tools array. Existing entries get LRURank refreshed to the current
-// turn (so they win the sticky-cap sort) and Demoted cleared — an
-// explicit load_tools call is a strong relevance signal. Missing entries
-// are appended.
-//
-// KnownTools is defensively copied before mutation: stores may return
-// slices that share the backing array with their
-// internal cache (the in-process fakeInjectionStateStore does, the
-// DB-backed one in production doesn't), and mutating the read snapshot in
-// place before a write could leave partially-applied state visible to a
-// concurrent reader if the write later fails. Copying once keeps the path
-// uniform across both store implementations.
-//
-// Read/write failures log a warning and return — the LLM's load_tools
-// call already succeeded for this round-trip; only the durable promotion
-// is lost (later turns won't see the tool until a successful write; the
-// callers record it in the turn's turnToolLoads for this turn).
-func (o *Orchestrator) persistToolPromotion(ctx context.Context, sessionID, name string) {
-	existing, err := o.injectionStateStore.GetInjectionState(ctx, sessionID)
-	if err != nil {
-		slog.WarnContext(ctx, "load_tools: read state failed, promotion skipped",
-			"component", "orchestrator", "session", sessionID, "tool", name, "error", err)
-		return
-	}
-	updated := state.InjectionState{
-		KnownTools: append([]state.KnownToolEntry(nil), existing.KnownTools...),
-	}
-	turn := o.sessionTurnNumber(sessionID)
-	found := false
-	for i := range updated.KnownTools {
-		if updated.KnownTools[i].ToolName != name {
-			continue
-		}
-		if turn > updated.KnownTools[i].LRURank {
-			updated.KnownTools[i].LRURank = turn
-		}
-		updated.KnownTools[i].Demoted = false
-		found = true
-		break
-	}
-	if !found {
-		updated.KnownTools = append(updated.KnownTools, state.KnownToolEntry{
-			ToolName: name,
-			LRURank:  turn,
-		})
-	}
-	if err := o.injectionStateStore.UpdateInjectionState(ctx, sessionID, updated); err != nil {
-		slog.WarnContext(ctx, "load_tools: write state failed, promotion will not survive request",
-			"component", "orchestrator", "session", sessionID, "tool", name, "error", err)
-		return
-	}
-}
-
-// loadTool loads one tool, the same way on every load path: a sticky promotion
-// in the session store when there is one, which also clears a demotion, and an
-// entry in the turn's turnToolLoads, which keeps the tool in the requests of
-// this turn even when the store did not save the promotion.
-func (o *Orchestrator) loadTool(ctx context.Context, sessionID, fqn string) {
-	if sessionID != "" && o.injectionStateStore != nil {
-		o.persistToolPromotion(ctx, sessionID, fqn)
-	}
-	turnToolLoadsFromContext(ctx).record(fqn)
-}
-
-// loadToolAndCompanions loads the tool canonical and then its companions, for
-// _meta__load_tools and for a load on call alike, and returns the companions
-// it loaded.
-func (o *Orchestrator) loadToolAndCompanions(
-	ctx context.Context, sessionID, canonical string, allowed map[string]struct{}, allowedPlugins cachedAllowedPlugins,
-) []string {
-	o.loadTool(ctx, sessionID, canonical)
-	return o.loadCompanions(ctx, canonical, allowed, allowedPlugins)
-}
-
-// loadCompanions loads the companions declared by the action of the loaded tool
-// canonical, the way that tool was loaded, and returns the ones it loaded.
-func (o *Orchestrator) loadCompanions(
-	ctx context.Context, canonical string, allowed map[string]struct{}, allowedPlugins cachedAllowedPlugins,
-) []string {
+// companionsOf returns the companions the action of the tool canonical
+// declares that load with it: visible to the session and not always included.
+func (o *Orchestrator) companionsOf(canonical string, allowed map[string]struct{}, allowedPlugins cachedAllowedPlugins) []string {
 	plugin, name, err := parseToolName(canonical)
 	if err != nil {
 		return nil
 	}
 	action := o.resolveAction(plugin, name)
-	if action == nil || len(action.Companions) == 0 {
+	if action == nil {
 		return nil
 	}
-	sessionID := actor.SessionID(ctx)
-	loaded, _ := o.promotedToolSet(ctx)
 	var out []string
 	for _, companion := range action.Companions {
 		fqn, visible := o.resolveVisibleTool(toolFQN(plugin, companion), allowed, allowedPlugins)
@@ -423,16 +319,6 @@ func (o *Orchestrator) loadCompanions(
 		if a := o.resolveAction(plugin, companion); a == nil || a.AlwaysInclude {
 			continue
 		}
-		if loaded[fqn] {
-			// Later promotions this turn can push it out of the capped sticky set.
-			turnToolLoadsFromContext(ctx).record(fqn)
-			continue
-		}
-		if o.toolDemoted(ctx, sessionID, fqn) {
-			continue
-		}
-		o.loadTool(ctx, sessionID, fqn)
-		loaded[fqn] = true
 		out = append(out, fqn)
 	}
 	return out
@@ -459,8 +345,8 @@ func (o *Orchestrator) registerLoadToolsTool() {
 				"Never guess a tool's parameters from its one-line summary. " +
 				`Returns a JSON status, e.g. {"loaded":["plugin__action"],"ready":true}.`,
 			AlwaysInclude: true,
-			// Pure bookkeeping: marks the named tools as loaded for the
-			// rest of the session and returns a status string. No
+			// Pure bookkeeping: the stored call loads the named tools until
+			// the next compaction (loadedTools); it returns a status string. No
 			// user-visible state changes, so skipping the confirmation
 			// gate removes a noise prompt + planner-narration LLM call
 			// every time the LLM loads catalog tools.

@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"slices"
+
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
@@ -43,7 +45,6 @@ func (c *cachedSessionStore) Create(p state.SessionParams) *state.Session {
 }
 
 func (c *cachedSessionStore) AddMessage(id string, msg provider.Message) error {
-	msg = state.WithStoreKey(msg)
 	if err := c.inner.AddMessage(id, msg); err != nil {
 		return err
 	}
@@ -62,27 +63,12 @@ func (c *cachedSessionStore) AddMessageWithMetadata(id string, msg provider.Mess
 	// after an approval would still replay the exchange to the model. The rest
 	// of the map stays transcript-only.
 	msg.PromptType = metadata["prompt_type"]
-	msg = state.WithStoreKey(msg)
 	if err := c.inner.AddMessageWithMetadata(id, msg, metadata); err != nil {
 		return err
 	}
 	// Update cache in-memory so subsequent Get() calls don't hit the DB.
 	if s, ok := c.cache[id]; ok {
 		s.Messages = append(s.Messages, msg)
-	}
-	return nil
-}
-
-func (c *cachedSessionStore) SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error {
-	if err := c.inner.SetAnnouncement(id, storeKey, announcement); err != nil {
-		return err
-	}
-	if s, ok := c.cache[id]; ok {
-		for i := range s.Messages {
-			if s.Messages[i].StoreKey == storeKey {
-				s.Messages[i].Announcement = announcement
-			}
-		}
 	}
 	return nil
 }
@@ -128,18 +114,19 @@ func (c *cachedSessionStore) SetTitle(id, title string) error {
 	return nil
 }
 
-func (c *cachedSessionStore) SetSummary(id string, summary string, messages []provider.Message) error {
-	if err := c.inner.SetSummary(id, summary, messages); err != nil {
+func (c *cachedSessionStore) TruncateMessages(id string, n int) error {
+	if err := c.inner.TruncateMessages(id, n); err != nil {
 		return err
 	}
-	// Invalidate — the message set changed completely.
-	delete(c.cache, id)
+	if s, ok := c.cache[id]; ok && n < len(s.Messages) {
+		s.Messages = slices.Clip(s.Messages[:n])
+	}
 	return nil
 }
 
 func (c *cachedSessionStore) ClearMessages(id string) error {
 	// Drop cache entry so the next Get reloads the cleared state from the
-	// inner store (messages emptied, summary cleared, identity preserved).
+	// inner store (messages emptied, identity preserved).
 	delete(c.cache, id)
 	return c.inner.ClearMessages(id)
 }

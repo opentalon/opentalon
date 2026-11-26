@@ -3,9 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/provider"
@@ -205,76 +203,6 @@ func TestPairToolMessages(t *testing.T) {
 	}
 }
 
-func TestSummaryCut_NeverSplitsAToolPair(t *testing.T) {
-	native := []provider.Message{user("u1"), toolUse("", "a"), toolResult("a"), user("u2"), toolUse("", "b"), toolResult("b")}
-	text := []provider.Message{user("u1"), assistant("[tool_call] x"), user("[plugin_output] y"), user("u2")}
-	// A notification between the two halves of a pair.
-	split := []provider.Message{user("u1"), toolUse("", "a"), assistant("note"), toolResult("a"), assistant("done"), user("u2")}
-	tests := []struct {
-		name       string
-		msgs       []provider.Message
-		keep, want int
-	}{
-		{"native: only result b kept → its call too", native, 1, 4},
-		{"native: cut on a call", native, 2, 4},
-		{"native: cut on a user turn", native, 3, 3},
-		{"native: cut on result a → back to its call", native, 4, 1},
-		{"native: keep all", native, 6, 0},
-		{"text: cut on [plugin_output] → back to its [tool_call]", text, 2, 1},
-		{"text: cut on a user turn", text, 1, 3},
-		{"split: cut between call and result → back to the call", split, 4, 1},
-		{"split: cut after the result", split, 2, 4},
-		{"split: cut on the next user turn", split, 1, 5},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := summaryCut(tt.msgs, tt.keep)
-			if got != tt.want {
-				t.Errorf("summaryCut(keep=%d) = %d, want %d", tt.keep, got, tt.want)
-			}
-			// The kept history may need a move, but never loses a call or a
-			// result to the summary.
-			if _, r := pairToolMessages(tt.msgs[got:]); len(r.OrphanResultIDs) > 0 || len(r.UnansweredCallIDs) > 0 {
-				t.Errorf("kept history split a pair: %+v", r)
-			}
-		})
-	}
-}
-
-func TestFitRequestToWindow_KeepsTheCallOfALoneFinalResult(t *testing.T) {
-	big := toolResult("a")
-	big.Content = strings.Repeat("r", 4000)
-	req := &provider.CompletionRequest{Messages: []provider.Message{
-		{Role: provider.RoleSystem, Content: block("s")},
-		user(block("u")),
-		toolUse("", "a"),
-		big,
-	}}
-	fit(t, req, 600, 0, 1.0)
-	if len(req.Messages) != 3 || len(req.Messages[1].ToolCalls) == 0 {
-		t.Fatalf("want system + tool call + result, got %d messages", len(req.Messages))
-	}
-	assertPaired(t, req.Messages)
-}
-
-// A text-format [plugin_output] turn is plain text to the provider: when it is
-// all that fits, it is sent alone rather than pulling its [tool_call] turn back
-// in over budget.
-func TestFitRequestToWindow_TextFormatResultIsNotSentOverBudget(t *testing.T) {
-	req := &provider.CompletionRequest{Messages: []provider.Message{
-		{Role: provider.RoleSystem, Content: block("s")},
-		assistant("[tool_call] " + strings.Repeat("x", 4000)),
-		user("[plugin_output] small"),
-	}}
-	est := fit(t, req, 600, 0, 1.0)
-	if len(req.Messages) != 2 || req.Messages[1].Content != "[plugin_output] small" {
-		t.Fatalf("want system + [plugin_output], got %d messages", len(req.Messages))
-	}
-	if budget := inputTokenBudget(600, 0); est > budget {
-		t.Errorf("estimate %d over budget %d", est, budget)
-	}
-}
-
 // scriptedPairLLM records every request and plays its responses in order,
 // then answers in plain text.
 type scriptedPairLLM struct {
@@ -331,27 +259,6 @@ func TestRun_UnpairedHistoryIsRepairedBeforeSending(t *testing.T) {
 	}
 }
 
-// A cut that steps back to the start keeps everything: there is nothing to
-// summarize, so no summarization request is made and the history stays.
-func TestMaybeSummarizeSession_SkipsWhenTheCutKeepsEverything(t *testing.T) {
-	llm := &scriptedPairLLM{}
-	sessions := state.NewSessionStore("")
-	sessions.Create(state.SessionParams{ID: "sess"})
-	_ = sessions.AddMessage("sess", toolUse("", "a"))
-	_ = sessions.AddMessage("sess", toolResult("a"))
-	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, NewToolRegistry(), state.NewMemoryStore(""), sessions,
-		OrchestratorOpts{SummarizeAfterMessages: 2, MaxMessagesAfterSummary: 1})
-
-	orch.maybeSummarizeSession(context.Background(), "sess")
-
-	if len(llm.requests) != 0 {
-		t.Errorf("summarization requests = %d, want 0", len(llm.requests))
-	}
-	if sess, _ := sessions.Get("sess"); len(sess.Messages) != 2 || sess.Summary != "" {
-		t.Errorf("session rewritten: %d messages, summary %q", len(sess.Messages), sess.Summary)
-	}
-}
-
 func TestPairingReported_ReportsEachRepairOncePerTurn(t *testing.T) {
 	var seen pairingReported
 	first := toolPairingReport{UnansweredCallIDs: []string{"a"}, UnansweredTools: []string{"t"}, OrphanResultIDs: []string{"x"}, DroppedCallCount: 1}
@@ -391,32 +298,5 @@ func TestPairingReported_RepeatedIDsAreNewDamage(t *testing.T) {
 	want = toolPairingReport{UnansweredCallIDs: []string{"call-1"}, UnansweredTools: []string{"a__x"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("same tool, same id again = %+v, want %+v", got, want)
-	}
-}
-
-// overflowLLM refuses every request as too long and counts the attempts.
-type overflowLLM struct{ calls int }
-
-func (l *overflowLLM) Complete(_ context.Context, _ *provider.CompletionRequest) (*provider.CompletionResponse, error) {
-	l.calls++
-	return nil, errors.New("anthropic api error (status 400): prompt is too long: 250000 tokens > 200000 maximum")
-}
-
-// When the re-fit after a refusal cannot drop anything more, the same request
-// would be refused again: the turn gives up after the first refusal instead of
-// spending maxOverflowRetries more calls on it.
-func TestRun_OverflowRetryStopsWhenNothingMoreCanBeDropped(t *testing.T) {
-	llm := &overflowLLM{}
-	sessions := state.NewSessionStore("")
-	sessions.Create(state.SessionParams{ID: "sess"})
-	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, NewToolRegistry(), state.NewMemoryStore(""), sessions,
-		OrchestratorOpts{ContextWindow: 200000})
-
-	_, err := orch.Run(context.Background(), "sess", "hello")
-	if err == nil || !strings.Contains(err.Error(), "prompt is too long") {
-		t.Fatalf("err = %v, want the provider's refusal", err)
-	}
-	if llm.calls != 1 {
-		t.Errorf("LLM calls = %d, want 1 (nothing to drop after the refusal)", llm.calls)
 	}
 }

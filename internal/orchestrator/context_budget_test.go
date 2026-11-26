@@ -1,37 +1,11 @@
 package orchestrator
 
 import (
-	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/provider"
 )
-
-// block is one conversation message's worth of filler — 400 characters, which
-// the prose ratio prices at ~97 tokens including framing.
-func block(c string) string { return strings.Repeat(c, 400) }
-
-// sixMessages is a system prompt plus five conversation turns: ~500 estimated
-// tokens, sized so a 1000-token window fits it with the flat 10 % reserve and
-// trims it once anything else (tools, a correction, an output reserve) is
-// charged against the same window.
-func sixMessages() []provider.Message {
-	return []provider.Message{
-		{Role: provider.RoleSystem, Content: block("s")},
-		{Role: provider.RoleUser, Content: block("a")},
-		{Role: provider.RoleAssistant, Content: block("b")},
-		{Role: provider.RoleUser, Content: block("c")},
-		{Role: provider.RoleAssistant, Content: block("d")},
-		{Role: provider.RoleUser, Content: block("e")},
-	}
-}
-
-func fit(t *testing.T, req *provider.CompletionRequest, window, maxOut int, correction float64) int {
-	t.Helper()
-	return fitRequestToWindow(context.Background(), req, window, maxOut, correction)
-}
 
 // --- what the estimate counts -------------------------------------------
 //
@@ -105,172 +79,6 @@ func TestEstimateToolTokens(t *testing.T) {
 }
 
 // --- what the fit does ----------------------------------------------------
-
-func TestFitRequestToWindow_LeavesAFittingRequestAlone(t *testing.T) {
-	req := &provider.CompletionRequest{Messages: sixMessages()}
-	if got := fit(t, req, 100000, 0, 1.0); got == 0 {
-		t.Error("expected a non-zero estimate")
-	}
-	if len(req.Messages) != 6 {
-		t.Fatalf("nothing should have been dropped, got %d of 6", len(req.Messages))
-	}
-}
-
-func TestFitRequestToWindow_DropsOldestFirstAndKeepsTheEnds(t *testing.T) {
-	req := &provider.CompletionRequest{Messages: sixMessages()}
-	fit(t, req, 400, 0, 1.0)
-
-	if len(req.Messages) >= 6 {
-		t.Fatalf("expected a trim, kept %d of 6", len(req.Messages))
-	}
-	if req.Messages[0].Role != provider.RoleSystem {
-		t.Errorf("system message must survive, got %s", req.Messages[0].Role)
-	}
-	if req.Messages[len(req.Messages)-1].Content != block("e") {
-		t.Error("the most recent message must survive")
-	}
-}
-
-func TestFitRequestToWindow_CountsReplayedThinking(t *testing.T) {
-	// A replayed thinking block carries its full thinking in the signature and
-	// the provider counts it as input, though the message's text is short.
-	thinking := json.RawMessage(`{"type":"thinking","thinking":"","signature":"` + strings.Repeat("A", 4000) + `"}`)
-	req := &provider.CompletionRequest{Messages: []provider.Message{
-		{Role: provider.RoleSystem, Content: block("s")},
-		{Role: provider.RoleUser, Content: "How many items?"},
-		{Role: provider.RoleAssistant, Thinking: []json.RawMessage{thinking}, ToolCalls: []provider.ToolCall{{ID: "call_1", Name: "list-items"}}},
-		{Role: provider.RoleTool, Content: "5", ToolCallID: "call_1"},
-		{Role: provider.RoleUser, Content: "And now?"},
-	}}
-	fit(t, req, 1000, 0, 1.0)
-
-	for _, m := range req.Messages {
-		if len(m.Thinking) > 0 {
-			t.Fatalf("the thinking-heavy message should have been dropped, kept %d of 5", len(req.Messages))
-		}
-	}
-	if last := req.Messages[len(req.Messages)-1]; last.Content != "And now?" {
-		t.Errorf("the most recent message must survive, got %q", last.Content)
-	}
-}
-
-func TestFitRequestToWindow_KeepsEverySystemMessage(t *testing.T) {
-	req := &provider.CompletionRequest{Messages: []provider.Message{
-		{Role: provider.RoleSystem, Content: block("s")},
-		{Role: provider.RoleSystem, Content: "Previous conversation summary: stuff"},
-		{Role: provider.RoleUser, Content: strings.Repeat("a", 4000)},
-		{Role: provider.RoleAssistant, Content: strings.Repeat("b", 4000)},
-		{Role: provider.RoleUser, Content: block("c")},
-	}}
-	fit(t, req, 2000, 0, 1.0)
-
-	systems := 0
-	for _, m := range req.Messages {
-		if m.Role == provider.RoleSystem {
-			systems++
-		}
-	}
-	if systems != 2 {
-		t.Errorf("expected both system messages kept, got %d", systems)
-	}
-}
-
-func TestFitRequestToWindow_DoesNotOrphanAToolResult(t *testing.T) {
-	// The budget forces dropping the oldest user turn AND the assistant
-	// tool-call — which would leave the tool RESULT as the new first message: a
-	// RoleTool with no preceding call, which the LLM API rejects.
-	req := &provider.CompletionRequest{Messages: []provider.Message{
-		{Role: provider.RoleSystem, Content: block("s")},
-		{Role: provider.RoleUser, Content: block("a")},
-		{Role: provider.RoleAssistant, Content: block("b"), ToolCalls: []provider.ToolCall{{ID: "c1", Name: "inv.list"}}},
-		{Role: provider.RoleTool, Content: block("r"), ToolCallID: "c1"},
-		{Role: provider.RoleAssistant, Content: block("d")},
-		{Role: provider.RoleUser, Content: block("e")},
-	}}
-	fit(t, req, 400, 0, 1.0)
-
-	for i, m := range req.Messages {
-		if m.Role == provider.RoleTool {
-			t.Errorf("orphaned tool result survived at index %d", i)
-		}
-	}
-	if req.Messages[0].Role != provider.RoleSystem {
-		t.Errorf("system message must survive, got %s", req.Messages[0].Role)
-	}
-	if req.Messages[len(req.Messages)-1].Content != block("e") {
-		t.Error("the most recent message must survive")
-	}
-}
-
-func TestFitRequestToWindow_ChargesForToolDefinitions(t *testing.T) {
-	// The whole point of moving the fit onto the assembled request: the tools
-	// are half of what it costs, and they used to be free. A request the
-	// trimmer believed fit at 90 631 tokens arrived at 132 235.
-	free := &provider.CompletionRequest{Messages: sixMessages()}
-	fit(t, free, 1000, 0, 1.0)
-	if len(free.Messages) != 6 {
-		t.Fatalf("without tools this must fit: kept %d of 6", len(free.Messages))
-	}
-
-	// ~500 tokens of definitions, the same order as a handful of real tools.
-	withTools := &provider.CompletionRequest{
-		Messages: sixMessages(),
-		Tools: []provider.ToolDefinition{{
-			Name:        "timly__list-items",
-			Description: strings.Repeat("List items via a Lucene query. ", 70),
-		}},
-	}
-	fit(t, withTools, 1000, 0, 1.0)
-	if len(withTools.Messages) >= 6 {
-		t.Fatalf("tool definitions must be charged for: kept %d of 6", len(withTools.Messages))
-	}
-}
-
-func TestFitRequestToWindow_AppliesTheCorrection(t *testing.T) {
-	// A correction learned from the provider makes the same conversation trim
-	// earlier — this is what stops a session drifting over the wall.
-	plain := &provider.CompletionRequest{Messages: sixMessages()}
-	fit(t, plain, 1000, 0, 1.0)
-	if len(plain.Messages) != 6 {
-		t.Fatalf("uncorrected this must fit: kept %d of 6", len(plain.Messages))
-	}
-
-	corrected := &provider.CompletionRequest{Messages: sixMessages()}
-	fit(t, corrected, 1000, 0, 2.0)
-	if len(corrected.Messages) >= 6 {
-		t.Fatalf("a 2x correction must force a trim: kept %d of 6", len(corrected.Messages))
-	}
-}
-
-func TestFitRequestToWindow_ReservingOutputTrimsEarlier(t *testing.T) {
-	// Proves the output reserve tightens the usable input as intended:
-	// 1000-token window, ~500 estimated. Flat 10 % reserve (900) fits;
-	// reserving 400 for output (1000-400-50 = 550) does not.
-	fits := &provider.CompletionRequest{Messages: sixMessages()}
-	fit(t, fits, 1000, 0, 1.0)
-	if len(fits.Messages) != 6 {
-		t.Fatalf("flat reserve: expected no trim, kept %d of 6", len(fits.Messages))
-	}
-
-	reserved := &provider.CompletionRequest{Messages: sixMessages()}
-	fit(t, reserved, 1000, 400, 1.0)
-	if len(reserved.Messages) >= 6 {
-		t.Fatalf("output reserve: expected a trim, kept %d of 6", len(reserved.Messages))
-	}
-}
-
-func TestFitRequestToWindow_WindowDisabledStillEstimates(t *testing.T) {
-	// contextWindow 0 means "no trimming configured"; the caller still needs
-	// the estimate, because that is what the calibration is judged against.
-	req := &provider.CompletionRequest{Messages: sixMessages()}
-	got := fit(t, req, 0, 0, 1.0)
-	if len(req.Messages) != 6 {
-		t.Errorf("no window configured must not trim, kept %d of 6", len(req.Messages))
-	}
-	if got == 0 {
-		t.Error("expected an estimate even with trimming disabled")
-	}
-}
 
 func TestInputTokenBudget(t *testing.T) {
 	// Unknown output budget (0) → historical flat 10% reserve.
@@ -352,19 +160,16 @@ func TestCalibration_ObserveRejection(t *testing.T) {
 		t.Errorf("factor = %v, expected the provider's own 132235/90588 ≈ 1.46", measured.factor)
 	}
 
-	// When it names nothing, step up so the retry is meaningfully smaller —
-	// and maxOverflowRetries blind steps must reach the ceiling, or a turn runs
-	// out of attempts while still under-counting.
+	// When it names nothing, step up so the compaction the refusal triggers
+	// aims meaningfully lower, never past the cap.
 	blind := &calibration{factor: 1.0}
-	for i := 0; i < maxOverflowRetries; i++ {
-		before := blind.factor
-		blind.observeRejection(90588, 0)
-		if blind.factor <= before {
-			t.Fatalf("rejection %d did not tighten: still %v", i+1, blind.factor)
-		}
+	blind.observeRejection(90588, 0)
+	if blind.factor != rejectionStep {
+		t.Errorf("factor = %v after one blind rejection, want %v", blind.factor, rejectionStep)
 	}
+	blind.observeRejection(90588, 0)
 	if blind.factor != maxCalibrationFactor {
-		t.Errorf("%d rejections must reach the %v cap, got %v", maxOverflowRetries, maxCalibrationFactor, blind.factor)
+		t.Errorf("factor = %v after two blind rejections, want the %v cap", blind.factor, maxCalibrationFactor)
 	}
 }
 

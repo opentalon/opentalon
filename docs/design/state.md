@@ -120,7 +120,7 @@ type Session struct {
 ```
 
 - Persisted to `<data_dir>/sessions/<session_id>.yaml`
-- Compaction: old messages can be summarized to fit context window
+- Compaction: a summary stored as one message stands in for the messages before it in every later request
 - Session lifecycle: create, update, compact, delete
 
 ### 2. Long-term Memory

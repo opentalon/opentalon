@@ -137,55 +137,6 @@ func pairToolMessages(msgs []provider.Message) ([]provider.Message, toolPairingR
 	return out, report
 }
 
-// summaryCut returns the index where summarization splits msgs so that the
-// last keep messages stay verbatim. The cut moves earlier while a kept result
-// would lose its call to the summary: when it lands on a tool result, or
-// inside an exchange whose call is before the cut and whose result is after it
-// (e.g. a notification between the two halves).
-func summaryCut(msgs []provider.Message, keep int) int {
-	cut := len(msgs) - keep
-	for cut > 0 && cut < len(msgs) {
-		if provider.IsToolResult(msgs[cut]) {
-			cut--
-			continue
-		}
-		k, ok := openExchangeCall(msgs, cut)
-		if !ok {
-			break
-		}
-		cut = k
-	}
-	return cut
-}
-
-// openExchangeCall reports whether a cut at position cut splits a native tool
-// exchange: the closest tool-calling assistant message before cut, with no
-// user turn in between, has a result at or after cut (before the exchange
-// ends at the next user turn or tool-calling assistant message). It returns
-// that assistant message's index.
-func openExchangeCall(msgs []provider.Message, cut int) (int, bool) {
-	k := cut - 1
-	for k >= 0 && !bordersExchange(msgs[k]) {
-		k--
-	}
-	if k < 0 || msgs[k].Role == provider.RoleUser {
-		return 0, false
-	}
-	ids := make(map[string]bool, len(msgs[k].ToolCalls))
-	for _, tc := range msgs[k].ToolCalls {
-		ids[tc.ID] = true
-	}
-	for j := cut; j < len(msgs); j++ {
-		if bordersExchange(msgs[j]) {
-			break
-		}
-		if msgs[j].Role == provider.RoleTool && ids[msgs[j].ToolCallID] {
-			return k, true
-		}
-	}
-	return 0, false
-}
-
 // bordersExchange reports whether m opens or closes a native tool exchange (a
 // tool-calling assistant message and the results that answer it): a user turn
 // or another tool-calling assistant message. Assistant text without calls,

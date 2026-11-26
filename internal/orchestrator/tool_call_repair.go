@@ -65,12 +65,8 @@ import (
 // actually reached the tool, or the model would re-plan — and the user
 // re-approve — a write that may already have run.
 //
-// Error-tracking integration: a repaired success resets the
-// consecutive-error counters exactly like a normal success, but every
-// corrector invocation is additionally counted per tool
-// (recordRepairAttempt) and feeds the same sticky-demotion threshold, so a
-// repair loop can never mask a tool whose schema chronically misleads the
-// planner.
+// Error-tracking integration: a repaired success resets the tool's
+// consecutive-error count within the turn like a normal success.
 
 // defaultRepairMaxAttempts is the per-failed-call repair budget applied when
 // RepairConfig.MaxAttempts is unset. Each attempt is one corrector side-call
@@ -141,7 +137,7 @@ func (o *Orchestrator) callRequiresConfirmation(ctx context.Context, call ToolCa
 // exhausted — the tool never ran) it returns the inputs unchanged and
 // false so the caller follows the normal error flow.
 func (o *Orchestrator) maybeRepairToolCall(
-	ctx context.Context, sessionID string, call ToolCall, failed ToolResult, approvedPrompt string, approved bool,
+	ctx context.Context, call ToolCall, failed ToolResult, approvedPrompt string, approved bool,
 ) (ToolCall, ToolResult, bool) {
 	if o.repairer == nil || !isRepairableToolResult(failed) {
 		return call, failed, false
@@ -183,10 +179,6 @@ func (o *Orchestrator) maybeRepairToolCall(
 		}); invokedID != "" {
 			repairCtx = emit.WithParent(ctx, invokedID)
 		}
-		// Counted separately from the error counters (which a repaired
-		// success resets) so chronic repair pressure still trips demotion.
-		o.recordRepairAttempt(ctx, sessionID, call)
-
 		res, err := o.repairer.RepairToolCall(repairCtx, pipeline.RepairToolCallRequest{
 			Model:          o.repairConfig.Model,
 			PromptOverride: o.repairConfig.Prompt,

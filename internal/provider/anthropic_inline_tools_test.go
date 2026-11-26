@@ -22,7 +22,7 @@ func inlineTestRequest(chatLoop bool) *CompletionRequest {
 		Model: "claude-x",
 		Messages: []Message{
 			{Role: RoleSystem, Content: inlineTestSegments.Join()},
-			{Role: RoleUser, Content: "How many items?", Announcement: &ToolAnnouncement{Added: []string{"p__loaded"}}},
+			{Role: RoleUser, Content: "How many items?", LoadedTools: []string{"p__loaded"}},
 		},
 		Tools: []ToolDefinition{
 			inlineTestTool("p__loaded", "Loaded tool.", true),

@@ -121,7 +121,6 @@ func TestSessionClearMessagesPreservesIdentity(t *testing.T) {
 	_ = store.SetModel("sess1", "anthropic/claude-sonnet-4")
 	_ = store.AddMessage("sess1", provider.Message{Role: provider.RoleUser, Content: "Hello"})
 	_ = store.AddMessage("sess1", provider.Message{Role: provider.RoleAssistant, Content: "Hi"})
-	_ = store.SetSummary("sess1", "prior summary", []provider.Message{{Role: provider.RoleUser, Content: "kept"}})
 	createdAt := sess.CreatedAt
 
 	if err := store.ClearMessages("sess1"); err != nil {
@@ -134,9 +133,6 @@ func TestSessionClearMessagesPreservesIdentity(t *testing.T) {
 	}
 	if len(got.Messages) != 0 {
 		t.Errorf("Messages len = %d, want 0", len(got.Messages))
-	}
-	if got.Summary != "" {
-		t.Errorf("Summary = %q, want empty", got.Summary)
 	}
 	if got.ActiveModel != "anthropic/claude-sonnet-4" {
 		t.Errorf("ActiveModel = %q, want preserved", got.ActiveModel)

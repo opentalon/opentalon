@@ -4,97 +4,89 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
-	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 )
 
 // Tool-catalog discovery model. The native provider `tools` array carries
 // only a small set — the always-include core (load_tools + any
-// AlwaysInclude action) plus the tools the LLM has explicitly loaded this
-// session (sticky). Every other allowed tool surfaces as a one-line
-// CATALOG entry (name + first line of its description) in the system
-// prompt, sourced directly from the Core tool registry. The LLM loads a
-// catalog tool's full schema on demand via load_tools.
+// AlwaysInclude action) plus the tools the conversation has loaded since the
+// session's last compaction (loadedTools). Every other allowed tool surfaces
+// as a one-line CATALOG entry (name + first line of its description) in the
+// system prompt, sourced directly from the Core tool registry. The LLM loads
+// a catalog tool's full schema on demand via load_tools, or by calling it.
 
-// maxStickyTools backstops the sticky (loaded) set: once promoted, a tool
-// stays in the native tools array for the session, but the promoted set is
-// capped here. When more tools are loaded than the cap, the most recently
-// promoted win: highest LRURank (the turn of the tool's latest promotion,
-// see persistToolPromotion), ties broken by name. Calling a tool does not
-// refresh its rank. Always-include core tools are EXEMPT from the cap —
-// they are never dropped.
-const maxStickyTools = 40
-
-// promotedToolSet returns the session's sticky tool set — the tools the
-// LLM has loaded via load_tools (and any prior invocations) that should
-// stay in the native tools array: the stored set (storedPromotedToolSet)
-// plus the tools loaded this turn (turnToolLoads: through load_tools, on
-// call, and their companions). The latter come from memory, so they stay in
-// the array for the rest of the turn even when the store did not save their
-// promotion, and they are exempt from the sticky cap, so a tool just
-// loaded is never missing from the next request. read is false when the
-// stored set could not be read.
-func (o *Orchestrator) promotedToolSet(ctx context.Context) (promoted map[string]bool, read bool) {
-	promoted, read = o.storedPromotedToolSet(ctx)
-	for fqn := range turnToolLoadsFromContext(ctx).snapshot() {
-		promoted[fqn] = true
+// loadedTools returns the on-demand tools the conversation conv has loaded,
+// and marks on each tool result the ones the call it answers loaded
+// (Message.LoadedTools), the place a request announces them. A call loads a
+// tool when it is a _meta__load_tools call naming it or a call to it (an
+// unloaded tool is loaded on call, see answerUnloadedCall), either way with its
+// companions; only a call answered by a result in conv counts, so what a
+// request offers and what it announces agree. conv starts at the session's
+// last compaction, so a compaction drops every loaded tool.
+func (o *Orchestrator) loadedTools(ctx context.Context, conv []provider.Message) map[string]bool {
+	loaded := map[string]bool{}
+	allowed, allowedPlugins := allowedToolsSet(ctx, o), o.resolveAllowedPlugins(ctx)
+	var calls map[string]provider.ToolCall
+	for i := range conv {
+		m := &conv[i]
+		switch {
+		case m.Role == provider.RoleAssistant && len(m.ToolCalls) > 0:
+			calls = make(map[string]provider.ToolCall, len(m.ToolCalls))
+			for _, tc := range m.ToolCalls {
+				calls[tc.ID] = tc
+			}
+		case m.Role == provider.RoleTool:
+			tc, ok := calls[m.ToolCallID]
+			if !ok {
+				continue
+			}
+			for _, fqn := range o.toolsLoadedBy(tc, allowed, allowedPlugins) {
+				if !loaded[fqn] {
+					loaded[fqn] = true
+					m.LoadedTools = append(m.LoadedTools, fqn)
+				}
+			}
+		}
 	}
-	return promoted, read
+	return loaded
 }
 
-// storedPromotedToolSet reads the session's KnownTools, keeps the
-// non-demoted entries, sorts by LRURank descending, and takes the top
-// maxStickyTools. Returns an empty map when there's no session, no state
-// store, or a read failure (logged, read false) — the always-include core still
-// renders, so the LLM is never left with no tools.
-func (o *Orchestrator) storedPromotedToolSet(ctx context.Context) (promoted map[string]bool, read bool) {
-	sessionID := actor.SessionID(ctx)
-	if sessionID == "" || o.injectionStateStore == nil {
-		return map[string]bool{}, true
+// toolsLoadedBy returns the on-demand tools call loads, each followed by its
+// companions: the tools a _meta__load_tools call names, or the tool any other
+// call calls. A tool the session cannot see, or one always included, loads
+// nothing.
+func (o *Orchestrator) toolsLoadedBy(call provider.ToolCall, allowed map[string]struct{}, allowedPlugins cachedAllowedPlugins) []string {
+	names := []string{call.Name}
+	if plugin, action, err := parseToolName(call.Name); err == nil && plugin == metaPluginName && action == metaLoadTools {
+		if names = splitToolNames(call.Arguments["names"]); len(names) == 0 {
+			names = splitToolNames(call.Arguments["name"])
+		}
 	}
-	st, err := o.injectionStateStore.GetInjectionState(ctx, sessionID)
-	if err != nil {
-		slog.WarnContext(ctx, "tool_catalog: read state failed, no sticky tools this request",
-			"component", "orchestrator", "session", sessionID, "error", err)
-		return map[string]bool{}, false
-	}
-	entries := make([]state.KnownToolEntry, 0, len(st.KnownTools))
-	for _, kt := range st.KnownTools {
-		if kt.Demoted {
+	var out []string
+	for _, name := range names {
+		fqn, visible := o.resolveVisibleTool(name, allowed, allowedPlugins)
+		if !visible {
 			continue
 		}
-		entries = append(entries, kt)
-	}
-	// The most recently promoted win when over the cap. Tie-break by name
-	// so the cap is deterministic across requests.
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].LRURank != entries[j].LRURank {
-			return entries[i].LRURank > entries[j].LRURank
+		plugin, action, _ := parseToolName(fqn)
+		if a := o.resolveAction(plugin, action); a == nil || a.AlwaysInclude {
+			continue
 		}
-		return entries[i].ToolName < entries[j].ToolName
-	})
-	if len(entries) > maxStickyTools {
-		entries = entries[:maxStickyTools]
+		out = append(out, fqn)
+		out = append(out, o.companionsOf(fqn, allowed, allowedPlugins)...)
 	}
-	out := make(map[string]bool, len(entries))
-	for _, kt := range entries {
-		out[kt.ToolName] = true
-	}
-	return out, true
+	return out
 }
 
 // toolIsNative reports whether an allowed action belongs to the native tools
 // array the model receives in native-tools mode: the always-include core plus
-// the tools promoted into the session's sticky set via _meta__load_tools. It is
+// the tools the conversation has loaded (loadedTools). It is
 // the SINGLE predicate that decides native-vs-catalog — buildToolDefinitions
 // uses it to pick what to SEND the model, and renderToolCatalog uses its
 // negation to list the rest as catalog entries — so a tool is in exactly one of
@@ -106,8 +98,8 @@ func (o *Orchestrator) storedPromotedToolSet(ctx context.Context) (promoted map[
 // applied separately by every caller (buildToolDefinitions, renderToolCatalog,
 // and the plugin + user-only gates in executeCall), so it is deliberately NOT
 // folded in.
-func toolIsNative(action Action, fqn string, promoted map[string]bool) bool {
-	return action.AlwaysInclude || promoted[fqn]
+func toolIsNative(action Action, fqn string, loaded map[string]bool) bool {
+	return action.AlwaysInclude || loaded[fqn]
 }
 
 // callToUnloadedTool reports whether a model-originated call targets a tool that
@@ -123,10 +115,9 @@ func toolIsNative(action Action, fqn string, promoted map[string]bool) bool {
 //     unloaded write never even reaches the approval question.
 //
 // It checks membership in the set actually sent this request (sentNativeTools on
-// ctx), not a fresh read of session state, so it cannot disagree with the array
-// the model saw: a tool that was sent stays admissible even if it is later
-// demoted or evicted mid-turn, and a tool loaded by an earlier call in the SAME
-// response is not run until its schema arrives on the next round. The action is
+// ctx), not a fresh derivation, so it cannot disagree with the array the model
+// saw: a tool loaded by an earlier call in the SAME response is not run until
+// its schema arrives on the next round. The action is
 // resolved canonically (resolveAction applies the same LLM-mangling
 // normalizations as executeCall), so the lookup keys off the registered name
 // regardless of separator drift or a dropped MCP prefix in the model's name.
@@ -155,15 +146,11 @@ func (o *Orchestrator) callToUnloadedTool(ctx context.Context, call ToolCall) bo
 // runs: its arguments were guessed from a catalog line, which carries no
 // parameters and none of the rules the tool's description states.
 //   - A tool _meta__load_tools could load for this session (resolveVisibleTool)
-//     is loaded the way load_tools loads it — a sticky promotion in the session
-//     store — and also recorded in the turn's turnToolLoads, so the next
-//     request of the turn carries its schema whether or not the store saved the
-//     promotion. Its companions are loaded with it (loadToolAndCompanions).
-//     The answer names them and tells the model to call the tool again,
+//     is loaded, with its companions, by the call itself: the stored call and
+//     this answer put it into the next request's tools (loadedTools). The
+//     answer names the companions and tells the model to call the tool again,
 //     directly, from its description (loadOnCallAnswer); it is marked NotRun,
 //     and its tool_call_result has the status not_run.
-//   - A demoted tool keeps the answer it had before loading on call existed
-//     (load it first): promoting it would clear the demotion.
 //   - Anything else (a preparer or guard action, an action the session palette
 //     excludes) is not available. Hidden plugins, user-only actions and unknown
 //     names never get here: executeCall's earlier gates refuse them first.
@@ -175,16 +162,7 @@ func (o *Orchestrator) answerUnloadedCall(ctx context.Context, call ToolCall, di
 		slog.Warn("BLOCKED LLM call to a tool not available to this session", "plugin", call.Plugin, "action", call.Action)
 		return o.emitRefusalResult(ctx, call, fmt.Sprintf("tool %q is not available", fqn), dispatchStart)
 	}
-	sessionID := actor.SessionID(ctx)
-	if o.toolDemoted(ctx, sessionID, canonical) {
-		loadTools := toolFQN(metaPluginName, metaLoadTools)
-		slog.Warn("BLOCKED LLM call to unloaded demoted tool", "plugin", call.Plugin, "action", call.Action, "load_tools", loadTools)
-		return o.emitRefusalResult(ctx, call, fmt.Sprintf(
-			"tool %q is not loaded: its parameters are not in your context, so you cannot call it yet. "+
-				"First call %s(names=%q), then call %s on your next step. Do not guess the parameters.",
-			canonical, loadTools, canonical, canonical), dispatchStart)
-	}
-	companions := o.loadToolAndCompanions(ctx, sessionID, canonical, allowed, allowedPlugins)
+	companions := o.companionsOf(canonical, allowed, allowedPlugins)
 	slog.Info("LLM called an unloaded tool: loaded it, call not run",
 		"plugin", call.Plugin, "action", call.Action, "companions", companions)
 	answer := loadOnCallAnswer(canonical, companions)
@@ -227,68 +205,6 @@ func retriesOfUnrunCalls(calls []ToolCall, unrun map[string]bool) []ToolCall {
 	return retries
 }
 
-// toolDemoted reports whether the session store marks the tool demoted. No
-// session, no store, no entry or a failed read all read as not demoted.
-func (o *Orchestrator) toolDemoted(ctx context.Context, sessionID, fqn string) bool {
-	if sessionID == "" || o.injectionStateStore == nil {
-		return false
-	}
-	st, err := o.injectionStateStore.GetInjectionState(ctx, sessionID)
-	if err != nil {
-		return false
-	}
-	for _, kt := range st.KnownTools {
-		if kt.ToolName == fqn {
-			return kt.Demoted
-		}
-	}
-	return false
-}
-
-// turnToolLoads is one agent-loop turn's set of the tools loaded this turn, by
-// either load path; outside the agent loop there is none (nil).
-type turnToolLoads struct {
-	mu    sync.Mutex // the load_tools executor records from its own goroutine, which outlives its deadline
-	tools map[string]bool
-}
-
-type turnToolLoadsKey struct{}
-
-func newTurnToolLoads() *turnToolLoads {
-	return &turnToolLoads{tools: map[string]bool{}}
-}
-
-func withTurnToolLoads(ctx context.Context, loads *turnToolLoads) context.Context {
-	return context.WithValue(ctx, turnToolLoadsKey{}, loads)
-}
-
-func turnToolLoadsFromContext(ctx context.Context) *turnToolLoads {
-	loads, _ := ctx.Value(turnToolLoadsKey{}).(*turnToolLoads)
-	return loads
-}
-
-func (l *turnToolLoads) record(fqn string) {
-	if l == nil {
-		return
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.tools[fqn] = true
-}
-
-func (l *turnToolLoads) snapshot() map[string]bool {
-	if l == nil {
-		return nil
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make(map[string]bool, len(l.tools))
-	for fqn := range l.tools {
-		out[fqn] = true
-	}
-	return out
-}
-
 // catalogEntry is one row of the rendered tool catalog: the tool's
 // fully-qualified name and the one-line summary (first line of its
 // description).
@@ -299,16 +215,16 @@ type catalogEntry struct {
 
 // renderToolCatalog returns the "## Tool catalog" system-prompt block
 // listing every allowed tool that is NOT already in the native tools
-// array (i.e. not always-include and not sticky-promoted). Each entry is
+// array (i.e. not always-include and not loaded). Each entry is
 // name + the first line of its description. The block nudges the LLM to
 // load the tools it needs via load_tools before calling them.
 //
 // Source is the Core tool registry directly — no RAG, no tier decision.
 // Walks o.registry.ListCapabilities(), skips plugins the profile gate
 // blocks, and per action skips preparer/guard actions, UserOnly actions,
-// and anything already native (AlwaysInclude or promoted). Returns "" when
+// and anything already native (AlwaysInclude or loaded). Returns "" when
 // there's nothing to surface (the caller can append unconditionally).
-func (o *Orchestrator) renderToolCatalog(promoted map[string]bool, allowedPlugins cachedAllowedPlugins) string {
+func (o *Orchestrator) renderToolCatalog(loaded map[string]bool, allowedPlugins cachedAllowedPlugins) string {
 	preparerAction := o.preparerActions
 
 	var entries []catalogEntry
@@ -324,7 +240,7 @@ func (o *Orchestrator) renderToolCatalog(promoted map[string]bool, allowedPlugin
 			// Already in the native tools array — no catalog entry needed.
 			// Same predicate buildToolDefinitions sends by, so a tool is in
 			// exactly one of the two surfaces (native array or catalog).
-			if toolIsNative(action, fqn, promoted) {
+			if toolIsNative(action, fqn, loaded) {
 				continue
 			}
 			entries = append(entries, catalogEntry{fqn: fqn, summary: firstLine(action.Description)})
@@ -378,7 +294,7 @@ func writeCatalogEntries(sb *strings.Builder, entries []catalogEntry) {
 	sb.WriteString("\n")
 }
 
-// toolArraySet is the promoted set under which renderToolCatalog lists exactly the allowed tools the array lacks.
+// toolArraySet is the loaded set under which renderToolCatalog lists exactly the allowed tools the array lacks.
 func toolArraySet(tools []provider.ToolDefinition) map[string]bool {
 	set := make(map[string]bool, len(tools))
 	for _, td := range tools {
@@ -387,93 +303,19 @@ func toolArraySet(tools []provider.ToolDefinition) map[string]bool {
 	return set
 }
 
+// toolArrayNames is the set of the tools array's names, as the tool-load gate reads it.
+func toolArrayNames(tools []provider.ToolDefinition) map[string]struct{} {
+	set := make(map[string]struct{}, len(tools))
+	for _, td := range tools {
+		set[td.Name] = struct{}{}
+	}
+	return set
+}
+
 func withToolCatalog(segs provider.SystemSegments, catalog, inlineCatalog string) provider.SystemSegments {
 	segs.Catalog = catalog
 	segs.InlineCatalog = inlineCatalog
 	return segs
-}
-
-func recordToolChange(ctx context.Context, sessions SessionStoreInterface, sessionID string, req *provider.CompletionRequest) {
-	at := lastUserRole(req.Messages)
-	if at < 0 {
-		return
-	}
-	change := toolChange(announcedTools(req.Messages[:at]), req.Tools)
-	if sameAnnouncement(change, req.Messages[at].Announcement) {
-		return
-	}
-	req.Messages[at].Announcement = change
-	key := req.Messages[at].StoreKey
-	// One-round messages and pairing notices have no stored row: their record lives in this request only.
-	if key == "" {
-		return
-	}
-	if err := sessions.SetAnnouncement(sessionID, key, change); err != nil {
-		slog.WarnContext(ctx, "tool_catalog: announcement not stored",
-			"component", "orchestrator", "session", sessionID, "error", err)
-	}
-}
-
-func endsOnRecord(msgs []provider.Message) bool {
-	at := lastUserRole(msgs)
-	return at >= 0 && msgs[at].Announcement != nil
-}
-
-func lastUserRole(msgs []provider.Message) int {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == provider.RoleUser || msgs[i].Role == provider.RoleTool {
-			return i
-		}
-	}
-	return -1
-}
-
-func announcedTools(msgs []provider.Message) map[string]bool {
-	announced := map[string]bool{}
-	for _, m := range msgs {
-		if m.Announcement == nil {
-			continue
-		}
-		for _, name := range m.Announcement.Added {
-			announced[name] = true
-		}
-		for _, name := range m.Announcement.Removed {
-			delete(announced, name)
-		}
-	}
-	return announced
-}
-
-func toolChange(announced map[string]bool, tools []provider.ToolDefinition) *provider.ToolAnnouncement {
-	var change provider.ToolAnnouncement
-	callable := make(map[string]bool, len(tools))
-	for _, td := range tools {
-		if !td.OnDemand {
-			continue
-		}
-		callable[td.Name] = true
-		if !announced[td.Name] {
-			change.Added = append(change.Added, td.Name)
-		}
-	}
-	for name := range announced {
-		if !callable[name] {
-			change.Removed = append(change.Removed, name)
-		}
-	}
-	if len(change.Added) == 0 && len(change.Removed) == 0 {
-		return nil
-	}
-	sort.Strings(change.Added)
-	sort.Strings(change.Removed)
-	return &change
-}
-
-func sameAnnouncement(a, b *provider.ToolAnnouncement) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return slices.Equal(a.Added, b.Added) && slices.Equal(a.Removed, b.Removed)
 }
 
 // preparerActionSet pre-computes the FQNs the preparer pipeline itself

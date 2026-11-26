@@ -281,6 +281,38 @@ func TestLLMResponseCarriesTheRequestSize(t *testing.T) {
 	}
 }
 
+// A compaction's summary is counted as the summary block, the messages after
+// it as history.
+func TestRequestSizeNamesTheSummary(t *testing.T) {
+	const summary = "The user counts items in two warehouses."
+	for _, path := range sizeTestPaths() {
+		t.Run(path.name, func(t *testing.T) {
+			req := sizeTestRequest(&sizeTestSegments)
+			row := Message{Role: RoleUser, Content: summary, PromptType: PromptTypeCompaction}
+			req.Messages = append([]Message{req.Messages[0], row}, req.Messages[1:]...)
+			var bodies [][]byte
+			sink := &recordingEventSink{}
+			if err := path.send(sizeTestServer(t, &bodies).URL, sink, req); err != nil {
+				t.Fatal(err)
+			}
+			var payload events.LLMResponsePayload
+			if err := json.Unmarshal(sink.snapshot()[1].Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]events.RequestBlock{}
+			for _, b := range payload.Request.Blocks {
+				got[b.Name] = b
+			}
+			if b := got[events.BlockSummary]; b.Count != 1 || b.Bytes != len(summary) {
+				t.Errorf("summary block = %+v, want 1 message of %d bytes", b, len(summary))
+			}
+			if got[events.BlockHistory].Count != 3 {
+				t.Errorf("history block = %+v, want the 3 other messages", got[events.BlockHistory])
+			}
+		})
+	}
+}
+
 func TestFailedCallCarriesNoRequestSize(t *testing.T) {
 	for _, path := range sizeTestPaths() {
 		t.Run(path.name, func(t *testing.T) {

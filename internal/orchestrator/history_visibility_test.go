@@ -27,6 +27,7 @@ func TestIsVisibleUserMessage(t *testing.T) {
 		{"hidden user (system note)", provider.Message{Role: provider.RoleUser, Visibility: provider.VisibilityHidden, Content: "[system] done"}, false},
 		{"assistant", provider.Message{Role: provider.RoleAssistant, Content: "hello"}, false},
 		{"tool result", provider.Message{Role: provider.RoleTool, Content: "result"}, false},
+		{"compaction summary", provider.Message{Role: provider.RoleUser, PromptType: provider.PromptTypeCompaction, Content: "summary"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

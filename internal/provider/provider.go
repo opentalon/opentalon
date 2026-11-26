@@ -49,20 +49,18 @@ type Message struct {
 	// it). Internal history-filtering signal only — never serialized toward
 	// a provider (see orchestrator's stripApprovedConfirmationExchanges).
 	PromptType string `json:"-"`
-	// Announcement is set only on the user-role message that ends a request.
-	Announcement *ToolAnnouncement `json:"-"`
-	// StoreKey identifies the stored row of the message; empty on a message no session store wrote.
-	StoreKey string `json:"-"`
+	// KeptUserMessages is, on a compaction's row (PromptTypeCompaction), how
+	// many of the user messages before it every later request carries word
+	// for word; persisted as the row's "kept" metadata.
+	KeptUserMessages int `json:"-"`
+	// LoadedTools are, on a tool result, the on-demand tools the call it
+	// answers loaded; set on a request's messages only, never stored.
+	LoadedTools []string `json:"-"`
 }
 
 // IsToolResult reports whether m is a tool result: a native RoleTool message or a text-format [plugin_output] user message.
 func IsToolResult(m Message) bool {
 	return m.Role == RoleTool || (m.Role == RoleUser && strings.Contains(m.Content, "[plugin_output]"))
-}
-
-type ToolAnnouncement struct {
-	Added   []string
-	Removed []string
 }
 
 // VisibilityHidden is the Message.Visibility value marking a turn that is fed
@@ -76,6 +74,9 @@ const VisibilityHidden = "hidden"
 const (
 	PromptTypeToolConfirmation     = "tool_confirmation"
 	PromptTypeConfirmationResponse = "confirmation_response"
+	// PromptTypeCompaction marks the user-role row that holds a compaction's
+	// summary, which stands in every later request for the messages before it.
+	PromptTypeCompaction = "compaction"
 )
 
 // ToolDefinition describes a tool the LLM can call (native function calling).
@@ -137,6 +138,14 @@ type CompletionRequest struct {
 	// LoadableTools are the allowed tools the session has not loaded, in name order, never in Tools.
 	LoadableTools []ToolDefinition `json:"-"`
 	ModelRef      ModelRef         `json:"-"`
+	// Compaction marks the request that writes a compaction's summary: it is
+	// rendered like the chat loop's, but its response is no chat-loop round.
+	Compaction bool `json:"-"`
+}
+
+// chatLoop reports whether the response to req is a round of the chat loop.
+func (r *CompletionRequest) chatLoop() bool {
+	return r.Segments != nil && !r.Compaction
 }
 
 // Usage is a call's tokens and cost. InputTokens counts every input token,
@@ -176,14 +185,17 @@ type CompletionResponse struct {
 	EventID string `json:"-"`
 
 	Fallback bool `json:"-"`
+	// ModelRef names the provider and model that answered.
+	ModelRef ModelRef `json:"-"`
 }
 
 type StreamChunk struct {
-	Content  string `json:"content"`
-	Done     bool   `json:"done"`
-	Model    string `json:"model,omitempty"`
-	Usage    Usage  `json:"usage,omitempty"`
-	Fallback bool   `json:"-"`
+	Content  string   `json:"content"`
+	Done     bool     `json:"done"`
+	Model    string   `json:"model,omitempty"`
+	Usage    Usage    `json:"usage,omitempty"`
+	Fallback bool     `json:"-"`
+	ModelRef ModelRef `json:"-"`
 }
 
 type ResponseStream interface {

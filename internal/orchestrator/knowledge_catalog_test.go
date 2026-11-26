@@ -80,13 +80,13 @@ func TestWarmKnowledgeCatalogPutsTheCatalogIntoTheFirstPrompt(t *testing.T) {
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
 	cold := newOrch(t)
-	if prompt := cold.buildSystemPrompt(ctx, "q", true).Fixed; strings.Contains(prompt, "slug: `returns`") {
+	if prompt := cold.turnSystemPrompt(ctx, "q", true).Fixed; strings.Contains(prompt, "slug: `returns`") {
 		t.Fatal("the first prompt of a cold orchestrator must not carry the catalog yet; the test premise is wrong")
 	}
 
 	warm := newOrch(t)
 	warm.WarmKnowledgeCatalog(ctx)
-	if prompt := warm.buildSystemPrompt(ctx, "q", true).Fixed; !strings.Contains(prompt, "slug: `returns`") {
+	if prompt := warm.turnSystemPrompt(ctx, "q", true).Fixed; !strings.Contains(prompt, "slug: `returns`") {
 		t.Fatalf("warmed orchestrator: first prompt lacks the catalog:\n%s", prompt)
 	}
 }

@@ -57,41 +57,45 @@ func (s *selectingProvider) route(req *CompletionRequest) (*selected, ModelInfo,
 	}
 	def := *req
 	def.Model = s.model
-	providerID, modelID, qualified := strings.Cut(ref, "/")
-	if !qualified {
-		if findModel(s.def.Models(), ref).ID != "" {
-			return nil, ModelInfo{}, req
-		}
-		s.log.Warn("requested model is not a model of the default provider; using the default model",
-			"requested", ref, "model", s.model)
+	if _, _, qualified := strings.Cut(ref, "/"); !qualified && findModel(s.def.Models(), ref).ID != "" {
+		return nil, ModelInfo{}, req
+	}
+	p, m, why := s.lookup(ref)
+	if why != "" {
+		s.log.Warn(why+"; using the default model", "requested", ref, "model", s.model)
 		return nil, ModelInfo{}, &def
 	}
-	if providerID == "" || modelID == "" {
-		s.log.Warn("requested model is not a <provider>/<model> reference; using the default model",
-			"requested", ref, "model", s.model)
-		return nil, ModelInfo{}, &def
-	}
-	if providerID == s.def.ID() && modelID == s.model {
-		return nil, ModelInfo{}, &def
-	}
-	p, ok := s.providers[providerID]
-	if !ok {
-		s.log.Warn("requested model names a provider the config does not define; using the default model",
-			"requested", ref, "model", s.model)
-		return nil, ModelInfo{}, &def
-	}
-	m := findModel(p.prov.Models(), modelID)
-	if m.ID == "" {
-		s.log.Warn("requested model is not a model of its provider; using the default model",
-			"requested", ref, "model", s.model)
+	if p == nil {
 		return nil, ModelInfo{}, &def
 	}
 	if p.health != nil && !p.health.isHealthy() {
 		s.log.Debug("requested model's provider is unhealthy; using the default model",
-			"provider", providerID, "model", modelID)
+			"provider", m.ProviderID, "model", m.ID)
 		return nil, ModelInfo{}, &def
 	}
 	return p, m, &def
+}
+
+// lookup resolves ref to a model of a configured provider other than the
+// default model; why says what is wrong with a ref that names none.
+func (s *selectingProvider) lookup(ref string) (p *selected, m ModelInfo, why string) {
+	providerID, modelID, qualified := strings.Cut(ref, "/")
+	switch {
+	case !qualified:
+		return nil, ModelInfo{}, "requested model is not a model of the default provider"
+	case providerID == "" || modelID == "":
+		return nil, ModelInfo{}, "requested model is not a <provider>/<model> reference"
+	case providerID == s.def.ID() && modelID == s.model:
+		return nil, ModelInfo{}, ""
+	}
+	p, ok := s.providers[providerID]
+	if !ok {
+		return nil, ModelInfo{}, "requested model names a provider the config does not define"
+	}
+	if m = findModel(p.prov.Models(), modelID); m.ID == "" {
+		return nil, ModelInfo{}, "requested model is not a model of its provider"
+	}
+	return p, m, ""
 }
 
 func selectedRequest(req *CompletionRequest, m ModelInfo) *CompletionRequest {

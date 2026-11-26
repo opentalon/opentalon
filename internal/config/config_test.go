@@ -1061,7 +1061,6 @@ orchestrator:
   preparer:
     tool_error_handling:
       loop_cap_per_turn: 4
-      sticky_demotion_threshold: 6
 `
 	cfg, err := Parse([]byte(yaml))
 	if err != nil {
@@ -1071,8 +1070,36 @@ orchestrator:
 	if got.LoopCapPerTurn != 4 {
 		t.Errorf("LoopCapPerTurn = %d, want 4", got.LoopCapPerTurn)
 	}
-	if got.StickyDemotionThreshold != 6 {
-		t.Errorf("StickyDemotionThreshold = %d, want 6", got.StickyDemotionThreshold)
+}
+
+// A configuration that still sets a setting compaction replaced starts, and
+// the settings around it keep their values.
+func TestParseIgnoresSettingsCompactionReplaced(t *testing.T) {
+	yaml := `
+orchestrator:
+  preparer:
+    tool_error_handling:
+      loop_cap_per_turn: 2
+      sticky_demotion_threshold: 2
+state:
+  session:
+    max_messages: 40
+    context_messages: 10
+    summarize_after_messages: 10
+    max_messages_after_summary: 6
+    summarize_prompt: "Summarize."
+    summarize_update_prompt: "Update the summary."
+    max_idle_days: 7
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Orchestrator.Preparer.ToolErrorHandling; got != (ToolErrorHandlingConfig{LoopCapPerTurn: 2}) {
+		t.Errorf("ToolErrorHandling = %+v, want only loop_cap_per_turn", got)
+	}
+	if got := cfg.State.Session; got != (SessionConfig{MaxMessages: 40, MaxIdleDays: 7}) {
+		t.Errorf("Session = %+v, want only max_messages and max_idle_days", got)
 	}
 }
 
@@ -1089,7 +1116,7 @@ orchestrator:
 		t.Fatal(err)
 	}
 	eh := cfg.Orchestrator.Preparer.ToolErrorHandling
-	if eh.LoopCapPerTurn != 0 || eh.StickyDemotionThreshold != 0 {
+	if eh.LoopCapPerTurn != 0 {
 		t.Errorf("absent tool_error_handling block must parse to zero ToolErrorHandlingConfig, got %+v", eh)
 	}
 }

@@ -1,10 +1,6 @@
 package orchestrator
 
 import (
-	"errors"
-	"reflect"
-	"slices"
-	"strings"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/provider"
@@ -60,20 +56,6 @@ func (s *stubSessionStore) AddMessageWithMetadata(id string, msg provider.Messag
 	return s.AddMessage(id, msg)
 }
 
-func (s *stubSessionStore) SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error {
-	sess := s.sessions[id]
-	if sess == nil {
-		return &sessionNotFoundError{id}
-	}
-	for i := range sess.Messages {
-		if sess.Messages[i].StoreKey == storeKey {
-			sess.Messages[i].Announcement = announcement
-			return nil
-		}
-	}
-	return state.ErrMessageNotFound
-}
-
 func (s *stubSessionStore) SetModel(id string, model provider.ModelRef) error {
 	sess := s.sessions[id]
 	if sess == nil {
@@ -83,13 +65,12 @@ func (s *stubSessionStore) SetModel(id string, model provider.ModelRef) error {
 	return nil
 }
 
-func (s *stubSessionStore) SetSummary(id string, summary string, messages []provider.Message) error {
+func (s *stubSessionStore) TruncateMessages(id string, n int) error {
 	sess := s.sessions[id]
 	if sess == nil {
 		return &sessionNotFoundError{id}
 	}
-	sess.Summary = summary
-	sess.Messages = messages
+	sess.Messages = sess.Messages[:min(n, len(sess.Messages))]
 	return nil
 }
 
@@ -124,7 +105,6 @@ func (s *stubSessionStore) ClearMessages(id string) error {
 		return &sessionNotFoundError{id}
 	}
 	sess.Messages = nil
-	sess.Summary = ""
 	return nil
 }
 
@@ -197,32 +177,29 @@ func TestCachedSessionStore_AddMessageUpdatesCache(t *testing.T) {
 	}
 }
 
-func TestCachedSessionStore_SetSummaryInvalidatesCache(t *testing.T) {
+func TestCachedSessionStore_TruncateMessagesReachesCacheAndInner(t *testing.T) {
 	stub := newStubSessionStore()
 	stub.Create(state.SessionParams{ID: "s1"})
 	cached := newCachedSessionStore(stub)
-
-	// Populate cache.
-	if _, err := cached.Get("s1"); err != nil {
+	for _, c := range []string{"a", "b", "c"} {
+		if err := cached.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: c}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cached.TruncateMessages("s1", 1); err != nil {
 		t.Fatal(err)
 	}
-
-	// SetSummary should invalidate.
-	if err := cached.SetSummary("s1", "summary", []provider.Message{{Role: provider.RoleAssistant, Content: "kept"}}); err != nil {
+	if err := cached.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "d"}); err != nil {
 		t.Fatal(err)
 	}
-
-	// Next Get should hit inner store again.
-	beforeCalls := stub.getCalls
-	s, err := cached.Get("s1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stub.getCalls <= beforeCalls {
-		t.Fatal("expected inner Get call after SetSummary invalidation")
-	}
-	if s.Summary != "summary" {
-		t.Fatalf("expected summary 'summary', got %q", s.Summary)
+	for name, get := range map[string]func(string) (*state.Session, error){"cache": cached.Get, "inner": stub.Get} {
+		s, err := get("s1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(s.Messages) != 2 || s.Messages[0].Content != "a" || s.Messages[1].Content != "d" {
+			t.Errorf("%s messages = %+v, want a then d", name, s.Messages)
+		}
 	}
 }
 
@@ -304,60 +281,5 @@ func TestCachedSessionStore_CreateForwardsLabels(t *testing.T) {
 
 	if got := stub.created["s-sys"]; got != [2]string{"system", "csv_mapping"} {
 		t.Errorf("inner Create got (kind, source) = %v, want (system, csv_mapping)", got)
-	}
-}
-
-func TestCachedSessionStore_SetAnnouncementReachesCacheAndInner(t *testing.T) {
-	inner := state.NewSessionStore("")
-	inner.Create(state.SessionParams{ID: "s1"})
-	cached := newCachedSessionStore(inner)
-	if _, err := cached.Get("s1"); err != nil {
-		t.Fatal(err)
-	}
-	for _, m := range []provider.Message{
-		{Role: provider.RoleUser, Content: "u1"},
-		{Role: provider.RoleTool, ToolCallID: "c1", Content: "r1"},
-		{Role: provider.RoleAssistant, Content: "a1"},
-	} {
-		if err := cached.AddMessage("s1", m); err != nil {
-			t.Fatal(err)
-		}
-	}
-	keysOf := func(store SessionStoreInterface) []string {
-		s, err := store.Get("s1")
-		if err != nil {
-			t.Fatal(err)
-		}
-		var keys []string
-		for _, m := range s.Messages {
-			keys = append(keys, m.StoreKey)
-		}
-		return keys
-	}
-	keys := keysOf(cached)
-	if inKeys := keysOf(inner); !reflect.DeepEqual(keys, inKeys) || len(keys) != 3 || slices.Contains(keys, "") ||
-		keys[0] == keys[1] || keys[1] == keys[2] {
-		t.Fatalf("store keys: cache %q, inner %q; want three distinct keys, the same in both", keys, inKeys)
-	}
-	if err := cached.SetAnnouncement("s1", keys[1], &provider.ToolAnnouncement{Added: []string{"p__a"}}); err != nil {
-		t.Fatal(err)
-	}
-	for name, store := range map[string]SessionStoreInterface{"cache": cached, "inner": inner} {
-		s, err := store.Get("s1")
-		if err != nil {
-			t.Fatal(err)
-		}
-		var got []string
-		for _, m := range s.Messages {
-			if m.Announcement != nil {
-				got = append(got, m.Content+" +"+strings.Join(m.Announcement.Added, ","))
-			}
-		}
-		if want := []string{"r1 +p__a"}; !reflect.DeepEqual(got, want) {
-			t.Errorf("%s: announcements %q, want %q", name, got, want)
-		}
-	}
-	if err := cached.SetAnnouncement("s1", "unknown", &provider.ToolAnnouncement{}); !errors.Is(err, state.ErrMessageNotFound) {
-		t.Errorf("SetAnnouncement with an unknown key = %v, want ErrMessageNotFound", err)
 	}
 }

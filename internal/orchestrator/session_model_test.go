@@ -22,7 +22,6 @@ const (
 	callQuestion = "confirmation question"
 	callClassify = "classifier"
 	callTitle    = "title"
-	callSummary  = "summary"
 )
 
 func callKind(req *provider.CompletionRequest) string {
@@ -39,8 +38,6 @@ func callKind(req *provider.CompletionRequest) string {
 		return callQuestion
 	case first.Content == prompts.SessionTitle:
 		return callTitle
-	case first.Content == prompts.SummarizeDefault:
-		return callSummary
 	}
 	return "unknown"
 }
@@ -71,7 +68,6 @@ func (s *helperScript) Complete(_ context.Context, req *provider.CompletionReque
 		callQuestion: "Shall I analyze myrepo?",
 		callClassify: `{"decision":"amend","requests_change":false,"reason":"asks which branch"}`,
 		callTitle:    "Code analysis",
-		callSummary:  "The user asked for a code analysis.",
 	}[kind]
 	if kind == callChat {
 		s.chats++
@@ -169,12 +165,11 @@ func TestATurnsHelperCallsAskForTheChatLoopsModel(t *testing.T) {
 	}
 }
 
-// The session title and the summary, written after the turn, ask for the
-// model the turn asked for.
-func TestTitleAndSummaryAskForTheTurnsModel(t *testing.T) {
+// The session title, written after the turn, asks for the model the turn
+// asked for.
+func TestTitleAsksForTheTurnsModel(t *testing.T) {
 	for kind, opts := range map[string]OrchestratorOpts{
-		callTitle:   {SessionTitlesEnabled: true},
-		callSummary: {SummarizeAfterMessages: 1, MaxMessagesAfterSummary: 1},
+		callTitle: {SessionTitlesEnabled: true},
 	} {
 		for _, want := range []provider.ModelRef{budgetPremium, ""} {
 			t.Run(kind+"/"+string(want), func(t *testing.T) {

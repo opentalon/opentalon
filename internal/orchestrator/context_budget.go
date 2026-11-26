@@ -1,11 +1,9 @@
 package orchestrator
 
 import (
-	"context"
 	"encoding/json"
 	"sync"
 
-	"github.com/opentalon/opentalon/internal/logger"
 	"github.com/opentalon/opentalon/internal/provider"
 )
 
@@ -139,17 +137,10 @@ func (c *calibration) raiseTo(f float64) {
 // squeeze the conversation to nothing.
 const maxCalibrationFactor = 2.0
 
-// maxOverflowRetries bounds how often one turn may re-send a round after a
-// "prompt too long" refusal. Two is enough for the correction to reach its
-// ceiling from any starting point; beyond that the conversation genuinely does
-// not fit and the turn should say so rather than spin.
-const maxOverflowRetries = 2
-
 // rejectionStep is how far the correction moves when the provider refuses the
-// prompt without saying how big it found it. Sized so that maxOverflowRetries
-// blind steps traverse the whole range up to maxCalibrationFactor: with only
-// two attempts to spend, a timid step would run out of retries still under-
-// counting. Providers that DO name the size skip this path entirely and land on
+// prompt without saying how big it found it: far enough that the compaction the
+// refusal triggers (compaction.go) aims meaningfully lower than the request
+// that was refused. Providers that DO name the size skip this path and land on
 // the exact factor in one go.
 const rejectionStep = 1.5
 
@@ -228,13 +219,12 @@ func (c *calibrators) observeRejection(model string, estimated, measured int) {
 // on chain-of-thought. Reserving it is the portable choice; the deployment
 // controls the cost by setting max_tokens to what completions actually need.
 //
-// When maxOutputTokens is unknown (0) we fall back to the historical 10%
-// reserve. When max_tokens (plus margin) alone fills the window — a
-// misconfiguration, since max_tokens should be a fraction of the window — the
-// budget clamps to 0 rather than a positive floor: any positive floor plus
-// that output budget would exceed the window and re-admit the very overflow
-// this reserve exists to prevent. The trim still keeps the system prompt and
-// the most recent message, so a 0 budget cannot strand it.
+// When maxOutputTokens is unknown (0) we fall back to a 10% reserve. When
+// max_tokens (plus margin) alone fills the window — a misconfiguration, since
+// max_tokens should be a fraction of the window — the budget clamps to 0
+// rather than a positive floor: any positive floor plus that output budget
+// would exceed the window and re-admit the very overflow this reserve exists
+// to prevent.
 func inputTokenBudget(contextWindow, maxOutputTokens int) int {
 	if contextWindow <= 0 {
 		return 0
@@ -248,98 +238,4 @@ func inputTokenBudget(contextWindow, maxOutputTokens int) int {
 		return 0
 	}
 	return budget
-}
-
-// fitRequestToWindow drops the oldest conversation messages from req, keeping
-// the system messages at the front, until the whole request fits the usable
-// input budget. It returns the corrected estimate for what remains — the figure
-// the provider's own count is later judged against.
-//
-// It runs on the assembled request, not during message assembly, because the
-// tool definitions are half of what a request costs and they are only known
-// here. They are subtracted off the top rather than trimmed: the model cannot
-// call what it cannot see, so the conversation is what gives way.
-func fitRequestToWindow(ctx context.Context, req *provider.CompletionRequest, contextWindow, maxOutputTokens int, correction float64) int {
-	if correction <= 0 {
-		correction = 1.0
-	}
-	corrected := func(n int) int { return int(float64(n) * correction) }
-
-	messages := req.Messages
-	toolTokens := corrected(estimateToolTokens(req.Tools))
-
-	// One pass, kept: the drop loop below subtracts from this slice instead of
-	// re-measuring (and re-marshalling the tool calls of) every message it drops.
-	costs := make([]int, len(messages))
-	total := toolTokens
-	for i, m := range messages {
-		costs[i] = corrected(estimateMessageTokens(m))
-		total += costs[i]
-	}
-
-	if contextWindow <= 0 {
-		return total // trimming disabled; the caller still wants the estimate
-	}
-	maxTokens := inputTokenBudget(contextWindow, maxOutputTokens)
-	if total <= maxTokens {
-		return total
-	}
-
-	// Find where conversation messages start (skip leading system messages).
-	convStart := 0
-	for convStart < len(messages) && messages[convStart].Role == provider.RoleSystem {
-		convStart++
-	}
-
-	// Drop oldest conversation messages (pairs of assistant+user typically)
-	// until we fit. Always keep at least the last conversation message.
-	for total > maxTokens && convStart < len(messages)-1 {
-		total -= costs[convStart]
-		convStart++
-	}
-	// Don't leave a tool result orphaned by dropping its tool-call — advance the
-	// boundary past any leading orphaned results (but never to an empty slice).
-	if i := firstNonOrphanIndex(messages, convStart); i < len(messages) {
-		for j := convStart; j < i; j++ {
-			total -= costs[j]
-		}
-		convStart = i
-	} else {
-		// Only results are left. A native result needs its call, so step back
-		// to it and send the pair over budget rather than a lone result the
-		// provider rejects. A text-format [plugin_output] turn is plain text to
-		// the provider and is sent as it is.
-		for convStart > 0 && messages[convStart-1].Role != provider.RoleSystem && messages[convStart].Role == provider.RoleTool {
-			convStart--
-			total += costs[convStart]
-		}
-	}
-
-	trimmed := make([]provider.Message, 0, len(messages))
-	// Keep system messages.
-	for i := 0; i < len(messages); i++ {
-		if messages[i].Role == provider.RoleSystem {
-			trimmed = append(trimmed, messages[i])
-		} else {
-			break
-		}
-	}
-	// Append remaining conversation messages.
-	trimmed = append(trimmed, messages[convStart:]...)
-	req.Messages = trimmed
-
-	log := logger.FromContext(ctx)
-	log.Info("context trimming",
-		"dropped", len(messages)-len(trimmed),
-		"tokens", total, "limit", maxTokens,
-		"tool_tokens", toolTokens, "calibration", correction)
-	// Running out of things to drop is not the same as fitting. Saying so is
-	// the difference between a diagnosable warning and the old log line, which
-	// reported the leftover estimate as though the trim had succeeded.
-	if total > maxTokens {
-		log.Warn("context trimming could not free enough room; request will likely be rejected",
-			"tokens", total, "limit", maxTokens,
-			"tool_tokens", toolTokens, "kept_messages", len(trimmed))
-	}
-	return total
 }

@@ -8,7 +8,7 @@ When `state.data_dir` is set, conversation and rules persist across restarts usi
 - **User/actor context** — that actor's stored rules
 - **Session** — conversation history
 
-Sessions are one per channel/conversation or thread; optional **summarization** after N messages compresses history into a summary and keeps only the last few messages, so token usage stays bounded.
+Sessions are one per channel/conversation or thread. A conversation that nears a model's input budget is **compacted**: the model writes a summary, stored as one message, and later requests carry it in place of the messages before it, so token usage stays bounded (see [Long conversations](configuration.md#long-conversations)).
 
 Pipeline state is currently in-memory only — persistence is planned for Phase 4.
 

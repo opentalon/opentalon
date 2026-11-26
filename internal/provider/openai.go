@@ -353,6 +353,7 @@ type oaiResponseStream struct {
 	finishReason string
 	usage        Usage // the last usage the stream reported, priced by usageFn
 	chatLoop     bool  // the request carried system segments
+	ref          ModelRef
 	currency     string
 	// usageFn prices token counts when a chunk reports usage. Captured as a
 	// closure rather than a back-pointer to the provider so the stream stays
@@ -610,7 +611,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 			Price:              usage.Price,
 			LatencyMS:          latencyMS,
 			ProviderResponseID: oaiResp.ID,
-			ChatLoop:           req.Segments != nil,
+			ChatLoop:           req.chatLoop(),
 			Request:            oaiRequestSize(req, oaiReq, len(body)),
 		})
 	}
@@ -622,6 +623,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 		ToolCalls: toolCalls,
 		Usage:     usage,
 		EventID:   eventID,
+		ModelRef:  NewModelRef(p.id, req.Model),
 	}, nil
 }
 
@@ -727,7 +729,8 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 		emitCtx:   ctx,
 		eventSink: p.eventSink,
 		startTime: start,
-		chatLoop:  req.Segments != nil,
+		chatLoop:  req.chatLoop(),
+		ref:       NewModelRef(p.id, req.Model),
 		currency:  p.currency,
 		usageFn: func(in, out int) Usage {
 			return p.usage(ctx, oaiReq.Model, in, out)
@@ -801,11 +804,11 @@ func (s *oaiResponseStream) Recv() (StreamChunk, error) {
 		// Usage without text: the usage-only final chunk (sent when stream_options.include_usage
 		// is true), or a finishing choice whose empty delta carries the usage.
 		if chunk.Usage != nil && (len(chunk.Choices) == 0 || chunk.Choices[0].Delta.Content == "") {
-			return StreamChunk{Model: chunk.Model, Usage: s.usage}, nil
+			return StreamChunk{Model: chunk.Model, Usage: s.usage, ModelRef: s.ref}, nil
 		}
 
 		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-			sc := StreamChunk{Content: string(chunk.Choices[0].Delta.Content), Model: chunk.Model}
+			sc := StreamChunk{Content: string(chunk.Choices[0].Delta.Content), Model: chunk.Model, ModelRef: s.ref}
 			if chunk.Usage != nil {
 				sc.Usage = s.usage
 			}

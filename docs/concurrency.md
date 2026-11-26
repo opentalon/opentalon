@@ -24,9 +24,9 @@ channel registry's code comments point here.
    with only in-pod serialization. See `internal/sessionlock`.
 
 Stages 4 and 5 are always taken together, in that order (one helper in the
-orchestrator owns the ordering). Background work that rewrites session state —
-the summarizer, which deletes and reinserts message rows — takes the same two
-locks as a turn.
+orchestrator owns the ordering). Background work that rewrites session state
+takes the same two locks as a turn; a compaction runs inside the turn and holds
+them already.
 
 ## Session parallelism
 
@@ -64,7 +64,7 @@ Where per-session state may live, so that multi-pod deployments stay correct:
 
 - **Per-session mutable state lives in the state store or is only mutated
   while holding the session locks.** Anything a later turn — possibly on
-  another pod — must observe (messages, summaries, titles, pending tool
+  another pod — must observe (messages, compactions, titles, pending tool
   calls) is persisted, and rewritten only under the in-pod mutex plus the
   cross-pod turn lease.
 - **In-memory maps are per-pod optimizations.** They must tolerate cross-pod

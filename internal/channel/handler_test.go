@@ -2157,16 +2157,16 @@ func TestHandler_OpenSession_NoteWithoutAReplyIsStoredWithoutATurn(t *testing.T)
 	})
 }
 
-// The key stays taken after summarisation or trimming drops the note's row.
+// The key stays taken after a rollback or trimming drops the note's row.
 func TestHandler_OpenSession_NoteKeyOutlivesItsRow(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		for _, reply := range []string{"true", "false"} {
-			for _, drop := range []string{"summarised", "trimmed"} {
+			for _, drop := range []string{"rolled back", "trimmed"} {
 				t.Run("reply "+reply+", "+drop, func(t *testing.T) {
 					store := kind.open(t)
 					dropRow := map[string]func(){
-						"summarised": func() { _ = store.SetSummary(openedSession, "summary", nil) },
-						"trimmed":    func() { store.trim(t, openedSession) },
+						"rolled back": func() { _ = store.TruncateMessages(openedSession, 0) },
+						"trimmed":     func() { store.trim(t, openedSession) },
 					}[drop]
 					if drop == "trimmed" && store.trim == nil {
 						t.Skip("this store keeps every row")

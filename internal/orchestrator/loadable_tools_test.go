@@ -40,37 +40,34 @@ func TestBuildToolDefinitions_CallableAndLoadable(t *testing.T) {
 			t.Fatalf("register %s: %v", c.Name, err)
 		}
 	}
-	store := &fakeInjectionStateStore{}
 	sessions := state.NewSessionStore("")
 	sessions.Create(state.SessionParams{ID: "s1"})
 	orch := NewWithRules(nativeToolsLLM{&fakeLLM{}}, &fakeParser{}, registry, state.NewMemoryStore(""), sessions,
 		OrchestratorOpts{
-			ContentPreparers:    []ContentPreparerEntry{{Plugin: "p", Action: "prepare"}},
-			InjectionStateStore: store,
+			ContentPreparers: []ContentPreparerEntry{{Plugin: "p", Action: "prepare"}},
 		})
 	ctx := withAllowedPlugins(actor.WithSessionID(context.Background(), "s1"),
 		cachedAllowedPlugins{m: map[string]bool{"p": true}, strict: true})
 
 	for _, tc := range []struct {
 		name               string
-		loaded             []state.KnownToolEntry
+		loaded             map[string]bool
 		callable, loadable []string
 	}{
 		{"nothing loaded", nil,
 			[]string{"_meta__load_tools", "p__always"}, []string{"p__alpha*", "p__zeta*"}},
-		{"one tool loaded", []state.KnownToolEntry{{ToolName: "p__zeta"}},
+		{"one tool loaded", map[string]bool{"p__zeta": true},
 			[]string{"_meta__load_tools", "p__zeta*", "p__always"}, []string{"p__alpha*"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store.store = map[string]state.InjectionState{"s1": {KnownTools: tc.loaded}}
-			callable, loadable, _ := orch.buildToolDefinitions(ctx)
+			callable, loadable := orch.buildToolDefinitions(ctx, tc.loaded)
 			if got := toolMarks(callable); !reflect.DeepEqual(got, tc.callable) {
 				t.Errorf("callable = %v, want %v", got, tc.callable)
 			}
 			if got := toolMarks(loadable); !reflect.DeepEqual(got, tc.loadable) {
 				t.Errorf("loadable = %v, want %v", got, tc.loadable)
 			}
-			againCallable, againLoadable, _ := orch.buildToolDefinitions(ctx)
+			againCallable, againLoadable := orch.buildToolDefinitions(ctx, tc.loaded)
 			if !reflect.DeepEqual(againCallable, callable) || !reflect.DeepEqual(againLoadable, loadable) {
 				t.Errorf("a second build differs: %+v %+v, first %+v %+v", againCallable, againLoadable, callable, loadable)
 			}
@@ -79,7 +76,7 @@ func TestBuildToolDefinitions_CallableAndLoadable(t *testing.T) {
 }
 
 func TestRun_LoadableToolsStayOutOfTheToolsArray(t *testing.T) {
-	orch, llm, exec := loadOnCallOrch(t, &fakeInjectionStateStore{}, callOf("r1", "p__catalog", map[string]string{"q": "x"}))
+	orch, llm, exec := loadOnCallOrch(t, callOf("r1", "p__catalog", map[string]string{"q": "x"}))
 	res := runTurn(t, orch)
 	if len(llm.requests) != 2 {
 		t.Fatalf("requests = %d, want 2 (the call, the answer)", len(llm.requests))
@@ -101,7 +98,7 @@ func TestRun_LoadableToolsStayOutOfTheToolsArray(t *testing.T) {
 	}
 	with, without := *llm.requests[0], *llm.requests[0]
 	without.LoadableTools = nil
-	if a, b := fitRequestToWindow(context.Background(), &with, 0, 0, 1), fitRequestToWindow(context.Background(), &without, 0, 0, 1); a != b {
+	if a, b := estimateRequestTokens(&with), estimateRequestTokens(&without); a != b {
 		t.Errorf("estimate with loadable tools = %d, without = %d, want them equal", a, b)
 	}
 }

@@ -2,7 +2,6 @@ package state
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,13 +24,10 @@ import (
 // cause the client to discard a valid conversation_id.
 var ErrSessionNotFound = errors.New("session not found")
 
-var ErrMessageNotFound = errors.New("message not found")
-
 type Session struct {
 	ID          string             `yaml:"id"`
 	Messages    []provider.Message `yaml:"messages"`
-	Summary     string             `yaml:"summary,omitempty"` // compressed history when summarization is used
-	Title       string             `yaml:"title,omitempty"`   // short LLM-generated label; empty until maybeGenerateTitle has run
+	Title       string             `yaml:"title,omitempty"` // short LLM-generated label; empty until maybeGenerateTitle has run
 	ActiveModel provider.ModelRef  `yaml:"active_model,omitempty"`
 	Metadata    map[string]string  `yaml:"metadata,omitempty"`
 	EntityID    string             `yaml:"entity_id,omitempty"`  // the owner the session was created for (SessionParams.EntityID); empty without a profile
@@ -64,7 +60,7 @@ type SessionStore struct {
 
 // claim is an opener claim or a note reservation: when it was taken, and
 // whether the turn's input has been stored under it since. Like the
-// DB-backed markers, stored survives ClearMessages and SetSummary.
+// DB-backed markers, stored survives ClearMessages and TruncateMessages.
 type claim struct {
 	at     time.Time
 	stored bool
@@ -382,30 +378,13 @@ func (s *SessionStore) Get(id string) (*Session, error) {
 	return sess.clone(), nil
 }
 
-// Messages are copied as values: only SetAnnouncement changes a stored message, and only its announcement.
+// Messages are copied as values: no stored message is ever changed.
 func (sess *Session) clone() *Session {
 	cp := *sess
 	cp.Messages = slices.Clone(sess.Messages)
-	for i := range cp.Messages {
-		cp.Messages[i].Announcement = cloneAnnouncement(cp.Messages[i].Announcement)
-	}
 	cp.Metadata = maps.Clone(sess.Metadata)
 	cp.VerifiedOwner = sess.VerifiedOwner.clone()
 	return &cp
-}
-
-func cloneAnnouncement(a *provider.ToolAnnouncement) *provider.ToolAnnouncement {
-	if a == nil {
-		return nil
-	}
-	return &provider.ToolAnnouncement{Added: slices.Clone(a.Added), Removed: slices.Clone(a.Removed)}
-}
-
-func WithStoreKey(msg provider.Message) provider.Message {
-	if msg.StoreKey == "" {
-		msg.StoreKey = rand.Text()
-	}
-	return msg
 }
 
 func (o *VerifiedOwner) clone() *VerifiedOwner {
@@ -453,26 +432,9 @@ func (s *SessionStore) AddMessageWithMetadata(id string, msg provider.Message, m
 		}
 		held.stored = true
 	}
-	sess.Messages = append(sess.Messages, WithStoreKey(msg))
+	sess.Messages = append(sess.Messages, msg)
 	sess.UpdatedAt = time.Now()
 	return nil
-}
-
-func (s *SessionStore) SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	sess, ok := s.sessions[id]
-	if !ok {
-		return fmt.Errorf("session %q not found", id)
-	}
-	for i := range sess.Messages {
-		if storeKey != "" && sess.Messages[i].StoreKey == storeKey {
-			sess.Messages[i].Announcement = cloneAnnouncement(announcement)
-			return nil
-		}
-	}
-	return fmt.Errorf("session %q: %w", id, ErrMessageNotFound)
 }
 
 func (s *SessionStore) SetModel(id string, model provider.ModelRef) error {
@@ -533,8 +495,9 @@ func (s *SessionStore) SetTitle(id, title string) error {
 	return nil
 }
 
-// SetSummary updates the session summary and trims messages to the given slice (for summarization).
-func (s *SessionStore) SetSummary(id string, summary string, messages []provider.Message) error {
+// TruncateMessages keeps the session's first n messages and deletes the
+// ones after them; the kept messages stay as they are.
+func (s *SessionStore) TruncateMessages(id string, n int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -542,14 +505,14 @@ func (s *SessionStore) SetSummary(id string, summary string, messages []provider
 	if !ok {
 		return fmt.Errorf("session %q not found", id)
 	}
-	sess.Summary = summary
-	sess.Messages = slices.Clone(messages)
+	if n < len(sess.Messages) {
+		sess.Messages = slices.Clip(sess.Messages[:n])
+	}
 	sess.UpdatedAt = time.Now()
 	return nil
 }
 
-// ClearMessages drops the conversation history of a session — messages and
-// the derived summary — while leaving the session row intact (ID, identity
+// ClearMessages drops the conversation history of a session while leaving the session row intact (ID, identity
 // fields, ActiveModel, Metadata, Title, CreatedAt). Used by the clear_session
 // command to reset the LLM context without losing entity/group association
 // or audit events. Title is preserved intentionally: it labels the session
@@ -563,7 +526,6 @@ func (s *SessionStore) ClearMessages(id string) error {
 		return nil
 	}
 	sess.Messages = make([]provider.Message, 0)
-	sess.Summary = ""
 	sess.UpdatedAt = time.Now()
 	return nil
 }

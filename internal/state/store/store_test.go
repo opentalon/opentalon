@@ -243,9 +243,10 @@ func TestSessionStore_SetTitleOnlyFillsEmpty(t *testing.T) {
 	}
 }
 
-func TestSessionStore_SetSummaryRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	db, err := Open(config.DBConfig{}, dir)
+// TruncateMessages keeps the first n messages and drops the rest; a
+// compaction row reads back with the user messages it keeps.
+func TestSessionStore_TruncateMessagesAndCompactionRow(t *testing.T) {
+	db, err := Open(config.DBConfig{}, t.TempDir())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -253,21 +254,26 @@ func TestSessionStore_SetSummaryRoundTrip(t *testing.T) {
 
 	sessStore := NewSessionStore(db, 0, 0)
 	sessStore.Create(state.SessionParams{ID: "s1"})
-	_ = sessStore.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: "a"})
-	err = sessStore.SetSummary("s1", "Summary of past conversation.", []provider.Message{
-		{Role: provider.RoleUser, Content: "last user"},
-		{Role: provider.RoleAssistant, Content: "last assistant"},
-	})
-	if err != nil {
-		t.Fatalf("SetSummary: %v", err)
+	for _, c := range []string{"a", "b", "c"} {
+		_ = sessStore.AddMessage("s1", provider.Message{Role: provider.RoleUser, Content: c})
 	}
-
+	if err := sessStore.TruncateMessages("s1", 2); err != nil {
+		t.Fatalf("TruncateMessages: %v", err)
+	}
+	row := provider.Message{Role: provider.RoleUser, Content: "summary", PromptType: provider.PromptTypeCompaction}
+	if err := sessStore.AddMessageWithMetadata("s1", row, map[string]string{"prompt_type": provider.PromptTypeCompaction, "kept": "2"}); err != nil {
+		t.Fatalf("AddMessageWithMetadata: %v", err)
+	}
 	sess, _ := sessStore.Get("s1")
-	if sess.Summary != "Summary of past conversation." {
-		t.Errorf("Summary = %q", sess.Summary)
+	var got []string
+	for _, m := range sess.Messages {
+		got = append(got, m.Content)
 	}
-	if len(sess.Messages) != 2 {
-		t.Errorf("len(Messages) = %d, want 2", len(sess.Messages))
+	if !reflect.DeepEqual(got, []string{"a", "b", "summary"}) {
+		t.Fatalf("messages = %q, want a, b and the summary", got)
+	}
+	if last := sess.Messages[2]; last.PromptType != provider.PromptTypeCompaction || last.KeptUserMessages != 2 {
+		t.Errorf("compaction row = prompt_type %q, kept %d; want compaction, 2", last.PromptType, last.KeptUserMessages)
 	}
 }
 
@@ -462,48 +468,9 @@ func TestSessionStore_EmptyToolCallsSlicePersistsAsNull(t *testing.T) {
 	}
 }
 
-func TestSessionStore_SetSummaryPreservesToolCalls(t *testing.T) {
-	dir := t.TempDir()
-	db, err := Open(config.DBConfig{}, dir)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	sessStore := NewSessionStore(db, 0, 0)
-	sessStore.Create(state.SessionParams{ID: "s1"})
-
-	calls := []provider.ToolCall{{
-		ID: "call_x", Name: "items.list", Arguments: map[string]string{"q": "drone"},
-	}}
-	err = sessStore.SetSummary("s1", "summary", []provider.Message{
-		{Role: provider.RoleUser, Content: "find a drone"},
-		{Role: provider.RoleAssistant, ToolCalls: calls},
-		{Role: provider.RoleTool, Content: `{"items":[]}`, ToolCallID: "call_x"},
-	})
-	if err != nil {
-		t.Fatalf("SetSummary: %v", err)
-	}
-
-	sess, err := sessStore.Get("s1")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if len(sess.Messages) != 3 {
-		t.Fatalf("len(Messages) = %d, want 3", len(sess.Messages))
-	}
-	if got := sess.Messages[1].ToolCalls; len(got) != 1 || got[0].Name != "items.list" ||
-		got[0].Arguments["q"] != "drone" {
-		t.Errorf("ToolCalls after SetSummary mismatch: %+v", got)
-	}
-	if sess.Messages[2].ToolCallID != "call_x" {
-		t.Errorf("ToolCallID after SetSummary = %q", sess.Messages[2].ToolCallID)
-	}
-}
-
 // TestSessionStore_ThinkingRoundTrip stores an assistant tool-call message
-// with thinking blocks and their fingerprint and reads both back unchanged,
-// after AddMessage and after SetSummary keeps the message. A row without
+// with thinking blocks and their fingerprint and reads both back unchanged.
+// A row without
 // thinking, as every row written before migration 017 is, loads with no
 // blocks; a row holding a plain array of blocks, the column's first form,
 // loads them without a fingerprint, so they are never replayed.
@@ -543,7 +510,7 @@ func TestSessionStore_ThinkingRoundTrip(t *testing.T) {
 		Fingerprint string
 	}
 	want := []loaded{{}, {Blocks: blocks}, {Blocks: blocks, Fingerprint: "fp-1"}}
-	check := func(after string) []provider.Message {
+	check := func(after string) {
 		t.Helper()
 		sess, err := sessStore.Get("s1")
 		if err != nil {
@@ -556,13 +523,8 @@ func TestSessionStore_ThinkingRoundTrip(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("after %s: thinking per message = %q, want %q", after, got, want)
 		}
-		return sess.Messages
 	}
-	msgs := check("AddMessage")
-	if err := sessStore.SetSummary("s1", "summary", msgs); err != nil {
-		t.Fatalf("SetSummary: %v", err)
-	}
-	check("SetSummary")
+	check("AddMessage")
 }
 
 // TestRunPluginMigrations_BinaryPath ensures that passing the directory of the

@@ -17,7 +17,7 @@ import (
 
 // TestSessionStore_ClearMessagesPreservesIdentityAndEvents verifies the
 // contract of the clear_session command after the entity-stripping fix:
-// the conversation history (messages + summary) is wiped, but the session
+// the conversation history is wiped, but the session
 // row itself — including entity_id, group_id, active_model, metadata, and
 // created_at — survives. session_events should also not be touched.
 func TestSessionStore_ClearMessagesPreservesIdentityAndEvents(t *testing.T) {
@@ -38,11 +38,6 @@ func TestSessionStore_ClearMessagesPreservesIdentityAndEvents(t *testing.T) {
 	}
 	if err := store.SetMetadata(sid, "debug", "true"); err != nil {
 		t.Fatalf("SetMetadata: %v", err)
-	}
-	if err := store.SetSummary(sid, "prior summary", []provider.Message{
-		{Role: provider.RoleUser, Content: "summary-anchor"},
-	}); err != nil {
-		t.Fatalf("SetSummary: %v", err)
 	}
 
 	// Seed the audit log — ClearMessages must NOT touch session_events.
@@ -86,9 +81,6 @@ func TestSessionStore_ClearMessagesPreservesIdentityAndEvents(t *testing.T) {
 	if len(after.Messages) != 0 {
 		t.Errorf("Messages len = %d, want 0 (history should be dropped)", len(after.Messages))
 	}
-	if after.Summary != "" {
-		t.Errorf("Summary = %q, want empty (summary is derived from messages)", after.Summary)
-	}
 	if after.ActiveModel != "anthropic/claude-sonnet-4" {
 		t.Errorf("ActiveModel = %q, want preserved", after.ActiveModel)
 	}
@@ -129,8 +121,8 @@ func TestSessionStore_ClearMessagesPreservesIdentityAndEvents(t *testing.T) {
 
 // TestSessionStore_LastUserMessageIDSurvivesTranscriptRewrites pins the
 // storage contract the orchestrator's last_user_message_id relies on: the id
-// lives in session metadata, so summarisation (SetSummary), clear_session
-// (ClearMessages) and writes of other metadata keys (the pending tool call is
+// lives in session metadata, so the confirmation rollback (TruncateMessages),
+// clear_session (ClearMessages) and writes of other metadata keys (the pending tool call is
 // set and cleared on every confirmation) must all leave it in place.
 func TestSessionStore_LastUserMessageIDSurvivesTranscriptRewrites(t *testing.T) {
 	db := openTestDB(t)
@@ -165,10 +157,10 @@ func TestSessionStore_LastUserMessageIDSurvivesTranscriptRewrites(t *testing.T) 
 	}
 	check("setting and clearing another key")
 
-	if err := store.SetSummary(sid, "summary", nil); err != nil {
-		t.Fatalf("SetSummary: %v", err)
+	if err := store.TruncateMessages(sid, 0); err != nil {
+		t.Fatalf("TruncateMessages: %v", err)
 	}
-	check("SetSummary")
+	check("TruncateMessages")
 
 	if err := store.ClearMessages(sid); err != nil {
 		t.Fatalf("ClearMessages: %v", err)
@@ -502,7 +494,7 @@ type claimStore interface {
 	FreeNote(ctx context.Context, sessionID, noteKey string, reservedAt time.Time) error
 	AddMessage(id string, msg provider.Message) error
 	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
-	SetSummary(id string, summary string, messages []provider.Message) error
+	TruncateMessages(id string, n int) error
 	ClearMessages(id string) error
 }
 
@@ -656,10 +648,10 @@ func checkReserveNote(t *testing.T, store claimStore, db *DB) {
 		t.Errorf("note stored %d times, want once", n)
 	}
 	claimStep(t, "stale, note stored", state.ClaimSettled, reserveAt("note-s1", "chapter-1", now.Add(10*time.Minute)))
-	if err := store.SetSummary("note-s1", "summary", []provider.Message{note}); err != nil {
-		t.Fatalf("SetSummary: %v", err)
+	if err := store.TruncateMessages("note-s1", 0); err != nil {
+		t.Fatalf("TruncateMessages: %v", err)
 	}
-	claimStep(t, "stale, transcript summarised", state.ClaimSettled, reserveAt("note-s1", "chapter-1", now.Add(15*time.Minute)))
+	claimStep(t, "stale, transcript rolled back", state.ClaimSettled, reserveAt("note-s1", "chapter-1", now.Add(15*time.Minute)))
 	if err := store.ClearMessages("note-s1"); err != nil {
 		t.Fatalf("ClearMessages: %v", err)
 	}

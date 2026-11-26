@@ -150,49 +150,27 @@ type KnowledgeConfig struct {
 	Dir    string // directory to scan for .md files
 }
 
-// InjectionStateStore is the optional store dependency the orchestrator
-// uses to read/write the per-session tool-promotion bookkeeping
-// (known_tools sticky tiers). When nil, load_tools promotions don't
-// persist across turns.
-// SessionStore (state/store) satisfies this interface in production;
-// tests may inject a fake. The shape matches SessionStore's helpers
-// exactly so structural typing wires both ends without an explicit
-// adapter.
-type InjectionStateStore interface {
-	GetInjectionState(ctx context.Context, sessionID string) (state.InjectionState, error)
-	UpdateInjectionState(ctx context.Context, sessionID string, st state.InjectionState) error
-}
-
 // ToolErrorHandlingConfig is the runtime form of the tool-failure
-// protections. Both fields are opt-in: a zero/unset value turns that
-// protection OFF (no default is substituted). LoopCapPerTurn governs the
-// in-loop "Tool X failed N times" nudge injection; StickyDemotionThreshold
-// governs the session-level demotion flag in known_tools. Successful
-// invocations reset both counters (self-healing).
+// protection. LoopCapPerTurn governs the in-turn "Tool X failed N times"
+// nudge; opt-in: a zero/unset value turns it OFF (no default is substituted).
 type ToolErrorHandlingConfig struct {
-	LoopCapPerTurn          int // consecutive identical-tool errors per turn before nudge injection; <= 0 disables
-	StickyDemotionThreshold int // consecutive session-level errors before known_tools demotion; <= 0 disables
+	LoopCapPerTurn int // consecutive identical-tool errors per turn before nudge injection; <= 0 disables
 }
 
-// OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check, no summarization).
+// OrchestratorOpts holds optional configuration for NewWithRules. Zero values mean defaults (no permission check).
 type OrchestratorOpts struct {
-	CustomRules             []string
-	ContentPreparers        []ContentPreparerEntry
-	ResponseFormatters      []ResponseFormatterEntry
-	LuaScriptPaths          map[string]string
-	PermissionChecker       PermissionChecker
-	PermissionPluginName    string
-	RuntimePromptPath       string                        // optional path to editable prompt file (e.g. data_dir/custom_prompt.txt); appended to system prompt
-	ContextArgProviders     map[string]ContextArgProvider // optional; if nil, default providers (e.g. session_id) are used
-	ContextMessages         int                           // send only last N messages to LLM (0 = all)
-	SummarizeAfterMessages  int                           // 0 = off
-	MaxMessagesAfterSummary int                           // keep this many messages after summarization
-	SummarizePrompt         string                        // empty = default English
-	SummarizeUpdatePrompt   string                        // empty = default English
-	SessionTitlePrompt      string                        // system prompt for the background title-generation pass (maybeGenerateTitle); empty = default in internal/prompts
-	SessionTitlesEnabled    bool                          // master switch for first-turn title generation; default false so tests that don't allocate the extra LLM response don't deadlock on a shared fake. Production (main.go) sets true.
-	PipelineEnabled         bool                          // when true, create Planner from llm
-	PlanTimeout             time.Duration                 // max time for planner LLM call; 0 = default 15s
+	CustomRules          []string
+	ContentPreparers     []ContentPreparerEntry
+	ResponseFormatters   []ResponseFormatterEntry
+	LuaScriptPaths       map[string]string
+	PermissionChecker    PermissionChecker
+	PermissionPluginName string
+	RuntimePromptPath    string                        // optional path to editable prompt file (e.g. data_dir/custom_prompt.txt); appended to system prompt
+	ContextArgProviders  map[string]ContextArgProvider // optional; if nil, default providers (e.g. session_id) are used
+	SessionTitlePrompt   string                        // system prompt for the background title-generation pass (maybeGenerateTitle); empty = default in internal/prompts
+	SessionTitlesEnabled bool                          // master switch for first-turn title generation; default false so tests that don't allocate the extra LLM response don't deadlock on a shared fake. Production (main.go) sets true.
+	PipelineEnabled      bool                          // when true, create Planner from llm
+	PlanTimeout          time.Duration                 // max time for planner LLM call; 0 = default 15s
 	// ConfirmationClassifierEnabled turns on the free-text confirmation
 	// classifier (approve/amend/reject of a pending confirmation reply).
 	// It is INDEPENDENT of PipelineEnabled by design: the classifier uses a
@@ -203,8 +181,6 @@ type OrchestratorOpts struct {
 	PipelineConfig                pipeline.PipelineConfig
 	ConfirmationPlugin            string             // optional; plugin name for confirmation strategy (e.g. "planner")
 	ConfirmationAction            string             // optional; action name (e.g. "check_confirmation")
-	ContextWindow                 int                // model context window in tokens; 0 = no trimming
-	MaxOutputTokens               int                // default model's per-call output budget (max_tokens); reserved from the window when trimming so prompt + completion cannot exceed the context length. 0 = fall back to a flat 10% reserve
 	MaxConcurrentSessions         int                // max sessions running in parallel; default 1 (sequential)
 	GroupPluginLookup             GroupPluginLookup  // optional; when set, filters tool list by profile group
 	UsageRecorder                 UsageRecorder      // optional; when set, records LLM usage after each run
@@ -224,9 +200,9 @@ type OrchestratorOpts struct {
 	ConversationSender            ConversationSender      // optional; when set, _notify can push to an explicit channel+conversation (not just a packed session key)
 	OnStreamChunk                 StreamChunkCallback     // optional; when set and LLM supports streaming, final answers are streamed
 	ShowToolCalls                 string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	InjectionStateStore           InjectionStateStore     // optional; persists known_tools sticky tiers across turns (load_tools promotion)
-	ToolErrorHandling             ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
-	ChannelSender                 ChannelSender           // optional; when set, maybeGenerateTitle pushes the generated title to the originating channel as a session.title frame
+	ToolErrorHandling             ToolErrorHandlingConfig // tool-failure protection; opt-in (a zero/unset threshold disables it)
+	ChannelSender                 ChannelSender           // optional; when set, the session.title and session.compaction frames reach the session's chat clients
+	SessionEvents                 SessionEventReader      // optional; the stored compaction_finished events an expected compaction duration is computed from
 	Repair                        RepairConfig            // post-failure tool-call repair phase; default off
 	// SessionLocker is the cross-pod per-session turn lease. In multi-pod
 	// deployments the in-memory session mutex only serializes turns within
@@ -259,11 +235,11 @@ type RepairConfig struct {
 
 // ChannelSender pushes an OutboundMessage onto the channel that owns the
 // given session. The orchestrator uses it for server-initiated frames
-// that aren't tied to a Run() response — currently only the session-
-// title broadcast emitted by maybeGenerateTitle once the background
-// title-generation call completes. Optional: nil = no live-push, the
-// title still persists on the session row and clients can pick it up on
-// the next list query.
+// that aren't tied to a Run() response: the session-title broadcast
+// maybeGenerateTitle emits once the background title-generation call
+// completes, and the session.compaction frames (compaction.go). Optional:
+// nil = no live-push; the title still persists on the session row and
+// clients can pick it up on the next list query.
 type ChannelSender func(ctx context.Context, sessionID string, msg pkgchannel.OutboundMessage) error
 
 // MemoryStoreInterface is the scoped memory store used for general + per-actor memories.
@@ -285,14 +261,12 @@ type SessionStoreInterface interface {
 	// reloaded client can redraw the Approve/Reject UI. A nil map behaves like
 	// AddMessage.
 	AddMessageWithMetadata(id string, msg provider.Message, metadata map[string]string) error
-	// SetAnnouncement replaces the announcement of the session's message with the given StoreKey;
-	// AddMessage and AddMessageWithMetadata give a message without one a new StoreKey.
-	SetAnnouncement(id, storeKey string, announcement *provider.ToolAnnouncement) error
 	SetModel(id string, model provider.ModelRef) error
-	SetSummary(id string, summary string, messages []provider.Message) error // for summarization; optional, may be no-op
-	SetTitle(id, title string) error                                         // fill the short session label ONLY while empty; never overwrites a title set elsewhere; missing id is a no-op
-	SetMetadata(id, key, value string) error                                 // upsert a single metadata key; empty value removes it
-	// ClearMessages drops Messages and Summary; preserves EntityID, GroupID,
+	// TruncateMessages keeps the session's first n messages, unchanged, and deletes the rest.
+	TruncateMessages(id string, n int) error
+	SetTitle(id, title string) error         // fill the short session label ONLY while empty; never overwrites a title set elsewhere; missing id is a no-op
+	SetMetadata(id, key, value string) error // upsert a single metadata key; empty value removes it
+	// ClearMessages drops Messages; preserves EntityID, GroupID,
 	// ActiveModel, Metadata, and CreatedAt; bumps UpdatedAt. The audit log
 	// (session_events) is untouched. Missing id is a no-op — destructive
 	// operations on this interface are idempotent. Used by the clear_session
@@ -406,20 +380,15 @@ type Orchestrator struct {
 	// definitions, palette computation) and every _meta__load_tools
 	// call — rebuilding the map per read is wasted work that scales
 	// linearly with the LLM's appetite for meta-tool lookups.
-	preparerActions         map[string]bool
-	luaScriptPaths          map[string]string             // optional; plugin name -> path to .lua script (for "lua:name" preparers)
-	permissionChecker       PermissionChecker             // optional; when set, executeCall checks permission before running
-	permissionPluginName    string                        // name of the permission plugin (skip permission check when executing it)
-	runtimePromptPath       string                        // optional; if set, buildSystemPrompt appends file contents
-	contextArgProviders     map[string]ContextArgProvider // name -> extract from context; used to inject args per action
-	contextMessages         int                           // send only last N messages to LLM (0 = all)
-	summarizeAfterMessages  int                           // 0 = off; after this many messages run summarization
-	maxMessagesAfterSummary int                           // keep this many messages after summarization
-	summarizePrompt         string                        // system prompt for initial summarization (config; empty = default English)
-	summarizeUpdatePrompt   string                        // system prompt for updating summary (config; empty = default English)
-	sessionTitlePrompt      string                        // system prompt for the title-generation pass; defaulted to prompts.SessionTitle in NewWithRules
-	sessionTitlesEnabled    bool                          // master switch; when false maybeGenerateTitle returns immediately and the Run-defer spawn is a cheap no-op
-	planner                 *pipeline.Planner             // nil = pipeline disabled
+	preparerActions      map[string]bool
+	luaScriptPaths       map[string]string             // optional; plugin name -> path to .lua script (for "lua:name" preparers)
+	permissionChecker    PermissionChecker             // optional; when set, executeCall checks permission before running
+	permissionPluginName string                        // name of the permission plugin (skip permission check when executing it)
+	runtimePromptPath    string                        // optional; if set, buildSystemPrompt appends file contents
+	contextArgProviders  map[string]ContextArgProvider // name -> extract from context; used to inject args per action
+	sessionTitlePrompt   string                        // system prompt for the title-generation pass; defaulted to prompts.SessionTitle in NewWithRules
+	sessionTitlesEnabled bool                          // master switch; when false maybeGenerateTitle returns immediately and the Run-defer spawn is a cheap no-op
+	planner              *pipeline.Planner             // nil = pipeline disabled
 	// classifier is a Planner used ONLY for ClassifyConfirmation (free-text
 	// confirmation replies). It is deliberately separate from planner: sharing
 	// the planner handle would also switch on the server-side single-step
@@ -445,8 +414,6 @@ type Orchestrator struct {
 	pipelineConfig      pipeline.PipelineConfig
 	confirmationPlugin  string             // optional; plugin for confirmation strategy
 	confirmationAction  string             // optional; action name for confirmation check
-	contextWindow       int                // model context window in tokens; 0 = no trimming
-	maxOutputTokens     int                // reserved output budget (max_tokens) subtracted from the window when trimming; 0 = flat 10% reserve
 	calibrators         *calibrators       // per-model correction between the token estimate and what the provider charges; always allocated
 	groupPluginLookup   GroupPluginLookup  // optional; nil = no group-based filtering
 	usageRecorder       UsageRecorder      // optional; nil = no usage tracking
@@ -471,17 +438,14 @@ type Orchestrator struct {
 	// already running one, so a flapping deterministic trigger can't stack
 	// goroutines. Disjoint domain from sessionMuxes/titleMuxes — only the
 	// keyedMutex mechanics are shared.
-	escalationMuxes     *keyedMutex
-	onStreamChunk       StreamChunkCallback     // optional; when set, final answers stream to caller
-	showToolCalls       string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
-	injectionStateStore InjectionStateStore     // optional; nil = load_tools sticky promotions don't persist across turns
-	toolErrorHandling   ToolErrorHandlingConfig // tool-failure protections; opt-in (zero/unset thresholds disable each protection)
-	toolErrorTracker    *toolErrorTracker       // RFC #249 Phase 4 in-memory consecutive-error counters (per session, per tool); always allocated, gated at use-site by injectionStateStore
-	channelSender       ChannelSender           // optional; nil = title generation persists silently, no live push to clients
+	escalationMuxes   *keyedMutex
+	onStreamChunk     StreamChunkCallback     // optional; when set, final answers stream to caller
+	showToolCalls     string                  // "raw" = debug blocks, "friendly" = short labels, "" = hidden
+	toolErrorHandling ToolErrorHandlingConfig // tool-failure protection; opt-in (a zero/unset threshold disables it)
+	channelSender     ChannelSender           // optional; nil = no live push of session.title / session.compaction frames
+	sessionEvents     SessionEventReader      // optional; nil = no expected compaction duration
 	// titleMuxes serializes per-session title-generation goroutines
-	// without blocking the foreground Run path. Summarization shares the
-	// sessionMux because it triggers after many turns and tolerates one
-	// turn of latency on the next user message; title generation runs on
+	// without blocking the foreground Run path: title generation runs on
 	// every first turn and the user is most likely to follow up quickly,
 	// so the title goroutine must NOT hold sessionMux. The dedicated
 	// instance keeps the no-duplicate-LLM-call guarantee (two channels
@@ -680,12 +644,6 @@ func NewWithRules(
 	sessions SessionStoreInterface,
 	opts OrchestratorOpts,
 ) *Orchestrator {
-	if opts.SummarizePrompt == "" {
-		opts.SummarizePrompt = prompts.SummarizeDefault
-	}
-	if opts.SummarizeUpdatePrompt == "" {
-		opts.SummarizeUpdatePrompt = prompts.SummarizeUpdate
-	}
 	if opts.SessionTitlePrompt == "" {
 		opts.SessionTitlePrompt = prompts.SessionTitle
 	}
@@ -744,7 +702,7 @@ func NewWithRules(
 	// ToolErrorHandling is opt-in: a zero/unset threshold means that
 	// protection is OFF (recordToolOutcome guards on `> 0`). Passed through
 	// as-is — we do NOT substitute a default for zero, so an operator who
-	// omits the config gets neither the loop-cap nudge nor sticky demotion.
+	// omits the config gets no loop-cap nudge.
 	errCfg := opts.ToolErrorHandling
 
 	sessionLocker := opts.SessionLocker
@@ -753,64 +711,56 @@ func NewWithRules(
 	}
 
 	o := &Orchestrator{
-		sessionMuxes:            newKeyedMutex(),
-		sessionLocker:           sessionLocker,
-		semaphore:               semaphore,
-		llm:                     llm,
-		parser:                  parser,
-		registry:                registry,
-		memory:                  memory,
-		sessions:                sessions,
-		guard:                   NewGuard(),
-		rules:                   NewRulesConfig(opts.CustomRules),
-		preparers:               preparers,
-		formatters:              opts.ResponseFormatters,
-		guards:                  guards,
-		preparerActions:         preparerActionSet(preparers, guards),
-		luaScriptPaths:          opts.LuaScriptPaths,
-		permissionChecker:       opts.PermissionChecker,
-		permissionPluginName:    opts.PermissionPluginName,
-		runtimePromptPath:       opts.RuntimePromptPath,
-		contextMessages:         opts.ContextMessages,
-		summarizeAfterMessages:  opts.SummarizeAfterMessages,
-		maxMessagesAfterSummary: opts.MaxMessagesAfterSummary,
-		summarizePrompt:         opts.SummarizePrompt,
-		summarizeUpdatePrompt:   opts.SummarizeUpdatePrompt,
-		sessionTitlePrompt:      opts.SessionTitlePrompt,
-		sessionTitlesEnabled:    opts.SessionTitlesEnabled,
-		planner:                 planner,
-		classifier:              classifier,
-		repairer:                repairer,
-		repairConfig:            repairCfg,
-		pendingPipelines:        make(map[string]pendingPipeline),
-		pipelineConfig:          pipelineCfg,
-		confirmationPlugin:      opts.ConfirmationPlugin,
-		confirmationAction:      opts.ConfirmationAction,
-		contextWindow:           opts.ContextWindow,
-		maxOutputTokens:         opts.MaxOutputTokens,
-		calibrators:             newCalibrators(),
-		groupPluginLookup:       opts.GroupPluginLookup,
-		usageRecorder:           opts.UsageRecorder,
-		pluginCallObserver:      opts.PluginCallObserver,
-		pluginUsageObserver:     opts.PluginUsageObserver,
-		eventSink:               eventSink,
-		snapshotStore:           opts.PromptSnapshotStore,
-		syncActionsPlugin:       opts.SyncActionsPlugin,
-		syncActionsAction:       opts.SyncActionsAction,
-		knowledge:               opts.Knowledge,
-		onStreamChunk:           opts.OnStreamChunk,
-		showToolCalls:           opts.ShowToolCalls,
-		injectionStateStore:     opts.InjectionStateStore,
-		toolErrorHandling:       errCfg,
-		toolErrorTracker:        newToolErrorTracker(),
-		channelSender:           opts.ChannelSender,
-		titleMuxes:              newKeyedMutex(),
-		escalationLimit:         opts.EscalationLimitChecker,
-		budget:                  opts.BudgetReader,
-		defaultModel:            opts.DefaultModel,
-		escalationMuxes:         newKeyedMutex(),
-		conversationSender:      opts.ConversationSender,
-		langDetector:            buildReplyLanguageDetector(),
+		sessionMuxes:         newKeyedMutex(),
+		sessionLocker:        sessionLocker,
+		semaphore:            semaphore,
+		llm:                  llm,
+		parser:               parser,
+		registry:             registry,
+		memory:               memory,
+		sessions:             sessions,
+		guard:                NewGuard(),
+		rules:                NewRulesConfig(opts.CustomRules),
+		preparers:            preparers,
+		formatters:           opts.ResponseFormatters,
+		guards:               guards,
+		preparerActions:      preparerActionSet(preparers, guards),
+		luaScriptPaths:       opts.LuaScriptPaths,
+		permissionChecker:    opts.PermissionChecker,
+		permissionPluginName: opts.PermissionPluginName,
+		runtimePromptPath:    opts.RuntimePromptPath,
+		sessionTitlePrompt:   opts.SessionTitlePrompt,
+		sessionTitlesEnabled: opts.SessionTitlesEnabled,
+		planner:              planner,
+		classifier:           classifier,
+		repairer:             repairer,
+		repairConfig:         repairCfg,
+		pendingPipelines:     make(map[string]pendingPipeline),
+		pipelineConfig:       pipelineCfg,
+		confirmationPlugin:   opts.ConfirmationPlugin,
+		confirmationAction:   opts.ConfirmationAction,
+		calibrators:          newCalibrators(),
+		groupPluginLookup:    opts.GroupPluginLookup,
+		usageRecorder:        opts.UsageRecorder,
+		pluginCallObserver:   opts.PluginCallObserver,
+		pluginUsageObserver:  opts.PluginUsageObserver,
+		eventSink:            eventSink,
+		snapshotStore:        opts.PromptSnapshotStore,
+		syncActionsPlugin:    opts.SyncActionsPlugin,
+		syncActionsAction:    opts.SyncActionsAction,
+		knowledge:            opts.Knowledge,
+		onStreamChunk:        opts.OnStreamChunk,
+		showToolCalls:        opts.ShowToolCalls,
+		toolErrorHandling:    errCfg,
+		channelSender:        opts.ChannelSender,
+		sessionEvents:        opts.SessionEvents,
+		titleMuxes:           newKeyedMutex(),
+		escalationLimit:      opts.EscalationLimitChecker,
+		budget:               opts.BudgetReader,
+		defaultModel:         opts.DefaultModel,
+		escalationMuxes:      newKeyedMutex(),
+		conversationSender:   opts.ConversationSender,
+		langDetector:         buildReplyLanguageDetector(),
 	}
 	// Context arg providers need access to 'o' for allowed_plugins resolution.
 	o.contextArgProviders = defaultContextArgProviders(o, opts.ContextArgProviders)
@@ -1365,9 +1315,8 @@ func (o *Orchestrator) formatResponse(ctx context.Context, result *RunResult) er
 // first, then the cross-pod turn lease (a no-op locker in single-pod mode).
 // The returned unlock releases both in reverse order and must be called
 // exactly once when the turn's critical section ends. It is the ONLY place
-// that encodes this ordering — every session-state-mutating path (Run, the
-// background summarizer) must go through it rather than taking the locks
-// individually.
+// that encodes this ordering — every session-state-mutating path must go
+// through it rather than taking the locks individually.
 //
 // Lock ordering (must always be acquired in this sequence to prevent deadlock):
 //  1. semaphore      – global concurrency cap (Run acquires it before calling this)
@@ -1675,7 +1624,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// success or — if the corrected call was dispatched and failed —
 			// the corrected call plus its real error.
 			execCall := *tc
-			if repairedCall, repairedResult, replaced := o.maybeRepairToolCall(ctx, sessionID, execCall, result, pendingCallPrompt, true); replaced {
+			if repairedCall, repairedResult, replaced := o.maybeRepairToolCall(ctx, execCall, result, pendingCallPrompt, true); replaced {
 				execCall, result = repairedCall, repairedResult
 			}
 			// Record in session history.
@@ -1742,7 +1691,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// confirmation attempt. Without this, the LLM sees prior tool
 			// results and narrates instead of re-calling the tool.
 			if s, _ := sessions.Get(sessionID); s != nil && msgCountAtStart < len(s.Messages) {
-				_ = sessions.SetSummary(sessionID, s.Summary, s.Messages[:msgCountAtStart])
+				_ = sessions.TruncateMessages(sessionID, msgCountAtStart)
 			}
 			// The classifier's reason is written for the log and stays in the
 			// event; the user gets a fixed notice their client can word in
@@ -2302,14 +2251,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			}
 		}
 	}
-	// Run summarization asynchronously so it doesn't block the user's request.
-	backgroundCtx := withSessionModel(context.Background(), sessionModel(ctx))
-	go o.maybeSummarizeSession(backgroundCtx, sessionID)
-	// Title generation also runs in the background, but spawns on Run
-	// return instead of here: it uses its own titleMux (not sessionMux),
-	// so it can't ride summarization's "wait for sessionMux release"
-	// trick to see the assistant message. Deferring the launch to after
-	// Run completes guarantees the goroutine reads session state with
+	// Title generation runs in the background and spawns on Run return: it
+	// uses its own titleMux (not sessionMux), and deferring the launch to
+	// after Run completes guarantees the goroutine reads session state with
 	// the just-finished turn's assistant message already committed. Self-
 	// gates on `Title=="" AND >=1 assistant message` so the cost on
 	// every subsequent Run is one Get() against the inner store.
@@ -2317,6 +2261,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// single-turn call needs no human-facing title, and system sessions are
 	// excluded from the chat-session picker anyway.
 	if p := profile.FromContext(ctx); p == nil || p.Kind != profile.KindSystem {
+		backgroundCtx := withSessionModel(context.Background(), sessionModel(ctx))
 		defer func() { go o.maybeGenerateTitle(backgroundCtx, sessionID) }()
 	}
 
@@ -2329,6 +2274,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var totalInputCost, totalOutputCost float64
 	var totalPrice *float64
 	var modelUsed string
+	spend := func(usage provider.Usage) {
+		totalInputTokens += usage.InputTokens
+		totalOutputTokens += usage.OutputTokens
+		totalInputCost += usage.InputCost
+		totalOutputCost += usage.OutputCost
+		totalPrice = addPrice(totalPrice, usage.Price)
+	}
 	defer func() {
 		if o.usageRecorder != nil {
 			if p := profile.FromContext(ctx); p != nil {
@@ -2339,26 +2291,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		}
 	}()
 
-	// Resolve allowed plugins once per Run call and cache in ctx so that
-	// buildSystemPrompt and executeCall share the result without a second DB hit.
+	// Resolve allowed plugins once per Run call and cache in ctx so that the
+	// system text and executeCall share the result without a second DB hit.
 	ctx = withAllowedPlugins(ctx, o.resolveAllowedPlugins(ctx))
 
-	// Cache static parts of the LLM request once per Run so every agent-loop
-	// round sends a byte-identical prefix. This maximizes provider-side KV
-	// cache hits (vLLM automatic prefix caching, OpenAI prompt caching) and
-	// avoids rebuilding ~25k tokens of tool definitions on every round.
-	var cachedTools, loadableTools []provider.ToolDefinition
-	var loadedRead bool
-	var toolCatalog, inlineCatalog string
+	// Build the system prompt once per Run; every round's request is built
+	// from it (roundRequests).
 	nativeMode := o.supportsNativeTools()
-	if nativeMode {
-		cachedTools, loadableTools, loadedRead = o.buildToolDefinitions(ctx)
-		toolCatalog = o.renderToolCatalog(toolArraySet(cachedTools), o.resolveAllowedPlugins(ctx))
-		inlineCatalog = renderInlineToolCatalog(cachedTools, loadableTools)
+	requests, err := o.newRoundRequests(ctx, sessions, sessionID, o.buildSystemPrompt(ctx, content, true), profileRef)
+	if err != nil {
+		return nil, err
 	}
-	// Build the system prompt once per Run; appendConversation derives each
-	// round's per-round segment from it.
-	sysPrompt := o.buildSystemPromptWithoutCatalog(ctx, content, true)
 
 	// Emit turn_start once per Run — captures the static request shape
 	// (system prompt digest, tool catalogue, model intent) that all agent
@@ -2376,7 +2319,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// confirmation) intentionally bypass this emission: the LLM is not
 	// driving those decisions, so there's no "turn" to start. They still
 	// emit user_message (above) because the user did send input.
-	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, withToolCatalog(sysPrompt, toolCatalog, inlineCatalog).Join(), profileModel, cachedTools))
+	turnStartID := emit.EmitTurnStart(ctx, o.eventSink, o.prepareTurnStart(ctx, requests.turnStartPrompt(), profileModel, requests.tools.callable))
 	// Root every subsequent event in this turn under turn_start by
 	// stamping it as the default parent on ctx. Specific spans (planner,
 	// llm_response, tool_call_extracted) overwrite this slot with their
@@ -2387,9 +2330,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var stripRetries int
 	var toolRetries int // retries when planner expected tools but LLM didn't call any
 	var transientMessages []provider.Message
-	var lastCallSig string          // "plugin__action\x00arg1=val1\x00..." for loop detection
-	var pairingSeen pairingReported // tool-pairing repairs already reported this turn
+	var lastCallSig string // "plugin__action\x00arg1=val1\x00..." for loop detection
 	var repeatCount int
+	toolErrors := turnToolErrors{}
 	var lastUnrun map[string]bool // signatures of the previous response's calls answered without running
 	// Phantom-completion guard state (consumed in the calls==nil branch). The
 	// model sometimes loads a write tool, resolves every parameter through
@@ -2404,99 +2347,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var writeToolLoaded bool // load_tools promoted a non-read-only action this turn
 	var writeToolCalled bool // the model attempted any non-read-only call this turn
 	var actionNudged bool    // the one-shot phantom nudge was already spent
-	ctx = withTurnToolLoads(ctx, newTurnToolLoads())
 	agentRound := 0
 	for i := 0; i < maxAgentLoopIterations; i++ {
 		agentRound = i + 1
-		sess, _ := sessions.Get(sessionID)
 
-		messages, system := o.appendConversation(ctx, sess, withToolCatalog(sysPrompt, toolCatalog, inlineCatalog))
-		messages = append(messages, transientMessages...)
-		transientMessages = nil
-		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
-		if err != nil {
-			return nil, err
-		}
-		if blocked != nil {
-			return blocked, nil
-		}
-
-		// Log system prompt size from the first message (role=system).
-		if len(guardedMessages) > 0 && guardedMessages[0].Role == provider.RoleSystem {
-			log.Debug("system prompt", "round", i+1, "length", len(guardedMessages[0].Content))
-		}
-		log.Debug("LLM request", "round", i+1, "messages", len(guardedMessages))
-		for j, m := range guardedMessages {
-			log.Debug("LLM request message", "index", j+1, "role", m.Role, "content", m.Content)
-		}
-
-		req := &provider.CompletionRequest{Messages: guardedMessages, Segments: &system, ModelRef: profileRef}
-		if profileModel != "" {
-			req.Model = profileModel
-		}
-
-		// Native tool calling: reuse cached tool definitions on every round
-		// so the LLM can chain multiple tool calls. The identical prefix
-		// maximizes provider-side KV cache hits.
-		if nativeMode {
-			req.Tools = cachedTools
-			req.LoadableTools = loadableTools
-			// Record exactly what the model is being sent this round so the
-			// tool-load gate (executeCall / maybeRequireConfirmation) can admit a
-			// call iff its tool was in this array — no per-call state re-read, and
-			// no divergence from what the model actually saw. cachedTools is
-			// rebuilt after a successful load_tools or a tool loaded on call,
-			// so the next round's set widens accordingly; a tool loaded by an
-			// earlier call in THIS response is deliberately absent here, so a
-			// call to it before its next-round schema arrives does not run.
-			sent := make(map[string]struct{}, len(cachedTools))
-			for _, td := range cachedTools {
-				sent[td.Name] = struct{}{}
-			}
-			ctx = withSentNativeTools(ctx, sent)
-			if i == 0 {
-				toolNames := make([]string, len(req.Tools))
-				for ti, td := range req.Tools {
-					toolNames[ti] = td.Name
-				}
-				log.Debug("native tools attached", "count", len(req.Tools), "tools", toolNames)
-			}
-		}
-		log.Debug("tool calling mode", "native", nativeMode, "model", req.Model)
-
-		// Per-turn override (channel metadata) wins over the model default,
-		// which the provider serving the request would otherwise fill.
-		if eff := actor.ReasoningEffort(ctx); eff != "" {
-			req.ReasoningEffort = eff
-		}
-
-		// Enable reasoning on EVERY turn the model supports it — including
-		// tool-attached turns, where the model decides WHICH tool to call.
-		// The earlier heuristic disabled reasoning whenever tools were
-		// attached (assuming chain-of-thought doesn't help tool selection and
-		// only adds ~10s/round); an A/B on gpt-oss-120b showed the opposite —
-		// with reasoning off it skipped/mis-routed tool calls (e.g. answered
-		// "no items" without ever calling list-items). We now run the
-		// configured effort ("high") on the decision turns too, without the
-		// old summary-round downgrade, so reasoning runs at max where it helps.
-		// The effort itself is left empty here; the provider serving the
-		// request resolves it from its model config ("high").
-		if o.supportsReasoning() {
-			req.Reasoning = true
-			if p := profile.FromContext(ctx); p != nil && p.BudgetTokens > 0 {
-				req.BudgetTokens = p.BudgetTokens
-			}
-			log.Debug("reasoning enabled for LLM request", "round", i+1,
-				"has_tools", len(req.Tools) > 0,
-				"budget_tokens", req.BudgetTokens,
-				"reasoning_effort", req.ReasoningEffort)
-		}
-
-		// Use streaming when a callback is registered and the LLM supports it.
 		// Streaming delivers tokens to the channel in real-time while still
-		// collecting the full response for tool-call parsing.
-		// A per-request callback (from context) takes priority over the global one.
-		var resp *provider.CompletionResponse
+		// collecting the full response for tool-call parsing; a per-request
+		// callback (from context) takes priority over the global one.
 		if timing != nil {
 			timing.begin(fmt.Sprintf("llm_round_%d", agentRound))
 		}
@@ -2506,85 +2363,29 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// The spoken version must be out before anything is shown (spoken_reply.go).
 			streamCB = nil
 		}
-		// Repair broken tool-call pairing before measuring, so the estimate
-		// counts what is sent. The fit keeps pairs intact, so once is enough.
-		var pairing toolPairingReport
-		req.Messages, pairing = pairToolMessages(req.Messages)
-		if fresh := pairingSeen.fresh(pairing); !fresh.empty() {
-			o.reportToolPairing(ctx, sessionID, fresh)
+		round, err := requests.round(ctx, transientMessages, streamCB != nil)
+		transientMessages = nil
+		for _, usage := range round.compactions {
+			spend(usage)
 		}
-		// Make it fit, send it, and if the provider says it is still too long,
-		// take its measurement and make it fit again. The refusal is our own
-		// mistake and it is deterministic — without this loop it ended the turn
-		// and every later message in the session, each one rebuilding the same
-		// oversized prompt and being refused again.
-		//
-		// The retry sits here, around the send alone, rather than re-running
-		// the round: replaying the round would re-invoke every guard preparer
-		// for a failure that has nothing to do with them.
-		var estimatedTokens int
-		sentMessages := 0
-		// Before the first fit only the store has set records, so a record on the last user-role message was sent by an earlier request.
-		recordChange := nativeMode && loadedRead && !endsOnRecord(req.Messages)
-		for attempt := 0; ; attempt++ {
-			estimatedTokens = fitRequestToWindow(ctx, req, o.contextWindow, o.maxOutputTokens, o.calibrators.factor(req.Model))
-			if recordChange {
-				recordToolChange(ctx, sessions, sessionID, req)
-			}
-			// The fit only ever drops messages. When the re-fit after a
-			// refusal dropped none (nothing left to drop, or the last tool
-			// call and its result kept together over budget), the provider
-			// would refuse the same request again: give up with its refusal
-			// instead of spending more calls on it.
-			if attempt > 0 && len(req.Messages) >= sentMessages {
-				log.Warn("prompt refused as too long and nothing more can be dropped; giving up",
-					"round", agentRound, "attempt", attempt+1,
-					"messages_count", len(req.Messages), "estimated_tokens", estimatedTokens)
-				break
-			}
-			sentMessages = len(req.Messages)
-			// Always logged, not only under session debug as it used to be:
-			// this is the figure that has to be reconciled against the
-			// provider's own count when a session nears the window, and the
-			// session that overflows is precisely the one nobody had debug
-			// switched on for.
-			log.Info("llm request size",
-				"round", agentRound, "attempt", attempt+1,
-				"messages_count", len(req.Messages),
-				"tools_count", len(req.Tools),
-				"estimated_tokens", estimatedTokens,
-				"calibration", o.calibrators.factor(req.Model))
-
-			if streamCB != nil {
-				resp, err = o.streamComplete(ctx, req)
-			} else {
-				resp, err = o.llm.Complete(ctx, req)
-			}
-			measured, isOverflow := provider.ContextOverflow(err)
-			if !isOverflow || attempt >= maxOverflowRetries {
-				break
-			}
-			o.calibrators.observeRejection(req.Model, estimatedTokens, measured)
-			log.Warn("prompt refused as too long; re-fitting and sending again",
-				"round", agentRound, "attempt", attempt+1,
-				"estimated_tokens", estimatedTokens, "provider_measured", measured,
-				"calibration", o.calibrators.factor(req.Model))
-		}
-		llmDuration := time.Since(llmStart)
 		if err != nil {
-			return nil, fmt.Errorf("LLM completion: %w", err)
+			return nil, err
+		}
+		if round.blocked != nil {
+			return round.blocked, nil
+		}
+		resp := round.resp
+		llmDuration := time.Since(llmStart)
+		if nativeMode {
+			// The tool-load gate (executeCall / maybeRequireConfirmation)
+			// admits a call iff its tool was in the array the model was sent:
+			// a tool loaded by an earlier call in THIS response is absent, so a
+			// call to it before its next-round schema arrives does not run.
+			ctx = withSentNativeTools(ctx, toolArrayNames(round.req.Tools))
 		}
 		written := resp.Content
 		turnSpoken, rest, turnShown := takeSpoken(ctx, written)
 		resp.Content = rest
-		// The provider's own count of what it just charged for. Free, exact,
-		// and the only ground truth the estimate ever gets.
-		answered, estimated := req.Model, estimatedTokens
-		if resp.Fallback {
-			answered = ""
-			estimated = int(float64(estimatedTokens) * o.calibrators.factor("") / o.calibrators.factor(req.Model))
-		}
-		o.calibrators.observe(answered, estimated, resp.Usage.InputTokens)
 		// Stamp the just-emitted llm_response as parent for the rest of
 		// this iteration: tool_call_extracted / tool_call_result / retry
 		// / confirmation events all form a tight subtree under the LLM
@@ -2611,11 +2412,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				_ = sessions.SetModel(sessionID, provider.ModelRef(resp.Model))
 			}
 		}
-		totalInputTokens += resp.Usage.InputTokens
-		totalOutputTokens += resp.Usage.OutputTokens
-		totalInputCost += resp.Usage.InputCost
-		totalOutputCost += resp.Usage.OutputCost
-		totalPrice = addPrice(totalPrice, resp.Usage.Price)
+		spend(resp.Usage)
 
 		// Prefer native tool calls from the API response over text-based parsing.
 		var calls []ToolCall
@@ -2973,7 +2770,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// would have required an approval. When the loop replaces the
 			// pair, the corrected call + its result feed history, error
 			// tracking, and observers below.
-			repairedCall, repairedResult, repaired := o.maybeRepairToolCall(ctx, sessionID, call, toolResult, "", false)
+			repairedCall, repairedResult, repaired := o.maybeRepairToolCall(ctx, call, toolResult, "", false)
 			if repaired {
 				call, toolResult = repairedCall, repairedResult
 			}
@@ -2990,31 +2787,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				log.Warn("tool call error", "plugin", call.Plugin, "action", call.Action, "error", toolResult.Error)
 			}
 
-			// Same-turn load completion for _meta__load_tools and for a tool
-			// loaded on call. Both paths already persisted a sticky
-			// KnownToolEntry for each loaded tool and its companions, and
-			// recorded them in turnToolLoads, so a fresh buildToolDefinitions
-			// picks them up via promotedToolSet and puts their full schemas
-			// into the tools array for the rest of THIS turn. Without the
-			// rebuild below the load would only take effect on the NEXT
-			// request for native-tools-mode providers — the per-Run
-			// cachedTools snapshot built before the loop would still drive
-			// every subsequent round's `req.Tools`, leaving the LLM with the
-			// same catalog-only entry it just loaded.
-			//
-			// Gated on native-tools mode (text-mode LLMs list the loaded tools
-			// inline in the system prompt on the next round; cachedTools is
-			// irrelevant on that path) and, for load_tools, a successful
-			// result (a failed batch promoted nothing).
-			if nativeMode && (toolResult.NotRun || (toolResult.Error == "" &&
-				call.Plugin == metaPluginName && call.Action == metaLoadTools)) {
-				cachedTools, loadableTools, loadedRead = o.buildToolDefinitions(ctx)
-				toolCatalog = o.renderToolCatalog(toolArraySet(cachedTools), o.resolveAllowedPlugins(ctx))
-				inlineCatalog = renderInlineToolCatalog(cachedTools, loadableTools)
-				log.Debug("cachedTools refreshed after a tool load",
-					"tools_count", len(cachedTools), "loaded_on_call", toolResult.NotRun)
-			}
-			// Phantom-completion guard: remember when this load promoted a
+			// Phantom-completion guard: remember when this load loaded a
 			// write tool. Parsed from the executor's result payload — the
 			// `loaded` array holds only the names that actually resolved,
 			// unlike the request args, which may carry failed names. Not
@@ -3023,12 +2796,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				call.Plugin == metaPluginName && call.Action == metaLoadTools {
 				writeToolLoaded = o.loadedAnyWriteTool(toolResult.Content)
 			}
-			// RFC #249 Phase 4 D5: update the consecutive-error counters,
-			// inject the "Tool X failed N times" nudge into the next LLM
-			// iteration when LoopCapPerTurn trips, and flip the Demoted
-			// flag in known_tools when StickyDemotionThreshold trips
-			// (cleared again on the next successful invocation).
-			if warning := o.recordToolOutcome(ctx, sessionID, call, toolResult, repaired); warning != nil {
+			// The "Tool X failed N times" nudge for the next request once
+			// LoopCapPerTurn trips.
+			if warning := o.recordToolOutcome(toolErrors, call, toolResult); warning != nil {
 				transientMessages = append(transientMessages, *warning)
 			}
 			// A refused check never reached an execution, so the plugin-call
@@ -3098,14 +2868,13 @@ func (o *Orchestrator) supportsNativeTools() bool {
 // buildToolDefinitions converts the visible plugin actions into provider.ToolDefinition
 // for native function calling. The tools array carries only the small
 // native set: the always-include core (load_tools + any AlwaysInclude
-// action) plus the tools the session has loaded via load_tools (sticky,
-// capped at maxStickyTools). Every other allowed tool is discoverable via
-// the system-prompt catalog and comes back in loadable. Profile / preparer / UserOnly
-// filters still apply. read is false when the session's loaded tools could not be read.
-func (o *Orchestrator) buildToolDefinitions(ctx context.Context) (callable, loadable []provider.ToolDefinition, read bool) {
+// action) plus loaded, the tools the request's conversation has loaded
+// (loadedTools). Every other allowed tool is discoverable via the
+// system-prompt catalog and comes back in loadable. Profile / preparer /
+// UserOnly filters still apply.
+func (o *Orchestrator) buildToolDefinitions(ctx context.Context, loaded map[string]bool) (callable, loadable []provider.ToolDefinition) {
 	allowedPlugins, _ := ctx.Value(allowedPluginsKey{}).(cachedAllowedPlugins)
 	preparerAction := o.preparerActions
-	promoted, read := o.promotedToolSet(ctx)
 
 	for _, cap := range o.registry.ListCapabilities() {
 		if !o.pluginAllowed(cap, allowedPlugins) {
@@ -3119,11 +2888,11 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) (callable, load
 				continue
 			}
 			// Only the native set lands in the tools array: always-include
-			// core + the session's loaded (sticky) tools. The rest stay in
+			// core + the tools the conversation has loaded. The rest stay in
 			// the catalog until the LLM loads them via load_tools. Same
 			// predicate the tool-load gate enforces (toolIsNative) so the array
 			// the model sees and the calls executeCall admits cannot diverge.
-			native := toolIsNative(action, fqn, promoted)
+			native := toolIsNative(action, fqn, loaded)
 			// Build JSON Schema for parameters.
 			properties := make(map[string]interface{})
 			var required []string
@@ -3171,7 +2940,7 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) (callable, load
 		}
 	}
 	sort.Slice(loadable, func(i, j int) bool { return loadable[i].Name < loadable[j].Name })
-	return callable, loadable, read
+	return callable, loadable
 }
 
 // prepareTurnStart assembles the turn_start event payload from the static
@@ -3895,6 +3664,7 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 	var buf strings.Builder
 	var usage provider.Usage
 	var model string
+	var ref provider.ModelRef
 	var fallback bool
 	showLabels := o.showToolCalls == "friendly" || o.showToolCalls == "raw" || o.showToolCalls == "true"
 	filter := newStreamTagFilter(showLabels)
@@ -3915,6 +3685,9 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 		}
 		if chunk.Model != "" {
 			model = chunk.Model
+		}
+		if chunk.ModelRef != "" {
+			ref = chunk.ModelRef
 		}
 		fallback = fallback || chunk.Fallback
 		if chunk.Usage.InputTokens > 0 || chunk.Usage.OutputTokens > 0 || chunk.Usage.Price != nil {
@@ -3947,6 +3720,7 @@ func (o *Orchestrator) streamComplete(ctx context.Context, req *provider.Complet
 		Usage:    usage,
 		EventID:  eventID,
 		Fallback: fallback,
+		ModelRef: ref,
 	}, nil
 }
 
@@ -4475,114 +4249,6 @@ func hasToolResults(msgs []provider.Message) bool {
 	return false
 }
 
-// firstNonOrphanIndex advances start past any leading tool-result messages
-// whose originating tool-call would be left behind by a cut at start. A native
-// tool result (RoleTool) or a text-format [plugin_output] message must be
-// immediately preceded by its tool-call; if a trim drops the call but keeps the
-// result, the result is orphaned — and the LLM API rejects a dangling tool
-// message. Skipping the leading orphaned results keeps the kept slice a valid
-// transcript. Returns len(msgs) only if every remaining message is a result.
-func firstNonOrphanIndex(msgs []provider.Message, start int) int {
-	for start < len(msgs) && provider.IsToolResult(msgs[start]) {
-		start++
-	}
-	return start
-}
-
-// applySlidingWindow keeps only the last o.contextMessages entries
-// from msgs when configured. When the cut fires, it emits one
-// messages_truncated event with the dropped index range so analytics
-// can correlate context-window pressure across sessions. Returns the
-// (possibly shortened) slice; when contextMessages is zero or the
-// input fits, returns msgs unchanged with no event.
-//
-// Called from appendConversation on every agent-loop round, so a long
-// tool-call session can produce multiple messages_truncated events per
-// turn — each one represents a distinct cut that actually dropped
-// something. Consumers that want "the first cut per turn" should fold by
-// turn_start parent.
-func (o *Orchestrator) applySlidingWindow(ctx context.Context, msgs []provider.Message) []provider.Message {
-	if o.contextMessages <= 0 || len(msgs) <= o.contextMessages {
-		return msgs
-	}
-	dropped := len(msgs) - o.contextMessages
-	// Don't cut between a tool-call and its result — advance the boundary past
-	// any leading orphaned results so the kept slice stays a valid transcript.
-	dropped = firstNonOrphanIndex(msgs, dropped)
-	emit.EmitMessagesTruncated(ctx, o.eventSink, emit.MessagesTruncatedArgs{
-		DroppedSeqFrom: 0,
-		DroppedSeqTo:   dropped - 1,
-		DroppedCount:   dropped,
-	})
-	return msgs[dropped:]
-}
-
-// appendConversation assembles one round's message list from the system prompt
-// buildSystemPrompt built: the leading system message, with the optional
-// summary and the per-round section and reminders folded into its segments,
-// then the sliding-window-trimmed + sanitized + knowledge-context-stripped
-// history. It returns the segments the system message is the join of; nothing
-// changes that message after this.
-func (o *Orchestrator) appendConversation(ctx context.Context, sess *state.Session, system provider.SystemSegments) ([]provider.Message, provider.SystemSegments) {
-	// Sliding-window cutter (config-driven via o.contextMessages); emits
-	// messages_truncated when it fires.
-	convMessages := o.applySlidingWindow(ctx, sess.Messages)
-
-	// Single system block (provider-compliance rule #1): the leading message
-	// built by buildSystemPrompt is the ONLY role:system message in the array.
-	// The conversation summary and the format/don't-repeat reminders fold into
-	// its segments instead of being emitted as separate mid-array system
-	// messages. Anthropic's Messages API has no role:system inside the messages
-	// array — it carries one top-level `system` field — so scattered system
-	// turns made the adapter silently keep only the last one and drop the real
-	// prompt (see provider/anthropic.go toAnthRequest). Folding here keeps both
-	// the OpenAI-compatible and native-Anthropic adapters fed from one block.
-	if sess.Summary != "" {
-		// Ends its line: the per-round segment follows.
-		system.Conversation += "\n\nPrevious conversation summary: " + sess.Summary + "\n"
-	}
-	// The per-round segment as built is the output-format section. Hold it
-	// back until a tool result exists: on the first round the HTML format hint
-	// stops weak models from emitting [tool_call] blocks.
-	if !hasToolResults(sess.Messages) {
-		system.Round = ""
-	}
-	// For weaker / OSS models, repeat the channel format hint — but only after a
-	// tool result exists, so it doesn't compete with the tool-calling
-	// instruction on the first round.
-	if hint := channelFormatHint(ctx); hint != "" && hasToolResults(convMessages) {
-		system.Round += "\n\n[IMPORTANT — output format reminder] " + hint
-	}
-	// Don't-repeat reminder, only with actual prior conversation. Wording is
-	// position-independent ("most recent message") because it now lives in the
-	// system block ahead of the conversation rather than as a trailing turn.
-	if len(convMessages) > 2 {
-		system.Round += "\n\n[IMPORTANT] Answer ONLY the user's most recent message. Do NOT repeat or summarize any earlier answers from this conversation. Be concise."
-	}
-	// A spoken turn's instruction holds in every round, the first included
-	// (spoken_reply.go); the per-round segment sits after the cached prefix.
-	if actor.SpokenReply(ctx) {
-		system.Round += "\n\n" + prompts.OrchestratorSpokenReply
-	}
-	messages := make([]provider.Message, 0, len(sess.Messages)+4)
-	messages = append(messages, provider.Message{Role: provider.RoleSystem, Content: system.Join()})
-
-	// Strip [knowledge_context] from HISTORICAL user messages only (current turn
-	// kept verbatim so preparer-injected RAG reaches the LLM), drop genuinely
-	// poisoned assistant turns via sanitizeHistory, and drop resolved
-	// confirmation exchanges so the model never imitates the gate's narrated
-	// "Shall I proceed?" pattern in plain text.
-	messages = appendStrippingHistoricalKC(messages, sanitizeHistory(stripApprovedConfirmationExchanges(convMessages)))
-
-	// No trimming here. Half of what a request costs is the tool definitions,
-	// which are attached to the request after assembly — so "make it fit" runs
-	// on the finished request, in the agent loop (see fitRequestToWindow).
-	return messages, system
-}
-
-// Context-window accounting — the token estimate, the input budget and the
-// oldest-first trim — lives in context_budget.go.
-
 // agentGroundingPlugin is the config-key of the opentalon-agents plugin, whose
 // show/runs actions back agent-scoped chat grounding.
 const agentGroundingPlugin = "agents"
@@ -4644,19 +4310,12 @@ func (o *Orchestrator) buildAgentGroundingPrompt(ctx context.Context, agentID st
 	return sb.String()
 }
 
-// buildSystemPrompt builds the chat loop's system prompt in segments ordered
-// by how often they change. Round holds the output-format section, which
-// appendConversation leaves out until a tool result exists.
+// buildSystemPrompt builds the turn's system text in segments ordered by how
+// often they change, without the tool catalog: every round adds the one for
+// the tools its conversation has loaded (roundRequests). Round holds the
+// output-format section, which roundSystem leaves out until a tool result
+// exists.
 func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string, includeServerInstructions bool) provider.SystemSegments {
-	segs := o.buildSystemPromptWithoutCatalog(ctx, userMessage, includeServerInstructions)
-	if !o.supportsNativeTools() {
-		return segs
-	}
-	promoted, _ := o.promotedToolSet(ctx)
-	return withToolCatalog(segs, o.renderToolCatalog(promoted, o.resolveAllowedPlugins(ctx)), "")
-}
-
-func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, userMessage string, includeServerInstructions bool) provider.SystemSegments {
 	var fixed, conversation, round strings.Builder
 	var parts []provider.SystemPart
 	part := func(name string, bytes int) {
@@ -5361,17 +5020,16 @@ const maxSessionTitleChars = 120
 //
 // Concurrency: uses the dedicated titleMux, NOT sessionMux. Title
 // generation must run in parallel with the next user turn — see the
-// titleMuxes comment on Orchestrator for the trade-off vs.
-// summarization, which deliberately shares sessionMux.
+// titleMuxes comment on Orchestrator.
 //
 // Parent-id wiring: emits session_title_invoked first, then wraps ctx so
 // the provider's auto-emitted llm_request / llm_response (and the final
 // session_title_generated) all land under that parent. Mirrors the
-// planner_invoked span and the (now-fixed) summarization_triggered span.
+// planner_invoked and compaction_started spans.
 //
 // Cost attribution: no profile_usage row is written here. Title
-// generation is system overhead alongside summarization; per-customer
-// cost remains visible via the nested llm_response in session_events.
+// generation is system overhead; per-customer cost remains visible via the
+// nested llm_response in session_events.
 func (o *Orchestrator) maybeGenerateTitle(ctx context.Context, sessionID string) {
 	if !o.sessionTitlesEnabled || o.llm == nil {
 		return
@@ -5506,124 +5164,6 @@ func normalizeSessionTitle(raw string) string {
 		return ""
 	}
 	return strings.TrimSpace(s[:cut])
-}
-
-// maybeSummarizeSession runs summarization when the session has enough messages and config is set.
-// It takes the same locks as Run (via lockSessionTurn): SetSummary rewrites the
-// session's message rows (delete + reinsert), so it must hold both the in-pod
-// mutex and the cross-pod turn lease — otherwise a concurrent turn on another
-// pod could commit messages that the reinsert then drops permanently.
-func (o *Orchestrator) maybeSummarizeSession(ctx context.Context, sessionID string) {
-	if o.summarizeAfterMessages <= 0 || o.maxMessagesAfterSummary <= 0 {
-		return
-	}
-	unlock, err := o.lockSessionTurn(ctx, sessionID)
-	if err != nil {
-		// ctx ended while waiting for the turn lease. Never rewrite the
-		// message rows without the lock — skip; the next turn re-triggers.
-		slog.Warn("session summarization skipped: session turn lock not acquired", "error", err)
-		return
-	}
-	defer unlock()
-
-	sess, err := o.sessions.Get(sessionID)
-	if err != nil {
-		return
-	}
-	if len(sess.Messages) < o.summarizeAfterMessages {
-		return
-	}
-	// This fires from a background goroutine started in Run with
-	// context.Background(), so actor.SessionID(ctx) would resolve to "" and
-	// session_events writes would fail validation. Wrap the session id back
-	// onto ctx here so the emit helpers can read it via the standard slot.
-	ctx = actor.WithSessionID(ctx, sessionID)
-	keep := o.maxMessagesAfterSummary
-	if keep > len(sess.Messages) {
-		keep = len(sess.Messages)
-	}
-	cut := summaryCut(sess.Messages, keep)
-	if cut == 0 {
-		// Keeping the last messages verbatim means keeping all of them (the
-		// cut stepped back to a tool call at the start): nothing to summarize.
-		return
-	}
-	toSummarize := sess.Messages[:cut]
-	keepMessages := sess.Messages[cut:]
-	summTriggeredID := emit.EmitSummarizationTriggered(ctx, o.eventSink, emit.SummarizationTriggeredArgs{
-		MessageCount: len(sess.Messages),
-		Reason:       "threshold_reached",
-	})
-	// Scope the provider's auto-emitted llm_request / llm_response under
-	// summarization_triggered so summarization's nested LLM call is
-	// reachable from the trigger event the same way the planner span
-	// nests its own LLM events under planner_invoked (see the planner
-	// instrumentation above). Without this scope, the inner llm_response
-	// would land with parent_id = NULL and an analytics consumer would
-	// have to join by time-window to attribute the cost back to the
-	// summarization run.
-	summCtx := emit.WithParent(ctx, summTriggeredID)
-
-	var sysPrompt, userContent string
-	if sess.Summary != "" {
-		sysPrompt = o.summarizeUpdatePrompt
-		if sysPrompt == "" {
-			sysPrompt = prompts.SummarizeUpdate
-		}
-		var b strings.Builder
-		b.WriteString("Previous summary: ")
-		b.WriteString(sess.Summary)
-		b.WriteString("\n\nNew messages:\n")
-		for _, m := range toSummarize {
-			b.WriteString(string(m.Role) + ": " + m.Content + "\n")
-		}
-		userContent = b.String()
-	} else {
-		sysPrompt = o.summarizePrompt
-		if sysPrompt == "" {
-			sysPrompt = prompts.SummarizeDefault
-		}
-		var b strings.Builder
-		for _, m := range toSummarize {
-			b.WriteString(string(m.Role) + ": " + m.Content + "\n")
-		}
-		userContent = b.String()
-	}
-	req := onSessionModel(ctx, &provider.CompletionRequest{
-		Model: "",
-		Messages: []provider.Message{
-			{Role: provider.RoleSystem, Content: sysPrompt},
-			{Role: provider.RoleUser, Content: userContent},
-		},
-	})
-	summarizeStart := time.Now()
-	resp, err := o.llm.Complete(summCtx, req)
-	if err != nil {
-		slog.Warn("session summarization failed", "error", err)
-		// No completed event on LLM failure: triggered-without-completed
-		// is the analytics signal for "summarization started but did not
-		// finish". Same pattern as other failure-mode events in this file.
-		return
-	}
-	newSummary := strings.TrimSpace(resp.Content)
-	if newSummary == "" {
-		return
-	}
-	if err := o.sessions.SetSummary(sessionID, newSummary, keepMessages); err != nil {
-		// Same "triggered without completed" failure signal as the LLM
-		// error path above. SessionStore.SetSummary only errors on
-		// "session not found", which is already excluded by the earlier
-		// Get() check; reaching this branch would require the session
-		// being deleted concurrently between Get and SetSummary. Treated
-		// as a defensive return for that race, no dedicated test.
-		slog.Warn("set session summary failed", "error", err)
-		return
-	}
-	emit.EmitSummarizationCompleted(summCtx, o.eventSink, emit.SummarizationCompletedArgs{
-		Summary:      newSummary,
-		KeptMessages: len(keepMessages),
-		LatencyMS:    time.Since(summarizeStart).Milliseconds(),
-	})
 }
 
 // RunAction executes a single plugin action directly, bypassing the LLM loop.
@@ -6258,9 +5798,7 @@ func appendStrippingHistoricalKC(dst []provider.Message, msgs []provider.Message
 		if m.Role == provider.RoleUser {
 			if i != lastUserIdx {
 				stripped := stripKnowledgeContext(m.Content)
-				if stripped != m.Content {
-					m = provider.Message{Role: m.Role, Content: stripped, Files: m.Files, Announcement: m.Announcement, StoreKey: m.StoreKey}
-				}
+				m.Content = stripped
 			}
 			// Deduplicate knowledge article plugin outputs.
 			m = deduplicateKnowledgeOutput(m, seenKnowledge)
@@ -6300,7 +5838,8 @@ func deduplicateLargeToolResult(m provider.Message, seen map[uint64]bool) provid
 	replaced := m.Content[:start] +
 		"[plugin_output]\n(Same tool result as a previous call — see above.)\n[/plugin_output]" +
 		m.Content[end+len(closeTag):]
-	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files, Announcement: m.Announcement, StoreKey: m.StoreKey}
+	m.Content = strings.TrimSpace(replaced)
+	return m
 }
 
 // deduplicateKnowledgeOutput replaces repeated knowledge article plugin
@@ -6329,19 +5868,21 @@ func deduplicateKnowledgeOutput(m provider.Message, seen map[uint64]bool) provid
 	replaced := m.Content[:start] +
 		"[plugin_output]\n(Same knowledge articles as a previous lookup — see above.)\n[/plugin_output]" +
 		m.Content[end+len(closeTag):]
-	return provider.Message{Role: m.Role, Content: strings.TrimSpace(replaced), Files: m.Files, Announcement: m.Announcement, StoreKey: m.StoreKey}
+	m.Content = strings.TrimSpace(replaced)
+	return m
 }
 
 // isVisibleUserMessage reports whether m is the user's own visible turn: a real
-// user message, not a hidden system-injected note. Hidden notes (e.g. a
-// background job's completion status delivered via the inject path) are stored
-// as role=user but are model-only. Every derivation of "what the user actually
-// said" — reply-language detection, planner intent, RAG query enrichment — must
-// exclude them through this one predicate, or a machine-authored (often English)
-// note would be mistaken for the user's words. Only the model-facing prompt
-// includes hidden turns.
+// user message, not a hidden system-injected note and not a compaction's
+// summary. Hidden notes (e.g. a background job's completion status delivered
+// via the inject path) are stored as role=user but are model-only; a summary is
+// stored as role=user but written by a model. Every derivation of "what the
+// user actually said" — reply-language detection, planner intent, RAG query
+// enrichment — must exclude them through this one predicate, or a
+// machine-authored (often English) text would be mistaken for the user's words.
+// Only the model-facing prompt includes them.
 func isVisibleUserMessage(m provider.Message) bool {
-	return m.Role == provider.RoleUser && m.Visibility != provider.VisibilityHidden
+	return m.Role == provider.RoleUser && m.Visibility != provider.VisibilityHidden && m.PromptType != provider.PromptTypeCompaction
 }
 
 type turnClaimCtxKey struct{}

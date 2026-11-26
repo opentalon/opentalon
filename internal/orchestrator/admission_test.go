@@ -88,9 +88,8 @@ func TestExecuteCall_AdmissionRefusalEvents(t *testing.T) {
 	sessions.Create(state.SessionParams{ID: "s1"})
 	sink := &recordingEventSink{}
 	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
-		EventSink:           sink,
-		InjectionStateStore: &fakeInjectionStateStore{},
-		PermissionChecker:   stubPermissionChecker{denied: "locked", failing: "broken"},
+		EventSink:         sink,
+		PermissionChecker: stubPermissionChecker{denied: "locked", failing: "broken"},
 	})
 	base := emit.WithParent(actor.WithActor(actor.WithSessionID(context.Background(), "s1"), "user:alice"), "turn-parent")
 	unknownArgs := "unknown argument(s) for p__write: title; allowed: name"
@@ -424,10 +423,9 @@ func TestRun_MixedBatchStopsAtTheConfirmation(t *testing.T) {
 	}}}}
 	orch := NewWithRules(llm, &fakeParser{parseFn: func(string) []ToolCall { return nil }}, registry,
 		state.NewMemoryStore(""), sessions, OrchestratorOpts{
-			EventSink:           sink,
-			ConfirmationPlugin:  "conf",
-			ConfirmationAction:  "check",
-			InjectionStateStore: &fakeInjectionStateStore{},
+			EventSink:          sink,
+			ConfirmationPlugin: "conf",
+			ConfirmationAction: "check",
 		})
 
 	res, err := orch.Run(actor.WithSessionID(context.Background(), "s1"), "s1", "read, then write both")

@@ -6,7 +6,7 @@ import (
 	"github.com/opentalon/opentalon/internal/state/store/events"
 )
 
-// Preparer-phase emit helpers (RFC #249). One file groups the six events
+// Preparer-phase emit helpers (RFC #249). One file groups the five events
 // that fire from (or describe) the orchestrator's preparer pass:
 //
 //   - knowledge_retrieval / glossary_retrieval / tool_retrieval — one
@@ -16,8 +16,6 @@ import (
 //     injected, which tools tier-promoted, etc.). Always emitted exactly
 //     once per turn; the Mode field discriminates Phase-2 instrumentation
 //     from Phase-3+ dedup behaviour.
-//   - messages_truncated — emitted when the sliding-window cutter drops
-//     messages from the LLM-bound message slice.
 //
 // EmitToolRetrieval used to live in planner.go but moves here because
 // tool retrieval is preparer-phase scope, not planner scope. Callers
@@ -156,31 +154,6 @@ func EmitPreparerDecision(ctx context.Context, sink Sink, args PreparerDecisionA
 		Mode:      args.Mode,
 		Knowledge: args.Knowledge,
 		Tools:     args.Tools,
-	}, 0)
-}
-
-// MessagesTruncatedArgs describes one sliding-window cutter pass.
-// DroppedSeqRange is [from, to] inclusive indexed into sess.Messages
-// (position-based, since the in-memory message slice does not carry a
-// seq column).
-type MessagesTruncatedArgs struct {
-	DroppedSeqFrom int
-	DroppedSeqTo   int
-	DroppedCount   int
-}
-
-// EmitMessagesTruncated writes one messages_truncated event. Callers
-// should only emit when DroppedCount > 0; the helper does not guard
-// against a no-op emit so the orchestrator's logic stays explicit.
-func EmitMessagesTruncated(ctx context.Context, sink Sink, args MessagesTruncatedArgs) string {
-	var seqRange []int
-	if args.DroppedCount > 0 {
-		seqRange = []int{args.DroppedSeqFrom, args.DroppedSeqTo}
-	}
-	return send(ctx, sink, events.TypeMessagesTruncated, events.MessagesTruncatedPayload{
-		Header:          events.Header{V: events.MessagesTruncatedVersion},
-		DroppedSeqRange: seqRange,
-		DroppedCount:    args.DroppedCount,
 	}, 0)
 }
 

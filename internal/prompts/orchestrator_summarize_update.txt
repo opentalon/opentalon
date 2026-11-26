@@ -1,1 +1,0 @@
-Update the given conversation summary with the following new exchange. Keep the result to a short paragraph.
