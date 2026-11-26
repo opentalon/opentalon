@@ -68,16 +68,19 @@ func (e *groundingExecutor) Execute(_ context.Context, call ToolCall) ToolResult
 
 // segmentsFixture is an agent-scoped chat whose system prompt carries every
 // section of the segment table: a session with a summary and history, a
-// channel format, a user name, a reply language, a knowledge catalog,
-// additional instructions, a plugin with server instructions, the tool
-// catalog and the subprocess instructions.
+// channel format, a user name, a reply language, an operator's rule, a
+// knowledge catalog, additional instructions, a plugin with server
+// instructions, the tool catalog and the subprocess instructions.
 type segmentsFixture struct {
 	orch      *Orchestrator
 	ctx       context.Context
 	grounding *groundingExecutor
 }
 
-const segmentsUserMessage = "Please list every item that is low on stock today."
+const (
+	segmentsUserMessage  = "Please list every item that is low on stock today."
+	segmentsOperatorRule = "Ask before deleting an item."
+)
 
 func newSegmentsFixture(t *testing.T, llm LLMClient) segmentsFixture {
 	t.Helper()
@@ -115,6 +118,7 @@ func newSegmentsFixture(t *testing.T, llm LLMClient) segmentsFixture {
 	}
 
 	orch := NewWithRules(llm, DefaultParser, registry, state.NewMemoryStore(""), sessions, OrchestratorOpts{
+		CustomRules:       []string{segmentsOperatorRule},
 		RuntimePromptPath: instructions,
 		Subprocess:        SubprocessConfig{Enabled: true},
 	})
