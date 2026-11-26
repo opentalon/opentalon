@@ -7,8 +7,6 @@
 # Settings → Actions → General: allow GitHub Actions to create and approve pull requests.
 # A push to a pull request from a fork gets no secrets, so Talooner can't review it;
 # a member's !talooner comment can (comments from others are ignored).
-# Advice mode is on: blocking verdicts report as advisory and exit 0. Remove
-# TALOONER_ADVICE_MODE below to let Talooner actually block merges.
 # Branch protection: require the talooner check, not the review job, to block merges (a !talooner run's job never reports on the PR's commit).
 name: talooner
 on:
@@ -105,7 +103,6 @@ jobs:
           TALOONER_MODEL: claude-haiku-5-5
           CDM_URL: ${{ vars.CDM_URL }}
           CDM_TOKEN: ${{ secrets.CDM_TOKEN }}
-          TALOONER_ADVICE_MODE: "1"
           TALOONER_CHECK_RUN_ID: ${{ job.check_run_id }}
           GITHUB_TOKEN: ${{ github.token }}
   # Resolving a review thread needs contents: write, which the Talooner image
