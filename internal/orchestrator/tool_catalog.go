@@ -63,7 +63,9 @@ func (o *Orchestrator) loadedTools(ctx context.Context, conv []provider.Message)
 
 // callsOf returns the calls an assistant message makes: its native calls, or
 // the one, without an id, of a text-format row as formatToolCallMessage wrote
-// it, answered by the [plugin_output] row after it.
+// it, answered by the [plugin_output] row after it. The names of a
+// _meta__load_tools row are read whole: parseInlineToolCall splits arguments
+// at ", ", which a list of names may hold.
 func callsOf(m provider.Message) []provider.ToolCall {
 	if m.Role != provider.RoleAssistant {
 		return nil
@@ -78,6 +80,14 @@ func callsOf(m provider.Message) []provider.ToolCall {
 	call, ok := parseInlineToolCall(body, 1)
 	if !ok {
 		return nil
+	}
+	if call.Plugin == metaPluginName && call.Action == metaLoadTools {
+		for _, key := range []string{"names", "name"} {
+			if _, names, found := strings.Cut(body, "("+key+"="); found {
+				call.Args = map[string]string{key: strings.TrimSuffix(strings.TrimSpace(names), ")")}
+				break
+			}
+		}
 	}
 	return []provider.ToolCall{{Name: toolFQN(call.Plugin, call.Action), Arguments: call.Args}}
 }

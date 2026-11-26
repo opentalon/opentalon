@@ -1011,6 +1011,21 @@ func TestLoad_AlwaysIncludedToolLoadsItsCompanionsByName(t *testing.T) {
 	}
 }
 
+// A text-format _meta__load_tools row loads every tool its list names, also
+// when the list separates them with ", ".
+func TestLoad_TextFormatRowLoadsEveryNamedTool(t *testing.T) {
+	orch, _, _ := loadOnCallOrch(t)
+	conv := []provider.Message{
+		{Role: provider.RoleAssistant, Content: formatToolCallMessage(ToolCall{Plugin: metaPluginName, Action: metaLoadTools,
+			Args: map[string]string{"names": "p__catalog, p__other"}})},
+		{Role: provider.RoleUser, Content: "[plugin_output]loaded[/plugin_output]"},
+	}
+	want := []string{"p__catalog", "p__list", "p__lookup", "p__other"}
+	if got := sortedSet(orch.loadedTools(sentCtx("p__always"), conv)); !reflect.DeepEqual(got, want) {
+		t.Errorf("loaded %v, want %v", got, want)
+	}
+}
+
 func toolSet(names []string) map[string]bool {
 	set := make(map[string]bool, len(names))
 	for _, n := range names {
