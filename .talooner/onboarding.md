@@ -34,7 +34,6 @@ on — backend and model as configured by `CDM_URL` / `CDM_MODEL`
 
 ## Notes
 
-- Advice mode for the first weeks.
 - Check runs come from the CI jobs named `Test` and `Lint`.
 - One reviewer target (`review.opentalon`) for every gate; no separate "senior" concept.
 - The review is requested by assigning `user.owner`: with `GITHUB_TOKEN`, GitHub rejects
