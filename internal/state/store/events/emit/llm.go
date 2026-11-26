@@ -50,8 +50,7 @@ func EmitLLMRequest(ctx context.Context, sink Sink, args LLMRequestArgs) string 
 // values are passed through unchanged; the payload uses omitempty so
 // unpriced models simply leave the fields out.
 //
-// Request is the size of the request the call answers, computed by the
-// provider from the body it sent.
+// Request is computed by the provider from the body this call sent.
 type LLMResponseArgs struct {
 	RawContent         string
 	NativeToolCallsRaw json.RawMessage

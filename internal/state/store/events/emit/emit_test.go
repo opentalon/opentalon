@@ -276,9 +276,6 @@ func TestEmitLLMResponse_CacheFields(t *testing.T) {
 	}
 }
 
-// TestEmitLLMResponse_RequestSize checks the version 4 payload: the request
-// size passes through as body_bytes and blocks, count only where it is set,
-// and stays absent when the provider computed none.
 func TestEmitLLMResponse_RequestSize(t *testing.T) {
 	sink := &fakeSink{}
 	EmitLLMResponse(context.Background(), sink, LLMResponseArgs{RawContent: "ok", Request: &events.RequestSize{

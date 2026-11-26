@@ -13,19 +13,19 @@ import (
 	"github.com/opentalon/opentalon/internal/state/store/events"
 )
 
-// sizeTestSegments names two parts of Fixed and leaves "Other.\n" unnamed.
 var sizeTestSegments = SystemSegments{
-	Fixed:         "Preamble.\nRules.\nOther.\n",
-	FixedParts:    []SystemPart{{Name: events.BlockPreamble, Bytes: 10}, {Name: events.BlockRulesBuiltin, Bytes: 7}},
+	Fixed: "Preamble.\nRules.\nOther.\n",
+	FixedParts: []SystemPart{
+		{Name: events.BlockPreamble, Bytes: len("Preamble.\n")}, {Name: events.BlockRulesBuiltin, Bytes: len("Rules.\n")},
+	},
 	Catalog:       "Catalog.\n",
 	InlineCatalog: "Inline catalog.\n",
 	Conversation:  "Conversation.\n",
 	Round:         "Round.",
 }
 
-// sizeTestRequest is a chat-loop request with a tool round in its history:
-// a fixed and a loaded on-demand tool, one more loadable tool, a tool call
-// and its result.
+const laterSystem = "Reminder.\n"
+
 func sizeTestRequest(segs *SystemSegments) *CompletionRequest {
 	system := sizeTestSegments.Join()
 	return &CompletionRequest{
@@ -46,9 +46,6 @@ func sizeTestRequest(segs *SystemSegments) *CompletionRequest {
 	}
 }
 
-// wireBlocks returns the blocks of a body read from the body itself, by the
-// definition of events.RequestBlock, with the given system parts: the
-// tools, the system text, then every other message by its content as sent.
 func wireBlocks(t *testing.T, body []byte, system func(t *testing.T, text int) []events.RequestBlock) []events.RequestBlock {
 	t.Helper()
 	var sent struct {
@@ -83,7 +80,6 @@ func wireBlocks(t *testing.T, body []byte, system func(t *testing.T, text int) [
 		var s string
 		return s, json.Unmarshal(raw, &s) == nil
 	}
-	messages := sent.Messages
 	systemText := 0
 	if s, ok := text(sent.System); ok {
 		systemText = len(s)
@@ -95,19 +91,22 @@ func wireBlocks(t *testing.T, body []byte, system func(t *testing.T, text int) [
 		for _, p := range parts {
 			systemText += len(p.Text)
 		}
-	} else if s, _ := text(messages[0].Content); messages[0].Role == "system" {
-		systemText = len(s)
-		messages = messages[1:]
+	}
+	for _, m := range sent.Messages {
+		if s, ok := text(m.Content); ok && m.Role == "system" {
+			systemText += len(s)
+		}
 	}
 	blocks = append(blocks, system(t, systemText)...)
 	var history, results counted
-	for _, m := range messages {
+	for _, m := range sent.Messages {
 		s, isText := text(m.Content)
 		var parts []struct {
 			Type    string          `json:"type"`
 			Content json.RawMessage `json:"content"`
 		}
 		switch {
+		case isText && m.Role == "system":
 		case m.Role == "tool":
 			results.add(len(s))
 		case isText:
@@ -129,10 +128,7 @@ func wireBlocks(t *testing.T, body []byte, system func(t *testing.T, text int) [
 	return blocks
 }
 
-// namedSystem returns the system blocks of sizeTestSegments with catalog as
-// the tool index: the named parts, then the rest of the text sent, which is
-// the one unnamed line of Fixed.
-func namedSystem(catalog string) func(t *testing.T, text int) []events.RequestBlock {
+func namedSystem(catalog, later string) func(t *testing.T, text int) []events.RequestBlock {
 	return func(t *testing.T, text int) []events.RequestBlock {
 		named := []events.RequestBlock{
 			{Name: events.BlockPreamble, Bytes: len("Preamble.\n")},
@@ -145,8 +141,8 @@ func namedSystem(catalog string) func(t *testing.T, text int) []events.RequestBl
 		for _, b := range named {
 			rest -= b.Bytes
 		}
-		if rest != len("Other.\n") {
-			t.Errorf("the system text sent has %d bytes beside the named parts, want %d", rest, len("Other.\n"))
+		if unnamed := len("Other.\n" + later); rest != unnamed {
+			t.Errorf("the system text sent has %d bytes beside the named parts, want %d", rest, unnamed)
 		}
 		return append(named, events.RequestBlock{Name: events.BlockSystemOther, Bytes: rest})
 	}
@@ -158,12 +154,9 @@ func wholeSystem(name string) func(t *testing.T, text int) []events.RequestBlock
 	}
 }
 
-// sizeTestPath is one way a provider sends a request; the tool index of
-// sizeTestSegments it sends is catalog.
 type sizeTestPath struct {
-	name    string
-	catalog string
-	send    func(url string, sink *recordingEventSink, req *CompletionRequest) error
+	name, catalog, systemJoin string
+	send                      func(url string, sink *recordingEventSink, req *CompletionRequest) error
 }
 
 func sizeTestPaths() []sizeTestPath {
@@ -176,11 +169,11 @@ func sizeTestPaths() []sizeTestPath {
 		}
 	}
 	return []sizeTestPath{
-		{"openai", "Catalog.\n", func(url string, sink *recordingEventSink, req *CompletionRequest) error {
+		{"openai", "Catalog.\n", "", func(url string, sink *recordingEventSink, req *CompletionRequest) error {
 			_, err := NewOpenAIProvider("openai", url, "key", nil, WithOpenAISessionEventSink(sink)).Complete(context.Background(), req)
 			return err
 		}},
-		{"openai stream", "Catalog.\n", func(url string, sink *recordingEventSink, req *CompletionRequest) error {
+		{"openai stream", "Catalog.\n", "", func(url string, sink *recordingEventSink, req *CompletionRequest) error {
 			stream, err := NewOpenAIProvider("openai", url, "key", nil, WithOpenAISessionEventSink(sink)).
 				Stream(context.Background(), req)
 			if err != nil {
@@ -194,13 +187,12 @@ func sizeTestPaths() []sizeTestPath {
 				}
 			}
 		}},
-		{"anthropic", "Catalog.\n", anthropic(nil)},
-		{"anthropic inline_tools prompt cache", "Inline catalog.\n",
+		{"anthropic", "Catalog.\n", "\n\n", anthropic(nil)},
+		{"anthropic inline_tools prompt cache", "Inline catalog.\n", "",
 			anthropic([]Feature{FeatureTools, FeatureInlineTools}, WithAnthropicPromptCache(true))},
 	}
 }
 
-// sizeTestServer answers every request of each path with "ok".
 func sizeTestServer(t *testing.T, bodies *[][]byte) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -220,15 +212,15 @@ func sizeTestServer(t *testing.T, bodies *[][]byte) *httptest.Server {
 	return server
 }
 
-// TestLLMResponseCarriesTheRequestSize checks the request blocks on the
-// llm_response event of every provider path against the body sent: on a
-// chat-loop request the named parts of the system text and the rest, on a
-// request whose system message the segments no longer describe the whole
-// text as system_other, on any other request the whole text as system.
 func TestLLMResponseCarriesTheRequestSize(t *testing.T) {
 	changed := func() *CompletionRequest {
 		req := sizeTestRequest(&sizeTestSegments)
 		req.Messages[0].Content += "Guarded.\n"
+		return req
+	}
+	later := func(segs *SystemSegments) *CompletionRequest {
+		req := sizeTestRequest(segs)
+		req.Messages = append(req.Messages, Message{Role: RoleSystem, Content: laterSystem})
 		return req
 	}
 	for _, path := range sizeTestPaths() {
@@ -237,9 +229,11 @@ func TestLLMResponseCarriesTheRequestSize(t *testing.T) {
 			req    *CompletionRequest
 			system func(t *testing.T, text int) []events.RequestBlock
 		}{
-			{"chat loop", sizeTestRequest(&sizeTestSegments), namedSystem(path.catalog)},
+			{"chat loop", sizeTestRequest(&sizeTestSegments), namedSystem(path.catalog, "")},
 			{"chat loop, system message changed", changed(), wholeSystem(events.BlockSystemOther)},
+			{"chat loop, a later system message", later(&sizeTestSegments), namedSystem(path.catalog, path.systemJoin+laterSystem)},
 			{"outside the chat loop", sizeTestRequest(nil), wholeSystem(events.BlockSystem)},
+			{"outside the chat loop, a later system message", later(nil), wholeSystem(events.BlockSystem)},
 		} {
 			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
 				var bodies [][]byte
@@ -263,8 +257,7 @@ func TestLLMResponseCarriesTheRequestSize(t *testing.T) {
 				if !reflect.DeepEqual(payload.Request, want) {
 					t.Errorf("request:\n got %+v\nwant %+v\nbody %s", *payload.Request, *want, bodies[0])
 				}
-				// Every path sends the history and the tool result; inline_tools
-				// holds the loaded and the loadable on-demand tool back.
+				// inline_tools holds back the loaded and the loadable on-demand tool.
 				counts := map[string]int{}
 				for _, b := range want.Blocks {
 					counts[b.Name] = b.Count
@@ -288,8 +281,6 @@ func TestLLMResponseCarriesTheRequestSize(t *testing.T) {
 	}
 }
 
-// TestFailedCallCarriesNoRequestSize: a call the provider refuses writes its
-// error event, as before, and no response event with a request size.
 func TestFailedCallCarriesNoRequestSize(t *testing.T) {
 	for _, path := range sizeTestPaths() {
 		t.Run(path.name, func(t *testing.T) {

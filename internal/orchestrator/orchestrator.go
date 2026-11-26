@@ -4483,16 +4483,10 @@ func hasToolResults(msgs []provider.Message) bool {
 // message. Skipping the leading orphaned results keeps the kept slice a valid
 // transcript. Returns len(msgs) only if every remaining message is a result.
 func firstNonOrphanIndex(msgs []provider.Message, start int) int {
-	for start < len(msgs) && isToolResultMessage(msgs[start]) {
+	for start < len(msgs) && provider.IsToolResult(msgs[start]) {
 		start++
 	}
 	return start
-}
-
-// isToolResultMessage reports whether m is a tool result: a native RoleTool
-// message or a text-format [plugin_output] user message.
-func isToolResultMessage(m provider.Message) bool {
-	return m.Role == provider.RoleTool || (m.Role == provider.RoleUser && strings.Contains(m.Content, "[plugin_output]"))
 }
 
 // applySlidingWindow keeps only the last o.contextMessages entries
@@ -4664,13 +4658,13 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 
 func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, userMessage string, includeServerInstructions bool) provider.SystemSegments {
 	var fixed, conversation, round strings.Builder
-	// parts names what the steps below write to fixed.
 	var parts []provider.SystemPart
 	part := func(name string, bytes int) {
 		if bytes > 0 {
 			parts = append(parts, provider.SystemPart{Name: name, Bytes: bytes})
 		}
 	}
+	since := func(from int) int { return provider.TextBytes(fixed.String()[from:]) }
 
 	// Agent-scoped chat: when the turn is scoped to a workflow agent, lead with
 	// that agent's context (its program + recent runs) so the assistant answers
@@ -4679,7 +4673,7 @@ func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, user
 	if agentID := actor.AgentID(ctx); agentID != "" {
 		if grounding := o.buildAgentGroundingPrompt(ctx, agentID); grounding != "" {
 			fixed.WriteString(grounding)
-			part(events.BlockGrounding, len(grounding))
+			part(events.BlockGrounding, provider.TextBytes(grounding))
 		}
 	}
 
@@ -4693,11 +4687,11 @@ func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, user
 	} else {
 		fixed.WriteString(prompts.OrchestratorPreamble)
 	}
-	part(events.BlockPreamble, fixed.Len()-from)
+	part(events.BlockPreamble, since(from))
 
 	rules, operatorBytes := o.rules.promptSection()
 	fixed.WriteString(rules)
-	part(events.BlockRulesBuiltin, len(rules)-operatorBytes)
+	part(events.BlockRulesBuiltin, provider.TextBytes(rules)-operatorBytes)
 	part(events.BlockRulesOperator, operatorBytes)
 
 	// Always-on knowledge catalog: titles + slugs of pullable articles, so the
@@ -4705,7 +4699,7 @@ func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, user
 	// cache; a stale cache triggers a non-blocking background refresh.
 	if catalog := o.knowledgeCatalogSection(); catalog != "" {
 		fixed.WriteString(catalog)
-		part(events.BlockKnowledgeCatalog, len(catalog))
+		part(events.BlockKnowledgeCatalog, provider.TextBytes(catalog))
 	}
 
 	if o.runtimePromptPath != "" {
@@ -4714,7 +4708,7 @@ func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, user
 			fixed.WriteString("\n## Additional instructions (editable from chat)\n")
 			fixed.WriteString(string(data))
 			fixed.WriteString("\n\n")
-			part(events.BlockRuntimeInstructions, fixed.Len()-from)
+			part(events.BlockRuntimeInstructions, since(from))
 		}
 	}
 
@@ -4781,7 +4775,7 @@ func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, user
 			}
 		}
 		fixed.WriteString("\n")
-		part(events.BlockPluginPrefix+cap.Name, fixed.Len()-from)
+		part(events.BlockPluginPrefix+cap.Name, since(from))
 	}
 
 	if o.subprocessConfig.Enabled {

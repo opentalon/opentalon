@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,12 +20,23 @@ import (
 	"github.com/opentalon/opentalon/internal/provider"
 )
 
-// requestBodiesFile holds the sha256 of every request body
-// TestRun_RequestBodiesStayTheSame sends, keyed by variant and request number.
 const requestBodiesFile = "testdata/request_bodies.json"
 
-// bodyServer answers the requests of one variant in order, the last answer
-// for every later request, and keeps each body it was sent.
+var segmentsOpenAIAnswers = []string{
+	`{"id":"r1","model":"m","choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"c1",` +
+		`"type":"function","function":{"name":"inventory__list-items","arguments":"{}"}}]},"finish_reason":"tool_calls"}],` +
+		`"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+	`{"id":"r2","model":"m","choices":[{"message":{"role":"assistant","content":"Two items are low on stock."},` +
+		`"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+}
+
+var segmentsAnthropicAnswers = []string{
+	`{"id":"r1","model":"m","content":[{"type":"tool_use","id":"t1","name":"inventory__list-items","input":{}}],` +
+		`"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`,
+	`{"id":"r2","model":"m","content":[{"type":"text","text":"Two items are low on stock."}],` +
+		`"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+}
+
 type bodyServer struct {
 	mu      sync.Mutex
 	answers []string
@@ -51,22 +63,10 @@ func (s *bodyServer) sent() [][]byte {
 	return append([][]byte(nil), s.bodies...)
 }
 
-// TestRun_RequestBodiesStayTheSame sends the two rounds of the segments
-// fixture's turn (a tool call, then the answer) through each provider, the
-// second round once more as a stream, and compares every body with the digest
-// recorded for it. A deliberate change to a prompt or to how a request is put
-// together records them again:
-//
-//	UPDATE_REQUEST_BODIES=1 go test -run TestRun_RequestBodiesStayTheSame ./internal/orchestrator/
+// Re-record after a deliberate change: UPDATE_REQUEST_BODIES=1 go test -run TestRun_RequestBodiesStayTheSame ./internal/orchestrator/
 func TestRun_RequestBodiesStayTheSame(t *testing.T) {
 	tools := []provider.Feature{provider.FeatureTools}
 	inline := []provider.Feature{provider.FeatureTools, provider.FeatureInlineTools}
-	anthropicAnswers := []string{
-		`{"id":"r1","model":"m","content":[{"type":"tool_use","id":"t1","name":"inventory__list-items","input":{}}],` +
-			`"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`,
-		`{"id":"r2","model":"m","content":[{"type":"text","text":"Two items are low on stock."}],` +
-			`"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
-	}
 	anthropic := func(features []provider.Feature, opts ...provider.AnthropicOption) func(string) provider.Provider {
 		return func(url string) provider.Provider {
 			return provider.NewAnthropicProvider("anth", url, "key", []provider.ModelInfo{{ID: "m", Features: features}}, opts...)
@@ -80,24 +80,18 @@ func TestRun_RequestBodiesStayTheSame(t *testing.T) {
 	}{
 		{
 			name: "openai",
-			answers: []string{
-				`{"id":"r1","model":"m","choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"c1",` +
-					`"type":"function","function":{"name":"inventory__list-items","arguments":"{}"}}]},"finish_reason":"tool_calls"}],` +
-					`"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
-				`{"id":"r2","model":"m","choices":[{"message":{"role":"assistant","content":"Two items are low on stock."},` +
-					`"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
-				"data: {\"id\":\"r3\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Two items.\"}}]}\n\n" +
-					"data: [DONE]\n\n",
-			},
+			answers: append(slices.Clone(segmentsOpenAIAnswers),
+				"data: {\"id\":\"r3\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Two items.\"}}]}\n\n"+
+					"data: [DONE]\n\n"),
 			provider: func(url string) provider.Provider {
 				return provider.NewOpenAIProvider("oai", url, "key", []provider.ModelInfo{{ID: "m", Features: tools}})
 			},
 			stream: true,
 		},
-		{name: "anthropic", answers: anthropicAnswers, provider: anthropic(tools)},
-		{name: "anthropic prompt cache", answers: anthropicAnswers, provider: anthropic(tools, provider.WithAnthropicPromptCache(true))},
+		{name: "anthropic", answers: segmentsAnthropicAnswers, provider: anthropic(tools)},
+		{name: "anthropic prompt cache", answers: segmentsAnthropicAnswers, provider: anthropic(tools, provider.WithAnthropicPromptCache(true))},
 		{
-			name: "anthropic inline_tools prompt cache", answers: anthropicAnswers,
+			name: "anthropic inline_tools prompt cache", answers: segmentsAnthropicAnswers,
 			provider: anthropic(inline, provider.WithAnthropicPromptCache(true)),
 		},
 	}

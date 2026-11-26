@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/opentalon/opentalon/internal/prompts"
+	"github.com/opentalon/opentalon/internal/provider"
 )
 
 type RulesConfig struct {
@@ -42,8 +43,6 @@ func (rc *RulesConfig) BuildPromptSection() string {
 	return section
 }
 
-// promptSection returns the rules section and the size of the lines of the
-// operator's rules in it.
 func (rc *RulesConfig) promptSection() (section string, operatorBytes int) {
 	var sb strings.Builder
 	sb.WriteString("## MANDATORY SAFETY RULES\n")
@@ -59,7 +58,7 @@ func (rc *RulesConfig) promptSection() (section string, operatorBytes int) {
 		sb.WriteString(rule)
 		sb.WriteString("\n")
 		if i >= builtinRuleCount() {
-			operatorBytes += sb.Len() - from
+			operatorBytes += provider.TextBytes(sb.String()[from:])
 		}
 	}
 	sb.WriteString("\n")

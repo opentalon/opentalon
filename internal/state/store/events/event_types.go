@@ -477,28 +477,20 @@ type LLMResponsePayload struct {
 // All are omitempty, so older rows decode cleanly with the fields absent.
 const LLMResponseVersion = 4
 
-// RequestSize is the size of a request body in bytes, split into blocks that
-// sum to BodyBytes. It holds names and numbers only, never text.
+// RequestSize holds names and numbers only, never text; its blocks sum to BodyBytes.
 type RequestSize struct {
 	BodyBytes int            `json:"body_bytes"`
 	Blocks    []RequestBlock `json:"blocks"`
 }
 
-// RequestBlock is one block of a request: Bytes is the UTF-8 size of its
-// content before JSON encoding, text as text, tool definitions and structured
-// message content as their JSON. Count is set on BlockToolsSent,
-// BlockToolsHeldBack, BlockHistory and BlockToolResults only.
+// RequestBlock: Bytes is the UTF-8 size of text as sent, of tools and structured content as JSON; Count is on tools and messages only.
 type RequestBlock struct {
 	Name  string `json:"name"`
 	Count int    `json:"count,omitempty"`
 	Bytes int    `json:"bytes"`
 }
 
-// Block names of a RequestSize, in the order the blocks appear in it.
-// WIRE-STABLE: consumers group by them. A chat-loop request names the parts
-// of its system text (BlockGrounding to BlockSystemOther, one
-// BlockPluginPrefix block per plugin); any other request has one
-// BlockSystem.
+// Block names of a RequestSize. WIRE-STABLE: consumers group by them.
 const (
 	BlockToolsSent           = "tools_sent"
 	BlockToolsHeldBack       = "tools_held_back"

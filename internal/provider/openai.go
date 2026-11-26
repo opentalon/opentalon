@@ -359,8 +359,7 @@ type oaiResponseStream struct {
 	// decoupled from OpenAIProvider for targeted tests. nil when no pricing
 	// should be computed (test fakes that skip provider construction).
 	usageFn func(tokensIn, tokensOut int) Usage
-	// requestSize returns the blocks of the request the stream answers; it
-	// runs at end-of-stream, never before the response. nil in test fakes.
+	// requestSize runs at end-of-stream, so the breakdown never delays the response.
 	requestSize func() *events.RequestSize
 	streamErr   error // non-nil → Close emits llm_error instead of llm_response/llm_refused
 
@@ -902,8 +901,6 @@ func (s *oaiResponseStream) emitStreamEnd() {
 	})
 }
 
-// request returns the blocks of the request the stream answers, nil when the
-// stream was built without them.
 func (s *oaiResponseStream) request() *events.RequestSize {
 	if s.requestSize == nil {
 		return nil

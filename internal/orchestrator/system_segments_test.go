@@ -147,10 +147,8 @@ func toolRounds() *segmentsTestLLM {
 // renders, as the builder wrote it before the split into segments.
 type promptSections struct {
 	grounding, preamble, rules, knowledge, instructions, session, plugins, toolCatalog, subprocess string
-	outputFormat, user, language, summary, formatReminder, answerOnly, inlineCatalog               string
-	// operatorRule is the line of the operator's rule in rules; pluginSections
-	// holds the name and text of each plugin's section in plugins.
-	operatorRule   string
+	outputFormat, user, language, summary, formatReminder, answerOnly, inlineCatalog, operatorRule string
+
 	pluginSections [][2]string
 }
 
@@ -221,8 +219,8 @@ func TestRun_SystemPromptSectionsKeepTheirText(t *testing.T) {
 }
 
 // TestRun_SystemPromptSegments checks the segments of each chat-loop request
-// section by section, agent grounding first, the names and sizes of the parts
-// of Fixed, and that the leading system message is their join.
+// section by section, agent grounding first, and that the leading system
+// message is their join.
 func TestRun_SystemPromptSegments(t *testing.T) {
 	llm := toolRounds()
 	f := newSegmentsFixture(t, llm)
@@ -238,7 +236,6 @@ func TestRun_SystemPromptSegments(t *testing.T) {
 	if !strings.HasSuffix(s.rules, s.operatorRule+"\n") {
 		t.Fatalf("the rules section must end on the operator's rule, got %q", s.rules)
 	}
-	// The subprocess instructions are no named part.
 	parts := []provider.SystemPart{
 		{Name: events.BlockGrounding, Bytes: len(s.grounding)},
 		{Name: events.BlockPreamble, Bytes: len(s.preamble)},
