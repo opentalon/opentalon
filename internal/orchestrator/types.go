@@ -151,10 +151,14 @@ const (
 // CheckResult is a plugin's verdict on a call sent for a check. Kind and
 // Message describe a refusal: the kind of error the execution would give
 // (e.g. "forbidden", "invalid_argument") and the text its error would carry.
+// ConfirmationNotRequired, with CheckPassed, is the plugin's statement that
+// the call needs no confirmation by the user; the gate honours it only with
+// OrchestratorOpts.CheckSkipsConfirmation. Ignored with any other verdict.
 type CheckResult struct {
-	Verdict CheckVerdict
-	Kind    string
-	Message string
+	Verdict                 CheckVerdict
+	Kind                    string
+	Message                 string
+	ConfirmationNotRequired bool
 }
 
 type WorkflowStep struct {

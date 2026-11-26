@@ -172,7 +172,8 @@ func (c *Client) ExecuteContext(ctx context.Context, call orchestrator.ToolCall)
 // sends, and returns the plugin's verdict. It implements
 // orchestrator.CheckExecutor. The request ends with ctx. An error means the
 // check could not be answered: a plugin that does not check calls answers
-// gRPC Unimplemented (inspect with status.Code(err)).
+// gRPC Unimplemented (inspect with status.Code(err)). Only a pass carries
+// confirmation_not_required; with any other verdict it is dropped.
 func (c *Client) Check(ctx context.Context, call orchestrator.ToolCall) (orchestrator.CheckResult, error) {
 	resp, err := c.client.Check(ctx, toolCallRequest(ctx, call))
 	if err != nil {
@@ -180,7 +181,10 @@ func (c *Client) Check(ctx context.Context, call orchestrator.ToolCall) (orchest
 	}
 	switch resp.GetVerdict() {
 	case pluginpb.CheckVerdict_CHECK_VERDICT_PASSED:
-		return orchestrator.CheckResult{Verdict: orchestrator.CheckPassed}, nil
+		return orchestrator.CheckResult{
+			Verdict:                 orchestrator.CheckPassed,
+			ConfirmationNotRequired: resp.GetConfirmationNotRequired(),
+		}, nil
 	case pluginpb.CheckVerdict_CHECK_VERDICT_REFUSED:
 		return orchestrator.CheckResult{
 			Verdict: orchestrator.CheckRefused,

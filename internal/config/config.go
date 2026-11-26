@@ -450,6 +450,12 @@ type PipelineOrchestratorConfig struct {
 	// NOT activate server-side pipeline execution. Requires
 	// confirmation_plugin/confirmation_action to be set.
 	ConfirmationClassifierEnabled bool `yaml:"confirmation_classifier_enabled"` // default false
+	// CheckSkipsConfirmation lets a passed check that states
+	// confirmation_not_required execute the call without the confirmation
+	// question. Default false: such a call is asked about like any other
+	// passed check. Independent of Enabled; it acts only where
+	// confirmation_plugin/confirmation_action ask for a confirmation.
+	CheckSkipsConfirmation bool `yaml:"check_skips_confirmation"` // default false
 }
 
 // SubprocessOrchestratorConfig enables subprocess (sub-agent) forking from the main agent loop.

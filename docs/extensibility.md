@@ -133,8 +133,22 @@ handler implements `Checker`; the answer is a `CheckResult`:
 | Verdict | What the host does |
 |---|---|
 | `passed` | Asks the user to confirm the call, as without a check. |
+| `passed`, with `confirmation_not_required` | With `check_skips_confirmation` on: executes the call without asking the user. Off (the default): asks, as for `passed`, and logs that the statement was not honoured. |
 | `refused`, with `kind` and `message` | Gives the model `message` as the call's failed result; its `tool_call_result` session event has the status `refused`. The user is not asked and the call is never executed. |
 | `unspecified`, `refused` without a `message`, or no answer | Asks the user, as without a check. |
+
+`confirmation_not_required` (`ConfirmationNotRequired` in the Go SDK) lets the
+plugin decide per call that asking the user makes no sense. The host honours
+it only when its pipeline configuration says so, next to the confirmation
+gate:
+
+```yaml
+orchestrator:
+  pipeline:
+    confirmation_plugin: planner
+    confirmation_action: check_confirmation
+    check_skips_confirmation: true   # default false
+```
 
 - A check must not change anything. It is a plain request and answer, also
   for a plugin that sets `supports_callbacks`, so it cannot call back into
@@ -148,6 +162,12 @@ handler implements `Checker`; the answer is a `CheckResult`:
   and the execution keeps every check of its own.
 - A call that needs no confirmation (a read-only action) is never checked,
   and an approved call is not checked again.
+- `confirmation_not_required` counts only with `passed`; with any other
+  verdict, and next to an error, it is ignored.
+- A call executed without the question stays a write: everything that
+  counts write calls counts it. It is not an approved call: no confirmation
+  event, no pending call, and a failed attempt of it is never repaired (see
+  `repair` in `config.example.yaml`).
 - A turn that ends while its call is checked (the user cancels it) ends
   there: no question, and nothing is recorded for the call.
 

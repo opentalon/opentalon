@@ -133,7 +133,8 @@ const (
 	// could not be answered and asks the user as it would without a check.
 	CheckUnspecified CheckVerdict = iota
 	// CheckPassed: the plugin would not refuse the call, and the host asks
-	// the user to confirm it.
+	// the user to confirm it, unless the result states
+	// ConfirmationNotRequired and the host honours that.
 	CheckPassed
 	// CheckRefused: the plugin refuses the call. The host answers the call
 	// with the refusal, does not ask the user and never executes the call.
@@ -149,6 +150,12 @@ type CheckResult struct {
 	// failed result.
 	Kind    string `json:"kind,omitempty"`
 	Message string `json:"message,omitempty"`
+	// ConfirmationNotRequired, with CheckPassed, states that the call needs
+	// no confirmation by the user. A host configured to honour it
+	// (orchestrator.pipeline.check_skips_confirmation) executes the call
+	// without the question; otherwise it asks as for any passed check. The
+	// action stays a write action. Ignored with any other verdict.
+	ConfirmationNotRequired bool `json:"confirmation_not_required,omitempty"`
 }
 
 // ParameterMsg describes one parameter of an action.

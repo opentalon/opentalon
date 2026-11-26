@@ -203,6 +203,7 @@ type OrchestratorOpts struct {
 	PipelineConfig                pipeline.PipelineConfig
 	ConfirmationPlugin            string             // optional; plugin name for confirmation strategy (e.g. "planner")
 	ConfirmationAction            string             // optional; action name (e.g. "check_confirmation")
+	CheckSkipsConfirmation        bool               // optional; a passed check that states ConfirmationNotRequired executes the call without the question (checkBeforeConfirmation)
 	ContextWindow                 int                // model context window in tokens; 0 = no trimming
 	MaxOutputTokens               int                // default model's per-call output budget (max_tokens); reserved from the window when trimming so prompt + completion cannot exceed the context length. 0 = fall back to a flat 10% reserve
 	MaxConcurrentSessions         int                // max sessions running in parallel; default 1 (sequential)
@@ -426,6 +427,10 @@ type Orchestrator struct {
 	// execution path (gated on planner != nil), which has its own confirmation
 	// gate but is otherwise dead in prod. nil = classifier disabled.
 	classifier *pipeline.Planner
+	// checkSkipsConfirmation: a passed check that states
+	// ConfirmationNotRequired lets the call execute without the question
+	// (checkBeforeConfirmation). Off: such a call is asked about.
+	checkSkipsConfirmation bool
 	// repairer is a Planner used ONLY for RepairToolCall (the post-failure
 	// tool-call corrector). Separate handle for the same reason classifier
 	// is: enabling repair must never activate the single-step execution
@@ -786,6 +791,7 @@ func NewWithRules(
 		pipelineConfig:          pipelineCfg,
 		confirmationPlugin:      opts.ConfirmationPlugin,
 		confirmationAction:      opts.ConfirmationAction,
+		checkSkipsConfirmation:  opts.CheckSkipsConfirmation,
 		contextWindow:           opts.ContextWindow,
 		maxOutputTokens:         opts.MaxOutputTokens,
 		calibrators:             newCalibrators(),
@@ -3437,8 +3443,10 @@ type gateOutcome int
 
 const (
 	// gateExecute: the call needs no confirmation (read-only, bypass, no
-	// confirmation plugin, or a call executeCall refuses by OpenTalon's own
-	// lookups); the caller executes it.
+	// confirmation plugin, a call executeCall refuses by OpenTalon's own
+	// lookups, or a passed check that states it needs none, honoured with
+	// checkSkipsConfirmation); the caller executes it. The gate grants no
+	// approval: it never marks a call ConfirmationBypass.
 	gateExecute gateOutcome = iota
 	// gateAwaitApproval: the user is asked and the call is stored as pending;
 	// the caller returns the question and executes nothing.
@@ -3560,13 +3568,15 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	log.Info("tool call requires confirmation", "plugin", call.Plugin, "action", call.Action)
 	// The check sits here: only a call that needs the user's approval is
 	// checked, and before the question is worded. A refusal answers the call;
-	// every other verdict asks the user as without a check.
-	checked, answered, err := o.checkBeforeConfirmation(ctx, call)
+	// a pass that states the call needs no confirmation executes it when
+	// checkSkipsConfirmation is on; every other verdict asks the user as
+	// without a check.
+	checked, decided, err := o.checkBeforeConfirmation(ctx, call)
 	if err != nil {
 		return gateDecision{}, err
 	}
-	if answered {
-		return gateDecision{outcome: gateAnswered, result: checked}, nil
+	if decided {
+		return checked, nil
 	}
 	// Narrate with the main LLM so the prompt is in the user's language and the
 	// effect (e.g. batch count) is explicit; fall back to a static template.
@@ -3620,36 +3630,48 @@ func (o *Orchestrator) maybeRequireConfirmation(
 // plugin for a check, when its action declares one (Action.Check). The call is
 // admitted first, on a copy (admitCall): a call OpenTalon refuses itself is
 // answered with that refusal, without a check, and the plugin checks the call
-// its execution would get. answered is true when the call is answered without
-// a question, with the admission refusal or with the plugin's refusal. Every
-// other case asks the user as without a check: the action declares none, the
-// check passed, or it could not be answered (the plugin does not check calls,
-// a transport error, the deadline of a plugin call, no verdict, a refusal
-// without a message, which would read as a success). Only the typed verdict
-// refuses; no error text is read as one. err is the turn's ctx error when the
-// turn ended while the call was checked; then nothing is emitted.
+// its execution would get. decided is true when the check settles the call
+// without a question: gateAnswered with the admission refusal or with the
+// plugin's refusal, or gateExecute when the check passed with
+// ConfirmationNotRequired and checkSkipsConfirmation is on. Every other case
+// asks the user as without a check (decided false, decision empty): the
+// action declares none, the check passed (with ConfirmationNotRequired but
+// checkSkipsConfirmation off, too), or it could not be answered (the plugin
+// does not check calls, a transport error, the deadline of a plugin call, no
+// verdict, a refusal without a message, which would read as a success). Only
+// the typed verdict refuses; no error text is read as one, and
+// ConfirmationNotRequired counts only with the verdict passed. err is the
+// turn's ctx error when the turn ended while the call was checked; then
+// nothing is emitted.
+//
+// A call executed without the question was not approved by the user: the
+// caller executes it as it is, without ConfirmationBypass, nothing is stored
+// as pending and no confirmation event is emitted. The repair phase's
+// consent boundary (callRequiresConfirmation) does not ask the check, so such
+// a call is never repaired.
 //
 // A model's call that is answered emits the call's pair once the outcome is
 // known: tool_call_extracted with the call as issued and one outcome event
 // parented to it, the admission refusal's own or a tool_call_result with the
 // status refused. A pass or a check that cannot be answered emits nothing,
-// as a call waiting for approval emits nothing.
-func (o *Orchestrator) checkBeforeConfirmation(ctx context.Context, call ToolCall) (result ToolResult, answered bool, err error) {
+// as a call waiting for approval emits nothing; a call executed without the
+// question gets its events from executeCall.
+func (o *Orchestrator) checkBeforeConfirmation(ctx context.Context, call ToolCall) (decision gateDecision, decided bool, err error) {
 	action := o.resolveAction(call.Plugin, call.Action)
 	if action == nil || !action.Check {
-		return ToolResult{}, false, nil
+		return gateDecision{}, false, nil
 	}
 	log := logger.FromContext(ctx)
 	dispatchStart := time.Now()
 	admitted, refuse, ok := o.admitCall(ctx, call, dispatchStart)
 	if !ok {
-		return refuse(o.emitToolCallExtracted(ctx, call)), true, nil
+		return gateDecision{outcome: gateAnswered, result: refuse(o.emitToolCallExtracted(ctx, call))}, true, nil
 	}
 	checker, ok := admitted.exec.(CheckExecutor)
 	if !ok {
 		log.Info("plugin does not check calls; asking for confirmation without a check",
 			"plugin", call.Plugin, "action", call.Action)
-		return ToolResult{}, false, nil
+		return gateDecision{}, false, nil
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, o.callDeadline(admitted.call))
 	verdict, checkErr := checker.Check(checkCtx, admitted.call)
@@ -3657,23 +3679,31 @@ func (o *Orchestrator) checkBeforeConfirmation(ctx context.Context, call ToolCal
 	// The deadline of the check and the end of the turn both end checkCtx;
 	// only the turn's own ctx tells them apart.
 	if err := ctx.Err(); err != nil {
-		return ToolResult{}, false, err
+		return gateDecision{}, false, err
 	}
 	switch {
 	case checkErr != nil:
 		log.Warn("tool call check could not be answered; asking for confirmation",
 			"plugin", call.Plugin, "action", call.Action, "error", checkErr)
-		return ToolResult{}, false, nil
+		return gateDecision{}, false, nil
+	case verdict.Verdict == CheckPassed && verdict.ConfirmationNotRequired && o.checkSkipsConfirmation:
+		log.Info("tool call check states the call needs no confirmation; executing it without asking",
+			"plugin", call.Plugin, "action", call.Action)
+		return gateDecision{outcome: gateExecute}, true, nil
+	case verdict.Verdict == CheckPassed && verdict.ConfirmationNotRequired:
+		log.Info("tool call check states the call needs no confirmation; not honoured, check_skips_confirmation is off, asking for confirmation",
+			"plugin", call.Plugin, "action", call.Action)
+		return gateDecision{}, false, nil
 	case verdict.Verdict == CheckPassed:
-		return ToolResult{}, false, nil
+		return gateDecision{}, false, nil
 	case verdict.Verdict != CheckRefused:
 		log.Warn("tool call check gave no verdict; asking for confirmation",
 			"plugin", call.Plugin, "action", call.Action)
-		return ToolResult{}, false, nil
+		return gateDecision{}, false, nil
 	case strings.TrimSpace(verdict.Message) == "":
 		log.Warn("tool call check refused without a message; asking for confirmation",
 			"plugin", call.Plugin, "action", call.Action, "kind", verdict.Kind)
-		return ToolResult{}, false, nil
+		return gateDecision{}, false, nil
 	}
 	log.Info("tool call refused by its check; answering it without asking",
 		"plugin", call.Plugin, "action", call.Action, "kind", verdict.Kind)
@@ -3686,7 +3716,7 @@ func (o *Orchestrator) checkBeforeConfirmation(ctx context.Context, call ToolCal
 			LatencyMS: time.Since(dispatchStart).Milliseconds(),
 		})
 	}
-	return refused, true, nil
+	return gateDecision{outcome: gateAnswered, result: refused}, true, nil
 }
 
 // confirmationNarratePrompt steers the pre-write confirmation: it must be in the

@@ -222,8 +222,9 @@ func TestCapsToProto_Check(t *testing.T) {
 }
 
 // TestCheckResultToProto pins the verdict a handler returns onto the wire:
-// a refusal keeps its kind and message, and a verdict the SDK does not
-// define goes out as unspecified, which the host reads as unanswered.
+// a refusal keeps its kind and message, a pass keeps the statement that the
+// call needs no confirmation, and a verdict the SDK does not define goes out
+// as unspecified, which the host reads as unanswered.
 func TestCheckResultToProto(t *testing.T) {
 	tests := []struct {
 		name string
@@ -232,6 +233,8 @@ func TestCheckResultToProto(t *testing.T) {
 	}{
 		{"passed", CheckResult{Verdict: CheckPassed},
 			&pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_PASSED}},
+		{"passed, confirmation not required", CheckResult{Verdict: CheckPassed, ConfirmationNotRequired: true},
+			&pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_PASSED, ConfirmationNotRequired: true}},
 		{"refused", CheckResult{Verdict: CheckRefused, Kind: "invalid_argument", Message: "name is taken"},
 			&pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_REFUSED, Kind: "invalid_argument", Message: "name is taken"}},
 		{"unspecified", CheckResult{},

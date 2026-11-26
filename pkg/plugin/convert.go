@@ -120,7 +120,8 @@ func responseToProto(r Response) *pluginpb.ToolResultResponse {
 
 // checkResultToProto maps a handler's verdict onto the wire. A verdict the
 // SDK does not define goes out as unspecified, which the host reads as a
-// check that could not be answered.
+// check that could not be answered. ConfirmationNotRequired goes out as the
+// handler set it; the host reads it only with the verdict passed.
 func checkResultToProto(r CheckResult) *pluginpb.CheckResponse {
 	verdict := pluginpb.CheckVerdict_CHECK_VERDICT_UNSPECIFIED
 	switch r.Verdict {
@@ -129,5 +130,10 @@ func checkResultToProto(r CheckResult) *pluginpb.CheckResponse {
 	case CheckRefused:
 		verdict = pluginpb.CheckVerdict_CHECK_VERDICT_REFUSED
 	}
-	return &pluginpb.CheckResponse{Verdict: verdict, Kind: r.Kind, Message: r.Message}
+	return &pluginpb.CheckResponse{
+		Verdict:                 verdict,
+		Kind:                    r.Kind,
+		Message:                 r.Message,
+		ConfirmationNotRequired: r.ConfirmationNotRequired,
+	}
 }

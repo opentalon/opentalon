@@ -142,8 +142,10 @@ func (s *verdictService) Check(context.Context, *pluginpb.ToolCallRequest) (*plu
 }
 
 // TestClientCheck_VerdictFromTheWire pins the host's reading of a verdict:
-// a refusal keeps its kind and message; unspecified and a verdict this host
-// does not know read as unspecified, without kind or message.
+// a refusal keeps its kind and message; a pass keeps the statement that the
+// call needs no confirmation, which no other verdict carries; unspecified and
+// a verdict this host does not know read as unspecified, without kind or
+// message.
 func TestClientCheck_VerdictFromTheWire(t *testing.T) {
 	tests := []struct {
 		name string
@@ -152,9 +154,15 @@ func TestClientCheck_VerdictFromTheWire(t *testing.T) {
 	}{
 		{"passed", &pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_PASSED},
 			orchestrator.CheckResult{Verdict: orchestrator.CheckPassed}},
+		{"passed, confirmation not required", &pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_PASSED, ConfirmationNotRequired: true},
+			orchestrator.CheckResult{Verdict: orchestrator.CheckPassed, ConfirmationNotRequired: true}},
 		{"refused", &pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_REFUSED, Kind: "forbidden", Message: "missing right: tickets"},
 			orchestrator.CheckResult{Verdict: orchestrator.CheckRefused, Kind: "forbidden", Message: "missing right: tickets"}},
+		{"refused, confirmation not required", &pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_REFUSED, Kind: "forbidden", Message: "missing right: tickets", ConfirmationNotRequired: true},
+			orchestrator.CheckResult{Verdict: orchestrator.CheckRefused, Kind: "forbidden", Message: "missing right: tickets"}},
 		{"unspecified", &pluginpb.CheckResponse{Kind: "forbidden", Message: "ignored"},
+			orchestrator.CheckResult{}},
+		{"unspecified, confirmation not required", &pluginpb.CheckResponse{ConfirmationNotRequired: true},
 			orchestrator.CheckResult{}},
 		{"unknown verdict", &pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict(99), Kind: "forbidden", Message: "ignored"},
 			orchestrator.CheckResult{}},

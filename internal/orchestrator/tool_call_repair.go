@@ -34,7 +34,9 @@ import (
 // argument names made the pre-confirmation validation skip the gate — is
 // never repaired: its error falls back to the model, whose corrected
 // re-plan then goes through the normal confirmation gate.
-// ConfirmationBypass is set only when a real approval exists.
+// ConfirmationBypass is set only when a real approval exists. A call its
+// check let through without the question (check_skips_confirmation) has no
+// approval either: the boundary still reads it as a call that requires one.
 //
 // The hard boundary is form-only repair: the corrector may rename unknown
 // parameters and restructure nesting, never change substance. Enforced
@@ -116,7 +118,10 @@ func (o *Orchestrator) resolveAction(pluginName, actionName string) *Action {
 // the repair phase's consent boundary asks it whether re-executing a
 // failed call would need an approval that was never granted.
 // checkConfirmationPlugin fails safe — a plugin error reads as "requires
-// confirmation", which for repair means "do not repair".
+// confirmation", which for repair means "do not repair". It does not send
+// the call for a check: a check that states the call needs no confirmation
+// waives the question in maybeRequireConfirmation, but grants no approval,
+// so for repair such a call still requires one.
 func (o *Orchestrator) callRequiresConfirmation(ctx context.Context, call ToolCall) bool {
 	if o.confirmationPlugin == "" || o.confirmationAction == "" ||
 		o.registry.IsActionReadOnly(call.Plugin, call.Action) {

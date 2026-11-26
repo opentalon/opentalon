@@ -161,6 +161,8 @@ func TestGRPCServer_Check(t *testing.T) {
 	}{
 		{"passed", CheckResult{Verdict: CheckPassed},
 			&pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_PASSED}},
+		{"passed, confirmation not required", CheckResult{Verdict: CheckPassed, ConfirmationNotRequired: true},
+			&pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_PASSED, ConfirmationNotRequired: true}},
 		{"refused", CheckResult{Verdict: CheckRefused, Kind: "forbidden", Message: "missing right: tickets"},
 			&pluginpb.CheckResponse{Verdict: pluginpb.CheckVerdict_CHECK_VERDICT_REFUSED, Kind: "forbidden", Message: "missing right: tickets"}},
 	}

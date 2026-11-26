@@ -863,6 +863,7 @@ func main() {
 		ConfirmationPlugin:            cfg.Orchestrator.Pipeline.ConfirmationPlugin,
 		ConfirmationAction:            cfg.Orchestrator.Pipeline.ConfirmationAction,
 		ConfirmationClassifierEnabled: cfg.Orchestrator.Pipeline.ConfirmationClassifierEnabled,
+		CheckSkipsConfirmation:        cfg.Orchestrator.Pipeline.CheckSkipsConfirmation,
 		ContextWindow:                 contextWindow,
 		MaxOutputTokens:               maxOutputTokens,
 		MaxConcurrentSessions:         cfg.Orchestrator.MaxConcurrentSessions,

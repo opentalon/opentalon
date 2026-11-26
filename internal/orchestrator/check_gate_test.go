@@ -1,12 +1,16 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -650,5 +654,214 @@ func TestCheckGate_ActionsNeverChecked(t *testing.T) {
 				t.Errorf("ran %d time(s); a read runs, a write waits for approval", ran)
 			}
 		})
+	}
+}
+
+// passedWithoutConfirmation is a pass that states the call needs no
+// confirmation by the user.
+var passedWithoutConfirmation = verdictOf(CheckResult{Verdict: CheckPassed, ConfirmationNotRequired: true}, nil)
+
+// The Info lines the gate logs for a pass that states the call needs no
+// confirmation: honoured, and not honoured because the switch is off.
+const (
+	executedWithoutAskingLog = "tool call check states the call needs no confirmation; executing it without asking"
+	notHonouredLog           = "tool call check states the call needs no confirmation; not honoured, check_skips_confirmation is off, asking for confirmation"
+)
+
+// lockedLog is a log destination the turn's goroutines may write to at once.
+type lockedLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+// infoLinesForTag counts the Info lines with msg that name the plugin p and
+// the action tag.
+func (l *lockedLog) infoLinesForTag(msg string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, line := range strings.Split(l.buf.String(), "\n") {
+		if strings.Contains(line, "level=INFO") && strings.Contains(line, "msg="+strconv.Quote(msg)) &&
+			strings.Contains(line, " plugin=p") && strings.Contains(line, " action=tag") {
+			n++
+		}
+	}
+	return n
+}
+
+// captureLog sends the default logger to a lockedLog until the test ends.
+func captureLog(t *testing.T) *lockedLog {
+	t.Helper()
+	logs := &lockedLog{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return logs
+}
+
+// A passed check that states the call needs no confirmation executes the
+// call without the question when check_skips_confirmation is on, and asks as
+// for any pass when it is off; each logs one Info line naming the plugin and
+// the action. Next to any other verdict, or next to an error, the statement
+// changes nothing. Both call sites.
+func TestCheckGate_PassedWithoutConfirmation(t *testing.T) {
+	plan := `{"type":"pipeline","steps":[{"id":"1","name":"Tag","plugin":"p","action":"tag","args":{"name":"A"}}]}`
+	stating := func(r CheckResult, err error) func(context.Context, ToolCall) (CheckResult, error) {
+		r.ConfirmationNotRequired = true
+		return verdictOf(r, err)
+	}
+	answers := map[string]string{
+		"executed": "Tagged A.",
+		"asked":    "Shall I tag A?",
+		"refused":  "I cannot tag A: the name is taken.",
+	}
+	for _, site := range []struct {
+		name     string
+		pipeline bool
+		first    string
+		callID   string
+	}{
+		{"agent loop", false, "CALL p tag A", "c1"},
+		{"single step", true, plan, "planner-p-tag"},
+	} {
+		for _, tc := range []struct {
+			name    string
+			check   func(context.Context, ToolCall) (CheckResult, error)
+			on      bool
+			outcome string // executed, asked or refused
+			logged  string // the Info line for the statement, "" for none
+		}{
+			{"switch on", passedWithoutConfirmation, true, "executed", executedWithoutAskingLog},
+			{"switch off", passedWithoutConfirmation, false, "asked", notHonouredLog},
+			{"pass without the statement", verdictOf(CheckResult{Verdict: CheckPassed}, nil), true, "asked", ""},
+			{"no verdict with the statement", stating(CheckResult{}, nil), true, "asked", ""},
+			{"refusal with the statement", stating(CheckResult{Verdict: CheckRefused, Kind: "already_exists", Message: takenMessage}, nil),
+				true, "refused", ""},
+			{"error with the statement", stating(CheckResult{Verdict: CheckPassed}, status.Error(codes.Unavailable, "connection refused")),
+				true, "asked", ""},
+		} {
+			t.Run(site.name+"/"+tc.name, func(t *testing.T) {
+				logs := captureLog(t)
+				exec := &checkingExecutor{check: tc.check}
+				orch, sessions, sink := checkGateOrch(t, exec, nil, false,
+					&fakeLLM{responses: []string{site.first, answers[tc.outcome]}},
+					OrchestratorOpts{PipelineEnabled: site.pipeline, CheckSkipsConfirmation: tc.on})
+
+				res, err := orch.Run(context.Background(), "s1", "tag A")
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				if checks := exec.checked(); len(checks) != 1 {
+					t.Fatalf("the call must be checked once, got %+v", checks)
+				}
+				pending, _, _, _ := loadPendingToolCall(sessions, "s1")
+				ran := exec.snapshot()
+				questions := countEventType(sink.snapshot(), events.TypeConfirmationRequested)
+
+				switch tc.outcome {
+				case "executed":
+					if res.Metadata["type"] == "confirmation" || res.Response != answers["executed"] {
+						t.Errorf("the call must execute and the model answer, without a question, got %+v", res)
+					}
+					admitted := map[string]string{"name": "A", contextargs.SessionID: "s1"}
+					if len(ran) != 1 || !reflect.DeepEqual(ran[0].Args, admitted) {
+						t.Errorf("the call must execute once with the injected arg, ran %+v", ran)
+					}
+					if pending != nil || questions != 0 {
+						t.Errorf("nothing may be asked or pending, got %d question(s), pending %+v", questions, pending)
+					}
+					want := []string{
+						formatToolCallMessage(ToolCall{Plugin: "p", Action: "tag", Args: map[string]string{"name": "A"}}),
+						orch.guard.WrapContent(ToolResult{Content: "ok"}),
+					}
+					if rows := exchangeRows(t, sessions); !reflect.DeepEqual(rows, want) {
+						t.Errorf("the history must pair the call with its result, got %q, want %q", rows, want)
+					}
+				case "asked":
+					if res.Metadata["type"] != "confirmation" || res.Response != answers["asked"] {
+						t.Errorf("the user must be asked as for any pass, got %+v", res)
+					}
+					if pending == nil || pending.ID != site.callID || questions != 1 {
+						t.Errorf("the call must be pending behind one question, got %d question(s), pending %+v", questions, pending)
+					}
+					if len(ran) != 0 {
+						t.Errorf("a call waiting for approval must not be executed, ran %+v", ran)
+					}
+				case "refused":
+					if res.Metadata["type"] == "confirmation" || res.Response != answers["refused"] {
+						t.Errorf("the refusal must reach the model, which answers, got %+v", res)
+					}
+					if pending != nil || questions != 0 || len(ran) != 0 {
+						t.Errorf("a refused call is neither asked, pending nor executed: %d question(s), pending %+v, ran %+v",
+							questions, pending, ran)
+					}
+				}
+
+				for _, msg := range []string{executedWithoutAskingLog, notHonouredLog} {
+					want := 0
+					if msg == tc.logged {
+						want = 1
+					}
+					if got := logs.infoLinesForTag(msg); got != want {
+						t.Errorf("Info lines %q naming p and tag: got %d, want %d", msg, got, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+// A call its check let through without the question was not approved by the
+// user: it executes without ConfirmationBypass and leaves no question, no
+// pending call and no confirmation event behind. The repair phase's consent
+// boundary does not ask the check: it still reads the call as one that
+// requires a confirmation, so a failed attempt of it is never repaired.
+func TestCheckGate_CallRunWithoutTheQuestionIsNotApproved(t *testing.T) {
+	exec := &checkingExecutor{check: passedWithoutConfirmation}
+	orch, sessions, sink := checkGateOrch(t, exec, nil, false, &fakeLLM{responses: []string{"CALL p tag A", "Tagged A."}},
+		OrchestratorOpts{CheckSkipsConfirmation: true, Repair: RepairConfig{Enabled: true}})
+
+	if _, err := orch.Run(context.Background(), "s1", "tag A"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if ran := exec.snapshot(); len(ran) != 1 || ran[0].ConfirmationBypass {
+		t.Fatalf("the call must execute once without ConfirmationBypass, ran %+v", ran)
+	}
+	if pending, _, _, _ := loadPendingToolCall(sessions, "s1"); pending != nil {
+		t.Errorf("nothing may be pending, got %+v", pending)
+	}
+	evs := sink.snapshot()
+	if n := countEventType(evs, events.TypeConfirmationRequested) + countEventType(evs, events.TypeConfirmationResolved); n != 0 {
+		t.Errorf("no confirmation event may be emitted, got %d", n)
+	}
+	s, err := sessions.Get("s1")
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	for _, m := range s.Messages {
+		if m.PromptType != "" {
+			t.Errorf("no message may be a confirmation prompt, got %+v", m)
+		}
+	}
+
+	call := ToolCall{ID: "c9", Plugin: "p", Action: "tag", Args: map[string]string{"nme": "A"}, FromLLM: true}
+	if !orch.callRequiresConfirmation(context.Background(), call) {
+		t.Error("the consent boundary must read the call as one that requires a confirmation")
+	}
+	failed := ToolResult{CallID: "c9", Error: `unknown argument "nme"`, ArgsInvalid: true}
+	if _, _, replaced := orch.maybeRepairToolCall(context.Background(), "s1", call, failed, "", false); replaced {
+		t.Error("an unapproved call that requires a confirmation must not be repaired")
+	}
+	if n := countEventType(sink.snapshot(), events.TypeToolCallRepairInvoked); n != 0 {
+		t.Errorf("the corrector must not be invoked, got %d repair(s)", n)
+	}
+	if checks := exec.checked(); len(checks) != 1 {
+		t.Errorf("the consent boundary must not send the call for a check, checks %+v", checks)
 	}
 }

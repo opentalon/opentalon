@@ -28,7 +28,9 @@ const (
 	// No verdict. The host reads it as a check that could not be answered and
 	// asks the user as it would without a check.
 	CheckVerdict_CHECK_VERDICT_UNSPECIFIED CheckVerdict = 0
-	// The plugin would not refuse the call; the host asks the user to confirm it.
+	// The plugin would not refuse the call; the host asks the user to confirm
+	// it, unless the response states confirmation_not_required and the host
+	// honours that.
 	CheckVerdict_CHECK_VERDICT_PASSED CheckVerdict = 1
 	// The plugin refuses the call. The host answers the call with the refusal,
 	// does not ask the user and never executes the call.
@@ -654,10 +656,16 @@ type CheckResponse struct {
 	// "forbidden", "invalid_argument") and its message, the text the
 	// execution's error would carry. The host gives the model the message as
 	// the call's failed result.
-	Kind          string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
-	Message       string `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Kind    string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	Message string `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	// With the verdict passed: the plugin states that the call needs no
+	// confirmation by the user. A host configured to honour it
+	// (orchestrator.pipeline.check_skips_confirmation) executes the call
+	// without the question; otherwise it asks as for any passed check. The
+	// action stays a write action. Ignored with any other verdict.
+	ConfirmationNotRequired bool `protobuf:"varint,4,opt,name=confirmation_not_required,json=confirmationNotRequired,proto3" json:"confirmation_not_required,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *CheckResponse) Reset() {
@@ -709,6 +717,13 @@ func (x *CheckResponse) GetMessage() string {
 		return x.Message
 	}
 	return ""
+}
+
+func (x *CheckResponse) GetConfirmationNotRequired() bool {
+	if x != nil {
+		return x.ConfirmationNotRequired
+	}
+	return false
 }
 
 type PluginCapabilities struct {
@@ -1263,11 +1278,12 @@ const file_plugin_proto_rawDesc = "" +
 	"\acall_id\x18\x01 \x01(\tR\x06callId\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12-\n" +
-	"\x12structured_content\x18\x04 \x01(\tR\x11structuredContent\"z\n" +
+	"\x12structured_content\x18\x04 \x01(\tR\x11structuredContent\"\xb6\x01\n" +
 	"\rCheckResponse\x12;\n" +
 	"\averdict\x18\x01 \x01(\x0e2!.opentalon.plugin.v1.CheckVerdictR\averdict\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x18\n" +
-	"\amessage\x18\x03 \x01(\tR\amessage\"\xfc\x02\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\x12:\n" +
+	"\x19confirmation_not_required\x18\x04 \x01(\bR\x17confirmationNotRequired\"\xfc\x02\n" +
 	"\x12PluginCapabilities\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x125\n" +
