@@ -4664,6 +4664,13 @@ func (o *Orchestrator) buildSystemPrompt(ctx context.Context, userMessage string
 
 func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, userMessage string, includeServerInstructions bool) provider.SystemSegments {
 	var fixed, conversation, round strings.Builder
+	// parts names what the steps below write to fixed.
+	var parts []provider.SystemPart
+	part := func(name string, bytes int) {
+		if bytes > 0 {
+			parts = append(parts, provider.SystemPart{Name: name, Bytes: bytes})
+		}
+	}
 
 	// Agent-scoped chat: when the turn is scoped to a workflow agent, lead with
 	// that agent's context (its program + recent runs) so the assistant answers
@@ -4672,6 +4679,7 @@ func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, user
 	if agentID := actor.AgentID(ctx); agentID != "" {
 		if grounding := o.buildAgentGroundingPrompt(ctx, agentID); grounding != "" {
 			fixed.WriteString(grounding)
+			part(events.BlockGrounding, len(grounding))
 		}
 	}
 
@@ -4679,26 +4687,34 @@ func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, user
 	// omits the text-based [tool_call] format instructions. Sending both
 	// the text format and native tools confuses weaker models — they
 	// narrate instead of calling tools.
+	from := fixed.Len()
 	if o.supportsNativeTools() {
 		fixed.WriteString(prompts.OrchestratorPreambleNative)
 	} else {
 		fixed.WriteString(prompts.OrchestratorPreamble)
 	}
+	part(events.BlockPreamble, fixed.Len()-from)
 
-	fixed.WriteString(o.rules.BuildPromptSection())
+	rules, operatorBytes := o.rules.promptSection()
+	fixed.WriteString(rules)
+	part(events.BlockRulesBuiltin, len(rules)-operatorBytes)
+	part(events.BlockRulesOperator, operatorBytes)
 
 	// Always-on knowledge catalog: titles + slugs of pullable articles, so the
 	// model knows what background it can fetch via ask_knowledge. Served from
 	// cache; a stale cache triggers a non-blocking background refresh.
 	if catalog := o.knowledgeCatalogSection(); catalog != "" {
 		fixed.WriteString(catalog)
+		part(events.BlockKnowledgeCatalog, len(catalog))
 	}
 
 	if o.runtimePromptPath != "" {
 		if data, err := os.ReadFile(o.runtimePromptPath); err == nil {
+			from = fixed.Len()
 			fixed.WriteString("\n## Additional instructions (editable from chat)\n")
 			fixed.WriteString(string(data))
 			fixed.WriteString("\n\n")
+			part(events.BlockRuntimeInstructions, fixed.Len()-from)
 		}
 	}
 
@@ -4740,6 +4756,7 @@ func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, user
 			continue
 		}
 
+		from = fixed.Len()
 		fmt.Fprintf(&fixed, "## %s\n%s\n", cap.Name, cap.Description)
 		// Server instructions first — domain context the LLM needs before
 		// reading tool definitions (e.g. entity relationships, counting
@@ -4764,6 +4781,7 @@ func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, user
 			}
 		}
 		fixed.WriteString("\n")
+		part(events.BlockPluginPrefix+cap.Name, fixed.Len()-from)
 	}
 
 	if o.subprocessConfig.Enabled {
@@ -4799,7 +4817,7 @@ func (o *Orchestrator) buildSystemPromptWithoutCatalog(ctx context.Context, user
 		round.WriteString("\n")
 	}
 
-	return provider.SystemSegments{Fixed: fixed.String(), Conversation: conversation.String(), Round: round.String()}
+	return provider.SystemSegments{Fixed: fixed.String(), FixedParts: parts, Conversation: conversation.String(), Round: round.String()}
 }
 
 // sessionDescriptor returns a 1-2 line string describing the caller's current

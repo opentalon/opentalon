@@ -94,12 +94,22 @@ type ToolCall struct {
 // change from one round to the next.
 type SystemSegments struct {
 	Fixed string
+	// FixedParts names the parts of Fixed in order, with their sizes; text of
+	// Fixed outside them belongs to none.
+	FixedParts []SystemPart
 	// Catalog lists the allowed tools the request's Tools lack.
 	Catalog string
 	// InlineCatalog lists every on-demand tool, loaded or not, for a model with FeatureInlineTools.
 	InlineCatalog string
 	Conversation  string
 	Round         string
+}
+
+// SystemPart is a named part of a system segment and its size in bytes; its
+// name is one of the events.Block* names of a system part.
+type SystemPart struct {
+	Name  string
+	Bytes int
 }
 
 // Join returns the system message the segments make up; InlineCatalog is no part of it.

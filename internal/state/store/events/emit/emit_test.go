@@ -264,7 +264,7 @@ func TestEmitLLMResponse_CacheFields(t *testing.T) {
 
 	got := sink.snapshot()
 	set, unset := string(got[0].Payload), string(got[1].Payload)
-	for _, want := range []string{`"v":3,`, `"tokens_in":40210,`, `"cache_write_tokens":2104,`, `"cache_read_tokens":37950,`, `"chat_loop":true}`} {
+	for _, want := range []string{`"v":4,`, `"tokens_in":40210,`, `"cache_write_tokens":2104,`, `"cache_read_tokens":37950,`, `"chat_loop":true}`} {
 		if !strings.Contains(set, want) {
 			t.Errorf("payload lacks %s: %s", want, set)
 		}
@@ -273,6 +273,32 @@ func TestEmitLLMResponse_CacheFields(t *testing.T) {
 		if strings.Contains(unset, key) {
 			t.Errorf("zero %s must be omitted, got: %s", key, unset)
 		}
+	}
+}
+
+// TestEmitLLMResponse_RequestSize checks the version 4 payload: the request
+// size passes through as body_bytes and blocks, count only where it is set,
+// and stays absent when the provider computed none.
+func TestEmitLLMResponse_RequestSize(t *testing.T) {
+	sink := &fakeSink{}
+	EmitLLMResponse(context.Background(), sink, LLMResponseArgs{RawContent: "ok", Request: &events.RequestSize{
+		BodyBytes: 1000,
+		Blocks: []events.RequestBlock{
+			{Name: events.BlockToolsSent, Count: 2, Bytes: 600},
+			{Name: events.BlockPreamble, Bytes: 300},
+			{Name: events.BlockOther, Bytes: 100},
+		},
+	}})
+	EmitLLMResponse(context.Background(), sink, LLMResponseArgs{RawContent: "ok"})
+
+	got := sink.snapshot()
+	want := `"request":{"body_bytes":1000,"blocks":[{"name":"tools_sent","count":2,"bytes":600},` +
+		`{"name":"preamble","bytes":300},{"name":"other","bytes":100}]}`
+	if set := string(got[0].Payload); !strings.Contains(set, want) || !strings.Contains(set, `"v":4,`) {
+		t.Errorf("payload lacks v4 and %s: %s", want, set)
+	}
+	if unset := string(got[1].Payload); strings.Contains(unset, `"request"`) {
+		t.Errorf("a call without a request size must leave request out, got: %s", unset)
 	}
 }
 

@@ -518,6 +518,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *CompletionRequest
 		ChatLoop:           req.Segments != nil,
 		CacheMissReason:    cacheMissReason,
 		ThinkingDropped:    anthResp.thinkingDropped(),
+		Request:            anthRequestSize(req, anthReq, len(body)),
 	})
 
 	resp := &CompletionResponse{
@@ -709,11 +710,7 @@ func leadSegments(req *CompletionRequest, inlineTools bool) (lead []string, segm
 		req.Messages[0].Role != RoleSystem || req.Messages[0].Content != segs.Join() {
 		return nil, false
 	}
-	catalog := segs.Catalog
-	if inlineTools {
-		catalog = segs.InlineCatalog
-	}
-	return []string{segs.Fixed, catalog + segs.Conversation, segs.Round}, true
+	return []string{segs.Fixed, segs.catalog(inlineTools) + segs.Conversation, segs.Round}, true
 }
 
 // cachedSystemBlocks returns one text block per text, leaving out blank ones

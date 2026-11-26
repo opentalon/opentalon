@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
+	"github.com/opentalon/opentalon/internal/state/store/events"
 	pkgchannel "github.com/opentalon/opentalon/pkg/channel"
 )
 
@@ -146,11 +148,20 @@ func toolRounds() *segmentsTestLLM {
 type promptSections struct {
 	grounding, preamble, rules, knowledge, instructions, session, plugins, toolCatalog, subprocess string
 	outputFormat, user, language, summary, formatReminder, answerOnly, inlineCatalog               string
+	// operatorRule is the line of the operator's rule in rules; pluginSections
+	// holds the name and text of each plugin's section in plugins.
+	operatorRule   string
+	pluginSections [][2]string
 }
 
 func (f segmentsFixture) sections() promptSections {
 	promoted, _ := f.orch.promotedToolSet(f.ctx)
 	callable, loadable, _ := f.orch.buildToolDefinitions(f.ctx)
+	plugins := [][2]string{
+		{"_meta", "## _meta\nOrchestrator-owned meta-tools.\n\n"},
+		{"_subprocess", "## _subprocess\nFork a focused sub-agent process to handle a sub-task\n\n"},
+		{"inventory", "## inventory\nInventory tools\n--- plugin: inventory ---\nCount items with list-items.\n--- end plugin: inventory ---\n\n"},
+	}
 	return promptSections{
 		grounding:    f.orch.buildAgentGroundingPrompt(f.ctx, "agent-7"),
 		preamble:     prompts.OrchestratorPreambleNative,
@@ -160,9 +171,9 @@ func (f segmentsFixture) sections() promptSections {
 		session: "## Current session\nYou are currently on channel `web`, conversation `conv-1`.\n\n" +
 			"When a tool parameter's description says it defaults to the current channel or conversation, OMIT it — " +
 			"the host injects these values automatically. Do not try to invent or ask for an id.\n\n",
-		plugins: "## _meta\nOrchestrator-owned meta-tools.\n\n" +
-			"## _subprocess\nFork a focused sub-agent process to handle a sub-task\n\n" +
-			"## inventory\nInventory tools\n--- plugin: inventory ---\nCount items with list-items.\n--- end plugin: inventory ---\n\n",
+		plugins:        plugins[0][1] + plugins[1][1] + plugins[2][1],
+		pluginSections: plugins,
+		operatorRule:   "- [custom] " + segmentsOperatorRule + "\n",
 		toolCatalog:    f.orch.renderToolCatalog(promoted, f.orch.resolveAllowedPlugins(f.ctx)),
 		inlineCatalog:  renderInlineToolCatalog(callable, loadable),
 		subprocess:     prompts.OrchestratorSubprocess,
@@ -210,8 +221,8 @@ func TestRun_SystemPromptSectionsKeepTheirText(t *testing.T) {
 }
 
 // TestRun_SystemPromptSegments checks the segments of each chat-loop request
-// section by section, agent grounding first, and that the leading system
-// message is their join.
+// section by section, agent grounding first, the names and sizes of the parts
+// of Fixed, and that the leading system message is their join.
 func TestRun_SystemPromptSegments(t *testing.T) {
 	llm := toolRounds()
 	f := newSegmentsFixture(t, llm)
@@ -224,18 +235,34 @@ func TestRun_SystemPromptSegments(t *testing.T) {
 	s := f.sections()
 	fixed := s.grounding + s.preamble + s.rules + s.knowledge + s.instructions + s.plugins + s.subprocess
 	conversation := s.session + s.user + s.language + s.summary + "\n"
+	if !strings.HasSuffix(s.rules, s.operatorRule+"\n") {
+		t.Fatalf("the rules section must end on the operator's rule, got %q", s.rules)
+	}
+	// The subprocess instructions are no named part.
+	parts := []provider.SystemPart{
+		{Name: events.BlockGrounding, Bytes: len(s.grounding)},
+		{Name: events.BlockPreamble, Bytes: len(s.preamble)},
+		{Name: events.BlockRulesBuiltin, Bytes: len(s.rules) - len(s.operatorRule)},
+		{Name: events.BlockRulesOperator, Bytes: len(s.operatorRule)},
+		{Name: events.BlockKnowledgeCatalog, Bytes: len(s.knowledge)},
+		{Name: events.BlockRuntimeInstructions, Bytes: len(s.instructions)},
+	}
+	for _, plugin := range s.pluginSections {
+		parts = append(parts, provider.SystemPart{Name: events.BlockPluginPrefix + plugin[0], Bytes: len(plugin[1])})
+	}
 	want := []provider.SystemSegments{
 		// Round 1: no tool result yet, so neither the output-format section
 		// nor its reminder.
-		{Fixed: fixed, Catalog: s.toolCatalog, InlineCatalog: s.inlineCatalog, Conversation: conversation, Round: s.answerOnly},
-		{Fixed: fixed, Catalog: s.toolCatalog, InlineCatalog: s.inlineCatalog, Conversation: conversation,
+		{Fixed: fixed, FixedParts: parts, Catalog: s.toolCatalog, InlineCatalog: s.inlineCatalog, Conversation: conversation,
+			Round: s.answerOnly},
+		{Fixed: fixed, FixedParts: parts, Catalog: s.toolCatalog, InlineCatalog: s.inlineCatalog, Conversation: conversation,
 			Round: s.outputFormat + s.formatReminder + s.answerOnly},
 	}
 	for i, req := range llm.requests {
 		if req.Segments == nil {
 			t.Fatalf("round %d: chat-loop request carries no segments", i+1)
 		}
-		if *req.Segments != want[i] {
+		if !reflect.DeepEqual(*req.Segments, want[i]) {
 			t.Errorf("round %d segments:\n got %#v\nwant %#v", i+1, *req.Segments, want[i])
 		}
 		if req.Messages[0].Role != provider.RoleSystem || req.Messages[0].Content != req.Segments.Join() {

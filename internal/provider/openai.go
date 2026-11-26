@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opentalon/opentalon/internal/state/store/events"
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 )
 
@@ -357,8 +358,11 @@ type oaiResponseStream struct {
 	// closure rather than a back-pointer to the provider so the stream stays
 	// decoupled from OpenAIProvider for targeted tests. nil when no pricing
 	// should be computed (test fakes that skip provider construction).
-	usageFn   func(tokensIn, tokensOut int) Usage
-	streamErr error // non-nil → Close emits llm_error instead of llm_response/llm_refused
+	usageFn func(tokensIn, tokensOut int) Usage
+	// requestSize returns the blocks of the request the stream answers; it
+	// runs at end-of-stream, never before the response. nil in test fakes.
+	requestSize func() *events.RequestSize
+	streamErr   error // non-nil → Close emits llm_error instead of llm_response/llm_refused
 
 	// lastEventID is the session-event id of the llm_response event emitted
 	// at end-of-stream; empty for refusal/error paths and when no sink is
@@ -608,6 +612,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *CompletionRequest) (
 			LatencyMS:          latencyMS,
 			ProviderResponseID: oaiResp.ID,
 			ChatLoop:           req.Segments != nil,
+			Request:            oaiRequestSize(req, oaiReq, len(body)),
 		})
 	}
 
@@ -727,6 +732,9 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *CompletionRequest) (Re
 		currency:  p.currency,
 		usageFn: func(in, out int) Usage {
 			return p.usage(ctx, oaiReq.Model, in, out)
+		},
+		requestSize: func() *events.RequestSize {
+			return oaiRequestSize(req, oaiReq, len(body))
 		},
 	}
 	// Wire end-of-stream capture only when this session opted in. Sessions
@@ -890,7 +898,17 @@ func (s *oaiResponseStream) emitStreamEnd() {
 		LatencyMS:          latencyMS,
 		ProviderResponseID: s.responseID,
 		ChatLoop:           s.chatLoop,
+		Request:            s.request(),
 	})
+}
+
+// request returns the blocks of the request the stream answers, nil when the
+// stream was built without them.
+func (s *oaiResponseStream) request() *events.RequestSize {
+	if s.requestSize == nil {
+		return nil
+	}
+	return s.requestSize()
 }
 
 // priced returns u with its cost and price from usageFn.

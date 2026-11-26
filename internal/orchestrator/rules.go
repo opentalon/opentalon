@@ -38,11 +38,19 @@ func (rc *RulesConfig) Rules() []string {
 }
 
 func (rc *RulesConfig) BuildPromptSection() string {
+	section, _ := rc.promptSection()
+	return section
+}
+
+// promptSection returns the rules section and the size of the lines of the
+// operator's rules in it.
+func (rc *RulesConfig) promptSection() (section string, operatorBytes int) {
 	var sb strings.Builder
 	sb.WriteString("## MANDATORY SAFETY RULES\n")
 	sb.WriteString("You MUST follow ALL of the following rules at all times. Violation is not permitted under any circumstances.\n\n")
 
 	for i, rule := range rc.rules {
+		from := sb.Len()
 		if i < builtinRuleCount() {
 			sb.WriteString("- ")
 		} else {
@@ -50,7 +58,10 @@ func (rc *RulesConfig) BuildPromptSection() string {
 		}
 		sb.WriteString(rule)
 		sb.WriteString("\n")
+		if i >= builtinRuleCount() {
+			operatorBytes += sb.Len() - from
+		}
 	}
 	sb.WriteString("\n")
-	return sb.String()
+	return sb.String(), operatorBytes
 }
