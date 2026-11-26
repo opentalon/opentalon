@@ -515,3 +515,86 @@ func TestAnthropicInlineToolsAnnouncementMovesBehindAFollowingUserMessage(t *tes
 	}
 	checkWireAnnouncedIsCallable(t, reqs, run.llm.callable)
 }
+
+// chainedRecorder gives the chat loop a model chain, so it compacts, and keeps
+// the chat-loop requests it is sent.
+type chainedRecorder struct {
+	*callableRecorder
+	chain []provider.ModelInfo
+	sent  []*provider.CompletionRequest
+}
+
+func (c *chainedRecorder) ModelChain(provider.ModelRef) []provider.ModelInfo { return c.chain }
+
+func (c *chainedRecorder) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	c.mu.Lock()
+	c.sent = append(c.sent, req)
+	c.mu.Unlock()
+	return c.callableRecorder.Complete(ctx, req)
+}
+
+// newCompactingWireRun is an inline-tools run on the Anthropic wire whose
+// session s1 holds a conversation that loaded p__other and whose answers fill
+// most of the window, with chain as its model chain.
+func newCompactingWireRun(t *testing.T, chain []provider.ModelInfo, script ...string) (*inlineRun, *chainedRecorder) {
+	t.Helper()
+	sessions := sqliteSessions(t)
+	long := strings.Repeat("stock ", 7000)
+	for _, m := range []provider.Message{
+		{Role: provider.RoleUser, Content: "Which items do we have?"},
+		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "toolu_0", Name: "_meta__load_tools", Arguments: map[string]string{"names": "p__other"}}}},
+		{Role: provider.RoleTool, ToolCallID: "toolu_0", Content: `{"loaded":["p__other"],"ready":true}`},
+		{Role: provider.RoleAssistant, Content: long},
+		{Role: provider.RoleUser, Content: "And the containers?"},
+		{Role: provider.RoleAssistant, Content: long},
+	} {
+		if err := sessions.AddMessage("s1", m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := newInlineRunOn(t, sessions, inlineRegistry(t, announceActions(), &countingExecutor{}), OrchestratorOpts{}, script...)
+	llm := &chainedRecorder{callableRecorder: run.llm, chain: chain}
+	run.orch.llm = llm
+	return run, llm
+}
+
+// On an Anthropic model with inline tools, the first request after a
+// compaction carries the tool definitions and the fixed system text of the
+// request before it, and every later request until the next compaction starts
+// with the request before it: across a load, a spoken turn and the typed turn
+// after it. The tools the conversation loaded before the compaction are no
+// longer announced; a load after it announces again.
+func TestAnthropicInlineToolsKeepThePrefixAcrossACompaction(t *testing.T) {
+	const turn = "How many items are low on stock?"
+	probe, probeLLM := newCompactingWireRun(t, nil)
+	probe.turn(t, probe.ctx, turn)
+	raw := estimateRequestTokens(probeLLM.sent[0])
+
+	run, llm := newCompactingWireRun(t, []provider.ModelInfo{windowModel("anthropic/claude-x", raw*102/100)},
+		`{"type":"text","text":"The user keeps a warehouse."}`,
+		`{"type":"tool_use","id":"toolu_l","name":"_meta__load_tools","input":{"names":"p__other"}}`,
+	)
+	run.turn(t, run.ctx, turn)
+	run.turn(t, actor.WithSpokenReply(run.ctx), "And today?")
+	run.turn(t, run.ctx, "And tomorrow?")
+
+	reqs := run.api.requests(t)
+	if len(reqs) != 5 || !llm.sent[0].Compaction {
+		t.Fatalf("want the summary request then 4 chat-loop requests, got %d requests (first a summary: %v)", len(reqs), llm.sent[0].Compaction)
+	}
+	summary, first := reqs[0], reqs[1]
+	if !bytes.Equal(first.Tools, summary.Tools) || len(first.System) == 0 || !bytes.Equal(first.System[0], summary.System[0]) {
+		t.Errorf("the first request after the compaction must carry the tools and the fixed system text of the request before it")
+	}
+	if !bytes.Contains(first.Messages[0], []byte("The user keeps a warehouse.")) {
+		t.Errorf("the first request after the compaction must start with the summary, starts with %s", first.Messages[0])
+	}
+	checkStartsWith(t, "the round after the load", reqs[1], reqs[2], true)
+	checkStartsWith(t, "the spoken turn", reqs[2], reqs[3], false)
+	checkStartsWith(t, "the typed turn after it", reqs[3], reqs[4], false)
+	checkWireAnnouncedIsCallable(t, reqs, run.llm.callable)
+	if !slices.Equal(run.llm.callable[0], []string{"p__other"}) || len(run.llm.callable[1]) != 0 ||
+		!slices.Equal(run.llm.callable[2], []string{"p__other"}) {
+		t.Errorf("callable on demand = %v, want p__other before the compaction, none after it, p__other again after the load", run.llm.callable)
+	}
+}

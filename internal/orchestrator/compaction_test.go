@@ -90,8 +90,19 @@ type eventReader struct {
 	err      error
 }
 
-func (r eventReader) RecentPayloads(context.Context, string, int) ([]json.RawMessage, error) {
-	return r.payloads, r.err
+func (r eventReader) RecentPayloads(_ context.Context, _ string, limit int, accept func(json.RawMessage) bool) ([]json.RawMessage, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	var out []json.RawMessage
+	for _, p := range r.payloads {
+		if accept(p) {
+			if out = append(out, p); len(out) == limit {
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 // compactionRun is a text-mode orchestrator over session s1, seeded with
@@ -359,24 +370,36 @@ func TestCompaction_WhenItCannotMakeRoom(t *testing.T) {
 }
 
 // A refusal for size starts one compaction and one retry; a second refusal,
-// or one right after a compaction, ends the turn with context_length_exceeded.
+// one right after a compaction, a retry that still exceeds the budget the
+// refusal raised, or a refusal without a window ends the turn with
+// context_length_exceeded.
 func TestCompaction_RefusalForSize(t *testing.T) {
+	longTurn := strings.Repeat("why ", 80000)
+	longRaw := func(raw int) int {
+		return raw - estimateMessageTokens(provider.Message{Role: provider.RoleUser, Content: compactTurn}) +
+			estimateMessageTokens(provider.Message{Role: provider.RoleUser, Content: longTurn})
+	}
 	for _, tc := range []struct {
-		name     string
-		budget   func(raw int) int
-		refusals int
-		fails    bool
+		name      string
+		turn      string
+		budget    func(raw int) int
+		refusals  int
+		fails     bool
+		summaries int
+		chats     int
 	}{
-		{"one refusal", func(raw int) int { return 2 * raw }, 1, false},
-		{"two refusals", func(raw int) int { return 2 * raw }, 2, true},
-		{"a refusal right after a compaction", func(raw int) int { return raw * 102 / 100 }, 1, true},
+		{"one refusal", compactTurn, func(raw int) int { return 2 * raw }, 1, false, 1, 2},
+		{"two refusals", compactTurn, func(raw int) int { return 2 * raw }, 2, true, 1, 2},
+		{"a refusal right after a compaction", compactTurn, func(raw int) int { return raw * 102 / 100 }, 1, true, 1, 1},
+		{"the retry exceeds the raised budget", longTurn, func(raw int) int { return longRaw(raw) * 10 / 9 }, 1, true, 1, 1},
+		{"a refusal without a window", compactTurn, func(int) int { return 0 }, 1, true, 0, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newCompactionRun(t, longHistory(), OrchestratorOpts{})
 			run.llm.chain = []provider.ModelInfo{windowModel(compactModelA, tc.budget(run.raw))}
 			run.llm.refusals = tc.refusals
 
-			res, err := run.orch.Run(run.ctx, "s1", compactTurn)
+			res, err := run.orch.Run(run.ctx, "s1", tc.turn)
 			if tc.fails {
 				if !provider.IsContextOverflow(err) {
 					t.Fatalf("Run error = %v, want context_length_exceeded", err)
@@ -384,8 +407,8 @@ func TestCompaction_RefusalForSize(t *testing.T) {
 			} else if err != nil || res.Response != "Answer." {
 				t.Fatalf("the retry must be answered, got %v, %+v", err, res)
 			}
-			if n := len(run.llm.summaries()); n != 1 {
-				t.Errorf("summary calls = %d, want exactly one", n)
+			if n, m := len(run.llm.summaries()), len(run.llm.chats()); n != tc.summaries || m != tc.chats {
+				t.Errorf("summary calls = %d, chat requests = %d, want %d and %d", n, m, tc.summaries, tc.chats)
 			}
 			if got := run.orch.calibrators.factor(string(compactModelA)); got != rejectionStep {
 				t.Errorf("calibration after the refusal = %v, want %v", got, rejectionStep)
@@ -429,34 +452,64 @@ func TestCompaction_KeptUserMessages(t *testing.T) {
 	}
 }
 
-// The stored summary is the model's text cut to its share of the room at a
-// rune boundary, and the line naming the tools called before it, without the
+// The stored summary is the model's text cut at a rune boundary, and the line
+// naming the tools called before it, natively or in text format, without the
 // core's meta-tools.
 func TestCompaction_SummaryText(t *testing.T) {
 	stored := []provider.Message{
 		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{Name: "inv__list"}, {Name: "_meta__load_tools"}}},
 		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{Name: "inv__add"}, {Name: "inv__list"}}},
+		{Role: provider.RoleAssistant, Content: formatToolCallMessage(ToolCall{Plugin: "inv", Action: "count", Args: map[string]string{"q": "x"}})},
 	}
 	tools := toolsCalled(stored)
-	if !reflect.DeepEqual(tools, []string{"inv__add", "inv__list"}) {
+	if !reflect.DeepEqual(tools, []string{"inv__add", "inv__count", "inv__list"}) {
 		t.Fatalf("tools called = %v", tools)
 	}
-	line := "\n\n" + fmt.Sprintf(prompts.CompactionTools, "inv__add, inv__list")
+	line := "\n\n" + fmt.Sprintf(prompts.CompactionTools, "inv__add, inv__count, inv__list")
+	if got := toolsLine(tools); got != line {
+		t.Errorf("toolsLine = %q, want %q", got, line)
+	}
+	if got := toolsLine(nil); got != "" {
+		t.Errorf("toolsLine without tools = %q, want none", got)
+	}
 	for _, tc := range []struct {
-		name, written string
-		tools         []string
-		capTokens     int
-		want          string
+		name, written, tools string
+		limit                int
+		want                 string
 	}{
-		{"with the tools line", " Done. ", tools, 1000, "Done." + line},
-		{"no tools", "Done.", nil, 1000, "Done."},
-		{"cut at a rune boundary", strings.Repeat("ä", 10), nil, 2, strings.Repeat("ä", 4)},
+		{"with the tools line", " Done. ", line, 1000, "Done." + line},
+		{"cut at a rune boundary", strings.Repeat("ä", 10), "", 9, strings.Repeat("ä", 4)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := summaryText(tc.written, tc.tools, tc.capTokens); got != tc.want {
+			if got := summaryText(tc.written, tc.tools, tc.limit); got != tc.want {
 				t.Errorf("summaryText = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// A compaction whose line naming the tools called fills the summary's share
+// of the room alone fails before the summary call; the turn goes on.
+func TestCompaction_ToolsLineFillsTheSummaryShare(t *testing.T) {
+	var calls []provider.ToolCall
+	for i := range 400 {
+		calls = append(calls, provider.ToolCall{ID: fmt.Sprint("c", i), Name: fmt.Sprintf("inventory__%s_%03d", strings.Repeat("x", 100), i)})
+	}
+	history := append(longHistory(), provider.Message{Role: provider.RoleAssistant, ToolCalls: calls})
+	run := newCompactionRun(t, history, OrchestratorOpts{})
+	run.llm.chain = []provider.ModelInfo{windowModel(compactModelA, run.raw*102/100)}
+
+	if _, err := run.orch.Run(run.ctx, "s1", compactTurn); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(run.llm.summaries()); n != 0 {
+		t.Errorf("summary calls = %d, want none", n)
+	}
+	if got := frameStates(*run.frames); !reflect.DeepEqual(got, []string{"started", "failed"}) {
+		t.Errorf("frames = %v, want started and failed", got)
+	}
+	if failed := eventPayloads[events.CompactionFailedPayload](t, run.sink.snapshot(), events.TypeCompactionFailed); len(failed) != 1 {
+		t.Errorf("compaction_failed events = %+v, want one", failed)
 	}
 }
 
@@ -484,6 +537,13 @@ func TestCompaction_ShortenToolResults(t *testing.T) {
 	for i, m := range r.Messages {
 		if len(m.Content) < shortenedResultMin && m.Content != req().Messages[i].Content {
 			t.Errorf("result %d shortened below %d: %d bytes", i, shortenedResultMin, len(m.Content))
+		}
+	}
+	r = req()
+	shortenToolResults(r, []chainLimit{{factor: 1, budget: 1}})
+	for i, m := range r.Messages {
+		if len(m.Content) > shortenedResultMin+len(shortenedMarker) {
+			t.Errorf("a request that cannot fit must leave every result at its minimum, result %d has %d bytes", i, len(m.Content))
 		}
 	}
 }

@@ -7,7 +7,7 @@ import (
 )
 
 func TestChain(t *testing.T) {
-	dedicated := &fakeProvider{id: "dedicated", model: "m1", window: 131072}
+	dedicated := &fakeProvider{id: "dedicated", model: "m1", window: 131072, extra: []string{"m1-small"}}
 	shared := &fakeProvider{id: "shared", model: "m1-shared", window: 131072}
 	def := newTestHG(dedicated, shared, 1, nil)
 	sel := &fakeProvider{id: "sel", model: "m2", window: 262144}
@@ -22,6 +22,7 @@ func TestChain(t *testing.T) {
 	}{
 		{"a selected model, then the default chain", s, "sel/m2", "m1", []ModelRef{"sel/m2", "dedicated/m1", "shared/m1-shared"}},
 		{"no selection", s, "", "m1", []ModelRef{"dedicated/m1", "shared/m1-shared"}},
+		{"a bare model the default provider serves", s, "m1-small", "m1-small", []ModelRef{"dedicated/m1-small", "shared/m1-shared"}},
 		{"a reference no provider serves", s, "gone/m9", "m1", []ModelRef{"dedicated/m1", "shared/m1-shared"}},
 		{"a bare provider", sel, "", "m2", []ModelRef{"sel/m2"}},
 	} {

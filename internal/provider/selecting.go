@@ -55,11 +55,11 @@ func (s *selectingProvider) route(req *CompletionRequest) (*selected, ModelInfo,
 	if ref == "" {
 		return nil, ModelInfo{}, req
 	}
-	def := *req
-	def.Model = s.model
-	if _, _, qualified := strings.Cut(ref, "/"); !qualified && findModel(s.def.Models(), ref).ID != "" {
+	if s.servesBare(ref) {
 		return nil, ModelInfo{}, req
 	}
+	def := *req
+	def.Model = s.model
 	p, m, why := s.lookup(ref)
 	if why != "" {
 		s.log.Warn(why+"; using the default model", "requested", ref, "model", s.model)
@@ -74,6 +74,13 @@ func (s *selectingProvider) route(req *CompletionRequest) (*selected, ModelInfo,
 		return nil, ModelInfo{}, &def
 	}
 	return p, m, &def
+}
+
+// servesBare reports whether ref is a bare model id the default provider
+// serves: a request for it goes there with that model.
+func (s *selectingProvider) servesBare(ref string) bool {
+	_, _, qualified := strings.Cut(ref, "/")
+	return !qualified && findModel(s.def.Models(), ref).ID != ""
 }
 
 // lookup resolves ref to a model of a configured provider other than the

@@ -213,26 +213,37 @@ func TestSessionEventStore_PruneByTimestamp(t *testing.T) {
 	}
 }
 
-// RecentPayloads reads one event type across sessions, newest first, at most limit.
+// RecentPayloads reads one event type across sessions, newest first, and
+// keeps the ones accept takes, at most limit, reading past a page of events it
+// does not take.
 func TestSessionEventStore_RecentPayloads(t *testing.T) {
 	es := NewSessionEventStore(openTestDB(t))
 	ctx := context.Background()
 	base := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
-	for i, ev := range []struct{ session, typ string }{
-		{"s1", events.TypeCompactionFinished}, {"s2", events.TypeCompactionFinished},
-		{"s1", events.TypeUserMessage}, {"s2", events.TypeCompactionFinished},
-	} {
-		if err := es.Insert(ctx, SessionEvent{SessionID: ev.session, EventType: ev.typ, Timestamp: base.Add(time.Duration(i) * time.Minute),
-			Payload: payloadJSON(t, map[string]int{"n": i})}); err != nil {
+	insert := func(i int, session, typ string, n int) {
+		if err := es.Insert(ctx, SessionEvent{SessionID: session, EventType: typ, Timestamp: base.Add(time.Duration(i) * time.Second),
+			Payload: payloadJSON(t, map[string]int{"n": n})}); err != nil {
 			t.Fatalf("Insert %d: %v", i, err)
 		}
 	}
-	got, err := es.RecentPayloads(ctx, events.TypeCompactionFinished, 2)
+	insert(0, "s1", events.TypeCompactionFinished, 3)
+	insert(1, "s2", events.TypeCompactionFinished, 2)
+	insert(2, "s1", events.TypeUserMessage, 1)
+	insert(3, "s2", events.TypeCompactionFinished, 1)
+	for i := 4; i < 254; i++ {
+		insert(i, "s3", events.TypeCompactionFinished, 0)
+	}
+	odd := func(p json.RawMessage) bool { var v struct{ N int }; return json.Unmarshal(p, &v) == nil && v.N%2 == 1 }
+	got, err := es.RecentPayloads(ctx, events.TypeCompactionFinished, 5, odd)
 	if err != nil {
 		t.Fatalf("RecentPayloads: %v", err)
 	}
-	if len(got) != 2 || string(got[0]) != `{"n":3}` || string(got[1]) != `{"n":1}` {
-		t.Errorf("payloads = %s, want n 3 then n 1", got)
+	if len(got) != 2 || string(got[0]) != `{"n":1}` || string(got[1]) != `{"n":3}` {
+		t.Errorf("payloads = %s, want n 1 then n 3, behind 250 newer events accept does not take", got)
+	}
+	got, err = es.RecentPayloads(ctx, events.TypeCompactionFinished, 1, func(json.RawMessage) bool { return true })
+	if err != nil || len(got) != 1 || string(got[0]) != `{"n":0}` {
+		t.Errorf("payloads = %s, %v, want the newest one only", got, err)
 	}
 }
 

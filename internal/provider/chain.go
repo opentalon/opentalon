@@ -7,6 +7,9 @@ package provider
 func Chain(p Provider, ref ModelRef, model string) []ModelInfo {
 	switch p := p.(type) {
 	case *selectingProvider:
+		if p.servesBare(string(ref)) {
+			return Chain(p.def, "", model)
+		}
 		var out []ModelInfo
 		if sel, m, _ := p.lookup(string(ref)); sel != nil {
 			out = append(out, m)

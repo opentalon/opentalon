@@ -246,21 +246,45 @@ func newSessionEventID() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// RecentPayloads returns the payloads of the newest limit events of
-// eventType across all sessions, newest first.
-func (s *SessionEventStore) RecentPayloads(ctx context.Context, eventType string, limit int) ([]json.RawMessage, error) {
+// RecentPayloads returns the payloads of the newest events of eventType
+// across all sessions that accept takes, newest first, at most limit. It
+// reads the events a page at a time until it has limit of them or none is
+// left.
+func (s *SessionEventStore) RecentPayloads(ctx context.Context, eventType string, limit int,
+	accept func(json.RawMessage) bool) ([]json.RawMessage, error) {
+	const page = 200
+	var out []json.RawMessage
+	for offset := 0; ; offset += page {
+		payloads, err := s.payloadPage(ctx, eventType, page, offset)
+		if err != nil {
+			return nil, fmt.Errorf("recent %s events: %w", eventType, err)
+		}
+		for _, p := range payloads {
+			if accept(p) {
+				if out = append(out, p); len(out) == limit {
+					return out, nil
+				}
+			}
+		}
+		if len(payloads) < page {
+			return out, nil
+		}
+	}
+}
+
+func (s *SessionEventStore) payloadPage(ctx context.Context, eventType string, limit, offset int) ([]json.RawMessage, error) {
 	rows, err := s.db.SQLDB().QueryContext(ctx,
-		s.db.Dialect().Rebind(`SELECT payload FROM session_events WHERE event_type = ? ORDER BY ts DESC LIMIT ?`),
-		eventType, limit)
+		s.db.Dialect().Rebind(`SELECT payload FROM session_events WHERE event_type = ? ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`),
+		eventType, limit, offset)
 	if err != nil {
-		return nil, fmt.Errorf("recent %s events: %w", eventType, err)
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	var out []json.RawMessage
 	for rows.Next() {
 		var payload string
 		if err := rows.Scan(&payload); err != nil {
-			return nil, fmt.Errorf("recent %s events: %w", eventType, err)
+			return nil, err
 		}
 		out = append(out, json.RawMessage(payload))
 	}

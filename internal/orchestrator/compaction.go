@@ -44,12 +44,10 @@ const (
 	summaryShare  = 0.10
 	// Expected compaction duration: the exponentially weighted mean of the
 	// durations of the model's newest expectedDurationSamples compactions,
-	// each older one weighing expectedDurationDecay times the next, read from
-	// the newest expectedDurationScan compaction_finished events of all
-	// models. Provisional values, to be set from measured compactions.
+	// each older one weighing expectedDurationDecay times the next.
+	// Provisional values, to be set from measured compactions.
 	expectedDurationSamples = 8
 	expectedDurationDecay   = 0.7
-	expectedDurationScan    = 200
 	// shortenedResultMin is the length a tool result of the summary request
 	// is never shortened below.
 	shortenedResultMin = 2000
@@ -73,9 +71,9 @@ var errContextLengthExceeded = errors.New("context_length_exceeded: the conversa
 
 // SessionEventReader reads stored session events across sessions.
 type SessionEventReader interface {
-	// RecentPayloads returns the payloads of the newest events of eventType,
-	// newest first, at most limit.
-	RecentPayloads(ctx context.Context, eventType string, limit int) ([]json.RawMessage, error)
+	// RecentPayloads returns the payloads of the newest events of eventType
+	// that accept takes, newest first, at most limit.
+	RecentPayloads(ctx context.Context, eventType string, limit int, accept func(json.RawMessage) bool) ([]json.RawMessage, error)
 }
 
 // ModelChainer is implemented by an LLM client that can name the models a
@@ -92,7 +90,6 @@ func (o *Orchestrator) modelChain(ref provider.ModelRef) []provider.ModelInfo {
 	return nil
 }
 
-// roundResult is one round's response and the request that got it.
 type roundResult struct {
 	req         *provider.CompletionRequest
 	resp        *provider.CompletionResponse
@@ -101,7 +98,8 @@ type roundResult struct {
 }
 
 // round builds the round's request, compacts first when it reaches a trigger,
-// sends it, and answers a refusal for size with one compaction and one retry.
+// sends it, and answers a refusal for size with one compaction and one retry;
+// without a window in the chain a refusal ends the turn.
 func (r *roundRequests) round(ctx context.Context, transient []provider.Message, stream bool) (roundResult, error) {
 	r.spent = nil
 	res, err := r.compactedRound(ctx, transient, stream)
@@ -130,17 +128,13 @@ func (r *roundRequests) compactedRound(ctx context.Context, transient []provider
 	r.o.calibrators.observeRejection(r.first(), estimateRequestTokens(req), measured)
 	logger.FromContext(ctx).Warn("prompt refused as too long; compacting and sending again",
 		"provider_measured", measured, "calibration", r.o.calibrators.factor(r.first()))
-	if r.justCompacted() {
+	if limits = r.limits(); r.justCompacted() || len(limits) == 0 {
 		return roundResult{}, fmt.Errorf("%w: %w", errContextLengthExceeded, err)
 	}
-	limit := chainLimit{ref: provider.ModelRef(r.first())}
-	if len(limits) > 0 {
-		limit = limits[0]
-	}
-	if err := r.compact(ctx, req, limit, limit.tokens(estimateRequestTokens(req))); err != nil {
+	if err := r.compact(ctx, req, limits[0], limits[0].tokens(estimateRequestTokens(req))); err != nil {
 		return roundResult{}, fmt.Errorf("%w: %w", errContextLengthExceeded, err)
 	}
-	if req, blocked, err = r.build(ctx, transient); err != nil || blocked != nil {
+	if req, blocked, err = r.rebuild(ctx, transient); err != nil || blocked != nil {
 		return roundResult{blocked: blocked}, err
 	}
 	resp, err = r.send(ctx, req, stream)
@@ -156,15 +150,23 @@ func (r *roundRequests) compactedRound(ctx context.Context, transient []provider
 // must fit every model's input budget; one that does not ends the turn.
 func (r *roundRequests) compactAndRebuild(ctx context.Context, req *provider.CompletionRequest, reached chainLimit,
 	estimate int, transient []provider.Message) (*provider.CompletionRequest, *RunResult, error) {
-	limits := r.limits()
-	if !r.justCompacted() && room(limits, fixedTokens(req)) > 0 {
+	if !r.justCompacted() && room(r.limits(), fixedTokens(req)) > 0 {
 		if err := r.compact(ctx, req, reached, estimate); err == nil {
-			rebuilt, blocked, err := r.build(ctx, transient)
-			if err != nil || blocked != nil {
-				return nil, blocked, err
-			}
-			req = rebuilt
+			return r.rebuild(ctx, transient)
 		}
+	}
+	if overBudget(r.limits(), estimateRequestTokens(req)) {
+		return nil, nil, errContextLengthExceeded
+	}
+	return req, nil, nil
+}
+
+// rebuild builds the round's request again after a compaction; one that
+// still exceeds a model's input budget ends the turn.
+func (r *roundRequests) rebuild(ctx context.Context, transient []provider.Message) (*provider.CompletionRequest, *RunResult, error) {
+	req, blocked, err := r.build(ctx, transient)
+	if err != nil || blocked != nil {
+		return nil, blocked, err
 	}
 	if overBudget(r.limits(), estimateRequestTokens(req)) {
 		return nil, nil, errContextLengthExceeded
@@ -184,7 +186,6 @@ func (r *roundRequests) answered(req *provider.CompletionRequest, resp *provider
 	return roundResult{req: req, resp: resp}, nil
 }
 
-// first is the chain's first model, the one a request goes to.
 func (r *roundRequests) first() string {
 	if len(r.chain) == 0 {
 		return string(r.ref)
@@ -225,6 +226,11 @@ func (r *roundRequests) compact(ctx context.Context, req *provider.CompletionReq
 	start := time.Now()
 
 	summaryCap := int(float64(roomTokens) * summaryShare)
+	tools := toolsLine(toolsCalled(sess.Messages))
+	textLimit := int(float64(summaryCap)*charsPerTokenProse) - len(tools)
+	if textLimit <= 0 {
+		return r.compactionFailed(ctx, errors.New("the line naming the tools called fills the summary's share of the room"))
+	}
 	resp, err := r.o.llm.Complete(ctx, summaryRequest(req, limits, summaryCap))
 	if resp != nil {
 		r.spent = append(r.spent, resp.Usage)
@@ -235,7 +241,7 @@ func (r *roundRequests) compact(ctx context.Context, req *provider.CompletionReq
 	if err != nil {
 		return r.compactionFailed(ctx, err)
 	}
-	summary := summaryText(resp.Content, toolsCalled(sess.Messages), summaryCap)
+	summary := summaryText(resp.Content, tools, textLimit)
 	kept := keptUserCount(sess.Messages, int(float64(roomTokens)*keptUserShare))
 	metadata := map[string]string{
 		"prompt_type":      provider.PromptTypeCompaction,
@@ -308,7 +314,7 @@ func summaryWords(capTokens int) int {
 }
 
 // shortenToolResults cuts the longest tool results of req until its estimate
-// fits every model's input budget, or no result is left to shorten.
+// fits every model's input budget, or every result is at its minimum.
 func shortenToolResults(req *provider.CompletionRequest, limits []chainLimit) {
 	for {
 		excess := excessTokens(limits, estimateRequestTokens(req))
@@ -317,7 +323,8 @@ func shortenToolResults(req *provider.CompletionRequest, limits []chainLimit) {
 		}
 		longest := -1
 		for i, m := range req.Messages {
-			if provider.IsToolResult(m) && (longest < 0 || len(m.Content) > len(req.Messages[longest].Content)) {
+			if provider.IsToolResult(m) && len(m.Content) > shortenedResultMin+len(shortenedMarker) &&
+				(longest < 0 || len(m.Content) > len(req.Messages[longest].Content)) {
 				longest = i
 			}
 		}
@@ -326,25 +333,23 @@ func shortenToolResults(req *provider.CompletionRequest, limits []chainLimit) {
 		}
 		content := req.Messages[longest].Content
 		keep := max(shortenedResultMin, len(content)-int(float64(excess)*charsPerTokenJSON)-len(shortenedMarker))
-		if keep >= len(content) {
-			return
-		}
 		req.Messages[longest].Content = cutUTF8(content, keep) + shortenedMarker
 	}
 }
 
-// summaryText is the stored summary: the model's text, cut to the summary's
-// share of the room, and the line naming the tools called before it.
-func summaryText(written string, tools []string, capTokens int) string {
-	var toolsLine string
-	if len(tools) > 0 {
-		toolsLine = "\n\n" + fmt.Sprintf(prompts.CompactionTools, strings.Join(tools, ", "))
+// toolsLine is the line that ends a summary, naming the tools called before
+// the compaction; empty when none was.
+func toolsLine(tools []string) string {
+	if len(tools) == 0 {
+		return ""
 	}
-	summary := strings.TrimSpace(written)
-	if limit := int(float64(capTokens)*charsPerTokenProse) - len(toolsLine); limit > 0 && len(summary) > limit {
-		summary = strings.TrimSpace(cutUTF8(summary, limit))
-	}
-	return summary + toolsLine
+	return "\n\n" + fmt.Sprintf(prompts.CompactionTools, strings.Join(tools, ", "))
+}
+
+// summaryText is the stored summary: the model's text cut to limit bytes,
+// then tools.
+func summaryText(written, tools string, limit int) string {
+	return strings.TrimSpace(cutUTF8(strings.TrimSpace(written), limit)) + tools
 }
 
 // cutUTF8 returns s cut to at most n bytes, at a rune boundary.
@@ -363,7 +368,7 @@ func cutUTF8(s string, n int) string {
 func toolsCalled(stored []provider.Message) []string {
 	called := map[string]bool{}
 	for _, m := range stored {
-		for _, tc := range m.ToolCalls {
+		for _, tc := range callsOf(m) {
 			if !strings.HasPrefix(tc.Name, metaPluginName+"__") {
 				called[tc.Name] = true
 			}
@@ -381,8 +386,6 @@ func sortedSet(set map[string]bool) []string {
 	return out
 }
 
-// lastCompaction returns the index of the newest compaction row in stored, -1
-// when there is none.
 func lastCompaction(stored []provider.Message) int {
 	for i := len(stored) - 1; i >= 0; i-- {
 		if stored[i].PromptType == provider.PromptTypeCompaction {
@@ -490,7 +493,6 @@ func reachedTrigger(limits []chainLimit, raw int) (chainLimit, int, bool) {
 	return chainLimit{}, 0, false
 }
 
-// overBudget reports whether the estimate raw exceeds a model's input budget.
 func overBudget(limits []chainLimit, raw int) bool {
 	return excessTokens(limits, raw) > 0
 }
@@ -539,20 +541,18 @@ func (o *Orchestrator) expectedCompactionMS(ctx context.Context, model provider.
 	if o.sessionEvents == nil || model == "" {
 		return 0
 	}
-	payloads, err := o.sessionEvents.RecentPayloads(ctx, events.TypeCompactionFinished, expectedDurationScan)
+	var durations []int64
+	_, err := o.sessionEvents.RecentPayloads(ctx, events.TypeCompactionFinished, expectedDurationSamples, func(raw json.RawMessage) bool {
+		var p events.CompactionFinishedPayload
+		if json.Unmarshal(raw, &p) != nil || p.Fallback || p.SummaryModel != string(model) || p.DurationMS <= 0 {
+			return false
+		}
+		durations = append(durations, p.DurationMS)
+		return true
+	})
 	if err != nil {
 		slog.Warn("compaction durations not read; no expected duration", "error", err)
 		return 0
-	}
-	var durations []int64
-	for _, raw := range payloads {
-		var p events.CompactionFinishedPayload
-		if json.Unmarshal(raw, &p) != nil || p.Fallback || p.SummaryModel != string(model) || p.DurationMS <= 0 {
-			continue
-		}
-		if durations = append(durations, p.DurationMS); len(durations) == expectedDurationSamples {
-			break
-		}
 	}
 	return weightedMean(durations)
 }

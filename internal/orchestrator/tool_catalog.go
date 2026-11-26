@@ -35,36 +35,62 @@ func (o *Orchestrator) loadedTools(ctx context.Context, conv []provider.Message)
 	var calls map[string]provider.ToolCall
 	for i := range conv {
 		m := &conv[i]
+		var call provider.ToolCall
 		switch {
-		case m.Role == provider.RoleAssistant && len(m.ToolCalls) > 0:
-			calls = make(map[string]provider.ToolCall, len(m.ToolCalls))
-			for _, tc := range m.ToolCalls {
+		case m.Role == provider.RoleAssistant:
+			calls = map[string]provider.ToolCall{}
+			for _, tc := range callsOf(*m) {
 				calls[tc.ID] = tc
 			}
+			continue
 		case m.Role == provider.RoleTool:
-			tc, ok := calls[m.ToolCallID]
-			if !ok {
-				continue
-			}
-			for _, fqn := range o.toolsLoadedBy(tc, allowed, allowedPlugins) {
-				if !loaded[fqn] {
-					loaded[fqn] = true
-					m.LoadedTools = append(m.LoadedTools, fqn)
-				}
+			call = calls[m.ToolCallID]
+		case provider.IsToolResult(*m):
+			call = calls[""]
+		}
+		if call.Name == "" {
+			continue
+		}
+		for _, fqn := range o.toolsLoadedBy(call, allowed, allowedPlugins) {
+			if !loaded[fqn] {
+				loaded[fqn] = true
+				m.LoadedTools = append(m.LoadedTools, fqn)
 			}
 		}
 	}
 	return loaded
 }
 
+// callsOf returns the calls an assistant message makes: its native calls, or
+// the one, without an id, of a text-format row as formatToolCallMessage wrote
+// it, answered by the [plugin_output] row after it.
+func callsOf(m provider.Message) []provider.ToolCall {
+	if m.Role != provider.RoleAssistant {
+		return nil
+	}
+	if len(m.ToolCalls) > 0 {
+		return m.ToolCalls
+	}
+	body, ok := strings.CutPrefix(m.Content, "[tool_call] ")
+	if !ok {
+		return nil
+	}
+	call, ok := parseInlineToolCall(body, 1)
+	if !ok {
+		return nil
+	}
+	return []provider.ToolCall{{Name: toolFQN(call.Plugin, call.Action), Arguments: call.Args}}
+}
+
 // toolsLoadedBy returns the on-demand tools call loads, each followed by its
 // companions: the tools a _meta__load_tools call names, or the tool any other
-// call calls. A tool the session cannot see, or one always included, loads
-// nothing.
+// call calls. A tool the session cannot see loads nothing; one always
+// included loads only its companions, and only when a _meta__load_tools call
+// names it, as that call's answer says (loadToolsExecutor).
 func (o *Orchestrator) toolsLoadedBy(call provider.ToolCall, allowed map[string]struct{}, allowedPlugins cachedAllowedPlugins) []string {
-	names := []string{call.Name}
+	names, named := []string{call.Name}, false
 	if plugin, action, err := parseToolName(call.Name); err == nil && plugin == metaPluginName && action == metaLoadTools {
-		if names = splitToolNames(call.Arguments["names"]); len(names) == 0 {
+		if names, named = splitToolNames(call.Arguments["names"]), true; len(names) == 0 {
 			names = splitToolNames(call.Arguments["name"])
 		}
 	}
@@ -75,10 +101,12 @@ func (o *Orchestrator) toolsLoadedBy(call provider.ToolCall, allowed map[string]
 			continue
 		}
 		plugin, action, _ := parseToolName(fqn)
-		if a := o.resolveAction(plugin, action); a == nil || a.AlwaysInclude {
+		switch a := o.resolveAction(plugin, action); {
+		case a == nil, a.AlwaysInclude && !named:
 			continue
+		case !a.AlwaysInclude:
+			out = append(out, fqn)
 		}
-		out = append(out, fqn)
 		out = append(out, o.companionsOf(fqn, allowed, allowedPlugins)...)
 	}
 	return out

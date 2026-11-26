@@ -75,12 +75,10 @@ func (t *toolSurface) update(ctx context.Context, o *Orchestrator, conv []provid
 	t.inline = renderInlineToolCatalog(t.callable, t.loadable)
 }
 
-// turnStartPrompt is the system text the turn starts with, for turn_start.
 func (r *roundRequests) turnStartPrompt() string {
 	return withToolCatalog(r.sysPrompt, r.tools.catalog, r.tools.inline).Join()
 }
 
-// stored reads the session as stored.
 func (r *roundRequests) stored() (*state.Session, error) {
 	sess, err := r.sessions.Get(r.sessionID)
 	if err != nil {
@@ -179,7 +177,6 @@ func requestConversation(stored []provider.Message) []provider.Message {
 	return appendStrippingHistoricalKC(nil, sanitizeHistory(stripApprovedConfirmationExchanges(compactedConversation(stored))))
 }
 
-// send sends req as one call, streamed when stream is set.
 func (r *roundRequests) send(ctx context.Context, req *provider.CompletionRequest, stream bool) (*provider.CompletionResponse, error) {
 	// Always logged: the figure to reconcile against the provider's own count
 	// when a session nears a trigger.

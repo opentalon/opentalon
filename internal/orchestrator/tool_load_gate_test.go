@@ -902,7 +902,8 @@ func companionOrch(t *testing.T, companions ...string) *Orchestrator {
 }
 
 // Loading a tool loads its companions with it, through _meta__load_tools and on
-// call alike: named in the answer, and in the request after it (loadedTools). A
+// call alike: named in the answer, and in the request after it (loadedTools),
+// from native and text-format rows alike. A
 // companion the session may not see is skipped and the tool still loads; an
 // always-included one is left as it is; a companion's own companions are not
 // loaded; a tool without companions loads alone. (A companion is an action of
@@ -947,18 +948,66 @@ func TestLoad_CompanionsLoadWithTheTool(t *testing.T) {
 				if !reflect.DeepEqual(named, want) {
 					t.Errorf("the answer names %v as loaded, want %v", named, want)
 				}
-				conv := []provider.Message{
-					{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{call}},
-					{Role: provider.RoleTool, ToolCallID: "c1", Content: "answer"},
-				}
-				if got := sortedSet(orch.loadedTools(ctx, conv)); !reflect.DeepEqual(got, sortedSet(toolSet(want))) {
-					t.Errorf("the request after loads %v, want %v", got, want)
-				}
-				if !reflect.DeepEqual(conv[1].LoadedTools, want) {
-					t.Errorf("the result is marked with %v, want %v", conv[1].LoadedTools, want)
+				plugin, action, _ := parseToolName(call.Name)
+				for format, conv := range map[string][]provider.Message{
+					"native": {
+						{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{call}},
+						{Role: provider.RoleTool, ToolCallID: "c1", Content: "answer"},
+					},
+					"text": {
+						{Role: provider.RoleAssistant, Content: formatToolCallMessage(ToolCall{Plugin: plugin, Action: action, Args: call.Arguments})},
+						{Role: provider.RoleUser, Content: "[plugin_output]answer[/plugin_output]"},
+					},
+				} {
+					if got := sortedSet(orch.loadedTools(ctx, conv)); !reflect.DeepEqual(got, sortedSet(toolSet(want))) {
+						t.Errorf("%s: the request after loads %v, want %v", format, got, want)
+					}
+					if !reflect.DeepEqual(conv[1].LoadedTools, want) {
+						t.Errorf("%s: the result is marked with %v, want %v", format, conv[1].LoadedTools, want)
+					}
 				}
 			})
 		}
+	}
+}
+
+// An always-included tool named in _meta__load_tools loads its companions, as
+// the call's answer says; a call to it loads nothing.
+func TestLoad_AlwaysIncludedToolLoadsItsCompanionsByName(t *testing.T) {
+	registry := NewToolRegistry()
+	if err := registry.Register(PluginCapability{
+		Name: "p", Description: "companion fixtures",
+		Actions: []Action{
+			{Name: "always", Description: "Always-include tool.", AlwaysInclude: true, ReadOnly: true, Companions: []string{"lookup"}},
+			{Name: "lookup", Description: "A lookup.", ReadOnly: true},
+		},
+	}, &countingExecutor{}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	orch := NewWithRules(&fakeLLM{}, &fakeParser{}, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
+	ctx := sentCtx("p__always")
+	exec, _ := orch.registry.GetExecutor(metaPluginName)
+	answer := decodeLoadResult(t, exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": "p__always"}})).Loaded
+	if !reflect.DeepEqual(answer, []string{"p__always", "p__lookup"}) {
+		t.Fatalf("the answer names %v as loaded", answer)
+	}
+	for _, tc := range []struct {
+		name string
+		call provider.ToolCall
+		want []string
+	}{
+		{"named in load_tools", provider.ToolCall{ID: "c1", Name: "_meta__load_tools", Arguments: map[string]string{"names": "p__always"}}, []string{"p__lookup"}},
+		{"called", provider.ToolCall{ID: "c1", Name: "p__always", Arguments: map[string]string{}}, []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conv := []provider.Message{
+				{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{tc.call}},
+				{Role: provider.RoleTool, ToolCallID: "c1", Content: "answer"},
+			}
+			if got := sortedSet(orch.loadedTools(ctx, conv)); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("the request after loads %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

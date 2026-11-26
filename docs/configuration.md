@@ -709,10 +709,12 @@ compaction.
   messages the compaction kept and the messages stored after it. Kept are
   the newest user message, hidden or not, and before it the newest visible
   ones while they fit a quarter of the room the conversation has; the
-  summary is held to a tenth of it.
+  summary, its line of tools included, is held to a tenth of it, and a
+  compaction whose line of tools alone does not fit fails.
 - A refusal for size starts one compaction and one retry. When the request
-  right after a compaction is still over the budget or is refused, the turn
-  fails with `context_length_exceeded` and nothing is stored.
+  right after a compaction is still over the budget or is refused, or no
+  model of the chain has a `context_window`, the turn fails with
+  `context_length_exceeded` and nothing is stored.
 - When the summary cannot be written, nothing is stored and the turn goes on
   uncompacted while its requests fit the budget; the next request tries
   again.
@@ -728,7 +730,8 @@ compaction.
   Only compactions without a fallback count, each for the model that wrote
   its summary; a model without one gets no `expected_ms`.
 - Settings of the removed message-count summariser and message window are
-  ignored: a configuration that still sets them starts.
+  ignored: a configuration that still sets them starts. A summary that
+  summariser stored is no longer read; the messages it kept stay.
 
 ## Orchestrator
 
