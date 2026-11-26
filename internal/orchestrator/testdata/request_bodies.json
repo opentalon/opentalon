@@ -1,0 +1,11 @@
+{
+  "anthropic 1": "10798 0ca82cd6e7d47c3e64aaa0828633f1cc73d3fc08087a62f2e4c8697687327b4f",
+  "anthropic 2": "11430 256aa0b5e47ff3942f27b96ac022ae964ff07e1872358267aa9de28fcecdc961",
+  "anthropic inline_tools prompt cache 1": "12667 f3acb06c74fcd0be86eb470787d56a49d045aba15fbf08097eb722c9c18f8c85",
+  "anthropic inline_tools prompt cache 2": "13299 19ea4e4364adc1d0fb2c414bbfcc578bbb25363d9ad5ce09e89ebe7c0dd88580",
+  "anthropic prompt cache 1": "10949 45a717cc41398c4092ec781fd9b89c6f4b8d53e13a187cc4493448205c7b4cab",
+  "anthropic prompt cache 2": "11581 793c025f261d26f740a11edf8d61a2bc654fa33bcf4dbd11816ed5a1400e99d6",
+  "openai 1": "10857 58a0ff8f0f0f332b4aabac1d45babc750de5899637b282bfda2fcddb8fb71e9c",
+  "openai 2": "11490 97cd5f6c0717373da38cdff6993119dcff8f46328d0a0bb25ba64b1078f6696d",
+  "openai 3": "11544 bd62839d4c5ab2c3eb4da9b81f55f5ec1d583c91fd8b95225527be01d9096ba6"
+}

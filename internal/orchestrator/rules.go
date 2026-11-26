@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/opentalon/opentalon/internal/prompts"
+	"github.com/opentalon/opentalon/internal/provider"
 )
 
 type RulesConfig struct {
@@ -38,11 +39,17 @@ func (rc *RulesConfig) Rules() []string {
 }
 
 func (rc *RulesConfig) BuildPromptSection() string {
+	section, _ := rc.promptSection()
+	return section
+}
+
+func (rc *RulesConfig) promptSection() (section string, operatorBytes int) {
 	var sb strings.Builder
 	sb.WriteString("## MANDATORY SAFETY RULES\n")
 	sb.WriteString("You MUST follow ALL of the following rules at all times. Violation is not permitted under any circumstances.\n\n")
 
 	for i, rule := range rc.rules {
+		from := sb.Len()
 		if i < builtinRuleCount() {
 			sb.WriteString("- ")
 		} else {
@@ -50,7 +57,10 @@ func (rc *RulesConfig) BuildPromptSection() string {
 		}
 		sb.WriteString(rule)
 		sb.WriteString("\n")
+		if i >= builtinRuleCount() {
+			operatorBytes += provider.TextBytes(sb.String()[from:])
+		}
 	}
 	sb.WriteString("\n")
-	return sb.String()
+	return sb.String(), operatorBytes
 }

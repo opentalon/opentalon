@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 type Role string
@@ -54,6 +55,11 @@ type Message struct {
 	StoreKey string `json:"-"`
 }
 
+// IsToolResult reports whether m is a tool result: a native RoleTool message or a text-format [plugin_output] user message.
+func IsToolResult(m Message) bool {
+	return m.Role == RoleTool || (m.Role == RoleUser && strings.Contains(m.Content, "[plugin_output]"))
+}
+
 type ToolAnnouncement struct {
 	Added   []string
 	Removed []string
@@ -94,12 +100,20 @@ type ToolCall struct {
 // change from one round to the next.
 type SystemSegments struct {
 	Fixed string
+	// FixedParts names parts of Fixed in order; text of Fixed between them belongs to none.
+	FixedParts []SystemPart
 	// Catalog lists the allowed tools the request's Tools lack.
 	Catalog string
 	// InlineCatalog lists every on-demand tool, loaded or not, for a model with FeatureInlineTools.
 	InlineCatalog string
 	Conversation  string
 	Round         string
+}
+
+// SystemPart is a named part of a system segment; Bytes is its size as sent (see TextBytes).
+type SystemPart struct {
+	Name  string
+	Bytes int
 }
 
 // Join returns the system message the segments make up; InlineCatalog is no part of it.

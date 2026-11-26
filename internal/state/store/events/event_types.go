@@ -447,6 +447,7 @@ const LLMRequestVersion = 2
 // reported for the call, e.g. "messages_changed" or "previous_message_not_found".
 // ThinkingDropped counts the replayed thinking blocks Anthropic dropped
 // because the conversation before them changed or the model differs.
+// Request is the size of the request the call answers, in blocks.
 type LLMResponsePayload struct {
 	Header
 	RawContentExcerpt   string          `json:"raw_content_excerpt"`
@@ -467,13 +468,48 @@ type LLMResponsePayload struct {
 	ThinkingDropped     int             `json:"thinking_dropped,omitempty"`
 	CostCurrency        string          `json:"cost_currency,omitempty"`
 	Price               *float64        `json:"price,omitempty"`
+	Request             *RequestSize    `json:"request,omitempty"`
 }
 
 // LLMResponseVersion bumped to 2 when the payload gained cache_write_tokens,
-// cache_read_tokens, chat_loop, cache_miss_reason and thinking_dropped, and
-// to 3 when it gained cost_currency and price. All are omitempty, so older
-// rows decode cleanly with the fields absent.
-const LLMResponseVersion = 3
+// cache_read_tokens, chat_loop, cache_miss_reason and thinking_dropped, to 3
+// when it gained cost_currency and price, and to 4 when it gained request.
+// All are omitempty, so older rows decode cleanly with the fields absent.
+const LLMResponseVersion = 4
+
+// RequestSize holds names and numbers only, never text; its blocks sum to BodyBytes.
+type RequestSize struct {
+	BodyBytes int            `json:"body_bytes"`
+	Blocks    []RequestBlock `json:"blocks"`
+}
+
+// RequestBlock: Bytes is the UTF-8 size of text as sent, of tools and structured content as JSON; Count is on tools and messages only.
+type RequestBlock struct {
+	Name  string `json:"name"`
+	Count int    `json:"count,omitempty"`
+	Bytes int    `json:"bytes"`
+}
+
+// Block names of a RequestSize. WIRE-STABLE: consumers group by them.
+const (
+	BlockToolsSent           = "tools_sent"
+	BlockToolsHeldBack       = "tools_held_back"
+	BlockSystem              = "system"
+	BlockGrounding           = "grounding"
+	BlockPreamble            = "preamble"
+	BlockRulesBuiltin        = "rules_builtin"
+	BlockRulesOperator       = "rules_operator"
+	BlockKnowledgeCatalog    = "knowledge_catalog"
+	BlockRuntimeInstructions = "runtime_instructions"
+	BlockPluginPrefix        = "plugin:"
+	BlockToolIndex           = "tool_index"
+	BlockConversation        = "conversation"
+	BlockRound               = "round"
+	BlockSystemOther         = "system_other"
+	BlockHistory             = "history"
+	BlockToolResults         = "tool_results"
+	BlockOther               = "other"
+)
 
 // PlannerInvokedPayload / PlannerRequestPayload / PlannerResponsePayload /
 // PlannerStepPayload — populated by the future planner instrumentation.

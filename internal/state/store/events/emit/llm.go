@@ -49,6 +49,8 @@ func EmitLLMRequest(ctx context.Context, sink Sink, args LLMRequestArgs) string 
 // currency — see LLMResponsePayload doc. Zero
 // values are passed through unchanged; the payload uses omitempty so
 // unpriced models simply leave the fields out.
+//
+// Request is computed by the provider from the body this call sent.
 type LLMResponseArgs struct {
 	RawContent         string
 	NativeToolCallsRaw json.RawMessage
@@ -66,6 +68,7 @@ type LLMResponseArgs struct {
 	ThinkingDropped    int
 	CostCurrency       string
 	Price              *float64
+	Request            *events.RequestSize
 }
 
 // EmitLLMResponse writes one llm_response event. The helper computes
@@ -96,6 +99,7 @@ func EmitLLMResponse(ctx context.Context, sink Sink, args LLMResponseArgs) strin
 		ThinkingDropped:     args.ThinkingDropped,
 		CostCurrency:        args.CostCurrency,
 		Price:               args.Price,
+		Request:             args.Request,
 	}, args.LatencyMS)
 }
 

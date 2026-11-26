@@ -145,7 +145,7 @@ func pairToolMessages(msgs []provider.Message) ([]provider.Message, toolPairingR
 func summaryCut(msgs []provider.Message, keep int) int {
 	cut := len(msgs) - keep
 	for cut > 0 && cut < len(msgs) {
-		if isToolResultMessage(msgs[cut]) {
+		if provider.IsToolResult(msgs[cut]) {
 			cut--
 			continue
 		}
