@@ -1752,6 +1752,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if pendingMetaClearErr != nil {
 				if e := sessions.SetMetadata(sessionID, "pending_tool_call", ""); e != nil {
 					log.Warn("pending_tool_call re-clear still failing; session may resurrect-and-reject next turn", "error", e)
+				} else {
+					pendingMetaClearErr = nil
 				}
 			}
 			// Rollback session to before this Run — remove the user message
@@ -1765,7 +1767,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// event; the user gets a fixed notice their client can word in
 			// their language by its action.
 			res := notApprovedResult(resolvedBy, confirmationRejectedReply, "confirmation_rejected")
-			if c := paused; c != nil {
+			// A record still stored keeps the sub-agent paused: the answer
+			// that clears it ends the outer call.
+			if c := paused; c != nil && pendingMetaClearErr == nil {
 				why := "the user rejected its call"
 				if resolvedBy == resolvedByFallback {
 					why = "the user's reply to its question could not be interpreted"
