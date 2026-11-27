@@ -38,9 +38,10 @@ post-processing makes config text behave differently from the default.
 ## A prompt edit is a behaviour change
 
 `Hash()` is the sha256 of every embedded `.txt`, sorted by filename, including
-the filename and its content. Cassettes store that digest, so any prompt edit
-invalidates recorded replays. Re-record or update the affected cassettes in the
-same PR; `docs/vcr-cassettes.md` has the commands.
+the filename and its content. Every cassette stores that digest, so any prompt
+edit makes every cassette stale, also an edit to a prompt no replay sends: replays
+run native tool calling, so `orchestrator_preamble.txt` is never sent. Re-record
+them all in the same PR; `docs/vcr-cassettes.md` has the commands.
 
 > **Gotcha**: fixing a typo in `orchestrator_preamble.txt` and leaving the VCR
 > jobs failing, or re-recording on a different branch so the cassette carries a
