@@ -66,7 +66,9 @@ Where per-session state may live, so that multi-pod deployments stay correct:
   while holding the session locks.** Anything a later turn — possibly on
   another pod — must observe (messages, summaries, titles, pending tool
   calls) is persisted, and rewritten only under the in-pod mutex plus the
-  cross-pod turn lease.
+  cross-pod turn lease. A sub-agent waiting for the user's approval lives in
+  the session's pending tool-call record, with every child of its
+  `_subprocess` call, waiting or finished, so any pod resumes it.
 - **In-memory maps are per-pod optimizations.** They must tolerate cross-pod
   invalidation: another pod may change the authoritative state at any time,
   so a map entry may only ever be a cache over persisted state — never the

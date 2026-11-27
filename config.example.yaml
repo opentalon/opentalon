@@ -259,6 +259,14 @@ orchestrator:
   # sub-task; `_subprocess.parallel` runs several INDEPENDENT tasks concurrently
   # (e.g. "check these N items at once") and returns their answers together, in
   # task order. Bounded by depth/iteration/timeout per child plus a concurrency cap.
+  # Sub-agents need native tool calling (a model with `features: [tools]`);
+  # without it a `_subprocess` call gets an error result and sends no request.
+  # The `_subprocess` call itself asks the user nothing: each call a sub-agent
+  # makes asks for approval as a main-loop call does. In the chat, such a call
+  # pauses the sub-agent until the user answers, one question per turn for the
+  # children of a parallel call, and a rejection stops every waiting child. A
+  # sub-agent started outside the chat loop (a plugin callback, the scheduler)
+  # gets such a call refused.
   # subprocess:
   #   enabled: true            # default false
   #   max_depth: 2             # max nesting depth (default 2, hard cap 3)

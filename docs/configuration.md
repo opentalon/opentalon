@@ -584,7 +584,9 @@ provider does not have to be part of `routing`:
 - A set `repair.model` keeps the repair call on that model. Sub-agents run
   on the model a host-side caller names, else on their parent's, else on
   the default chain, so a task the chat model starts never fans out onto
-  the profile's model.
+  the profile's model. They call their tools natively only, which a model
+  with `features: [tools]` at the provider of `routing.primary` turns on;
+  without it a `_subprocess` call gets an error result and sends no request.
 - The call uses the selected model's own entry: its `thinking` and
   `reasoning_effort`, reasoning only when it has `features: [reasoning]`, and
   the request form of [`inline_tools`](#inline-tools) only when it has that
@@ -755,6 +757,7 @@ orchestrator:
 
 - `callback_timeout` caps one non-streaming plugin action: a tool call from the LLM, or a plugin's callback into the host (`RunAction`), including a decider's `decide`. A decider's HTTP request has no timeout of its own, so `callback_timeout` is its only cut, retries included. Unset, zero or invalid keeps 30s.
 - `_subprocess.run` and `_subprocess.parallel` get the larger of `callback_timeout` and `subprocess.default_timeout × ceil(tasks / max_parallel) + 10s` (`tasks` = 1 for `run`), so a callback is not cut before its sub-agents can finish.
+- `_subprocess.run` and `_subprocess.parallel` ask the user nothing; each call a sub-agent makes asks for approval as a main-loop call does. In the chat loop such a call pauses the sub-agent, and the turn ends with a question that names its task. An approval runs the call and the sub-agent goes on, also on another pod; the wait does not count against `subprocess.default_timeout`. The children of a parallel call that need no approval run to their end, and those that wait are asked about one per turn. A rejection, or a reply that is neither yes nor no, stops every waiting child, and the `_subprocess` call's result lists the calls that ran and the answers of the children that finished. A sub-agent started anywhere else (a plugin callback, the scheduler, the exec dispatcher) gets such a call refused.
 - An action on a plugin's external gateway (`grpc_port`) has no host deadline of its own; it runs until the caller's gRPC deadline. Callbacks it makes get the deadlines above.
 - `max_response_bytes` caps `Content`, `Error` and `StructuredContent` of each plugin result handled by the orchestrator. Text over the cap is truncated with a notice. Structured content over the cap is dropped and the result becomes an error naming its size and the limit, so a caller never gets truncated JSON. Results returned to an external gateway caller are not capped. Unset, zero or negative keeps 65536.
 
