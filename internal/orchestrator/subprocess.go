@@ -126,6 +126,8 @@ func isInteractiveTurn(ctx context.Context) bool {
 	return turn != nil
 }
 
+const subprocessNeedsNativeTools = "sub-agents need native tool calling, which this deployment's models do not support"
+
 // subprocessExecutor implements PluginExecutor for the built-in _subprocess plugin.
 type subprocessExecutor struct {
 	orch *Orchestrator
@@ -135,7 +137,7 @@ func (s *subprocessExecutor) Execute(ctx context.Context, call ToolCall) ToolRes
 	// A sub-agent calls its tools natively only; without native tool calling
 	// it sends no request at all.
 	if !s.orch.supportsNativeTools() {
-		return ToolResult{CallID: call.ID, Error: "sub-agents need native tool calling, which this deployment's models do not support"}
+		return ToolResult{CallID: call.ID, Error: subprocessNeedsNativeTools}
 	}
 	ctx = s.orch.withPluginStage(ctx, call)
 	if call.Action == "parallel" {
@@ -286,33 +288,34 @@ type subprocessResult struct {
 	Paused     *subprocessChild
 }
 
-// runSubprocess runs a mini agent loop for a focused sub-task. Every request
-// offers the sub-agent's permitted tools as native definitions; each
-// structured call of a response is checked against them and the confirmation
-// decision (subprocessCall), run, and kept in the loop's own messages in the
-// shapes the main loop stores. In the model's call in the agent loop
-// (interactiveTurnKey), a call that needs the user's approval pauses the
-// sub-agent: it returns where it stopped, with the response's later calls
-// recorded as not executed, as the main loop records them.
+// runSubprocess runs a mini agent loop for a focused sub-task, from its start
+// (continueSubprocess).
 func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest, depth int) (*subprocessResult, error) {
-	deadline := time.Now().Add(o.subprocessTimeout())
+	return o.continueSubprocess(ctx, subprocessChild{
+		Request: req, Depth: depth, Remaining: o.subprocessTimeout(),
+		Messages: []provider.Message{
+			{Role: provider.RoleSystem, Content: buildSubprocessSystemPrompt(req)},
+			{Role: provider.RoleUser, Content: req.Task},
+		},
+	})
+}
+
+// continueSubprocess runs child's agent loop from where it stands, for the
+// running time and the iterations it has left. Every request offers the
+// sub-agent's permitted tools, as the caller's profile permits them now, as
+// native definitions; each structured call of a response is checked against
+// them and the confirmation decision (subprocessCall), run, and kept in the
+// loop's own messages in the shapes the main loop stores. In the model's call
+// in the agent loop (interactiveTurnKey), a call that needs the user's
+// approval pauses the sub-agent: it returns where it stopped, with the
+// response's later calls recorded as not executed, as the main loop records
+// them.
+func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessChild) (*subprocessResult, error) {
+	req := child.Request
+	deadline := time.Now().Add(child.Remaining)
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-
-	ctx = withSubprocessDepth(ctx, depth)
-	if req.Model != "" {
-		ctx = context.WithValue(ctx, subprocessModelKey{}, req.Model)
-	}
-	// This ctx is derived from the caller's, which carries the caller's sent
-	// native set. The sub-agent sends its own whole permitted set and checks
-	// every call against it below, so the tool-load gate must not judge its
-	// calls by the PARENT's array: a load on call from in here would change
-	// the tools the parent session has loaded.
-	ctx = withoutSentNativeTools(ctx)
-	// A call the sub-agent makes is never the agent loop's own call, nor is a
-	// callback from inside it.
-	mayAsk := isInteractiveTurn(ctx)
-	ctx = withoutInteractiveTurn(ctx)
+	ctx, mayAsk := subprocessContext(ctx, req, child.Depth)
 
 	maxIter := req.MaxIterations
 	if maxIter <= 0 {
@@ -334,18 +337,14 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 		maxIter = 1
 	}
 
-	log := slog.With("component", "subprocess", "depth", depth)
-	log.Info("subprocess started", "task", taskPreview(req.Task), "max_iterations", maxIter, "allowed_tools", len(req.AllowedTools), "model", req.Model)
+	log := slog.With("component", "subprocess", "depth", child.Depth)
+	log.Info("subprocess started", "task", taskPreview(req.Task), "max_iterations", maxIter, "allowed_tools", len(req.AllowedTools), "model", req.Model,
+		"iterations", child.Iterations)
 
 	permitted, tools := o.subprocessTools(ctx, req)
-	messages := []provider.Message{
-		{Role: provider.RoleSystem, Content: buildSubprocessSystemPrompt(req)},
-		{Role: provider.RoleUser, Content: req.Task},
-	}
-
+	messages, ran := child.Messages, child.Ran
 	result := &subprocessResult{}
-	var ran []ranCall
-	for i := 0; i < maxIter; i++ {
+	for i := child.Iterations; i < maxIter; i++ {
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
 		if err != nil {
 			return nil, fmt.Errorf("subprocess guard: %w", err)
@@ -391,14 +390,12 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 			if outcome == gateAwaitApproval {
 				messages = append(messages, interruptedCallMessages(call, calls[k+1:], &thinking)...)
 				log.Info("subprocess paused for the user's approval", "iterations", i+1, "plugin", call.Plugin, "action", call.Action)
-				return &subprocessResult{Paused: &subprocessChild{
-					Request: req, Depth: depth, Messages: messages, Iterations: i + 1,
-					Remaining: time.Until(deadline), Ran: ran,
-					Waiting: waitingCall{
-						continuationCall: continuationCallOf(call), Text: text, responseThinking: takeThinking(&thinking),
-						InputTokens: perCallInput, OutputTokens: perCallOutput,
-					},
-				}}, nil
+				child.Messages, child.Iterations, child.Remaining, child.Ran = messages, i+1, time.Until(deadline), ran
+				child.Waiting = waitingCall{
+					continuationCall: continuationCallOf(call), Text: text, responseThinking: takeThinking(&thinking),
+					InputTokens: perCallInput, OutputTokens: perCallOutput,
+				}
+				return &subprocessResult{Paused: &child}, nil
 			}
 			if outcome == gateExecute {
 				ran = append(ran, ranCall{continuationCall: continuationCallOf(call), Error: toolResult.Error})
@@ -449,11 +446,36 @@ func (o *Orchestrator) subprocessCall(ctx context.Context, permitted map[string]
 		return ToolResult{CallID: call.ID, Error: fmt.Sprintf(
 			"tool %s needs the user's approval, which this sub-agent cannot ask for; the call did not run", name)}, gateAnswered, nil
 	}
+	return o.executeSubprocessCall(ctx, call, inputTokens, outputTokens), gateExecute, nil
+}
+
+// executeSubprocessCall executes a sub-agent's call and reports it to the
+// plugin call observer with the tokens of its response attributed to it.
+func (o *Orchestrator) executeSubprocessCall(ctx context.Context, call ToolCall, inputTokens, outputTokens int) ToolResult {
 	result := o.executeCall(ctx, call)
 	if o.pluginCallObserver != nil {
 		o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, result.Error != "", inputTokens, outputTokens)
 	}
-	return result, gateExecute, nil
+	return result
+}
+
+// subprocessContext is ctx for the calls of a sub-agent of req at depth: at
+// its depth, on its model, and without the caller's sent native set or the
+// interactive marker. mayAsk says whether ctx carried the marker.
+func subprocessContext(ctx context.Context, req subprocessRequest, depth int) (_ context.Context, mayAsk bool) {
+	ctx = withSubprocessDepth(ctx, depth)
+	if req.Model != "" {
+		ctx = context.WithValue(ctx, subprocessModelKey{}, req.Model)
+	}
+	// This ctx is derived from the caller's, which carries the caller's sent
+	// native set. The sub-agent sends its own whole permitted set and checks
+	// every call against it, so the tool-load gate must not judge its calls by
+	// the PARENT's array: a load on call from in here would change the tools
+	// the parent session has loaded.
+	ctx = withoutSentNativeTools(ctx)
+	// A call the sub-agent makes is never the agent loop's own call, nor is a
+	// callback from inside it.
+	return withoutInteractiveTurn(ctx), isInteractiveTurn(ctx)
 }
 
 func (o *Orchestrator) recordSubprocessUsage(ctx context.Context, model string, u provider.Usage) {

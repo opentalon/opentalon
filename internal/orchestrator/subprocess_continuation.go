@@ -37,7 +37,11 @@ type subprocessContinuation struct {
 	// message has taken, for the call's message when it is stored.
 	ReplyText string `json:"reply_text,omitempty"`
 	responseThinking
-	Children []subprocessChild `json:"children"`
+	// InputTokens and OutputTokens are the parent's response tokens
+	// attributed to the call, for the plugin call observer when the call ends.
+	InputTokens  int               `json:"input_tokens,omitempty"`
+	OutputTokens int               `json:"output_tokens,omitempty"`
+	Children     []subprocessChild `json:"children"`
 	// Asking is the index in Children of the child whose call the stored
 	// question is about.
 	Asking int `json:"asking"`
@@ -192,15 +196,114 @@ func (o *Orchestrator) pauseSubprocess(
 	return &RunResult{Response: question, Metadata: frameMeta}, ToolResult{}
 }
 
-// stopSubprocess gives c's outer call its stopped-call result and emits it as
-// the call's tool_call_result, under the call's extracted event.
+// stopSubprocess ends c's outer call with its stopped-call result
+// (endSubprocess).
 func (o *Orchestrator) stopSubprocess(ctx context.Context, c *subprocessContinuation, why string, dispatchStart time.Time) ToolResult {
-	result := o.guard.Sanitize(c.stoppedResult(why))
+	return o.endSubprocess(ctx, c, c.stoppedResult(why), dispatchStart)
+}
+
+// endSubprocess gives c's outer call result, sanitized, and emits it as the
+// call's tool_call_result under the call's extracted event: the one result
+// event the call has, when it completes or is stopped.
+func (o *Orchestrator) endSubprocess(ctx context.Context, c *subprocessContinuation, result ToolResult, dispatchStart time.Time) ToolResult {
+	result = o.guard.Sanitize(result)
+	status, response, structured := "ok", result.Content, result.StructuredContent
+	if result.Error != "" {
+		status, response, structured = "error", result.Error, ""
+	}
 	result.EventID = emit.EmitToolCallResult(emit.WithParent(ctx, c.EventID), o.eventSink, emit.ToolCallResultArgs{
-		CallID:    c.Call.ID,
-		Status:    "error",
-		Response:  result.Error,
-		LatencyMS: time.Since(dispatchStart).Milliseconds(),
+		CallID:     c.Call.ID,
+		Status:     status,
+		Response:   response,
+		Structured: structured,
+		LatencyMS:  time.Since(dispatchStart).Milliseconds(),
 	})
 	return result
+}
+
+// resumeSubprocess runs the call c's sub-agent waits with, which the user
+// approved, and lets the sub-agent go on where it paused. The call runs once,
+// under the deadline every call gets and without repair, and its result enters
+// the sub-agent's messages, not the parent's history. The sub-agent then runs
+// for the running time it had left, with the tools the caller's profile
+// permits now, and may ask again: its next call that needs approval is asked
+// about as at a pause, and the question returned. Otherwise the outer call
+// ends (endSubprocess) with the sub-agent's answer, or with the stopped-call
+// result when this orchestrator cannot run the sub-agent any more; the waiting
+// call does not run then.
+func (o *Orchestrator) resumeSubprocess(ctx context.Context, sessions SessionStoreInterface, sessionID, userMessage string, c *subprocessContinuation) (*RunResult, ToolResult) {
+	start := time.Now()
+	child := c.Children[c.Asking]
+	if why := o.subprocessUnavailable(ctx, child.Request); why != "" {
+		return nil, o.stopSubprocess(ctx, c, why, start)
+	}
+	// The sub-agent's calls emit under the outer call, as in the outer call's turn.
+	subCtx := emit.WithParent(ctx, c.EventID)
+	callCtx, _ := subprocessContext(subCtx, child.Request, child.Depth)
+	waiting := child.Waiting
+	result := o.executeSubprocessCall(callCtx, waiting.toolCall(), waiting.InputTokens, waiting.OutputTokens)
+	child.Ran = append(child.Ran, ranCall{continuationCall: waiting.continuationCall, Error: result.Error})
+	child.Messages = append(child.Messages,
+		waiting.attach(provider.Message{
+			Role:      provider.RoleAssistant,
+			Content:   waiting.Text,
+			ToolCalls: []provider.ToolCall{{ID: waiting.ID, Name: toolFQN(waiting.Plugin, waiting.Action), Arguments: waiting.Args}},
+		}),
+		provider.Message{Role: provider.RoleTool, Content: nativeToolContent(result), ToolCallID: waiting.ID},
+	)
+
+	// The resume runs inside the turn's lock, so the sub-agent may ask again.
+	res, err := o.continueSubprocess(withInteractiveTurn(subCtx, sessions, userMessage), child)
+	switch {
+	case err != nil:
+		return nil, o.endSubprocess(ctx, c, ToolResult{CallID: c.Call.ID, Error: fmt.Sprintf("subprocess failed: %v", err)}, start)
+	case res.Paused != nil:
+		c.Children[c.Asking] = *res.Paused
+		thinking := c.responseThinking
+		return o.pauseSubprocess(ctx, sessions, sessionID, userMessage, c, nil, true, &thinking, start)
+	}
+	return nil, o.endSubprocess(ctx, c, ToolResult{CallID: c.Call.ID, Content: res.Response}, start)
+}
+
+// subprocessUnavailable says why this orchestrator cannot run a sub-agent of
+// req, empty when it can: sub-agents are switched off, its models lack native
+// tool calling, or req's model is not one a sub-agent may run on.
+func (o *Orchestrator) subprocessUnavailable(ctx context.Context, req subprocessRequest) string {
+	if !o.subprocessConfig.Enabled {
+		return "sub-agents are switched off"
+	}
+	if !o.supportsNativeTools() {
+		return subprocessNeedsNativeTools
+	}
+	if _, err := o.resolveSubprocessModel(ctx, ToolCall{}, req.Model); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// endedSubprocess is the outer call of a paused sub-agent that a later turn
+// ended, with its result; resumed when the user approved the waiting call.
+type endedSubprocess struct {
+	call    ToolCall
+	result  ToolResult
+	resumed bool
+}
+
+// settleSubprocess records c's outer call, ended with result in a turn after
+// its pause: the call, with the reply text and thinking of the parent's
+// response c kept, and its result enter the parent's history in the native
+// shapes, and the plugin call observer gets the call with the parent's tokens
+// attributed to it.
+func (o *Orchestrator) settleSubprocess(sessions SessionStoreInterface, sessionID string, c *subprocessContinuation, result ToolResult, resumed bool) *endedSubprocess {
+	call := c.Call.toolCall()
+	_ = sessions.AddMessage(sessionID, c.attach(provider.Message{
+		Role:      provider.RoleAssistant,
+		Content:   c.ReplyText,
+		ToolCalls: []provider.ToolCall{{ID: call.ID, Name: toolFQN(call.Plugin, call.Action), Arguments: call.Args}},
+	}))
+	_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleTool, Content: nativeToolContent(result), ToolCallID: call.ID})
+	if o.pluginCallObserver != nil {
+		o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, result.Error != "", c.InputTokens, c.OutputTokens)
+	}
+	return &endedSubprocess{call: call, result: result, resumed: resumed}
 }

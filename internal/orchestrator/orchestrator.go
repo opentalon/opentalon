@@ -1617,12 +1617,14 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// still links to the request that started the pending state. (An
 	// in-memory copy would go stale when another pod resolves the call and
 	// could route a later message into a second execution.)
-	var pendingCall *ToolCall
-	var pendingCallConfID, pendingCallPrompt string
-	var pendingCallThinking responseThinking
+	var pending pendingToolCallMeta
 	if !hidden {
-		pendingCall, pendingCallConfID, pendingCallPrompt, pendingCallThinking = loadPendingToolCall(sessions, sessionID)
+		pending = loadPendingRecord(sessions, sessionID)
 	}
+	// A paused sub-agent's record asks about its waiting call; the answer
+	// resumes or stops the sub-agent, and ended is its outer call then.
+	pendingCall, paused := pending.askedCall(), pending.Subprocess
+	var ended *endedSubprocess
 	var pendingMetaClearErr error
 	if pendingCall != nil {
 		// Clear the persisted pending call up front. If this fails we MUST NOT
@@ -1638,8 +1640,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		// (potentially from a prior turn or even a prior pod). Empty id is
 		// the legacy/pre-instrumentation path — leave the turn_start parent.
 		resolvedCtx := ctx
-		if pendingCallConfID != "" {
-			resolvedCtx = emit.WithParent(ctx, pendingCallConfID)
+		if pending.ConfirmationRequestedID != "" {
+			resolvedCtx = emit.WithParent(ctx, pending.ConfirmationRequestedID)
 		}
 		decision, reason, resolvedBy := o.classifyConfirmationReply(ctx, userMessage, tc.Action, tc.Args)
 		// Safety override: if we couldn't clear the persisted pending call, do
@@ -1663,6 +1665,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				ToolCallID: tc.ID,
 				ResolvedBy: resolvedBy,
 			})
+			if c := paused; c != nil {
+				// The sub-agent runs the call and goes on; its answer, or the
+				// stopped-call result, is the outer call's, or it asks again.
+				question, result := o.resumeSubprocess(ctx, sessions, sessionID, userMessage, c)
+				if question != nil {
+					return question, nil
+				}
+				ended = o.settleSubprocess(sessions, sessionID, c, result, true)
+				toolCallConfirmed = true
+				break
+			}
 			log.Debug("tool call confirmed, executing", "plugin", tc.Plugin, "action", tc.Action)
 			result := o.executeCall(ctx, *tc)
 			// Repair phase: a failed approved call gets a bounded corrector
@@ -1675,13 +1688,13 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// success or — if the corrected call was dispatched and failed —
 			// the corrected call plus its real error.
 			execCall := *tc
-			if repairedCall, repairedResult, replaced := o.maybeRepairToolCall(ctx, sessionID, execCall, result, pendingCallPrompt, true); replaced {
+			if repairedCall, repairedResult, replaced := o.maybeRepairToolCall(ctx, sessionID, execCall, result, pending.Prompt, true); replaced {
 				execCall, result = repairedCall, repairedResult
 			}
 			// Record in session history.
 			tr := ToolResult{CallID: execCall.ID, Content: result.Content, StructuredContent: result.StructuredContent, Error: result.Error}
 			if o.supportsNativeTools() {
-				_ = sessions.AddMessage(sessionID, pendingCallThinking.attach(provider.Message{
+				_ = sessions.AddMessage(sessionID, pending.attach(provider.Message{
 					Role: provider.RoleAssistant,
 					ToolCalls: []provider.ToolCall{{
 						ID: execCall.ID, Name: toolFQN(execCall.Plugin, execCall.Action), Arguments: execCall.Args,
@@ -1716,6 +1729,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				Reason:     reason,
 			})
 			log.Debug("tool call amended, re-planning", "plugin", tc.Plugin, "action", tc.Action, "reason", reason)
+			if c := paused; c != nil {
+				stopped := o.stopSubprocess(ctx, c, "the user answered its question without approving the call", turnStartedAt)
+				ended = o.settleSubprocess(sessions, sessionID, c, stopped, false)
+			}
 			// No return and toolCallConfirmed stays false → execution continues
 			// into the normal turn below.
 
@@ -1747,7 +1764,16 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// The classifier's reason is written for the log and stays in the
 			// event; the user gets a fixed notice their client can word in
 			// their language by its action.
-			return notApprovedResult(resolvedBy, confirmationRejectedReply, "confirmation_rejected"), nil
+			res := notApprovedResult(resolvedBy, confirmationRejectedReply, "confirmation_rejected")
+			if c := paused; c != nil {
+				why := "the user rejected its call"
+				if resolvedBy == resolvedByFallback {
+					why = "the user's reply to its question could not be interpreted"
+				}
+				e := o.settleSubprocess(sessions, sessionID, c, o.stopSubprocess(ctx, c, why, turnStartedAt), false)
+				res.ToolCalls, res.Results = []ToolCall{e.call}, []ToolResult{e.result}
+			}
+			return res, nil
 		}
 	}
 
@@ -2329,6 +2355,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var totalInputCost, totalOutputCost float64
 	var totalPrice *float64
 	var modelUsed string
+	// A paused sub-agent's outer call this turn ended opens its call records.
+	if ended != nil {
+		result.ToolCalls, result.Results, totalToolCalls = []ToolCall{ended.call}, []ToolResult{ended.result}, 1
+	}
 	defer func() {
 		if o.usageRecorder != nil {
 			if p := profile.FromContext(ctx); p != nil {
@@ -2391,6 +2421,11 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var pairingSeen pairingReported // tool-pairing repairs already reported this turn
 	var repeatCount int
 	var lastUnrun map[string]bool // signatures of the previous response's calls answered without running
+	// The outer call an approval resumed counts as the previous response, so
+	// the same call right after it does not run the sub-agent's work again.
+	if ended != nil && ended.resumed {
+		lastCallSig, repeatCount = toolCallSignature([]ToolCall{ended.call}), 1
+	}
 	// Phantom-completion guard state (consumed in the calls==nil branch). The
 	// model sometimes loads a write tool, resolves every parameter through
 	// lookups — and then NARRATES the mutation instead of calling it ("The
@@ -2944,7 +2979,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				// Its sub-agent waits for the user's approval of a call. The
 				// outer call enters the history, the turn's call records and
 				// the observer only when it completes or is stopped.
-				c.Call, c.ReplyText = continuationCallOf(calls[i]), replyText
+				c.Call, c.ReplyText, c.InputTokens, c.OutputTokens = continuationCallOf(calls[i]), replyText, perCallInput, perCallOutput
 				question, stopped := o.pauseSubprocess(ctx, sessions, sessionID, userMessage, c, calls[i+1:], nativeToolCalls, &thinking, pluginStart)
 				if question != nil {
 					return question, nil
@@ -5775,7 +5810,8 @@ type pendingToolCallMeta struct {
 	Prompt string `json:"prompt,omitempty"`
 	// Subprocess is a model's _subprocess call whose sub-agent waits for the
 	// approval of one of its calls. The record's own call fields stay empty
-	// then: no reader finds a call to run in it.
+	// then: its question asks about the waiting call (askedCall), which only
+	// the sub-agent runs when it resumes.
 	Subprocess *subprocessContinuation `json:"subprocess,omitempty"`
 	// FromLLM marks the call as LLM-originated so a restored call still
 	// passes executeCall's unknown-args validation. Rows persisted before
@@ -5788,6 +5824,22 @@ type pendingToolCallMeta struct {
 	// message the approval stores. A blob written before the fingerprint
 	// existed holds blocks without one, which are never replayed.
 	responseThinking
+}
+
+// askedCall is the call the record's question asks about: its own, or a
+// paused sub-agent's waiting call; nil when there is none.
+func (m pendingToolCallMeta) askedCall() *ToolCall {
+	if c := m.Subprocess; c != nil {
+		if c.Asking < 0 || c.Asking >= len(c.Children) {
+			return nil
+		}
+		waiting := c.Children[c.Asking].Waiting.toolCall()
+		return &waiting
+	}
+	if m.Plugin == "" {
+		return nil
+	}
+	return &ToolCall{ID: m.ID, Plugin: m.Plugin, Action: m.Action, Args: m.Args, FromLLM: m.FromLLM}
 }
 
 // frameID is the id the record's question frame carries: the call's, or a
@@ -5917,25 +5969,27 @@ func writePendingToolCall(sessions SessionStoreInterface, sessionID string, meta
 	return sessions.SetMetadata(sessionID, "pending_tool_call", string(data))
 }
 
-// loadPendingToolCall restores the pending tool call from session metadata.
-// Returns the ToolCall, the confirmation_requested event id, the
-// confirmation prompt (either string empty when the persisted row predates
-// the field or nothing was captured), and the thinking of the response that
-// issued the call. A record without a call of its own (a paused sub-agent's)
-// holds nothing to run. A record that cannot be read is cleared, so it is not
+// loadPendingRecord restores the session's pending tool-call record, zero
+// when none is stored. A record that cannot be read is cleared, so it is not
 // kept forever; only Run loads the record, inside the turn lock.
-func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string, string, responseThinking) {
-	meta, found, err := readPendingToolCall(sessions, sessionID)
+func loadPendingRecord(sessions SessionStoreInterface, sessionID string) pendingToolCallMeta {
+	meta, _, err := readPendingToolCall(sessions, sessionID)
 	if err != nil {
 		slog.Warn("pending tool call cannot be read; clearing it", "session", sessionID, "error", err)
 		if err := sessions.SetMetadata(sessionID, "pending_tool_call", ""); err != nil {
 			slog.Warn("unreadable pending tool call not cleared", "session", sessionID, "error", err)
 		}
 	}
-	if !found || meta.Plugin == "" {
-		return nil, "", "", responseThinking{}
-	}
-	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args, FromLLM: meta.FromLLM}, meta.ConfirmationRequestedID, meta.Prompt, meta.responseThinking
+	return meta
+}
+
+// loadPendingToolCall restores the call the pending record asks about
+// (askedCall), the confirmation_requested event id, the confirmation prompt
+// (either string empty when the persisted row predates the field or nothing
+// was captured), and the thinking of the response that issued the call.
+func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string, string, responseThinking) {
+	meta := loadPendingRecord(sessions, sessionID)
+	return meta.askedCall(), meta.ConfirmationRequestedID, meta.Prompt, meta.responseThinking
 }
 
 // readPendingToolCall returns the persisted pending call as stored; found is
