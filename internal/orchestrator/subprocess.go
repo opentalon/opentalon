@@ -95,6 +95,29 @@ func subprocessDepth(ctx context.Context) int {
 	return v
 }
 
+// interactiveTurnKey marks the context of the model's call in the agent loop,
+// the one caller whose sub-agent may ask the user: only the agent loop ends a
+// turn with a question and takes the answer on the next one. It carries that
+// turn's session store and user message. Every other caller (the single-step
+// path, pipeline and preparer steps, the direct action entry) reaches a
+// sub-agent without it, and a sub-agent removes it from the context of its own
+// calls, so a callback from inside one never carries it.
+type interactiveTurnKey struct{}
+
+type interactiveTurn struct {
+	sessions    SessionStoreInterface
+	userMessage string
+}
+
+func withInteractiveTurn(ctx context.Context, sessions SessionStoreInterface, userMessage string) context.Context {
+	return context.WithValue(ctx, interactiveTurnKey{}, &interactiveTurn{sessions: sessions, userMessage: userMessage})
+}
+
+// withoutInteractiveTurn removes the interactiveTurn ctx inherited.
+func withoutInteractiveTurn(ctx context.Context) context.Context {
+	return context.WithValue(ctx, interactiveTurnKey{}, (*interactiveTurn)(nil))
+}
+
 // subprocessExecutor implements PluginExecutor for the built-in _subprocess plugin.
 type subprocessExecutor struct {
 	orch *Orchestrator
@@ -249,8 +272,9 @@ type subprocessResult struct {
 
 // runSubprocess runs a mini agent loop for a focused sub-task. Every request
 // offers the sub-agent's permitted tools as native definitions; each
-// structured call of a response is checked against them, run, and kept in the
-// loop's own messages in the shapes the main loop stores.
+// structured call of a response is checked against them and the confirmation
+// decision (subprocessCall), run, and kept in the loop's own messages in the
+// shapes the main loop stores.
 func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest, depth int) (*subprocessResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, o.subprocessTimeout())
 	defer cancel()
@@ -265,6 +289,9 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	// calls by the PARENT's array: a load on call from in here would change
 	// the tools the parent session has loaded.
 	ctx = withoutSentNativeTools(ctx)
+	// A call the sub-agent makes is never the agent loop's own call, nor is a
+	// callback from inside it.
+	ctx = withoutInteractiveTurn(ctx)
 
 	maxIter := req.MaxIterations
 	if maxIter <= 0 {
@@ -339,21 +366,15 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 		thinking := responseThinking{Blocks: resp.Thinking, Fingerprint: resp.ThinkingFingerprint}
 		text := resp.Content
 		for _, call := range calls {
-			name := toolFQN(call.Plugin, call.Action)
-			var toolResult ToolResult
-			if _, ok := permitted[name]; ok {
-				toolResult = o.executeCall(ctx, call)
-				if o.pluginCallObserver != nil {
-					o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", perCallInput, perCallOutput)
-				}
-			} else {
-				toolResult = ToolResult{CallID: call.ID, Error: fmt.Sprintf("tool %s not allowed in this subprocess", name)}
+			toolResult, err := o.subprocessCall(ctx, permitted, call, perCallInput, perCallOutput)
+			if err != nil {
+				return nil, fmt.Errorf("subprocess call check: %w", err)
 			}
 			messages = append(messages,
 				takeThinking(&thinking).attach(provider.Message{
 					Role:      provider.RoleAssistant,
 					Content:   text,
-					ToolCalls: []provider.ToolCall{{ID: call.ID, Name: name, Arguments: call.Args}},
+					ToolCalls: []provider.ToolCall{{ID: call.ID, Name: toolFQN(call.Plugin, call.Action), Arguments: call.Args}},
 				}),
 				provider.Message{Role: provider.RoleTool, Content: nativeToolContent(toolResult), ToolCallID: call.ID},
 			)
@@ -364,6 +385,35 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	result.Response = "(subprocess reached iteration limit without a final answer)"
 	result.Iterations = maxIter
 	log.Warn("subprocess hit iteration limit", "iterations", maxIter)
+	return result, nil
+}
+
+// subprocessCall runs one of a sub-agent's calls behind the confirmation
+// decision every main-loop call passes (decideConfirmation). A call outside the
+// permitted set, and a call that needs the user's approval, does not run and
+// gets an error result naming it; nothing is asked or stored. A call its check
+// refused gets that refusal. err is ctx's error when the sub-agent ended while
+// the call was checked.
+func (o *Orchestrator) subprocessCall(ctx context.Context, permitted map[string]struct{}, call ToolCall, inputTokens, outputTokens int) (ToolResult, error) {
+	name := toolFQN(call.Plugin, call.Action)
+	if _, ok := permitted[name]; !ok {
+		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("tool %s not allowed in this subprocess", name)}, nil
+	}
+	decision, err := o.decideConfirmation(ctx, call)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	switch decision.outcome {
+	case gateAnswered:
+		return decision.result, nil
+	case gateAwaitApproval:
+		return ToolResult{CallID: call.ID, Error: fmt.Sprintf(
+			"tool %s needs the user's approval, which this sub-agent cannot ask for; the call did not run", name)}, nil
+	}
+	result := o.executeCall(ctx, call)
+	if o.pluginCallObserver != nil {
+		o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, result.Error != "", inputTokens, outputTokens)
+	}
 	return result, nil
 }
 

@@ -29,8 +29,8 @@ func writeChild() map[string][]provider.CompletionResponse {
 	}}
 }
 
-// plugin is a capability and the executor registered for it.
-type plugin struct {
+// registeredPlugin is a capability and the executor registered for it.
+type registeredPlugin struct {
 	cap  PluginCapability
 	exec PluginExecutor
 }
@@ -38,11 +38,11 @@ type plugin struct {
 // gatedSubprocessOrch builds an orchestrator whose confirmation plugin asks for
 // every call (confirmingExecutor), with sub-agents on, the write store__write
 // counting how often it ran, the plugins a test adds, and the session s1.
-func gatedSubprocessOrch(t *testing.T, llm LLMClient, opts OrchestratorOpts, extra ...plugin) (*Orchestrator, *countingExecutor, *recordingEventSink) {
+func gatedSubprocessOrch(t *testing.T, llm LLMClient, opts OrchestratorOpts, extra ...registeredPlugin) (*Orchestrator, *countingExecutor, *recordingEventSink) {
 	t.Helper()
 	write := &countingExecutor{}
 	registry := NewToolRegistry()
-	for _, p := range append([]plugin{
+	for _, p := range append([]registeredPlugin{
 		{PluginCapability{Name: "store", Actions: []Action{{Name: "write", Description: "Write a record."}}}, write},
 		{PluginCapability{Name: "conf", Actions: []Action{{Name: "check"}}}, confirmingExecutor{}},
 	}, extra...) {
@@ -193,8 +193,8 @@ func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
 				return ToolResult{CallID: call.ID, Content: content}
 			})
 			orch, write, sink := gatedSubprocessOrch(t, llm, tc.opts,
-				plugin{PluginCapability{Name: "hook", Actions: []Action{{Name: "review", Description: "Review.", ReadOnly: true, AlwaysInclude: true}}}, hook},
-				plugin{PluginCapability{Name: "invoker", Actions: []Action{{Name: "prepare", Description: "Prepare."}}}, &fixedResultExecutor{content: invoke}},
+				registeredPlugin{PluginCapability{Name: "hook", Actions: []Action{{Name: "review", Description: "Review.", ReadOnly: true, AlwaysInclude: true}}}, hook},
+				registeredPlugin{PluginCapability{Name: "invoker", Actions: []Action{{Name: "prepare", Description: "Prepare."}}}, &fixedResultExecutor{content: invoke}},
 			)
 
 			if err := tc.run(context.Background(), orch); err != nil {
@@ -208,5 +208,55 @@ func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Only the model's call in the agent loop carries the interactive marker, with
+// the turn's session store and user message: a plugin the agent loop calls sees
+// it; a call inside a sub-agent and a callback through the direct action entry
+// do not.
+func TestInteractiveTurnMarksOnlyTheAgentLoopsCall(t *testing.T) {
+	seen := map[string]*interactiveTurn{}
+	probe := executorFunc(func(ctx context.Context, call ToolCall) ToolResult {
+		turn, _ := ctx.Value(interactiveTurnKey{}).(*interactiveTurn)
+		seen[call.ID] = turn
+		return ToolResult{CallID: call.ID, Content: "looked"}
+	})
+	var orch *Orchestrator
+	hook := executorFunc(func(ctx context.Context, call ToolCall) ToolResult {
+		content, _, err := orch.RunActionResult(ctx, "probe", "look", map[string]string{})
+		if err != nil {
+			return ToolResult{CallID: call.ID, Error: err.Error()}
+		}
+		return ToolResult{CallID: call.ID, Content: content}
+	})
+	readOnly := []Action{{Name: "look", Description: "Look.", ReadOnly: true, AlwaysInclude: true}}
+	llm := &subagentLLM{
+		parent: []provider.CompletionResponse{
+			{ToolCalls: []provider.ToolCall{
+				{ID: "p-load", Name: toolFQN(metaPluginName, metaLoadTools), Arguments: map[string]string{"names": "_subprocess__run"}},
+				{ID: "p-probe", Name: "probe__look", Arguments: map[string]string{}},
+			}},
+			callReply("p-sub", "_subprocess__run", map[string]string{"task": "look", "tools": "probe__look"}),
+			callReply("p-hook", "hook__look", map[string]string{}),
+			{Content: "done"},
+		},
+		children: map[string][]provider.CompletionResponse{"look": {callReply("c1", "probe__look", map[string]string{}), {Content: "seen"}}},
+	}
+	orch, _, _ = gatedSubprocessOrch(t, llm, OrchestratorOpts{},
+		registeredPlugin{PluginCapability{Name: "probe", Actions: readOnly}, probe},
+		registeredPlugin{PluginCapability{Name: "hook", Actions: readOnly}, hook},
+	)
+
+	if _, err := orch.Run(context.Background(), "s1", "look around"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if turn := seen["p-probe"]; turn == nil || turn.sessions == nil || turn.userMessage != "look around" {
+		t.Errorf("the agent loop's call carries %+v, want the turn's session store and user message", turn)
+	}
+	for _, id := range []string{"c1", "direct-probe-look"} {
+		if turn, ok := seen[id]; !ok || turn != nil {
+			t.Errorf("call %s: ran %v, marker %+v; want it run without the marker", id, ok, turn)
+		}
 	}
 }

@@ -103,6 +103,17 @@ deployment missing that config key fails with `plugin "_subprocess" not
 found`, not a HostCaller-wiring error; don't mistake it for one. See
 Configuration below.
 
+A sub-agent started by a callback has no user to ask. Every call it makes
+passes the same confirmation decision as a call of the agent loop, and a call
+that needs the user's approval is refused before it runs: the sub-agent gets an
+error result naming the call, and no question, pending call or session state
+is written, also when the callback carries a chat session id
+(`contextargs.CallbackSessionID`). A callback runs on the context of the plugin
+call that sent it, which can be the agent loop's own call; `RunActionResult`
+removes the agent loop's mark (`interactiveTurnKey` in
+`internal/orchestrator/subprocess.go`) from that context, so nothing a callback
+reaches counts as the agent loop's call.
+
 ## Gateway serving lifecycle
 
 `Manager` builds and loads plugins (including any `grpc_port` gateways)

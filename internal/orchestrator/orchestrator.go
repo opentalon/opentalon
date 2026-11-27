@@ -2937,7 +2937,8 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			pluginStart := time.Now()
 			toolResult := decision.result
 			if decision.outcome == gateExecute {
-				toolResult = o.executeCall(ctx, calls[i])
+				// The only call whose sub-agent may ask the user (interactiveTurnKey).
+				toolResult = o.executeCall(withInteractiveTurn(ctx, sessions, userMessage), calls[i])
 			}
 			if toolResult.NotRun {
 				unrun[toolCallSignature(calls[i:i+1])] = true
@@ -3389,8 +3390,10 @@ const (
 	// confirmation plugin, or a call executeCall refuses by OpenTalon's own
 	// lookups); the caller executes it.
 	gateExecute gateOutcome = iota
-	// gateAwaitApproval: the user is asked and the call is stored as pending;
-	// the caller returns the question and executes nothing.
+	// gateAwaitApproval: the call needs the user's approval and executes
+	// nothing. maybeRequireConfirmation asks the user and stores the call as
+	// pending, and its caller returns the question; a sub-agent's call is
+	// refused instead (subprocessCall).
 	gateAwaitApproval
 	// gateAnswered: the call is answered without being executed, with an
 	// admission refusal or the refusal of its check; the caller records the
@@ -3407,38 +3410,46 @@ type gateDecision struct {
 	result   ToolResult
 }
 
-// maybeRequireConfirmation raises a confirmation_requested for a privileged
-// write call and records the pending state, mirroring the agent-loop gate. It is
-// the single place that decides "does this call need confirmation?" and is used
-// by BOTH the agent loop and the server-side single-step path so the two can
-// never drift into a write-without-consent gap. Its decision is one of three
-// outcomes (gateOutcome): execute the call now, wait for the user's approval
-// (the caller returns the question and executes nothing), or answered with a
-// result (the caller records the result and executes nothing). A call to an
-// action that declares a check is sent for one before the question is worded
-// (checkBeforeConfirmation). A non-nil error is the turn's ctx error when the
-// turn ended while the call was checked: the caller returns it; nothing was
-// stored or emitted for the call.
-//
-// interrupted carries the not-yet-executed calls from the SAME model response
-// that this confirmation abandons (the agent loop stops at the gated call and
-// returns). Each one is recorded into history as an explicit "not executed"
-// exchange BEFORE the confirmation prompt row — without that trace the model
-// later treats its own issued-but-dropped calls as done and reports phantom
-// results (observed: structure/create_category_and_container_type — the second
-// create of a two-call batch vanished and the model announced both as created,
-// inventing an id). The pairs sit before the prompt row so the resolved
-// prompt+reply pair stays adjacent for stripApprovedConfirmationExchanges.
-// interruptedNative says how THIS response's calls are being recorded (the
-// loop's per-response native flag), so the pairs match the surrounding format.
-// thinking holds the response's thinking blocks no stored message has taken
-// yet: a raised confirmation hands them to the first interrupted call's
-// message, else to the pending call (takeThinking). nil holds none.
+// maybeRequireConfirmation is the confirmation gate of a call the user's turn
+// makes: it raises a confirmation_requested for a privileged write call and
+// records the pending state. It is used by BOTH the agent loop and the
+// server-side single-step path so the two can never drift into a
+// write-without-consent gap. Its decision is one of three outcomes
+// (gateOutcome): execute the call now, wait for the user's approval (the
+// caller returns the question and executes nothing), or answered with a
+// result (the caller records the result and executes nothing). The decision
+// is decideConfirmation's, which a sub-agent's calls pass as well; only a call
+// that needs the user's approval reaches raiseConfirmation. A non-nil error is
+// the turn's ctx error when the turn ended while the call was checked: the
+// caller returns it; nothing was stored or emitted for the call.
 func (o *Orchestrator) maybeRequireConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
 	interrupted []ToolCall, interruptedNative bool, thinking *responseThinking,
 ) (gateDecision, error) {
+	decision, err := o.decideConfirmation(ctx, call)
+	if err != nil || decision.outcome != gateAwaitApproval {
+		return decision, err
+	}
+	return o.raiseConfirmation(ctx, sessions, sessionID, call, userMessage, interrupted, interruptedNative, thinking), nil
+}
+
+// decideConfirmation is the single place that decides "does this call need
+// confirmation?". It asks nobody and stores nothing: the call executes
+// (gateExecute), is answered without running (gateAnswered, with an admission
+// refusal or the refusal of its check), or needs the user's approval
+// (gateAwaitApproval, without a question). A call to an action that declares a
+// check is sent for one before the question is worded
+// (checkBeforeConfirmation). A non-nil error is ctx's error when ctx ended
+// while the call was checked; nothing was emitted for the call.
+func (o *Orchestrator) decideConfirmation(ctx context.Context, call ToolCall) (gateDecision, error) {
 	if call.ConfirmationBypass {
+		return gateDecision{outcome: gateExecute}, nil
+	}
+	// The _subprocess run and parallel calls ask nothing: every call the
+	// sub-agent makes passes this decision itself (subprocessCall). They are
+	// exempted here, not marked read-only, because the read-only flag also
+	// drives the phantom-completion guard and loadedAnyWriteTool.
+	if call.Plugin == "_subprocess" {
 		return gateDecision{outcome: gateExecute}, nil
 	}
 	// A call to a tool the model has not loaded (a native-mode catalog tool)
@@ -3517,6 +3528,32 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	if answered {
 		return gateDecision{outcome: gateAnswered, result: checked}, nil
 	}
+	return gateDecision{outcome: gateAwaitApproval}, nil
+}
+
+// raiseConfirmation asks the user about a call decideConfirmation found to
+// need their approval: it words the question, stores it and the pending call
+// in the session and emits confirmation_requested. The decision it returns is
+// gateAwaitApproval with that question.
+//
+// interrupted carries the not-yet-executed calls from the SAME model response
+// that this confirmation abandons (the agent loop stops at the gated call and
+// returns). Each one is recorded into history as an explicit "not executed"
+// exchange BEFORE the confirmation prompt row — without that trace the model
+// later treats its own issued-but-dropped calls as done and reports phantom
+// results (observed: structure/create_category_and_container_type — the second
+// create of a two-call batch vanished and the model announced both as created,
+// inventing an id). The pairs sit before the prompt row so the resolved
+// prompt+reply pair stays adjacent for stripApprovedConfirmationExchanges.
+// interruptedNative says how THIS response's calls are being recorded (the
+// loop's per-response native flag), so the pairs match the surrounding format.
+// thinking holds the response's thinking blocks no stored message has taken
+// yet: a raised confirmation hands them to the first interrupted call's
+// message, else to the pending call (takeThinking). nil holds none.
+func (o *Orchestrator) raiseConfirmation(
+	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
+	interrupted []ToolCall, interruptedNative bool, thinking *responseThinking,
+) gateDecision {
 	// Narrate with the main LLM so the prompt is in the user's language and the
 	// effect (e.g. batch count) is explicit; fall back to a static template.
 	var recentMsgs []provider.Message
@@ -3562,7 +3599,7 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	return gateDecision{outcome: gateAwaitApproval, question: &RunResult{
 		Response: confirmMsg,
 		Metadata: frameMeta,
-	}}, nil
+	}}
 }
 
 // checkBeforeConfirmation sends a call that needs the user's approval to its
@@ -5604,7 +5641,10 @@ func (o *Orchestrator) RunActionResult(ctx context.Context, plugin, action strin
 		Args:   args,
 	}
 
-	result := o.executeCall(ctx, call)
+	// A plugin's callback runs on the context of the plugin call that sent it
+	// (plugin.Client.handleCallback), which can be the agent loop's own call:
+	// nothing reached through this entry may ask the user.
+	result := o.executeCall(withoutInteractiveTurn(ctx), call)
 	if result.Error != "" {
 		return "", "", fmt.Errorf("%s: %s", toolFQN(plugin, action), result.Error)
 	}
