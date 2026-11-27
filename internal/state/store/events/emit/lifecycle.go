@@ -104,8 +104,11 @@ func EmitModelSwitch(ctx context.Context, sink Sink, args ModelSwitchArgs) strin
 
 // ConfirmationRequestedArgs records that the orchestrator is asking the
 // frontend / user for an explicit yes-or-no on a privileged action.
-// ToolCallID links to the proposed tool_call_extracted event.
+// ToolCallID links to the proposed tool_call_extracted event. ID, when set,
+// is the event's id (NewEventID), for a caller that stores it with the
+// pending state before the event is emitted; empty, it is generated.
 type ConfirmationRequestedArgs struct {
+	ID         string
 	Prompt     string
 	Choices    []string
 	ToolCallID string
@@ -116,7 +119,7 @@ type ConfirmationRequestedArgs struct {
 // pending state and use it as parent_id on the matching resolved event
 // once the user replies in a later turn.
 func EmitConfirmationRequested(ctx context.Context, sink Sink, args ConfirmationRequestedArgs) string {
-	return send(ctx, sink, events.TypeConfirmationRequested, events.ConfirmationRequestedPayload{
+	return sendWithID(ctx, sink, args.ID, events.TypeConfirmationRequested, events.ConfirmationRequestedPayload{
 		Header:     events.Header{V: events.ConfirmationRequestedVersion},
 		Prompt:     events.SanitizeUTF8(args.Prompt),
 		Choices:    args.Choices,

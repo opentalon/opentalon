@@ -142,9 +142,10 @@ func (c *subprocessContinuation) stoppedResult(why string) ToolResult {
 // the user's approval of one of its calls. c is the outer call's continuation;
 // later are the parent's calls of the same response after it, recorded as
 // laterNative says; thinking holds the response's thinking no stored message
-// has taken. c is stored with the pending call before anything is published;
-// then the later calls are recorded as not executed, the question is stored and
-// confirmation_requested is emitted, with the waiting call's id. When c cannot
+// has taken. c is stored with the pending call, and with the id of the
+// confirmation_requested event to come, before anything is published; then
+// the later calls are recorded as not executed, the question is stored and
+// confirmation_requested is emitted under that id, naming the waiting call. When c cannot
 // be stored, over maxContinuationBytes or because the write fails, nothing is
 // asked or recorded: there is no question, and the outer call gets its
 // stopped-call result instead.
@@ -176,22 +177,18 @@ func (o *Orchestrator) pauseSubprocess(
 		}
 	}
 	spoken, question := o.wordConfirmation(ctx, recent, waiting, userMessage, child.Request.Task)
-	meta := pendingToolCallMeta{Prompt: question, Spoken: actor.SpokenReply(ctx), Subprocess: c}
+	confID, err := emit.NewEventID()
+	if err != nil {
+		log.Warn("confirmation_requested id not generated; the answer will not link to the question", "error", err)
+	}
+	meta := pendingToolCallMeta{Prompt: question, Spoken: actor.SpokenReply(ctx), Subprocess: c, ConfirmationRequestedID: confID}
 	if err := writePendingToolCall(sessions, sessionID, meta); err != nil {
 		log.Warn("paused sub-agent cannot be stored; stopping it", "error", err)
 		return nil, o.stopSubprocess(ctx, c, "it waited for the user's approval, and the session could not store it", dispatchStart)
 	}
 
 	o.recordConfirmationInterruptedCalls(sessionID, sessions, c.Call.toolCall(), later, laterNative, thinking)
-	frameMeta, confID := o.publishConfirmation(ctx, sessions, sessionID, spoken, question, c.questionID(), waiting.ID)
-	// The event's id exists only once it is emitted; a record without it only
-	// loses the link of the answer's confirmation_resolved event.
-	if confID != "" {
-		meta.ConfirmationRequestedID = confID
-		if err := writePendingToolCall(sessions, sessionID, meta); err != nil {
-			log.Warn("confirmation_requested id not stored with the paused sub-agent", "error", err)
-		}
-	}
+	frameMeta, _ := o.publishConfirmation(ctx, sessions, sessionID, spoken, question, c.questionID(), waiting.ID, confID)
 	return &RunResult{Response: question, Metadata: frameMeta}, ToolResult{}
 }
 

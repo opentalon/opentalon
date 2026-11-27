@@ -163,6 +163,12 @@ func ParentID(ctx context.Context) string {
 // what analytics queries index — payloads that carry a latency_ms field
 // of their own pass the same value here so the column stays in sync.
 func send(ctx context.Context, sink Sink, eventType string, payload any, durationMS int64) string {
+	return sendWithID(ctx, sink, "", eventType, payload, durationMS)
+}
+
+// sendWithID is send with the event's id given by the caller; an empty id is
+// generated as send generates it.
+func sendWithID(ctx context.Context, sink Sink, id, eventType string, payload any, durationMS int64) string {
 	if sink == nil {
 		return ""
 	}
@@ -177,13 +183,14 @@ func send(ctx context.Context, sink Sink, eventType string, payload any, duratio
 		)
 		return ""
 	}
-	id, err := newEventID()
-	if err != nil {
-		slog.Warn("session event emit: id generation failed",
-			"event_type", eventType,
-			"error", err,
-		)
-		return ""
+	if id == "" {
+		if id, err = NewEventID(); err != nil {
+			slog.Warn("session event emit: id generation failed",
+				"event_type", eventType,
+				"error", err,
+			)
+			return ""
+		}
 	}
 	sink.Emit(ctx, Event{
 		ID:         id,
@@ -197,10 +204,11 @@ func send(ctx context.Context, sink Sink, eventType string, payload any, duratio
 	return id
 }
 
-// newEventID returns a 32-char hex id, matching the shape of the
+// NewEventID returns a 32-char hex id, matching the shape of the
 // fallback generator in store.session_events. Generating producer-side
-// lets callers thread the id as parent_id on subsequent emits.
-func newEventID() (string, error) {
+// lets callers thread the id as parent_id on subsequent emits, and store it
+// before the event is emitted (ConfirmationRequestedArgs.ID).
+func NewEventID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err

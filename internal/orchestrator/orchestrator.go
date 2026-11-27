@@ -3579,7 +3579,7 @@ func (o *Orchestrator) raiseConfirmation(
 	// prompt row below, so a resolved prompt+reply pair stays adjacent for
 	// stripApprovedConfirmationExchanges.
 	o.recordConfirmationInterruptedCalls(sessionID, sessions, call, interrupted, interruptedNative, thinking)
-	frameMeta, confID := o.publishConfirmation(ctx, sessions, sessionID, spokenQuestion, confirmMsg, call.ID, call.ID)
+	frameMeta, confID := o.publishConfirmation(ctx, sessions, sessionID, spokenQuestion, confirmMsg, call.ID, call.ID, "")
 	// Persist the pending call — the single source of pending tool-call state,
 	// surviving restarts and shared across pods. The confirmation_requested id
 	// rides along to preserve parent linkage; the prompt is what the user
@@ -3615,9 +3615,10 @@ func (o *Orchestrator) wordConfirmation(ctx context.Context, recent []provider.M
 
 // publishConfirmation stores the question as an assistant row and emits
 // confirmation_requested. frameID is the id the question's frame carries,
-// callID the call the event names. It returns the frame's metadata and the
-// event's id.
-func (o *Orchestrator) publishConfirmation(ctx context.Context, sessions SessionStoreInterface, sessionID, spoken, question, frameID, callID string) (map[string]string, string) {
+// callID the call the event names, eventID the event's id when the caller
+// stored it beforehand (empty: generated). It returns the frame's metadata and
+// the event's id.
+func (o *Orchestrator) publishConfirmation(ctx context.Context, sessions SessionStoreInterface, sessionID, spoken, question, frameID, callID, eventID string) (map[string]string, string) {
 	// Store the prompt so the next turn has context for the reply/amend, and
 	// persist the confirmation-frame metadata on that row so a reloaded client
 	// rebuilds the Approve/Reject buttons from the transcript (the live frame's
@@ -3627,6 +3628,7 @@ func (o *Orchestrator) publishConfirmation(ctx context.Context, sessions Session
 	// Buttons are deterministic approve/reject only; amend is a free-text-classifier
 	// outcome with no button by design, so the Choices set stays two-way.
 	confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
+		ID:         eventID,
 		Prompt:     question,
 		Choices:    []string{"approve", "reject"},
 		ToolCallID: callID,

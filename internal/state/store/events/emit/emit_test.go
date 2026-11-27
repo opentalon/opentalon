@@ -1504,3 +1504,30 @@ func TestConfirmationResolvedPayload_V2OmitemptyBackCompat(t *testing.T) {
 		t.Errorf("decoded v1 = %+v, want V=1 choice=reject with empty resolved_by/reason", v)
 	}
 }
+
+// A confirmation_requested event takes the id its caller stored beforehand;
+// without one it gets a generated id, as every other event does.
+func TestEmitConfirmationRequested_PresetID(t *testing.T) {
+	preset, err := NewEventID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, id string
+	}{{"preset", preset}, {"generated", ""}} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &fakeSink{}
+			got := EmitConfirmationRequested(context.Background(), sink, ConfirmationRequestedArgs{ID: tc.id, Prompt: "ok?"})
+			evs := sink.snapshot()
+			if len(evs) != 1 || evs[0].ID != got {
+				t.Fatalf("emitted %+v, returned id %q; want one event with that id", evs, got)
+			}
+			if tc.id != "" && got != tc.id {
+				t.Errorf("id = %q, want the preset %q", got, tc.id)
+			}
+			if tc.id == "" && (len(got) != 32 || got == preset) {
+				t.Errorf("id = %q, want a new 32-char id", got)
+			}
+		})
+	}
+}
