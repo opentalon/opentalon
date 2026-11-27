@@ -2,16 +2,107 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 )
+
+// nativeLLM gives a test model native tool calling, the only path a sub-agent
+// runs on, so a fake written for another test can drive one.
+type nativeLLM struct{ LLMClient }
+
+func (nativeLLM) SupportsFeature(f provider.Feature) bool { return f == provider.FeatureTools }
+
+// subagentLLM scripts a parent agent loop and its sub-agents apart. A request
+// whose system message is the sub-agent preamble is a sub-agent's: it is
+// recorded and gets the next reply scripted for its task (its first user
+// message). Every other request is the parent's and gets the next parent
+// reply. Either answers "done" once its script is used up. Parallel sub-agents
+// call it concurrently.
+type subagentLLM struct {
+	mu       sync.Mutex
+	parent   []provider.CompletionResponse
+	children map[string][]provider.CompletionResponse
+	requests []provider.CompletionRequest // the sub-agents' requests, in arrival order
+}
+
+func (l *subagentLLM) Complete(_ context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(req.Messages) < 2 || req.Messages[0].Role != provider.RoleSystem ||
+		!strings.HasPrefix(req.Messages[0].Content, prompts.SubprocessPreamble) {
+		return popReply(&l.parent), nil
+	}
+	rec := *req
+	rec.Messages = slices.Clone(req.Messages)
+	l.requests = append(l.requests, rec)
+	task := req.Messages[1].Content
+	script := l.children[task]
+	reply := popReply(&script)
+	if l.children != nil {
+		l.children[task] = script
+	}
+	return reply, nil
+}
+
+func (*subagentLLM) SupportsFeature(f provider.Feature) bool { return f == provider.FeatureTools }
+
+// popReply takes the first reply off script, or answers "done" when it is empty.
+func popReply(script *[]provider.CompletionResponse) *provider.CompletionResponse {
+	if len(*script) == 0 {
+		return &provider.CompletionResponse{Content: "done"}
+	}
+	r := (*script)[0]
+	*script = (*script)[1:]
+	return &r
+}
+
+func callReply(id, name string, args map[string]string) provider.CompletionResponse {
+	return provider.CompletionResponse{ToolCalls: []provider.ToolCall{{ID: id, Name: name, Arguments: args}}}
+}
+
+// searchCalls is n replies that each call search__query again.
+func searchCalls(n int) []provider.CompletionResponse {
+	replies := make([]provider.CompletionResponse, n)
+	for i := range replies {
+		replies[i] = callReply(fmt.Sprintf("c%d", i+1), "search__query", map[string]string{"q": fmt.Sprintf("attempt %d", i+1)})
+	}
+	return replies
+}
+
+func toolNames(req provider.CompletionRequest) []string {
+	names := make([]string, len(req.Tools))
+	for i, td := range req.Tools {
+		names[i] = td.Name
+	}
+	return names
+}
+
+// subprocessResultOf returns the content of the turn's one _subprocess call result.
+func subprocessResultOf(t *testing.T, result *RunResult) string {
+	t.Helper()
+	for i, call := range result.ToolCalls {
+		if call.Plugin == "_subprocess" {
+			if result.Results[i].Error != "" {
+				t.Fatalf("_subprocess call failed: %s", result.Results[i].Error)
+			}
+			return result.Results[i].Content
+		}
+	}
+	t.Fatalf("no _subprocess call in the turn: %+v", result.ToolCalls)
+	return ""
+}
 
 func setupSubprocessOrchestrator(llm LLMClient) *Orchestrator {
 	registry := NewToolRegistry()
@@ -37,7 +128,7 @@ func setupSubprocessOrchestrator(llm LLMClient) *Orchestrator {
 	memory := state.NewMemoryStore("")
 	sessions := state.NewSessionStore("")
 
-	return NewWithRules(llm, DefaultParser, registry, memory, sessions, OrchestratorOpts{
+	return NewWithRules(nativeLLM{llm}, DefaultParser, registry, memory, sessions, OrchestratorOpts{
 		Subprocess: SubprocessConfig{
 			Enabled:        true,
 			MaxDepth:       2,
@@ -48,39 +139,40 @@ func setupSubprocessOrchestrator(llm LLMClient) *Orchestrator {
 }
 
 func TestSubprocessBasicFork(t *testing.T) {
-	// LLM response sequence:
-	// 1. Parent calls _subprocess__run
-	// 2. Subprocess LLM returns direct answer (no tool calls)
-	llm := &fakeLLM{responses: []string{
-		`[tool_call]
-{"tool": "_subprocess__run", "args": {"task": "What is the capital of France?"}}
-[/tool_call]`,
-		// Subprocess LLM - direct answer
-		"The capital of France is Paris.",
-		// Parent LLM - final answer incorporating subprocess result
-		"Based on my research: Paris is the capital of France.",
-	}}
+	// The parent loads _subprocess__run and calls it; the sub-agent answers
+	// directly; the parent answers from the sub-agent's result.
+	const task = "What is the capital of France?"
+	llm := &subagentLLM{
+		parent: []provider.CompletionResponse{
+			callReply("p1", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": "_subprocess__run"}),
+			callReply("p2", "_subprocess__run", map[string]string{"task": task}),
+			{Content: "Based on my research: Paris is the capital of France."},
+		},
+		children: map[string][]provider.CompletionResponse{task: {{Content: "The capital of France is Paris."}}},
+	}
 
 	orch := setupSubprocessOrchestrator(llm)
 	sess := orch.sessions.Create(state.SessionParams{ID: "test-basic"})
 
-	result, err := orch.Run(context.Background(), sess.ID, "What is the capital of France?")
+	result, err := orch.Run(context.Background(), sess.ID, task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(result.Response, "Paris") {
-		t.Errorf("expected response to contain 'Paris', got: %s", result.Response)
+	if got := subprocessResultOf(t, result); got != "The capital of France is Paris." {
+		t.Errorf("_subprocess result = %q, want the sub-agent's answer", got)
+	}
+	if len(llm.requests) != 1 {
+		t.Errorf("sub-agent requests = %d, want 1", len(llm.requests))
 	}
 }
 
 func TestSubprocess_ClearsInheritedNativeSentSet(t *testing.T) {
 	// A subprocess derives its ctx from the caller, which — on a native parent
-	// round — carries the parent's sent native tool set. The subprocess lists
-	// its tools inline (no native array) and dispatches child calls as FromLLM,
-	// so the tool-load gate must NOT enforce the parent's set against the
-	// subprocess's tools. Regression guard: a catalog tool the parent never
-	// promoted must still run inside the subprocess. Pre-fix (inherited set),
-	// it was refused "not loaded", killing the sub-agent on native providers.
+	// round — carries the parent's sent native tool set. The subprocess sends
+	// its own tools and dispatches child calls as FromLLM, so the tool-load gate
+	// must NOT enforce the parent's set against the subprocess's tools.
+	// Regression guard: a catalog tool the parent never promoted must still run
+	// inside the subprocess, not be answered with a load on call.
 	exec := &countingExecutor{}
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
@@ -90,10 +182,10 @@ func TestSubprocess_ClearsInheritedNativeSentSet(t *testing.T) {
 		}}},
 	}, exec)
 	sessions := state.NewSessionStore("")
-	llm := &fakeLLM{responses: []string{
-		"[tool_call]\n{\"tool\": \"search__query\", \"args\": {\"q\": \"x\"}}\n[/tool_call]",
-		"found it",
-	}}
+	llm := &subagentLLM{children: map[string][]provider.CompletionResponse{"search it": {
+		callReply("c1", "search__query", map[string]string{"q": "x"}),
+		{Content: "found it"},
+	}}}
 	orch := NewWithRules(llm, DefaultParser, registry, state.NewMemoryStore(""), sessions,
 		OrchestratorOpts{Subprocess: SubprocessConfig{Enabled: true, MaxDepth: 2}})
 
@@ -111,25 +203,26 @@ func TestSubprocess_ClearsInheritedNativeSentSet(t *testing.T) {
 	}
 }
 
+// A sub-agent's structured calls run, and its messages keep each call and its
+// result in the main loop's native shapes: an assistant message with the call
+// (the response's text and thinking on the first only) and a tool-role result.
 func TestSubprocessWithToolCalls(t *testing.T) {
-	// LLM sequence:
-	// 1. Parent calls _subprocess__run with tools restriction
-	// 2. Subprocess LLM calls search__query
-	// 3. Subprocess LLM returns answer
-	// 4. Parent LLM returns final answer
-	llm := &fakeLLM{responses: []string{
-		`[tool_call]
-{"tool": "_subprocess__run", "args": {"task": "Search for refund policy", "tools": "search__query"}}
-[/tool_call]`,
-		// Subprocess LLM calls a tool
-		`[tool_call]
-{"tool": "search__query", "args": {"q": "refund policy"}}
-[/tool_call]`,
-		// Subprocess LLM returns answer after getting tool result
-		"The refund policy allows returns within 30 days.",
-		// Parent LLM final answer
-		"Our refund policy allows returns within 30 days.",
-	}}
+	const task = "Search for refund policy"
+	thinking := []json.RawMessage{json.RawMessage(`{"type":"thinking","thinking":"look it up"}`)}
+	llm := &subagentLLM{
+		parent: []provider.CompletionResponse{
+			callReply("p1", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": "_subprocess__run"}),
+			callReply("p2", "_subprocess__run", map[string]string{"task": task, "tools": "search__query"}),
+			{Content: "Our refund policy allows returns within 30 days."},
+		},
+		children: map[string][]provider.CompletionResponse{task: {
+			{Content: "Looking it up.", Thinking: thinking, ThinkingFingerprint: "fp-1", ToolCalls: []provider.ToolCall{
+				{ID: "c1", Name: "search__query", Arguments: map[string]string{"q": "refund policy"}},
+				{ID: "c2", Name: "search__query", Arguments: map[string]string{"q": "returns"}},
+			}},
+			{Content: "The refund policy allows returns within 30 days."},
+		}},
+	}
 
 	orch := setupSubprocessOrchestrator(llm)
 	sess := orch.sessions.Create(state.SessionParams{ID: "test-tools"})
@@ -138,8 +231,29 @@ func TestSubprocessWithToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(result.Response, "30 days") {
-		t.Errorf("expected response about refund policy, got: %s", result.Response)
+	if got := subprocessResultOf(t, result); got != "The refund policy allows returns within 30 days." {
+		t.Errorf("_subprocess result = %q, want the sub-agent's answer", got)
+	}
+	if len(llm.requests) != 2 {
+		t.Fatalf("sub-agent requests = %d, want 2", len(llm.requests))
+	}
+	want := []provider.Message{
+		{Role: provider.RoleAssistant, Content: "Looking it up.", Thinking: thinking, ThinkingFingerprint: "fp-1",
+			ToolCalls: []provider.ToolCall{{ID: "c1", Name: "search__query", Arguments: map[string]string{"q": "refund policy"}}}},
+		{Role: provider.RoleTool, Content: "executed search.query", ToolCallID: "c1"},
+		{Role: provider.RoleAssistant,
+			ToolCalls: []provider.ToolCall{{ID: "c2", Name: "search__query", Arguments: map[string]string{"q": "returns"}}}},
+		{Role: provider.RoleTool, Content: "executed search.query", ToolCallID: "c2"},
+	}
+	if got := llm.requests[1].Messages[2:]; !reflect.DeepEqual(got, want) {
+		t.Errorf("sub-agent messages after the task =\n%+v\nwant\n%+v", got, want)
+	}
+	for i, req := range llm.requests {
+		for _, m := range req.Messages {
+			if strings.Contains(m.Content, "[tool_call]") || strings.Contains(m.Content, "[plugin_output]") {
+				t.Errorf("request %d carries text protocol: %q", i, m.Content)
+			}
+		}
 	}
 }
 
@@ -160,12 +274,7 @@ func TestSubprocessDepthLimit(t *testing.T) {
 
 func TestSubprocessIterationLimit(t *testing.T) {
 	// Subprocess LLM always returns tool calls, never a final answer.
-	llm := &fakeLLM{responses: make([]string, 20)}
-	for i := range llm.responses {
-		llm.responses[i] = fmt.Sprintf(`[tool_call]
-{"tool": "search__query", "args": {"q": "attempt %d"}}
-[/tool_call]`, i)
-	}
+	llm := &subagentLLM{children: map[string][]provider.CompletionResponse{"keep searching": searchCalls(20)}}
 
 	orch := setupSubprocessOrchestrator(llm)
 	orch.subprocessConfig.MaxIterations = 3
@@ -183,55 +292,95 @@ func TestSubprocessIterationLimit(t *testing.T) {
 	}
 }
 
-func TestSubprocessToolAllowlist(t *testing.T) {
-	// Subprocess tries to call math__calculate but only search__query is allowed.
-	llm := &fakeLLM{responses: []string{
-		// Subprocess calls disallowed tool
-		`[tool_call]
-{"tool": "math__calculate", "args": {"expr": "2+2"}}
-[/tool_call]`,
-		// Then gives up
-		"I couldn't calculate that — the math tool is not available.",
-	}}
+// Every request of a sub-agent offers exactly its permitted tools: those the
+// caller may call, without _subprocess, the _meta plugin, preparer, guard and
+// user-only actions. Its prompt lists none.
+func TestSubprocessRequestOffersThePermittedTools(t *testing.T) {
+	registry := NewToolRegistry()
+	query := []Parameter{{Name: "q", Description: "Search query", Required: true}}
+	_ = registry.Register(PluginCapability{Name: "search", Actions: []Action{{Name: "query", Description: "Search", Parameters: query}}}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{Name: "math", Actions: []Action{{Name: "calculate", Description: "Calculate"}}}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{Name: "store", Actions: []Action{
+		{Name: "inspect", Description: "Inspect"},
+		{Name: "purge", Description: "Purge", UserOnly: true},
+	}}, &echoExecutor{})
+	_ = registry.Register(PluginCapability{Name: "prep", Actions: []Action{{Name: "enrich"}}}, &prefixingExecutor{})
+	_ = registry.Register(PluginCapability{Name: "guard", Actions: []Action{{Name: "scan"}}}, &prefixingExecutor{})
+	llm := &subagentLLM{children: map[string][]provider.CompletionResponse{"look": {
+		callReply("c1", "search__query", map[string]string{"q": "x"}),
+		{Content: "found"},
+	}}}
+	orch := NewWithRules(llm, DefaultParser, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{
+		ContentPreparers: []ContentPreparerEntry{{Plugin: "prep", Action: "enrich"}, {Plugin: "guard", Action: "scan", Guard: true}},
+		Subprocess:       SubprocessConfig{Enabled: true},
+	})
 
-	orch := setupSubprocessOrchestrator(llm)
-
-	req := subprocessRequest{
-		Task:         "calculate 2+2",
-		AllowedTools: []string{"search__query"},
+	res := (&subprocessExecutor{orch: orch}).Execute(context.Background(),
+		ToolCall{ID: "o1", Plugin: "_subprocess", Action: "run", Args: map[string]string{"task": "look"}})
+	if res.Error != "" || res.Content != "found" {
+		t.Fatalf("result = %+v, want the sub-agent's answer", res)
 	}
-	result, err := orch.runSubprocess(context.Background(), req, 1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if len(llm.requests) != 2 {
+		t.Fatalf("sub-agent requests = %d, want 2", len(llm.requests))
 	}
-	if result.Response == "" {
-		t.Error("expected a response")
+	want := []string{"math__calculate", "search__query", "store__inspect"}
+	for i, req := range llm.requests {
+		if got := toolNames(req); !slices.Equal(got, want) {
+			t.Errorf("request %d tools = %v, want %v", i, got, want)
+		}
+		if got := req.Messages[0].Content; got != prompts.SubprocessPreamble {
+			t.Errorf("request %d system prompt = %q, want the preamble alone", i, got)
+		}
 	}
 }
 
-func TestSubprocessBlocksRecursion(t *testing.T) {
-	// Subprocess tries to call _subprocess__run — should be blocked.
-	llm := &fakeLLM{responses: []string{
-		`[tool_call]
-{"tool": "_subprocess__run", "args": {"task": "recursive task"}}
-[/tool_call]`,
-		"I can't spawn subprocesses from here.",
-	}}
+// A structured call outside the sub-agent's permitted set does not run: its
+// result is an error naming the tool. The allowlist only narrows what the
+// caller may use, and _subprocess is never callable inside a sub-agent.
+func TestSubprocessToolAllowlist(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		plugins   []string // the caller's profile plugin list; nil = unrestricted
+		tools     string
+		call      string
+		wantTools []string
+	}{
+		{name: "allowlist narrows the tools", tools: "search__query", call: "math__calculate",
+			wantTools: []string{"search__query"}},
+		{name: "allowlist adds no plugin the caller may not use", plugins: []string{"search"},
+			tools: "search__query,math__calculate", call: "math__calculate", wantTools: []string{"search__query"}},
+		{name: "_subprocess stays uncallable", call: "_subprocess__run",
+			wantTools: []string{"math__calculate", "search__query"}},
+		{name: "_subprocess stays uncallable when listed", tools: "_subprocess__run,search__query", call: "_subprocess__run",
+			wantTools: []string{"search__query"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			llm := &subagentLLM{children: map[string][]provider.CompletionResponse{"t": {
+				callReply("c1", tt.call, map[string]string{}),
+				{Content: "gave up"},
+			}}}
+			orch := setupSubprocessOrchestrator(llm)
+			ctx := profile.WithProfile(context.Background(), &profile.Profile{Plugins: tt.plugins})
 
-	orch := setupSubprocessOrchestrator(llm)
-
-	req := subprocessRequest{Task: "try to recurse"}
-	result, err := orch.runSubprocess(context.Background(), req, 1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// The subprocess should have gotten an error for the _subprocess call
-	// and then returned a final answer.
-	if result.Response == "" {
-		t.Fatal("expected a non-empty response")
-	}
-	if result.Iterations < 1 {
-		t.Errorf("expected at least 1 iteration, got %d", result.Iterations)
+			res := (&subprocessExecutor{orch: orch}).Execute(ctx,
+				ToolCall{ID: "o1", Plugin: "_subprocess", Action: "run", Args: map[string]string{"task": "t", "tools": tt.tools}})
+			if res.Error != "" || res.Content != "gave up" {
+				t.Fatalf("result = %+v, want the sub-agent's answer", res)
+			}
+			if len(llm.requests) != 2 {
+				t.Fatalf("sub-agent requests = %d, want 2", len(llm.requests))
+			}
+			for i, req := range llm.requests {
+				if got := toolNames(req); !slices.Equal(got, tt.wantTools) {
+					t.Errorf("request %d tools = %v, want %v", i, got, tt.wantTools)
+				}
+			}
+			want := provider.Message{Role: provider.RoleTool, ToolCallID: "c1",
+				Content: "error: tool " + tt.call + " not allowed in this subprocess"}
+			if got := llm.requests[1].Messages[3]; !reflect.DeepEqual(got, want) {
+				t.Errorf("result of the refused call = %+v, want %+v", got, want)
+			}
+		})
 	}
 }
 
@@ -290,6 +439,29 @@ func TestSubprocessEnabled(t *testing.T) {
 
 	if _, ok := orch.registry.GetExecutor("_subprocess"); !ok {
 		t.Error("expected _subprocess to be registered when enabled")
+	}
+}
+
+// Without native tool calling a sub-agent call fails at once and no request
+// reaches the model, for run and parallel alike.
+func TestSubprocessNeedsNativeToolCalling(t *testing.T) {
+	for _, call := range []ToolCall{
+		{ID: "o1", Plugin: "_subprocess", Action: "run", Args: map[string]string{"task": "t"}},
+		{ID: "o2", Plugin: "_subprocess", Action: "parallel", Args: map[string]string{"tasks": `[{"task":"a"},{"task":"b"}]`}},
+	} {
+		t.Run(call.Action, func(t *testing.T) {
+			llm := &modelLLM{}
+			orch := NewWithRules(llm, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), state.NewSessionStore(""),
+				OrchestratorOpts{Subprocess: SubprocessConfig{Enabled: true}})
+
+			res := (&subprocessExecutor{orch: orch}).Execute(context.Background(), call)
+			if !strings.Contains(res.Error, "sub-agents need native tool calling") {
+				t.Errorf("result = %+v, want an error saying sub-agents need native tool calling", res)
+			}
+			if len(llm.models) != 0 {
+				t.Errorf("the model received %d request(s), want none", len(llm.models))
+			}
+		})
 	}
 }
 
@@ -385,92 +557,9 @@ func TestParseSubprocessRequest(t *testing.T) {
 	}
 }
 
-func TestIsSubprocessToolAllowed(t *testing.T) {
-	// _subprocess is always blocked
-	empty := subprocessRequest{}
-	if isSubprocessToolAllowed(ToolCall{Plugin: "_subprocess", Action: "run"}, empty) {
-		t.Error("_subprocess should always be blocked")
-	}
-
-	// No allowlist = everything except _subprocess
-	if !isSubprocessToolAllowed(ToolCall{Plugin: "search", Action: "query"}, empty) {
-		t.Error("search__query should be allowed with no allowlist")
-	}
-
-	// With allowlist
-	allowed := subprocessRequest{AllowedTools: []string{"search__query"}}
-	if !isSubprocessToolAllowed(ToolCall{Plugin: "search", Action: "query"}, allowed) {
-		t.Error("search__query should be in allowlist")
-	}
-	if isSubprocessToolAllowed(ToolCall{Plugin: "math", Action: "calculate"}, allowed) {
-		t.Error("math__calculate should not be in allowlist")
-	}
-
-	// NoTools = nothing is allowed, even with an otherwise-permissive empty list
-	noTools := subprocessRequest{NoTools: true}
-	if isSubprocessToolAllowed(ToolCall{Plugin: "search", Action: "query"}, noTools) {
-		t.Error("no tool should be allowed when NoTools is set")
-	}
-}
-
-func TestSubprocessSystemPromptExcludesSubprocess(t *testing.T) {
-	orch := setupSubprocessOrchestrator(&fakeLLM{})
-
-	prompt := orch.buildSubprocessSystemPrompt(context.Background(), subprocessRequest{
-		Task: "test",
-	})
-
-	if strings.Contains(prompt, "_subprocess") {
-		t.Error("subprocess system prompt should not contain _subprocess")
-	}
-	if !strings.Contains(prompt, "search__query") {
-		t.Error("subprocess system prompt should contain search__query")
-	}
-	if !strings.Contains(prompt, "math__calculate") {
-		t.Error("subprocess system prompt should contain math__calculate")
-	}
-}
-
-func TestSubprocessSystemPromptNoTools(t *testing.T) {
-	orch := setupSubprocessOrchestrator(&fakeLLM{})
-
-	prompt := orch.buildSubprocessSystemPrompt(context.Background(), subprocessRequest{
-		Task:    "judge this",
-		NoTools: true,
-	})
-
-	if strings.Contains(prompt, "search__query") || strings.Contains(prompt, "math__calculate") {
-		t.Errorf("NoTools prompt must not list any tools, got:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "no tools") {
-		t.Errorf("NoTools prompt should tell the sub-agent it has no tools, got:\n%s", prompt)
-	}
-}
-
-func TestSubprocessSystemPromptRespectsAllowlist(t *testing.T) {
-	orch := setupSubprocessOrchestrator(&fakeLLM{})
-
-	prompt := orch.buildSubprocessSystemPrompt(context.Background(), subprocessRequest{
-		Task:         "test",
-		AllowedTools: []string{"search__query"},
-	})
-
-	if !strings.Contains(prompt, "search__query") {
-		t.Error("subprocess system prompt should contain search__query")
-	}
-	if strings.Contains(prompt, "math__calculate") {
-		t.Error("subprocess system prompt should not contain math__calculate when not in allowlist")
-	}
-}
-
 func TestSubprocessMaxIterationsCapped(t *testing.T) {
 	// Request max_iterations=20, should be capped at 10
-	llm := &fakeLLM{responses: make([]string, 15)}
-	for i := range llm.responses {
-		llm.responses[i] = fmt.Sprintf(`[tool_call]
-{"tool": "search__query", "args": {"q": "attempt %d"}}
-[/tool_call]`, i)
-	}
+	llm := &subagentLLM{children: map[string][]provider.CompletionResponse{"keep going": searchCalls(15)}}
 
 	orch := setupSubprocessOrchestrator(llm)
 
@@ -485,16 +574,12 @@ func TestSubprocessMaxIterationsCapped(t *testing.T) {
 	}
 }
 
-// A no-tools sub-agent is pinned to a single iteration, so an adversarial task
-// that keeps emitting (refused) tool calls can't burn several model calls — the
-// determinism/budget guarantee a caller like llm_review relies on.
+// A no-tools sub-agent is offered no tools and is pinned to a single
+// iteration, so an adversarial task that keeps emitting (refused) tool calls
+// can't burn several model calls — the determinism/budget guarantee a caller
+// like llm_review relies on.
 func TestSubprocessNoToolsPinsSingleIteration(t *testing.T) {
-	llm := &fakeLLM{responses: make([]string, 5)}
-	for i := range llm.responses {
-		llm.responses[i] = fmt.Sprintf(`[tool_call]
-{"tool": "search__query", "args": {"q": "attempt %d"}}
-[/tool_call]`, i)
-	}
+	llm := &subagentLLM{children: map[string][]provider.CompletionResponse{"judge": searchCalls(5)}}
 
 	orch := setupSubprocessOrchestrator(llm)
 
@@ -505,6 +590,12 @@ func TestSubprocessNoToolsPinsSingleIteration(t *testing.T) {
 	}
 	if result.Iterations != 1 {
 		t.Errorf("NoTools must pin to a single iteration regardless of max_iterations, got: %d", result.Iterations)
+	}
+	if len(llm.requests) != 1 || len(llm.requests[0].Tools) != 0 {
+		t.Fatalf("want one request without tools, got %d request(s): %+v", len(llm.requests), llm.requests)
+	}
+	if prompt := llm.requests[0].Messages[0].Content; !strings.Contains(prompt, "no tools") {
+		t.Errorf("NoTools prompt should tell the sub-agent it has no tools, got:\n%s", prompt)
 	}
 }
 

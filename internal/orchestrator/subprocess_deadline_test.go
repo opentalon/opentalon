@@ -49,7 +49,7 @@ func deadlineTestOrch(llm LLMClient, opts OrchestratorOpts) *Orchestrator {
 		Actions: []Action{{Name: "wait"}},
 	}, &sleepExecutor{delay: 300 * time.Millisecond})
 	opts.Subprocess.Enabled = true
-	return NewWithRules(llm, DefaultParser, registry, state.NewMemoryStore(""), state.NewSessionStore(""), opts)
+	return NewWithRules(nativeLLM{llm}, DefaultParser, registry, state.NewMemoryStore(""), state.NewSessionStore(""), opts)
 }
 
 func parallelTasksArg(n int) map[string]string {

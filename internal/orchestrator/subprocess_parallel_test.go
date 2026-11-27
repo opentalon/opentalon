@@ -37,7 +37,7 @@ func lastUserContentForTest(req *provider.CompletionRequest) string {
 }
 
 func parallelOrch(llm LLMClient, maxParallel int) *Orchestrator {
-	return NewWithRules(llm, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), state.NewSessionStore(""),
+	return NewWithRules(nativeLLM{llm}, DefaultParser, NewToolRegistry(), state.NewMemoryStore(""), state.NewSessionStore(""),
 		OrchestratorOpts{Subprocess: SubprocessConfig{
 			Enabled: true, MaxDepth: 2, MaxIterations: 5, DefaultTimeout: 30 * time.Second, MaxParallel: maxParallel,
 		}})
