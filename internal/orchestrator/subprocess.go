@@ -344,7 +344,7 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	}
 
 	result := &subprocessResult{}
-	var ran []continuationCall
+	var ran []ranCall
 	for i := 0; i < maxIter; i++ {
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
 		if err != nil {
@@ -401,7 +401,7 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 				}}, nil
 			}
 			if outcome == gateExecute {
-				ran = append(ran, continuationCallOf(call))
+				ran = append(ran, ranCall{continuationCall: continuationCallOf(call), Error: toolResult.Error})
 			}
 			messages = append(messages,
 				takeThinking(&thinking).attach(provider.Message{

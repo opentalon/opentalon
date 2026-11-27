@@ -83,9 +83,17 @@ type subprocessChild struct {
 	// Remaining is what is left of its running time; the wait for the user's
 	// answer does not count.
 	Remaining time.Duration `json:"remaining"`
-	// Ran are the calls it executed, in order.
-	Ran     []continuationCall `json:"ran,omitempty"`
-	Waiting waitingCall        `json:"waiting"`
+	// Ran are the calls it sent for execution, in order.
+	Ran     []ranCall   `json:"ran,omitempty"`
+	Waiting waitingCall `json:"waiting"`
+}
+
+// ranCall is a call a sub-agent sent for execution, with the error it got. A
+// call refused before it reached its plugin gets one too, so a failed call is
+// never reported as one that ran.
+type ranCall struct {
+	continuationCall
+	Error string `json:"error,omitempty"`
 }
 
 // waitingCall is a sub-agent's call that waits for the user's approval, with
@@ -112,15 +120,19 @@ func (c *subprocessContinuation) questionID() string {
 
 // stoppedResult is the outer call's result when its sub-agents are stopped
 // before they finish: why, and per child the waiting call that did not run and
-// the calls that already ran, so the parent model never repeats work it cannot
-// see.
+// the calls already sent for execution, each as ran or failed with its error,
+// so the parent model never repeats work it cannot see.
 func (c *subprocessContinuation) stoppedResult(why string) ToolResult {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "the sub-agent was stopped before it finished: %s.", why)
 	for _, child := range c.Children {
 		fmt.Fprintf(&sb, "\n\nTask %d:\n- did not run: %s", child.Position+1, child.Waiting.continuationCall)
 		for _, ran := range child.Ran {
-			fmt.Fprintf(&sb, "\n- ran: %s", ran)
+			if ran.Error != "" {
+				fmt.Fprintf(&sb, "\n- failed: %s: %s", ran.continuationCall, ran.Error)
+			} else {
+				fmt.Fprintf(&sb, "\n- ran: %s", ran.continuationCall)
+			}
 		}
 	}
 	return ToolResult{CallID: c.Call.ID, Error: sb.String()}
