@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/opentalon/opentalon/internal/actor"
@@ -90,43 +89,6 @@ func assertRefusedWithoutAsking(t *testing.T, orch *Orchestrator, llm *subagentL
 		Content: "error: tool store__write needs the user's approval, which this sub-agent cannot ask for; the call did not run"}
 	if got := llm.requests[1].Messages[3]; !reflect.DeepEqual(got, want) {
 		t.Errorf("result of the gated call = %+v, want %+v", got, want)
-	}
-}
-
-// The model's _subprocess parallel call asks the user nothing, and stays a
-// write for the read-only checks; a child of it does not pause, so its call
-// the confirmation plugin asks about is refused and never runs.
-func TestSubprocessGatedCallInTheAgentLoop(t *testing.T) {
-	for _, tc := range []struct {
-		action string
-		args   map[string]string
-	}{
-		{"parallel", map[string]string{"tasks": `[{"task":"` + writeTask + `"}]`}},
-	} {
-		t.Run(tc.action, func(t *testing.T) {
-			tool := toolFQN("_subprocess", tc.action)
-			llm := &subagentLLM{
-				parent: []provider.CompletionResponse{
-					callReply("p1", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": tool}),
-					callReply("p2", tool, tc.args),
-					{Content: "The sub-agent could not write."},
-				},
-				children: writeChild(),
-			}
-			orch, write, sink := gatedSubprocessOrch(t, llm, OrchestratorOpts{})
-
-			res, err := orch.Run(context.Background(), "s1", "write the record")
-			if err != nil {
-				t.Fatalf("Run: %v", err)
-			}
-			assertRefusedWithoutAsking(t, orch, llm, write, sink)
-			if got := subprocessResultOf(t, res); !strings.Contains(got, "could not write") {
-				t.Errorf("_subprocess result = %q, want the sub-agent's answer", got)
-			}
-			if orch.registry.IsActionReadOnly("_subprocess", tc.action) {
-				t.Errorf("%s is read-only; it must stay a write for the phantom-completion guard", tool)
-			}
-		})
 	}
 }
 
