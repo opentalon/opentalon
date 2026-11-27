@@ -597,7 +597,7 @@ func TestNonChatLoopRequestsCarryNoSegments(t *testing.T) {
 		}},
 		{"confirmation narration", func(_ *testing.T, llm *segmentsTestLLM) {
 			newOrch(llm, OrchestratorOpts{}, 0).narrateConfirmation(context.Background(), nil,
-				ToolCall{Action: "delete-item"}, "delete the item")
+				ToolCall{Action: "delete-item"}, "delete the item", "")
 		}},
 		{"subprocess", func(t *testing.T, llm *segmentsTestLLM) {
 			if _, err := setupSubprocessOrchestrator(llm).runSubprocess(context.Background(),

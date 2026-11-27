@@ -93,15 +93,14 @@ func assertRefusedWithoutAsking(t *testing.T, orch *Orchestrator, llm *subagentL
 	}
 }
 
-// The model's _subprocess run and parallel calls ask the user nothing, and stay
-// writes for the read-only checks; the sub-agent's own call the confirmation
-// plugin asks about is refused and never runs.
+// The model's _subprocess parallel call asks the user nothing, and stays a
+// write for the read-only checks; a child of it does not pause, so its call
+// the confirmation plugin asks about is refused and never runs.
 func TestSubprocessGatedCallInTheAgentLoop(t *testing.T) {
 	for _, tc := range []struct {
 		action string
 		args   map[string]string
 	}{
-		{"run", map[string]string{"task": writeTask}},
 		{"parallel", map[string]string{"tasks": `[{"task":"` + writeTask + `"}]`}},
 	} {
 		t.Run(tc.action, func(t *testing.T) {

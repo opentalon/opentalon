@@ -25,7 +25,7 @@ func TestNarrateConfirmation_FeedsRecentContextAndReturnsLLMText(t *testing.T) {
 	}
 	call := ToolCall{Action: "timly.delete-item", Args: map[string]string{"scope_token": "scope_xyz"}}
 
-	got := orch.narrateConfirmation(context.Background(), recent, call, "lösche die Abräumwagen")
+	got := orch.narrateConfirmation(context.Background(), recent, call, "lösche die Abräumwagen", "")
 
 	if got != "Sie möchten 2 Abräumwagen löschen — fortfahren?" {
 		t.Errorf("must return the LLM narration verbatim, got %q", got)
@@ -59,7 +59,7 @@ func TestNarrateConfirmation_FeedsRecentContextAndReturnsLLMText(t *testing.T) {
 // the method returns "" so the caller uses the static template.
 func TestNarrateConfirmation_NilLLMReturnsEmpty(t *testing.T) {
 	orch := &Orchestrator{}
-	if got := orch.narrateConfirmation(context.Background(), nil, ToolCall{Action: "x"}, ""); got != "" {
+	if got := orch.narrateConfirmation(context.Background(), nil, ToolCall{Action: "x"}, "", ""); got != "" {
 		t.Errorf("nil LLM must return empty string, got %q", got)
 	}
 }
@@ -82,7 +82,7 @@ func TestNarrateConfirmation_SingleRecordPromptDemandsFields(t *testing.T) {
 		state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
 
 	call := ToolCall{Action: "timly.update-item", Args: map[string]string{"id": "42", "serial_number": "X-9"}}
-	orch.narrateConfirmation(context.Background(), nil, call, "setz die Seriennummer auf X-9")
+	orch.narrateConfirmation(context.Background(), nil, call, "setz die Seriennummer auf X-9", "")
 
 	if len(llm.requests) != 1 {
 		t.Fatalf("expected exactly 1 LLM call, got %d", len(llm.requests))
@@ -140,7 +140,7 @@ func narratorSystemPrompt(t *testing.T, ctx context.Context, userMessage string)
 		{Role: provider.RoleTool, Content: `{"id": 42, "name": "Machine 7", "serial_number": "A-1"}`},
 	}
 	call := ToolCall{Action: "items.update", Args: map[string]string{"id": "42", "serial_number": "X-9"}}
-	orch.narrateConfirmation(ctx, recent, call, userMessage)
+	orch.narrateConfirmation(ctx, recent, call, userMessage, "")
 
 	if len(llm.requests) != 1 {
 		t.Fatalf("expected exactly 1 LLM call, got %d", len(llm.requests))
@@ -216,7 +216,7 @@ func TestNarrateConfirmation_FollowsTheToolsHint(t *testing.T) {
 	orch := NewWithRules(llm, &fakeParser{}, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
 
 	call := ToolCall{Plugin: "timly", Action: "walk-through-task", Args: map[string]string{"task": "create_item", "example_name": "Bleistift HB"}}
-	got := orch.narrateConfirmation(context.Background(), nil, call, "Wie lege ich einen Bleistift an?")
+	got := orch.narrateConfirmation(context.Background(), nil, call, "Wie lege ich einen Bleistift an?", "")
 
 	if got != "Ich zeige Ihnen, wie Sie „Bleistift HB“ anlegen. Loslegen?" {
 		t.Errorf("must return the LLM narration verbatim, got %q", got)
@@ -239,7 +239,7 @@ func TestNarrateConfirmation_FollowsTheToolsHint(t *testing.T) {
 
 	// Without a hint the general rules apply as before.
 	plain := ToolCall{Plugin: "timly", Action: "update-item", Args: map[string]string{"id": "7"}}
-	orch.narrateConfirmation(context.Background(), nil, plain, "ändere die Seriennummer")
+	orch.narrateConfirmation(context.Background(), nil, plain, "ändere die Seriennummer", "")
 	for _, m := range llm.requests[1].Messages {
 		if m.Role == provider.RoleSystem && !strings.Contains(m.Content, "field: previous value") {
 			t.Errorf("an action without a hint keeps the general rules, got: %q", m.Content)
@@ -269,7 +269,7 @@ func TestNarrateConfirmation_HintFoundUnderMCPNames(t *testing.T) {
 	}
 	orch := NewWithRules(llm, &fakeParser{}, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
 
-	orch.narrateConfirmation(context.Background(), nil, ToolCall{Plugin: "timly", Action: "walk-through-task"}, "zeig es mir")
+	orch.narrateConfirmation(context.Background(), nil, ToolCall{Plugin: "timly", Action: "walk-through-task"}, "zeig es mir", "")
 
 	for _, m := range llm.requests[0].Messages {
 		if m.Role == provider.RoleSystem && !strings.Contains(m.Content, "Ask whether to show it.") {

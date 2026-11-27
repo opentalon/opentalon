@@ -133,6 +133,11 @@ type ToolResult struct {
 	// is not run again. It counts as a failed call within the turn, not toward
 	// the tool's demotion, and the plugin-call observer leaves it out.
 	RefusedByCheck bool `yaml:"-"`
+	// Suspended marks a _subprocess call whose sub-agent waits for the user's
+	// approval of one of its calls: the call has no result yet, and Content
+	// and Error are empty. It is a field of its own because ValidateResult and
+	// Sanitize truncate Content. Only Run stores it (pauseSubprocess).
+	Suspended *subprocessContinuation `yaml:"-"`
 }
 
 // CheckVerdict is a plugin's answer to a check of a call (CheckExecutor).

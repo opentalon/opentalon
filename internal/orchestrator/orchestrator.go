@@ -2940,6 +2940,17 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				// The only call whose sub-agent may ask the user (interactiveTurnKey).
 				toolResult = o.executeCall(withInteractiveTurn(ctx, sessions, userMessage), calls[i])
 			}
+			if c := toolResult.Suspended; c != nil {
+				// Its sub-agent waits for the user's approval of a call. The
+				// outer call enters the history, the turn's call records and
+				// the observer only when it completes or is stopped.
+				c.Call, c.ReplyText = continuationCallOf(calls[i]), replyText
+				question, stopped := o.pauseSubprocess(ctx, sessions, sessionID, userMessage, c, calls[i+1:], nativeToolCalls, &thinking, pluginStart)
+				if question != nil {
+					return question, nil
+				}
+				toolResult = stopped
+			}
 			if toolResult.NotRun {
 				unrun[toolCallSignature(calls[i:i+1])] = true
 			}
@@ -3364,8 +3375,8 @@ func (o *Orchestrator) PendingConfirmationFrame(sessionID string) (content strin
 	// Tool call: the persisted blob is the single source of pending tool-call
 	// state (survives restart / failover, shared across pods) and carries the
 	// approved-intent prompt it was stored with.
-	if pending, found := readPendingToolCall(o.sessions, sessionID); found {
-		return pending.Prompt, resumedSpoken(toolConfirmationFrameMetadata(pending.ID), pending.Spoken), true
+	if pending, found, _ := readPendingToolCall(o.sessions, sessionID); found {
+		return pending.Prompt, resumedSpoken(toolConfirmationFrameMetadata(pending.frameID()), pending.Spoken), true
 	}
 
 	// Pipeline plan: in-memory only (no persistence), so this covers a live
@@ -3554,16 +3565,11 @@ func (o *Orchestrator) raiseConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
 	interrupted []ToolCall, interruptedNative bool, thinking *responseThinking,
 ) gateDecision {
-	// Narrate with the main LLM so the prompt is in the user's language and the
-	// effect (e.g. batch count) is explicit; fall back to a static template.
 	var recentMsgs []provider.Message
 	if s, gerr := sessions.Get(sessionID); gerr == nil && s != nil {
 		recentMsgs = s.Messages
 	}
-	spokenQuestion, _, confirmMsg := takeSpoken(ctx, o.narrateConfirmation(ctx, recentMsgs, call, userMessage))
-	if confirmMsg == "" {
-		confirmMsg = o.confirmationFallback(call)
-	}
+	spokenQuestion, confirmMsg := o.wordConfirmation(ctx, recentMsgs, call, userMessage, "")
 	// The confirmation abandons every later call of this response — leave an
 	// explicit trace of each so the model re-issues them instead of assuming
 	// they ran (see the interrupted parameter's doc above). Position is load
@@ -3573,22 +3579,7 @@ func (o *Orchestrator) raiseConfirmation(
 	// prompt row below, so a resolved prompt+reply pair stays adjacent for
 	// stripApprovedConfirmationExchanges.
 	o.recordConfirmationInterruptedCalls(sessionID, sessions, call, interrupted, interruptedNative, thinking)
-	// Store the prompt so the next turn has context for the reply/amend, and
-	// persist the confirmation-frame metadata on that row so a reloaded client
-	// rebuilds the Approve/Reject buttons from the transcript (the live frame's
-	// metadata below is transient). Same map, so reload and live path match.
-	if spokenQuestion == "" {
-		spokenQuestion = confirmMsg
-	}
-	frameMeta := speakAsIs(ctx, spokenQuestion, toolConfirmationFrameMetadata(call.ID))
-	_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: confirmMsg}, frameMeta)
-	// Buttons are deterministic approve/reject only; amend is a free-text-classifier
-	// outcome with no button by design, so the Choices set stays two-way.
-	confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
-		Prompt:     confirmMsg,
-		Choices:    []string{"approve", "reject"},
-		ToolCallID: call.ID,
-	})
+	frameMeta, confID := o.publishConfirmation(ctx, sessions, sessionID, spokenQuestion, confirmMsg, call.ID, call.ID)
 	// Persist the pending call — the single source of pending tool-call state,
 	// surviving restarts and shared across pods. The confirmation_requested id
 	// rides along to preserve parent linkage; the prompt is what the user
@@ -3600,6 +3591,47 @@ func (o *Orchestrator) raiseConfirmation(
 		Response: confirmMsg,
 		Metadata: frameMeta,
 	}}
+}
+
+// wordConfirmation words the question about call: narrated by the main LLM in
+// the user's language with the effect explicit (e.g. a batch count), or else a
+// static template. recent is the conversation the narration describes the
+// call from. subagentTask names the task of the sub-agent that makes the call,
+// empty for a main-loop call. spoken is how the question is asked aloud in a
+// spoken turn: the question itself when the narration gave no spoken form.
+func (o *Orchestrator) wordConfirmation(ctx context.Context, recent []provider.Message, call ToolCall, userMessage, subagentTask string) (spoken, question string) {
+	spoken, _, question = takeSpoken(ctx, o.narrateConfirmation(ctx, recent, call, userMessage, subagentTask))
+	if question == "" {
+		question = o.confirmationFallback(call)
+		if subagentTask != "" {
+			question = fmt.Sprintf("A sub-agent working on the task %q asks for your approval.\n\n%s", taskPreview(subagentTask), question)
+		}
+	}
+	if spoken == "" {
+		spoken = question
+	}
+	return spoken, question
+}
+
+// publishConfirmation stores the question as an assistant row and emits
+// confirmation_requested. frameID is the id the question's frame carries,
+// callID the call the event names. It returns the frame's metadata and the
+// event's id.
+func (o *Orchestrator) publishConfirmation(ctx context.Context, sessions SessionStoreInterface, sessionID, spoken, question, frameID, callID string) (map[string]string, string) {
+	// Store the prompt so the next turn has context for the reply/amend, and
+	// persist the confirmation-frame metadata on that row so a reloaded client
+	// rebuilds the Approve/Reject buttons from the transcript (the live frame's
+	// metadata is transient). Same map, so reload and live path match.
+	frameMeta := speakAsIs(ctx, spoken, toolConfirmationFrameMetadata(frameID))
+	_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: question}, frameMeta)
+	// Buttons are deterministic approve/reject only; amend is a free-text-classifier
+	// outcome with no button by design, so the Choices set stays two-way.
+	confID := emit.EmitConfirmationRequested(ctx, o.eventSink, emit.ConfirmationRequestedArgs{
+		Prompt:     question,
+		Choices:    []string{"approve", "reject"},
+		ToolCallID: callID,
+	})
+	return frameMeta, confID
 }
 
 // checkBeforeConfirmation sends a call that needs the user's approval to its
@@ -3807,15 +3839,20 @@ Rules:
 // narrateConfirmation produces the user-facing confirmation prompt with the main
 // LLM. It feeds the recent conversation so the model can resolve an opaque
 // scope_token to the count + example records the preceding list call returned,
-// and phrase the question in the user's language. Returns "" on any error so the
-// caller falls back to the static template.
-func (o *Orchestrator) narrateConfirmation(ctx context.Context, recent []provider.Message, call ToolCall, userMessage string) string {
+// and phrase the question in the user's language. A sub-agent's call
+// (subagentTask set) is described from the sub-agent's messages, and the
+// question says that a sub-agent asks and for which task. Returns "" on any
+// error so the caller falls back to the static template.
+func (o *Orchestrator) narrateConfirmation(ctx context.Context, recent []provider.Message, call ToolCall, userMessage, subagentTask string) string {
 	if o.llm == nil {
 		return ""
 	}
 	var ub strings.Builder
 	if userMessage != "" {
 		fmt.Fprintf(&ub, "User's latest request: %s\n\n", userMessage)
+	}
+	if subagentTask != "" {
+		fmt.Fprintf(&ub, "A sub-agent makes this call, working on the task: %s\nSay in the question that a sub-agent asks, and for which task.\n\n", taskPreview(subagentTask))
 	}
 	fmt.Fprintf(&ub, "About to call tool %q with arguments: %v\n\n", call.Action, call.Args)
 	if len(recent) > 0 {
@@ -5004,6 +5041,12 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	}
 	result = o.guard.ValidateResult(call, result)
 	result = o.guard.Sanitize(result)
+	if result.Suspended != nil {
+		// A paused sub-agent call has no result yet: it emits its
+		// tool_call_result when it completes or is stopped, under this event.
+		result.Suspended.EventID = emit.ParentID(ctx)
+		return result
+	}
 	if call.FromLLM {
 		status := "ok"
 		respBody := result.Content
@@ -5728,6 +5771,10 @@ type pendingToolCallMeta struct {
 	// user approves. Persisted so a post-approval repair on another
 	// instance can still hand the corrector the approved intent.
 	Prompt string `json:"prompt,omitempty"`
+	// Subprocess is a model's _subprocess call whose sub-agent waits for the
+	// approval of one of its calls. The record's own call fields stay empty
+	// then: no reader finds a call to run in it.
+	Subprocess *subprocessContinuation `json:"subprocess,omitempty"`
 	// FromLLM marks the call as LLM-originated so a restored call still
 	// passes executeCall's unknown-args validation. Rows persisted before
 	// this field unmarshal to false — exactly how they were restored then.
@@ -5739,6 +5786,15 @@ type pendingToolCallMeta struct {
 	// message the approval stores. A blob written before the fingerprint
 	// existed holds blocks without one, which are never replayed.
 	responseThinking
+}
+
+// frameID is the id the record's question frame carries: the call's, or a
+// paused sub-agent's question's.
+func (m pendingToolCallMeta) frameID() string {
+	if m.Subprocess != nil {
+		return m.Subprocess.questionID()
+	}
+	return m.ID
 }
 
 // responseThinking is a response's thinking blocks with the fingerprint of
@@ -5781,43 +5837,62 @@ func takeThinking(pending *responseThinking) responseThinking {
 func (o *Orchestrator) recordConfirmationInterruptedCalls(
 	sessionID string, sessions SessionStoreInterface, gated ToolCall, dropped []ToolCall, native bool, thinking *responseThinking,
 ) {
-	notice := fmt.Sprintf(
-		"NOT EXECUTED — this call was issued in the same response as %s, which is now waiting for the user's confirmation. It did not run and changed nothing. Issue it again after that confirmation is resolved if it is still needed.",
-		toolFQN(gated.Plugin, gated.Action))
-	for _, dc := range dropped {
-		result := ToolResult{CallID: dc.ID, Content: notice}
-		if native {
-			_ = sessions.AddMessage(sessionID, takeThinking(thinking).attach(provider.Message{
-				Role: provider.RoleAssistant,
-				ToolCalls: []provider.ToolCall{{
-					ID:        dc.ID,
-					Name:      toolFQN(dc.Plugin, dc.Action),
-					Arguments: dc.Args,
-				}},
-			}))
-			_ = sessions.AddMessage(sessionID, provider.Message{
-				Role:       provider.RoleTool,
-				Content:    nativeToolContent(result),
-				ToolCallID: dc.ID,
-			})
-			continue
+	if native {
+		for _, m := range interruptedCallMessages(gated, dropped, thinking) {
+			_ = sessions.AddMessage(sessionID, m)
 		}
+		return
+	}
+	for _, dc := range dropped {
 		_ = sessions.AddMessage(sessionID, provider.Message{
 			Role:    provider.RoleAssistant,
 			Content: formatToolCallMessage(dc),
 		})
 		_ = sessions.AddMessage(sessionID, provider.Message{
 			Role:    provider.RoleUser,
-			Content: o.guard.WrapContent(result),
+			Content: o.guard.WrapContent(interruptedCallResult(gated, dc)),
 		})
 	}
+}
+
+// interruptedCallMessages are the native "NOT EXECUTED" exchanges of the calls
+// a confirmation of gated drops (recordConfirmationInterruptedCalls); a paused
+// sub-agent keeps them in its own messages. The first call message takes the
+// response's thinking blocks left in thinking.
+func interruptedCallMessages(gated ToolCall, dropped []ToolCall, thinking *responseThinking) []provider.Message {
+	var out []provider.Message
+	for _, dc := range dropped {
+		out = append(out,
+			takeThinking(thinking).attach(provider.Message{
+				Role: provider.RoleAssistant,
+				ToolCalls: []provider.ToolCall{{
+					ID:        dc.ID,
+					Name:      toolFQN(dc.Plugin, dc.Action),
+					Arguments: dc.Args,
+				}},
+			}),
+			provider.Message{
+				Role:       provider.RoleTool,
+				Content:    nativeToolContent(interruptedCallResult(gated, dc)),
+				ToolCallID: dc.ID,
+			})
+	}
+	return out
+}
+
+// interruptedCallResult is the "NOT EXECUTED" result of dropped, a call of the
+// same response as gated, which waits for the user's confirmation.
+func interruptedCallResult(gated, dropped ToolCall) ToolResult {
+	return ToolResult{CallID: dropped.ID, Content: fmt.Sprintf(
+		"NOT EXECUTED — this call was issued in the same response as %s, which is now waiting for the user's confirmation. It did not run and changed nothing. Issue it again after that confirmation is resolved if it is still needed.",
+		toolFQN(gated.Plugin, gated.Action))}
 }
 
 // savePendingToolCall persists the pending call with the thinking in
 // *thinking, which it takes (takeThinking); spoken says it was raised in a
 // spoken turn.
 func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *ToolCall, confirmationRequestedID, prompt string, spoken bool, thinking *responseThinking) {
-	meta := pendingToolCallMeta{
+	_ = writePendingToolCall(sessions, sessionID, pendingToolCallMeta{
 		ID:                      tc.ID,
 		Plugin:                  tc.Plugin,
 		Action:                  tc.Action,
@@ -5827,42 +5902,56 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 		FromLLM:                 tc.FromLLM,
 		Spoken:                  spoken,
 		responseThinking:        takeThinking(thinking),
-	}
+	})
+}
+
+// writePendingToolCall stores meta as the session's pending tool-call record
+// and returns the store's error.
+func writePendingToolCall(sessions SessionStoreInterface, sessionID string, meta pendingToolCallMeta) error {
 	data, err := json.Marshal(meta)
 	if err != nil {
-		return
+		return err
 	}
-	_ = sessions.SetMetadata(sessionID, "pending_tool_call", string(data))
+	return sessions.SetMetadata(sessionID, "pending_tool_call", string(data))
 }
 
 // loadPendingToolCall restores the pending tool call from session metadata.
 // Returns the ToolCall, the confirmation_requested event id, the
 // confirmation prompt (either string empty when the persisted row predates
 // the field or nothing was captured), and the thinking of the response that
-// issued the call.
+// issued the call. A record without a call of its own (a paused sub-agent's)
+// holds nothing to run. A record that cannot be read is cleared, so it is not
+// kept forever; only Run loads the record, inside the turn lock.
 func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string, string, responseThinking) {
-	meta, found := readPendingToolCall(sessions, sessionID)
-	if !found {
+	meta, found, err := readPendingToolCall(sessions, sessionID)
+	if err != nil {
+		slog.Warn("pending tool call cannot be read; clearing it", "session", sessionID, "error", err)
+		if err := sessions.SetMetadata(sessionID, "pending_tool_call", ""); err != nil {
+			slog.Warn("unreadable pending tool call not cleared", "session", sessionID, "error", err)
+		}
+	}
+	if !found || meta.Plugin == "" {
 		return nil, "", "", responseThinking{}
 	}
 	return &ToolCall{ID: meta.ID, Plugin: meta.Plugin, Action: meta.Action, Args: meta.Args, FromLLM: meta.FromLLM}, meta.ConfirmationRequestedID, meta.Prompt, meta.responseThinking
 }
 
 // readPendingToolCall returns the persisted pending call as stored; found is
-// false when none is, or it cannot be read.
-func readPendingToolCall(sessions SessionStoreInterface, sessionID string) (meta pendingToolCallMeta, found bool) {
-	sess, err := sessions.Get(sessionID)
-	if err != nil || sess == nil {
-		return pendingToolCallMeta{}, false
+// false when none is, or it cannot be read. err is the decoding error of a
+// stored record that cannot be read.
+func readPendingToolCall(sessions SessionStoreInterface, sessionID string) (meta pendingToolCallMeta, found bool, err error) {
+	sess, gerr := sessions.Get(sessionID)
+	if gerr != nil || sess == nil {
+		return pendingToolCallMeta{}, false, nil
 	}
 	raw := sess.Metadata["pending_tool_call"]
 	if raw == "" {
-		return pendingToolCallMeta{}, false
+		return pendingToolCallMeta{}, false, nil
 	}
-	if json.Unmarshal([]byte(raw), &meta) != nil {
-		return pendingToolCallMeta{}, false
+	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
+		return pendingToolCallMeta{}, false, err
 	}
-	return meta, true
+	return meta, true, nil
 }
 
 // toolCallSignature builds a deterministic string from a set of tool calls

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/provider"
@@ -54,6 +55,7 @@ type narratingLLM struct {
 	*subagentLLM
 	mu         sync.Mutex
 	narrations []string // the user content of each narration request
+	fail       bool     // every narration fails
 }
 
 const pauseQuestion = "A sub-agent working on updating record 7 asks: may it write the record?"
@@ -64,6 +66,9 @@ func (l *narratingLLM) Complete(ctx context.Context, req *provider.CompletionReq
 		l.mu.Lock()
 		l.narrations = append(l.narrations, req.Messages[1].Content)
 		l.mu.Unlock()
+		if l.fail {
+			return nil, errors.New("narration failed")
+		}
 		return &provider.CompletionResponse{Content: pauseQuestion}, nil
 	}
 	return l.subagentLLM.Complete(ctx, req)
@@ -248,8 +253,11 @@ func TestSubprocessGatedCallPausesTheTurn(t *testing.T) {
 			t.Fatalf("pending record %q: %v", s.Metadata["pending_tool_call"], err)
 		}
 		requested := eventsOfCall(t, h.sink, events.TypeConfirmationRequested, "c1")
-		if len(requested) != 1 {
-			t.Fatalf("confirmation_requested for c1 = %d, want 1", len(requested))
+		if len(requested) != 1 || countEventType(h.sink.snapshot(), events.TypeConfirmationRequested) != 1 {
+			t.Fatalf("confirmation_requested for c1 = %d, want the turn's only one", len(requested))
+		}
+		if h.orch.registry.IsActionReadOnly("_subprocess", "run") {
+			t.Errorf("_subprocess__run is read-only; it must stay a write for the phantom-completion guard")
 		}
 		if rec.ID != "" || rec.Plugin != "" || rec.Action != "" || rec.Args != nil {
 			t.Errorf("record holds a runnable call: %+v", rec)
@@ -327,6 +335,39 @@ func TestSubprocessGatedCallPausesTheTurn(t *testing.T) {
 			t.Errorf("pending frame = %q %v %v, want the question with id p2-0-c1", content, meta, ok)
 		}
 	})
+}
+
+// When the narration fails, the fallback question still says that a sub-agent
+// asks, and for which task.
+func TestSubprocessPauseFallbackQuestionNamesTheTask(t *testing.T) {
+	eachStore(t, func(t *testing.T, kind storeKind) {
+		h := newPauseHarness(t, kind.open(t), pauseTask)
+		h.llm.fail = true
+
+		res, err := h.orch.Run(context.Background(), "s1", "fix record 7")
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if res.Metadata["tool_call_id"] != "p2-0-c1" {
+			t.Fatalf("turn ended with %q %v, want the question with frame id p2-0-c1", res.Response, res.Metadata)
+		}
+		for _, want := range []string{"sub-agent", pauseTask} {
+			if !strings.Contains(res.Response, want) {
+				t.Errorf("fallback question lacks %q: %q", want, res.Response)
+			}
+		}
+		if h.write.count != 0 {
+			t.Errorf("store__write ran %d time(s), want 0", h.write.count)
+		}
+	})
+}
+
+// The task a question names is cut at a character boundary.
+func TestTaskPreviewKeepsUTF8Valid(t *testing.T) {
+	got := taskPreview(strings.Repeat("a", 99) + "äbc")
+	if !utf8.ValidString(got) || got != strings.Repeat("a", 99)+"..." {
+		t.Errorf("taskPreview = %q, want 99 a and ...", got)
+	}
 }
 
 // A paused sub-agent the session cannot store, because the write fails or the
