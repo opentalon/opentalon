@@ -39,11 +39,13 @@ type subprocessContinuation struct {
 	responseThinking
 	// InputTokens and OutputTokens are the parent's response tokens
 	// attributed to the call, for the plugin call observer when the call ends.
-	InputTokens  int               `json:"input_tokens,omitempty"`
-	OutputTokens int               `json:"output_tokens,omitempty"`
-	Children     []subprocessChild `json:"children"`
-	// Asking is the index in Children of the child whose call the stored
-	// question is about.
+	InputTokens  int `json:"input_tokens,omitempty"`
+	OutputTokens int `json:"output_tokens,omitempty"`
+	// Children are the call's sub-agents in task order, run's one or each of
+	// parallel's, waiting or finished.
+	Children []subprocessChild `json:"children"`
+	// Asking is the index in Children of the waiting child whose call the
+	// stored question is about.
 	Asking int `json:"asking"`
 }
 
@@ -73,7 +75,8 @@ func (c continuationCall) String() string {
 	return toolFQN(c.Plugin, c.Action) + "(" + strings.Join(args, ", ") + ")"
 }
 
-// subprocessChild is one sub-agent where it paused: what its loop resumes from.
+// subprocessChild is one sub-agent where it paused, what its loop resumes
+// from, or one that finished, with its Result.
 type subprocessChild struct {
 	// Position is the child's place among a parallel call's tasks; 0 for run.
 	Position int               `json:"position"`
@@ -90,6 +93,41 @@ type subprocessChild struct {
 	// Ran are the calls it sent for execution, in order.
 	Ran     []ranCall   `json:"ran,omitempty"`
 	Waiting waitingCall `json:"waiting"`
+	// Result is its answer once it finished; nil while it waits.
+	Result *parallelTaskResult `json:"result,omitempty"`
+}
+
+// finish keeps the outcome of child's loop, res and err as continueSubprocess
+// returns them, in place of what it would resume from.
+func (child *subprocessChild) finish(res *subprocessResult, err error) {
+	child.Result = &parallelTaskResult{Task: child.Request.Task}
+	if res != nil {
+		child.Ran = res.Ran
+	}
+	if err != nil {
+		child.Result.Error = fmt.Sprintf("subprocess failed: %v", err)
+	} else {
+		child.Result.Response, child.Result.Iterations = res.Response, res.Iterations
+	}
+	child.Messages, child.Waiting = nil, waitingCall{}
+}
+
+// waitingChild is the index of the first child that waits, -1 when none does.
+func (c *subprocessContinuation) waitingChild() int {
+	return slices.IndexFunc(c.Children, func(child subprocessChild) bool { return child.Result == nil })
+}
+
+// result is the outer call's result once no child waits: run's child's answer,
+// or parallel's answers joined as when no child waited.
+func (c *subprocessContinuation) result() ToolResult {
+	if c.Call.Action == "parallel" {
+		return joinParallel(c.Call.ID, c.Children)
+	}
+	r := c.Children[0].Result
+	if r.Error != "" {
+		return ToolResult{CallID: c.Call.ID, Error: r.Error}
+	}
+	return ToolResult{CallID: c.Call.ID, Content: r.Response}
 }
 
 // ranCall is a call a sub-agent sent for execution, with the error it got. A
@@ -123,20 +161,35 @@ func (c *subprocessContinuation) questionID() string {
 }
 
 // stoppedResult is the outer call's result when its sub-agents are stopped
-// before they finish: why, and per child the waiting call that did not run and
-// the calls already sent for execution, each as ran or failed with its error,
-// so the parent model never repeats work it cannot see.
+// before they finish: why, and per child a waiting child's call that did not
+// run, marked when the user was not asked about it yet; the calls already sent
+// for execution, each as ran or failed with its error; and a finished child's
+// answer. So the parent model never repeats work it cannot see.
 func (c *subprocessContinuation) stoppedResult(why string) ToolResult {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "the sub-agent was stopped before it finished: %s.", why)
-	for _, child := range c.Children {
-		fmt.Fprintf(&sb, "\n\nTask %d:\n- did not run: %s", child.Position+1, child.Waiting.continuationCall)
+	for i, child := range c.Children {
+		fmt.Fprintf(&sb, "\n\nTask %d:", child.Position+1)
+		switch {
+		case child.Result != nil:
+		case i == c.Asking:
+			fmt.Fprintf(&sb, "\n- did not run: %s", child.Waiting.continuationCall)
+		default:
+			fmt.Fprintf(&sb, "\n- did not run (not asked about yet): %s", child.Waiting.continuationCall)
+		}
 		for _, ran := range child.Ran {
 			if ran.Error != "" {
 				fmt.Fprintf(&sb, "\n- failed: %s: %s", ran.continuationCall, ran.Error)
 			} else {
 				fmt.Fprintf(&sb, "\n- ran: %s", ran.continuationCall)
 			}
+		}
+		switch r := child.Result; {
+		case r == nil:
+		case r.Error != "":
+			fmt.Fprintf(&sb, "\n- error: %s", r.Error)
+		default:
+			fmt.Fprintf(&sb, "\n- answer: %s", r.Response)
 		}
 	}
 	return ToolResult{CallID: c.Call.ID, Error: sb.String()}
@@ -221,28 +274,64 @@ func (o *Orchestrator) endSubprocess(ctx context.Context, c *subprocessContinuat
 	return result
 }
 
-// resumeSubprocess runs the call c's sub-agent waits with, which the user
-// approved, and lets the sub-agent go on where it paused. The call runs once,
-// under the deadline every call gets and without repair, and its result enters
-// the sub-agent's messages, not the parent's history. The sub-agent then runs
-// for the running time it had left, with the tools the caller's profile
-// permits now, and may ask again: its next call that needs approval is asked
-// about as at a pause, and the question returned. Otherwise the outer call
-// ends (endSubprocess) with the sub-agent's answer, or with the stopped-call
-// result when this orchestrator cannot run the sub-agent any more; the waiting
-// call does not run then.
+// resumeSubprocess lets c's sub-agents go on after the user approved the call
+// the asked child waits with, one child at a time (resumeChild): the asked
+// child with its approved call, then each next waiting child with its call
+// decided again. A child that asks again, or a call decided again that still
+// needs approval, is asked about as at a pause, and the question returned.
+// Once no child waits, the outer call ends (endSubprocess) with the answer, or
+// answers, of its sub-agents, or with the stopped-call result as soon as this
+// orchestrator cannot run a child any more; that child's call does not run.
 func (o *Orchestrator) resumeSubprocess(ctx context.Context, sessions SessionStoreInterface, sessionID, userMessage string, c *subprocessContinuation) (*RunResult, ToolResult) {
 	start := time.Now()
-	child := c.Children[c.Asking]
-	if why := o.subprocessUnavailable(ctx, child.Request); why != "" {
-		return nil, o.stopSubprocess(ctx, c, why, start)
-	}
-	// The sub-agent's calls emit under the outer call, as in the outer call's turn.
+	// The sub-agents' calls emit under the outer call, as in the outer call's turn.
 	subCtx := emit.WithParent(ctx, c.EventID)
-	callCtx, _ := subprocessContext(subCtx, child.Request, child.Depth)
+	for approved := true; ; approved = false {
+		child := &c.Children[c.Asking]
+		if why := o.subprocessUnavailable(ctx, child.Request); why != "" {
+			return nil, o.stopSubprocess(ctx, c, why, start)
+		}
+		res, err := o.resumeChild(subCtx, sessions, userMessage, *child, approved)
+		if err == nil && res.Paused != nil {
+			*child = *res.Paused
+			thinking := c.responseThinking
+			return o.pauseSubprocess(ctx, sessions, sessionID, userMessage, c, nil, true, &thinking, start)
+		}
+		child.finish(res, err)
+		if c.Asking = c.waitingChild(); c.Asking < 0 {
+			return nil, o.endSubprocess(ctx, c, c.result(), start)
+		}
+	}
+}
+
+// resumeChild settles the call child waits with and lets child go on where it
+// paused. An approved call runs once, under the deadline every call gets and
+// without repair. Any other passes the confirmation decision again, its check
+// included, since what the decision reads may have changed while child
+// waited; when the call still needs the user's approval, child pauses on it
+// again. The call's result enters child's messages, not the parent's history,
+// and child then runs as continueSubprocess says, for the running time it had
+// left and with the tools the caller's profile permits now.
+func (o *Orchestrator) resumeChild(ctx context.Context, sessions SessionStoreInterface, userMessage string, child subprocessChild, approved bool) (*subprocessResult, error) {
+	callCtx, _ := subprocessContext(ctx, child.Request, child.Depth)
 	waiting := child.Waiting
-	result := o.executeSubprocessCall(callCtx, waiting.toolCall(), waiting.InputTokens, waiting.OutputTokens)
-	child.Ran = append(child.Ran, ranCall{continuationCall: waiting.continuationCall, Error: result.Error})
+	result, outcome := ToolResult{}, gateExecute
+	if approved {
+		result = o.executeSubprocessCall(callCtx, waiting.toolCall(), waiting.InputTokens, waiting.OutputTokens)
+	} else {
+		permitted, _ := o.subprocessTools(callCtx, child.Request)
+		var err error
+		result, outcome, err = o.subprocessCall(callCtx, permitted, waiting.toolCall(), true, waiting.InputTokens, waiting.OutputTokens)
+		if err != nil {
+			return nil, fmt.Errorf("subprocess call check: %w", err)
+		}
+		if outcome == gateAwaitApproval {
+			return &subprocessResult{Paused: &child}, nil
+		}
+	}
+	if outcome == gateExecute {
+		child.Ran = append(child.Ran, ranCall{continuationCall: waiting.continuationCall, Error: result.Error})
+	}
 	child.Messages = append(child.Messages,
 		waiting.attach(provider.Message{
 			Role:      provider.RoleAssistant,
@@ -251,18 +340,8 @@ func (o *Orchestrator) resumeSubprocess(ctx context.Context, sessions SessionSto
 		}),
 		provider.Message{Role: provider.RoleTool, Content: nativeToolContent(result), ToolCallID: waiting.ID},
 	)
-
 	// The resume runs inside the turn's lock, so the sub-agent may ask again.
-	res, err := o.continueSubprocess(withInteractiveTurn(subCtx, sessions, userMessage), child)
-	switch {
-	case err != nil:
-		return nil, o.endSubprocess(ctx, c, ToolResult{CallID: c.Call.ID, Error: fmt.Sprintf("subprocess failed: %v", err)}, start)
-	case res.Paused != nil:
-		c.Children[c.Asking] = *res.Paused
-		thinking := c.responseThinking
-		return o.pauseSubprocess(ctx, sessions, sessionID, userMessage, c, nil, true, &thinking, start)
-	}
-	return nil, o.endSubprocess(ctx, c, ToolResult{CallID: c.Call.ID, Content: res.Response}, start)
+	return o.continueSubprocess(withInteractiveTurn(ctx, sessions, userMessage), child)
 }
 
 // subprocessUnavailable says why this orchestrator cannot run a sub-agent of

@@ -190,7 +190,10 @@ type parallelTaskResult struct {
 // executeParallel fans out several independent sub-agent tasks concurrently and
 // joins their answers in task order. It reuses runSubprocess per task, so every
 // per-child guardrail (iteration cap, timeout, no-recursion) is inherited; the
-// only new bound is MaxParallel (concurrency) plus a total-tasks cap.
+// only new bound is MaxParallel (concurrency) plus a total-tasks cap. Children
+// that need no approval run to their end; when any child paused for the
+// user's approval of a call, the call is suspended with every child, waiting
+// or finished, and asks about the first waiting one.
 func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall) ToolResult {
 	reqs, err := parseParallelRequest(call.Args)
 	for i := 0; err == nil && i < len(reqs); i++ {
@@ -219,9 +222,6 @@ func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall)
 	}
 
 	maxParallel := s.orch.subprocessMaxParallel()
-	// A child of a parallel call does not ask the user: its call that needs
-	// the user's approval is refused.
-	ctx = withoutInteractiveTurn(ctx)
 
 	log := slog.With("component", "subprocess", "depth", currentDepth+1, "mode", "parallel")
 	log.Info("parallel subprocess started", "tasks", len(reqs), "max_parallel", maxParallel)
@@ -236,7 +236,7 @@ func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall)
 	// that already lets MaxConcurrentSessions > 1 run turns in parallel. The one
 	// observer implementation, metrics.Collector, is goroutine-safe (Prometheus
 	// CounterVec ops are).
-	results := make([]parallelTaskResult, len(reqs))
+	children := make([]subprocessChild, len(reqs))
 	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
 	for i, req := range reqs {
@@ -246,20 +246,34 @@ func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall)
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			results[i].Task = req.Task
 			res, err := s.orch.runSubprocess(ctx, req, currentDepth+1)
-			if err != nil {
-				results[i].Error = fmt.Sprintf("subprocess failed: %v", err)
-				return
+			if err == nil && res.Paused != nil {
+				children[i] = *res.Paused
+			} else {
+				children[i] = subprocessChild{Request: req}
+				children[i].finish(res, err)
 			}
-			results[i].Response = res.Response
-			results[i].Iterations = res.Iterations
+			children[i].Position = i
 		}(i, req)
 	}
 	wg.Wait()
 
+	c := &subprocessContinuation{Children: children}
+	if c.Asking = c.waitingChild(); c.Asking >= 0 {
+		log.Info("parallel subprocess paused for the user's approval", "tasks", len(reqs))
+		return ToolResult{CallID: call.ID, Suspended: c}
+	}
 	log.Info("parallel subprocess completed", "tasks", len(reqs))
+	return joinParallel(call.ID, children)
+}
 
+// joinParallel is a parallel call's result once every child finished: their
+// answers in task order, and the structured payload.
+func joinParallel(callID string, children []subprocessChild) ToolResult {
+	results := make([]parallelTaskResult, len(children))
+	for i, child := range children {
+		results[i] = *child.Result
+	}
 	var sb strings.Builder
 	for i, r := range results {
 		fmt.Fprintf(&sb, "## Task %d: %s\n", i+1, r.Task)
@@ -277,14 +291,16 @@ func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall)
 	// Error ignored: parallelTaskResult is a flat struct of strings/ints, which
 	// json.Marshal cannot fail on. structured is "" on the impossible error.
 	structured, _ := json.Marshal(results)
-	return ToolResult{CallID: call.ID, Content: strings.TrimRight(sb.String(), "\n"), StructuredContent: string(structured)}
+	return ToolResult{CallID: callID, Content: strings.TrimRight(sb.String(), "\n"), StructuredContent: string(structured)}
 }
 
-// subprocessResult is the outcome of a subprocess execution: its answer, or
-// the sub-agent where it paused for the user's approval of a call.
+// subprocessResult is the outcome of a subprocess execution: its answer and
+// the calls it sent for execution, or the sub-agent where it paused for the
+// user's approval of a call.
 type subprocessResult struct {
 	Response   string
 	Iterations int
+	Ran        []ranCall
 	Paused     *subprocessChild
 }
 
@@ -309,7 +325,7 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 // in the agent loop (interactiveTurnKey), a call that needs the user's
 // approval pauses the sub-agent: it returns where it stopped, with the
 // response's later calls recorded as not executed, as the main loop records
-// them.
+// them. With an error, the result still holds the calls it sent for execution.
 func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessChild) (*subprocessResult, error) {
 	req := child.Request
 	deadline := time.Now().Add(child.Remaining)
@@ -342,12 +358,12 @@ func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessC
 		"iterations", child.Iterations)
 
 	permitted, tools := o.subprocessTools(ctx, req)
-	messages, ran := child.Messages, child.Ran
-	result := &subprocessResult{}
+	messages := child.Messages
+	result := &subprocessResult{Ran: child.Ran}
 	for i := child.Iterations; i < maxIter; i++ {
 		guardedMessages, blocked, err := o.runGuardPlugins(ctx, messages)
 		if err != nil {
-			return nil, fmt.Errorf("subprocess guard: %w", err)
+			return result, fmt.Errorf("subprocess guard: %w", err)
 		}
 		if blocked != nil {
 			result.Response = blocked.Response
@@ -358,7 +374,7 @@ func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessC
 
 		resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{Messages: guardedMessages, Model: req.Model, Tools: tools})
 		if err != nil {
-			return nil, fmt.Errorf("subprocess LLM: %w", err)
+			return result, fmt.Errorf("subprocess LLM: %w", err)
 		}
 		model := resp.Model
 		if model == "" {
@@ -385,12 +401,12 @@ func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessC
 		for k, call := range calls {
 			toolResult, outcome, err := o.subprocessCall(ctx, permitted, call, mayAsk, perCallInput, perCallOutput)
 			if err != nil {
-				return nil, fmt.Errorf("subprocess call check: %w", err)
+				return result, fmt.Errorf("subprocess call check: %w", err)
 			}
 			if outcome == gateAwaitApproval {
 				messages = append(messages, interruptedCallMessages(call, calls[k+1:], &thinking)...)
 				log.Info("subprocess paused for the user's approval", "iterations", i+1, "plugin", call.Plugin, "action", call.Action)
-				child.Messages, child.Iterations, child.Remaining, child.Ran = messages, i+1, time.Until(deadline), ran
+				child.Messages, child.Iterations, child.Remaining, child.Ran = messages, i+1, time.Until(deadline), result.Ran
 				child.Waiting = waitingCall{
 					continuationCall: continuationCallOf(call), Text: text, responseThinking: takeThinking(&thinking),
 					InputTokens: perCallInput, OutputTokens: perCallOutput,
@@ -398,7 +414,7 @@ func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessC
 				return &subprocessResult{Paused: &child}, nil
 			}
 			if outcome == gateExecute {
-				ran = append(ran, ranCall{continuationCall: continuationCallOf(call), Error: toolResult.Error})
+				result.Ran = append(result.Ran, ranCall{continuationCall: continuationCallOf(call), Error: toolResult.Error})
 			}
 			messages = append(messages,
 				takeThinking(&thinking).attach(provider.Message{
