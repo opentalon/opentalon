@@ -429,6 +429,31 @@ func TestSubprocessPauseThatCannotBeStored(t *testing.T) {
 	}
 }
 
+// The stopped-call result reports a call refused before it reached its plugin
+// as failed, with its error, never as a call that ran.
+func TestSubprocessStoppedResultReportsARefusedCallAsFailed(t *testing.T) {
+	h := newPauseHarness(t, pendingFailingStore{state.NewSessionStore("")}, pauseTask)
+	child := pauseChild(pauseTask)
+	child[pauseTask][0] = callReply("c0", "look__see", map[string]string{"x": "1"})
+	h.llm.children = child
+
+	if _, err := h.orch.Run(context.Background(), "s1", "fix record 7"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if h.looks.count != 2 {
+		t.Errorf("look__see ran %d time(s), want 2 (p0, p3; c0 is refused)", h.looks.count)
+	}
+	var stopped string
+	for _, m := range h.session(t).Messages {
+		if m.ToolCallID == "p2" {
+			stopped = m.Content
+		}
+	}
+	if !strings.Contains(stopped, "- failed: look__see(x=1): unknown argument(s)") || strings.Contains(stopped, "ran: look__see") {
+		t.Errorf("outer call result = %q, want c0 reported as failed with its error", stopped)
+	}
+}
+
 // A click on the question of a paused sub-agent finds no call to run: it
 // answers as expired and runs nothing.
 func TestSubprocessPauseClickAnswersExpired(t *testing.T) {
