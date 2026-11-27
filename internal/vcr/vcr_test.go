@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,6 +141,73 @@ func TestRecorderSaveAndReplay(t *testing.T) {
 		t.Errorf("replay mismatch: got %q, %q", r1.Content, r2.Content)
 	}
 }
+
+func TestPlayerAndRecorderReportNativeToolCalling(t *testing.T) {
+	path := writeCassette(t, Cassette{PromptHash: prompts.Hash(), ScenariosHash: scenarios.Hash()})
+	p, err := NewPlayer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		llm  LLMClient
+		want bool
+	}{
+		{"player", p, true},
+		{"recorder of a native client", NewRecorder(nativeStub{&stubLLM{}}, path, "m"), true},
+		{"recorder of a text client", NewRecorder(&stubLLM{}, path, "m"), false},
+	} {
+		fp, ok := tc.llm.(interface{ SupportsFeature(provider.Feature) bool })
+		if got := ok && fp.SupportsFeature(provider.FeatureTools); got != tc.want {
+			t.Errorf("%s: native tool calling = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestPlayerRefusesARequestOffTheRecordedPath(t *testing.T) {
+	request := func(preamble string, tools ...string) *provider.CompletionRequest {
+		req := &provider.CompletionRequest{Messages: []provider.Message{
+			{Role: provider.RoleSystem, Content: preamble + "rules"}, {Role: provider.RoleUser, Content: "hi"},
+		}}
+		for _, name := range tools {
+			req.Tools = append(req.Tools, provider.ToolDefinition{Name: name})
+		}
+		return req
+	}
+	recorded := request(prompts.OrchestratorPreambleNative, "_meta__load_tools")
+	for _, tc := range []struct {
+		name string
+		sent *provider.CompletionRequest
+		want string // the error's end; "" = replayed
+	}{
+		{"the recorded path", request(prompts.OrchestratorPreambleNative, "_meta__load_tools"), ""},
+		{"the text path", request(prompts.OrchestratorPreamble),
+			`interaction 1: request differs from the recorded one: tools [], recorded ["_meta__load_tools"]; native preamble false, recorded true`},
+		{"other tools", request(prompts.OrchestratorPreambleNative, "gitlab__analyze_code"),
+			`request differs from the recorded one: tools ["gitlab__analyze_code"], recorded ["_meta__load_tools"]`},
+	} {
+		path := writeCassette(t, Cassette{
+			PromptHash: prompts.Hash(), ScenariosHash: scenarios.Hash(),
+			Interactions: []Interaction{{Request: recorded, Response: &provider.CompletionResponse{Content: "ok"}}},
+		})
+		p, err := NewPlayer(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := p.Complete(context.Background(), tc.sent)
+		switch {
+		case tc.want == "" && (err != nil || resp.Content != "ok"):
+			t.Errorf("%s: Complete = %v, %v; want the recorded response", tc.name, resp, err)
+		case tc.want != "" && (err == nil || !strings.HasSuffix(err.Error(), tc.want)):
+			t.Errorf("%s: Complete error = %v, want it to end in %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+// nativeStub is a client with native tool calling.
+type nativeStub struct{ *stubLLM }
+
+func (nativeStub) SupportsFeature(f provider.Feature) bool { return f == provider.FeatureTools }
 
 type stubLLM struct {
 	responses []string
