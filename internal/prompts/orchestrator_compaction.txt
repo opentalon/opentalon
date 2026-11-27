@@ -2,7 +2,7 @@
 
 Carry over:
 - what the user wants, what has been done for it and what is still open, with the exact names, ids, numbers and values needed to go on;
-- every instruction still in force, whoever gave it and including those in hidden messages, word for word where its wording matters;
+- every instruction still in force, whoever gave it and including those in hidden messages, quoted word for word as a list of its own; when they do not all fit the word limit, quote those whose exact wording matters and give the rest in short;
 - the last question asked and the next step.
 
 Write plain text in the language of the conversation, without a preamble, in at most %d words.
