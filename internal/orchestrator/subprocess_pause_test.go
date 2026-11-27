@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -72,6 +73,19 @@ func (l *narratingLLM) Complete(ctx context.Context, req *provider.CompletionReq
 		return &provider.CompletionResponse{Content: pauseQuestion}, nil
 	}
 	return l.subagentLLM.Complete(ctx, req)
+}
+
+// pendingWriteCounter counts the writes of a pending call.
+type pendingWriteCounter struct {
+	SessionStoreInterface
+	writes atomic.Int32
+}
+
+func (s *pendingWriteCounter) SetMetadata(id, key, value string) error {
+	if key == "pending_tool_call" && value != "" {
+		s.writes.Add(1)
+	}
+	return s.SessionStoreInterface.SetMetadata(id, key, value)
 }
 
 // pendingFailingStore fails every write of a pending call.
@@ -212,13 +226,15 @@ func mentionsCall(m provider.Message, id string) bool {
 
 // A sub-agent's gated call in the agent loop ends the turn with one question
 // about it, worded from the sub-agent's task and messages. The call does not
-// run; the record holds the sub-agent with no runnable call of its own; the
+// run; the record, written once, holds the sub-agent with no runnable call of
+// its own and the id of the question's confirmation_requested event; the
 // parent's history holds neither the outer call nor anything of the
 // sub-agent's, and its later call is recorded as not executed; the outer call
 // emits no result and is not observed.
 func TestSubprocessGatedCallPausesTheTurn(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
-		h := newPauseHarness(t, kind.open(t), pauseTask)
+		sessions := &pendingWriteCounter{SessionStoreInterface: kind.open(t)}
+		h := newPauseHarness(t, sessions, pauseTask)
 
 		res, err := h.orch.Run(context.Background(), "s1", "fix record 7")
 		if err != nil {
@@ -262,8 +278,11 @@ func TestSubprocessGatedCallPausesTheTurn(t *testing.T) {
 		if rec.ID != "" || rec.Plugin != "" || rec.Action != "" || rec.Args != nil {
 			t.Errorf("record holds a runnable call: %+v", rec)
 		}
-		if rec.Prompt != pauseQuestion || rec.ConfirmationRequestedID != requested[0].ID {
+		if rec.Prompt != pauseQuestion || rec.ConfirmationRequestedID == "" || rec.ConfirmationRequestedID != requested[0].ID {
 			t.Errorf("record prompt %q, event id %q; want the question and %q", rec.Prompt, rec.ConfirmationRequestedID, requested[0].ID)
+		}
+		if n := sessions.writes.Load(); n != 1 {
+			t.Errorf("pending record written %d time(s), want once, with the event's id", n)
 		}
 		c := rec.Subprocess
 		if c == nil || len(c.Children) != 1 {
