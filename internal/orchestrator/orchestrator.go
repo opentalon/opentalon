@@ -2621,25 +2621,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 		var calls []ToolCall
 		nativeToolCalls := len(resp.ToolCalls) > 0
 		if nativeToolCalls {
+			calls = structuredCalls(resp.ToolCalls)
 			for idx, tc := range resp.ToolCalls {
-				plugin, action, _ := parseToolName(tc.Name)
-				id := tc.ID
-				if id == "" {
-					// Some providers omit the tool-call id. Synthesize a stable
-					// one (mirroring the text parser's scheme) so every
-					// downstream handle — the tool-result pairing that echoes it
-					// back to the provider, and the confirmation-prompt dedup key
-					// the chat client renders from it — always has a value.
-					id = fmt.Sprintf("call-%d", idx+1)
-				}
-				calls = append(calls, ToolCall{
-					ID:      id,
-					Plugin:  plugin,
-					Action:  action,
-					Args:    tc.Arguments,
-					FromLLM: true,
-				})
-				log.Debug("native tool call", "id", id, "name", tc.Name, "args", tc.Arguments)
+				log.Debug("native tool call", "id", calls[idx].ID, "name", tc.Name, "args", tc.Arguments)
 			}
 			log.Info("native tool calls received", "round", i+1, "count", len(calls))
 		} else {
@@ -3124,43 +3108,8 @@ func (o *Orchestrator) buildToolDefinitions(ctx context.Context) (callable, load
 			// predicate the tool-load gate enforces (toolIsNative) so the array
 			// the model sees and the calls executeCall admits cannot diverge.
 			native := toolIsNative(action, fqn, promoted)
-			// Build JSON Schema for parameters.
-			properties := make(map[string]interface{})
-			var required []string
-			for _, p := range action.Parameters {
-				schema, fromPlugin := parameterSchema(p)
-				properties[p.Name] = schema
-				if native && p.Schema != "" && !fromPlugin {
-					// The plugin went to the trouble of declaring a schema and
-					// the model is not getting it. Silence here would leave a
-					// missing enum looking exactly like a parameter that never
-					// had one.
-					slog.Warn("tool registration: unusable parameter schema, falling back to type and description",
-						"tool", fqn, "param", p.Name)
-				}
-				if p.Required {
-					required = append(required, p.Name)
-				}
-			}
-			// JSON Schema requires `required` to be an array when present. A nil
-			// []string here marshals to `"required": null`, which strict providers
-			// (Mistral) reject with 400 "Invalid tool schema: None is not of type
-			// 'array'". Omit the key entirely when no parameter is required —
-			// leniently-parsing providers (OVH gpt-oss) accept both forms.
-			params := map[string]interface{}{
-				"type":                 "object",
-				"properties":           properties,
-				"additionalProperties": false,
-			}
-			if len(required) > 0 {
-				params["required"] = required
-			}
-			td := provider.ToolDefinition{
-				Name:        fqn,
-				Description: action.Description,
-				Parameters:  params,
-				OnDemand:    !action.AlwaysInclude,
-			}
+			td := toolDefinition(fqn, action, native)
+			td.OnDemand = !action.AlwaysInclude
 			if !native {
 				loadable = append(loadable, td)
 				slog.Debug("tool registration: loadable (catalog-only, not loaded)", "tool", fqn)
@@ -5206,9 +5155,10 @@ func (o *Orchestrator) admitCall(ctx context.Context, call ToolCall, dispatchSta
 	// answerUnloadedCall loads the tool when load_tools could, and tells the
 	// model to call it again from its description. The gate keys off the set
 	// actually sent this request (recorded on ctx by the agent loop), so it fires
-	// exactly where "unloaded" is meaningful: it is a no-op for text mode and the
-	// sub-agent loop (both list every tool in full inline, no native array) and
-	// for host-constructed calls (FromLLM=false). Placed after the plugin /
+	// exactly where "unloaded" is meaningful: it is a no-op for text mode (every
+	// tool listed in full inline, no native array), for the sub-agent loop (which
+	// sends its whole permitted set and checks each call against it) and for
+	// host-constructed calls (FromLLM=false). Placed after the plugin /
 	// user-only gates (a hidden tool is refused for that stronger reason first)
 	// and before arg validation (loading the real schema is the actionable fix,
 	// not the guessed args).
@@ -5661,6 +5611,32 @@ func (o *Orchestrator) RunActionResult(ctx context.Context, plugin, action strin
 	return result.Content, result.StructuredContent, nil
 }
 
+// structuredCalls returns a response's native tool calls as model-originated
+// calls, in the response's order.
+func structuredCalls(tcs []provider.ToolCall) []ToolCall {
+	calls := make([]ToolCall, 0, len(tcs))
+	for idx, tc := range tcs {
+		plugin, action, _ := parseToolName(tc.Name)
+		id := tc.ID
+		if id == "" {
+			// Some providers omit the tool-call id. Synthesize a stable
+			// one (mirroring the text parser's scheme) so every
+			// downstream handle — the tool-result pairing that echoes it
+			// back to the provider, and the confirmation-prompt dedup key
+			// the chat client renders from it — always has a value.
+			id = fmt.Sprintf("call-%d", idx+1)
+		}
+		calls = append(calls, ToolCall{
+			ID:      id,
+			Plugin:  plugin,
+			Action:  action,
+			Args:    tc.Arguments,
+			FromLLM: true,
+		})
+	}
+	return calls
+}
+
 // nativeToolContent returns the content string for a role=tool message in
 // the native tool-calling format.  When the plugin returned an error the
 // error text is used so the LLM can read and react to it instead of seeing
@@ -5953,9 +5929,9 @@ func expectedToolsFromContext(ctx context.Context) []*pipeline.Step {
 //
 // Presence of the value marks "this request surfaced tools via the native
 // array". The agent loop sets it per round when native tool calling is on;
-// text-mode requests, the sub-agent loop (which lists every tool in full inline
-// in its prompt, no native array), and any non-agent-loop caller never set it —
-// so the gate is a no-op there, exactly matching where "unloaded" is a
+// text-mode requests and any non-agent-loop caller never set it, and the
+// sub-agent loop (which sends its whole permitted set, nothing to load) clears
+// it — so the gate is a no-op there, exactly matching where "unloaded" is a
 // meaningful concept. Gating against the set actually sent (rather than
 // re-deriving loadedness from session state) keeps the array the model saw and
 // the calls the gate admits identical by construction, needs no per-call state
@@ -5965,8 +5941,8 @@ type sentNativeToolsKey struct{}
 // sentNativeToolsVal is the ctx payload for the native tool set. active
 // distinguishes three states that a bare map cannot: key ABSENT (no native
 // array in this scope — the default), active=true (a native array WAS sent;
-// fqns is it, possibly empty), and active=false (a nested scope explicitly has
-// NO native array and must neutralize an inherited parent value — see
+// fqns is it, possibly empty), and active=false (a nested scope the gate must
+// not judge, which neutralizes an inherited parent value — see
 // withoutSentNativeTools). Collapsing "empty array sent" into "no array sent"
 // would be wrong: the former should refuse every tool, the latter none.
 type sentNativeToolsVal struct {
@@ -5978,19 +5954,21 @@ func withSentNativeTools(ctx context.Context, fqns map[string]struct{}) context.
 	return context.WithValue(ctx, sentNativeToolsKey{}, sentNativeToolsVal{fqns: fqns, active: true})
 }
 
-// withoutSentNativeTools marks the current scope as surfacing NO native array,
-// overriding any set inherited from a parent ctx. The sub-agent loop uses it:
-// it derives its ctx from the caller (which carries the caller's sent set) but
-// lists every tool in full inline in its own prompt with no native array, so
-// the tool-load gate must be a no-op inside it — not enforce the PARENT's set.
+// withoutSentNativeTools marks the current scope as one the tool-load gate does
+// not judge, overriding any set inherited from a parent ctx. The sub-agent loop
+// uses it: it derives its ctx from the caller (which carries the caller's sent
+// set), sends its whole permitted set as its own native array and refuses any
+// call outside it before executeCall. Enforcing the PARENT's set there would
+// answer a call to a tool the parent never loaded with a load on call, which
+// changes the tools the parent session has loaded.
 func withoutSentNativeTools(ctx context.Context) context.Context {
 	return context.WithValue(ctx, sentNativeToolsKey{}, sentNativeToolsVal{active: false})
 }
 
 // sentNativeToolsFromContext returns the native tool set sent this request and
 // true when the current scope surfaced tools natively. ok == false means no
-// native array was sent (text mode, the sub-agent loop, or a non-agent-loop
-// caller), and the gate must not fire.
+// native array was sent (text mode, a non-agent-loop caller) or the scope is
+// the sub-agent loop's, and the gate must not fire.
 func sentNativeToolsFromContext(ctx context.Context) (map[string]struct{}, bool) {
 	v, ok := ctx.Value(sentNativeToolsKey{}).(sentNativeToolsVal)
 	if !ok || !v.active {

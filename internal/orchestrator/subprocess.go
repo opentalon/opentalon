@@ -101,6 +101,11 @@ type subprocessExecutor struct {
 }
 
 func (s *subprocessExecutor) Execute(ctx context.Context, call ToolCall) ToolResult {
+	// A sub-agent calls its tools natively only; without native tool calling
+	// it sends no request at all.
+	if !s.orch.supportsNativeTools() {
+		return ToolResult{CallID: call.ID, Error: "sub-agents need native tool calling, which this deployment's models do not support"}
+	}
 	ctx = s.orch.withPluginStage(ctx, call)
 	if call.Action == "parallel" {
 		return s.executeParallel(ctx, call)
@@ -161,7 +166,7 @@ func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall)
 
 	// Depth clamp mirrors the run path: a parallel call already at the depth
 	// cap spawns nothing. Children run one level deeper; because _subprocess is
-	// excluded from sub-agent prompts, they cannot recurse into more parallel/run.
+	// excluded from a sub-agent's tools, they cannot recurse into more parallel/run.
 	currentDepth := subprocessDepth(ctx)
 	maxDepth := s.orch.subprocessConfig.MaxDepth
 	if maxDepth <= 0 {
@@ -187,7 +192,7 @@ func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall)
 	// MaxConcurrentSessions > 1 (or, hypothetically, several parallel calls in
 	// one turn) — see the config note on max_parallel. This is also the first
 	// place runSubprocess runs concurrently within a single session, so every
-	// shared dependency it touches (o.llm, o.executeCall, o.parser, o.guard,
+	// shared dependency it touches (o.llm, o.executeCall, o.guard,
 	// o.pluginCallObserver) must be safe for concurrent use — the same contract
 	// that already lets MaxConcurrentSessions > 1 run turns in parallel. The one
 	// observer implementation, metrics.Collector, is goroutine-safe (Prometheus
@@ -242,7 +247,10 @@ type subprocessResult struct {
 	Iterations int
 }
 
-// runSubprocess runs a mini agent loop for a focused sub-task.
+// runSubprocess runs a mini agent loop for a focused sub-task. Every request
+// offers the sub-agent's permitted tools as native definitions; each
+// structured call of a response is checked against them, run, and kept in the
+// loop's own messages in the shapes the main loop stores.
 func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest, depth int) (*subprocessResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, o.subprocessTimeout())
 	defer cancel()
@@ -251,11 +259,11 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	if req.Model != "" {
 		ctx = context.WithValue(ctx, subprocessModelKey{}, req.Model)
 	}
-	// The sub-agent loop lists every allowed tool in full inline in its own
-	// prompt and sends NO native tools array, so the tool-load gate must be a
-	// no-op for its child calls. This ctx is derived from the caller's, which
-	// carries the caller's sent native set; neutralize it so the gate does not
-	// wrongly enforce the PARENT's array against the sub-agent's tools.
+	// This ctx is derived from the caller's, which carries the caller's sent
+	// native set. The sub-agent sends its own whole permitted set and checks
+	// every call against it below, so the tool-load gate must not judge its
+	// calls by the PARENT's array: a load on call from in here would change
+	// the tools the parent session has loaded.
 	ctx = withoutSentNativeTools(ctx)
 
 	maxIter := req.MaxIterations
@@ -285,10 +293,9 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	}
 	log.Info("subprocess started", "task", taskPreview, "max_iterations", maxIter, "allowed_tools", len(req.AllowedTools), "model", req.Model)
 
-	systemPrompt := o.buildSubprocessSystemPrompt(ctx, req)
-
+	permitted, tools := o.subprocessTools(ctx, req)
 	messages := []provider.Message{
-		{Role: provider.RoleSystem, Content: systemPrompt},
+		{Role: provider.RoleSystem, Content: buildSubprocessSystemPrompt(req)},
 		{Role: provider.RoleUser, Content: req.Task},
 	}
 
@@ -305,7 +312,7 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 			return result, nil
 		}
 
-		resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{Messages: guardedMessages, Model: req.Model})
+		resp, err := o.llm.Complete(ctx, &provider.CompletionRequest{Messages: guardedMessages, Model: req.Model, Tools: tools})
 		if err != nil {
 			return nil, fmt.Errorf("subprocess LLM: %w", err)
 		}
@@ -316,45 +323,41 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 		o.observePluginUsage(ctx, model, resp.Usage)
 		o.recordSubprocessUsage(ctx, model, resp.Usage)
 
-		calls := o.parser.Parse(resp.Content)
-		if calls == nil {
+		calls := structuredCalls(resp.ToolCalls)
+		if len(calls) == 0 {
 			result.Response = StripInternalBlocks(resp.Content)
 			result.Iterations = i + 1
 			log.Info("subprocess completed", "iterations", result.Iterations)
 			return result, nil
 		}
 
-		perCallInput, perCallOutput := 0, 0
-		if len(calls) > 0 {
-			perCallInput = resp.Usage.InputTokens / len(calls)
-			perCallOutput = resp.Usage.OutputTokens / len(calls)
-		}
+		perCallInput := resp.Usage.InputTokens / len(calls)
+		perCallOutput := resp.Usage.OutputTokens / len(calls)
 
+		// The response's thinking and text ride on the first call's message
+		// only, as in the main loop: a replay sends each once.
+		thinking := responseThinking{Blocks: resp.Thinking, Fingerprint: resp.ThinkingFingerprint}
+		text := resp.Content
 		for _, call := range calls {
-			call.FromLLM = true
-
-			if !isSubprocessToolAllowed(call, req) {
-				tr := ToolResult{
-					CallID: call.ID,
-					Error:  fmt.Sprintf("tool %s not allowed in this subprocess", toolFQN(call.Plugin, call.Action)),
+			name := toolFQN(call.Plugin, call.Action)
+			var toolResult ToolResult
+			if _, ok := permitted[name]; ok {
+				toolResult = o.executeCall(ctx, call)
+				if o.pluginCallObserver != nil {
+					o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", perCallInput, perCallOutput)
 				}
-				messages = append(messages,
-					provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(call)},
-					provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)},
-				)
-				continue
+			} else {
+				toolResult = ToolResult{CallID: call.ID, Error: fmt.Sprintf("tool %s not allowed in this subprocess", name)}
 			}
-
-			toolResult := o.executeCall(ctx, call)
-
-			if o.pluginCallObserver != nil {
-				o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, toolResult.Error != "", perCallInput, perCallOutput)
-			}
-
 			messages = append(messages,
-				provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(call)},
-				provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(toolResult)},
+				takeThinking(&thinking).attach(provider.Message{
+					Role:      provider.RoleAssistant,
+					Content:   text,
+					ToolCalls: []provider.ToolCall{{ID: call.ID, Name: name, Arguments: call.Args}},
+				}),
+				provider.Message{Role: provider.RoleTool, Content: nativeToolContent(toolResult), ToolCallID: call.ID},
 			)
+			text = ""
 		}
 	}
 
@@ -382,78 +385,55 @@ func (o *Orchestrator) recordSubprocessUsage(ctx context.Context, model string, 
 		model, p.Kind, p.SystemSource, u.InputTokens, u.OutputTokens, 0, u.InputCost, u.OutputCost, u.Price)
 }
 
-// buildSubprocessSystemPrompt builds a focused system prompt for a subprocess
-// with only the allowed tools listed. It excludes _subprocess itself to prevent fork bombs.
-func (o *Orchestrator) buildSubprocessSystemPrompt(ctx context.Context, req subprocessRequest) string {
+// buildSubprocessSystemPrompt builds a sub-agent's system prompt. It lists no
+// tools: they reach the model as native definitions in every request.
+func buildSubprocessSystemPrompt(req subprocessRequest) string {
 	var sb strings.Builder
 	sb.WriteString(prompts.SubprocessPreamble)
 
-	// No tools requested: advertise none and answer directly. Listing tools the
-	// sub-agent isn't allowed to call would only invite refused calls.
+	// No tools requested: none are sent, so tell the model to answer directly.
 	if req.NoTools {
 		sb.WriteString("\nYou have no tools available. Answer the task directly from what you are given.\n")
-		return sb.String()
 	}
+	return sb.String()
+}
 
-	// Build allowlist set for fast lookup.
-	allowSet := make(map[string]bool, len(req.AllowedTools))
+// subprocessTools is the one decision behind both the tools each sub-agent
+// request offers and the calls the sub-agent may run. It returns the permitted
+// tools by name and their native definitions in registry order: the tools the
+// caller may call (allowedToolsSet: nothing from a plugin the caller may not
+// use, no _meta, preparer, guard or user-only action) without _subprocess
+// itself, narrowed to the request's allowlist when it names one. An allowlist
+// only narrows the caller's tools, never adds to them; NoTools permits none.
+func (o *Orchestrator) subprocessTools(ctx context.Context, req subprocessRequest) (map[string]struct{}, []provider.ToolDefinition) {
+	if req.NoTools {
+		return nil, nil
+	}
+	callerTools := allowedToolsSet(ctx, o)
+	listed := make(map[string]bool, len(req.AllowedTools))
 	for _, t := range req.AllowedTools {
-		allowSet[t] = true
+		listed[t] = true
 	}
-	hasAllowlist := len(allowSet) > 0
-
-	// Don't list preparer/guard actions.
-	internalActions := make(map[string]bool)
-	for _, prep := range o.preparers {
-		internalActions[toolFQN(prep.Plugin, prep.Action)] = true
-	}
-	for _, g := range o.guards {
-		internalActions[toolFQN(g.Plugin, g.Action)] = true
-	}
-
-	allowedPlugins := o.resolveAllowedPlugins(ctx)
-	caps := o.registry.ListCapabilities()
-
-	for _, cap := range caps {
-		// Exclude _subprocess to prevent recursion.
+	permitted := make(map[string]struct{})
+	var defs []provider.ToolDefinition
+	for _, cap := range o.registry.ListCapabilities() {
+		// A sub-agent never starts another one.
 		if cap.Name == "_subprocess" {
 			continue
 		}
-
-		if !o.pluginAllowed(cap, allowedPlugins) {
-			continue
-		}
-
-		var visibleActions []Action
 		for _, action := range cap.Actions {
-			if internalActions[toolFQN(cap.Name, action.Name)] || action.UserOnly {
+			fqn := toolFQN(cap.Name, action.Name)
+			if _, ok := callerTools[fqn]; !ok {
 				continue
 			}
-			if hasAllowlist && !allowSet[toolFQN(cap.Name, action.Name)] {
+			if len(listed) > 0 && !listed[fqn] {
 				continue
 			}
-			visibleActions = append(visibleActions, action)
+			permitted[fqn] = struct{}{}
+			defs = append(defs, toolDefinition(fqn, action, true))
 		}
-
-		if len(visibleActions) == 0 {
-			continue
-		}
-
-		fmt.Fprintf(&sb, "## %s\n%s\n", cap.Name, cap.Description)
-		for _, action := range visibleActions {
-			fmt.Fprintf(&sb, "- %s: %s\n", toolFQN(cap.Name, action.Name), action.Description)
-			for _, p := range action.Parameters {
-				reqMark := ""
-				if p.Required {
-					reqMark = " (required)"
-				}
-				fmt.Fprintf(&sb, "  - %s: %s%s\n", p.Name, p.Description, reqMark)
-			}
-		}
-		sb.WriteString("\n")
 	}
-
-	return sb.String()
+	return permitted, defs
 }
 
 // resolveSubprocessModel returns the model a sub-agent runs on. An explicit
@@ -569,26 +549,3 @@ func parseParallelRequest(args map[string]string) ([]subprocessRequest, error) {
 // empty allowlist already means "all tools", and a caller needs a way to say the
 // opposite (a pure-reasoning turn with no side effects).
 const noToolsSentinel = "none"
-
-// isSubprocessToolAllowed checks whether a tool call is permitted in a subprocess.
-// _subprocess is always blocked (prevents fork bombs). With NoTools, nothing is
-// permitted. Otherwise, when an allowlist is provided only listed tools are
-// permitted; when empty, all tools except _subprocess are allowed.
-func isSubprocessToolAllowed(call ToolCall, req subprocessRequest) bool {
-	if call.Plugin == "_subprocess" {
-		return false
-	}
-	if req.NoTools {
-		return false
-	}
-	if len(req.AllowedTools) == 0 {
-		return true
-	}
-	key := toolFQN(call.Plugin, call.Action)
-	for _, t := range req.AllowedTools {
-		if t == key {
-			return true
-		}
-	}
-	return false
-}

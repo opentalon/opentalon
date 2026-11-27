@@ -2,12 +2,57 @@ package orchestrator
 
 import (
 	"encoding/json"
+	"log/slog"
 	"strings"
+
+	"github.com/opentalon/opentalon/internal/provider"
 )
 
 // Turning a plugin's declared parameters into the JSON Schema the model is
 // shown. Kept out of orchestrator.go so the schema rules sit together and can
 // be read without the agent loop around them.
+
+// toolDefinition is the native tool definition of one action, its parameters
+// as one JSON Schema object. OnDemand is the caller's to set. warn logs every
+// parameter whose plugin-supplied schema could not be used; a caller passes it
+// for a definition the model is actually sent.
+func toolDefinition(fqn string, action Action, warn bool) provider.ToolDefinition {
+	properties := make(map[string]interface{})
+	var required []string
+	for _, p := range action.Parameters {
+		schema, fromPlugin := parameterSchema(p)
+		properties[p.Name] = schema
+		if warn && p.Schema != "" && !fromPlugin {
+			// The plugin went to the trouble of declaring a schema and
+			// the model is not getting it. Silence here would leave a
+			// missing enum looking exactly like a parameter that never
+			// had one.
+			slog.Warn("tool registration: unusable parameter schema, falling back to type and description",
+				"tool", fqn, "param", p.Name)
+		}
+		if p.Required {
+			required = append(required, p.Name)
+		}
+	}
+	// JSON Schema requires `required` to be an array when present. A nil
+	// []string here marshals to `"required": null`, which strict providers
+	// (Mistral) reject with 400 "Invalid tool schema: None is not of type
+	// 'array'". Omit the key entirely when no parameter is required —
+	// leniently-parsing providers (OVH gpt-oss) accept both forms.
+	params := map[string]interface{}{
+		"type":                 "object",
+		"properties":           properties,
+		"additionalProperties": false,
+	}
+	if len(required) > 0 {
+		params["required"] = required
+	}
+	return provider.ToolDefinition{
+		Name:        fqn,
+		Description: action.Description,
+		Parameters:  params,
+	}
+}
 
 // parameterSchema is the JSON Schema fragment the model is shown for one
 // parameter. Exactly one of two branches produces it, and the precedence
