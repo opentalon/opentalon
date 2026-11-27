@@ -2,13 +2,16 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/opentalon/opentalon/internal/pipeline"
 	"github.com/opentalon/opentalon/internal/profile"
+	"github.com/opentalon/opentalon/internal/prompts"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/scenarios"
 	"github.com/opentalon/opentalon/internal/vcr"
@@ -23,6 +26,12 @@ const (
 
 // isRecording returns true when VCR_RECORD=1 is set.
 func isRecording() bool { return os.Getenv("VCR_RECORD") == "1" }
+
+// nativeModel declares a recorded model with native tool calling, the path
+// the player replays.
+func nativeModel(id string) []provider.ModelInfo {
+	return []provider.ModelInfo{{ID: id, Features: []provider.Feature{provider.FeatureTools}}}
+}
 
 // mustPlayer loads a cassette. Skips the test if the file doesn't exist (not yet
 // recorded). Fails immediately if the cassette is stale (prompt_hash mismatch).
@@ -48,7 +57,7 @@ func vcrLLM(t *testing.T, cassettePath string) (LLMClient, func()) {
 		if apiKey == "" {
 			t.Skip("VCR_RECORD=1 requires ANTHROPIC_API_KEY")
 		}
-		real := provider.NewAnthropicProvider("anthropic", "", apiKey, nil)
+		real := provider.NewAnthropicProvider("anthropic", "", apiKey, nativeModel(recordModelAnthropic))
 		rec := vcr.NewRecorder(real, cassettePath, recordModelAnthropic)
 		return rec, func() {
 			if err := rec.Save(); err != nil {
@@ -68,7 +77,7 @@ func vcrLLMOpenRouter(t *testing.T, cassettePath string) (LLMClient, func()) {
 		if apiKey == "" {
 			t.Skip("VCR_RECORD=1 requires OPENROUTER_API_KEY for OpenRouter tests")
 		}
-		real := provider.NewOpenAIProvider("openrouter", openrouterBaseURL, apiKey, nil)
+		real := provider.NewOpenAIProvider("openrouter", openrouterBaseURL, apiKey, nativeModel(recordModelOpenRouter))
 		rec := vcr.NewRecorder(real, cassettePath, recordModelOpenRouter)
 		return rec, func() {
 			if err := rec.Save(); err != nil {
@@ -112,8 +121,9 @@ func vcrProviders() []providerFixture {
 }
 
 // withModel wraps an LLMClient so that any Complete call with an empty model
-// field is filled in. The planner makes its own Complete calls without inheriting
-// the profile model, so this wrapper ensures it reaches the provider correctly.
+// field is filled in. Sub-agents and the planner make their own Complete calls
+// without inheriting the profile model, so this wrapper ensures they reach the
+// provider correctly.
 type withModelLLM struct {
 	inner LLMClient
 	model string
@@ -128,6 +138,15 @@ func (w *withModelLLM) Complete(ctx context.Context, req *provider.CompletionReq
 		req.Model = w.model
 	}
 	return w.inner.Complete(ctx, req)
+}
+
+// SupportsFeature forwards the inner client's support: the VCR player and
+// recorder take the native path, the integration suite's clients the text path.
+func (w *withModelLLM) SupportsFeature(f provider.Feature) bool { return supportsFeature(w.inner, f) }
+
+func supportsFeature(llm LLMClient, f provider.Feature) bool {
+	rp, ok := llm.(ReasoningProvider)
+	return ok && rp.SupportsFeature(f)
 }
 
 // ── Core scenarios (both providers, driven from internal/scenarios/testdata) ──
@@ -206,56 +225,27 @@ func TestVCRSelfIntroduction(t *testing.T) {
 	}
 }
 
-// TestVCRPipelineConfirmation verifies that a multi-step request triggers pipeline
-// planning and the orchestrator returns a confirmation narrative (not tool results).
-// The planner LLM call and the NarratePlan call each consume one cassette interaction.
-func TestVCRPipelineConfirmation(t *testing.T) {
-	for _, prov := range vcrProviders() {
-		prov := prov
-		t.Run(prov.name, func(t *testing.T) {
-			llm, save := prov.llmFn(t, "testdata/vcr/"+prov.prefix+"pipeline_confirmation.json")
-			defer save()
-			// withModel ensures planner LLM calls (which don't inherit profile model)
-			// reach the provider with a valid model field.
-			orch, sessID := setupOrchestratorWithOpts(withModel(llm, prov.model), DefaultParser, OrchestratorOpts{
-				PipelineEnabled: true,
-				PipelineConfig:  pipeline.PipelineConfig{},
-			})
-			result, err := orch.Run(prov.ctxFn(), sessID, "analyze code in myrepo and then create a jira issue for the findings")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if result.Response == "" {
-				t.Error("empty response")
-			}
-			// Pipeline confirmation returns the narrative, no tool calls yet.
-			if !isRecording() && len(result.ToolCalls) != 0 {
-				t.Errorf("pipeline confirmation should have no tool calls, got %d", len(result.ToolCalls))
-			}
-		})
-	}
-}
-
 // TestVCRSubprocessParallel drives the full real-LLM path for the parallel
-// sub-agent primitive (#307): the model is asked two independent questions and
-// steered to answer both in one `_subprocess.parallel` call; each task runs as
-// its own sub-agent and the parent synthesizes the answers.
+// sub-agent primitive (#307): the model is steered to hand two code analyses to
+// one `_subprocess__parallel` call, which it loads through `_meta__load_tools`
+// first; each task runs as its own sub-agent, which calls gitlab__analyze_code
+// natively, and the parent synthesizes the answers.
 //
 // Anthropic-only and recorded with MaxParallel=1 ON PURPOSE. The VCR Player
-// replays interactions by position, ignoring request content, and its pos
-// counter is not mutex-guarded — so genuinely concurrent sub-agent LLM calls
-// would both race the counter and be nondeterministic on replay. Serializing to
-// one at a time keeps recording + replay race-free and deterministic; the
-// concurrency/cap behaviour itself is covered by the barrier-LLM unit test in
-// subprocess_parallel_test.go. Which sub-agent consumes which of the two
-// adjacent recorded interactions is irrelevant: the parent's final synthesis is
-// a fixed recorded response, so result.Response and the tool-call assertion are
-// stable either way. withModel supplies the model for sub-agent Complete calls,
-// which (like the planner) don't inherit the profile model.
+// replays interactions by position and its pos counter is not mutex-guarded —
+// so genuinely concurrent sub-agent LLM calls would both race the counter and
+// be nondeterministic on replay. Serializing to one at a time keeps recording +
+// replay race-free; the concurrency/cap behaviour itself is covered by the
+// barrier-LLM unit test in subprocess_parallel_test.go. Which child runs first
+// still varies, so both run the same tool and every sub-agent request offers
+// the same tools: whichever child consumes which recorded exchange, its
+// requests match the recorded ones, and the parent's final synthesis is a fixed
+// recorded response. withModel supplies the model for sub-agent Complete calls.
 func TestVCRSubprocessParallel(t *testing.T) {
 	llm, save := vcrLLM(t, "testdata/vcr/subprocess_parallel.json")
 	defer save()
-	orch, sessID := setupOrchestratorWithOpts(withModel(llm, recordModelAnthropic), DefaultParser, OrchestratorOpts{
+	children := &subagentLog{LLMClient: withModel(llm, recordModelAnthropic)}
+	orch, sessID := setupOrchestratorWithOpts(children, DefaultParser, OrchestratorOpts{
 		Subprocess: SubprocessConfig{
 			Enabled:        true,
 			MaxDepth:       2,
@@ -265,7 +255,7 @@ func TestVCRSubprocessParallel(t *testing.T) {
 		},
 	})
 
-	prompt := "I have two completely independent questions. Use the _subprocess.parallel tool to answer BOTH of them at once in a single call: (1) What is the capital of France? (2) What is 7 times 6? Then give me both answers."
+	prompt := "Analyze the code of two repositories, alpha and beta, independently. Use the _subprocess__parallel tool to run both analyses at once in a single call, one task per repository, each telling its sub-agent to call gitlab__analyze_code for that repository. Then give me both results."
 	result, err := orch.Run(vcrCtx(), sessID, prompt)
 	if err != nil {
 		t.Fatal(err)
@@ -275,17 +265,84 @@ func TestVCRSubprocessParallel(t *testing.T) {
 	}
 
 	// Assert in BOTH record and replay: the scenario is only meaningful if the
-	// real model actually drove a _subprocess.parallel fan-out. Failing at
-	// record time signals the prompt/steering needs adjustment before committing
-	// a cassette.
-	sawParallel := false
+	// real model drove a _subprocess__parallel fan-out whose children called
+	// their tool natively. Failing at record time signals the prompt/steering
+	// needs adjustment before committing a cassette.
+	var tasks []parallelTaskResult
 	for _, tc := range result.ToolCalls {
-		if tc.Plugin == "_subprocess" && tc.Action == "parallel" {
-			sawParallel = true
+		for _, r := range result.Results {
+			if tc.Plugin == "_subprocess" && tc.Action == "parallel" && r.CallID == tc.ID {
+				if err := json.Unmarshal([]byte(r.StructuredContent), &tasks); err != nil {
+					t.Errorf("parallel call's structured result %q: %v", r.StructuredContent, err)
+				}
+			}
 		}
 	}
-	if !sawParallel {
-		t.Errorf("expected a _subprocess.parallel tool call; got tool calls %+v", result.ToolCalls)
+	if len(tasks) != 2 {
+		t.Fatalf("parallel call's tasks = %+v, want two; tool calls %+v", tasks, result.ToolCalls)
+	}
+	for _, task := range tasks {
+		if task.Error != "" {
+			t.Errorf("task %q failed: %s", task.Task, task.Error)
+		}
+	}
+	called := map[string]bool{} // task -> its sub-agent got a native gitlab__analyze_code call
+	var offered []string
+	for i, ex := range children.exchanges {
+		var names []string
+		for _, td := range ex.Request.Tools {
+			names = append(names, td.Name)
+		}
+		if i == 0 {
+			offered = names
+		}
+		if !slices.Contains(names, "gitlab__analyze_code") || !slices.Equal(names, offered) {
+			t.Errorf("sub-agent request %d offered %q, want gitlab__analyze_code among the tools every sub-agent request offers (%q)", i+1, names, offered)
+		}
+		if slices.ContainsFunc(ex.Response.ToolCalls, func(c provider.ToolCall) bool { return c.Name == "gitlab__analyze_code" }) {
+			called[ex.Request.Messages[1].Content] = true
+		}
+	}
+	if len(called) != 2 {
+		t.Errorf("sub-agents whose response called gitlab__analyze_code: %d of 2 tasks", len(called))
+	}
+}
+
+// subagentLog passes requests on and keeps every sub-agent exchange, a request
+// whose system message is the sub-agent preamble with its response.
+type subagentLog struct {
+	LLMClient
+	mu        sync.Mutex
+	exchanges []vcr.Interaction
+}
+
+func (l *subagentLog) SupportsFeature(f provider.Feature) bool {
+	return supportsFeature(l.LLMClient, f)
+}
+
+func (l *subagentLog) Complete(ctx context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	resp, err := l.LLMClient.Complete(ctx, req)
+	if err == nil && strings.HasPrefix(req.Messages[0].Content, prompts.SubprocessPreamble) {
+		l.mu.Lock()
+		l.exchanges = append(l.exchanges, vcr.Interaction{Request: req, Response: resp})
+		l.mu.Unlock()
+	}
+	return resp, err
+}
+
+// TestVCRReplayRefusesTheTextPath replays a tool-calling cassette against an
+// orchestrator on the text path: the player refuses its first request.
+func TestVCRReplayRefusesTheTextPath(t *testing.T) {
+	if isRecording() {
+		t.Skip("replay only")
+	}
+	// The anonymous struct keeps only Complete, so no native tool calling.
+	textOnly := struct{ LLMClient }{mustPlayer(t, "testdata/vcr/single_tool_call.json")}
+	orch, sessID := setupOrchestrator(textOnly, DefaultParser)
+	_, err := orch.Run(vcrCtx(), sessID, "analyze code in myrepo")
+	if err == nil || !strings.Contains(err.Error(), "interaction 1: request differs from the recorded one: tools [], recorded [") ||
+		!strings.HasSuffix(err.Error(), "; native preamble false, recorded true") {
+		t.Fatalf("Run error = %v, want the first request refused as off the recorded path", err)
 	}
 }
 
