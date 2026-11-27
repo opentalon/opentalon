@@ -1,0 +1,212 @@
+package orchestrator
+
+import (
+	"context"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/opentalon/opentalon/internal/actor"
+	"github.com/opentalon/opentalon/internal/provider"
+	"github.com/opentalon/opentalon/internal/state"
+	"github.com/opentalon/opentalon/internal/state/store/events"
+)
+
+// executorFunc is a PluginExecutor written inline.
+type executorFunc func(context.Context, ToolCall) ToolResult
+
+func (f executorFunc) Execute(ctx context.Context, call ToolCall) ToolResult { return f(ctx, call) }
+
+// writeTask is the sub-agent task of these tests: its first reply calls the
+// write store__write, which the confirmation plugin asks about, and its second
+// answers.
+const writeTask = "write it"
+
+func writeChild() map[string][]provider.CompletionResponse {
+	return map[string][]provider.CompletionResponse{writeTask: {
+		callReply("c1", "store__write", map[string]string{}),
+		{Content: "could not write"},
+	}}
+}
+
+// plugin is a capability and the executor registered for it.
+type plugin struct {
+	cap  PluginCapability
+	exec PluginExecutor
+}
+
+// gatedSubprocessOrch builds an orchestrator whose confirmation plugin asks for
+// every call (confirmingExecutor), with sub-agents on, the write store__write
+// counting how often it ran, the plugins a test adds, and the session s1.
+func gatedSubprocessOrch(t *testing.T, llm LLMClient, opts OrchestratorOpts, extra ...plugin) (*Orchestrator, *countingExecutor, *recordingEventSink) {
+	t.Helper()
+	write := &countingExecutor{}
+	registry := NewToolRegistry()
+	for _, p := range append([]plugin{
+		{PluginCapability{Name: "store", Actions: []Action{{Name: "write", Description: "Write a record."}}}, write},
+		{PluginCapability{Name: "conf", Actions: []Action{{Name: "check"}}}, confirmingExecutor{}},
+	}, extra...) {
+		if err := registry.Register(p.cap, p.exec); err != nil {
+			t.Fatalf("register %s: %v", p.cap.Name, err)
+		}
+	}
+	sink := &recordingEventSink{}
+	sessions := state.NewSessionStore("")
+	sessions.Create(state.SessionParams{ID: "s1"})
+	opts.EventSink = sink
+	opts.ConfirmationPlugin, opts.ConfirmationAction = "conf", "check"
+	opts.Subprocess = SubprocessConfig{Enabled: true, MaxDepth: 2}
+	return NewWithRules(llm, DefaultParser, registry, state.NewMemoryStore(""), sessions, opts), write, sink
+}
+
+// assertRefusedWithoutAsking checks that store__write never ran, that the
+// sub-agent got a refusal naming the call as the call's result, and that nobody
+// was asked: no confirmation_requested event, no question in the session and
+// no pending call.
+func assertRefusedWithoutAsking(t *testing.T, orch *Orchestrator, llm *subagentLLM, write *countingExecutor, sink *recordingEventSink) {
+	t.Helper()
+	if n := countEventType(sink.snapshot(), events.TypeConfirmationRequested); n != 0 {
+		t.Errorf("confirmation_requested events = %d, want none", n)
+	}
+	s, err := orch.sessions.Get("s1")
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	if p := s.Metadata["pending_tool_call"]; p != "" {
+		t.Errorf("pending call stored: %s", p)
+	}
+	for _, m := range s.Messages {
+		if m.PromptType == provider.PromptTypeToolConfirmation {
+			t.Errorf("question stored in the session: %q", m.Content)
+		}
+	}
+	if write.count != 0 {
+		t.Errorf("store__write ran %d time(s), want never", write.count)
+	}
+	if len(llm.requests) != 2 {
+		t.Fatalf("sub-agent requests = %d, want 2 (the call, then the answer)", len(llm.requests))
+	}
+	want := provider.Message{Role: provider.RoleTool, ToolCallID: "c1",
+		Content: "error: tool store__write needs the user's approval, which this sub-agent cannot ask for; the call did not run"}
+	if got := llm.requests[1].Messages[3]; !reflect.DeepEqual(got, want) {
+		t.Errorf("result of the gated call = %+v, want %+v", got, want)
+	}
+}
+
+// The model's _subprocess run and parallel calls ask the user nothing, and stay
+// writes for the read-only checks; the sub-agent's own call the confirmation
+// plugin asks about is refused and never runs.
+func TestSubprocessGatedCallInTheAgentLoop(t *testing.T) {
+	for _, tc := range []struct {
+		action string
+		args   map[string]string
+	}{
+		{"run", map[string]string{"task": writeTask}},
+		{"parallel", map[string]string{"tasks": `[{"task":"` + writeTask + `"}]`}},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			tool := toolFQN("_subprocess", tc.action)
+			llm := &subagentLLM{
+				parent: []provider.CompletionResponse{
+					callReply("p1", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": tool}),
+					callReply("p2", tool, tc.args),
+					{Content: "The sub-agent could not write."},
+				},
+				children: writeChild(),
+			}
+			orch, write, sink := gatedSubprocessOrch(t, llm, OrchestratorOpts{})
+
+			res, err := orch.Run(context.Background(), "s1", "write the record")
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			assertRefusedWithoutAsking(t, orch, llm, write, sink)
+			if got := subprocessResultOf(t, res); !strings.Contains(got, "could not write") {
+				t.Errorf("_subprocess result = %q, want the sub-agent's answer", got)
+			}
+			if orch.registry.IsActionReadOnly("_subprocess", tc.action) {
+				t.Errorf("%s is read-only; it must stay a write for the phantom-completion guard", tool)
+			}
+		})
+	}
+}
+
+// A sub-agent started by anything but the model's call in the agent loop is
+// refused its gated call the same way, and nothing is asked or stored: through
+// the direct action entry with a chat session id (the scheduler, the exec
+// dispatcher), as a callback of a plugin the agent loop called, on the
+// planner's single-step path and as a preparer's invoke step.
+func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
+	const singleStep = `{"type":"pipeline","steps":[{"id":"1","name":"Delegate","plugin":"_subprocess","action":"run","args":{"task":"` + writeTask + `"}}]}`
+	const invoke = `{"send_to_llm": false, "invoke": {"plugin": "_subprocess", "action": "run", "args": {"task": "` + writeTask + `"}}}`
+	for _, tc := range []struct {
+		name      string
+		parent    []provider.CompletionResponse
+		opts      OrchestratorOpts
+		untouched bool // the session must stay exactly as created
+		run       func(ctx context.Context, orch *Orchestrator) error
+	}{
+		{
+			name:      "direct action entry with a chat session id",
+			untouched: true,
+			run: func(ctx context.Context, orch *Orchestrator) error {
+				_, _, err := orch.RunActionResult(actor.WithSessionID(ctx, "s1"), "_subprocess", "run", map[string]string{"task": writeTask})
+				return err
+			},
+		},
+		{
+			name:   "callback of a plugin the agent loop called",
+			parent: []provider.CompletionResponse{callReply("p1", "hook__review", map[string]string{}), {Content: "reviewed"}},
+			run: func(ctx context.Context, orch *Orchestrator) error {
+				_, err := orch.Run(ctx, "s1", "review it")
+				return err
+			},
+		},
+		{
+			name:   "single-step path",
+			parent: []provider.CompletionResponse{{Content: singleStep}, {Content: "delegated"}},
+			opts:   OrchestratorOpts{PipelineEnabled: true},
+			run: func(ctx context.Context, orch *Orchestrator) error {
+				_, err := orch.Run(ctx, "s1", "delegate it")
+				return err
+			},
+		},
+		{
+			name: "preparer step",
+			opts: OrchestratorOpts{ContentPreparers: []ContentPreparerEntry{{Plugin: "invoker", Action: "prepare"}}},
+			run: func(ctx context.Context, orch *Orchestrator) error {
+				_, err := orch.Run(ctx, "s1", "anything")
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			llm := &subagentLLM{parent: tc.parent, children: writeChild()}
+			var orch *Orchestrator
+			// A plugin callback runs on the context of the plugin call that
+			// sent it (plugin.Client.handleCallback).
+			hook := executorFunc(func(ctx context.Context, call ToolCall) ToolResult {
+				content, _, err := orch.RunActionResult(WithPluginCaller(ctx, "hook", "review"), "_subprocess", "run", map[string]string{"task": writeTask})
+				if err != nil {
+					return ToolResult{CallID: call.ID, Error: err.Error()}
+				}
+				return ToolResult{CallID: call.ID, Content: content}
+			})
+			orch, write, sink := gatedSubprocessOrch(t, llm, tc.opts,
+				plugin{PluginCapability{Name: "hook", Actions: []Action{{Name: "review", Description: "Review.", ReadOnly: true, AlwaysInclude: true}}}, hook},
+				plugin{PluginCapability{Name: "invoker", Actions: []Action{{Name: "prepare", Description: "Prepare."}}}, &fixedResultExecutor{content: invoke}},
+			)
+
+			if err := tc.run(context.Background(), orch); err != nil {
+				t.Fatalf("entry: %v", err)
+			}
+			assertRefusedWithoutAsking(t, orch, llm, write, sink)
+			if tc.untouched {
+				s, _ := orch.sessions.Get("s1")
+				if len(s.Messages) != 0 || len(s.Metadata) != 0 {
+					t.Errorf("session written: messages %+v, metadata %v", s.Messages, s.Metadata)
+				}
+			}
+		})
+	}
+}
