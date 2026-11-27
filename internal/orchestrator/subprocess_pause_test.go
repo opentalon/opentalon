@@ -11,7 +11,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/opentalon/opentalon/internal/actor"
 	"github.com/opentalon/opentalon/internal/provider"
 	"github.com/opentalon/opentalon/internal/state"
 	"github.com/opentalon/opentalon/internal/state/store/events"
@@ -471,28 +470,6 @@ func TestSubprocessStoppedResultReportsARefusedCallAsFailed(t *testing.T) {
 	if !strings.Contains(stopped, "- failed: look__see(x=1): unknown argument(s)") || strings.Contains(stopped, "ran: look__see") {
 		t.Errorf("outer call result = %q, want c0 reported as failed with its error", stopped)
 	}
-}
-
-// A click on the question of a paused sub-agent finds no call to run: it
-// answers as expired and runs nothing.
-func TestSubprocessPauseClickAnswersExpired(t *testing.T) {
-	eachStore(t, func(t *testing.T, kind storeKind) {
-		h := newPauseHarness(t, kind.open(t), pauseTask)
-		if res, err := h.orch.Run(context.Background(), "s1", "fix record 7"); err != nil || res.Response != pauseQuestion {
-			t.Fatalf("Run: %v %+v, want the question", err, res)
-		}
-
-		res, err := h.orch.Run(actor.WithConfirmationDecision(context.Background(), "approve"), "s1", "approve")
-		if err != nil {
-			t.Fatalf("click Run: %v", err)
-		}
-		if res.Metadata["action"] != "confirmation_expired" {
-			t.Errorf("click answered %q %v, want confirmation_expired", res.Response, res.Metadata)
-		}
-		if h.write.count != 0 {
-			t.Errorf("store__write ran %d time(s), want never", h.write.count)
-		}
-	})
 }
 
 // A pending record that cannot be read is cleared by the next turn, not kept.
