@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -247,5 +248,49 @@ func TestSubprocessResumeKeepsItsRunningTime(t *testing.T) {
 	}
 	if !strings.Contains(c3, "timed out") {
 		t.Errorf("c3 after the resume got %q, want it cut by the remaining running time", c3)
+	}
+}
+
+// clearFailingStore fails the next n clears of a pending call.
+type clearFailingStore struct {
+	SessionStoreInterface
+	n int
+}
+
+func (s *clearFailingStore) SetMetadata(id, key, value string) error {
+	if key == "pending_tool_call" && value == "" && s.n > 0 {
+		s.n--
+		return errors.New("metadata clear failed")
+	}
+	return s.SessionStoreInterface.SetMetadata(id, key, value)
+}
+
+// An answer whose turn cannot clear the record is rejected and leaves the
+// sub-agent paused; the answer that clears it ends the outer call, once.
+func TestSubprocessAnswerThatCannotClearTheRecordLeavesItPaused(t *testing.T) {
+	store := &clearFailingStore{SessionStoreInterface: state.NewSessionStore("")}
+	h := pausedHarness(t, store, subOn, nil)
+	reject := actor.WithConfirmationDecision(context.Background(), "reject")
+	ended := func() (results, calls int) {
+		for _, m := range h.session(t).Messages {
+			if m.Role == provider.RoleAssistant && mentionsCall(m, "p2") {
+				calls++
+			}
+		}
+		return len(eventsOfCall(t, h.sink, events.TypeToolCallResult, "p2")), calls
+	}
+
+	store.n = 2
+	if _, err := h.orch.Run(reject, "s1", "reject"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if results, calls := ended(); results != 0 || calls != 0 || h.session(t).Metadata["pending_tool_call"] == "" {
+		t.Errorf("uncleared answer: %d result event(s), %d outer call(s) in history; want none, and the record kept", results, calls)
+	}
+	if _, err := h.orch.Run(reject, "s1", "reject"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if results, calls := ended(); results != 1 || calls != 1 {
+		t.Errorf("after the answer that clears the record: %d result event(s), %d outer call(s); want one each", results, calls)
 	}
 }
