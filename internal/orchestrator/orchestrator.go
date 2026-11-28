@@ -1690,15 +1690,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// Record in session history.
 			tr := ToolResult{CallID: execCall.ID, Content: result.Content, StructuredContent: result.StructuredContent, Error: result.Error}
 			if o.supportsNativeTools() {
-				_ = sessions.AddMessage(sessionID, pending.attach(provider.Message{
-					Role: provider.RoleAssistant,
-					ToolCalls: []provider.ToolCall{{
-						ID: execCall.ID, Name: toolFQN(execCall.Plugin, execCall.Action), Arguments: execCall.Args,
-					}},
-				}))
-				_ = sessions.AddMessage(sessionID, provider.Message{
-					Role: provider.RoleTool, Content: nativeToolContent(tr), ToolCallID: execCall.ID,
-				})
+				assistant, tool := nativeCallMessages(execCall, "", tr)
+				_ = sessions.AddMessage(sessionID, pending.attach(assistant))
+				_ = sessions.AddMessage(sessionID, tool)
 			} else {
 				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(execCall)})
 				_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)})
@@ -2105,19 +2099,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					// Record in session history so the LLM has context.
 					tr := ToolResult{CallID: call.ID, Content: result.Content, Error: result.Error}
 					if o.supportsNativeTools() {
-						_ = sessions.AddMessage(sessionID, provider.Message{
-							Role: provider.RoleAssistant,
-							ToolCalls: []provider.ToolCall{{
-								ID:        call.ID,
-								Name:      toolFQN(call.Plugin, call.Action),
-								Arguments: call.Args,
-							}},
-						})
-						_ = sessions.AddMessage(sessionID, provider.Message{
-							Role:       provider.RoleTool,
-							Content:    nativeToolContent(tr),
-							ToolCallID: call.ID,
-						})
+						assistant, tool := nativeCallMessages(call, "", tr)
+						_ = sessions.AddMessage(sessionID, assistant)
+						_ = sessions.AddMessage(sessionID, tool)
 					} else {
 						_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(call)})
 						_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)})
@@ -2257,19 +2241,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 					// Seed session after the user message: assistant tool call, tool result.
 					if o.supportsNativeTools() {
 						// Native format: assistant with tool_calls + tool result with tool_call_id.
-						_ = sessions.AddMessage(sessionID, provider.Message{
-							Role: provider.RoleAssistant,
-							ToolCalls: []provider.ToolCall{{
-								ID:        call.ID,
-								Name:      toolFQN(call.Plugin, call.Action),
-								Arguments: call.Args,
-							}},
-						})
-						_ = sessions.AddMessage(sessionID, provider.Message{
-							Role:       provider.RoleTool,
-							Content:    nativeToolContent(toolResult),
-							ToolCallID: call.ID,
-						})
+						assistant, tool := nativeCallMessages(call, "", toolResult)
+						_ = sessions.AddMessage(sessionID, assistant)
+						_ = sessions.AddMessage(sessionID, tool)
 					} else {
 						// Text-based format: assistant + user with [plugin_output].
 						_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(call)})
@@ -3064,21 +3038,10 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			if nativeToolCalls {
 				// Native tool calling: store assistant message with tool_calls
 				// and tool result as role=tool with tool_call_id.
-				_ = sessions.AddMessage(sessionID, takeThinking(&thinking).attach(provider.Message{
-					Role:    provider.RoleAssistant,
-					Content: replyText,
-					ToolCalls: []provider.ToolCall{{
-						ID:        call.ID,
-						Name:      toolFQN(call.Plugin, call.Action),
-						Arguments: call.Args,
-					}},
-				}))
+				assistant, tool := nativeCallMessages(call, replyText, toolResult)
 				replyText = ""
-				_ = sessions.AddMessage(sessionID, provider.Message{
-					Role:       provider.RoleTool,
-					Content:    nativeToolContent(toolResult),
-					ToolCallID: call.ID,
-				})
+				_ = sessions.AddMessage(sessionID, takeThinking(&thinking).attach(assistant))
+				_ = sessions.AddMessage(sessionID, tool)
 			} else {
 				// Text-based tool calling: store as assistant + user messages.
 				_ = sessions.AddMessage(sessionID, provider.Message{
@@ -4348,19 +4311,9 @@ func (o *Orchestrator) executePipeline(ctx context.Context, sessionID string, p 
 		toolCalls = append(toolCalls, tc)
 		toolResults = append(toolResults, tr)
 		if o.supportsNativeTools() {
-			_ = o.sessions.AddMessage(sessionID, provider.Message{
-				Role: provider.RoleAssistant,
-				ToolCalls: []provider.ToolCall{{
-					ID:        tc.ID,
-					Name:      toolFQN(tc.Plugin, tc.Action),
-					Arguments: tc.Args,
-				}},
-			})
-			_ = o.sessions.AddMessage(sessionID, provider.Message{
-				Role:       provider.RoleTool,
-				Content:    nativeToolContent(tr),
-				ToolCallID: tc.ID,
-			})
+			assistant, tool := nativeCallMessages(tc, "", tr)
+			_ = o.sessions.AddMessage(sessionID, assistant)
+			_ = o.sessions.AddMessage(sessionID, tool)
 		} else {
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleAssistant, Content: formatToolCallMessage(tc)})
 			_ = o.sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleUser, Content: o.guard.WrapContent(tr)})
