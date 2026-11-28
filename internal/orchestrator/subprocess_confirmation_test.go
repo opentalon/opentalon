@@ -202,3 +202,62 @@ func TestInteractiveTurnMarksOnlyTheAgentLoopsCall(t *testing.T) {
 	}
 	llm.assertTools(t, 2, "probe__look")
 }
+
+// A sub-agent's call resolves as the agent loop's does: a name with underscores
+// for hyphens reaches the gate, while a tool it was not offered, or a name that
+// resolves to none, is refused without asking.
+func TestSubprocessCallNamesResolveAsTheAgentLoops(t *testing.T) {
+	const task = "remove item 7"
+	for _, tc := range []struct {
+		name, call, tools, refusal string
+	}{
+		{name: "underscores for hyphens", call: "depot__remove_item"},
+		{name: "a tool not offered", call: "store__write", tools: "depot__remove-item",
+			refusal: "error: tool store__write not allowed in this subprocess"},
+		{name: "a name that resolves to none", call: "depot__purge",
+			refusal: "error: tool depot__purge not allowed in this subprocess"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := map[string]string{"task": task}
+			if tc.tools != "" {
+				args["tools"] = tc.tools
+			}
+			llm := &subagentLLM{
+				parent: []provider.CompletionResponse{
+					callOf("p-load", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": "_subprocess__run"}),
+					callOf("p-sub", "_subprocess__run", args),
+					{Content: "done"},
+				},
+				children: map[string][]provider.CompletionResponse{task: {
+					callOf("c1", tc.call, map[string]string{"id": "7"}),
+					{Content: "child done"},
+				}},
+			}
+			remove := &countingExecutor{}
+			orch, write, sink := gatedSubprocessOrch(t, llm, OrchestratorOpts{},
+				registeredPlugin{PluginCapability{Name: "depot", Actions: []Action{{Name: "remove-item", Description: "Remove an item."}}}, remove})
+
+			res, err := orch.Run(context.Background(), "s1", task)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if remove.count != 0 || write.count != 0 {
+				t.Errorf("depot__remove-item ran %d time(s), store__write %d; want neither before an approval", remove.count, write.count)
+			}
+			asked := countEventType(sink.snapshot(), events.TypeConfirmationRequested)
+			if tc.refusal == "" {
+				if asked != 1 || res.Metadata["prompt_type"] != provider.PromptTypeToolConfirmation {
+					t.Errorf("confirmation_requested events = %d, turn ended with %q %v; want the question", asked, res.Response, res.Metadata)
+				}
+				return
+			}
+			if asked != 0 {
+				t.Errorf("confirmation_requested events = %d, want none", asked)
+			}
+			want := provider.Message{Role: provider.RoleTool, ToolCallID: "c1", Content: tc.refusal}
+			if len(llm.requests) != 2 || !reflect.DeepEqual(llm.requests[1].Messages[3], want) {
+				t.Errorf("sub-agent requests %d; result of c1 = %+v, want %+v", len(llm.requests), llm.requests, want)
+			}
+		})
+	}
+}
