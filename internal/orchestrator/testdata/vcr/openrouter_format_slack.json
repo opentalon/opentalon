@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "00b599fec7fa7fca7cd5c844bd00c334fd2fe138cb24c8aa6aa317ec5a14c76f",
+  "prompt_hash": "07df30f10462922992d91a75b2d181d1a423b7bc37c5018ad476b630c1eefea8",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-11-28T07:26:23.453836Z",
+  "recorded_at": "2026-11-28T08:08:31.378152Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -38,12 +38,12 @@
         ]
       },
       "response": {
-        "id": "gen-1795850783-nCt7guIjxGyLWS2thqOd",
+        "id": "gen-1795853311-xtoKxzdBSKKLjvy3pEaP",
         "model": "mistralai/ministral-8b-2512",
-        "content": "Here’s what I can do based on the tools and plugins available to me:\n\n### **Core Tools (Already Loaded)**\nI can interact with the following tools directly (no need to load them first):\n\n1. **Monitoring \u0026 Reporting**\n   - List violations (e.g., policy violations, content issues).\n   - Scan content (e.g., text, code, or files for specific patterns).\n   - Generate reports (e.g., summaries, compliance reports).\n\n2. **Content \u0026 Data Management**\n   - Create, update, or delete content (e.g., documents, records, or entries).\n   - Search for specific data or information.\n   - Retrieve or fetch data based on queries.\n\n3. **Scheduling \u0026 Automation**\n   - Create, pause, resume, update, or delete scheduled jobs.\n   - List existing scheduled jobs.\n\n4. **Approval Workflows**\n   - Handle jobs that require approval (e.g., creation, deletion, or updates) by notifying approvers if needed.\n\n---\n\n### **Additional Tools (Available in Catalog)**\nI can load and use these tools **only if explicitly requested** by you. These require calling `_meta__load_tools` first to access their full capabilities:\n\n- **GitLab Integration**\n  - `gitlab__analyze_code`: Analyze code in GitLab repositories.\n  - `gitlab__create_pr`: Create pull requests in GitLab.\n\n- **Jira Integration**\n  - `jira__create_issue`: Create issues in Jira.\n\n---\n### **Key Features**\n- **Data-Driven**: I only act on real data retrieved from tools. I never guess or fabricate information.\n- **Automated Confirmations**: For write actions (e.g., create, update, delete), I will call the tool directly, and the system will handle user confirmation.\n- **Scheduling**: I can suggest or create scheduled jobs for recurring tasks (e.g., monitoring, scans) with your approval.\n- **Approvals**: If a task requires authorization, I will notify the appropriate approvers.",
+        "content": "Here’s what I can do based on the tools and plugins available to me:\n\n### **Core Tools (Available Now)**\nI can perform the following actions directly:\n1. **Monitoring \u0026 Reporting**\n   - List violations (e.g., security, compliance, or content violations).\n   - List issues (e.g., Jira tickets or GitLab issues).\n   - List jobs (e.g., scheduled tasks).\n   - List repositories (e.g., GitLab repositories).\n   - List projects (e.g., Jira projects or GitLab projects).\n   - List users (e.g., system or organization users).\n\n2. **Content \u0026 Code Analysis**\n   - Analyze content (e.g., text, code, or files for specific patterns).\n   - Search content (e.g., within repositories or documents).\n\n3. **Write Actions (with confirmation)**\n   - Create, update, or delete violations.\n   - Create, update, or delete issues (e.g., Jira tickets).\n   - Create, update, or delete jobs (e.g., scheduled tasks).\n   - Create, update, or delete repositories (e.g., GitLab repositories).\n   - Create, update, or delete projects (e.g., Jira projects or GitLab projects).\n   - Create, update, or delete users (e.g., system or organization users).\n\n4. **Scheduled Tasks**\n   - List, pause, resume, update, or delete scheduled jobs.\n   - Create new scheduled jobs (with user approval).\n\n---\n\n### **Additional Tools (Available via Catalog)**\nIf you need capabilities beyond the core tools, I can load these plugins on request:\n- **GitLab Integration**\n  - Analyze code.\n  - Create pull requests (PRs).\n- **Jira Integration**\n  - Create issues.\n\nLet me know what you need, and I’ll take action! For example:\n- *\"List all violations in the system.\"*\n- *\"Create a scheduled job to check for new issues every day.\"*\n- *\"Load the GitLab code analysis tool and analyze this repository.\"*",
         "usage": {
           "input_tokens": 1466,
-          "output_tokens": 423
+          "output_tokens": 420
         }
       }
     }

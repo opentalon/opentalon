@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "00b599fec7fa7fca7cd5c844bd00c334fd2fe138cb24c8aa6aa317ec5a14c76f",
+  "prompt_hash": "07df30f10462922992d91a75b2d181d1a423b7bc37c5018ad476b630c1eefea8",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-11-28T07:26:05.778599Z",
+  "recorded_at": "2026-11-28T08:07:10.068538Z",
   "model": "mistralai/ministral-8b-2512",
   "interactions": [
     {
@@ -38,12 +38,12 @@
         ]
       },
       "response": {
-        "id": "gen-1795850765-TBieRu7aGSwjOqlWXLZO",
+        "id": "gen-1795853230-H49fof7vqIH3xzn5glWf",
         "model": "mistralai/ministral-8b-2512",
         "content": "",
         "tool_calls": [
           {
-            "id": "fKA0xUd8c",
+            "id": "mIWP54nAx",
             "name": "_meta__load_tools",
             "arguments": {
               "names": "gitlab__analyze_code,jira__create_issue"
@@ -73,7 +73,7 @@
             "content": "",
             "tool_calls": [
               {
-                "id": "fKA0xUd8c",
+                "id": "mIWP54nAx",
                 "name": "_meta__load_tools",
                 "arguments": {
                   "names": "gitlab__analyze_code,jira__create_issue"
@@ -84,7 +84,7 @@
           {
             "role": "tool",
             "content": "{\"loaded\":[\"gitlab__analyze_code\",\"jira__create_issue\"],\"ready\":true,\"instruction\":\"Loaded tools are callable NOW. Keep executing the user's ORIGINAL request in this same turn until it is fully done — an intermediate lookup (resolving a person/item id) is not done: follow it with the call the request actually asked for. Never end the turn to report loaded tools or to ask in free text whether to proceed; write tools trigger the system's own confirmation when called.\"}",
-            "tool_call_id": "fKA0xUd8c"
+            "tool_call_id": "mIWP54nAx"
           }
         ],
         "tools": [
@@ -136,12 +136,12 @@
         ]
       },
       "response": {
-        "id": "gen-1795850766-oHQUhPt3faY9TAu8sjCU",
+        "id": "gen-1795853230-m0FEvuNdeK8TceUpQCty",
         "model": "mistralai/ministral-8b-2512",
         "content": "",
         "tool_calls": [
           {
-            "id": "Ftw6bO0u6",
+            "id": "xMC7FgOP5",
             "name": "gitlab__analyze_code",
             "arguments": {
               "repo": "myrepo"
@@ -171,7 +171,7 @@
             "content": "",
             "tool_calls": [
               {
-                "id": "fKA0xUd8c",
+                "id": "mIWP54nAx",
                 "name": "_meta__load_tools",
                 "arguments": {
                   "names": "gitlab__analyze_code,jira__create_issue"
@@ -182,14 +182,14 @@
           {
             "role": "tool",
             "content": "{\"loaded\":[\"gitlab__analyze_code\",\"jira__create_issue\"],\"ready\":true,\"instruction\":\"Loaded tools are callable NOW. Keep executing the user's ORIGINAL request in this same turn until it is fully done — an intermediate lookup (resolving a person/item id) is not done: follow it with the call the request actually asked for. Never end the turn to report loaded tools or to ask in free text whether to proceed; write tools trigger the system's own confirmation when called.\"}",
-            "tool_call_id": "fKA0xUd8c"
+            "tool_call_id": "mIWP54nAx"
           },
           {
             "role": "assistant",
             "content": "",
             "tool_calls": [
               {
-                "id": "Ftw6bO0u6",
+                "id": "xMC7FgOP5",
                 "name": "gitlab__analyze_code",
                 "arguments": {
                   "repo": "myrepo"
@@ -200,7 +200,7 @@
           {
             "role": "tool",
             "content": "executed gitlab.analyze_code",
-            "tool_call_id": "Ftw6bO0u6"
+            "tool_call_id": "xMC7FgOP5"
           }
         ],
         "tools": [
@@ -252,12 +252,12 @@
         ]
       },
       "response": {
-        "id": "gen-1795850766-e5lhtxwY3LaOMv2HXTMM",
+        "id": "gen-1795853231-qJl4jHOcUSDpBnc3DHYL",
         "model": "mistralai/ministral-8b-2512",
         "content": "",
         "tool_calls": [
           {
-            "id": "si3DO0Cga",
+            "id": "KDxRiB1rd",
             "name": "jira__create_issue",
             "arguments": {
               "title": "Code review"
@@ -287,7 +287,7 @@
             "content": "",
             "tool_calls": [
               {
-                "id": "fKA0xUd8c",
+                "id": "mIWP54nAx",
                 "name": "_meta__load_tools",
                 "arguments": {
                   "names": "gitlab__analyze_code,jira__create_issue"
@@ -298,14 +298,14 @@
           {
             "role": "tool",
             "content": "{\"loaded\":[\"gitlab__analyze_code\",\"jira__create_issue\"],\"ready\":true,\"instruction\":\"Loaded tools are callable NOW. Keep executing the user's ORIGINAL request in this same turn until it is fully done — an intermediate lookup (resolving a person/item id) is not done: follow it with the call the request actually asked for. Never end the turn to report loaded tools or to ask in free text whether to proceed; write tools trigger the system's own confirmation when called.\"}",
-            "tool_call_id": "fKA0xUd8c"
+            "tool_call_id": "mIWP54nAx"
           },
           {
             "role": "assistant",
             "content": "",
             "tool_calls": [
               {
-                "id": "Ftw6bO0u6",
+                "id": "xMC7FgOP5",
                 "name": "gitlab__analyze_code",
                 "arguments": {
                   "repo": "myrepo"
@@ -316,14 +316,14 @@
           {
             "role": "tool",
             "content": "executed gitlab.analyze_code",
-            "tool_call_id": "Ftw6bO0u6"
+            "tool_call_id": "xMC7FgOP5"
           },
           {
             "role": "assistant",
             "content": "",
             "tool_calls": [
               {
-                "id": "si3DO0Cga",
+                "id": "KDxRiB1rd",
                 "name": "jira__create_issue",
                 "arguments": {
                   "title": "Code review"
@@ -334,7 +334,7 @@
           {
             "role": "tool",
             "content": "executed jira.create_issue",
-            "tool_call_id": "si3DO0Cga"
+            "tool_call_id": "KDxRiB1rd"
           }
         ],
         "tools": [
@@ -386,7 +386,7 @@
         ]
       },
       "response": {
-        "id": "gen-1795850767-2YwycLQtQ0bAyyiDKwJX",
+        "id": "gen-1795853231-62e1bL3JY6gSR6pIPAUR",
         "model": "mistralai/ministral-8b-2512",
         "content": "The code in `myrepo` has been analyzed, and a Jira issue titled **\"Code review\"** has been created.",
         "usage": {

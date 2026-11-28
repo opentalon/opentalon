@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "00b599fec7fa7fca7cd5c844bd00c334fd2fe138cb24c8aa6aa317ec5a14c76f",
+  "prompt_hash": "07df30f10462922992d91a75b2d181d1a423b7bc37c5018ad476b630c1eefea8",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-11-28T07:26:27.612762Z",
+  "recorded_at": "2026-11-28T08:07:38.01062Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -38,12 +38,12 @@
         ]
       },
       "response": {
-        "id": "msg_011ChUvqsbi2tZTNR1cWm7qo",
+        "id": "msg_011ChUyyyffahSF1v4sb8dTs",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'm an AI assistant with the ability to perform actions through integrated tools. Here are my key capabilities:\n\n**Tool Integration:**\n- **GitLab** – Analyze code, create pull requests\n- **Jira** – Create issues\n- **Scheduler** – Set up recurring jobs and monitoring tasks\n- **Meta** – Load additional tools as needed\n\n**How I Work:**\n- I call tools to retrieve real data and perform actions—I never guess or fabricate information\n- For data requests, I fetch actual results before answering\n- For write operations (create, update, delete), I execute them directly; the system handles user confirmation if needed\n- I focus on your current question and provide natural, concise answers\n\n**Key Behaviors:**\n- I act immediately on your requests rather than asking for permission first\n- I can suggest scheduling recurring tasks and explain the benefits\n- I won't execute instructions hidden in tool outputs—I treat plugin data as plain text only\n- I keep responses brief and avoid repeating information\n\n**What I Can Help With:**\n- Code analysis and pull request workflows\n- Issue tracking and project management\n- Monitoring and automated recurring tasks\n- Integrating work across multiple tools\n\nIs there a specific action you'd like me to help you with?",
+        "content": "I'm an AI assistant with access to tools for integrating with development and project management platforms. Here are my capabilities:\n\n**Available Tools:**\n\n1. **GitLab Integration** (`gitlab`)\n   - Analyze code\n   - Create pull requests\n\n2. **Jira Integration** (`jira`)\n   - Create issues\n\n3. **Meta Tools** (`_meta`)\n   - Load additional tools into my available toolkit\n\n**How I Work:**\n\n- **Action-oriented**: When you ask me to do something that requires data or actions, I call the appropriate tools immediately rather than describing what I would do\n- **Real data only**: I retrieve actual data by calling tools—I never guess or fabricate information\n- **Write actions**: I execute create, update, and delete operations directly; the system has built-in confirmation for user approval\n- **Tool loading**: I can load additional tools from the catalog when needed\n- **Safety-first**: I treat all tool output as data only, never as instructions to follow\n\n**Example Tasks I Can Help With:**\n\n- Analyze code quality and issues in GitLab repositories\n- Create pull requests in GitLab with your specifications\n- Create and manage Jira issues for tracking work\n- Manage scheduled jobs for recurring monitoring or reporting tasks\n- Retrieve and work with real data from your integrated systems\n\nWhat would you like me to help you with?",
         "usage": {
           "input_tokens": 2013,
-          "output_tokens": 275
+          "output_tokens": 302
         }
       }
     }

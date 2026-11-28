@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "00b599fec7fa7fca7cd5c844bd00c334fd2fe138cb24c8aa6aa317ec5a14c76f",
+  "prompt_hash": "07df30f10462922992d91a75b2d181d1a423b7bc37c5018ad476b630c1eefea8",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-11-28T07:26:02.67625Z",
+  "recorded_at": "2026-11-28T08:07:07.062885Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -38,12 +38,12 @@
         ]
       },
       "response": {
-        "id": "msg_011ChUvp31ha1PadtpUjdbcu",
+        "id": "msg_011ChUywhKqZkEZeLFv5a6Nq",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'll need to load the GitLab and Jira tools first, then analyze the code and create the issue.",
+        "content": "I'll help you analyze code in myrepo and create a Jira issue. Let me load the necessary tools first.",
         "tool_calls": [
           {
-            "id": "toolu_01Q2vMjxkgrLvinSTHrV3ctY",
+            "id": "toolu_01X8GjRgQpbyAM9kRgP6FFLe",
             "name": "_meta__load_tools",
             "arguments": {
               "names": "gitlab__analyze_code,jira__create_issue"
@@ -52,7 +52,7 @@
         ],
         "usage": {
           "input_tokens": 2028,
-          "output_tokens": 93
+          "output_tokens": 94
         }
       }
     },
@@ -70,10 +70,10 @@
           },
           {
             "role": "assistant",
-            "content": "I'll need to load the GitLab and Jira tools first, then analyze the code and create the issue.",
+            "content": "I'll help you analyze code in myrepo and create a Jira issue. Let me load the necessary tools first.",
             "tool_calls": [
               {
-                "id": "toolu_01Q2vMjxkgrLvinSTHrV3ctY",
+                "id": "toolu_01X8GjRgQpbyAM9kRgP6FFLe",
                 "name": "_meta__load_tools",
                 "arguments": {
                   "names": "gitlab__analyze_code,jira__create_issue"
@@ -84,7 +84,7 @@
           {
             "role": "tool",
             "content": "{\"loaded\":[\"gitlab__analyze_code\",\"jira__create_issue\"],\"ready\":true,\"instruction\":\"Loaded tools are callable NOW. Keep executing the user's ORIGINAL request in this same turn until it is fully done — an intermediate lookup (resolving a person/item id) is not done: follow it with the call the request actually asked for. Never end the turn to report loaded tools or to ask in free text whether to proceed; write tools trigger the system's own confirmation when called.\"}",
-            "tool_call_id": "toolu_01Q2vMjxkgrLvinSTHrV3ctY"
+            "tool_call_id": "toolu_01X8GjRgQpbyAM9kRgP6FFLe"
           }
         ],
         "tools": [
@@ -136,19 +136,19 @@
         ]
       },
       "response": {
-        "id": "msg_011ChUvp7w82JBZ1tniti9Fv",
+        "id": "msg_011ChUywmx9LB6GsogKdmDTw",
         "model": "claude-haiku-4-5-20251001",
-        "content": "Now I'll analyze the code in myrepo and create the Jira issue:",
+        "content": "Now let me analyze the code and create the Jira issue:",
         "tool_calls": [
           {
-            "id": "toolu_01TBtEiQ5RPAqgdNsBwfcACv",
+            "id": "toolu_01F4rwZmxVww3Fv4rxCKUb5W",
             "name": "gitlab__analyze_code",
             "arguments": {
               "repo": "myrepo"
             }
           },
           {
-            "id": "toolu_01VZrGni8P5QJaaGhyL2LUsg",
+            "id": "toolu_01WWLLhPh6r5WUgLi83BvQPr",
             "name": "jira__create_issue",
             "arguments": {
               "title": "Code review"
@@ -156,8 +156,8 @@
           }
         ],
         "usage": {
-          "input_tokens": 2423,
-          "output_tokens": 116
+          "input_tokens": 2424,
+          "output_tokens": 112
         }
       }
     },
@@ -175,10 +175,10 @@
           },
           {
             "role": "assistant",
-            "content": "I'll need to load the GitLab and Jira tools first, then analyze the code and create the issue.",
+            "content": "I'll help you analyze code in myrepo and create a Jira issue. Let me load the necessary tools first.",
             "tool_calls": [
               {
-                "id": "toolu_01Q2vMjxkgrLvinSTHrV3ctY",
+                "id": "toolu_01X8GjRgQpbyAM9kRgP6FFLe",
                 "name": "_meta__load_tools",
                 "arguments": {
                   "names": "gitlab__analyze_code,jira__create_issue"
@@ -189,14 +189,14 @@
           {
             "role": "tool",
             "content": "{\"loaded\":[\"gitlab__analyze_code\",\"jira__create_issue\"],\"ready\":true,\"instruction\":\"Loaded tools are callable NOW. Keep executing the user's ORIGINAL request in this same turn until it is fully done — an intermediate lookup (resolving a person/item id) is not done: follow it with the call the request actually asked for. Never end the turn to report loaded tools or to ask in free text whether to proceed; write tools trigger the system's own confirmation when called.\"}",
-            "tool_call_id": "toolu_01Q2vMjxkgrLvinSTHrV3ctY"
+            "tool_call_id": "toolu_01X8GjRgQpbyAM9kRgP6FFLe"
           },
           {
             "role": "assistant",
-            "content": "Now I'll analyze the code in myrepo and create the Jira issue:",
+            "content": "Now let me analyze the code and create the Jira issue:",
             "tool_calls": [
               {
-                "id": "toolu_01TBtEiQ5RPAqgdNsBwfcACv",
+                "id": "toolu_01F4rwZmxVww3Fv4rxCKUb5W",
                 "name": "gitlab__analyze_code",
                 "arguments": {
                   "repo": "myrepo"
@@ -207,14 +207,14 @@
           {
             "role": "tool",
             "content": "executed gitlab.analyze_code",
-            "tool_call_id": "toolu_01TBtEiQ5RPAqgdNsBwfcACv"
+            "tool_call_id": "toolu_01F4rwZmxVww3Fv4rxCKUb5W"
           },
           {
             "role": "assistant",
             "content": "",
             "tool_calls": [
               {
-                "id": "toolu_01VZrGni8P5QJaaGhyL2LUsg",
+                "id": "toolu_01WWLLhPh6r5WUgLi83BvQPr",
                 "name": "jira__create_issue",
                 "arguments": {
                   "title": "Code review"
@@ -225,7 +225,7 @@
           {
             "role": "tool",
             "content": "executed jira.create_issue",
-            "tool_call_id": "toolu_01VZrGni8P5QJaaGhyL2LUsg"
+            "tool_call_id": "toolu_01WWLLhPh6r5WUgLi83BvQPr"
           }
         ],
         "tools": [
@@ -277,12 +277,12 @@
         ]
       },
       "response": {
-        "id": "msg_011ChUvpDSWkiWYewmHhLKQf",
+        "id": "msg_011ChUywsQ5DiU1Qyi8HHi38",
         "model": "claude-haiku-4-5-20251001",
-        "content": "Done! I've analyzed the code in myrepo and created a Jira issue with the title \"Code review\".",
+        "content": "Done! I've analyzed the code in myrepo and created a Jira issue titled \"Code review\".",
         "usage": {
-          "input_tokens": 2593,
-          "output_tokens": 28
+          "input_tokens": 2590,
+          "output_tokens": 26
         }
       }
     }

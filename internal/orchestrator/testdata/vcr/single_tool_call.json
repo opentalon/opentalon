@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "00b599fec7fa7fca7cd5c844bd00c334fd2fe138cb24c8aa6aa317ec5a14c76f",
+  "prompt_hash": "07df30f10462922992d91a75b2d181d1a423b7bc37c5018ad476b630c1eefea8",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-11-28T07:25:58.124633Z",
+  "recorded_at": "2026-11-28T08:07:01.225202Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -38,12 +38,12 @@
         ]
       },
       "response": {
-        "id": "msg_011ChUvohXv8UrmNx8ZrM4YM",
+        "id": "msg_011ChUywGMRVN9UspakTYRNN",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'll analyze the code in myrepo for you. Let me load the GitLab code analysis tool first.",
+        "content": "I'll analyze the code in myrepo for you. Let me load the GitLab analysis tool first.",
         "tool_calls": [
           {
-            "id": "toolu_015ASDDLz3gtLYidJU9HqVRU",
+            "id": "toolu_01Dhgh1egS6ESjVkRHq1LMWA",
             "name": "_meta__load_tools",
             "arguments": {
               "names": "gitlab__analyze_code"
@@ -52,7 +52,7 @@
         ],
         "usage": {
           "input_tokens": 1974,
-          "output_tokens": 85
+          "output_tokens": 84
         }
       }
     },
@@ -70,10 +70,10 @@
           },
           {
             "role": "assistant",
-            "content": "I'll analyze the code in myrepo for you. Let me load the GitLab code analysis tool first.",
+            "content": "I'll analyze the code in myrepo for you. Let me load the GitLab analysis tool first.",
             "tool_calls": [
               {
-                "id": "toolu_015ASDDLz3gtLYidJU9HqVRU",
+                "id": "toolu_01Dhgh1egS6ESjVkRHq1LMWA",
                 "name": "_meta__load_tools",
                 "arguments": {
                   "names": "gitlab__analyze_code"
@@ -84,7 +84,7 @@
           {
             "role": "tool",
             "content": "{\"loaded\":[\"gitlab__analyze_code\"],\"ready\":true,\"instruction\":\"Loaded tools are callable NOW. Keep executing the user's ORIGINAL request in this same turn until it is fully done — an intermediate lookup (resolving a person/item id) is not done: follow it with the call the request actually asked for. Never end the turn to report loaded tools or to ask in free text whether to proceed; write tools trigger the system's own confirmation when called.\"}",
-            "tool_call_id": "toolu_015ASDDLz3gtLYidJU9HqVRU"
+            "tool_call_id": "toolu_01Dhgh1egS6ESjVkRHq1LMWA"
           }
         ],
         "tools": [
@@ -122,12 +122,12 @@
         ]
       },
       "response": {
-        "id": "msg_011ChUvomypXnnM5Kx6XidDu",
+        "id": "msg_011ChUywLnKyV1q5qMZ8JyDw",
         "model": "claude-haiku-4-5-20251001",
-        "content": "Now let me analyze the code:",
+        "content": "Now I'll analyze the code in myrepo:",
         "tool_calls": [
           {
-            "id": "toolu_01GNvLtuDcvsFQ7Q51EzpGBH",
+            "id": "toolu_01919WMDFveDpvac44VCS5ri",
             "name": "gitlab__analyze_code",
             "arguments": {
               "repo": "myrepo"
@@ -135,8 +135,8 @@
           }
         ],
         "usage": {
-          "input_tokens": 2282,
-          "output_tokens": 65
+          "input_tokens": 2281,
+          "output_tokens": 69
         }
       }
     },
@@ -154,10 +154,10 @@
           },
           {
             "role": "assistant",
-            "content": "I'll analyze the code in myrepo for you. Let me load the GitLab code analysis tool first.",
+            "content": "I'll analyze the code in myrepo for you. Let me load the GitLab analysis tool first.",
             "tool_calls": [
               {
-                "id": "toolu_015ASDDLz3gtLYidJU9HqVRU",
+                "id": "toolu_01Dhgh1egS6ESjVkRHq1LMWA",
                 "name": "_meta__load_tools",
                 "arguments": {
                   "names": "gitlab__analyze_code"
@@ -168,14 +168,14 @@
           {
             "role": "tool",
             "content": "{\"loaded\":[\"gitlab__analyze_code\"],\"ready\":true,\"instruction\":\"Loaded tools are callable NOW. Keep executing the user's ORIGINAL request in this same turn until it is fully done — an intermediate lookup (resolving a person/item id) is not done: follow it with the call the request actually asked for. Never end the turn to report loaded tools or to ask in free text whether to proceed; write tools trigger the system's own confirmation when called.\"}",
-            "tool_call_id": "toolu_015ASDDLz3gtLYidJU9HqVRU"
+            "tool_call_id": "toolu_01Dhgh1egS6ESjVkRHq1LMWA"
           },
           {
             "role": "assistant",
-            "content": "Now let me analyze the code:",
+            "content": "Now I'll analyze the code in myrepo:",
             "tool_calls": [
               {
-                "id": "toolu_01GNvLtuDcvsFQ7Q51EzpGBH",
+                "id": "toolu_01919WMDFveDpvac44VCS5ri",
                 "name": "gitlab__analyze_code",
                 "arguments": {
                   "repo": "myrepo"
@@ -186,7 +186,7 @@
           {
             "role": "tool",
             "content": "executed gitlab.analyze_code",
-            "tool_call_id": "toolu_01GNvLtuDcvsFQ7Q51EzpGBH"
+            "tool_call_id": "toolu_01919WMDFveDpvac44VCS5ri"
           }
         ],
         "tools": [
@@ -224,12 +224,12 @@
         ]
       },
       "response": {
-        "id": "msg_011ChUvor29h7dnKXq7TufW6",
+        "id": "msg_011ChUywQjhHsGdswxBjJJQ2",
         "model": "claude-haiku-4-5-20251001",
-        "content": "The code analysis for myrepo has been completed. The analysis examined the repository's codebase and generated findings about code quality, structure, and potential issues. \n\nWould you like me to provide more details about specific aspects of the code, such as performance concerns, security vulnerabilities, or code style issues?",
+        "content": "The code analysis for myrepo has been completed. The analysis tool has scanned the repository and generated insights about the codebase. If you'd like to see specific details about code quality issues, vulnerabilities, test coverage, or other aspects, please let me know!",
         "usage": {
-          "input_tokens": 2365,
-          "output_tokens": 67
+          "input_tokens": 2368,
+          "output_tokens": 59
         }
       }
     }
