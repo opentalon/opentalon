@@ -297,7 +297,7 @@ func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessC
 	deadline := time.Now().Add(child.Remaining)
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	ctx, mayAsk := subprocessContext(ctx, req, child.Depth)
+	ctx, tools, mayAsk := o.subprocessScope(ctx, req, child.Depth)
 
 	maxIter := req.MaxIterations
 	if maxIter <= 0 {
@@ -323,7 +323,6 @@ func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessC
 	log.Info("subprocess started", "task", taskPreview(req.Task), "max_iterations", maxIter, "allowed_tools", len(req.AllowedTools), "model", req.Model,
 		"iterations", child.Iterations)
 
-	permitted, tools := o.subprocessTools(ctx, req)
 	messages := child.Messages
 	result := &subprocessResult{Ran: child.Ran}
 	for i := child.Iterations; i < maxIter; i++ {
@@ -364,7 +363,7 @@ func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessC
 		thinking := responseThinking{Blocks: resp.Thinking, Fingerprint: resp.ThinkingFingerprint}
 		text := resp.Content
 		for k, call := range calls {
-			toolResult, outcome, err := o.subprocessCall(ctx, permitted, call, mayAsk, perCallInput, perCallOutput)
+			toolResult, outcome, err := o.subprocessCall(ctx, call, mayAsk, perCallInput, perCallOutput)
 			if err != nil {
 				return result, fmt.Errorf("subprocess call check: %w", err)
 			}
@@ -393,9 +392,9 @@ func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessC
 	return result, nil
 }
 
-func (o *Orchestrator) subprocessCall(ctx context.Context, permitted map[string]struct{}, call ToolCall, mayAsk bool, inputTokens, outputTokens int) (ToolResult, gateOutcome, error) {
+func (o *Orchestrator) subprocessCall(ctx context.Context, call ToolCall, mayAsk bool, inputTokens, outputTokens int) (ToolResult, gateOutcome, error) {
 	name := toolFQN(call.Plugin, call.Action)
-	if _, ok := permitted[name]; !ok {
+	if !o.offeredToSubprocess(ctx, call) {
 		return ToolResult{CallID: call.ID, Error: fmt.Sprintf("tool %s not allowed in this subprocess", name)}, gateAnswered, nil
 	}
 	decision, err := o.decideConfirmation(ctx, call)
@@ -415,6 +414,18 @@ func (o *Orchestrator) subprocessCall(ctx context.Context, permitted map[string]
 	return o.executeSubprocessCall(ctx, call, inputTokens, outputTokens), gateExecute, nil
 }
 
+// A sub-agent's call names a tool as the agent loop's calls do. A tool it was not
+// offered is refused, never loaded on call: a load would change the parent's tools.
+func (o *Orchestrator) offeredToSubprocess(ctx context.Context, call ToolCall) bool {
+	action := o.resolveAction(call.Plugin, call.Action)
+	if action == nil {
+		return false
+	}
+	offered, _ := sentNativeToolsFromContext(ctx)
+	_, ok := offered[toolFQN(call.Plugin, action.Name)]
+	return ok
+}
+
 func (o *Orchestrator) executeSubprocessCall(ctx context.Context, call ToolCall, inputTokens, outputTokens int) ToolResult {
 	result := o.executeCall(ctx, call)
 	if o.pluginCallObserver != nil {
@@ -428,8 +439,6 @@ func subprocessContext(ctx context.Context, req subprocessRequest, depth int) (_
 	if req.Model != "" {
 		ctx = context.WithValue(ctx, subprocessModelKey{}, req.Model)
 	}
-	// The tool-load gate must not judge these calls by the parent's sent set: a load on call would change the parent's tools.
-	ctx = withoutSentNativeTools(ctx)
 	return withoutInteractiveTurn(ctx), isInteractiveTurn(ctx)
 }
 
@@ -470,6 +479,14 @@ func buildSubprocessSystemPrompt(req subprocessRequest) string {
 		sb.WriteString("\nYou have no tools available. Answer the task directly from what you are given.\n")
 	}
 	return sb.String()
+}
+
+// subprocessScope is a sub-agent's context with the tools it is offered as its native
+// array: the tool-load gate judges its calls by that array, never by the parent's.
+func (o *Orchestrator) subprocessScope(ctx context.Context, req subprocessRequest, depth int) (context.Context, []provider.ToolDefinition, bool) {
+	ctx, mayAsk := subprocessContext(ctx, req, depth)
+	offered, tools := o.subprocessTools(ctx, req)
+	return withSentNativeTools(ctx, offered), tools, mayAsk
 }
 
 // An allowlist only narrows the tools the caller may use, never adds to them.

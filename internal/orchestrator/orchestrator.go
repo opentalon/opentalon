@@ -6007,44 +6007,27 @@ func expectedToolsFromContext(ctx context.Context) []*pipeline.Step {
 //
 // Presence of the value marks "this request surfaced tools via the native
 // array". The agent loop sets it per round when native tool calling is on;
-// text-mode requests and any non-agent-loop caller never set it, and the sub-agent loop clears it —
-// so the gate is a no-op there, exactly matching where "unloaded" is a
-// meaningful concept. Gating against the set actually sent (rather than
-// re-deriving loadedness from session state) keeps the array the model saw and
-// the calls the gate admits identical by construction, needs no per-call state
-// read, and cannot be thrown off by a mid-turn demotion / eviction / store blip.
+// the sub-agent loop sets the tools it offers the sub-agent; text-mode requests
+// and any other caller never set it, so the gate is a no-op there, exactly
+// matching where "unloaded" is a meaningful concept. An empty set present
+// refuses every tool; an absent one refuses none. Gating against the set
+// actually sent (rather than re-deriving loadedness from session state) keeps
+// the array the model saw and the calls the gate admits identical by
+// construction, needs no per-call state read, and cannot be thrown off by a
+// mid-turn demotion / eviction / store blip.
 type sentNativeToolsKey struct{}
 
-// sentNativeToolsVal is the ctx payload for the native tool set. active
-// distinguishes three states that a bare map cannot: key ABSENT (no native
-// array in this scope — the default), active=true (a native array WAS sent;
-// fqns is it, possibly empty), and active=false (a nested scope the gate must
-// not judge, which neutralizes an inherited parent value — see
-// withoutSentNativeTools). Collapsing "empty array sent" into "no array sent"
-// would be wrong: the former should refuse every tool, the latter none.
-type sentNativeToolsVal struct {
-	fqns   map[string]struct{}
-	active bool
-}
-
 func withSentNativeTools(ctx context.Context, fqns map[string]struct{}) context.Context {
-	return context.WithValue(ctx, sentNativeToolsKey{}, sentNativeToolsVal{fqns: fqns, active: true})
-}
-
-func withoutSentNativeTools(ctx context.Context) context.Context {
-	return context.WithValue(ctx, sentNativeToolsKey{}, sentNativeToolsVal{active: false})
+	return context.WithValue(ctx, sentNativeToolsKey{}, fqns)
 }
 
 // sentNativeToolsFromContext returns the native tool set sent this request and
 // true when the current scope surfaced tools natively. ok == false means no
-// native array was sent (text mode, a non-agent-loop caller) or the scope is
-// the sub-agent loop's, and the gate must not fire.
+// native array was sent (text mode, a caller outside both loops), and the gate
+// must not fire.
 func sentNativeToolsFromContext(ctx context.Context) (map[string]struct{}, bool) {
-	v, ok := ctx.Value(sentNativeToolsKey{}).(sentNativeToolsVal)
-	if !ok || !v.active {
-		return nil, false
-	}
-	return v.fqns, true
+	fqns, ok := ctx.Value(sentNativeToolsKey{}).(map[string]struct{})
+	return fqns, ok
 }
 
 // Recovery hints: what the agent loop tells the model after a reply it cannot

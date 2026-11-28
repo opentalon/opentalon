@@ -221,15 +221,16 @@ func (o *Orchestrator) resumeSubprocess(ctx context.Context, sessions SessionSto
 
 // A call not yet approved is decided again: what the decision reads may have changed while the child waited.
 func (o *Orchestrator) resumeChild(ctx context.Context, child subprocessChild, approved bool) (*subprocessResult, error) {
-	callCtx, _ := subprocessContext(ctx, child.Request, child.Depth)
 	waiting := child.Waiting
 	result, outcome := ToolResult{}, gateExecute
 	if approved {
+		// As the agent loop's approved call, it runs where no tool array is in scope.
+		callCtx, _ := subprocessContext(ctx, child.Request, child.Depth)
 		result = o.executeSubprocessCall(callCtx, waiting.toolCall(), waiting.InputTokens, waiting.OutputTokens)
 	} else {
-		permitted, _ := o.subprocessTools(callCtx, child.Request)
+		callCtx, _, _ := o.subprocessScope(ctx, child.Request, child.Depth)
 		var err error
-		result, outcome, err = o.subprocessCall(callCtx, permitted, waiting.toolCall(), true, waiting.InputTokens, waiting.OutputTokens)
+		result, outcome, err = o.subprocessCall(callCtx, waiting.toolCall(), true, waiting.InputTokens, waiting.OutputTokens)
 		if err != nil {
 			return nil, fmt.Errorf("subprocess call check: %w", err)
 		}
