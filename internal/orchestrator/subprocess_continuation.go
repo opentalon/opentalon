@@ -194,17 +194,7 @@ func (o *Orchestrator) stopSubprocess(ctx context.Context, c *subprocessContinua
 
 func (o *Orchestrator) endSubprocess(ctx context.Context, c *subprocessContinuation, result ToolResult, dispatchStart time.Time) ToolResult {
 	result = o.guard.Sanitize(result)
-	status, response, structured := "ok", result.Content, result.StructuredContent
-	if result.Error != "" {
-		status, response, structured = "error", result.Error, ""
-	}
-	result.EventID = emit.EmitToolCallResult(emit.WithParent(ctx, c.EventID), o.eventSink, emit.ToolCallResultArgs{
-		CallID:     c.Call.ID,
-		Status:     status,
-		Response:   response,
-		Structured: structured,
-		LatencyMS:  time.Since(dispatchStart).Milliseconds(),
-	})
+	result.EventID = o.emitCallResult(emit.WithParent(ctx, c.EventID), c.Call.ID, result, dispatchStart)
 	return result
 }
 
@@ -216,7 +206,7 @@ func (o *Orchestrator) resumeSubprocess(ctx context.Context, sessions SessionSto
 		if why := o.subprocessUnavailable(ctx, child.Request); why != "" {
 			return nil, o.stopSubprocess(ctx, c, why, start)
 		}
-		res, err := o.resumeChild(subCtx, sessions, userMessage, *child, approved)
+		res, err := o.resumeChild(subCtx, *child, approved)
 		if err == nil && res.Paused != nil {
 			*child = *res.Paused
 			thinking := c.responseThinking
@@ -230,7 +220,7 @@ func (o *Orchestrator) resumeSubprocess(ctx context.Context, sessions SessionSto
 }
 
 // A call not yet approved is decided again: what the decision reads may have changed while the child waited.
-func (o *Orchestrator) resumeChild(ctx context.Context, sessions SessionStoreInterface, userMessage string, child subprocessChild, approved bool) (*subprocessResult, error) {
+func (o *Orchestrator) resumeChild(ctx context.Context, child subprocessChild, approved bool) (*subprocessResult, error) {
 	callCtx, _ := subprocessContext(ctx, child.Request, child.Depth)
 	waiting := child.Waiting
 	result, outcome := ToolResult{}, gateExecute
@@ -250,16 +240,10 @@ func (o *Orchestrator) resumeChild(ctx context.Context, sessions SessionStoreInt
 	if outcome == gateExecute {
 		child.Ran = append(child.Ran, ranCall{continuationCall: waiting.continuationCall, Error: result.Error})
 	}
-	child.Messages = append(child.Messages,
-		waiting.attach(provider.Message{
-			Role:      provider.RoleAssistant,
-			Content:   waiting.Text,
-			ToolCalls: []provider.ToolCall{{ID: waiting.ID, Name: toolFQN(waiting.Plugin, waiting.Action), Arguments: waiting.Args}},
-		}),
-		provider.Message{Role: provider.RoleTool, Content: nativeToolContent(result), ToolCallID: waiting.ID},
-	)
+	assistant, tool := nativeCallMessages(waiting.toolCall(), waiting.Text, result)
+	child.Messages = append(child.Messages, waiting.attach(assistant), tool)
 	// The resume runs inside the turn's lock, so the sub-agent may ask again.
-	return o.continueSubprocess(withInteractiveTurn(ctx, sessions, userMessage), child)
+	return o.continueSubprocess(withInteractiveTurn(ctx), child)
 }
 
 func (o *Orchestrator) subprocessUnavailable(ctx context.Context, req subprocessRequest) string {
@@ -276,21 +260,17 @@ func (o *Orchestrator) subprocessUnavailable(ctx context.Context, req subprocess
 }
 
 type endedSubprocess struct {
-	call    ToolCall
-	result  ToolResult
-	resumed bool
+	call   ToolCall
+	result ToolResult
 }
 
-func (o *Orchestrator) settleSubprocess(sessions SessionStoreInterface, sessionID string, c *subprocessContinuation, result ToolResult, resumed bool) *endedSubprocess {
+func (o *Orchestrator) settleSubprocess(sessions SessionStoreInterface, sessionID string, c *subprocessContinuation, result ToolResult) *endedSubprocess {
 	call := c.Call.toolCall()
-	_ = sessions.AddMessage(sessionID, c.attach(provider.Message{
-		Role:      provider.RoleAssistant,
-		Content:   c.ReplyText,
-		ToolCalls: []provider.ToolCall{{ID: call.ID, Name: toolFQN(call.Plugin, call.Action), Arguments: call.Args}},
-	}))
-	_ = sessions.AddMessage(sessionID, provider.Message{Role: provider.RoleTool, Content: nativeToolContent(result), ToolCallID: call.ID})
+	assistant, tool := nativeCallMessages(call, c.ReplyText, result)
+	_ = sessions.AddMessage(sessionID, c.attach(assistant))
+	_ = sessions.AddMessage(sessionID, tool)
 	if o.pluginCallObserver != nil {
 		o.pluginCallObserver.ObservePluginCall(call.Plugin, call.Action, result.Error != "", c.InputTokens, c.OutputTokens)
 	}
-	return &endedSubprocess{call: call, result: result, resumed: resumed}
+	return &endedSubprocess{call: call, result: result}
 }

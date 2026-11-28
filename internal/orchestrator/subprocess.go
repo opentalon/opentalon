@@ -99,22 +99,17 @@ func subprocessDepth(ctx context.Context) int {
 // Only the model's call in the agent loop may ask the user: only the agent loop takes the answer on the next turn.
 type interactiveTurnKey struct{}
 
-type interactiveTurn struct {
-	sessions    SessionStoreInterface
-	userMessage string
-}
-
-func withInteractiveTurn(ctx context.Context, sessions SessionStoreInterface, userMessage string) context.Context {
-	return context.WithValue(ctx, interactiveTurnKey{}, &interactiveTurn{sessions: sessions, userMessage: userMessage})
+func withInteractiveTurn(ctx context.Context) context.Context {
+	return context.WithValue(ctx, interactiveTurnKey{}, true)
 }
 
 func withoutInteractiveTurn(ctx context.Context) context.Context {
-	return context.WithValue(ctx, interactiveTurnKey{}, (*interactiveTurn)(nil))
+	return context.WithValue(ctx, interactiveTurnKey{}, false)
 }
 
 func isInteractiveTurn(ctx context.Context) bool {
-	turn, _ := ctx.Value(interactiveTurnKey{}).(*interactiveTurn)
-	return turn != nil
+	interactive, _ := ctx.Value(interactiveTurnKey{}).(bool)
+	return interactive
 }
 
 const subprocessNeedsNativeTools = "sub-agents need native tool calling, which this deployment's models do not support"
@@ -386,14 +381,8 @@ func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessC
 			if outcome == gateExecute {
 				result.Ran = append(result.Ran, ranCall{continuationCall: continuationCallOf(call), Error: toolResult.Error})
 			}
-			messages = append(messages,
-				takeThinking(&thinking).attach(provider.Message{
-					Role:      provider.RoleAssistant,
-					Content:   text,
-					ToolCalls: []provider.ToolCall{{ID: call.ID, Name: toolFQN(call.Plugin, call.Action), Arguments: call.Args}},
-				}),
-				provider.Message{Role: provider.RoleTool, Content: nativeToolContent(toolResult), ToolCallID: call.ID},
-			)
+			assistant, tool := nativeCallMessages(call, text, toolResult)
+			messages = append(messages, takeThinking(&thinking).attach(assistant), tool)
 			text = ""
 		}
 	}

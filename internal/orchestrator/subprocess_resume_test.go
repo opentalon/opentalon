@@ -59,7 +59,7 @@ func pausedHarness(t *testing.T, sessions SessionStoreInterface, sub SubprocessC
 	h := newPauseHarness(t, sessions, pauseTask)
 	h.orch = h.nextPod(t, sub, slow)
 	h.llm.parent = []provider.CompletionResponse{
-		callReply("p1", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": "_subprocess__run"}),
+		callOf("p1", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": "_subprocess__run"}),
 		{Content: "Delegating.", Thinking: resumeThinking, ThinkingFingerprint: "fp", Usage: provider.Usage{InputTokens: 6, OutputTokens: 2},
 			ToolCalls: []provider.ToolCall{{ID: "p2", Name: "_subprocess__run", Arguments: map[string]string{"task": pauseTask}}}},
 	}
@@ -167,7 +167,7 @@ func TestSubprocessAnswerToItsQuestion(t *testing.T) {
 
 func TestSubprocessResumesOnAnotherPodAndAsksAgain(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
-		h := pausedHarness(t, kind.open(t), subOn, nil, callReply("c3", "store__write", map[string]string{"id": "8"}))
+		h := pausedHarness(t, kind.open(t), subOn, nil, callOf("c3", "store__write", map[string]string{"id": "8"}))
 		first, second := h.orch, h.nextPod(t, subOn, nil)
 		approve := actor.WithConfirmationDecision(context.Background(), "approve")
 		ran := func(id string) int { return len(eventsOfCall(t, h.sink, events.TypeToolCallResult, id)) }
@@ -203,7 +203,7 @@ func TestSubprocessResumesOnAnotherPodAndAsksAgain(t *testing.T) {
 func TestSubprocessResumeKeepsItsRunningTime(t *testing.T) {
 	sub := SubprocessConfig{Enabled: true, MaxDepth: 2, DefaultTimeout: 120 * time.Millisecond}
 	slow := map[string]time.Duration{"look": 70 * time.Millisecond, "store": 70 * time.Millisecond}
-	h := pausedHarness(t, state.NewSessionStore(""), sub, slow, callReply("c3", "look__see", map[string]string{}))
+	h := pausedHarness(t, state.NewSessionStore(""), sub, slow, callOf("c3", "look__see", map[string]string{}))
 
 	if _, err := h.orch.Run(actor.WithConfirmationDecision(context.Background(), "approve"), "s1", "approve"); err != nil {
 		t.Fatalf("Run: %v", err)

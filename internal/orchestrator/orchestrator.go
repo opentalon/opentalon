@@ -1668,7 +1668,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				if question != nil {
 					return question, nil
 				}
-				ended = o.settleSubprocess(sessions, sessionID, c, result, true)
+				ended = o.settleSubprocess(sessions, sessionID, c, result)
 				toolCallConfirmed = true
 				break
 			}
@@ -1727,7 +1727,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			log.Debug("tool call amended, re-planning", "plugin", tc.Plugin, "action", tc.Action, "reason", reason)
 			if c := paused; c != nil {
 				stopped := o.stopSubprocess(ctx, c, "the user answered its question without approving the call", turnStartedAt)
-				ended = o.settleSubprocess(sessions, sessionID, c, stopped, false)
+				ended = o.settleSubprocess(sessions, sessionID, c, stopped)
 			}
 			// No return and toolCallConfirmed stays false → execution continues
 			// into the normal turn below.
@@ -1769,7 +1769,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				if resolvedBy == resolvedByFallback {
 					why = "the user's reply to its question could not be interpreted"
 				}
-				e := o.settleSubprocess(sessions, sessionID, c, o.stopSubprocess(ctx, c, why, turnStartedAt), false)
+				e := o.settleSubprocess(sessions, sessionID, c, o.stopSubprocess(ctx, c, why, turnStartedAt))
 				res.ToolCalls, res.Results = []ToolCall{e.call}, []ToolResult{e.result}
 			}
 			return res, nil
@@ -2420,7 +2420,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var repeatCount int
 	var lastUnrun map[string]bool // signatures of the previous response's calls answered without running
 	// The resumed outer call counts as the previous response, so the same call right after it is stopped as a repeat.
-	if ended != nil && ended.resumed {
+	if ended != nil && toolCallConfirmed {
 		lastCallSig, repeatCount = toolCallSignature([]ToolCall{ended.call}), 1
 	}
 	// Phantom-completion guard state (consumed in the calls==nil branch). The
@@ -2969,7 +2969,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			pluginStart := time.Now()
 			toolResult := decision.result
 			if decision.outcome == gateExecute {
-				toolResult = o.executeCall(withInteractiveTurn(ctx, sessions, userMessage), calls[i])
+				toolResult = o.executeCall(withInteractiveTurn(ctx), calls[i])
 			}
 			if c := toolResult.Suspended; c != nil {
 				c.Call, c.ReplyText, c.InputTokens, c.OutputTokens = continuationCallOf(calls[i]), replyText, perCallInput, perCallOutput
@@ -5047,25 +5047,26 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 		return result
 	}
 	if call.FromLLM {
-		status := "ok"
-		respBody := result.Content
-		structBody := result.StructuredContent
-		if result.Error != "" {
-			status = "error"
-			respBody = result.Error
-			structBody = ""
-		}
 		// The event id rides back on the result (ToolResult.EventID) so the
 		// repair phase can parent tool_call_repair_invoked onto this event.
-		result.EventID = emit.EmitToolCallResult(ctx, o.eventSink, emit.ToolCallResultArgs{
-			CallID:     call.ID,
-			Status:     status,
-			Response:   respBody,
-			Structured: structBody,
-			LatencyMS:  time.Since(dispatchStart).Milliseconds(),
-		})
+		result.EventID = o.emitCallResult(ctx, call.ID, result, dispatchStart)
 	}
 	return result
+}
+
+// emitCallResult emits a call's tool_call_result and returns its event id.
+func (o *Orchestrator) emitCallResult(ctx context.Context, callID string, result ToolResult, dispatchStart time.Time) string {
+	status, response, structured := "ok", result.Content, result.StructuredContent
+	if result.Error != "" {
+		status, response, structured = "error", result.Error, ""
+	}
+	return emit.EmitToolCallResult(ctx, o.eventSink, emit.ToolCallResultArgs{
+		CallID:     callID,
+		Status:     status,
+		Response:   response,
+		Structured: structured,
+		LatencyMS:  time.Since(dispatchStart).Milliseconds(),
+	})
 }
 
 // emitToolCallExtracted emits tool_call_extracted for a model's call, with the
@@ -5862,22 +5863,21 @@ func (o *Orchestrator) recordConfirmationInterruptedCalls(
 func interruptedCallMessages(gated ToolCall, dropped []ToolCall, thinking *responseThinking) []provider.Message {
 	var out []provider.Message
 	for _, dc := range dropped {
-		out = append(out,
-			takeThinking(thinking).attach(provider.Message{
-				Role: provider.RoleAssistant,
-				ToolCalls: []provider.ToolCall{{
-					ID:        dc.ID,
-					Name:      toolFQN(dc.Plugin, dc.Action),
-					Arguments: dc.Args,
-				}},
-			}),
-			provider.Message{
-				Role:       provider.RoleTool,
-				Content:    nativeToolContent(interruptedCallResult(gated, dc)),
-				ToolCallID: dc.ID,
-			})
+		assistant, tool := nativeCallMessages(dc, "", interruptedCallResult(gated, dc))
+		out = append(out, takeThinking(thinking).attach(assistant), tool)
 	}
 	return out
+}
+
+// nativeCallMessages is a native call's assistant message, carrying text, and the tool message with its result.
+func nativeCallMessages(call ToolCall, text string, result ToolResult) (assistant, tool provider.Message) {
+	assistant = provider.Message{
+		Role:      provider.RoleAssistant,
+		Content:   text,
+		ToolCalls: []provider.ToolCall{{ID: call.ID, Name: toolFQN(call.Plugin, call.Action), Arguments: call.Args}},
+	}
+	tool = provider.Message{Role: provider.RoleTool, Content: nativeToolContent(result), ToolCallID: call.ID}
+	return assistant, tool
 }
 
 func interruptedCallResult(gated, dropped ToolCall) ToolResult {

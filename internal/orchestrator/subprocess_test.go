@@ -59,14 +59,10 @@ func popReply(script *[]provider.CompletionResponse) *provider.CompletionRespons
 	return &r
 }
 
-func callReply(id, name string, args map[string]string) provider.CompletionResponse {
-	return provider.CompletionResponse{ToolCalls: []provider.ToolCall{{ID: id, Name: name, Arguments: args}}}
-}
-
 func searchCalls(n int) []provider.CompletionResponse {
 	replies := make([]provider.CompletionResponse, n)
 	for i := range replies {
-		replies[i] = callReply(fmt.Sprintf("c%d", i+1), "search__query", map[string]string{"q": fmt.Sprintf("attempt %d", i+1)})
+		replies[i] = callOf(fmt.Sprintf("c%d", i+1), "search__query", map[string]string{"q": fmt.Sprintf("attempt %d", i+1)})
 	}
 	return replies
 }
@@ -145,8 +141,8 @@ func TestSubprocessBasicFork(t *testing.T) {
 	const task = "What is the capital of France?"
 	llm := &subagentLLM{
 		parent: []provider.CompletionResponse{
-			callReply("p1", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": "_subprocess__run"}),
-			callReply("p2", "_subprocess__run", map[string]string{"task": task}),
+			callOf("p1", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": "_subprocess__run"}),
+			callOf("p2", "_subprocess__run", map[string]string{"task": task}),
 			{Content: "Based on my research: Paris is the capital of France."},
 		},
 		children: map[string][]provider.CompletionResponse{task: {{Content: "The capital of France is Paris."}}},
@@ -185,7 +181,7 @@ func TestSubprocess_ClearsInheritedNativeSentSet(t *testing.T) {
 	}, exec)
 	sessions := state.NewSessionStore("")
 	llm := &subagentLLM{children: map[string][]provider.CompletionResponse{"search it": {
-		callReply("c1", "search__query", map[string]string{"q": "x"}),
+		callOf("c1", "search__query", map[string]string{"q": "x"}),
 		{Content: "found it"},
 	}}}
 	orch := NewWithRules(llm, DefaultParser, registry, state.NewMemoryStore(""), sessions,
@@ -210,8 +206,8 @@ func TestSubprocessWithToolCalls(t *testing.T) {
 	thinking := []json.RawMessage{json.RawMessage(`{"type":"thinking","thinking":"look it up"}`)}
 	llm := &subagentLLM{
 		parent: []provider.CompletionResponse{
-			callReply("p1", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": "_subprocess__run"}),
-			callReply("p2", "_subprocess__run", map[string]string{"task": task, "tools": "search__query"}),
+			callOf("p1", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": "_subprocess__run"}),
+			callOf("p2", "_subprocess__run", map[string]string{"task": task, "tools": "search__query"}),
 			{Content: "Our refund policy allows returns within 30 days."},
 		},
 		children: map[string][]provider.CompletionResponse{task: {
@@ -303,7 +299,7 @@ func TestSubprocessRequestOffersThePermittedTools(t *testing.T) {
 	_ = registry.Register(PluginCapability{Name: "prep", Actions: []Action{{Name: "enrich"}}}, &prefixingExecutor{})
 	_ = registry.Register(PluginCapability{Name: "guard", Actions: []Action{{Name: "scan"}}}, &prefixingExecutor{})
 	llm := &subagentLLM{children: map[string][]provider.CompletionResponse{"look": {
-		callReply("c1", "search__query", map[string]string{"q": "x"}),
+		callOf("c1", "search__query", map[string]string{"q": "x"}),
 		{Content: "found"},
 	}}}
 	orch := NewWithRules(llm, DefaultParser, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{
@@ -343,7 +339,7 @@ func TestSubprocessToolAllowlist(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			llm := &subagentLLM{children: map[string][]provider.CompletionResponse{"t": {
-				callReply("c1", tt.call, map[string]string{}),
+				callOf("c1", tt.call, map[string]string{}),
 				{Content: "gave up"},
 			}}}
 			orch := setupSubprocessOrchestrator(llm)

@@ -278,10 +278,7 @@ func TestVCRSubprocessParallel(t *testing.T) {
 	called := map[string]bool{}
 	var offered []string
 	for i, ex := range children.exchanges {
-		var names []string
-		for _, td := range ex.Request.Tools {
-			names = append(names, td.Name)
-		}
+		names := toolNames(*ex.Request)
 		if i == 0 {
 			offered = names
 		}

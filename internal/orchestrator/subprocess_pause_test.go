@@ -23,7 +23,7 @@ var pauseTools = []string{"conf__check", "look__see", "store__write"}
 
 func pauseChild(task string) map[string][]provider.CompletionResponse {
 	return map[string][]provider.CompletionResponse{task: {
-		callReply("c0", "look__see", map[string]string{}),
+		callOf("c0", "look__see", map[string]string{}),
 		{ToolCalls: []provider.ToolCall{
 			{ID: "c1", Name: "store__write", Arguments: map[string]string{"id": "7"}},
 			{ID: "c2", Name: "look__see", Arguments: map[string]string{}},
@@ -420,7 +420,7 @@ func TestSubprocessPauseThatCannotBeStored(t *testing.T) {
 func TestSubprocessStoppedResultReportsARefusedCallAsFailed(t *testing.T) {
 	h := newPauseHarness(t, pendingFailingStore{state.NewSessionStore("")}, pauseTask)
 	child := pauseChild(pauseTask)
-	child[pauseTask][0] = callReply("c0", "look__see", map[string]string{"x": "1"})
+	child[pauseTask][0] = callOf("c0", "look__see", map[string]string{"x": "1"})
 	h.llm.children = child
 
 	if _, err := h.orch.Run(context.Background(), "s1", "fix record 7"); err != nil {

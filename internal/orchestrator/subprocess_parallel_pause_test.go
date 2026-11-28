@@ -16,7 +16,7 @@ import (
 
 const parallelTasks = `[{"task":"` + pauseTask + `"},{"task":"update record 8"},{"task":"count records"}]`
 
-var writeRecord8 = callReply("d1", "store__write", map[string]string{"id": "8"})
+var writeRecord8 = callOf("d1", "store__write", map[string]string{"id": "8"})
 
 func parallelPaused(t *testing.T, sessions SessionStoreInterface, second provider.CompletionResponse, extra ...registeredPlugin) *pauseHarness {
 	t.Helper()
@@ -28,13 +28,13 @@ func parallelPaused(t *testing.T, sessions SessionStoreInterface, second provide
 	}
 	h.orch = h.nextPod(t, subOn, nil)
 	h.llm.parent = []provider.CompletionResponse{
-		callReply("p1", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": "_subprocess__parallel"}),
-		callReply("p2", "_subprocess__parallel", map[string]string{"tasks": parallelTasks}),
+		callOf("p1", toolFQN(metaPluginName, metaLoadTools), map[string]string{"names": "_subprocess__parallel"}),
+		callOf("p2", "_subprocess__parallel", map[string]string{"tasks": parallelTasks}),
 	}
 	h.llm.children = map[string][]provider.CompletionResponse{
 		pauseTask: {
-			callReply("c0", "look__see", map[string]string{}),
-			callReply("c1", "store__write", map[string]string{"id": "7"}),
+			callOf("c0", "look__see", map[string]string{}),
+			callOf("c1", "store__write", map[string]string{"id": "7"}),
 			{Content: "record 7 updated"},
 		},
 		"update record 8": {second, {Content: "record 8 updated"}},
@@ -204,7 +204,7 @@ func TestSubprocessParallelDecidesTheNextChildsCallAgain(t *testing.T) {
 		}
 		return CheckResult{Verdict: CheckPassed}, nil
 	}
-	h := parallelPaused(t, state.NewSessionStore(""), callReply("d1", "desk__book", map[string]string{"id": "3"}),
+	h := parallelPaused(t, state.NewSessionStore(""), callOf("d1", "desk__book", map[string]string{"id": "3"}),
 		registeredPlugin{PluginCapability{Name: "desk", Actions: []Action{{Name: "book", Description: "Book a desk.", Check: true,
 			Parameters: []Parameter{{Name: "id", Description: "Desk id."}}}}}, desk})
 	h.llm.parent = []provider.CompletionResponse{{Content: "Record 7 updated; desk 3 is taken."}}

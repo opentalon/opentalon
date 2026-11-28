@@ -19,7 +19,7 @@ const writeTask = "write it"
 
 func writeChild() map[string][]provider.CompletionResponse {
 	return map[string][]provider.CompletionResponse{writeTask: {
-		callReply("c1", "store__write", map[string]string{}),
+		callOf("c1", "store__write", map[string]string{}),
 		{Content: "could not write"},
 	}}
 }
@@ -100,7 +100,7 @@ func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
 		},
 		{
 			name:   "callback of a plugin the agent loop called",
-			parent: []provider.CompletionResponse{callReply("p1", "hook__review", map[string]string{}), {Content: "reviewed"}},
+			parent: []provider.CompletionResponse{callOf("p1", "hook__review", map[string]string{}), {Content: "reviewed"}},
 			tools:  []string{"conf__check", "hook__review", "invoker__prepare", "store__write"},
 			run: func(ctx context.Context, orch *Orchestrator) error {
 				_, err := orch.Run(ctx, "s1", "review it")
@@ -158,10 +158,9 @@ func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
 }
 
 func TestInteractiveTurnMarksOnlyTheAgentLoopsCall(t *testing.T) {
-	seen := map[string]*interactiveTurn{}
+	seen := map[string]bool{}
 	probe := executorFunc(func(ctx context.Context, call ToolCall) ToolResult {
-		turn, _ := ctx.Value(interactiveTurnKey{}).(*interactiveTurn)
-		seen[call.ID] = turn
+		seen[call.ID] = isInteractiveTurn(ctx)
 		return ToolResult{CallID: call.ID, Content: "looked"}
 	})
 	var orch *Orchestrator
@@ -179,11 +178,11 @@ func TestInteractiveTurnMarksOnlyTheAgentLoopsCall(t *testing.T) {
 				{ID: "p-load", Name: toolFQN(metaPluginName, metaLoadTools), Arguments: map[string]string{"names": "_subprocess__run"}},
 				{ID: "p-probe", Name: "probe__look", Arguments: map[string]string{}},
 			}},
-			callReply("p-sub", "_subprocess__run", map[string]string{"task": "look", "tools": "probe__look"}),
-			callReply("p-hook", "hook__look", map[string]string{}),
+			callOf("p-sub", "_subprocess__run", map[string]string{"task": "look", "tools": "probe__look"}),
+			callOf("p-hook", "hook__look", map[string]string{}),
 			{Content: "done"},
 		},
-		children: map[string][]provider.CompletionResponse{"look": {callReply("c1", "probe__look", map[string]string{}), {Content: "seen"}}},
+		children: map[string][]provider.CompletionResponse{"look": {callOf("c1", "probe__look", map[string]string{}), {Content: "seen"}}},
 	}
 	orch, _, _ = gatedSubprocessOrch(t, llm, OrchestratorOpts{},
 		registeredPlugin{PluginCapability{Name: "probe", Actions: readOnly}, probe},
@@ -193,12 +192,12 @@ func TestInteractiveTurnMarksOnlyTheAgentLoopsCall(t *testing.T) {
 	if _, err := orch.Run(context.Background(), "s1", "look around"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if turn := seen["p-probe"]; turn == nil || turn.sessions == nil || turn.userMessage != "look around" {
-		t.Errorf("the agent loop's call carries %+v, want the turn's session store and user message", turn)
+	if !seen["p-probe"] {
+		t.Error("the agent loop's call runs without the marker, want it marked")
 	}
 	for _, id := range []string{"c1", "direct-probe-look"} {
-		if turn, ok := seen[id]; !ok || turn != nil {
-			t.Errorf("call %s: ran %v, marker %+v; want it run without the marker", id, ok, turn)
+		if marked, ran := seen[id]; !ran || marked {
+			t.Errorf("call %s: ran %v, marked %v; want it run without the marker", id, ran, marked)
 		}
 	}
 	llm.assertTools(t, 2, "probe__look")
