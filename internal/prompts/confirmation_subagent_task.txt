@@ -1,0 +1,2 @@
+A sub-agent makes this call, working on the task: {{task}}
+Say in the question that a sub-agent asks, and for which task.

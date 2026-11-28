@@ -41,8 +41,10 @@ func TestHashCoversAllFiles(t *testing.T) {
 
 func TestApplyOverrides_AppliesWithTransforms(t *testing.T) {
 	origNative, origSched, origSuffix, origCatalog := OrchestratorPreambleNative, SchedulingRules, PlannerSuffix, OrchestratorToolCatalogInline
+	origSubagent := ConfirmationSubagentTask
 	t.Cleanup(func() {
 		OrchestratorPreambleNative, SchedulingRules, PlannerSuffix, OrchestratorToolCatalogInline = origNative, origSched, origSuffix, origCatalog
+		ConfirmationSubagentTask = origSubagent
 	})
 
 	applied, unknown := ApplyOverrides(map[string]string{
@@ -50,12 +52,13 @@ func TestApplyOverrides_AppliesWithTransforms(t *testing.T) {
 		"rules_scheduling":                 "rule one\nrule two\n", // splitLines
 		"planner_suffix":                   "suffix text\n",        // trailing newline trimmed
 		"orchestrator_tool_catalog_inline": "catalog header\n",
+		"confirmation_subagent_task":       "task {{task}}\n",
 	})
 
 	if len(unknown) != 0 {
 		t.Fatalf("unexpected unknown keys: %v", unknown)
 	}
-	if got, want := strings.Join(applied, ","), "orchestrator_preamble_native,orchestrator_tool_catalog_inline,planner_suffix,rules_scheduling"; got != want {
+	if got, want := strings.Join(applied, ","), "confirmation_subagent_task,orchestrator_preamble_native,orchestrator_tool_catalog_inline,planner_suffix,rules_scheduling"; got != want {
 		t.Errorf("applied = %q, want sorted %q", got, want)
 	}
 	if OrchestratorPreambleNative != "RAW PREAMBLE" {
@@ -69,6 +72,9 @@ func TestApplyOverrides_AppliesWithTransforms(t *testing.T) {
 	}
 	if OrchestratorToolCatalogInline != "catalog header" {
 		t.Errorf("inline tool catalog header not trimmed: %q", OrchestratorToolCatalogInline)
+	}
+	if ConfirmationSubagentTask != "task {{task}}" {
+		t.Errorf("sub-agent confirmation text not trimmed: %q", ConfirmationSubagentTask)
 	}
 }
 

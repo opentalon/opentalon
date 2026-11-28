@@ -106,6 +106,11 @@ var OrchestratorSpokenReply string
 //go:embed confirmation_spoken_question.txt
 var ConfirmationSpokenQuestion string
 
+//go:embed confirmation_subagent_task.txt
+var confirmationSubagentTaskRaw string
+
+var ConfirmationSubagentTask = strings.TrimRight(confirmationSubagentTaskRaw, "\n")
+
 //go:embed orchestrator_tool_catalog_inline.txt
 var orchestratorToolCatalogInlineRaw string
 
@@ -200,6 +205,7 @@ var promptSetters = map[string]func(string){
 	"orchestrator_session_title":    func(s string) { SessionTitle = strings.TrimRight(s, "\n") },
 	"orchestrator_spoken_reply":     func(s string) { OrchestratorSpokenReply = s },
 	"confirmation_spoken_question":  func(s string) { ConfirmationSpokenQuestion = s },
+	"confirmation_subagent_task":    func(s string) { ConfirmationSubagentTask = strings.TrimRight(s, "\n") },
 	"rules_default":                 func(s string) { DefaultRules = splitLines(s) },
 	"rules_scheduling":              func(s string) { SchedulingRules = splitLines(s) },
 	"format_slack":                  func(s string) { FormatSlack = strings.TrimRight(s, "\n") },

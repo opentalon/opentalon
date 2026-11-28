@@ -35,6 +35,13 @@ post-processing makes config text behave differently from the default.
 > **Gotcha**: `"rules_default": func(s string) { DefaultRules = []string{s} }`
 > — one long rule instead of one rule per line.
 
+## A value inside a prompt is a named placeholder
+
+A prompt that carries a value holds a `{{name}}` placeholder, and the caller
+fills it with `strings.ReplaceAll`, never with a `fmt` verb: an override may be
+empty or contain `%`. `confirmation_subagent_task.txt` holds `{{task}}`, which
+`narrateConfirmation` replaces with the sub-agent's task.
+
 ## A prompt edit is a behaviour change
 
 `Hash()` is the sha256 of every embedded `.txt`, sorted by filename, including

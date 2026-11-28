@@ -3893,7 +3893,7 @@ func (o *Orchestrator) narrateConfirmation(ctx context.Context, recent []provide
 		fmt.Fprintf(&ub, "User's latest request: %s\n\n", userMessage)
 	}
 	if subagentTask != "" {
-		fmt.Fprintf(&ub, "A sub-agent makes this call, working on the task: %s\nSay in the question that a sub-agent asks, and for which task.\n\n", taskPreview(subagentTask))
+		ub.WriteString(strings.ReplaceAll(prompts.ConfirmationSubagentTask, "{{task}}", taskPreview(subagentTask)) + "\n\n")
 	}
 	fmt.Fprintf(&ub, "About to call tool %q with arguments: %v\n\n", call.Action, call.Args)
 	if len(recent) > 0 {
