@@ -80,6 +80,9 @@ func pausedHarness(t *testing.T, sessions SessionStoreInterface, sub SubprocessC
 	if res, err := h.orch.Run(context.Background(), "s1", "fix record 7"); err != nil || res.Response != pauseQuestion {
 		t.Fatalf("Run: %v %+v, want the question", err, res)
 	}
+	if h.write.count != 0 {
+		t.Fatalf("store__write ran %d time(s) before any approval", h.write.count)
+	}
 	return h
 }
 
@@ -99,22 +102,22 @@ func TestSubprocessAnswerToItsQuestion(t *testing.T) {
 		sub                   SubprocessConfig              // the answering pod's
 		parent                []provider.CompletionResponse // the parent's replies after the pause
 		response, result      string                        // the turn's answer; in the outer call's result
-		writes                int
+		writes, requests      int
 		observed              []string
 	}{
 		{"approval", "approve", "approve", subOn, []provider.CompletionResponse{
 			{ToolCalls: []provider.ToolCall{{ID: "p4", Name: "_subprocess__run", Arguments: map[string]string{"task": pauseTask}}}},
 			{Content: "Record 7 updated."},
-		}, "Record 7 updated.", "done", 1, []string{"store false 5/2", "_subprocess false 6/2"}},
+		}, "Record 7 updated.", "done", 1, 3, []string{"store false 5/2", "_subprocess false 6/2"}},
 		{"rejection", "reject", "reject", subOn, nil,
-			confirmationRejectedReply, "the user rejected its call." + stopped, 0, []string{"_subprocess true 6/2"}},
+			confirmationRejectedReply, "the user rejected its call." + stopped, 0, 2, []string{"_subprocess true 6/2"}},
 		{"another reply", "", "use record 8", subOn, []provider.CompletionResponse{
 			{Content: `{"decision":"amend","reason":"another record"}`}, // the classifier's
 			{Content: "Shall I update record 8?"},
-		}, "Shall I update record 8?", "without approving the call." + stopped, 0, []string{"_subprocess true 6/2"}},
+		}, "Shall I update record 8?", "without approving the call." + stopped, 0, 2, []string{"_subprocess true 6/2"}},
 		{"approval with sub-agents switched off", "approve", "approve", SubprocessConfig{}, []provider.CompletionResponse{
 			{Content: "Sub-agents are off."},
-		}, "Sub-agents are off.", "sub-agents are switched off." + stopped, 0, []string{"_subprocess true 6/2"}},
+		}, "Sub-agents are off.", "sub-agents are switched off." + stopped, 0, 2, []string{"_subprocess true 6/2"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eachStore(t, func(t *testing.T, kind storeKind) {
@@ -176,11 +179,7 @@ func TestSubprocessAnswerToItsQuestion(t *testing.T) {
 				if n := len(eventsOfCall(t, h.sink, events.TypeToolCallExtracted, "p4")); n != 0 {
 					t.Errorf("the same _subprocess call right after the resume was not stopped as a repeat")
 				}
-				for _, req := range h.llm.requests[1:] {
-					if !slices.Equal(toolNames(req), toolNames(h.llm.requests[0])) {
-						t.Errorf("sub-agent request offered %v, want %v", toolNames(req), toolNames(h.llm.requests[0]))
-					}
-				}
+				h.llm.assertTools(t, tc.requests, pauseTools...)
 			})
 		})
 	}
@@ -221,6 +220,7 @@ func TestSubprocessResumesOnAnotherPodAndAsksAgain(t *testing.T) {
 		if h.write.count != 2 || len(h.session(t).Messages) != messages {
 			t.Errorf("late approval changed something: %d write(s), %d messages (was %d)", h.write.count, len(h.session(t).Messages), messages)
 		}
+		h.llm.assertTools(t, 4, pauseTools...)
 	})
 }
 
@@ -249,6 +249,7 @@ func TestSubprocessResumeKeepsItsRunningTime(t *testing.T) {
 	if !strings.Contains(c3, "timed out") {
 		t.Errorf("c3 after the resume got %q, want it cut by the remaining running time", c3)
 	}
+	h.llm.assertTools(t, 4, pauseTools...)
 }
 
 // clearFailingStore fails the next n clears of a pending call.
@@ -284,13 +285,16 @@ func TestSubprocessAnswerThatCannotClearTheRecordLeavesItPaused(t *testing.T) {
 	if _, err := h.orch.Run(reject, "s1", "reject"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if results, calls := ended(); results != 0 || calls != 0 || h.session(t).Metadata["pending_tool_call"] == "" {
-		t.Errorf("uncleared answer: %d result event(s), %d outer call(s) in history; want none, and the record kept", results, calls)
+	if results, calls := ended(); results != 0 || calls != 0 || h.session(t).Metadata["pending_tool_call"] == "" || h.write.count != 0 {
+		t.Errorf("uncleared answer: %d result event(s), %d outer call(s) in history, %d write(s); want none, and the record kept",
+			results, calls, h.write.count)
 	}
 	if _, err := h.orch.Run(reject, "s1", "reject"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if results, calls := ended(); results != 1 || calls != 1 {
-		t.Errorf("after the answer that clears the record: %d result event(s), %d outer call(s); want one each", results, calls)
+	if results, calls := ended(); results != 1 || calls != 1 || h.write.count != 0 {
+		t.Errorf("after the answer that clears the record: %d result event(s), %d outer call(s), %d write(s); want one each and no write",
+			results, calls, h.write.count)
 	}
+	h.llm.assertTools(t, 2, pauseTools...)
 }

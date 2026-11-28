@@ -89,6 +89,20 @@ func toolNames(req provider.CompletionRequest) []string {
 	return names
 }
 
+func (l *subagentLLM) assertTools(t *testing.T, requests int, want ...string) {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i, req := range l.requests {
+		if got := toolNames(req); !slices.Equal(got, want) {
+			t.Errorf("sub-agent request %d offered %v, want %v", i, got, want)
+		}
+	}
+	if len(l.requests) != requests {
+		t.Fatalf("sub-agent requests = %d, want %d", len(l.requests), requests)
+	}
+}
+
 // subprocessResultOf returns the content of the turn's one _subprocess call result.
 func subprocessResultOf(t *testing.T, result *RunResult) string {
 	t.Helper()
@@ -320,14 +334,8 @@ func TestSubprocessRequestOffersThePermittedTools(t *testing.T) {
 	if res.Error != "" || res.Content != "found" {
 		t.Fatalf("result = %+v, want the sub-agent's answer", res)
 	}
-	if len(llm.requests) != 2 {
-		t.Fatalf("sub-agent requests = %d, want 2", len(llm.requests))
-	}
-	want := []string{"math__calculate", "search__query", "store__inspect"}
+	llm.assertTools(t, 2, "math__calculate", "search__query", "store__inspect")
 	for i, req := range llm.requests {
-		if got := toolNames(req); !slices.Equal(got, want) {
-			t.Errorf("request %d tools = %v, want %v", i, got, want)
-		}
 		if got := req.Messages[0].Content; got != prompts.SubprocessPreamble {
 			t.Errorf("request %d system prompt = %q, want the preamble alone", i, got)
 		}
@@ -367,14 +375,7 @@ func TestSubprocessToolAllowlist(t *testing.T) {
 			if res.Error != "" || res.Content != "gave up" {
 				t.Fatalf("result = %+v, want the sub-agent's answer", res)
 			}
-			if len(llm.requests) != 2 {
-				t.Fatalf("sub-agent requests = %d, want 2", len(llm.requests))
-			}
-			for i, req := range llm.requests {
-				if got := toolNames(req); !slices.Equal(got, tt.wantTools) {
-					t.Errorf("request %d tools = %v, want %v", i, got, tt.wantTools)
-				}
-			}
+			llm.assertTools(t, 2, tt.wantTools...)
 			want := provider.Message{Role: provider.RoleTool, ToolCallID: "c1",
 				Content: "error: tool " + tt.call + " not allowed in this subprocess"}
 			if got := llm.requests[1].Messages[3]; !reflect.DeepEqual(got, want) {

@@ -50,6 +50,9 @@ func parallelPaused(t *testing.T, sessions SessionStoreInterface, second provide
 	if res, err := h.orch.Run(context.Background(), "s1", "fix records 7 and 8"); err != nil || res.Metadata["tool_call_id"] != "p2-0-c1" {
 		t.Fatalf("Run: %v %q %v, want the question about c1", err, res.Response, res.Metadata)
 	}
+	if h.write.count != 0 {
+		t.Fatalf("store__write ran %d time(s) before any approval", h.write.count)
+	}
 	return h
 }
 
@@ -116,9 +119,6 @@ func TestSubprocessParallelAsksOneChildPerTurn(t *testing.T) {
 		if asking, children := h.pausedChildren(t); asking != 0 || !slices.Equal(children, []string{"0 waits c1", "1 waits d1", "2 answered 3 records"}) {
 			t.Errorf("record asks about child %d of %q", asking, children)
 		}
-		if h.write.count != 0 {
-			t.Errorf("store__write ran %d time(s) before any approval", h.write.count)
-		}
 
 		res, err := h.nextPod(t, subOn, nil).Run(approve, "s1", "approve")
 		if err != nil || res.Response != pauseQuestion || res.Metadata["tool_call_id"] != "p2-1-d1" {
@@ -155,6 +155,7 @@ func TestSubprocessParallelAsksOneChildPerTurn(t *testing.T) {
 		if h.orch.registry.IsActionReadOnly("_subprocess", "parallel") {
 			t.Errorf("_subprocess__parallel is read-only; it must stay a write for the phantom-completion guard")
 		}
+		h.llm.assertTools(t, 6, pauseTools...)
 	})
 }
 
@@ -174,14 +175,14 @@ func TestSubprocessParallelStopsEveryWaitingChild(t *testing.T) {
 		decision, reply  string
 		parent           []provider.CompletionResponse // the parent's replies to the answer
 		response, result string                        // the turn's answer; in the outer call's result
-		writes           int
+		writes, requests int
 	}{
-		{"rejection of the first", false, "reject", "reject", nil, confirmationRejectedReply, "the user rejected its call." + first, 0},
-		{"rejection of the second", true, "reject", "reject", nil, confirmationRejectedReply, "the user rejected its call." + second, 1},
+		{"rejection of the first", false, "reject", "reject", nil, confirmationRejectedReply, "the user rejected its call." + first, 0, 4},
+		{"rejection of the second", true, "reject", "reject", nil, confirmationRejectedReply, "the user rejected its call." + second, 1, 5},
 		{"another reply to the second", true, "", "use record 9", []provider.CompletionResponse{
 			{Content: `{"decision":"amend","reason":"another record"}`}, // the classifier's
 			{Content: "Shall I update record 9?"},
-		}, "Shall I update record 9?", "without approving the call." + second, 1},
+		}, "Shall I update record 9?", "without approving the call." + second, 1, 5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := parallelPaused(t, state.NewSessionStore(""), writeRecord8)
@@ -213,6 +214,7 @@ func TestSubprocessParallelStopsEveryWaitingChild(t *testing.T) {
 			if p := h.session(t).Metadata["pending_tool_call"]; p != "" {
 				t.Errorf("pending record left: %.200s", p)
 			}
+			h.llm.assertTools(t, tc.requests, pauseTools...)
 		})
 	}
 }
@@ -238,8 +240,9 @@ func TestSubprocessParallelDecidesTheNextChildsCallAgain(t *testing.T) {
 	if err != nil || res.Response != "Record 7 updated; desk 3 is taken." {
 		t.Fatalf("approval: %v %q %v, want the parent's answer", err, res.Response, res.Metadata)
 	}
-	if checks, runs := len(desk.checked()), len(desk.snapshot()); checks != 2 || runs != 0 {
-		t.Errorf("desk__book checked %d time(s), ran %d; want checked again after the wait, never run", checks, runs)
+	if checks, runs := len(desk.checked()), len(desk.snapshot()); checks != 2 || runs != 0 || h.write.count != 1 {
+		t.Errorf("desk__book checked %d time(s), ran %d, store__write ran %d; want checked again after the wait, never run, and c1 once",
+			checks, runs, h.write.count)
 	}
 	if n := countEventType(h.sink.snapshot(), events.TypeConfirmationRequested); n != 1 {
 		t.Errorf("confirmation_requested events = %d, want c1's alone", n)
@@ -261,4 +264,5 @@ func TestSubprocessParallelDecidesTheNextChildsCallAgain(t *testing.T) {
 	if p := h.session(t).Metadata["pending_tool_call"]; p != "" {
 		t.Errorf("pending record left: %.200s", p)
 	}
+	h.llm.assertTools(t, 6, "conf__check", "desk__book", "look__see", "store__write")
 }

@@ -22,6 +22,8 @@ import (
 // about, and look__see (c2) in the same response.
 const pauseTask = "update record 7"
 
+var pauseTools = []string{"conf__check", "look__see", "store__write"}
+
 func pauseChild(task string) map[string][]provider.CompletionResponse {
 	return map[string][]provider.CompletionResponse{task: {
 		callReply("c0", "look__see", map[string]string{}),
@@ -352,6 +354,7 @@ func TestSubprocessGatedCallPausesTheTurn(t *testing.T) {
 		if !ok || content != pauseQuestion || meta["tool_call_id"] != "p2-0-c1" {
 			t.Errorf("pending frame = %q %v %v, want the question with id p2-0-c1", content, meta, ok)
 		}
+		h.llm.assertTools(t, 2, pauseTools...)
 	})
 }
 
@@ -377,6 +380,7 @@ func TestSubprocessPauseFallbackQuestionNamesTheTask(t *testing.T) {
 		if h.write.count != 0 {
 			t.Errorf("store__write ran %d time(s), want 0", h.write.count)
 		}
+		h.llm.assertTools(t, 2, pauseTools...)
 	})
 }
 
@@ -442,6 +446,7 @@ func TestSubprocessPauseThatCannotBeStored(t *testing.T) {
 				if len(results) != 1 || len(extracted) != 1 || results[0].ParentID != extracted[0].ID {
 					t.Errorf("p2: %d tool_call_result, %d tool_call_extracted; want one result parented to the extracted event", len(results), len(extracted))
 				}
+				h.llm.assertTools(t, 2, pauseTools...)
 			})
 		})
 	}
@@ -458,8 +463,8 @@ func TestSubprocessStoppedResultReportsARefusedCallAsFailed(t *testing.T) {
 	if _, err := h.orch.Run(context.Background(), "s1", "fix record 7"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if h.looks.count != 2 {
-		t.Errorf("look__see ran %d time(s), want 2 (p0, p3; c0 is refused)", h.looks.count)
+	if h.looks.count != 2 || h.write.count != 0 {
+		t.Errorf("look__see ran %d time(s), store__write %d; want 2 (p0, p3; c0 is refused) and never", h.looks.count, h.write.count)
 	}
 	var stopped string
 	for _, m := range h.session(t).Messages {
@@ -470,6 +475,7 @@ func TestSubprocessStoppedResultReportsARefusedCallAsFailed(t *testing.T) {
 	if !strings.Contains(stopped, "- failed: look__see(x=1): unknown argument(s)") || strings.Contains(stopped, "ran: look__see") {
 		t.Errorf("outer call result = %q, want c0 reported as failed with its error", stopped)
 	}
+	h.llm.assertTools(t, 2, pauseTools...)
 }
 
 // A pending record that cannot be read is cleared by the next turn, not kept.

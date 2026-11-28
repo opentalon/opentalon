@@ -62,7 +62,7 @@ func gatedSubprocessOrch(t *testing.T, llm LLMClient, opts OrchestratorOpts, ext
 // sub-agent got a refusal naming the call as the call's result, and that nobody
 // was asked: no confirmation_requested event, no question in the session and
 // no pending call.
-func assertRefusedWithoutAsking(t *testing.T, orch *Orchestrator, llm *subagentLLM, write *countingExecutor, sink *recordingEventSink) {
+func assertRefusedWithoutAsking(t *testing.T, orch *Orchestrator, llm *subagentLLM, write *countingExecutor, sink *recordingEventSink, tools []string) {
 	t.Helper()
 	if n := countEventType(sink.snapshot(), events.TypeConfirmationRequested); n != 0 {
 		t.Errorf("confirmation_requested events = %d, want none", n)
@@ -82,9 +82,7 @@ func assertRefusedWithoutAsking(t *testing.T, orch *Orchestrator, llm *subagentL
 	if write.count != 0 {
 		t.Errorf("store__write ran %d time(s), want never", write.count)
 	}
-	if len(llm.requests) != 2 {
-		t.Fatalf("sub-agent requests = %d, want 2 (the call, then the answer)", len(llm.requests))
-	}
+	llm.assertTools(t, 2, tools...)
 	want := provider.Message{Role: provider.RoleTool, ToolCallID: "c1",
 		Content: "error: tool store__write needs the user's approval, which this sub-agent cannot ask for; the call did not run"}
 	if got := llm.requests[1].Messages[3]; !reflect.DeepEqual(got, want) {
@@ -105,11 +103,13 @@ func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
 		parent    []provider.CompletionResponse
 		opts      OrchestratorOpts
 		untouched bool // the session must stay exactly as created
+		tools     []string
 		run       func(ctx context.Context, orch *Orchestrator) error
 	}{
 		{
 			name:      "direct action entry with a chat session id",
 			untouched: true,
+			tools:     []string{"conf__check", "hook__review", "invoker__prepare", "store__write"},
 			run: func(ctx context.Context, orch *Orchestrator) error {
 				_, _, err := orch.RunActionResult(actor.WithSessionID(ctx, "s1"), "_subprocess", "run", map[string]string{"task": writeTask})
 				return err
@@ -118,6 +118,7 @@ func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
 		{
 			name:   "callback of a plugin the agent loop called",
 			parent: []provider.CompletionResponse{callReply("p1", "hook__review", map[string]string{}), {Content: "reviewed"}},
+			tools:  []string{"conf__check", "hook__review", "invoker__prepare", "store__write"},
 			run: func(ctx context.Context, orch *Orchestrator) error {
 				_, err := orch.Run(ctx, "s1", "review it")
 				return err
@@ -127,14 +128,16 @@ func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
 			name:   "single-step path",
 			parent: []provider.CompletionResponse{{Content: singleStep}, {Content: "delegated"}},
 			opts:   OrchestratorOpts{PipelineEnabled: true},
+			tools:  []string{"conf__check", "hook__review", "invoker__prepare", "store__write"},
 			run: func(ctx context.Context, orch *Orchestrator) error {
 				_, err := orch.Run(ctx, "s1", "delegate it")
 				return err
 			},
 		},
 		{
-			name: "preparer step",
-			opts: OrchestratorOpts{ContentPreparers: []ContentPreparerEntry{{Plugin: "invoker", Action: "prepare"}}},
+			name:  "preparer step",
+			opts:  OrchestratorOpts{ContentPreparers: []ContentPreparerEntry{{Plugin: "invoker", Action: "prepare"}}},
+			tools: []string{"conf__check", "hook__review", "store__write"},
 			run: func(ctx context.Context, orch *Orchestrator) error {
 				_, err := orch.Run(ctx, "s1", "anything")
 				return err
@@ -161,7 +164,7 @@ func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
 			if err := tc.run(context.Background(), orch); err != nil {
 				t.Fatalf("entry: %v", err)
 			}
-			assertRefusedWithoutAsking(t, orch, llm, write, sink)
+			assertRefusedWithoutAsking(t, orch, llm, write, sink, tc.tools)
 			if tc.untouched {
 				s, _ := orch.sessions.Get("s1")
 				if len(s.Messages) != 0 || len(s.Metadata) != 0 {
@@ -220,4 +223,5 @@ func TestInteractiveTurnMarksOnlyTheAgentLoopsCall(t *testing.T) {
 			t.Errorf("call %s: ran %v, marker %+v; want it run without the marker", id, ok, turn)
 		}
 	}
+	llm.assertTools(t, 2, "probe__look")
 }
