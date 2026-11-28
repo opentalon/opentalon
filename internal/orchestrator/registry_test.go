@@ -334,10 +334,10 @@ func TestRegistryRejectsDottedPluginName(t *testing.T) {
 func TestRegistryAcceptsValidFQN(t *testing.T) {
 	reg := NewToolRegistry()
 	cap := PluginCapability{
-		Name: "timly",
+		Name: "depot",
 		Actions: []Action{
 			{Name: "list-items"},
-			{Name: "timly__create-item"}, // bridged-MCP action; FQN = timly__timly__create-item
+			{Name: "depot__create-item"}, // bridged-MCP action; FQN = depot__depot__create-item
 		},
 	}
 	if err := reg.Register(cap, &mockExecutor{}); err != nil {

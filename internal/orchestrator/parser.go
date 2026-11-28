@@ -533,7 +533,7 @@ func toolFQN(plugin, action string) string {
 // require a function name to match ^[a-zA-Z0-9_-]{1,64}$, which rejects the dot.
 // The dot is tolerated only for backward compatibility: dot-trained LLM output,
 // persisted scheduler jobs, and session-history rows composed before the switch.
-// An action name may itself contain "__" (e.g. the MCP-bridged "timly__create-item"),
+// An action name may itself contain "__" (e.g. the MCP-bridged "depot__create-item"),
 // so the first "__" is the unambiguous plugin/action boundary (no plugin contains "__").
 func parseToolName(s string) (plugin, action string, err error) {
 	return toolfqn.Split(s)

@@ -49,7 +49,7 @@ func TestEstimateMessageTokens_CountsToolCallArguments(t *testing.T) {
 		Role: provider.RoleAssistant,
 		ToolCalls: []provider.ToolCall{{
 			ID:        "call_1",
-			Name:      "timly__list-items",
+			Name:      "depot__list-items",
 			Arguments: map[string]string{"query": strings.Repeat("org_unit_id:961 AND ", 40)},
 		}},
 	}
@@ -84,12 +84,12 @@ func TestEstimateMessageTokens_ChargesPerMessageFraming(t *testing.T) {
 
 func TestEstimateToolTokens(t *testing.T) {
 	// Tool definitions ride on every request but are not messages. Measured at
-	// 552 tokens each for the real Timly catalogue — 22 081 for the 40-tool cap.
+	// 552 tokens each for a real MCP tool catalogue — 22 081 for the 40-tool cap.
 	if got := estimateToolTokens(nil); got != 0 {
 		t.Errorf("no tools should cost nothing, got %d", got)
 	}
 	tools := []provider.ToolDefinition{{
-		Name:        "timly__list-persons",
+		Name:        "depot__list-persons",
 		Description: strings.Repeat("List persons via a Lucene query. ", 60),
 		Parameters: map[string]interface{}{"type": "object", "properties": map[string]interface{}{
 			"query": map[string]interface{}{"type": "string"},
@@ -216,7 +216,7 @@ func TestFitRequestToWindow_ChargesForToolDefinitions(t *testing.T) {
 	withTools := &provider.CompletionRequest{
 		Messages: sixMessages(),
 		Tools: []provider.ToolDefinition{{
-			Name:        "timly__list-items",
+			Name:        "depot__list-items",
 			Description: strings.Repeat("List items via a Lucene query. ", 70),
 		}},
 	}

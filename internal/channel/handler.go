@@ -198,7 +198,7 @@ func NewMessageHandler(cfg HandlerConfig) pkg.MessageHandler {
 		}
 
 		// Scope the turn to a specific workflow agent when the channel sends one
-		// (e.g. the Timly AI Workflows chat). The orchestrator injects that
+		// (e.g. a workflow chat). The orchestrator injects that
 		// agent's context into the system prompt so it answers as the workflow.
 		if agentID := msg.Metadata["agent_id"]; agentID != "" {
 			ctx = actor.WithAgentID(ctx, agentID)

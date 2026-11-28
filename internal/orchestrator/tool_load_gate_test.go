@@ -379,7 +379,7 @@ func TestRun_UnloadedWriteAsksNoConfirmationUntilCalledAgain(t *testing.T) {
 // wasted approval plus a SECOND prompt for the model's corrected retry
 // (observed as the double-confirm in ai_eval
 // checkout/put_in_container_by_barcode, where the model called action
-// "timly__load_tools" under plugin "timly"). The gate must also stay free of
+// "depot__load_tools" under plugin "depot"). The gate must also stay free of
 // side effects on the skip: no messages, no pending call.
 func TestMaybeRequireConfirmation_UnresolvableCallNeverPrompts(t *testing.T) {
 	exec := &countingExecutor{}

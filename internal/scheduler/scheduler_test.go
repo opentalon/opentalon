@@ -104,7 +104,7 @@ func TestJobParseAction(t *testing.T) {
 		// (remindMe writes reminder__say; create_job/remind_me schemas tell the
 		// LLM to use plugin__action). Must decode back to the same parts.
 		{"reminder__say", "reminder", "say", false},
-		{"timly__timly__create-item", "timly", "timly__create-item", false},
+		{"depot__depot__create-item", "depot", "depot__create-item", false},
 		// Legacy dot form — still tolerated for jobs persisted before the switch.
 		{"content.check_violations", "content", "check_violations", false},
 		{"reports.generate", "reports", "generate", false},

@@ -3,28 +3,28 @@ package orchestrator
 import "testing"
 
 // A bridged MCP server registers its tools under the "<server>__<tool>" action
-// name (e.g. "timly__list-persons"), and the orchestrator prefixes the plugin,
-// so the canonical FQN offered to the model is "timly__timly__list-persons".
+// name (e.g. "depot__list-persons"), and the orchestrator prefixes the plugin,
+// so the canonical FQN offered to the model is "depot__depot__list-persons".
 // gpt-oss-class models routinely mangle that name two ways at once — dropping a
 // prefix and/or typing "_" where the canonical carries "-":
 //
-//	timly__timly__list-persons  (canonical)
-//	timly__timly__list_persons  (underscore — the variant proven to trigger the bug)
-//	timly__list-persons         (one prefix dropped)
-//	timly__list_persons
+//	depot__depot__list-persons  (canonical)
+//	depot__depot__list_persons  (underscore — the variant proven to trigger the bug)
+//	depot__list-persons         (one prefix dropped)
+//	depot__list_persons
 //	list-persons                (both prefixes dropped)
 //	list_persons
 //
-// toolfqn.Split turns each into (plugin="timly", action=<remainder>). Every one
-// must resolve back to the registered "timly__list-persons". The regression:
+// toolfqn.Split turns each into (plugin="depot", action=<remainder>). Every one
+// must resolve back to the registered "depot__list-persons". The regression:
 // the pre-fix candidate generator ran ReplaceAll(action, "_", "-") across the
-// whole string, corrupting the "__" separator ("timly__list_persons" ->
-// "timly--list-persons") so the read-only flag was missed.
+// whole string, corrupting the "__" separator ("depot__list_persons" ->
+// "depot--list-persons") so the read-only flag was missed.
 
 const (
-	readServer  = "timly"
-	readAction  = "timly__list-persons" // registered read-only action
-	writeAction = "timly__assign-item"  // registered mutating action
+	readServer  = "depot"
+	readAction  = "depot__list-persons" // registered read-only action
+	writeAction = "depot__assign-item"  // registered mutating action
 )
 
 func toolNameRegistry(t *testing.T) *ToolRegistry {
@@ -54,13 +54,13 @@ func contains(candidates []string, want string) bool {
 }
 
 // TestActionNameCandidates_SeparatorSafe pins the pure candidate generator:
-// every mangled spelling must yield the registered "timly__list-persons", and
+// every mangled spelling must yield the registered "depot__list-persons", and
 // the "__" separator must never be corrupted into "--".
 func TestActionNameCandidates_SeparatorSafe(t *testing.T) {
 	// (plugin, action) as toolfqn.Split would hand them over.
 	mangled := []string{
-		"timly__list-persons",
-		"timly__list_persons", // the proven bug trigger
+		"depot__list-persons",
+		"depot__list_persons", // the proven bug trigger
 		"list-persons",
 		"list_persons",
 	}
@@ -70,7 +70,7 @@ func TestActionNameCandidates_SeparatorSafe(t *testing.T) {
 			t.Errorf("actionNameCandidates(%q, %q) = %v; missing canonical %q",
 				readServer, action, got, readAction)
 		}
-		if contains(got, "timly--list-persons") {
+		if contains(got, "depot--list-persons") {
 			t.Errorf("actionNameCandidates(%q, %q) = %v; leaked separator-corrupted form",
 				readServer, action, got)
 		}
@@ -85,7 +85,7 @@ func TestActionNameCandidates_SeparatorSafe(t *testing.T) {
 // TestActionNameCandidates_NoDuplicates keeps the candidate set tidy (the fix
 // dedups; a caller iterating them should not re-check the same name).
 func TestActionNameCandidates_NoDuplicates(t *testing.T) {
-	got := actionNameCandidates(readServer, "timly__list_persons")
+	got := actionNameCandidates(readServer, "depot__list_persons")
 	seen := map[string]bool{}
 	for _, c := range got {
 		if seen[c] {
@@ -102,8 +102,8 @@ func TestActionNameCandidates_NoDuplicates(t *testing.T) {
 func TestIsActionReadOnly_ResolvesMangledReadTool(t *testing.T) {
 	reg := toolNameRegistry(t)
 	for _, action := range []string{
-		"timly__list-persons",
-		"timly__list_persons", // proven bug trigger — pre-fix returned false here
+		"depot__list-persons",
+		"depot__list_persons", // proven bug trigger — pre-fix returned false here
 		"list-persons",
 		"list_persons",
 	} {
@@ -121,8 +121,8 @@ func TestIsActionReadOnly_ResolvesMangledReadTool(t *testing.T) {
 func TestIsActionReadOnly_WriteToolNeverReadOnly(t *testing.T) {
 	reg := toolNameRegistry(t)
 	for _, action := range []string{
-		"timly__assign-item",
-		"timly__assign_item",
+		"depot__assign-item",
+		"depot__assign_item",
 		"assign-item",
 		"assign_item",
 	} {
@@ -140,7 +140,7 @@ func TestIsActionReadOnly_UnknownFailsClosed(t *testing.T) {
 	reg := toolNameRegistry(t)
 	cases := []struct{ plugin, action string }{
 		{readServer, "totally-unknown"},
-		{readServer, "timly__does-not-exist"},
+		{readServer, "depot__does-not-exist"},
 		{"no-such-plugin", "list-persons"},
 	}
 	for _, tc := range cases {

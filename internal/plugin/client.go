@@ -309,7 +309,7 @@ func (c *Client) handleCallback(ctx context.Context, stream pluginpb.PluginServi
 // never sees them as tool arguments. The enriched ctx flows down through
 // every nested callback (handleCallback reuses the outer Execute ctx), so
 // setting it once at the workflow entrypoint reaches the leaf MCP tool call
-// where contextargs.EntityID is injected as an X-Timly-User-Id header.
+// where contextargs.EntityID is injected as a user-id header.
 //
 // No reserved keys → ctx and args pass through untouched (the common,
 // profile-carrying interactive path is unaffected).

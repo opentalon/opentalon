@@ -493,7 +493,7 @@ func TestEmitPreparerDecision_NestedBlocksRoundTrip(t *testing.T) {
 			InjectedBytes: 1024,
 		},
 		Tools: events.PreparerDecisionToolsBlock{
-			Tier1New: []string{"timly__list-items"},
+			Tier1New: []string{"depot__list-items"},
 		},
 	})
 
@@ -519,7 +519,7 @@ func TestEmitPreparerDecision_NestedBlocksRoundTrip(t *testing.T) {
 	if p.Knowledge.InjectedBytes != 1024 {
 		t.Errorf("Knowledge.InjectedBytes = %d", p.Knowledge.InjectedBytes)
 	}
-	if len(p.Tools.Tier1New) != 1 || p.Tools.Tier1New[0] != "timly__list-items" {
+	if len(p.Tools.Tier1New) != 1 || p.Tools.Tier1New[0] != "depot__list-items" {
 		t.Errorf("Tools.Tier1New = %v", p.Tools.Tier1New)
 	}
 }

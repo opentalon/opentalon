@@ -1476,7 +1476,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	// preparer-phase events (knowledge_retrieval / glossary_retrieval /
 	// tool_retrieval / preparer_decision) and turn_start emitted later
 	// in this turn surface as children of user_message — matching the
-	// tree shape consumers (api-plugin aggregations, Timly review UI)
+	// tree shape consumers (api-plugin aggregations, a review UI)
 	// rely on per RFC #249.
 	userMessageID := emit.EmitUserMessage(ctx, o.eventSink, userMessage)
 	ctx = emit.WithParent(ctx, userMessageID)
@@ -3516,7 +3516,7 @@ func (o *Orchestrator) decideConfirmation(ctx context.Context, call ToolCall) (g
 		return gateDecision{outcome: gateExecute}, nil
 	}
 	// A call whose action does not resolve at all — a hallucinated or mangled
-	// name (e.g. plugin "timly", action "timly__load_tools") — will be refused
+	// name (e.g. plugin "depot", action "depot__load_tools") — will be refused
 	// by executeCall's not-found path, so it must not cost the user an approval
 	// either. callToUnloadedTool deliberately returns false for these (the
 	// not-found refusal owns that error), and callRequiresConfirmation below
@@ -6956,7 +6956,7 @@ func (o *Orchestrator) SyncActions(ctx context.Context) {
 // refreshed by the periodic capability poll.
 //
 // A plugin exposed under alias names (e.g. the mcp bridge appears in the corpus
-// as "timly") is stored under those alias names — matching the startup
+// as "depot") is stored under those alias names — matching the startup
 // SyncActions, which iterates the alias-expanded ListCapabilities. We therefore
 // sync under the alias identity, not the raw plugin name; syncing the raw name
 // would write a duplicate corpus under a plugin name that retrieval never

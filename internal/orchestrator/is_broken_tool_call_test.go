@@ -14,7 +14,7 @@ func TestIsBrokenToolCall(t *testing.T) {
 	}{
 		{"compact canonical __", "[tool_call] inventory__list-items(category_id: 5)", false},
 		{"compact legacy dot", "[tool_call] reminder.say", false},
-		{"json body", "[tool_call]\n{\"tool\":\"timly__list-items\",\"args\":{}}\n[/tool_call]", false},
+		{"json body", "[tool_call]\n{\"tool\":\"depot__list-items\",\"args\":{}}\n[/tool_call]", false},
 		{"no tool_call marker", "Just a normal assistant answer.", false},
 
 		{"dot only", "[tool_call] .", true},

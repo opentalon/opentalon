@@ -19,12 +19,12 @@ import (
 //
 // The "_"<->"-" toggling is SEPARATOR-SAFE: it is applied only within each
 // "__"-delimited segment, never across the "__" plugin/action separator a
-// bridged MCP action name embeds (e.g. "timly__list-persons", whose canonical
-// FQN is "timly__timly__list-persons"). A whole-string ReplaceAll would rewrite
-// that separator too — turning a model-emitted "timly__list_persons" into
-// "timly--list-persons", which matches no registered name — so a read-only tool
+// bridged MCP action name embeds (e.g. "depot__list-persons", whose canonical
+// FQN is "depot__depot__list-persons"). A whole-string ReplaceAll would rewrite
+// that separator too — turning a model-emitted "depot__list_persons" into
+// "depot--list-persons", which matches no registered name — so a read-only tool
 // would miss its flag and fall through to a needless confirmation prompt.
-// Segment-wise toggling yields "timly__list-persons" and resolves. Because it
+// Segment-wise toggling yields "depot__list-persons" and resolves. Because it
 // only swaps the two intra-name separator characters, it can never rewrite one
 // tool's name into a different tool's.
 func actionNameCandidates(plugin, action string) []string {

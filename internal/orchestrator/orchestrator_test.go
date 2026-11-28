@@ -3001,7 +3001,7 @@ func TestSyncActionsCarriesKeepPlugins(t *testing.T) {
 }
 
 func TestSyncPluginActionsSyncsUnderAliasName(t *testing.T) {
-	// A plugin exposed under an alias (the mcp bridge appears as "timly") must be
+	// A plugin exposed under an alias (the mcp bridge appears as "depot") must be
 	// synced to the corpus under the alias name, not the raw plugin name — so the
 	// poll / late-load path matches the startup SyncActions (which iterates the
 	// alias-expanded ListCapabilities) and doesn't write a duplicate corpus under
@@ -3017,9 +3017,9 @@ func TestSyncPluginActionsSyncsUnderAliasName(t *testing.T) {
 	}})
 	_ = registry.Register(PluginCapability{
 		Name: "mcp", Description: "MCP bridge",
-		Actions: []Action{{Name: "timly__create-item", Description: "Create"}},
+		Actions: []Action{{Name: "depot__create-item", Description: "Create"}},
 	}, &echoExecutor{})
-	if err := registry.RegisterAlias("timly", "mcp"); err != nil {
+	if err := registry.RegisterAlias("depot", "mcp"); err != nil {
 		t.Fatalf("RegisterAlias: %v", err)
 	}
 
@@ -3036,8 +3036,8 @@ func TestSyncPluginActionsSyncsUnderAliasName(t *testing.T) {
 		t.Fatal("expected at least one sync_actions call")
 	}
 	for _, p := range payloads {
-		if !strings.Contains(p, `"plugin_name":"timly"`) {
-			t.Errorf("sync payload should use the alias name timly: %s", p)
+		if !strings.Contains(p, `"plugin_name":"depot"`) {
+			t.Errorf("sync payload should use the alias name depot: %s", p)
 		}
 		if strings.Contains(p, `"plugin_name":"mcp"`) {
 			t.Errorf("sync payload must NOT use the raw plugin name mcp: %s", p)

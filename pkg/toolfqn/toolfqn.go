@@ -42,8 +42,8 @@ func Join(plugin, action string) string {
 // Split decodes a tool FQN into its plugin and action parts. Both parts must be
 // valid identifiers, which rejects natural-language fragments an LLM might emit.
 //
-// An action name may itself contain "__" (e.g. the MCP-bridged "timly__create-item",
-// whose canonical FQN is "timly__timly__create-item"), so both branches resolve the
+// An action name may itself contain "__" (e.g. the MCP-bridged "depot__create-item",
+// whose canonical FQN is "depot__depot__create-item"), so both branches resolve the
 // boundary deterministically:
 //   - Legacy dot form is tried FIRST, splitting on the LAST '.', so a dotted
 //     "<plugin>.<action>" is disambiguated by its dot before any "__" is considered.

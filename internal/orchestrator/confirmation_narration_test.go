@@ -23,7 +23,7 @@ func TestNarrateConfirmation_FeedsRecentContextAndReturnsLLMText(t *testing.T) {
 		{Role: provider.RoleUser, Content: "lösche die Abräumwagen"},
 		{Role: provider.RoleUser, Content: "Items: 2 total • Abräumwagen [id: 2134281] • Abräumwagen [id: 2134285]"},
 	}
-	call := ToolCall{Action: "timly.delete-item", Args: map[string]string{"scope_token": "scope_xyz"}}
+	call := ToolCall{Action: "depot.delete-item", Args: map[string]string{"scope_token": "scope_xyz"}}
 
 	got := orch.narrateConfirmation(context.Background(), recent, call, "lösche die Abräumwagen", "")
 
@@ -81,7 +81,7 @@ func TestNarrateConfirmation_SingleRecordPromptDemandsFields(t *testing.T) {
 	orch := NewWithRules(llm, &fakeParser{}, NewToolRegistry(),
 		state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
 
-	call := ToolCall{Action: "timly.update-item", Args: map[string]string{"id": "42", "serial_number": "X-9"}}
+	call := ToolCall{Action: "depot.update-item", Args: map[string]string{"id": "42", "serial_number": "X-9"}}
 	orch.narrateConfirmation(context.Background(), nil, call, "setz die Seriennummer auf X-9", "")
 
 	if len(llm.requests) != 1 {
@@ -205,7 +205,7 @@ func TestNarrateConfirmation_FollowsTheToolsHint(t *testing.T) {
 	llm := &capturingLLM{responses: []string{"Ich zeige Ihnen, wie Sie „Bleistift HB“ anlegen. Loslegen?"}}
 	registry := NewToolRegistry()
 	if err := registry.Register(PluginCapability{
-		Name: "timly",
+		Name: "depot",
 		Actions: []Action{{
 			Name:             "walk-through-task",
 			ConfirmationHint: "Ask in one sentence whether to show how the example item is created.",
@@ -215,7 +215,7 @@ func TestNarrateConfirmation_FollowsTheToolsHint(t *testing.T) {
 	}
 	orch := NewWithRules(llm, &fakeParser{}, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
 
-	call := ToolCall{Plugin: "timly", Action: "walk-through-task", Args: map[string]string{"task": "create_item", "example_name": "Bleistift HB"}}
+	call := ToolCall{Plugin: "depot", Action: "walk-through-task", Args: map[string]string{"task": "create_item", "example_name": "Bleistift HB"}}
 	got := orch.narrateConfirmation(context.Background(), nil, call, "Wie lege ich einen Bleistift an?", "")
 
 	if got != "Ich zeige Ihnen, wie Sie „Bleistift HB“ anlegen. Loslegen?" {
@@ -238,7 +238,7 @@ func TestNarrateConfirmation_FollowsTheToolsHint(t *testing.T) {
 	}
 
 	// Without a hint the general rules apply as before.
-	plain := ToolCall{Plugin: "timly", Action: "update-item", Args: map[string]string{"id": "7"}}
+	plain := ToolCall{Plugin: "depot", Action: "update-item", Args: map[string]string{"id": "7"}}
 	orch.narrateConfirmation(context.Background(), nil, plain, "ändere die Seriennummer", "")
 	for _, m := range llm.requests[1].Messages {
 		if m.Role == provider.RoleSystem && !strings.Contains(m.Content, "field: previous value") {
@@ -257,19 +257,19 @@ func TestNarrateConfirmation_FollowsTheToolsHint(t *testing.T) {
 
 // TestNarrateConfirmation_HintFoundUnderMCPNames pins the lookup through the
 // name normalisation the mcp-plugin needs: the manifest carries the prefixed
-// form ("timly__walk-through-task"), the model emits the bare one.
+// form ("depot__walk-through-task"), the model emits the bare one.
 func TestNarrateConfirmation_HintFoundUnderMCPNames(t *testing.T) {
 	llm := &capturingLLM{responses: []string{"Loslegen?"}}
 	registry := NewToolRegistry()
 	if err := registry.Register(PluginCapability{
-		Name:    "timly",
-		Actions: []Action{{Name: "timly__walk-through-task", ConfirmationHint: "Ask whether to show it."}},
+		Name:    "depot",
+		Actions: []Action{{Name: "depot__walk-through-task", ConfirmationHint: "Ask whether to show it."}},
 	}, &echoExecutor{}); err != nil {
 		t.Fatal(err)
 	}
 	orch := NewWithRules(llm, &fakeParser{}, registry, state.NewMemoryStore(""), state.NewSessionStore(""), OrchestratorOpts{})
 
-	orch.narrateConfirmation(context.Background(), nil, ToolCall{Plugin: "timly", Action: "walk-through-task"}, "zeig es mir", "")
+	orch.narrateConfirmation(context.Background(), nil, ToolCall{Plugin: "depot", Action: "walk-through-task"}, "zeig es mir", "")
 
 	for _, m := range llm.requests[0].Messages {
 		if m.Role == provider.RoleSystem && !strings.Contains(m.Content, "Ask whether to show it.") {

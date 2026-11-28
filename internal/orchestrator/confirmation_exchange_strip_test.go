@@ -25,11 +25,11 @@ func TestStrip_ResolvedExchangesDropped(t *testing.T) {
 		{Role: provider.RoleUser, Content: "Please create three: 'Box A', 'Box B' and 'Box C'."},
 		{Role: provider.RoleAssistant, Content: "This will create Box A. Shall I go ahead?", PromptType: provider.PromptTypeToolConfirmation},
 		{Role: provider.RoleUser, Content: "y", PromptType: provider.PromptTypeConfirmationResponse},
-		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "c1", Name: "timly__create-container"}}},
+		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "c1", Name: "depot__create-container"}}},
 		{Role: provider.RoleTool, Content: "Created container: Box A", ToolCallID: "c1"},
 		{Role: provider.RoleAssistant, Content: "This will create Box B. Shall I go ahead?", PromptType: provider.PromptTypeToolConfirmation},
 		{Role: provider.RoleUser, Content: "y", PromptType: provider.PromptTypeConfirmationResponse},
-		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "c2", Name: "timly__create-container"}}},
+		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "c2", Name: "depot__create-container"}}},
 		{Role: provider.RoleTool, Content: "Created container: Box B", ToolCallID: "c2"},
 	}
 

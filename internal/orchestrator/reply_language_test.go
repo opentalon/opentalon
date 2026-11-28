@@ -517,7 +517,7 @@ func TestReplyLanguageDirectiveForHidden_SkipsEarlierHiddenTurn(t *testing.T) {
 
 // No confidently detectable visible user message → no pin, so the caller leaves
 // the turn unpinned and the standing rule (plus the note's own locale hint)
-// applies. This is the "fall back to the Timly language setting" path.
+// applies. This is the "fall back to the host application's language setting" path.
 func TestReplyLanguageDirectiveForHidden_NoDetectableHistory(t *testing.T) {
 	o := newDetectorOrchestrator()
 	history := []provider.Message{

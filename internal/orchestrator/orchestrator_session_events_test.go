@@ -2160,9 +2160,9 @@ func TestOrchestrator_Confirmation_ReadOnlyAction_SkipsPrompt(t *testing.T) {
 
 func TestOrchestrator_Confirmation_ReadOnlyAction_MatchesPrefixedManifestName(t *testing.T) {
 	// Regression: mcp-plugin stores each action's Name in the
-	// prefixed form "server__tool" (e.g. "timly__list-items"). The LLM
+	// prefixed form "server__tool" (e.g. "depot__list-items"). The LLM
 	// emits the same name; parseToolName splits on `__` so the
-	// orchestrator-side ToolCall ends up with Plugin="timly",
+	// orchestrator-side ToolCall ends up with Plugin="depot",
 	// Action="list-items" (the unprefixed form). IsActionReadOnly's
 	// lookup must accept both shapes — without it the short-circuit
 	// would silently miss every mcp-sourced read-only tool.
@@ -2170,7 +2170,7 @@ func TestOrchestrator_Confirmation_ReadOnlyAction_MatchesPrefixedManifestName(t 
 	llm := &nativeToolCallingLLM{
 		toolCalls: []provider.ToolCall{{
 			ID:        "tc-mcp",
-			Name:      "timly__list-items",
+			Name:      "depot__list-items",
 			Arguments: map[string]string{},
 		}},
 		textAfter: "results above",
@@ -2180,13 +2180,13 @@ func TestOrchestrator_Confirmation_ReadOnlyAction_MatchesPrefixedManifestName(t 
 	registry := NewToolRegistry()
 	// Capability registered exactly the way mcp-plugin emits it:
 	// Cap.Name = "mcp", Actions carry the server-prefixed action name.
-	// An alias "timly" -> "mcp" resolves the LLM's call name to the
+	// An alias "depot" -> "mcp" resolves the LLM's call name to the
 	// underlying capability.
 	_ = registry.Register(PluginCapability{
 		Name:    "mcp",
-		Actions: []Action{native(Action{Name: "timly__list-items", ReadOnly: true})},
+		Actions: []Action{native(Action{Name: "depot__list-items", ReadOnly: true})},
 	}, &echoExecutor{})
-	if err := registry.RegisterAlias("timly", "mcp"); err != nil {
+	if err := registry.RegisterAlias("depot", "mcp"); err != nil {
 		t.Fatalf("RegisterAlias: %v", err)
 	}
 	_ = registry.Register(PluginCapability{

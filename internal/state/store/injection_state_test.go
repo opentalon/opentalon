@@ -93,8 +93,8 @@ func TestInjectionState_PreservesToolFields(t *testing.T) {
 	ctx := context.Background()
 	want := state.InjectionState{
 		KnownTools: []state.KnownToolEntry{
-			{ToolName: "timly__list-items", LRURank: 5, Demoted: false},
-			{ToolName: "timly__broken-action", LRURank: 2, Demoted: true},
+			{ToolName: "depot__list-items", LRURank: 5, Demoted: false},
+			{ToolName: "depot__broken-action", LRURank: 2, Demoted: true},
 		},
 	}
 	if err := s.UpdateInjectionState(ctx, id, want); err != nil {

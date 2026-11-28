@@ -276,9 +276,9 @@ func TestPluginAllowed_MetaPluginAlwaysAllowed(t *testing.T) {
 		allowed cachedAllowedPlugins
 	}{
 		{"strict mode without _meta in allowlist",
-			cachedAllowedPlugins{m: map[string]bool{"timly": true}, strict: true}},
+			cachedAllowedPlugins{m: map[string]bool{"depot": true}, strict: true}},
 		{"non-strict mode with AllowedGroups set",
-			cachedAllowedPlugins{m: map[string]bool{"timly": true}, strict: false}},
+			cachedAllowedPlugins{m: map[string]bool{"depot": true}, strict: false}},
 		{"empty allowlist in strict mode",
 			cachedAllowedPlugins{m: map[string]bool{}, strict: true}},
 	}

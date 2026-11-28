@@ -223,22 +223,22 @@ func TestLoadTools_DeduplicatesRepeatedNamesInOneBatch(t *testing.T) {
 }
 
 // TestLoadTools_ResolvesBridgedMCPBareName pins the fix for the
-// double-prefix tool name an mcp bridge produces: a server "timly" surfaces
-// as alias "timly" whose actions keep the "timly__" prefix, so the canonical
-// FQN is "timly__timly__delete-item". The execute path forgives the dropped
+// double-prefix tool name an mcp bridge produces: a server "depot" surfaces
+// as alias "depot" whose actions keep the "depot__" prefix, so the canonical
+// FQN is "depot__depot__delete-item". The execute path forgives the dropped
 // prefix; load_tools must too, or an LLM that addresses the tool as
-// "timly__delete-item" gets a phantom failure and never loads it.
+// "depot__delete-item" gets a phantom failure and never loads it.
 func TestLoadTools_ResolvesBridgedMCPBareName(t *testing.T) {
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
 		Name: "mcp", Description: "MCP bridge",
 		Actions: []Action{
-			{Name: "timly__delete-item", Description: "Permanently remove an item.", Parameters: []Parameter{
+			{Name: "depot__delete-item", Description: "Permanently remove an item.", Parameters: []Parameter{
 				{Name: "scope_token", Description: "act on every item in a frozen set", Required: false},
 			}},
 		},
 	}, &fixedResultExecutor{content: "ok"})
-	if err := registry.RegisterAlias("timly", "mcp"); err != nil {
+	if err := registry.RegisterAlias("depot", "mcp"); err != nil {
 		t.Fatalf("RegisterAlias: %v", err)
 	}
 	memory := state.NewMemoryStore("")
@@ -251,15 +251,15 @@ func TestLoadTools_ResolvesBridgedMCPBareName(t *testing.T) {
 	ctx := actor.WithSessionID(context.Background(), "s1")
 
 	for _, name := range []string{
-		"timly__timly__delete-item", // canonical (split on first "__")
-		"timly__delete-item",        // LLM dropped the redundant server prefix
-		"timly.timly__delete-item",  // legacy dotted form still accepted
-		"timly.delete-item",         // legacy dotted, dropped prefix
+		"depot__depot__delete-item", // canonical (split on first "__")
+		"depot__delete-item",        // LLM dropped the redundant server prefix
+		"depot.depot__delete-item",  // legacy dotted form still accepted
+		"depot.delete-item",         // legacy dotted, dropped prefix
 	} {
 		res := exec.Execute(ctx, ToolCall{ID: "c1", Args: map[string]string{"names": name}})
 		got := decodeLoadResult(t, res)
-		if len(got.Loaded) != 1 || got.Loaded[0] != "timly__timly__delete-item" {
-			t.Errorf("name %q: loaded = %v, want canonical [timly__timly__delete-item]", name, got.Loaded)
+		if len(got.Loaded) != 1 || got.Loaded[0] != "depot__depot__delete-item" {
+			t.Errorf("name %q: loaded = %v, want canonical [depot__depot__delete-item]", name, got.Loaded)
 		}
 	}
 }

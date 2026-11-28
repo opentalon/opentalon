@@ -254,7 +254,7 @@ func (r *ToolRegistry) ListCapabilities() []PluginCapability {
 // Action-name lookup mirrors the normalization that executeCall's
 // resolve loop applies later in the dispatch path: the LLM may emit
 // the bare action ("list-items") while the manifest carries the
-// mcp-plugin-style prefixed form ("timly__list-items"), and
+// mcp-plugin-style prefixed form ("depot__list-items"), and
 // hyphen/underscore variants are tolerated either way. Without this
 // matching the short-circuit would silently miss every mcp-plugin
 // tool — the data would flow through end-to-end but the gate would

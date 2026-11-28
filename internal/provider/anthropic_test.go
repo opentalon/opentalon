@@ -451,7 +451,7 @@ func TestToAnthMessageEmptyContent(t *testing.T) {
 // onto Anthropic's `tools` array with input_schema, and the fully-qualified
 // "__"-separated tool name is sent verbatim (no wire encoding).
 func TestAnthropicToolsInRequest(t *testing.T) {
-	const fqn = "timly__timly__list-items"
+	const fqn = "depot__depot__list-items"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req anthRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -535,7 +535,7 @@ func TestAnthropicToolUseResponse(t *testing.T) {
 					Type:  "tool_use",
 					ID:    "toolu_01",
 					Name:  fqn,
-					Input: json.RawMessage(`{"names":"timly__list-items","limit":5}`),
+					Input: json.RawMessage(`{"names":"depot__list-items","limit":5}`),
 				},
 			},
 			Usage: anthUsage{InputTokens: 20, OutputTokens: 12},
@@ -565,7 +565,7 @@ func TestAnthropicToolUseResponse(t *testing.T) {
 	if tc.ID != "toolu_01" {
 		t.Errorf("tool id = %q", tc.ID)
 	}
-	if tc.Arguments["names"] != "timly__list-items" {
+	if tc.Arguments["names"] != "depot__list-items" {
 		t.Errorf("args[names] = %q", tc.Arguments["names"])
 	}
 	if tc.Arguments["limit"] != "5" {
@@ -613,7 +613,7 @@ func TestToAnthMessageToolResult(t *testing.T) {
 // the arguments re-shaped into the input object.
 func TestToAnthMessageAssistantToolUse(t *testing.T) {
 	p := NewAnthropicProvider("anthropic", "", "key", nil)
-	const fqn = "timly__timly__list-items"
+	const fqn = "depot__depot__list-items"
 
 	msg, err := p.toAnthMessage(Message{
 		Role:    RoleAssistant,
@@ -666,13 +666,13 @@ func TestAnthropicMultipleToolUseBlocks(t *testing.T) {
 				{
 					Type:  "tool_use",
 					ID:    "toolu_a",
-					Name:  "timly__timly__list-items",
+					Name:  "depot__depot__list-items",
 					Input: json.RawMessage(`{"limit":3}`),
 				},
 				{
 					Type:  "tool_use",
 					ID:    "toolu_b",
-					Name:  "timly__timly__show-item",
+					Name:  "depot__depot__show-item",
 					Input: json.RawMessage(`{"id":"42"}`),
 				},
 			},
@@ -693,13 +693,13 @@ func TestAnthropicMultipleToolUseBlocks(t *testing.T) {
 	if len(resp.ToolCalls) != 2 {
 		t.Fatalf("tool_calls = %d, want 2", len(resp.ToolCalls))
 	}
-	if resp.ToolCalls[0].ID != "toolu_a" || resp.ToolCalls[0].Name != "timly__timly__list-items" {
+	if resp.ToolCalls[0].ID != "toolu_a" || resp.ToolCalls[0].Name != "depot__depot__list-items" {
 		t.Errorf("tool_calls[0] = %+v", resp.ToolCalls[0])
 	}
 	if resp.ToolCalls[0].Arguments["limit"] != "3" {
 		t.Errorf("tool_calls[0].args[limit] = %q, want 3", resp.ToolCalls[0].Arguments["limit"])
 	}
-	if resp.ToolCalls[1].ID != "toolu_b" || resp.ToolCalls[1].Name != "timly__timly__show-item" {
+	if resp.ToolCalls[1].ID != "toolu_b" || resp.ToolCalls[1].Name != "depot__depot__show-item" {
 		t.Errorf("tool_calls[1] = %+v", resp.ToolCalls[1])
 	}
 	if resp.ToolCalls[1].Arguments["id"] != "42" {

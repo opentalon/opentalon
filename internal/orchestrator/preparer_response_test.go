@@ -73,8 +73,8 @@ func TestPreparerResponse_FullCandidatesShape(t *testing.T) {
 			}
 		],
 		"tool_candidates": [
-			{"tool_name": "timly.list-tickets", "score": 0.89, "position_in_results": 0},
-			{"tool_name": "timly.show-ticket", "score": 0.71, "position_in_results": 1}
+			{"tool_name": "depot.list-tickets", "score": 0.89, "position_in_results": 0},
+			{"tool_name": "depot.show-ticket", "score": 0.71, "position_in_results": 1}
 		],
 		"retrieval_metrics": {
 			"knowledge": {"search_text_source": "enriched", "top_k": 5, "min_score": 0.45, "latency_ms": 142},
