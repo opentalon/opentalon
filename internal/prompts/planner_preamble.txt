@@ -19,9 +19,9 @@ When an entire arg is one placeholder the resolved value's type is preserved (an
 
 Example:
   [
-    {"id": "step1", "plugin": "timly", "action": "list-containers", "args": {"query": "name:\"Berlin Garage\""}, "depends_on": []},
-    {"id": "step2", "plugin": "timly", "action": "list-items",      "args": {"query": "name:Tesla"},                "depends_on": []},
-    {"id": "step3", "plugin": "timly", "action": "schedule-item",
+    {"id": "step1", "plugin": "depot", "action": "list-containers", "args": {"query": "name:\"Berlin Garage\""}, "depends_on": []},
+    {"id": "step2", "plugin": "depot", "action": "list-items",      "args": {"query": "name:Tesla"},                "depends_on": []},
+    {"id": "step3", "plugin": "depot", "action": "schedule-item",
                 "args": {
                   "container_id": "{{step1.output.containers[0].id}}",
                   "item_id":      "{{step2.output.items[0].id}}",
