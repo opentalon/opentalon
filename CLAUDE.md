@@ -50,7 +50,7 @@ Integration tests that exercise the full orchestrator loop use pre-recorded cass
 Each cassette stores:
 - `prompt_hash` — `prompts.Hash()` at record time; Player fails immediately if this doesn't match
 - `scenarios_hash` — `scenarios.Hash()` at record time; Player fails immediately if this doesn't match
-- `interactions` — sequential LLM responses; Player returns them in order regardless of request content
+- `interactions` — each recorded request with its response; Player returns the responses in order and fails a request whose tools or native preamble differ from the recorded one. Replay and recording run native tool calling, so a wrapper around Player or Recorder must forward `SupportsFeature`.
 
 **Never edit cassette JSON by hand** except for hand-crafted fixtures. Real cassettes must be recorded with `make vcr-record-all`.
 
@@ -63,7 +63,7 @@ To add a new shared scenario (covered by VCR, structural, and eval):
    ```
 4. Commit the YAML change and the generated cassette files together.
 
-To add a VCR-only scenario (needs special setup like custom rules or pipeline):
+To add a VCR-only scenario (needs special setup like custom rules or sub-agents):
 1. Write the test function directly in `internal/orchestrator/vcr_test.go`.
 2. Use `mustPlayer(t, "testdata/vcr/<name>.json")` — skips if cassette missing.
 3. Record with `VCR_RECORD=1 go test -v -run TestVCR<Name> ./internal/orchestrator/...`
