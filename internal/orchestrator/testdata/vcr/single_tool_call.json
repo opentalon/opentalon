@@ -1,7 +1,7 @@
 {
-  "prompt_hash": "07df30f10462922992d91a75b2d181d1a423b7bc37c5018ad476b630c1eefea8",
+  "prompt_hash": "2f585a6f95bdec2f7dd6dcc9f2d56c054e8366c1c0a9c16f6b2d72fde5d4b654",
   "scenarios_hash": "1d912ef58123d3e61740e014b57143ad2f4626c5963c5898aab3b1cbcbe93765",
-  "recorded_at": "2026-11-28T08:07:01.225202Z",
+  "recorded_at": "2026-11-28T08:44:11.555025Z",
   "model": "claude-haiku-4-5-20251001",
   "interactions": [
     {
@@ -38,12 +38,12 @@
         ]
       },
       "response": {
-        "id": "msg_011ChUywGMRVN9UspakTYRNN",
+        "id": "msg_011ChV2mfzJLBP5Sq4eZUeQ7",
         "model": "claude-haiku-4-5-20251001",
-        "content": "I'll analyze the code in myrepo for you. Let me load the GitLab analysis tool first.",
+        "content": "I'll load the GitLab code analysis tool and then analyze the code in myrepo for you.",
         "tool_calls": [
           {
-            "id": "toolu_01Dhgh1egS6ESjVkRHq1LMWA",
+            "id": "toolu_01VFZju4SrTsvL6bbdDiTqRn",
             "name": "_meta__load_tools",
             "arguments": {
               "names": "gitlab__analyze_code"
@@ -52,7 +52,7 @@
         ],
         "usage": {
           "input_tokens": 1974,
-          "output_tokens": 84
+          "output_tokens": 83
         }
       }
     },
@@ -70,10 +70,10 @@
           },
           {
             "role": "assistant",
-            "content": "I'll analyze the code in myrepo for you. Let me load the GitLab analysis tool first.",
+            "content": "I'll load the GitLab code analysis tool and then analyze the code in myrepo for you.",
             "tool_calls": [
               {
-                "id": "toolu_01Dhgh1egS6ESjVkRHq1LMWA",
+                "id": "toolu_01VFZju4SrTsvL6bbdDiTqRn",
                 "name": "_meta__load_tools",
                 "arguments": {
                   "names": "gitlab__analyze_code"
@@ -84,7 +84,7 @@
           {
             "role": "tool",
             "content": "{\"loaded\":[\"gitlab__analyze_code\"],\"ready\":true,\"instruction\":\"Loaded tools are callable NOW. Keep executing the user's ORIGINAL request in this same turn until it is fully done — an intermediate lookup (resolving a person/item id) is not done: follow it with the call the request actually asked for. Never end the turn to report loaded tools or to ask in free text whether to proceed; write tools trigger the system's own confirmation when called.\"}",
-            "tool_call_id": "toolu_01Dhgh1egS6ESjVkRHq1LMWA"
+            "tool_call_id": "toolu_01VFZju4SrTsvL6bbdDiTqRn"
           }
         ],
         "tools": [
@@ -122,12 +122,12 @@
         ]
       },
       "response": {
-        "id": "msg_011ChUywLnKyV1q5qMZ8JyDw",
+        "id": "msg_011ChV2mkWQ85XYEEPPrnrCB",
         "model": "claude-haiku-4-5-20251001",
         "content": "Now I'll analyze the code in myrepo:",
         "tool_calls": [
           {
-            "id": "toolu_01919WMDFveDpvac44VCS5ri",
+            "id": "toolu_01TjCN692XntgNDrYhSYG4TX",
             "name": "gitlab__analyze_code",
             "arguments": {
               "repo": "myrepo"
@@ -135,7 +135,7 @@
           }
         ],
         "usage": {
-          "input_tokens": 2281,
+          "input_tokens": 2280,
           "output_tokens": 69
         }
       }
@@ -154,10 +154,10 @@
           },
           {
             "role": "assistant",
-            "content": "I'll analyze the code in myrepo for you. Let me load the GitLab analysis tool first.",
+            "content": "I'll load the GitLab code analysis tool and then analyze the code in myrepo for you.",
             "tool_calls": [
               {
-                "id": "toolu_01Dhgh1egS6ESjVkRHq1LMWA",
+                "id": "toolu_01VFZju4SrTsvL6bbdDiTqRn",
                 "name": "_meta__load_tools",
                 "arguments": {
                   "names": "gitlab__analyze_code"
@@ -168,14 +168,14 @@
           {
             "role": "tool",
             "content": "{\"loaded\":[\"gitlab__analyze_code\"],\"ready\":true,\"instruction\":\"Loaded tools are callable NOW. Keep executing the user's ORIGINAL request in this same turn until it is fully done — an intermediate lookup (resolving a person/item id) is not done: follow it with the call the request actually asked for. Never end the turn to report loaded tools or to ask in free text whether to proceed; write tools trigger the system's own confirmation when called.\"}",
-            "tool_call_id": "toolu_01Dhgh1egS6ESjVkRHq1LMWA"
+            "tool_call_id": "toolu_01VFZju4SrTsvL6bbdDiTqRn"
           },
           {
             "role": "assistant",
             "content": "Now I'll analyze the code in myrepo:",
             "tool_calls": [
               {
-                "id": "toolu_01919WMDFveDpvac44VCS5ri",
+                "id": "toolu_01TjCN692XntgNDrYhSYG4TX",
                 "name": "gitlab__analyze_code",
                 "arguments": {
                   "repo": "myrepo"
@@ -186,7 +186,7 @@
           {
             "role": "tool",
             "content": "executed gitlab.analyze_code",
-            "tool_call_id": "toolu_01919WMDFveDpvac44VCS5ri"
+            "tool_call_id": "toolu_01TjCN692XntgNDrYhSYG4TX"
           }
         ],
         "tools": [
@@ -224,12 +224,12 @@
         ]
       },
       "response": {
-        "id": "msg_011ChUywQjhHsGdswxBjJJQ2",
+        "id": "msg_011ChV2mpQYy8kvRfV48bpxg",
         "model": "claude-haiku-4-5-20251001",
-        "content": "The code analysis for myrepo has been completed. The analysis tool has scanned the repository and generated insights about the codebase. If you'd like to see specific details about code quality issues, vulnerabilities, test coverage, or other aspects, please let me know!",
+        "content": "The code analysis for myrepo has been completed. The tool has analyzed the repository and generated results. Would you like me to help you interpret specific findings or dive deeper into any particular aspect of the analysis?",
         "usage": {
-          "input_tokens": 2368,
-          "output_tokens": 59
+          "input_tokens": 2367,
+          "output_tokens": 45
         }
       }
     }
