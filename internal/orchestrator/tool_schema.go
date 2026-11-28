@@ -12,10 +12,6 @@ import (
 // shown. Kept out of orchestrator.go so the schema rules sit together and can
 // be read without the agent loop around them.
 
-// toolDefinition is the native tool definition of one action, its parameters
-// as one JSON Schema object. OnDemand is the caller's to set. warn logs every
-// parameter whose plugin-supplied schema could not be used; a caller passes it
-// for a definition the model is actually sent.
 func toolDefinition(fqn string, action Action, warn bool) provider.ToolDefinition {
 	properties := make(map[string]interface{})
 	var required []string

@@ -27,8 +27,6 @@ const (
 // isRecording returns true when VCR_RECORD=1 is set.
 func isRecording() bool { return os.Getenv("VCR_RECORD") == "1" }
 
-// nativeModel declares a recorded model with native tool calling, the path
-// the player replays.
 func nativeModel(id string) []provider.ModelInfo {
 	return []provider.ModelInfo{{ID: id, Features: []provider.Feature{provider.FeatureTools}}}
 }
@@ -121,9 +119,8 @@ func vcrProviders() []providerFixture {
 }
 
 // withModel wraps an LLMClient so that any Complete call with an empty model
-// field is filled in. Sub-agents and the planner make their own Complete calls
-// without inheriting the profile model, so this wrapper ensures they reach the
-// provider correctly.
+// field is filled in. Sub-agents make their own Complete calls without inheriting
+// the profile model, so this wrapper ensures they reach the provider correctly.
 type withModelLLM struct {
 	inner LLMClient
 	model string
@@ -140,8 +137,6 @@ func (w *withModelLLM) Complete(ctx context.Context, req *provider.CompletionReq
 	return w.inner.Complete(ctx, req)
 }
 
-// SupportsFeature forwards the inner client's support: the VCR player and
-// recorder take the native path, the integration suite's clients the text path.
 func (w *withModelLLM) SupportsFeature(f provider.Feature) bool { return supportsFeature(w.inner, f) }
 
 func supportsFeature(llm LLMClient, f provider.Feature) bool {
@@ -226,10 +221,7 @@ func TestVCRSelfIntroduction(t *testing.T) {
 }
 
 // TestVCRSubprocessParallel drives the full real-LLM path for the parallel
-// sub-agent primitive (#307): the model is steered to hand two code analyses to
-// one `_subprocess__parallel` call, which it loads through `_meta__load_tools`
-// first; each task runs as its own sub-agent, which calls gitlab__analyze_code
-// natively, and the parent synthesizes the answers.
+// sub-agent primitive (#307).
 //
 // Anthropic-only and recorded with MaxParallel=1 ON PURPOSE. The VCR Player
 // replays interactions by position and its pos counter is not mutex-guarded —
@@ -237,10 +229,7 @@ func TestVCRSelfIntroduction(t *testing.T) {
 // be nondeterministic on replay. Serializing to one at a time keeps recording +
 // replay race-free; the concurrency/cap behaviour itself is covered by the
 // barrier-LLM unit test in subprocess_parallel_test.go. Which child runs first
-// still varies, so both run the same tool and every sub-agent request offers
-// the same tools: whichever child consumes which recorded exchange, its
-// requests match the recorded ones, and the parent's final synthesis is a fixed
-// recorded response. withModel supplies the model for sub-agent Complete calls.
+// still varies, so both run the same tool and either child's requests match the recorded ones.
 func TestVCRSubprocessParallel(t *testing.T) {
 	llm, save := vcrLLM(t, "testdata/vcr/subprocess_parallel.json")
 	defer save()
@@ -265,9 +254,9 @@ func TestVCRSubprocessParallel(t *testing.T) {
 	}
 
 	// Assert in BOTH record and replay: the scenario is only meaningful if the
-	// real model drove a _subprocess__parallel fan-out whose children called
-	// their tool natively. Failing at record time signals the prompt/steering
-	// needs adjustment before committing a cassette.
+	// real model actually drove a _subprocess.parallel fan-out. Failing at
+	// record time signals the prompt/steering needs adjustment before committing
+	// a cassette.
 	var tasks []parallelTaskResult
 	for _, tc := range result.ToolCalls {
 		for _, r := range result.Results {
@@ -286,7 +275,7 @@ func TestVCRSubprocessParallel(t *testing.T) {
 			t.Errorf("task %q failed: %s", task.Task, task.Error)
 		}
 	}
-	called := map[string]bool{} // task -> its sub-agent got a native gitlab__analyze_code call
+	called := map[string]bool{}
 	var offered []string
 	for i, ex := range children.exchanges {
 		var names []string
@@ -308,8 +297,6 @@ func TestVCRSubprocessParallel(t *testing.T) {
 	}
 }
 
-// subagentLog passes requests on and keeps every sub-agent exchange, a request
-// whose system message is the sub-agent preamble with its response.
 type subagentLog struct {
 	LLMClient
 	mu        sync.Mutex
@@ -330,8 +317,6 @@ func (l *subagentLog) Complete(ctx context.Context, req *provider.CompletionRequ
 	return resp, err
 }
 
-// TestVCRReplayRefusesTheTextPath replays a tool-calling cassette against an
-// orchestrator on the text path: the player refuses its first request.
 func TestVCRReplayRefusesTheTextPath(t *testing.T) {
 	if isRecording() {
 		t.Skip("replay only")

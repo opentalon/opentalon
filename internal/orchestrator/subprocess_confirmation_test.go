@@ -11,14 +11,10 @@ import (
 	"github.com/opentalon/opentalon/internal/state/store/events"
 )
 
-// executorFunc is a PluginExecutor written inline.
 type executorFunc func(context.Context, ToolCall) ToolResult
 
 func (f executorFunc) Execute(ctx context.Context, call ToolCall) ToolResult { return f(ctx, call) }
 
-// writeTask is the sub-agent task of these tests: its first reply calls the
-// write store__write, which the confirmation plugin asks about, and its second
-// answers.
 const writeTask = "write it"
 
 func writeChild() map[string][]provider.CompletionResponse {
@@ -28,15 +24,11 @@ func writeChild() map[string][]provider.CompletionResponse {
 	}}
 }
 
-// registeredPlugin is a capability and the executor registered for it.
 type registeredPlugin struct {
 	cap  PluginCapability
 	exec PluginExecutor
 }
 
-// gatedSubprocessOrch builds an orchestrator whose confirmation plugin asks for
-// every call (confirmingExecutor), with sub-agents on, the write store__write
-// counting how often it ran, the plugins a test adds, and the session s1.
 func gatedSubprocessOrch(t *testing.T, llm LLMClient, opts OrchestratorOpts, extra ...registeredPlugin) (*Orchestrator, *countingExecutor, *recordingEventSink) {
 	t.Helper()
 	write := &countingExecutor{}
@@ -58,10 +50,6 @@ func gatedSubprocessOrch(t *testing.T, llm LLMClient, opts OrchestratorOpts, ext
 	return NewWithRules(llm, DefaultParser, registry, state.NewMemoryStore(""), sessions, opts), write, sink
 }
 
-// assertRefusedWithoutAsking checks that store__write never ran, that the
-// sub-agent got a refusal naming the call as the call's result, and that nobody
-// was asked: no confirmation_requested event, no question in the session and
-// no pending call.
 func assertRefusedWithoutAsking(t *testing.T, orch *Orchestrator, llm *subagentLLM, write *countingExecutor, sink *recordingEventSink, tools []string) {
 	t.Helper()
 	if n := countEventType(sink.snapshot(), events.TypeConfirmationRequested); n != 0 {
@@ -90,11 +78,6 @@ func assertRefusedWithoutAsking(t *testing.T, orch *Orchestrator, llm *subagentL
 	}
 }
 
-// A sub-agent started by anything but the model's call in the agent loop is
-// refused its gated call the same way, and nothing is asked or stored: through
-// the direct action entry with a chat session id (the scheduler, the exec
-// dispatcher), as a callback of a plugin the agent loop called, on the
-// planner's single-step path and as a preparer's invoke step.
 func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
 	const singleStep = `{"type":"pipeline","steps":[{"id":"1","name":"Delegate","plugin":"_subprocess","action":"run","args":{"task":"` + writeTask + `"}}]}`
 	const invoke = `{"send_to_llm": false, "invoke": {"plugin": "_subprocess", "action": "run", "args": {"task": "` + writeTask + `"}}}`
@@ -102,7 +85,7 @@ func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
 		name      string
 		parent    []provider.CompletionResponse
 		opts      OrchestratorOpts
-		untouched bool // the session must stay exactly as created
+		untouched bool
 		tools     []string
 		run       func(ctx context.Context, orch *Orchestrator) error
 	}{
@@ -147,8 +130,7 @@ func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			llm := &subagentLLM{parent: tc.parent, children: writeChild()}
 			var orch *Orchestrator
-			// A plugin callback runs on the context of the plugin call that
-			// sent it (plugin.Client.handleCallback).
+			// A plugin callback runs on the context of the plugin call that sent it (plugin.Client.handleCallback).
 			hook := executorFunc(func(ctx context.Context, call ToolCall) ToolResult {
 				content, _, err := orch.RunActionResult(WithPluginCaller(ctx, "hook", "review"), "_subprocess", "run", map[string]string{"task": writeTask})
 				if err != nil {
@@ -175,10 +157,6 @@ func TestSubprocessGatedCallOutsideTheAgentLoop(t *testing.T) {
 	}
 }
 
-// Only the model's call in the agent loop carries the interactive marker, with
-// the turn's session store and user message: a plugin the agent loop calls sees
-// it; a call inside a sub-agent and a callback through the direct action entry
-// do not.
 func TestInteractiveTurnMarksOnlyTheAgentLoopsCall(t *testing.T) {
 	seen := map[string]*interactiveTurn{}
 	probe := executorFunc(func(ctx context.Context, call ToolCall) ToolResult {

@@ -1505,8 +1505,6 @@ func TestConfirmationResolvedPayload_V2OmitemptyBackCompat(t *testing.T) {
 	}
 }
 
-// A confirmation_requested event takes the id its caller stored beforehand;
-// without one it gets a generated id, as every other event does.
 func TestEmitConfirmationRequested_PresetID(t *testing.T) {
 	preset, err := NewEventID()
 	if err != nil {

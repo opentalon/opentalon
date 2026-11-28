@@ -178,7 +178,7 @@ func TestPlayerRefusesARequestOffTheRecordedPath(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		sent *provider.CompletionRequest
-		want string // the error's end; "" = replayed
+		want string
 	}{
 		{"the recorded path", request(prompts.OrchestratorPreambleNative, "_meta__load_tools"), ""},
 		{"the text path", request(prompts.OrchestratorPreamble),
@@ -204,7 +204,6 @@ func TestPlayerRefusesARequestOffTheRecordedPath(t *testing.T) {
 	}
 }
 
-// nativeStub is a client with native tool calling.
 type nativeStub struct{ *stubLLM }
 
 func (nativeStub) SupportsFeature(f provider.Feature) bool { return f == provider.FeatureTools }

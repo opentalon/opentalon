@@ -18,23 +18,15 @@ import (
 	"github.com/opentalon/opentalon/internal/state"
 )
 
-// nativeLLM gives a test model native tool calling, the only path a sub-agent
-// runs on, so a fake written for another test can drive one.
 type nativeLLM struct{ LLMClient }
 
 func (nativeLLM) SupportsFeature(f provider.Feature) bool { return f == provider.FeatureTools }
 
-// subagentLLM scripts a parent agent loop and its sub-agents apart. A request
-// whose system message is the sub-agent preamble is a sub-agent's: it is
-// recorded and gets the next reply scripted for its task (its first user
-// message). Every other request is the parent's and gets the next parent
-// reply. Either answers "done" once its script is used up. Parallel sub-agents
-// call it concurrently.
 type subagentLLM struct {
 	mu       sync.Mutex
 	parent   []provider.CompletionResponse
 	children map[string][]provider.CompletionResponse
-	requests []provider.CompletionRequest // the sub-agents' requests, in arrival order
+	requests []provider.CompletionRequest
 }
 
 func (l *subagentLLM) Complete(_ context.Context, req *provider.CompletionRequest) (*provider.CompletionResponse, error) {
@@ -58,7 +50,6 @@ func (l *subagentLLM) Complete(_ context.Context, req *provider.CompletionReques
 
 func (*subagentLLM) SupportsFeature(f provider.Feature) bool { return f == provider.FeatureTools }
 
-// popReply takes the first reply off script, or answers "done" when it is empty.
 func popReply(script *[]provider.CompletionResponse) *provider.CompletionResponse {
 	if len(*script) == 0 {
 		return &provider.CompletionResponse{Content: "done"}
@@ -72,7 +63,6 @@ func callReply(id, name string, args map[string]string) provider.CompletionRespo
 	return provider.CompletionResponse{ToolCalls: []provider.ToolCall{{ID: id, Name: name, Arguments: args}}}
 }
 
-// searchCalls is n replies that each call search__query again.
 func searchCalls(n int) []provider.CompletionResponse {
 	replies := make([]provider.CompletionResponse, n)
 	for i := range replies {
@@ -103,7 +93,6 @@ func (l *subagentLLM) assertTools(t *testing.T, requests int, want ...string) {
 	}
 }
 
-// subprocessResultOf returns the content of the turn's one _subprocess call result.
 func subprocessResultOf(t *testing.T, result *RunResult) string {
 	t.Helper()
 	for i, call := range result.ToolCalls {
@@ -153,8 +142,6 @@ func setupSubprocessOrchestrator(llm LLMClient) *Orchestrator {
 }
 
 func TestSubprocessBasicFork(t *testing.T) {
-	// The parent loads _subprocess__run and calls it; the sub-agent answers
-	// directly; the parent answers from the sub-agent's result.
 	const task = "What is the capital of France?"
 	llm := &subagentLLM{
 		parent: []provider.CompletionResponse{
@@ -183,10 +170,11 @@ func TestSubprocessBasicFork(t *testing.T) {
 func TestSubprocess_ClearsInheritedNativeSentSet(t *testing.T) {
 	// A subprocess derives its ctx from the caller, which — on a native parent
 	// round — carries the parent's sent native tool set. The subprocess sends
-	// its own tools and dispatches child calls as FromLLM, so the tool-load gate
-	// must NOT enforce the parent's set against the subprocess's tools.
-	// Regression guard: a catalog tool the parent never promoted must still run
-	// inside the subprocess, not be answered with a load on call.
+	// its own native tools and dispatches child calls as FromLLM,
+	// so the tool-load gate must NOT enforce the parent's set against the
+	// subprocess's tools. Regression guard: a catalog tool the parent never
+	// promoted must still run inside the subprocess. Pre-fix (inherited set),
+	// it was refused "not loaded", killing the sub-agent on native providers.
 	exec := &countingExecutor{}
 	registry := NewToolRegistry()
 	_ = registry.Register(PluginCapability{
@@ -217,9 +205,6 @@ func TestSubprocess_ClearsInheritedNativeSentSet(t *testing.T) {
 	}
 }
 
-// A sub-agent's structured calls run, and its messages keep each call and its
-// result in the main loop's native shapes: an assistant message with the call
-// (the response's text and thinking on the first only) and a tool-role result.
 func TestSubprocessWithToolCalls(t *testing.T) {
 	const task = "Search for refund policy"
 	thinking := []json.RawMessage{json.RawMessage(`{"type":"thinking","thinking":"look it up"}`)}
@@ -306,9 +291,6 @@ func TestSubprocessIterationLimit(t *testing.T) {
 	}
 }
 
-// Every request of a sub-agent offers exactly its permitted tools: those the
-// caller may call, without _subprocess, the _meta plugin, preparer, guard and
-// user-only actions. Its prompt lists none.
 func TestSubprocessRequestOffersThePermittedTools(t *testing.T) {
 	registry := NewToolRegistry()
 	query := []Parameter{{Name: "q", Description: "Search query", Required: true}}
@@ -342,13 +324,10 @@ func TestSubprocessRequestOffersThePermittedTools(t *testing.T) {
 	}
 }
 
-// A structured call outside the sub-agent's permitted set does not run: its
-// result is an error naming the tool. The allowlist only narrows what the
-// caller may use, and _subprocess is never callable inside a sub-agent.
 func TestSubprocessToolAllowlist(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
-		plugins   []string // the caller's profile plugin list; nil = unrestricted
+		plugins   []string
 		tools     string
 		call      string
 		wantTools []string
@@ -443,8 +422,6 @@ func TestSubprocessEnabled(t *testing.T) {
 	}
 }
 
-// Without native tool calling a sub-agent call fails at once and no request
-// reaches the model, for run and parallel alike.
 func TestSubprocessNeedsNativeToolCalling(t *testing.T) {
 	for _, call := range []ToolCall{
 		{ID: "o1", Plugin: "_subprocess", Action: "run", Args: map[string]string{"task": "t"}},
@@ -575,10 +552,9 @@ func TestSubprocessMaxIterationsCapped(t *testing.T) {
 	}
 }
 
-// A no-tools sub-agent is offered no tools and is pinned to a single
-// iteration, so an adversarial task that keeps emitting (refused) tool calls
-// can't burn several model calls — the determinism/budget guarantee a caller
-// like llm_review relies on.
+// A no-tools sub-agent is pinned to a single iteration, so an adversarial task
+// that keeps emitting (refused) tool calls can't burn several model calls — the
+// determinism/budget guarantee a caller like llm_review relies on.
 func TestSubprocessNoToolsPinsSingleIteration(t *testing.T) {
 	llm := &subagentLLM{children: map[string][]provider.CompletionResponse{"judge": searchCalls(5)}}
 

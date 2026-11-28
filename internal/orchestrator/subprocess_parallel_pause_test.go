@@ -14,17 +14,10 @@ import (
 	"github.com/opentalon/opentalon/internal/state/store/events"
 )
 
-// parallelTasks are the tasks of the parallel call p2: the first reads (c0) and
-// then writes record 7 (c1), the second makes the call it is given (d1), and
-// the third answers at once.
 const parallelTasks = `[{"task":"` + pauseTask + `"},{"task":"update record 8"},{"task":"count records"}]`
 
 var writeRecord8 = callReply("d1", "store__write", map[string]string{"id": "8"})
 
-// parallelPaused is a pause harness, with the plugins extra adds, whose turn
-// paused on p2, the parent's response's only call: the first two children wait
-// for the user's approval of c1 and of second, the third has answered, and the
-// question asks about c1. A waiting child answers once its call has a result.
 func parallelPaused(t *testing.T, sessions SessionStoreInterface, second provider.CompletionResponse, extra ...registeredPlugin) *pauseHarness {
 	t.Helper()
 	h := newPauseHarness(t, sessions, pauseTask)
@@ -56,8 +49,6 @@ func parallelPaused(t *testing.T, sessions SessionStoreInterface, second provide
 	return h
 }
 
-// pausedChildren reads the stored continuation: the child its question asks
-// about, and per child its position and its waiting call or its answer.
 func (h *pauseHarness) pausedChildren(t *testing.T) (int, []string) {
 	t.Helper()
 	var rec struct {
@@ -88,7 +79,6 @@ func (h *pauseHarness) pausedChildren(t *testing.T) (int, []string) {
 	return rec.Subprocess.Asking, children
 }
 
-// outerCall returns how often the parent's history holds p2 and its results.
 func (h *pauseHarness) outerCall(t *testing.T) (calls int, results []string) {
 	t.Helper()
 	for _, m := range h.session(t).Messages {
@@ -102,14 +92,6 @@ func (h *pauseHarness) outerCall(t *testing.T) (calls int, results []string) {
 	return calls, results
 }
 
-// Two children of a parallel call wait at once and the third has answered: all
-// three are kept in the one record, and the user is asked about the first
-// waiting child's call. Its approval, on another pod, runs that call once, the
-// child finishes, and the second child's question is raised in the same turn;
-// approving that runs its call once and ends the outer call. Only then does the
-// parent's history hold the outer call and the joined answers in task order,
-// once, as a parallel call that needs no approval returns them. The outer call
-// itself is never asked about.
 func TestSubprocessParallelAsksOneChildPerTurn(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		h := parallelPaused(t, kind.open(t), writeRecord8)
@@ -159,11 +141,6 @@ func TestSubprocessParallelAsksOneChildPerTurn(t *testing.T) {
 	})
 }
 
-// A rejection of either question, or a reply to it that is neither yes nor no,
-// stops every waiting child: no waiting call runs, the record is gone, and the
-// outer call enters the parent's history once with the stopped-call result,
-// which names the call asked about, every call that ran and the answers of the
-// children that finished.
 func TestSubprocessParallelStopsEveryWaitingChild(t *testing.T) {
 	const first = "\n\nTask 1:\n- did not run: store__write(id=7)\n- ran: look__see()" +
 		"\n\nTask 2:\n- did not run (not asked about yet): store__write(id=8)\n\nTask 3:\n- answer: 3 records"
@@ -171,10 +148,10 @@ func TestSubprocessParallelStopsEveryWaitingChild(t *testing.T) {
 		"\n\nTask 2:\n- did not run: store__write(id=8)\n\nTask 3:\n- answer: 3 records"
 	for _, tc := range []struct {
 		name             string
-		approved         bool // the first question is approved before the answer
+		approved         bool
 		decision, reply  string
-		parent           []provider.CompletionResponse // the parent's replies to the answer
-		response, result string                        // the turn's answer; in the outer call's result
+		parent           []provider.CompletionResponse
+		response, result string
 		writes, requests int
 	}{
 		{"rejection of the first", false, "reject", "reject", nil, confirmationRejectedReply, "the user rejected its call." + first, 0, 4},
@@ -219,10 +196,6 @@ func TestSubprocessParallelStopsEveryWaitingChild(t *testing.T) {
 	}
 }
 
-// After the first child finishes, the next waiting child's call is decided
-// again, its check included, before it is asked about: a check that now
-// refuses the call answers it, nobody is asked, the child goes on with the
-// refusal as the call's result, and the outer call ends in the same turn.
 func TestSubprocessParallelDecidesTheNextChildsCallAgain(t *testing.T) {
 	desk := &checkingExecutor{}
 	desk.check = func(context.Context, ToolCall) (CheckResult, error) {

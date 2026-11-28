@@ -19,14 +19,8 @@ import (
 
 var subOn = SubprocessConfig{Enabled: true, MaxDepth: 2}
 
-// resumeThinking is the thinking of the parent's response that starts the
-// sub-agent as its only call, so only the outer call's message can take it.
 var resumeThinking = []json.RawMessage{json.RawMessage(`{"type":"thinking","thinking":"delegate","signature":"sig"}`)}
 
-// nextPod is another orchestrator over h's session store, plugins, model and
-// sinks, with the confirmation classifier: a pod that takes the next turn.
-// sub sets its sub-agents; slow delays every call of a plugin, and a call its
-// deadline cuts first does not run.
 func (h *pauseHarness) nextPod(t *testing.T, sub SubprocessConfig, slow map[string]time.Duration) *Orchestrator {
 	t.Helper()
 	registry := NewToolRegistry()
@@ -60,11 +54,6 @@ func (h *pauseHarness) nextPod(t *testing.T, sub SubprocessConfig, slow map[stri
 	})
 }
 
-// pausedHarness is a pause harness whose turn has paused on a pod as nextPod
-// builds it. The parent starts the sub-agent (p2) as its response's only call,
-// with reply text and thinking; the parent's response tokens are 6 and 2 for
-// p2, the sub-agent's second response's 5 and 2 for each of its two calls. After
-// its gated call the sub-agent replies more, then "done".
 func pausedHarness(t *testing.T, sessions SessionStoreInterface, sub SubprocessConfig, slow map[string]time.Duration, more ...provider.CompletionResponse) *pauseHarness {
 	t.Helper()
 	h := newPauseHarness(t, sessions, pauseTask)
@@ -86,22 +75,13 @@ func pausedHarness(t *testing.T, sessions SessionStoreInterface, sub SubprocessC
 	return h
 }
 
-// The answer to a paused sub-agent's question, on any pod. An approval runs
-// the call once, the sub-agent goes on with the tools it had, and its answer
-// is the outer call's result; the same call right after the resume is stopped
-// as a repeat. A rejection ends the turn with the main loop's notice, a reply
-// that is neither is a normal turn of the parent, and an approval on a pod with
-// sub-agents switched off runs nothing: each gives the outer call the
-// stopped-call result. Either way the outer call has one result event, one
-// observation, and enters the parent's history once, with the reply text and
-// thinking of the response that made it, and the record is gone.
 func TestSubprocessAnswerToItsQuestion(t *testing.T) {
 	const stopped = "\n\nTask 1:\n- did not run: store__write(id=7)\n- ran: look__see()"
 	for _, tc := range []struct {
 		name, decision, reply string
-		sub                   SubprocessConfig              // the answering pod's
-		parent                []provider.CompletionResponse // the parent's replies after the pause
-		response, result      string                        // the turn's answer; in the outer call's result
+		sub                   SubprocessConfig
+		parent                []provider.CompletionResponse
+		response, result      string
 		writes, requests      int
 		observed              []string
 	}{
@@ -185,11 +165,6 @@ func TestSubprocessAnswerToItsQuestion(t *testing.T) {
 	}
 }
 
-// A second pod over the same store resumes the sub-agent the first stored; its
-// next gated call raises the second question there, which the first pod
-// resumes in turn. Each gated call runs once, after its own approval, and the
-// outer call ends once. An approval with nothing waiting any more answers as
-// expired and changes nothing.
 func TestSubprocessResumesOnAnotherPodAndAsksAgain(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		h := pausedHarness(t, kind.open(t), subOn, nil, callReply("c3", "store__write", map[string]string{"id": "8"}))
@@ -224,11 +199,7 @@ func TestSubprocessResumesOnAnotherPodAndAsksAgain(t *testing.T) {
 	})
 }
 
-// A resumed sub-agent has the running time it had left, not a new timeout.
-// c0 uses 70 ms of the 120 ms, so about 50 ms are left at the pause. The
-// approved call takes 70 ms and runs: it has the deadline every call gets.
-// The next call takes 70 ms too, longer than what is left and shorter than
-// the timeout, and is cut.
+// c0 uses 70 ms of the 120 ms, so about 50 ms are left at the pause: the approved 70 ms call runs, the next 70 ms call is cut.
 func TestSubprocessResumeKeepsItsRunningTime(t *testing.T) {
 	sub := SubprocessConfig{Enabled: true, MaxDepth: 2, DefaultTimeout: 120 * time.Millisecond}
 	slow := map[string]time.Duration{"look": 70 * time.Millisecond, "store": 70 * time.Millisecond}
@@ -252,7 +223,6 @@ func TestSubprocessResumeKeepsItsRunningTime(t *testing.T) {
 	h.llm.assertTools(t, 4, pauseTools...)
 }
 
-// clearFailingStore fails the next n clears of a pending call.
 type clearFailingStore struct {
 	SessionStoreInterface
 	n int
@@ -266,8 +236,6 @@ func (s *clearFailingStore) SetMetadata(id, key, value string) error {
 	return s.SessionStoreInterface.SetMetadata(id, key, value)
 }
 
-// An answer whose turn cannot clear the record is rejected and leaves the
-// sub-agent paused; the answer that clears it ends the outer call, once.
 func TestSubprocessAnswerThatCannotClearTheRecordLeavesItPaused(t *testing.T) {
 	store := &clearFailingStore{SessionStoreInterface: state.NewSessionStore("")}
 	h := pausedHarness(t, store, subOn, nil)

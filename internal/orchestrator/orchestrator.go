@@ -1621,8 +1621,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	if !hidden {
 		pending = loadPendingRecord(sessions, sessionID)
 	}
-	// A paused sub-agent's record asks about its waiting call; the answer
-	// resumes or stops the sub-agent, and ended is its outer call then.
 	pendingCall, paused := pending.askedCall(), pending.Subprocess
 	var ended *endedSubprocess
 	var pendingMetaClearErr error
@@ -1666,8 +1664,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 				ResolvedBy: resolvedBy,
 			})
 			if c := paused; c != nil {
-				// The sub-agent runs the call and goes on; its answer, or the
-				// stopped-call result, is the outer call's, or it asks again.
 				question, result := o.resumeSubprocess(ctx, sessions, sessionID, userMessage, c)
 				if question != nil {
 					return question, nil
@@ -1767,8 +1763,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			// event; the user gets a fixed notice their client can word in
 			// their language by its action.
 			res := notApprovedResult(resolvedBy, confirmationRejectedReply, "confirmation_rejected")
-			// A record still stored keeps the sub-agent paused: the answer
-			// that clears it ends the outer call.
+			// A record not cleared keeps the sub-agent paused; the answer that clears it ends the outer call.
 			if c := paused; c != nil && pendingMetaClearErr == nil {
 				why := "the user rejected its call"
 				if resolvedBy == resolvedByFallback {
@@ -2359,7 +2354,6 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var totalInputCost, totalOutputCost float64
 	var totalPrice *float64
 	var modelUsed string
-	// A paused sub-agent's outer call this turn ended opens its call records.
 	if ended != nil {
 		result.ToolCalls, result.Results, totalToolCalls = []ToolCall{ended.call}, []ToolResult{ended.result}, 1
 	}
@@ -2425,8 +2419,7 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 	var pairingSeen pairingReported // tool-pairing repairs already reported this turn
 	var repeatCount int
 	var lastUnrun map[string]bool // signatures of the previous response's calls answered without running
-	// The outer call an approval resumed counts as the previous response, so
-	// the same call right after it does not run the sub-agent's work again.
+	// The resumed outer call counts as the previous response, so the same call right after it is stopped as a repeat.
 	if ended != nil && ended.resumed {
 		lastCallSig, repeatCount = toolCallSignature([]ToolCall{ended.call}), 1
 	}
@@ -2976,13 +2969,9 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, userMessage string, f
 			pluginStart := time.Now()
 			toolResult := decision.result
 			if decision.outcome == gateExecute {
-				// The only call whose sub-agent may ask the user (interactiveTurnKey).
 				toolResult = o.executeCall(withInteractiveTurn(ctx, sessions, userMessage), calls[i])
 			}
 			if c := toolResult.Suspended; c != nil {
-				// Its sub-agent waits for the user's approval of a call. The
-				// outer call enters the history, the turn's call records and
-				// the observer only when it completes or is stopped.
 				c.Call, c.ReplyText, c.InputTokens, c.OutputTokens = continuationCallOf(calls[i]), replyText, perCallInput, perCallOutput
 				question, stopped := o.pauseSubprocess(ctx, sessions, sessionID, userMessage, c, calls[i+1:], nativeToolCalls, &thinking, pluginStart)
 				if question != nil {
@@ -3440,10 +3429,7 @@ const (
 	// confirmation plugin, or a call executeCall refuses by OpenTalon's own
 	// lookups); the caller executes it.
 	gateExecute gateOutcome = iota
-	// gateAwaitApproval: the call needs the user's approval and executes
-	// nothing. maybeRequireConfirmation asks the user and stores the call as
-	// pending, and its caller returns the question; a sub-agent's call is
-	// refused instead (subprocessCall).
+	// gateAwaitApproval: the call needs the user's approval and executes nothing.
 	gateAwaitApproval
 	// gateAnswered: the call is answered without being executed, with an
 	// admission refusal or the refusal of its check; the caller records the
@@ -3460,18 +3446,33 @@ type gateDecision struct {
 	result   ToolResult
 }
 
-// maybeRequireConfirmation is the confirmation gate of a call the user's turn
-// makes: it raises a confirmation_requested for a privileged write call and
-// records the pending state. It is used by BOTH the agent loop and the
-// server-side single-step path so the two can never drift into a
-// write-without-consent gap. Its decision is one of three outcomes
-// (gateOutcome): execute the call now, wait for the user's approval (the
-// caller returns the question and executes nothing), or answered with a
-// result (the caller records the result and executes nothing). The decision
-// is decideConfirmation's, which a sub-agent's calls pass as well; only a call
-// that needs the user's approval reaches raiseConfirmation. A non-nil error is
-// the turn's ctx error when the turn ended while the call was checked: the
-// caller returns it; nothing was stored or emitted for the call.
+// maybeRequireConfirmation raises a confirmation_requested for a privileged
+// write call and records the pending state, mirroring the agent-loop gate. It is
+// the single place that decides "does this call need confirmation?" and is used
+// by BOTH the agent loop and the server-side single-step path so the two can
+// never drift into a write-without-consent gap. Its decision is one of three
+// outcomes (gateOutcome): execute the call now, wait for the user's approval
+// (the caller returns the question and executes nothing), or answered with a
+// result (the caller records the result and executes nothing). A call to an
+// action that declares a check is sent for one before the question is worded
+// (checkBeforeConfirmation). A non-nil error is the turn's ctx error when the
+// turn ended while the call was checked: the caller returns it; nothing was
+// stored or emitted for the call.
+//
+// interrupted carries the not-yet-executed calls from the SAME model response
+// that this confirmation abandons (the agent loop stops at the gated call and
+// returns). Each one is recorded into history as an explicit "not executed"
+// exchange BEFORE the confirmation prompt row — without that trace the model
+// later treats its own issued-but-dropped calls as done and reports phantom
+// results (observed: structure/create_category_and_container_type — the second
+// create of a two-call batch vanished and the model announced both as created,
+// inventing an id). The pairs sit before the prompt row so the resolved
+// prompt+reply pair stays adjacent for stripApprovedConfirmationExchanges.
+// interruptedNative says how THIS response's calls are being recorded (the
+// loop's per-response native flag), so the pairs match the surrounding format.
+// thinking holds the response's thinking blocks no stored message has taken
+// yet: a raised confirmation hands them to the first interrupted call's
+// message, else to the pending call (takeThinking). nil holds none.
 func (o *Orchestrator) maybeRequireConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
 	interrupted []ToolCall, interruptedNative bool, thinking *responseThinking,
@@ -3483,22 +3484,12 @@ func (o *Orchestrator) maybeRequireConfirmation(
 	return o.raiseConfirmation(ctx, sessions, sessionID, call, userMessage, interrupted, interruptedNative, thinking), nil
 }
 
-// decideConfirmation is the single place that decides "does this call need
-// confirmation?". It asks nobody and stores nothing: the call executes
-// (gateExecute), is answered without running (gateAnswered, with an admission
-// refusal or the refusal of its check), or needs the user's approval
-// (gateAwaitApproval, without a question). A call to an action that declares a
-// check is sent for one before the question is worded
-// (checkBeforeConfirmation). A non-nil error is ctx's error when ctx ended
-// while the call was checked; nothing was emitted for the call.
+// decideConfirmation asks nobody and stores nothing: parallel sub-agents call it concurrently.
 func (o *Orchestrator) decideConfirmation(ctx context.Context, call ToolCall) (gateDecision, error) {
 	if call.ConfirmationBypass {
 		return gateDecision{outcome: gateExecute}, nil
 	}
-	// The _subprocess run and parallel calls ask nothing: every call the
-	// sub-agent makes passes this decision itself (subprocessCall). They are
-	// exempted here, not marked read-only, because the read-only flag also
-	// drives the phantom-completion guard and loadedAnyWriteTool.
+	// The sub-agent's own calls pass this decision; marking _subprocess read-only would also switch off the phantom-completion guard.
 	if call.Plugin == "_subprocess" {
 		return gateDecision{outcome: gateExecute}, nil
 	}
@@ -3581,25 +3572,6 @@ func (o *Orchestrator) decideConfirmation(ctx context.Context, call ToolCall) (g
 	return gateDecision{outcome: gateAwaitApproval}, nil
 }
 
-// raiseConfirmation asks the user about a call decideConfirmation found to
-// need their approval: it words the question, stores it and the pending call
-// in the session and emits confirmation_requested. The decision it returns is
-// gateAwaitApproval with that question.
-//
-// interrupted carries the not-yet-executed calls from the SAME model response
-// that this confirmation abandons (the agent loop stops at the gated call and
-// returns). Each one is recorded into history as an explicit "not executed"
-// exchange BEFORE the confirmation prompt row — without that trace the model
-// later treats its own issued-but-dropped calls as done and reports phantom
-// results (observed: structure/create_category_and_container_type — the second
-// create of a two-call batch vanished and the model announced both as created,
-// inventing an id). The pairs sit before the prompt row so the resolved
-// prompt+reply pair stays adjacent for stripApprovedConfirmationExchanges.
-// interruptedNative says how THIS response's calls are being recorded (the
-// loop's per-response native flag), so the pairs match the surrounding format.
-// thinking holds the response's thinking blocks no stored message has taken
-// yet: a raised confirmation hands them to the first interrupted call's
-// message, else to the pending call (takeThinking). nil holds none.
 func (o *Orchestrator) raiseConfirmation(
 	ctx context.Context, sessions SessionStoreInterface, sessionID string, call ToolCall, userMessage string,
 	interrupted []ToolCall, interruptedNative bool, thinking *responseThinking,
@@ -3632,12 +3604,6 @@ func (o *Orchestrator) raiseConfirmation(
 	}}
 }
 
-// wordConfirmation words the question about call: narrated by the main LLM in
-// the user's language with the effect explicit (e.g. a batch count), or else a
-// static template. recent is the conversation the narration describes the
-// call from. subagentTask names the task of the sub-agent that makes the call,
-// empty for a main-loop call. spoken is how the question is asked aloud in a
-// spoken turn: the question itself when the narration gave no spoken form.
 func (o *Orchestrator) wordConfirmation(ctx context.Context, recent []provider.Message, call ToolCall, userMessage, subagentTask string) (spoken, question string) {
 	spoken, _, question = takeSpoken(ctx, o.narrateConfirmation(ctx, recent, call, userMessage, subagentTask))
 	if question == "" {
@@ -3652,16 +3618,11 @@ func (o *Orchestrator) wordConfirmation(ctx context.Context, recent []provider.M
 	return spoken, question
 }
 
-// publishConfirmation stores the question as an assistant row and emits
-// confirmation_requested. frameID is the id the question's frame carries,
-// callID the call the event names, eventID the event's id when the caller
-// stored it beforehand (empty: generated). It returns the frame's metadata and
-// the event's id.
 func (o *Orchestrator) publishConfirmation(ctx context.Context, sessions SessionStoreInterface, sessionID, spoken, question, frameID, callID, eventID string) (map[string]string, string) {
 	// Store the prompt so the next turn has context for the reply/amend, and
 	// persist the confirmation-frame metadata on that row so a reloaded client
 	// rebuilds the Approve/Reject buttons from the transcript (the live frame's
-	// metadata is transient). Same map, so reload and live path match.
+	// metadata below is transient). Same map, so reload and live path match.
 	frameMeta := speakAsIs(ctx, spoken, toolConfirmationFrameMetadata(frameID))
 	_ = sessions.AddMessageWithMetadata(sessionID, provider.Message{Role: provider.RoleAssistant, Content: question}, frameMeta)
 	// Buttons are deterministic approve/reject only; amend is a free-text-classifier
@@ -3880,10 +3841,8 @@ Rules:
 // narrateConfirmation produces the user-facing confirmation prompt with the main
 // LLM. It feeds the recent conversation so the model can resolve an opaque
 // scope_token to the count + example records the preceding list call returned,
-// and phrase the question in the user's language. A sub-agent's call
-// (subagentTask set) is described from the sub-agent's messages, and the
-// question says that a sub-agent asks and for which task. Returns "" on any
-// error so the caller falls back to the static template.
+// and phrase the question in the user's language. Returns "" on any error so the
+// caller falls back to the static template.
 func (o *Orchestrator) narrateConfirmation(ctx context.Context, recent []provider.Message, call ToolCall, userMessage, subagentTask string) string {
 	if o.llm == nil {
 		return ""
@@ -5083,8 +5042,7 @@ func (o *Orchestrator) executeCall(ctx context.Context, call ToolCall) ToolResul
 	result = o.guard.ValidateResult(call, result)
 	result = o.guard.Sanitize(result)
 	if result.Suspended != nil {
-		// A paused sub-agent call has no result yet: it emits its
-		// tool_call_result when it completes or is stopped, under this event.
+		// A paused sub-agent call emits its tool_call_result when it ends, under this event.
 		result.Suspended.EventID = emit.ParentID(ctx)
 		return result
 	}
@@ -5276,10 +5234,9 @@ func (o *Orchestrator) admitCall(ctx context.Context, call ToolCall, dispatchSta
 	// answerUnloadedCall loads the tool when load_tools could, and tells the
 	// model to call it again from its description. The gate keys off the set
 	// actually sent this request (recorded on ctx by the agent loop), so it fires
-	// exactly where "unloaded" is meaningful: it is a no-op for text mode (every
-	// tool listed in full inline, no native array), for the sub-agent loop (which
-	// sends its whole permitted set and checks each call against it) and for
-	// host-constructed calls (FromLLM=false). Placed after the plugin /
+	// exactly where "unloaded" is meaningful: it is a no-op for text mode and the
+	// sub-agent loop (neither has a sent native array to judge by) and
+	// for host-constructed calls (FromLLM=false). Placed after the plugin /
 	// user-only gates (a hidden tool is refused for that stronger reason first)
 	// and before arg validation (loading the real schema is the actionable fix,
 	// not the guessed args).
@@ -5725,9 +5682,7 @@ func (o *Orchestrator) RunActionResult(ctx context.Context, plugin, action strin
 		Args:   args,
 	}
 
-	// A plugin's callback runs on the context of the plugin call that sent it
-	// (plugin.Client.handleCallback), which can be the agent loop's own call:
-	// nothing reached through this entry may ask the user.
+	// A plugin callback runs on the context of the call that sent it (plugin.Client.handleCallback): nothing here may ask the user.
 	result := o.executeCall(withoutInteractiveTurn(ctx), call)
 	if result.Error != "" {
 		return "", "", fmt.Errorf("%s: %s", toolFQN(plugin, action), result.Error)
@@ -5735,8 +5690,6 @@ func (o *Orchestrator) RunActionResult(ctx context.Context, plugin, action strin
 	return result.Content, result.StructuredContent, nil
 }
 
-// structuredCalls returns a response's native tool calls as model-originated
-// calls, in the response's order.
 func structuredCalls(tcs []provider.ToolCall) []ToolCall {
 	calls := make([]ToolCall, 0, len(tcs))
 	for idx, tc := range tcs {
@@ -5812,10 +5765,7 @@ type pendingToolCallMeta struct {
 	// user approves. Persisted so a post-approval repair on another
 	// instance can still hand the corrector the approved intent.
 	Prompt string `json:"prompt,omitempty"`
-	// Subprocess is a model's _subprocess call whose sub-agent waits for the
-	// approval of one of its calls. The record's own call fields stay empty
-	// then: its question asks about the waiting call (askedCall), which only
-	// the sub-agent runs when it resumes.
+	// Set while a sub-agent's call is asked about; the record's own call fields stay empty then.
 	Subprocess *subprocessContinuation `json:"subprocess,omitempty"`
 	// FromLLM marks the call as LLM-originated so a restored call still
 	// passes executeCall's unknown-args validation. Rows persisted before
@@ -5830,8 +5780,6 @@ type pendingToolCallMeta struct {
 	responseThinking
 }
 
-// askedCall is the call the record's question asks about: its own, or a
-// paused sub-agent's waiting call; nil when there is none.
 func (m pendingToolCallMeta) askedCall() *ToolCall {
 	if c := m.Subprocess; c != nil {
 		if c.Asking < 0 || c.Asking >= len(c.Children) {
@@ -5846,8 +5794,6 @@ func (m pendingToolCallMeta) askedCall() *ToolCall {
 	return &ToolCall{ID: m.ID, Plugin: m.Plugin, Action: m.Action, Args: m.Args, FromLLM: m.FromLLM}
 }
 
-// frameID is the id the record's question frame carries: the call's, or a
-// paused sub-agent's question's.
 func (m pendingToolCallMeta) frameID() string {
 	if m.Subprocess != nil {
 		return m.Subprocess.questionID()
@@ -5913,10 +5859,6 @@ func (o *Orchestrator) recordConfirmationInterruptedCalls(
 	}
 }
 
-// interruptedCallMessages are the native "NOT EXECUTED" exchanges of the calls
-// a confirmation of gated drops (recordConfirmationInterruptedCalls); a paused
-// sub-agent keeps them in its own messages. The first call message takes the
-// response's thinking blocks left in thinking.
 func interruptedCallMessages(gated ToolCall, dropped []ToolCall, thinking *responseThinking) []provider.Message {
 	var out []provider.Message
 	for _, dc := range dropped {
@@ -5938,8 +5880,6 @@ func interruptedCallMessages(gated ToolCall, dropped []ToolCall, thinking *respo
 	return out
 }
 
-// interruptedCallResult is the "NOT EXECUTED" result of dropped, a call of the
-// same response as gated, which waits for the user's confirmation.
 func interruptedCallResult(gated, dropped ToolCall) ToolResult {
 	return ToolResult{CallID: dropped.ID, Content: fmt.Sprintf(
 		"NOT EXECUTED — this call was issued in the same response as %s, which is now waiting for the user's confirmation. It did not run and changed nothing. Issue it again after that confirmation is resolved if it is still needed.",
@@ -5963,8 +5903,6 @@ func savePendingToolCall(sessions SessionStoreInterface, sessionID string, tc *T
 	})
 }
 
-// writePendingToolCall stores meta as the session's pending tool-call record
-// and returns the store's error.
 func writePendingToolCall(sessions SessionStoreInterface, sessionID string, meta pendingToolCallMeta) error {
 	data, err := json.Marshal(meta)
 	if err != nil {
@@ -5973,9 +5911,7 @@ func writePendingToolCall(sessions SessionStoreInterface, sessionID string, meta
 	return sessions.SetMetadata(sessionID, "pending_tool_call", string(data))
 }
 
-// loadPendingRecord restores the session's pending tool-call record, zero
-// when none is stored. A record that cannot be read is cleared, so it is not
-// kept forever; only Run loads the record, inside the turn lock.
+// Only Run calls it, inside the turn lock: it clears a record that cannot be read.
 func loadPendingRecord(sessions SessionStoreInterface, sessionID string) pendingToolCallMeta {
 	meta, _, err := readPendingToolCall(sessions, sessionID)
 	if err != nil {
@@ -5987,18 +5923,18 @@ func loadPendingRecord(sessions SessionStoreInterface, sessionID string) pending
 	return meta
 }
 
-// loadPendingToolCall restores the call the pending record asks about
-// (askedCall), the confirmation_requested event id, the confirmation prompt
-// (either string empty when the persisted row predates the field or nothing
-// was captured), and the thinking of the response that issued the call.
+// loadPendingToolCall restores the pending tool call from session metadata.
+// Returns the ToolCall, the confirmation_requested event id, the
+// confirmation prompt (either string empty when the persisted row predates
+// the field or nothing was captured), and the thinking of the response that
+// issued the call.
 func loadPendingToolCall(sessions SessionStoreInterface, sessionID string) (*ToolCall, string, string, responseThinking) {
 	meta := loadPendingRecord(sessions, sessionID)
 	return meta.askedCall(), meta.ConfirmationRequestedID, meta.Prompt, meta.responseThinking
 }
 
 // readPendingToolCall returns the persisted pending call as stored; found is
-// false when none is, or it cannot be read. err is the decoding error of a
-// stored record that cannot be read.
+// false when none is, or it cannot be read.
 func readPendingToolCall(sessions SessionStoreInterface, sessionID string) (meta pendingToolCallMeta, found bool, err error) {
 	sess, gerr := sessions.Get(sessionID)
 	if gerr != nil || sess == nil {
@@ -6118,9 +6054,8 @@ func expectedToolsFromContext(ctx context.Context) []*pipeline.Step {
 //
 // Presence of the value marks "this request surfaced tools via the native
 // array". The agent loop sets it per round when native tool calling is on;
-// text-mode requests and any non-agent-loop caller never set it, and the
-// sub-agent loop (which sends its whole permitted set, nothing to load) clears
-// it — so the gate is a no-op there, exactly matching where "unloaded" is a
+// text-mode requests and any non-agent-loop caller never set it, and the sub-agent loop clears it —
+// so the gate is a no-op there, exactly matching where "unloaded" is a
 // meaningful concept. Gating against the set actually sent (rather than
 // re-deriving loadedness from session state) keeps the array the model saw and
 // the calls the gate admits identical by construction, needs no per-call state
@@ -6143,13 +6078,6 @@ func withSentNativeTools(ctx context.Context, fqns map[string]struct{}) context.
 	return context.WithValue(ctx, sentNativeToolsKey{}, sentNativeToolsVal{fqns: fqns, active: true})
 }
 
-// withoutSentNativeTools marks the current scope as one the tool-load gate does
-// not judge, overriding any set inherited from a parent ctx. The sub-agent loop
-// uses it: it derives its ctx from the caller (which carries the caller's sent
-// set), sends its whole permitted set as its own native array and refuses any
-// call outside it before executeCall. Enforcing the PARENT's set there would
-// answer a call to a tool the parent never loaded with a load on call, which
-// changes the tools the parent session has loaded.
 func withoutSentNativeTools(ctx context.Context) context.Context {
 	return context.WithValue(ctx, sentNativeToolsKey{}, sentNativeToolsVal{active: false})
 }

@@ -166,8 +166,6 @@ func send(ctx context.Context, sink Sink, eventType string, payload any, duratio
 	return sendWithID(ctx, sink, "", eventType, payload, durationMS)
 }
 
-// sendWithID is send with the event's id given by the caller; an empty id is
-// generated as send generates it.
 func sendWithID(ctx context.Context, sink Sink, id, eventType string, payload any, durationMS int64) string {
 	if sink == nil {
 		return ""
@@ -206,8 +204,7 @@ func sendWithID(ctx context.Context, sink Sink, id, eventType string, payload an
 
 // NewEventID returns a 32-char hex id, matching the shape of the
 // fallback generator in store.session_events. Generating producer-side
-// lets callers thread the id as parent_id on subsequent emits, and store it
-// before the event is emitted (ConfirmationRequestedArgs.ID).
+// lets callers thread the id as parent_id on subsequent emits.
 func NewEventID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {

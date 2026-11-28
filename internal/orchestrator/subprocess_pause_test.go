@@ -17,9 +17,6 @@ import (
 	"github.com/opentalon/opentalon/internal/state/store/events/emit"
 )
 
-// pauseTask is the sub-agent task of these tests: it reads with look__see (c0),
-// then calls the write store__write (c1), which the confirmation plugin asks
-// about, and look__see (c2) in the same response.
 const pauseTask = "update record 7"
 
 var pauseTools = []string{"conf__check", "look__see", "store__write"}
@@ -34,9 +31,6 @@ func pauseChild(task string) map[string][]provider.CompletionResponse {
 	}}
 }
 
-// pauseParent is the parent's script: it reads (p0) while loading
-// _subprocess__run, then starts the sub-agent (p2) with a later call (p3) in
-// the same response, and answers once the turn goes on.
 func pauseParent(task string) []provider.CompletionResponse {
 	return []provider.CompletionResponse{
 		{ToolCalls: []provider.ToolCall{
@@ -51,13 +45,11 @@ func pauseParent(task string) []provider.CompletionResponse {
 	}
 }
 
-// narratingLLM is a subagentLLM whose confirmation narrations are recorded and
-// answered with question.
 type narratingLLM struct {
 	*subagentLLM
 	mu         sync.Mutex
-	narrations []string // the user content of each narration request
-	fail       bool     // every narration fails
+	narrations []string
+	fail       bool
 }
 
 const pauseQuestion = "A sub-agent working on updating record 7 asks: may it write the record?"
@@ -76,7 +68,6 @@ func (l *narratingLLM) Complete(ctx context.Context, req *provider.CompletionReq
 	return l.subagentLLM.Complete(ctx, req)
 }
 
-// pendingWriteCounter counts the writes of a pending call.
 type pendingWriteCounter struct {
 	SessionStoreInterface
 	writes atomic.Int32
@@ -89,7 +80,6 @@ func (s *pendingWriteCounter) SetMetadata(id, key, value string) error {
 	return s.SessionStoreInterface.SetMetadata(id, key, value)
 }
 
-// pendingFailingStore fails every write of a pending call.
 type pendingFailingStore struct{ SessionStoreInterface }
 
 func (s pendingFailingStore) SetMetadata(id, key, value string) error {
@@ -99,8 +89,6 @@ func (s pendingFailingStore) SetMetadata(id, key, value string) error {
 	return s.SessionStoreInterface.SetMetadata(id, key, value)
 }
 
-// pauseHarness is an orchestrator whose confirmation plugin asks for every
-// write, with sub-agents on, over one session store holding s1.
 type pauseHarness struct {
 	orch     *Orchestrator
 	llm      *narratingLLM
@@ -156,7 +144,6 @@ func (h *pauseHarness) session(t *testing.T) *state.Session {
 	return s
 }
 
-// storedPause is the pending record of a paused sub-agent call as stored.
 type storedPause struct {
 	ID                      string            `json:"id"`
 	Plugin                  string            `json:"plugin"`
@@ -190,7 +177,6 @@ type continuationCallJSON struct {
 	Args   map[string]string `json:"args"`
 }
 
-// eventsOfCall returns the events of type typ whose payload names callID.
 func eventsOfCall(t *testing.T, sink *recordingEventSink, typ, callID string) []emit.Event {
 	t.Helper()
 	var out []emit.Event
@@ -212,7 +198,6 @@ func eventsOfCall(t *testing.T, sink *recordingEventSink, typ, callID string) []
 	return out
 }
 
-// mentionsCall reports whether m carries call id as a tool call or a result.
 func mentionsCall(m provider.Message, id string) bool {
 	if m.ToolCallID == id {
 		return true
@@ -225,13 +210,6 @@ func mentionsCall(m provider.Message, id string) bool {
 	return false
 }
 
-// A sub-agent's gated call in the agent loop ends the turn with one question
-// about it, worded from the sub-agent's task and messages. The call does not
-// run; the record, written once, holds the sub-agent with no runnable call of
-// its own and the id of the question's confirmation_requested event; the
-// parent's history holds neither the outer call nor anything of the
-// sub-agent's, and its later call is recorded as not executed; the outer call
-// emits no result and is not observed.
 func TestSubprocessGatedCallPausesTheTurn(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		sessions := &pendingWriteCounter{SessionStoreInterface: kind.open(t)}
@@ -249,7 +227,6 @@ func TestSubprocessGatedCallPausesTheTurn(t *testing.T) {
 			t.Errorf("store__write ran %d time(s), look__see %d; want 0 and 2 (p0, c0)", h.write.count, h.looks.count)
 		}
 
-		// The question is worded from the sub-agent's task and messages, once.
 		if len(h.llm.narrations) != 1 {
 			t.Fatalf("narrations = %d, want 1", len(h.llm.narrations))
 		}
@@ -263,7 +240,6 @@ func TestSubprocessGatedCallPausesTheTurn(t *testing.T) {
 			t.Errorf("narration request quotes the parent's messages:\n%s", n)
 		}
 
-		// The record: no runnable call of its own, the paused sub-agent.
 		s := h.session(t)
 		var rec storedPause
 		if err := json.Unmarshal([]byte(s.Metadata["pending_tool_call"]), &rec); err != nil {
@@ -319,7 +295,6 @@ func TestSubprocessGatedCallPausesTheTurn(t *testing.T) {
 			t.Errorf("c2 not recorded as not executed in the child's messages: %+v", child.Messages)
 		}
 
-		// The parent's history: nothing of the outer call or the sub-agent, p3 not executed.
 		var p3, question bool
 		for _, m := range s.Messages {
 			for _, id := range []string{"p2", "c0", "c1", "c2"} {
@@ -339,7 +314,6 @@ func TestSubprocessGatedCallPausesTheTurn(t *testing.T) {
 			t.Errorf("p3 recorded as not executed: %v, question stored: %v", p3, question)
 		}
 
-		// The outer call: no result event, no observation.
 		if n := len(eventsOfCall(t, h.sink, events.TypeToolCallResult, "p2")); n != 0 {
 			t.Errorf("tool_call_result events for p2 = %d, want none at the pause", n)
 		}
@@ -349,7 +323,6 @@ func TestSubprocessGatedCallPausesTheTurn(t *testing.T) {
 			}
 		}
 
-		// A reconnecting client is shown the same question under the same id.
 		content, meta, ok := h.orch.PendingConfirmationFrame("s1")
 		if !ok || content != pauseQuestion || meta["tool_call_id"] != "p2-0-c1" {
 			t.Errorf("pending frame = %q %v %v, want the question with id p2-0-c1", content, meta, ok)
@@ -358,8 +331,6 @@ func TestSubprocessGatedCallPausesTheTurn(t *testing.T) {
 	})
 }
 
-// When the narration fails, the fallback question still says that a sub-agent
-// asks, and for which task.
 func TestSubprocessPauseFallbackQuestionNamesTheTask(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		h := newPauseHarness(t, kind.open(t), pauseTask)
@@ -384,7 +355,6 @@ func TestSubprocessPauseFallbackQuestionNamesTheTask(t *testing.T) {
 	})
 }
 
-// The task a question names is cut at a character boundary.
 func TestTaskPreviewKeepsUTF8Valid(t *testing.T) {
 	got := taskPreview(strings.Repeat("a", 99) + "äbc")
 	if !utf8.ValidString(got) || got != strings.Repeat("a", 99)+"..." {
@@ -392,11 +362,6 @@ func TestTaskPreviewKeepsUTF8Valid(t *testing.T) {
 	}
 }
 
-// A paused sub-agent the session cannot store, because the write fails or the
-// continuation is over 1 MiB, asks nothing: the gated call does not run, no
-// question is stored or emitted, and the outer call takes the stopped-call
-// result naming the call that did not run and the call that ran, emitted once
-// as its result. The turn goes on.
 func TestSubprocessPauseThatCannotBeStored(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -452,8 +417,6 @@ func TestSubprocessPauseThatCannotBeStored(t *testing.T) {
 	}
 }
 
-// The stopped-call result reports a call refused before it reached its plugin
-// as failed, with its error, never as a call that ran.
 func TestSubprocessStoppedResultReportsARefusedCallAsFailed(t *testing.T) {
 	h := newPauseHarness(t, pendingFailingStore{state.NewSessionStore("")}, pauseTask)
 	child := pauseChild(pauseTask)
@@ -478,7 +441,6 @@ func TestSubprocessStoppedResultReportsARefusedCallAsFailed(t *testing.T) {
 	h.llm.assertTools(t, 2, pauseTools...)
 }
 
-// A pending record that cannot be read is cleared by the next turn, not kept.
 func TestUnreadablePendingRecordIsCleared(t *testing.T) {
 	eachStore(t, func(t *testing.T, kind storeKind) {
 		h := newPauseHarness(t, kind.open(t), pauseTask)

@@ -67,7 +67,6 @@ func (o *Orchestrator) callDeadline(call ToolCall) time.Duration {
 }
 
 // subprocessRequest is parsed from the LLM's _subprocess.run tool call args.
-// A paused sub-agent keeps it in its continuation.
 type subprocessRequest struct {
 	Task          string   `json:"task"`
 	AllowedTools  []string `json:"allowed_tools,omitempty"`
@@ -97,13 +96,7 @@ func subprocessDepth(ctx context.Context) int {
 	return v
 }
 
-// interactiveTurnKey marks the context of the model's call in the agent loop,
-// the one caller whose sub-agent may ask the user: only the agent loop ends a
-// turn with a question and takes the answer on the next one. It carries that
-// turn's session store and user message. Every other caller (the single-step
-// path, pipeline and preparer steps, the direct action entry) reaches a
-// sub-agent without it, and a sub-agent removes it from the context of its own
-// calls, so a callback from inside one never carries it.
+// Only the model's call in the agent loop may ask the user: only the agent loop takes the answer on the next turn.
 type interactiveTurnKey struct{}
 
 type interactiveTurn struct {
@@ -115,12 +108,10 @@ func withInteractiveTurn(ctx context.Context, sessions SessionStoreInterface, us
 	return context.WithValue(ctx, interactiveTurnKey{}, &interactiveTurn{sessions: sessions, userMessage: userMessage})
 }
 
-// withoutInteractiveTurn removes the interactiveTurn ctx inherited.
 func withoutInteractiveTurn(ctx context.Context) context.Context {
 	return context.WithValue(ctx, interactiveTurnKey{}, (*interactiveTurn)(nil))
 }
 
-// isInteractiveTurn reports whether ctx is the model's call in the agent loop.
 func isInteractiveTurn(ctx context.Context) bool {
 	turn, _ := ctx.Value(interactiveTurnKey{}).(*interactiveTurn)
 	return turn != nil
@@ -134,8 +125,6 @@ type subprocessExecutor struct {
 }
 
 func (s *subprocessExecutor) Execute(ctx context.Context, call ToolCall) ToolResult {
-	// A sub-agent calls its tools natively only; without native tool calling
-	// it sends no request at all.
 	if !s.orch.supportsNativeTools() {
 		return ToolResult{CallID: call.ID, Error: subprocessNeedsNativeTools}
 	}
@@ -190,10 +179,7 @@ type parallelTaskResult struct {
 // executeParallel fans out several independent sub-agent tasks concurrently and
 // joins their answers in task order. It reuses runSubprocess per task, so every
 // per-child guardrail (iteration cap, timeout, no-recursion) is inherited; the
-// only new bound is MaxParallel (concurrency) plus a total-tasks cap. Children
-// that need no approval run to their end; when any child paused for the
-// user's approval of a call, the call is suspended with every child, waiting
-// or finished, and asks about the first waiting one.
+// only new bound is MaxParallel (concurrency) plus a total-tasks cap.
 func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall) ToolResult {
 	reqs, err := parseParallelRequest(call.Args)
 	for i := 0; err == nil && i < len(reqs); i++ {
@@ -267,8 +253,6 @@ func (s *subprocessExecutor) executeParallel(ctx context.Context, call ToolCall)
 	return joinParallel(call.ID, children)
 }
 
-// joinParallel is a parallel call's result once every child finished: their
-// answers in task order, and the structured payload.
 func joinParallel(callID string, children []subprocessChild) ToolResult {
 	results := make([]parallelTaskResult, len(children))
 	for i, child := range children {
@@ -294,9 +278,7 @@ func joinParallel(callID string, children []subprocessChild) ToolResult {
 	return ToolResult{CallID: callID, Content: strings.TrimRight(sb.String(), "\n"), StructuredContent: string(structured)}
 }
 
-// subprocessResult is the outcome of a subprocess execution: its answer and
-// the calls it sent for execution, or the sub-agent where it paused for the
-// user's approval of a call.
+// subprocessResult is the outcome of a subprocess execution.
 type subprocessResult struct {
 	Response   string
 	Iterations int
@@ -304,8 +286,7 @@ type subprocessResult struct {
 	Paused     *subprocessChild
 }
 
-// runSubprocess runs a mini agent loop for a focused sub-task, from its start
-// (continueSubprocess).
+// runSubprocess runs a mini agent loop for a focused sub-task.
 func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest, depth int) (*subprocessResult, error) {
 	return o.continueSubprocess(ctx, subprocessChild{
 		Request: req, Depth: depth, Remaining: o.subprocessTimeout(),
@@ -316,16 +297,6 @@ func (o *Orchestrator) runSubprocess(ctx context.Context, req subprocessRequest,
 	})
 }
 
-// continueSubprocess runs child's agent loop from where it stands, for the
-// running time and the iterations it has left. Every request offers the
-// sub-agent's permitted tools, as the caller's profile permits them now, as
-// native definitions; each structured call of a response is checked against
-// them and the confirmation decision (subprocessCall), run, and kept in the
-// loop's own messages in the shapes the main loop stores. In the model's call
-// in the agent loop (interactiveTurnKey), a call that needs the user's
-// approval pauses the sub-agent: it returns where it stopped, with the
-// response's later calls recorded as not executed, as the main loop records
-// them. With an error, the result still holds the calls it sent for execution.
 func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessChild) (*subprocessResult, error) {
 	req := child.Request
 	deadline := time.Now().Add(child.Remaining)
@@ -394,8 +365,7 @@ func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessC
 		perCallInput := resp.Usage.InputTokens / len(calls)
 		perCallOutput := resp.Usage.OutputTokens / len(calls)
 
-		// The response's thinking and text ride on the first call's message
-		// only, as in the main loop: a replay sends each once.
+		// The response's thinking and text go on its first call's message only, as in the main loop: a replay sends each once.
 		thinking := responseThinking{Blocks: resp.Thinking, Fingerprint: resp.ThinkingFingerprint}
 		text := resp.Content
 		for k, call := range calls {
@@ -434,15 +404,6 @@ func (o *Orchestrator) continueSubprocess(ctx context.Context, child subprocessC
 	return result, nil
 }
 
-// subprocessCall runs one of a sub-agent's calls behind the confirmation
-// decision every main-loop call passes (decideConfirmation) and says what
-// became of it. gateExecute: it ran. gateAnswered: it did not run and its
-// result is an error naming it; that is a call outside the permitted set, a
-// call its check refused (with the refusal), and a call that needs the user's
-// approval when the sub-agent may not ask (mayAsk false). gateAwaitApproval
-// (mayAsk only): it needs the user's approval and did not run; the caller
-// pauses the sub-agent. Nothing is asked or stored here. err is ctx's error
-// when the sub-agent ended while the call was checked.
 func (o *Orchestrator) subprocessCall(ctx context.Context, permitted map[string]struct{}, call ToolCall, mayAsk bool, inputTokens, outputTokens int) (ToolResult, gateOutcome, error) {
 	name := toolFQN(call.Plugin, call.Action)
 	if _, ok := permitted[name]; !ok {
@@ -465,8 +426,6 @@ func (o *Orchestrator) subprocessCall(ctx context.Context, permitted map[string]
 	return o.executeSubprocessCall(ctx, call, inputTokens, outputTokens), gateExecute, nil
 }
 
-// executeSubprocessCall executes a sub-agent's call and reports it to the
-// plugin call observer with the tokens of its response attributed to it.
 func (o *Orchestrator) executeSubprocessCall(ctx context.Context, call ToolCall, inputTokens, outputTokens int) ToolResult {
 	result := o.executeCall(ctx, call)
 	if o.pluginCallObserver != nil {
@@ -475,22 +434,13 @@ func (o *Orchestrator) executeSubprocessCall(ctx context.Context, call ToolCall,
 	return result
 }
 
-// subprocessContext is ctx for the calls of a sub-agent of req at depth: at
-// its depth, on its model, and without the caller's sent native set or the
-// interactive marker. mayAsk says whether ctx carried the marker.
 func subprocessContext(ctx context.Context, req subprocessRequest, depth int) (_ context.Context, mayAsk bool) {
 	ctx = withSubprocessDepth(ctx, depth)
 	if req.Model != "" {
 		ctx = context.WithValue(ctx, subprocessModelKey{}, req.Model)
 	}
-	// This ctx is derived from the caller's, which carries the caller's sent
-	// native set. The sub-agent sends its own whole permitted set and checks
-	// every call against it, so the tool-load gate must not judge its calls by
-	// the PARENT's array: a load on call from in here would change the tools
-	// the parent session has loaded.
+	// The tool-load gate must not judge these calls by the parent's sent set: a load on call would change the parent's tools.
 	ctx = withoutSentNativeTools(ctx)
-	// A call the sub-agent makes is never the agent loop's own call, nor is a
-	// callback from inside it.
 	return withoutInteractiveTurn(ctx), isInteractiveTurn(ctx)
 }
 
@@ -512,8 +462,6 @@ func (o *Orchestrator) recordSubprocessUsage(ctx context.Context, model string, 
 		model, p.Kind, p.SystemSource, u.InputTokens, u.OutputTokens, 0, u.InputCost, u.OutputCost, u.Price)
 }
 
-// taskPreview is the start of a sub-agent's task, for a log line or a question
-// that names the task, cut at a character boundary.
 func taskPreview(task string) string {
 	if len(task) <= 100 {
 		return task
@@ -525,26 +473,17 @@ func taskPreview(task string) string {
 	return task[:cut] + "..."
 }
 
-// buildSubprocessSystemPrompt builds a sub-agent's system prompt. It lists no
-// tools: they reach the model as native definitions in every request.
 func buildSubprocessSystemPrompt(req subprocessRequest) string {
 	var sb strings.Builder
 	sb.WriteString(prompts.SubprocessPreamble)
 
-	// No tools requested: none are sent, so tell the model to answer directly.
 	if req.NoTools {
 		sb.WriteString("\nYou have no tools available. Answer the task directly from what you are given.\n")
 	}
 	return sb.String()
 }
 
-// subprocessTools is the one decision behind both the tools each sub-agent
-// request offers and the calls the sub-agent may run. It returns the permitted
-// tools by name and their native definitions in registry order: the tools the
-// caller may call (allowedToolsSet: nothing from a plugin the caller may not
-// use, no _meta, preparer, guard or user-only action) without _subprocess
-// itself, narrowed to the request's allowlist when it names one. An allowlist
-// only narrows the caller's tools, never adds to them; NoTools permits none.
+// An allowlist only narrows the tools the caller may use, never adds to them.
 func (o *Orchestrator) subprocessTools(ctx context.Context, req subprocessRequest) (map[string]struct{}, []provider.ToolDefinition) {
 	if req.NoTools {
 		return nil, nil
@@ -557,7 +496,6 @@ func (o *Orchestrator) subprocessTools(ctx context.Context, req subprocessReques
 	permitted := make(map[string]struct{})
 	var defs []provider.ToolDefinition
 	for _, cap := range o.registry.ListCapabilities() {
-		// A sub-agent never starts another one.
 		if cap.Name == "_subprocess" {
 			continue
 		}
